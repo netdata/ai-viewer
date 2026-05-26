@@ -41,6 +41,7 @@ This directory contains the **living specifications** of ai-viewer: what it does
 
 ### Cross-cutting
 
+- [pricing.md](pricing.md) — embedded pricing JSON schema, cost computation, refresh script contract.
 - [testing-strategy.md](testing-strategy.md) — test pyramid, fixture management, CI gates.
 - [deployment.md](deployment.md) — install, run, configure; SQLite location; ports.
 - [security.md](security.md) — bind address, read-only on sources, no auth in v1.
