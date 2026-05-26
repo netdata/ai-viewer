@@ -2,15 +2,18 @@
 
 ## TL;DR
 
-A normalized, format-agnostic, **span-shaped** model. Sessions contain Turns; Turns contain Ops; Ops are the universal span (LLM call, tool call, child session, reasoning block). Payloads are referenced by URI, never inlined. Adapters write rows; the presenter reads them. The schema is the contract between the two halves.
+A normalized, format-agnostic, **span-shaped** model. Sessions contain Turns; Turns contain Ops; Ops are the universal span (LLM call, tool call, child session, reasoning block, compaction event). Payloads are referenced by URI, never inlined. Adapters write rows via the canonical event pipeline; the presenter reads them. The schema is the contract between the two halves.
+
+The schema is **deliberately wider than any single source format** so it cleanly absorbs all five adapters (ai-agent v2/v3, claude-code, codex, opencode) and any future format. Columns unused by one adapter are NULL; format-specific extras live in compact JSON `extras_json` fields.
 
 ## Design Principles
 
-- **Span-shaped.** Every operation is an `op` row with start/end timestamps, parent/child links, tokens, cost, status. This maps 1:1 to APM/OTel concepts and makes the frontend trivial.
-- **Format-agnostic.** No `aiagent_only` column, no `claude_code_only` column. Format-specific extras go into a small `extras_json` field on the relevant row.
-- **Payloads stay on disk.** SQLite stores `payload_ref` pointers; the original gz/json files are the source of truth.
-- **Catalog tables for fast aggregation.** `catalog_tool`, `catalog_model`, `catalog_agent` are denormalized rollups updated by triggers (or batched by the ingester) so the Tools/Models/Agents analytics pages are fast.
-- **Cursors live in SQLite.** Each `source` row records its last-ingested position, so the ingester can resume after a restart.
+- **Span-shaped.** Every operation is an `op` row with start/end timestamps, parent/child links, tokens, cost, status. Maps 1:1 to APM/OTel concepts.
+- **Format-agnostic.** No `aiagent_only` column, no `claude_code_only` column. Format-specific extras go into `extras_json`.
+- **Payloads stay on disk.** SQLite stores `payload_refs` pointers; original gz/json files are the source of truth.
+- **Catalog tables for fast aggregation.** Denormalized rollups (`catalog_tools`, `catalog_models`, `catalog_agents`, `catalog_providers`) are updated by the ingester after each batch commit.
+- **Cursors live in SQLite.** Each `source` row records its last-ingested position so the ingester resumes after restart.
+- **Wider, not deeper.** Cache tokens, reasoning kind, provider alias, cwd, call_path — these are first-class columns because at least two adapters surface them and the cost-analysis / filtering paths need them. They're not extras_json bloat.
 
 ## Schema (v1)
 
@@ -37,25 +40,33 @@ CREATE TABLE sources (
 
 ```sql
 CREATE TABLE sessions (
-    id                TEXT PRIMARY KEY,         -- canonical session id (hash of source_id + native id)
+    id                TEXT PRIMARY KEY,         -- canonical session id (hash of source_id + native_id)
     source_id         TEXT NOT NULL REFERENCES sources(id),
-    native_id         TEXT NOT NULL,            -- the originId/sessionId/uuid from the source format
+    native_id         TEXT NOT NULL,            -- originId/sessionId/uuid from the source format
     parent_session_id TEXT REFERENCES sessions(id),
     root_session_id   TEXT NOT NULL REFERENCES sessions(id),
-    kind              TEXT NOT NULL,            -- 'root' | 'sub_agent' | 'tool_internal'
+    kind              TEXT NOT NULL,            -- 'root' | 'sub_agent' | 'tool_internal' | 'fork'
     agent_name        TEXT,                     -- if known
-    model             TEXT,                     -- primary model used in this session
-    status            TEXT,                     -- 'running' | 'completed' | 'failed' | 'unknown'
+    model             TEXT,                     -- primary model used in this session (last-known)
+    provider          TEXT,                     -- 'anthropic'|'openai'|'google'|'openrouter'|...
+    provider_alias    TEXT,                     -- user-defined provider alias (opencode); NULL otherwise
+    cwd               TEXT,                     -- working directory at session start (claude-code, codex, opencode)
+    call_path         TEXT,                     -- durable agent-chain string (ai-agent v3 callPath); NULL otherwise
+    status            TEXT NOT NULL,            -- 'running' | 'completed' | 'failed' | 'abandoned' | 'interrupted'
     error_class       TEXT,                     -- present when status='failed'
+    error_message     TEXT,
     start_ts          INTEGER NOT NULL,
     end_ts            INTEGER,
+    last_activity_ts  INTEGER NOT NULL,         -- updated on every event for this session; powers "stale running" filter
     tokens_in         INTEGER NOT NULL DEFAULT 0,
     tokens_out        INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
     cost_usd          REAL NOT NULL DEFAULT 0.0,
     turn_count        INTEGER NOT NULL DEFAULT 0,
     op_count          INTEGER NOT NULL DEFAULT 0,
     failure_count     INTEGER NOT NULL DEFAULT 0,
-    extras_json       TEXT,                     -- format-specific extras (cwd for claude-code, etc.)
+    extras_json       TEXT,                     -- format-specific extras (finalReport, pluginMetas, latestStatus, etc.)
     UNIQUE (source_id, native_id)
 );
 
@@ -63,25 +74,36 @@ CREATE INDEX idx_sessions_root_start ON sessions(root_session_id, start_ts);
 CREATE INDEX idx_sessions_start ON sessions(start_ts DESC);
 CREATE INDEX idx_sessions_agent ON sessions(agent_name);
 CREATE INDEX idx_sessions_model ON sessions(model);
+CREATE INDEX idx_sessions_provider ON sessions(provider);
 CREATE INDEX idx_sessions_status ON sessions(status);
 CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+CREATE INDEX idx_sessions_cwd ON sessions(cwd);
+CREATE INDEX idx_sessions_activity ON sessions(last_activity_ts DESC);
 ```
+
+Notes:
+
+- `status` is an explicit 5-value enum. `running` covers in-flight AND sessions from sources without a terminal signal (claude-code). The UI uses `last_activity_ts` to render "stale running" sessions distinctly from active ones.
+- `cwd`, `provider_alias`, and `call_path` are promoted to first-class columns because at least one adapter populates them today AND they drive a filter or grouping path in the UI. Extras_json holds the long tail (finalReport, pluginMetas, claude-code title, codex sandbox policy, etc.).
 
 ### turns
 
 ```sql
 CREATE TABLE turns (
-    id           TEXT PRIMARY KEY,
-    session_id   TEXT NOT NULL REFERENCES sessions(id),
-    seq          INTEGER NOT NULL,              -- 1-based turn number within the session
-    start_ts     INTEGER NOT NULL,
-    end_ts       INTEGER,
-    status       TEXT NOT NULL,                 -- 'running' | 'completed' | 'failed'
-    error_class  TEXT,
-    tokens_in    INTEGER NOT NULL DEFAULT 0,
-    tokens_out   INTEGER NOT NULL DEFAULT 0,
-    cost_usd     REAL NOT NULL DEFAULT 0.0,
-    op_count     INTEGER NOT NULL DEFAULT 0,
+    id                TEXT PRIMARY KEY,
+    session_id        TEXT NOT NULL REFERENCES sessions(id),
+    seq               INTEGER NOT NULL,         -- 0-based: 0 reserved for init turns (ai-agent v2); 1+ for normal turns
+    start_ts          INTEGER NOT NULL,
+    end_ts            INTEGER,
+    status            TEXT NOT NULL,            -- 'running' | 'completed' | 'failed' | 'aborted'
+    error_class       TEXT,
+    tokens_in         INTEGER NOT NULL DEFAULT 0,
+    tokens_out        INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    cost_usd          REAL NOT NULL DEFAULT 0.0,
+    op_count          INTEGER NOT NULL DEFAULT 0,
+    extras_json       TEXT,                     -- e.g. codex_turn_id, claude-code system.subtype='turn_duration'
     UNIQUE (session_id, seq)
 );
 
@@ -91,31 +113,37 @@ CREATE INDEX idx_turns_start ON turns(start_ts);
 
 ### ops
 
-The universal span. Every LLM call, tool call, child-session attachment, and reasoning block is an `op`.
+The universal span. Every LLM call, tool call, child-session attachment, reasoning block, system housekeeping op, and compaction event is an `op`.
 
 ```sql
 CREATE TABLE ops (
     id              TEXT PRIMARY KEY,
     turn_id         TEXT NOT NULL REFERENCES turns(id),
     session_id      TEXT NOT NULL REFERENCES sessions(id),  -- denormalized for fast filter
-    parent_op_id    TEXT REFERENCES ops(id),                -- for nested ops (e.g. reasoning inside an LLM op)
+    parent_op_id    TEXT REFERENCES ops(id),                -- for nested ops
     seq             INTEGER NOT NULL,                       -- order within turn
-    kind            TEXT NOT NULL,                          -- 'llm' | 'tool' | 'session' | 'reasoning' | 'internal'
-    name            TEXT NOT NULL,                          -- tool name, model name, child agent name, etc.
-    tool_namespace  TEXT,                                   -- present when kind='tool'
-    model           TEXT,                                   -- present when kind='llm'
-    provider        TEXT,                                   -- 'anthropic'|'openai'|'google'|...
+    kind            TEXT NOT NULL,                          -- 'llm'|'tool'|'session'|'reasoning'|'internal'|'system'|'compaction'
+    name            TEXT NOT NULL,                          -- tool name, model name, child agent name, compaction trigger, etc.
+    tool_namespace  TEXT,                                   -- kind='tool': 'mcp:<server>' | 'shell' | 'fs' | 'builtin' | format-specific
+    model           TEXT,                                   -- kind='llm'
+    provider        TEXT,                                   -- 'anthropic'|'openai'|'google'|'openrouter'|...
+    provider_alias  TEXT,                                   -- user-defined provider alias (opencode)
+    reasoning_kind  TEXT,                                   -- kind='reasoning': 'summary' | 'raw'
     start_ts        INTEGER NOT NULL,
     end_ts          INTEGER,
     duration_us     INTEGER,                                -- end_ts - start_ts when both known
-    status          TEXT NOT NULL,                          -- 'running'|'completed'|'failed'|'cancelled'
+    status          TEXT NOT NULL,                          -- 'running'|'completed'|'failed'|'cancelled'|'truncated'
     error_class     TEXT,
     error_message   TEXT,
     tokens_in       INTEGER NOT NULL DEFAULT 0,
     tokens_out      INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
     cost_usd        REAL NOT NULL DEFAULT 0.0,
     bytes_in        INTEGER NOT NULL DEFAULT 0,             -- request payload size (uncompressed)
-    bytes_out       INTEGER NOT NULL DEFAULT 0,             -- response payload size
+    bytes_out       INTEGER NOT NULL DEFAULT 0,
+    chars_in        INTEGER,                                -- when source records UTF-8 chars instead of bytes (ai-agent v2 tools)
+    chars_out       INTEGER,
     ctx_used        INTEGER,                                -- context window tokens consumed (LLM ops)
     ctx_max         INTEGER,                                -- model max context (LLM ops)
     child_session_id TEXT REFERENCES sessions(id),          -- present when kind='session'
@@ -128,25 +156,38 @@ CREATE INDEX idx_ops_turn_seq ON ops(turn_id, seq);
 CREATE INDEX idx_ops_kind_name ON ops(kind, name);
 CREATE INDEX idx_ops_tool ON ops(tool_namespace, name) WHERE kind='tool';
 CREATE INDEX idx_ops_model ON ops(model) WHERE kind='llm';
+CREATE INDEX idx_ops_provider ON ops(provider) WHERE kind='llm';
 CREATE INDEX idx_ops_status ON ops(status);
 CREATE INDEX idx_ops_start ON ops(start_ts);
 CREATE INDEX idx_ops_parent ON ops(parent_op_id);
+CREATE INDEX idx_ops_compaction ON ops(session_id, start_ts) WHERE kind='compaction';
 ```
+
+Notes on op kinds:
+
+- `llm` — model API call. Populates `model`, `provider`, optionally `provider_alias`, `ctx_used`, `ctx_max`.
+- `tool` — tool invocation. Populates `tool_namespace`, `name`. `chars_in`/`chars_out` populated when source records characters (ai-agent v2 tools).
+- `session` — child-session attachment (sub-agent, Task, Agent tool). Populates `child_session_id`.
+- `reasoning` — model reasoning. Populates `reasoning_kind` ('summary' or 'raw').
+- `internal` — adapter-internal housekeeping. UI hides by default; available via "Show internal" toggle.
+- `system` — session system ops (init/fin/handoff). ai-agent's `system` kind maps here. UI renders muted.
+- `compaction` — history compaction. claude-code `compact_boundary` and codex `compacted`/`context_compacted` map here. Extras_json carries `preTokens`, `postTokens`, `durationMs`, `trigger`. UI renders as a visible breakpoint on the session timeline.
 
 ### payload_refs
 
-Pointers to payload artifacts living on disk in the source system.
+Pointers to payload artifacts living on disk in the source system. ai-viewer NEVER copies these; only reads them when the UI requests.
 
 ```sql
 CREATE TABLE payload_refs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     op_id           TEXT NOT NULL REFERENCES ops(id),
     kind            TEXT NOT NULL,           -- 'llm_request'|'llm_response'|'llm_sdk_request'|'llm_sdk_response'|'llm_reasoning'|'tool_request'|'tool_response'|'log'
-    format          TEXT NOT NULL,           -- 'http'|'sse'|'json'|'jsonrpc'|'text'
+    format          TEXT NOT NULL,           -- 'http'|'sse'|'json'|'jsonrpc'|'text'|'binary'
     compression     TEXT,                    -- 'gzip' | NULL
-    location_uri    TEXT NOT NULL,           -- e.g. 'file:///home/costa/.ai-agent/sessions/payloads/...'
+    location_uri    TEXT NOT NULL,           -- 'file:///<absolute-path>'
     original_bytes  INTEGER,
-    stored_bytes    INTEGER
+    stored_bytes    INTEGER,
+    sha256          TEXT                     -- hex; NULL when source does not provide
 );
 
 CREATE INDEX idx_payload_refs_op ON payload_refs(op_id);
@@ -178,8 +219,41 @@ CREATE INDEX idx_log_severity ON log_entries(severity, ts) WHERE severity IN ('W
 Refreshed by the ingester after each batch commit. Powers the cross-session analytics pages.
 
 ```sql
+CREATE TABLE catalog_providers (
+    name             TEXT NOT NULL,                  -- canonical: 'anthropic'|'openai'|'google'|'openrouter'|...
+    alias            TEXT NOT NULL DEFAULT '',       -- user-defined alias (opencode); '' for canonical-only
+    first_seen       INTEGER NOT NULL,
+    last_seen        INTEGER NOT NULL,
+    session_count    INTEGER NOT NULL DEFAULT 0,
+    call_count       INTEGER NOT NULL DEFAULT 0,
+    failure_count    INTEGER NOT NULL DEFAULT 0,
+    total_tokens_in  INTEGER NOT NULL DEFAULT 0,
+    total_tokens_out INTEGER NOT NULL DEFAULT 0,
+    total_tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    total_tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    total_cost_usd   REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (name, alias)
+);
+
+CREATE TABLE catalog_models (
+    provider          TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    first_seen        INTEGER NOT NULL,
+    last_seen         INTEGER NOT NULL,
+    call_count        INTEGER NOT NULL DEFAULT 0,
+    failure_count     INTEGER NOT NULL DEFAULT 0,
+    total_tokens_in   INTEGER NOT NULL DEFAULT 0,
+    total_tokens_out  INTEGER NOT NULL DEFAULT 0,
+    total_tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    total_tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    total_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    total_duration_us INTEGER NOT NULL DEFAULT 0,
+    ctx_max           INTEGER,                       -- discovered from ops; updated when adapters observe a max
+    PRIMARY KEY (provider, name)
+);
+
 CREATE TABLE catalog_tools (
-    namespace        TEXT NOT NULL,
+    namespace        TEXT NOT NULL,                  -- 'mcp:<server>' | 'shell' | 'fs' | 'builtin' | format-specific
     name             TEXT NOT NULL,
     first_seen       INTEGER NOT NULL,
     last_seen        INTEGER NOT NULL,
@@ -192,23 +266,8 @@ CREATE TABLE catalog_tools (
     PRIMARY KEY (namespace, name)
 );
 
-CREATE TABLE catalog_models (
-    provider          TEXT NOT NULL,
-    name              TEXT NOT NULL,
-    first_seen        INTEGER NOT NULL,
-    last_seen         INTEGER NOT NULL,
-    call_count        INTEGER NOT NULL DEFAULT 0,
-    failure_count     INTEGER NOT NULL DEFAULT 0,
-    total_tokens_in   INTEGER NOT NULL DEFAULT 0,
-    total_tokens_out  INTEGER NOT NULL DEFAULT 0,
-    total_cost_usd    REAL NOT NULL DEFAULT 0.0,
-    total_duration_us INTEGER NOT NULL DEFAULT 0,
-    ctx_max           INTEGER,
-    PRIMARY KEY (provider, name)
-);
-
 CREATE TABLE catalog_agents (
-    source_format    TEXT NOT NULL,
+    source_format    TEXT NOT NULL,                  -- 'aiagent_v3'|'aiagent_v2'|'claude_code'|'codex'|'opencode'
     name             TEXT NOT NULL,
     first_seen       INTEGER NOT NULL,
     last_seen        INTEGER NOT NULL,
@@ -219,6 +278,16 @@ CREATE TABLE catalog_agents (
     total_tokens_out INTEGER NOT NULL DEFAULT 0,
     total_cost_usd   REAL NOT NULL DEFAULT 0.0,
     PRIMARY KEY (source_format, name)
+);
+
+CREATE TABLE catalog_cwds (
+    source_format    TEXT NOT NULL,
+    cwd              TEXT NOT NULL,
+    first_seen       INTEGER NOT NULL,
+    last_seen        INTEGER NOT NULL,
+    session_count    INTEGER NOT NULL DEFAULT 0,
+    total_cost_usd   REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (source_format, cwd)
 );
 ```
 
@@ -234,12 +303,48 @@ CREATE TABLE schema_meta (
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
 
-## Aggregation strategy
+## Cross-Format Compatibility Matrix
+
+How each canonical column is populated per adapter. `✓` = always when known; `~` = sometimes; `n/a` = source has no equivalent.
+
+| Column | v3 | v2 | claude-code | codex | opencode |
+|---|---|---|---|---|---|
+| `sessions.cwd` | ~ | ~ | ✓ | ✓ | ✓ |
+| `sessions.call_path` | ✓ | ~ | n/a | n/a | n/a |
+| `sessions.provider_alias` | n/a | n/a | n/a | n/a | ✓ |
+| `sessions.model` (at start) | ~ | ~ | ✓ | ✓ | ✓ |
+| `sessions.status='abandoned'` | ✓ | ~ | n/a | n/a | n/a |
+| `sessions.status='interrupted'` | ✓ | ~ | n/a | ~ | ~ |
+| `sessions.status='running'` indefinite | ~ | n/a | ✓ | ~ | ~ |
+| `turns.tokens_cache_read/write` | ~ | n/a | ✓ | ~ | ✓ |
+| `ops.tokens_cache_read/write` | ~ | n/a | ✓ | ~ | ✓ |
+| `ops.reasoning_kind='summary'` | n/a | n/a | n/a | ✓ | n/a |
+| `ops.reasoning_kind='raw'` | n/a | n/a | n/a | ✓ | n/a |
+| `ops.cost_usd` (from source) | ~ | ~ | n/a (computed) | n/a (computed) | ✓ |
+| `ops.chars_in/out` instead of bytes | n/a | ✓ (tool accounting) | n/a | n/a | n/a |
+| `ops.kind='system'` | ✓ | ✓ | n/a | n/a | n/a |
+| `ops.kind='compaction'` | n/a | n/a | ✓ | ✓ | n/a |
+| `payload_refs` populated | ✓ | ~ (legacy inline base64 not addressable as ref) | n/a | n/a | n/a |
+
+## Sub-Agent Linkage Strategy (Per Adapter)
+
+| Adapter | Strategy |
+|---|---|
+| ai-agent v3 | Child's `session_start` carries `parentSessionId` (96.8% observed). Fallback: parent's `ops[].kind='session'` lists `childSessionId`. Adapter emits both; ingester reconciles. |
+| ai-agent v2 | Children are embedded inside parent's opTree (no separate file). Adapter walks `op.childSession` recursively and synthesizes child `SessionStartedEvent` with `ParentNativeID` set to the wrapping op's session traceId. |
+| claude-code | Parent's assistant record has `tool_use` with id=X; sub-agent stored at `<sessionId>/subagents/agent-<agentId>.jsonl` with sidecar `.meta.json::toolUseId == X`. Adapter joins on toolUseId. Because sub-agent sessionId == parent sessionId, adapter synthesizes `NativeID = <parentSessionId>:agent:<agentId>` to avoid canonical-row collision. |
+| codex | Separate rollout file; linkage via `payload.source.subagent.thread_spawn.parent_thread_id` or `forked_from_id`. Adapter emits Kind=`sub_agent` (parent_thread_id) or Kind=`fork` (forked_from_id). |
+| opencode | `session.parent_id` column is authoritative (cross-checked against `part.data.state.metadata.sessionId` on `task` tool parts; 100% consistent observed). |
+
+The ingester's 5-second resolver pass handles out-of-order parent/child arrival universally.
+
+## Aggregation Strategy
 
 For statistics views over an arbitrary timeframe:
 
-- **Time-bucketed materialized rollups** (per-hour and per-day) per source, per model, per tool, per agent. Refreshed incrementally by the ingester. Avoids `SUM` over millions of rows on every page load.
-- Schema for rollups TBD in Phase 2 SOW (Phase 1 uses live aggregates over `ops`).
+- **Time-bucketed materialized rollups** (per-hour and per-day) per source, per model, per tool, per agent, per provider, per cwd. Refreshed incrementally by the ingester. Avoids `SUM` over millions of rows on every page load.
+- Schema for rollup tables is defined in SOW-0007 (Statistics & Analytics).
+- Phase 1 uses live aggregates over `ops`; rollups land in Phase 4.
 
 ## Retention
 
@@ -247,13 +352,21 @@ For statistics views over an arbitrary timeframe:
 - ai-viewer's SQLite grows with the source. Initial policy: no automatic deletion. A future SOW may add: "drop `payload_refs` older than N days where the underlying file no longer exists".
 - Catalog and rollup tables persist forever (small).
 
-## Cost calculation
+## Cost Calculation
 
 - `cost_usd` on every `op` and rolled-up onto turns/sessions.
 - Cost comes from two sources, in order:
-  1. **From the source snapshot itself** when the adapter can extract it (ai-agent records accounting per op).
-  2. **From a static pricing table** keyed on `(provider, model)` when the source doesn't record cost. Pricing table lives in code at `internal/canonical/pricing.go`; updated manually when models change. Documented in `pricing.md` spec (created when first needed).
+  1. **From the source itself** when the adapter can extract it (ai-agent v3 records accounting per op; opencode records cost on `message.data.cost`; ai-agent v2 records on `op.accounting[]`).
+  2. **From the static pricing table** keyed on `(provider, model)` when the source doesn't record cost. Pricing data lives at `internal/pricing/pricing.json`, embedded via `go:embed`. Updated by `scripts/refresh-pricing.sh` per SOW-0001 decision.
+- Documented in `pricing.md` (created in SOW-0001 Chunk 1).
 
-## Context-window-percent
+## Context-Window-Percent
 
-For LLM ops where the model's max context is known (catalog_models.ctx_max), the UI computes `ctx_used / ctx_max` as a percentage. When ctx_max is unknown the UI shows the raw token count instead.
+For LLM ops where the model's max context is known (`catalog_models.ctx_max`), the UI computes `ctx_used / ctx_max` as a percentage. When `ctx_max` is unknown the UI shows the raw token count instead. Adapters seed `catalog_models.ctx_max` from `ops.ctx_max` observations; the value is updated on `MAX(ctx_max)` increases only (never decreased).
+
+## References
+
+- `internal/store/migrations/0001_initial.sql` — DDL (created in SOW-0001 Chunk 2).
+- `.agents/sow/specs/canonical-events.md` — Event types one-to-one with the schema.
+- `.agents/sow/specs/adapter-*.md` — per-format projection details.
+- `.agents/sow/done/SOW-0002-20260526-cross-format-data-model-analysis.md` — the analysis that produced this schema.

@@ -1,118 +1,456 @@
-# Adapter: ai-agent v2 (legacy single-file format)
+# Adapter: ai-agent v2 (Legacy Single Gzipped JSON)
 
 ## Status
 
-**Phase 1 target.** Required because the operator has ~294,000 v2 snapshot files (~30 GB) accumulated on disk.
+**Phase 1 co-priority with v3.** The operator's `~/.ai-agent/sessions/` directory contains 294,316 v2 `.json.gz` files (~25.4 GB compressed, ~8 months of history) alongside 17,356 v3 `.jsonl` ledgers. Both formats live in the same root directory and must be parsed concurrently by separate adapters; the v2 adapter is the only path to historical data captured before the v3 evidence migration began.
+
+This spec is an evidence-based replacement of the bootstrap sketch. It corrects multiple claims in the sketch that did not match real on-disk data. Every shape statement below is grounded in citation to the producer source or to direct inspection of the operator's snapshot files (sanitized).
 
 ## Source Format
 
-Each session is a single gzipped JSON file:
+### Producer behavior
 
-```
-<sessions-dir>/<originId>.json.gz
-```
+The producer is `ai-agent` (`/home/costa/src/ai-agent.git`). Snapshots are written exclusively by `createPersistenceHandlers().handleSnapshot` in `ai-agent.git/src/persistence.ts:50-67`. The write sequence is:
 
-The decompressed JSON contains the full opTree for that session: metadata, accounting, finalReport, pluginMetas, and a deeply nested `opTree.turns[].ops[]` tree.
+1. `fs.mkdirSync(dir, { recursive: true })` — directory created on demand.
+2. Serialize `{ version, reason, opTree }` via `JSON.stringify`, then `gzipSync`.
+3. Write to a temp path `<dir>/<originId>.json.gz.tmp-<pid>-<Date.now()>`.
+4. `fs.renameSync(tmp, finalPath)` — atomic replace.
 
-Authoritative source: `ai-agent.git/.agents/sow/specs/snapshots.md` and `ai-agent.git/.agents/sow/specs/optree.md`.
+If the rename succeeds, the final path now contains the new snapshot. If the writer crashes between step 3 and step 4, the `.tmp-<pid>-<ts>` artifact is left behind. The producer never cleans these up. The operator's directory currently has two such orphans (cited under Edge Cases).
 
-## Top-Level Structure (sketched; refined when adapter is implemented)
+### Filename convention
+
+`<sessions-dir>/<originId>.json.gz` where `originId` is `AIAgentSession.originTxnId` (`ai-agent.git/src/ai-agent.ts:531`). For ROOT sessions, `originTxnId = txnId` (a fresh UUID v4 produced by `crypto.randomUUID()`). For SUB-AGENT sessions, `originTxnId` is inherited from the parent via `sessionConfig.trace.originId` (`ai-agent.git/src/ai-agent.ts:531,669`). **All descendants of a single root session share the same `originId` and therefore the same file path.** Each child session's own `persistSessionSnapshot('final')` and the parent's `persistSessionSnapshot('subagent_finish' | 'final')` all target the same `.json.gz` file (`ai-agent.git/src/ai-agent.ts:678,1221`). The last writer wins; in practice the parent's terminal `final` snapshot is the last write and contains the full embedded tree (verified empirically — see Snapshot Shape below).
+
+### Atomic-rename behavior
+
+The producer relies on Linux's POSIX rename atomicity. From the adapter's standpoint:
+
+- `fsnotify` will surface a `WRITE` event on the temp file (no listener needed), then a `RENAME`/`MOVED_TO` event on the final path. The `.tmp-<pid>-<ts>` files are tracked under `RENAME`/`CREATE` paths only if the watcher is set to surface all events; the adapter ignores them by suffix.
+- `RENAME` (target side, i.e. `Rename` in Go fsnotify) on the final path means "a new file was atomically moved into place".
+- mtime on the final path equals the temp file's mtime at rename time, which is approximately `Date.now()` of step 3. It is not the session's `endedAt`; it is the snapshot write time.
+
+### Coexistence with v3
+
+The same `<sessions-dir>` root contains:
+
+- v2 root-level files: `<originId>.json.gz`, `<originId>.json.gz.tmp-<pid>-<ts>` (orphans).
+- v3 subdirectories: `session/<sessionId>.jsonl`, `payloads/<sessionId>/turn-NNNN/...`.
+
+This is documented in `ai-agent.git/.agents/sow/specs/snapshots.md:30-45`.
+
+The v2 adapter MUST:
+
+- Watch only the root directory non-recursively, ignoring all subdirectories (`session/`, `payloads/`, and anything else).
+- Process only `*.json.gz` files at the root; skip `*.json.gz.tmp-*` and any other suffix.
+- Coordinate with the v3 adapter only through the shared cursor table (the SQLite `sources` table per `data-model.md`). The two adapters never see each other's files.
+
+A future v2 file MAY have an `originId` matching a v3 `sessionId` (the same root session migrated mid-lifetime). The ingester writes both into the same canonical `sessions` row keyed on `(source_id, native_id)`; running each adapter against the same `<sessions-dir>` location requires distinct `source_id` values (one for `aiagent_v2`, one for `aiagent_v3`). De-duplication across formats is an ingester concern, not an adapter concern.
+
+## Snapshot Shape (Canonical Contract Confirmed Against Real Files)
+
+The bootstrap sketch claimed a flat top-level with `originId`, `sessionId`, `createdAt`, `updatedAt`, `agentName`, `model`, `status`, `accounting`, `finalReport`, `pluginMetas`, plus a nested `opTree.turns[].ops[]`. **This is wrong.** The actual shape is:
+
+### Top level (`ai-agent.git/src/persistence.ts:53-57`)
 
 ```json
 {
-  "originId": "<uuid>",
-  "sessionId": "<uuid>",
-  "createdAt": <ms>,
-  "updatedAt": <ms>,
-  "agentName": "<string>",
-  "model": "<string>",
-  "status": "running"|"completed"|"failed",
-  "accounting": { ... totals ... },
-  "finalReport": <obj|null>,
-  "pluginMetas": [ ... ],
-  "opTree": {
-    "turns": [
-      {
-        "seq": 1,
-        "startTs": <ms>,
-        "endTs": <ms>,
-        "status": "...",
-        "ops": [
-          {
-            "id": "...",
-            "kind": "llm"|"tool"|"session"|"reasoning",
-            "name": "...",
-            "startTs": <ms>,
-            "endTs": <ms>,
-            "status": "...",
-            "tokensIn": ..., "tokensOut": ..., "costUsd": ...,
-            "model": "...", "provider": "...",
-            "toolNamespace": "...",
-            "childSession": { ... nested session ... },
-            "childSessionRef": "...",
-            "childSessionSummary": { ... },
-            "errorClass": "...", "errorMessage": "..."
-          }
-        ]
-      }
-    ]
+  "version": <int>,
+  "reason": <string>,
+  "opTree": { ... }
+}
+```
+
+Exactly three fields. Nothing else. Verified across 200 random samples and the producer code path:
+
+- `version`: integer, either `1` or `2`. Distribution on disk (50-sample run): v1 ≈ 60%, v2 ≈ 40%. The producer code at `ai-agent.git/src/ai-agent.ts:394` builds new snapshots with `version: 2`. Older snapshots on disk still carry `version: 1` from before the bump; they were never rewritten because the sessions ended before the change. **The version field gates SHAPE features inside `opTree`:**
+  - `version: 1` opTree lacks `steps[]`, `finalReport`, and `pluginMetas`.
+  - `version: 2` opTree may carry `steps[]`, `finalReport`, `pluginMetas`. All three are still optional within v2.
+  - Op-level shape is identical across v1 and v2.
+- `reason`: snapshot trigger reason, one of `'subagent_finish'` (intermediate, emitted by the parent after a child finishes), `'final'` (terminal, emitted once at session end), or `undefined` (test paths). On disk, **all 50 sampled files carry `reason: "final"`** — because intermediate `subagent_finish` snapshots are overwritten by the terminal `final` snapshot for the same originId.
+- `opTree`: the `SessionNode` from `SessionTreeBuilder.getSession()` at the moment of write.
+
+The wire-level `SessionSnapshotPayload` (`ai-agent.git/src/types.ts:786-793`) ALSO has `sessionId`, `originId`, `timestamp` fields — but these are NOT persisted to disk; `persistence.ts:53-57` strips them before gzip. The adapter must recover `originId` from the filename and `sessionId` and `timestamp` from inside `opTree` (see below).
+
+### opTree shape
+
+`opTree` is a `SessionNode` as defined in `ai-agent.git/src/session-tree.ts:8-22` and `ai-agent.git/.agents/sow/specs/optree.md:18-35`. Confirmed key union from 200 random samples:
+
+```json
+{
+  "id":            "<string>",      // session-tree internal id, NOT a UUID (e.g. "mitrcrkj-g6mp5m")
+  "traceId":       "<uuid>",        // = AIAgentSession.txnId. For root sessions == filename UUID
+  "agentId":       "<string>",      // agent name (e.g. "comparison-page", "web-research")
+  "callPath":      "<string>",      // hierarchical agent path (e.g. "web-research->agent__web-search->web-search")
+  "sessionTitle":  "<string>",      // often empty
+  "latestStatus":  "<string>",      // optional, set by agent__task_status
+  "startedAt":     <int millis>,    // ms-since-epoch from Date.now()
+  "endedAt":       <int millis>,    // optional, absent only for sessions that never completed
+  "success":       <bool>,          // optional, absent for never-completed sessions
+  "error":         "<string>",      // optional, free text error message
+  "attributes":    { ... },         // optional, observed empty across samples
+  "totals":        { ... },         // see SessionTotals below
+  "turns":         [ TurnNode... ],
+  "steps":         [ StepNode... ], // v2 only, optional
+  "finalReport":   { ... },         // v2 only, optional, see below
+  "pluginMetas":   { ... }          // v2 only, optional
+}
+```
+
+The relationship between `opTree.id`, `opTree.traceId`, and the filename:
+
+| Field | Value | Source |
+|---|---|---|
+| filename UUID | parent `originTxnId` | `ai-agent.git/src/persistence.ts:59` |
+| `opTree.traceId` | this session's `txnId` (== `selfId` if child, == `originTxnId` if root) | `ai-agent.git/src/ai-agent.ts:543` |
+| `opTree.id` | `uid()` random string from `SessionTreeBuilder` constructor | `ai-agent.git/src/session-tree.ts` builder |
+
+Therefore, for a ROOT session, `filename UUID == opTree.traceId`. For a CHILD session viewed inside a parent file (`op.childSession.traceId`), the child's traceId is a DIFFERENT UUID. The adapter must use `opTree.traceId` (and, for children, `childSession.traceId`) as the canonical `native_id` for the `sessions` table, NOT the filename.
+
+### TurnNode (`ai-agent.git/src/session-tree.ts:25-31`)
+
+```json
+{
+  "id":         "<string>",     // turn-tree internal id
+  "index":      <int>,          // 0-based: index 0 == "init" turn (system bookkeeping); index >= 1 == real user turns
+  "startedAt":  <int millis>,
+  "endedAt":    <int millis>,   // optional
+  "attributes": { ... },        // optional; system turns carry {system: true, label: "init"}
+  "ops":        [ OperationNode... ]
+}
+```
+
+The spec's claim that `index` is 1-based (optree.md:24) is **inconsistent with on-disk reality**: turn 0 always exists and is the system init turn; user turns begin at 1. The adapter MUST treat `index` as 0-based and either map turn 0 to canonical turn_seq=0 (preferred — exposes init events) or skip turn 0 entirely (acceptable for a leaner timeline). See "Mapping to Canonical Events" for the chosen convention.
+
+### StepNode (v2 only, `ai-agent.git/src/session-tree.ts:42-50`)
+
+```json
+{
+  "id":         "<string>",
+  "index":      <int>,
+  "kind":       "system" | "user" | "advisors" | "router_handoff" | "handoff" | "internal",
+  "startedAt":  <int millis>,
+  "endedAt":    <int millis>,
+  "attributes": { ... },
+  "ops":        [ OperationNode... ]
+}
+```
+
+Steps are sibling to turns; both contain ops. Observed `kind` in operator data: `"internal"` (history-compaction summarizer child sessions). Other kinds exist in the producer but are rarer.
+
+### OperationNode (`ai-agent.git/src/session-tree.ts:8-22`)
+
+Verified key union across 200 random samples:
+
+```json
+{
+  "opId":                "<string>",                      // session-tree internal id
+  "kind":                "llm" | "tool" | "session" | "system",  // four observed kinds
+  "startedAt":           <int millis>,
+  "endedAt":             <int millis>,                    // optional
+  "status":              "ok" | "failed",                 // optional, present for completed ops
+  "attributes":          { ... },                         // see below
+  "logs":                [ LogEntry... ],                 // always present, may be empty
+  "accounting":          [ AccountingEntry... ],          // always present, may be empty
+  "reasoning":           { ... },                         // optional, llm ops only
+  "request":             { kind, payload, size },         // optional
+  "response":            { payload, size, truncated },    // optional
+  "childSession":        SessionNode,                     // optional, when kind=session (and history-compaction internal step ops)
+  "childSessionRef":     { sessionId, originId, ... },    // optional, post-v3 compaction
+  "childSessionSummary": { sessionId, turns, steps, ... } // optional, post-v3 compaction
+}
+```
+
+Observed `kind` values in operator data: `system`, `llm`, `tool`, `session`. The spec's claimed `reasoning` op kind does NOT exist as a standalone kind — reasoning lives as `op.reasoning` on `llm` ops.
+
+Observed `attributes` keys (across 50 random files): `provider`, `model`, `latency`, `isFinalTurn` (llm ops); `name`, `provider`, `kind`, `latency`, `size`, `error` (tool / session ops); `label` (system ops).
+
+Observed `kind: session` op attributes (from a sub-agent sample): `{name: "agent__web-search", provider: "subagent", kind: "agent", latency: 216344, size: 11210}`.
+
+Observed `kind: tool` op attributes: `{name: "<tool_name>", provider: "<provider>", kind: "<tool_kind>", latency, size}`.
+
+Observed `status: failed` op attributes: `{error: "<slug>"}` — e.g. `error: "token_budget_exceeded"`.
+
+#### LogEntry shape
+
+Union of observed keys (50-sample): `agentId, agentPath, callPath, direction, fatal, headendId, llmRequestPayload, llmResponsePayload, max_subturns, max_turns, message, originTxnId, parentTxnId, path, remoteIdentifier, severity, subturn, timestamp, toolKind, turn, turnPath, txnId, type, details`. Mandatory-in-practice: `timestamp` (ms), `severity` (`"VRB"|"DBG"|"INF"|"WRN"|"ERR"`), `message`, `path` (stable bijective op path like `"1-2"` or `"S0-1"`).
+
+#### AccountingEntry shape
+
+Union of observed keys: `agentId, callPath, charactersIn, charactersOut, command, costUsd, error, latency, mcpServer, model, originTxnId, parentTxnId, provider, status, stopReason, timestamp, tokens, txnId, type`.
+
+Two values for `type`:
+
+- `type: "llm"`: carries `provider`, `model`, `tokens: { inputTokens, outputTokens, cacheReadInputTokens?, cacheWriteInputTokens?, cachedTokens?, totalTokens? }`, `costUsd`, `stopReason`, `latency`, `status`.
+- `type: "tool"`: carries `mcpServer`, `command`, `charactersIn`, `charactersOut`, `latency`, `status`, optional `error`.
+
+`tokens` has both Anthropic (`cacheReadInputTokens`, `cacheWriteInputTokens`) and OpenAI (`cachedTokens`) cache-token naming in the same data. The adapter normalizes to canonical `tokens_in`/`tokens_out`, summing cache reads/writes into `tokens_in` per existing model accounting conventions (see `ai-agent.git/.agents/sow/specs/accounting.md`).
+
+#### reasoning shape
+
+```json
+{
+  "chunks":     [],                  // legacy field, new snapshots keep empty
+  "final":      "<string>",          // optional, compact reasoning summary
+  "chunkCount": <int>,               // optional counter
+  "charCount":  <int>                // optional counter
+}
+```
+
+Legacy snapshots may have non-empty `chunks: [{ text, ts }, ...]`. The adapter passes whichever it finds; `final` is preferred when present (per `ai-agent.git/.agents/sow/specs/snapshots.md:105`).
+
+#### request / response shape
+
+```json
+"request":  { "kind": "llm" | "tool", "payload": <any>, "size": <int> }
+"response": { "payload": <any>, "size": <int>, "truncated": <bool?> }
+```
+
+Payload may be raw object, base64-encoded blob, or — in newer v2-era snapshots — `{ ref: EvidencePayloadRef }` pointing into `payloads/<sessionId>/...`. The adapter inspects each payload object; if `payload.ref` is set, emits a `PayloadRefEvent` whose `LocationURI` resolves the relative path against `<sessions-dir>`. Otherwise the adapter records `op.bytes_in = request.size`, `op.bytes_out = response.size` and does NOT inline the raw bytes (the canonical model never inlines payloads — see `canonical-events.md`).
+
+#### childSession shape (the embedded sub-agent pattern)
+
+`op.childSession` is a full nested `SessionNode` with its own `traceId`, `agentId`, `callPath`, `startedAt`, `endedAt`, `success`, `totals`, `turns[]`, `steps[]`. Verified empirically: across 31 child sessions inside one parent file (`00ce0ef4-2166-4792-8a92-403a0db5b7e0.json.gz`), **none** of the child `traceId`s exist as their own `<traceId>.json.gz` file at the root. **In v2, sub-agent sessions are NOT independently persisted.** They live exclusively inside the parent's snapshot. The adapter MUST recursively walk `childSession` to extract all sub-agent events; it cannot rely on a separate file for the child.
+
+`childSessionRef` / `childSessionSummary`: these post-v3-migration compaction artifacts appear in newer snapshots when the producer was already on the v3 evidence path but still wrote a legacy snapshot for compatibility. Observed in **0** of 50 random samples on the operator's disk, indicating they are rare in this particular dataset (most data predates the v3 migration). When present, the ref's `sessionId` should be looked up either in the v3 ledger (out of scope for this adapter) or in another v2 file (also rare). The adapter emits `OpStartedEvent(kind=session, ChildSessionNativeID=ref.sessionId)` and `OpFinalizedEvent` populated from `childSessionSummary`; no recursive descent.
+
+### SessionTotals shape
+
+```json
+{
+  "tokensIn":         <int>,
+  "tokensOut":        <int>,
+  "tokensCacheRead":  <int>,
+  "tokensCacheWrite": <int>,
+  "costUsd":          <float>,
+  "toolsRun":         <int>,
+  "agentsRun":        <int>,
+  "turnsUsed":        <int?>,
+  "turnsFailed":      <int?>,
+  "toolsInvalid":     <int?>,
+  "finalFailed":      <int?>,
+  "toolsFixed":       <int?>,
+  "finalFixed":       <int?>,
+  "finalForced":      <int?>
+}
+```
+
+Defined at `ai-agent.git/src/session-tree.ts:66-82`. `agentsRun` counts the root session itself plus all descendants. The adapter SHOULD NOT emit totals as canonical events — totals are reconstructed by the ingester from individual ops. It MAY persist them on the canonical `sessions` row's `extras_json` for cross-check at QA time.
+
+### finalReport / pluginMetas
+
+`finalReport` (when present) is the final user-facing report payload synced by `setSessionFinalArtifacts` (`ai-agent.git/src/session-tree.ts:122`). `pluginMetas` is keyed by plugin name, each entry a shallow record. Both are optional in v2 snapshots and absent from v1. The adapter stores both in `sessions.extras_json` as opaque JSON; no canonical event maps to them today.
+
+## Mapping to Canonical Events
+
+The translation is harder than v3 because the v2 file is a **snapshot of full state at one moment**, not an append-only ledger. The adapter therefore behaves as a deterministic projection: for each file scan, walk the full opTree and emit one canonical event per node. The ingester is responsible for upsert/dedup via stable `SourceSeq` values; replaying the same file produces the same events with the same `SourceSeq`, so the ingester's high-water-mark logic deduplicates trivially.
+
+### Conventions
+
+- Timestamps: opTree `startedAt`/`endedAt` are milliseconds. Canonical `Ts`/`EndTs` are microseconds. Multiply by 1000.
+- `SourceID`: a stable identifier for this v2 source, e.g. `aiagent_v2:/home/<user>/.ai-agent/sessions`.
+- `SourceSeq`: monotonic per source. Strategy: for each (file, opTree-node) emit a `SourceSeq` computed as `xxhash64("v2:" + <originId> + ":" + <pathInTree>)` where `pathInTree` is the opTree's stable path (`opTree.id` and concatenated turn/step/op indices, e.g. `"T:0/O:0"`, `"S:0/O:1"`, `"T:1/O:2/child/T:0/O:0"`). xxhash64 over uint64 is collision-safe within 2^32 events per source.
+- Stable native IDs:
+  - Session native_id = `opTree.traceId` (root) or `childSession.traceId` (sub-agent).
+  - Turn native_id = `<session.traceId>:T:<turn.index>`.
+  - Step native_id = `<session.traceId>:S:<step.index>`.
+  - Op native_id = `op.opId` (already unique within the tree, per `SessionTreeBuilder.uid()`).
+
+### Per-node emission
+
+| Source structure | Canonical events emitted | Notes |
+|---|---|---|
+| `opTree` (the file's session) | `SessionStartedEvent(NativeID=traceId, ParentNativeID="", Kind="root", AgentName=agentId, Model=<from first llm op>, Extras={callPath, sessionTitle, filename})` followed by `SessionUpdatedEvent` if model becomes known later | One per file; emitted on every scan; upsert by ingester |
+| `opTree` with `endedAt` set | `SessionFinalizedEvent(Status=success?"completed":"failed", ErrorClass=opTree.error, EndTs=endedAt)` | Only when `endedAt` exists |
+| `opTree.turns[i]` (any i including 0) | `TurnStartedEvent(Seq=index)` + (if `endedAt`) `TurnFinalizedEvent(Seq=index, Status=derived, EndTs=endedAt, TokensIn/Out=sum-of-llm-accounting-in-ops, CostUSD=sum)` | Turn 0 (init) is preserved as canonical turn 0 — operators can hide it in UI but the spec keeps it for fidelity |
+| `opTree.steps[i]` | `TurnStartedEvent(Seq=encode(step.index, kind))` + `TurnFinalizedEvent` | Encoded so step seqs do not collide with turn seqs, e.g. `seq = 10000 + step.index`; recorded in `extras_json.step_kind` |
+| `op` with `kind="llm"` | `OpStartedEvent(Kind="llm", Name=attributes.model, Model, Provider, ParentOpSeq=-1)` + `OpFinalizedEvent(TokensIn/Out from accounting[0].tokens, CostUSD from accounting[0].costUsd, Status, ErrorClass=attributes.error, BytesIn=request.size, BytesOut=response.size)` | When op has `reasoning.final`, emit nested `OpStartedEvent(Kind="reasoning", ParentOpSeq=<llm op's seq>)` immediately before so the reasoning span nests under the llm op |
+| `op` with `kind="tool"` | `OpStartedEvent(Kind="tool", Name=attributes.name, ToolNamespace=attributes.provider)` + `OpFinalizedEvent` | `BytesIn=charactersIn`, `BytesOut=charactersOut`, no tokens unless tool emits them |
+| `op` with `kind="session"` (embedded sub-agent) | `OpStartedEvent(Kind="session", Name=attributes.name, ChildSessionNativeID=childSession.traceId)` + `OpFinalizedEvent`, then RECURSE into `childSession` and emit its full event stream (SessionStarted, turns, ops, etc., with `ParentNativeID = parent traceId`) | The recursion is breadth-unbounded; deep sessions (32+ children) observed |
+| `op` with `kind="system"` | `OpStartedEvent(Kind="internal", Name=attributes.label||"system")` + `OpFinalizedEvent` | System ops contain logs only; ingested for log surfacing |
+| `op.logs[k]` | `LogEntryEvent(Severity, Source="aiagent_v2", Message, Ts=log.timestamp*1000, op_id_linkage)` | One event per log line |
+| `op.request.payload.ref` or `op.response.payload.ref` (when present) | `PayloadRefEvent(PayloadKind, Format, Compression="gzip", LocationURI=file://<sessions-dir>/<ref.path>, OriginalBytes, StoredBytes)` | Same path resolution as v3 |
+| `op.childSessionRef` (no `childSession`) | `OpStartedEvent(Kind="session", ChildSessionNativeID=ref.sessionId)` + `OpFinalizedEvent(populated from childSessionSummary)` | No recursion; child is found via another file/ledger |
+| `op.status == "failed"` | `OpFinalizedEvent(Status="failed", ErrorClass=attributes.error||"unknown")` | Plus `LogEntryEvent(severity="ERR")` with attributes.error message when present |
+| Periodic checkpoint after batch | `SourceProgressEvent(Cursor=...)` | See Cursor below |
+| Parse error on a file | `SourceErrorEvent(Path, Message)` | Increments `sources.parse_errors`, does not block other files |
+
+### Ordering
+
+Within a single file scan, the adapter emits events depth-first in opTree order: SessionStarted → Turn0Started → Turn0Op0Started/Finalized → … → TurnNFinalized → SessionFinalized. Child sessions are emitted in-place at the point of their parent `kind="session"` op. This satisfies the canonical-events.md ordering guarantee that turns within a session are chronological.
+
+## Watch Strategy
+
+- `fsnotify.NewWatcher()`, `watcher.Add(<sessions-dir>)`. **Non-recursive**: do NOT add `session/` or `payloads/`.
+- React to:
+  - `fsnotify.Create` on `*.json.gz` (new session file just renamed in).
+  - `fsnotify.Write` on `*.json.gz` (unlikely with atomic-rename producer, but defensive — older writers may not have used the temp+rename pattern).
+  - `fsnotify.Rename` on `*.json.gz` (target side; primary signal because the producer ALWAYS renames into place — `persistence.ts:62`).
+- Ignore:
+  - `*.json.gz.tmp-*` (the producer's temp files).
+  - Any path that descends into `session/` or `payloads/` (the v3 adapter owns those).
+  - Hidden files and dotfiles.
+- Debouncing: an active session can rewrite its `.json.gz` many times during one human turn (every sub-agent completion triggers `persistSessionSnapshot('subagent_finish')`). The adapter MUST coalesce: maintain a per-file `pendingScan` flag; on fsnotify event, set the flag; a worker pool drains the flag at most once per `debounceWindow` (proposed: 500 ms). Multiple events during the window collapse into one scan. The scan reads mtime first, then opens; if the file's mtime changes during read, re-read ONCE (not in a loop) and accept the second read.
+- Initial backfill on startup: enumerate the directory once, queue every `*.json.gz` (skipping tmp suffixes), process in worker pool with cursor-aware skip.
+
+## Cursor
+
+The cursor's purpose is to make a restart cheap: known-unchanged files MUST be skipped without opening them. Because v2 rewrites the entire file on each snapshot, the adapter cannot use byte offsets; it tracks file identity via `(mtime, size, contentHash)`.
+
+```json
+{
+  "version": 1,
+  "files": {
+    "<originId>.json.gz": {
+      "mtime_us":    <int>,
+      "size":        <int>,
+      "content_sha": "<hex64>"
+    }
   }
 }
 ```
 
-The exact field names and nesting will be confirmed against real samples (the operator's `~/.ai-agent/sessions/` contains 294K examples) during the SOW-0001 implementation. This spec will be updated with field-by-field evidence (file:offset citations) at that point.
+Skip logic on backfill or watch-driven scan:
 
-## Mapping to Canonical Events
+1. Stat the file. If size == 0, emit `SourceError` (cite path, "empty file") and skip.
+2. If cursor has an entry AND cursor.mtime_us == stat.mtime_us AND cursor.size == stat.size → skip.
+3. Otherwise read first 64 KiB and compute `content_sha`. If cursor entry exists AND `content_sha` matches → update cursor mtime/size, skip re-emission.
+4. Otherwise: re-parse, emit all events (the ingester's HWM dedup absorbs duplicates), then write the new cursor row.
 
-| Source structure | Canonical events |
-|---|---|
-| Top-level session metadata | `SessionStartedEvent` |
-| Each `turns[]` element | `TurnStartedEvent` + `TurnFinalizedEvent` |
-| Each `ops[]` item | `OpStartedEvent` + `OpFinalizedEvent` |
-| Inline `childSession` (sub-agent or `tool_output` child) | nested session emission: walk the child tree recursively, emit all its events; emit parent `OpStartedEvent` with `ChildSessionNativeID` |
-| `childSessionRef` (already compacted) | parent `OpStartedEvent`+`OpFinalizedEvent` with `ChildSessionNativeID`; child session events come from that session's own `<childSessionId>.json.gz` file (if present) |
-| `status: failed` | `SessionFinalizedEvent` status=failed |
-| `status: completed` | `SessionFinalizedEvent` status=completed |
+Because event `SourceSeq` is computed deterministically from `(originId, opTreePath)`, replaying produces the SAME `SourceSeq` values as the original emission. The ingester compares each event against the per-source high-water-mark (`canonical-events.md`); only NEW events (e.g. ops added since the last scan) pass through. Therefore the adapter is safe to re-emit every event on every scan; this is the deliberate trade-off for v2's snapshot-not-ledger nature.
 
-## Watch Strategy
+Cursor checkpointing: the adapter emits a `SourceProgressEvent` every N files during backfill (proposed N=1000) and after each watch-driven scan. The ingester persists `cursor` into the `sources` table per `data-model.md`.
 
-- `fsnotify.Add()` on `<sessions-dir>/` (directory).
-- React to: `CREATE`, `WRITE` (full file rewrite triggers WRITE), and `MOVED_TO` (atomic rename pattern from the producer).
-- Each touched file is re-parsed completely; the adapter emits a deduplicated event stream using a content hash for stable `SourceSeq` (since v2 rewrites the entire file on each change, there is no append cursor).
+## Sub-Agent Linkage
 
-## Cursor
+In v2, children are **embedded** in the parent's snapshot via `op.childSession` (a full nested `SessionNode`). They are NOT independently persisted at the root — verified by checking 31 child traceIds from one parent file: 0 of 31 had their own `<traceId>.json.gz` file (cited under Edge Cases).
 
-```json
-{
-  "files": {
-    "<originId>.json.gz": {
-      "mtime_us": <int>,
-      "size": <int>,
-      "content_hash": "<sha256:first-N-bytes>"
-    }
-  },
-  "version": 1
-}
-```
+The adapter therefore:
 
-The adapter skips files whose `(mtime, size)` is unchanged since the last scan. For changed files: re-parse and dedup against existing canonical rows by re-emitting events with stable `SourceSeq = sha256(<originId>:<op.id>)`. The ingester upserts.
+1. Walks `opTree.turns[].ops[]` and `opTree.steps[].ops[]` looking for `op.kind === "session"` and `op.childSession` populated.
+2. For each such op: emits `OpStartedEvent(Kind="session", ChildSessionNativeID=childSession.traceId)` + `OpFinalizedEvent`, then recursively emits the child's `SessionStartedEvent`, its turns, its ops, etc., with `ParentNativeID = parent traceId` and stable `SourceSeq` derived from the in-tree path including the descent marker.
+3. The ingester sets the canonical `sessions.parent_session_id` and `sessions.root_session_id` for the child via the canonical hash of `(source_id, native_id)` of the parent and the file's root traceId.
+
+If a future v2 file contains `childSessionRef` (without `childSession`) — produced when the v3 path was active but a v2 snapshot was still being written for compatibility — the adapter emits the session-kind op but does NOT recurse. The ingester records the link by native_id and reconciles when the referenced session is ingested from elsewhere. In the operator's current dataset this is rare (0/50 random samples). The adapter MUST be defensive: a `childSessionRef` whose `sessionId` is never observed elsewhere is fine — the child session row remains a stub (`status: 'unknown'`).
+
+If the same child traceId appears BOTH embedded in a parent AND as its own file (theoretical — never observed in operator data), the adapter MUST emit child events from both passes; the ingester's HWM dedup absorbs duplicates because `SourceSeq` is computed from `(originId-of-the-file-being-scanned, opTreePath-in-that-file)`. Note: the SAME canonical session row is updated from both passes — `sessions.native_id` is the child's traceId, identical in both emissions, and the ingester upserts by `(source_id, native_id)`.
+
+## Edge Cases
+
+1. **Empty (zero-byte) `.json.gz` files.** Verified count: **29 of 294,316** files are 0 bytes. Cause: producer crashed between `writeFileSync` (which created the temp file) and the gzip data being flushed, then the temp was renamed by another producer's later attempt. The adapter MUST detect zero-byte files via stat (no gzip decompression attempted) and emit `SourceError` with explanatory message; record file in cursor as "skipped, zero bytes" so it is not retried until the file is modified.
+
+2. **Orphaned `.tmp-<pid>-<ts>` files.** Verified count on operator's disk: 2 files (`143f3e6c-...json.gz.tmp-702094-1768162665628`, 13 KB; `e48f9399-...json.gz.tmp-702094-1768162665636`, 0 bytes). Producer never cleans these. The adapter MUST ignore them by suffix match (`*.json.gz.tmp-*`); never include them in scans.
+
+3. **Active session being rewritten while we read.** An active root session whose sub-agents are running rewrites its `.json.gz` many times per turn (every `subagent_finish` plus every child's own `final`). Pattern: open file → stream-decompress → during decompression, mtime advances; the next fsnotify event will fire. The adapter MUST tolerate this:
+   - Read with `os.Open` and a streaming gzip + json decoder (no `ioutil.ReadFile`).
+   - After successful parse, re-stat. If mtime advanced, schedule one additional debounced scan; do NOT loop.
+   - The atomic-rename means an in-flight rename never produces a partial file at the final path: either the OLD complete file is visible (if rename hasn't happened) or the NEW complete file is visible. Partial gzip should be extremely rare; if observed, emit `SourceError` and retry once.
+
+4. **Very old v1 snapshots.** v1 (no `steps[]`, no `finalReport`, no `pluginMetas`) is ~60% of disk data. Handle by treating those fields as optional; no schema differences inside ops or turns.
+
+5. **Sessions interrupted mid-turn (no `final` snapshot).** Producer writes `subagent_finish` snapshots during a session; if the process is killed before the `final` snapshot, the disk file is whatever the last intermediate write produced. Such a session has `opTree.endedAt` and `opTree.success` UNSET. The adapter:
+   - Emits `SessionStartedEvent` only (no `SessionFinalizedEvent`).
+   - The canonical row carries `status: 'running'` (or `'unknown'` if there is reason to suspect the producer is no longer alive).
+   - Turns whose `endedAt` is unset emit `TurnStartedEvent` only.
+   - Ops whose `endedAt` is unset emit `OpStartedEvent` only.
+   - The ingester's `running` rows are eligible for promotion to `completed`/`failed` on a later re-scan of the same file (if the producer eventually writes `final`).
+
+6. **Snapshots that already reference v3 payloads.** When `op.request.payload.ref` or `op.response.payload.ref` is populated, the payload bytes live under `<sessions-dir>/payloads/<sessionId>/...`. The v2 adapter emits `PayloadRefEvent` with `LocationURI = "file://<absolute-path>"`; the file content is read on demand by the presenter, not by the adapter. If the payload file is missing (the migration left a stale ref), the adapter still emits the event; the presenter handles the missing-file UI.
+
+7. **Snapshots > 100 MB compressed.** The largest file on disk is 151,881,088 bytes (151 MB compressed); decompressed it may exceed 1 GiB. The adapter MUST stream:
+   - `gzip.NewReader(file)` not `gzip.Decompress(ioutil.ReadAll)`.
+   - JSON decode via `encoding/json.Decoder.Decode` over the streaming reader.
+   - DO NOT load the entire JSON object into memory. Walk `opTree.turns[]` and `opTree.steps[]` and their nested `op.childSession.turns[]` via a streaming SAX-like decoder when the file size exceeds a configurable threshold (proposed: 50 MB compressed). For smaller files, full-object decode is acceptable.
+   - The largest files dominate decompression cost but are a small fraction of files (p99 = 1.2 MB compressed; max is the only extreme outlier). The streaming path is required for correctness under memory pressure, not for throughput.
+
+8. **Mixed agent versions in flight.** A single `<sessions-dir>` may contain files written by producers running different ai-agent versions concurrently (e.g. one process pre-v3 evidence, another post). The adapter MUST tolerate any `version` value (currently `1` or `2`); reject only when `version` is missing or not an integer (emit `SourceError`).
+
+9. **Filename whose UUID does not match `opTree.traceId`.** Possible if a future producer writes child sessions to their own files. The adapter trusts `opTree.traceId` as the canonical `native_id`; the filename is decoration. Mismatch is recorded in `extras_json.filename_originid_mismatch` for diagnostic visibility, not an error.
+
+10. **`payload.ref` paths escaping `<sessions-dir>`.** A malformed ref like `path: "../../../../etc/passwd"` would resolve outside the sessions root. The adapter MUST validate that the resolved absolute path is a descendant of `<sessions-dir>`; otherwise emit `SourceError` and skip the ref. This mirrors `readEvidencePayload` (`ai-agent.git/src/evidence/reader.ts`) which rejects path-escaping refs.
+
+11. **Concurrent shared-filename writes (root + descendants).** Because all descendants of a root session share the same filename, multiple producer processes (or one process with concurrent sub-agents) may racingly rename to the same final path. POSIX rename is atomic, so partial reads are impossible; the adapter just sees a different snapshot on each event. The adapter must accept that the file's CONTENT may flip between "child-only opTree" and "parent-with-children opTree" depending on which write was most recent — the parent's final write typically wins, but during execution the file may transiently show a child subtree. Re-scanning emits all events; the ingester's HWM and stable `SourceSeq` ensure no duplication. Per-session canonical rows converge to the final state once the parent's `final` snapshot lands.
 
 ## Performance Considerations
 
-- 294,000 files × ~62 KB average decompressed = ~18 GB to process for a full initial backfill.
-- Backfill strategy: bounded worker pool (e.g. 8 goroutines) reading and decompressing in parallel. Target: full backfill in under 60 minutes on the operator's workstation.
-- After backfill, the file watcher is the only load — incremental updates are tiny.
-- Initial backfill runs **on first launch only**, then resumes from cursor on subsequent launches.
+### Sizing reality
 
-## Known Edge Cases
+- 294,316 files at root.
+- ~25.4 GB compressed total; mean 92 KB; median 10 KB; p99 1.2 MB; max 151 MB.
+- Workstation: 12th Gen i9-12900K, 16 logical CPUs.
 
-- **Active session being re-written constantly**: an active v2 session can rewrite its `.json.gz` dozens of times per minute. The adapter must debounce: if a file's mtime advances while we're reading it, finish the current read, then re-read once (not in a loop).
-- **Files with empty/corrupt gzip**: count as `SourceError`, do not block other files.
-- **`childSession` inline vs detached**: handle both shapes — inline means we have the child's events in the parent file; detached means we wait for the child's own file.
+### Single-thread benchmark
+
+Direct Python `gzip + json.loads` over 200 random files: 887 files/s/thread, 40 MB/s compressed-throughput, 160 MB/s decompressed-throughput. Extrapolated single-thread total for 294,316 files: **5.5 minutes**.
+
+### Parallelization
+
+Go's `compress/gzip` is ~1.4× faster than Python; structured `encoding/json` is similar. The adapter uses a bounded worker pool (proposed: `runtime.NumCPU()` or 8, whichever is smaller) processing files in parallel:
+
+- 8 workers, ideal parallelism: ~0.7 min wall.
+- Realistic with I/O serialization and SQLite write contention: 5-10 minutes wall.
+
+**The 60-minute backfill gate is not at risk for v2.** The risk surface is elsewhere: SQLite write throughput, not adapter parsing.
+
+### Memory
+
+- Small files (p50): fully decoded in memory, ~64 KB heap per file. With 8 workers, ≤ 1 MB resident.
+- Large files (p99 = 1.2 MB compressed → ~5 MB decoded): ≤ 40 MB across 8 workers.
+- The 151 MB compressed outlier (~1+ GB decoded): MUST stream — `json.Decoder.Token()` over `gzip.NewReader(file)`. The adapter's worker that hits this file allocates more heap; other workers are unaffected. Proposed limit: workers detect compressed size > 50 MB and serialize through a single "large file" lane to bound peak memory.
+
+### Backfill checkpointing
+
+Emit `SourceProgressEvent` after every 1000 files processed. On restart, the cursor's `files` map skips already-processed files in O(1) (Bloom/hash-keyed lookup). The cursor is small: ~80 bytes per file × 294K files ≈ 23 MB JSON. Storing in `sources.cursor` as a single JSON blob is acceptable for v1; if the cursor grows beyond ~100 MB, the adapter should switch to a side table.
+
+### Incremental updates
+
+Post-backfill, fsnotify drives only changed files. Steady-state load is ≤ tens of events per second across all active sessions, trivially within budget.
+
+## Canonical Model Gaps
+
+These are v2 concepts that do not fit cleanly into `canonical-events.md` and `data-model.md`. Each gap requires a decision before SOW-0001 closes.
+
+1. **0-based init turn (turn 0).** The canonical `turns.seq` is described as 1-based in the bootstrap sketch. v2 has a turn 0 with `attributes.system: true`. **Decision needed:** preserve turn 0 as canonical seq=0 (proposed — cleanest, preserves init logs) OR skip turn 0 entirely (loses init telemetry) OR remap turn 0 to a special pseudo-step.
+2. **Steps as a sibling of turns.** v2 has `opTree.steps[]` for orchestration (advisors/router/handoff) and history-compaction (internal). Canonical has only `turns`. **Decision needed:** project steps onto turn seqs with a reserved offset (proposed: `step_seq = 10000 + step.index`, record `step_kind` in `extras_json`) OR add a `steps` table to the canonical model (larger surface change).
+3. **`system` op kind.** Canonical `OpKind` enumerates `llm`, `tool`, `session`, `reasoning`, `internal`. v2 uses `system` for the init/fin housekeeping ops. The adapter maps `system → internal` and stores the original kind in `extras_json.original_kind = "system"`.
+4. **Accounting type `tool` carrying `charactersIn`/`charactersOut`.** Canonical `OpFinalized` has `BytesIn`/`BytesOut`. The adapter maps `charactersIn → bytes_in`, `charactersOut → bytes_out`. This is a UTF-8 character-count not byte-count strictly, but the canonical field is documented as "request payload size (uncompressed)"; for tool ops the producer chose character count. Document the unit mismatch in `extras_json`.
+5. **`opTree.totals` denormalization.** v2 carries pre-computed totals on the session node. Canonical computes totals server-side from ops. The adapter does NOT emit a canonical event from totals (avoids double-counting). Totals are dropped or kept in `extras_json` for QA cross-check; **decision needed:** keep or drop.
+6. **`finalReport` payload.** A potentially-large structured object containing the agent's final user-facing report. Canonical has no place for it. **Decision needed:** store in `sessions.extras_json` (proposed for v1) OR define a new `final_reports` table.
+7. **`pluginMetas`.** Per-plugin final metadata. Same situation as `finalReport`. Proposed: `sessions.extras_json.plugin_metas`.
+8. **`latestStatus`.** Optional free-text progress string set by `agent__task_status`. Useful for showing "what was the agent's last self-reported status" in the UI. Proposed: `sessions.extras_json.latest_status`. Canonical does not have a dedicated field.
+9. **Per-op `reasoning` block.** Canonical has `reasoning` as a separate `OpKind`. The adapter spawns a nested `OpStartedEvent(Kind="reasoning", ParentOpSeq=<llm>)` per llm op that has `reasoning.final`. The reasoning text content is emitted as a `LogEntry` of severity `INF` attached to the reasoning op so the UI can render it without inlining it on the op row.
+10. **Embedded request/response payloads (legacy, no `ref`).** Older v2 snapshots inline base64-encoded payloads directly. Canonical never inlines. The adapter writes the payload bytes to a side-cache file under the ingester's working directory (`<work-dir>/aiagent_v2/<originId>/<opId>-{request,response}.bin`), then emits a `PayloadRefEvent` pointing to that file. The presenter resolves the URI identically to v3 payload refs. **Decision needed:** implement the side-cache or skip emitting payload refs for legacy inlines (lose payload visibility for older sessions).
 
 ## References
 
-- ai-agent.git/.agents/sow/specs/snapshots.md
-- ai-agent.git/.agents/sow/specs/optree.md
-- ai-agent.git/src/persistence.ts
-- ai-agent.git/src/session-tree.ts
+- `ai-agent.git/.agents/sow/specs/snapshots.md` — authoritative format spec (v2 and v3 sections).
+- `ai-agent.git/.agents/sow/specs/optree.md` — SessionNode/TurnNode/OperationNode field reference.
+- `ai-agent.git/.agents/sow/specs/accounting.md` — accounting entry semantics, token normalization.
+- `ai-agent.git/src/persistence.ts:19-67` — `getDefaultPersistenceConfig`, `createPersistenceHandlers.handleSnapshot` — the producer write path.
+- `ai-agent.git/src/session-persistence-events.ts:30-65` — `emitSessionSnapshotEvent` — what gets emitted; note disk payload is `{version, reason, opTree}` only.
+- `ai-agent.git/src/ai-agent.ts:392-403` — `persistSessionSnapshot`; uses `originTxnId` for filename.
+- `ai-agent.git/src/ai-agent.ts:530-544` — `txnId`/`originTxnId` identity model; `SessionTreeBuilder({traceId: txnId, ...})`.
+- `ai-agent.git/src/ai-agent.ts:669-678` — sub-agent dispatch; child inherits `originTxnId`, parent calls `persistSessionSnapshot('subagent_finish')` after child returns.
+- `ai-agent.git/src/ai-agent.ts:1220-1222` — terminal `persistSessionSnapshot('final')` callback site.
+- `ai-agent.git/src/session-tree.ts` — `SessionTreeBuilder`, node shape definitions.
+- `ai-agent.git/src/types.ts:786-793` — `SessionSnapshotPayload` in-memory shape (sessionId, originId, timestamp, snapshot) — note these in-memory fields are NOT persisted.
+- `ai-agent.git/src/evidence/reader.ts` — payload-ref path validation pattern (`readEvidencePayload`).
+- `ai-viewer.git/.agents/sow/specs/canonical-events.md` — Event types this adapter emits.
+- `ai-viewer.git/.agents/sow/specs/data-model.md` — SQLite schema this adapter's events populate.
+- `ai-viewer.git/.agents/sow/specs/adapter-aiagent-v3.md` — sibling adapter that shares the same `<sessions-dir>`.
+
+## Sampling Evidence (Sanitized)
+
+All evidence below was gathered by direct inspection of `<sessions-dir>` on the operator's workstation. UUIDs, agent names, paths, and session titles have been replaced with `<placeholder>` tokens.
+
+- File counts: 294,316 `.json.gz` at root; 17,356 `session/<sessionId>.jsonl`; 14,296 `payloads/<sessionId>/` dirs; 2 `.json.gz.tmp-*` orphans; 29 zero-byte `.json.gz`.
+- Compressed size distribution: min 0; p10 2,458; p50 10,878; p90 28,683; p99 1,192,114; max 151,881,088 bytes; total 27,272,835,000 bytes.
+- 200-sample shape audit: all top-level keys ∈ `{version, reason, opTree}`; version values `{1, 2}` only; all `reason` values `"final"`; opTree keys union exactly matches the producer source spec.
+- 50-sample child-session audit: 7 ops with embedded `childSession`, 0 with `childSessionRef`, 0 with `childSessionSummary` → embedded is dominant on this dataset.
+- 31-child traceId audit (one parent file): 0 of 31 child traceIds existed as their own `<traceId>.json.gz`, confirming v2 does not independently persist sub-agents.
+- 50-sample op-kind histogram: `{system: 132, llm: 107, tool: 46, session: 2, STEP_session: 5}`; step kinds: `{internal: 5}`.
+- 200-sample failed-op audit: 249 op-level failures observed; common attribute `error: "token_budget_exceeded"`; session-level errors include free-text slugs like `"Turn 1 failed after 1 attempt of 1 (maxTurns=3); ..."` and `"canceled"`.
+- 200-sample accounting tokens keys union: `{cacheReadInputTokens, cacheWriteInputTokens, cachedTokens, inputTokens, outputTokens, totalTokens}` — both Anthropic and OpenAI naming conventions appear.
+- Bench: 887 files/s/thread compressed decode + JSON parse on workstation CPU; extrapolated 5.5 min single-thread for full 294K backfill; ample headroom against the 60-min SOW gate.
+- File-mtime range on disk: oldest 2025-09-15, newest 2026-05-22 — ~8 months of history.
