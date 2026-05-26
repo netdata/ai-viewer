@@ -7,25 +7,32 @@ description: Invoke external LLMs (codex, gemini, glm, kimi, mimo, minimax, qwen
 
 ## When To Run
 
-Mandatory before marking these SOWs `completed`:
+External second-opinion review is **mandatory** — not "encouraged" — for any non-trivial work. The assistant does not trust itself; review converges before "done" is uttered.
 
+Mandatory before marking any of these SOWs `completed`:
+
+- Any code-producing SOW (new feature, bug fix beyond a one-liner, refactor).
 - New adapter implementation.
 - Schema change (touching `data-model.md`).
 - Cross-cutting refactor (e.g. ingest pipeline change).
 - Security-sensitive change.
 - Any SOW spanning > 3 files of non-trivial logic.
+- Any SOW the operator flags as important.
 
-Recommended:
+Mandatory minimum standard:
 
-- After major Phase milestones.
-- When a design tradeoff is unclear.
-- When the user requests a second opinion.
+- **At least three reviewers in parallel** for code review (default set: codex + gemini + glm + qwen).
+- **Same prompt across iterations**; never narrow scope on follow-up rounds.
+- **Iterate until reviewers converge** with no new actionable findings.
+- **Record every round in the SOW** under `## Reviews` with reviewer attribution and resolution.
 
-Skip:
+Skip only:
 
-- Typos, formatting, simple renames.
-- Mechanical changes within a single small file.
-- Doc-only updates without behavior change.
+- Typo / format-only changes the assistant has visually verified.
+- Mechanical renames with no behavior change.
+- Doc-only updates with no spec/runtime impact.
+
+The bar to skip is high. When in doubt, run reviewers.
 
 ## Safety Rule (CRITICAL)
 
@@ -155,7 +162,15 @@ THIS IS A READ-ONLY REQUEST.
 ## Anti-Patterns
 
 - **Narrowing scope on follow-up reviews.** Leaves the rest unreviewed. Always use the same prompt.
-- **One reviewer only for important work.** Single-reviewer blind spots are real.
-- **Editing the prompt to be less neutral after a reviewer disagreed.** The disagreement is data, not a thing to argue with.
+- **One reviewer only for important work.** Single-reviewer blind spots are real. Minimum three for code-producing SOWs.
+- **Editing the prompt to be less neutral after a reviewer disagreed.** The disagreement is data, not something to argue with.
 - **Running reviewers in background and forgetting.** Use foreground. The harness handles parallelism.
 - **Pre-screening: "skip review because I'm confident".** That's exactly when you need the review.
+- **Reporting work "done" before review convergence.** The honest phrasing while review is pending is "code written, gates green, review pending".
+
+## Cross-References
+
+- Workflow: `.agents/skills/project-workflow/SKILL.md`
+- Coding: `.agents/skills/project-coding/SKILL.md`
+- Delegation: `.agents/skills/project-delegation/SKILL.md`
+- Spec: `.agents/sow/specs/second-opinions.md`

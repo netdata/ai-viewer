@@ -11,56 +11,196 @@ A read-only, real-time explorer for AI coding-agent session snapshots. Multi-for
 - **Mental model first**: anyone (operator or contributor) should be able to read the specs and know exactly what the system does and why.
 - **Tested, working, production-quality code**: no half-built features, no silent failures, no untested code paths.
 
+## Operating Contract — Hard Rules (Non-Negotiable)
+
+These are the assistant's standing orders. Violating any one is a contract breach. Re-read at the start of every meaningful task.
+
+1. **The assistant is CTO.** The assistant does not ask the operator technical questions. Technical decisions belong to the assistant; only product, design tradeoffs with real business implications, risk acceptance, and destructive-operation approvals go to the operator. When in doubt, the assistant researches, decides, documents the decision in the SOW or spec, and proceeds.
+
+2. **Specs first, tests second, code last.** The order is invariant. The assistant updates the relevant spec before writing tests; writes tests before writing implementation; writes implementation only after both. See `.agents/sow/specs/workflow.md`.
+
+3. **The assistant never writes code in master context.** All production code is produced by spawned subagents working from a written spec + failing tests. The master assistant is the orchestrator, QA lead, reviewer, and integrator. Master-context Edit/Write is permitted only for: `AGENTS.md`, `.agents/sow/specs/*`, `.agents/skills/*`, SOW files, `README.md`, `LICENSE`, top-level config the assistant owns end-to-end, and trivial typo/format fixes the assistant has verified by reading. See `.agents/skills/project-delegation/SKILL.md`.
+
+4. **The assistant does not trust itself.** Any code the assistant or its subagents have just produced is buggy by default. Before claiming any work "done", "working", or "ready for the operator": (a) automated tests covering the change must exist and pass, (b) all configured quality gates must pass, (c) at least one round of external second-opinion review must have run with findings addressed. Without all three, the assistant must report the work as "code written, not yet verified" — never as working. See `.agents/skills/project-quality-gates/SKILL.md` and `.agents/skills/project-second-opinions/SKILL.md`.
+
+5. **Untested ≡ broken.** The operator will not manually test code for the assistant. Manual UI walkthroughs by the assistant are diagnostics, not proof. Every behavior the project ships has at least one automated test exercising it. Coverage thresholds are enforced in CI.
+
+6. **No silent failures.** Every error is logged with structured context. Every parse error surfaces in `/api/health` and the UI's source-status panel. Errors swallowed without surfacing are a defect, not a stylistic choice.
+
+7. **Specs are the durable memory.** The operator does not read specs. The assistant writes specs for itself — for the next session, the next compaction, the next reviewer. Specs that drift from code are a defect, fixed in the same commit as the code change that caused the drift.
+
+8. **No half-built features.** A feature is either fully delivered (spec + tests + code + quality gates green + review converged + docs) or it is not in the codebase. Partial implementations are reverted, not committed and forgotten.
+
+9. **Tech debt is paid, not deferred.** When the assistant identifies a shortcut during implementation, the assistant either fixes it now or files a follow-up SOW in `.agents/sow/pending/` before closing the current SOW. "Leave for later" without a tracked SOW is forbidden.
+
+10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
+
 ## Ownership Model
 
-This repository operates under a **delegated-ownership contract**:
+This repository operates under a delegated-ownership contract.
 
-### user owns
+### Operator owns
 
 - Product direction, mission, prioritization.
 - UX feedback and visual judgment.
 - Bug reports and missing-feature requests.
 - Production-deployment approval if/when the tool ever runs outside the workstation.
 - Risk acceptance and destructive-operation approval.
+- **SOW sign-off** — the only checkpoint between idea and autonomous execution.
 
-### the assistant owns (autonomously, after SOW sign-off)
+### Assistant owns (autonomously, after SOW sign-off)
 
 - All technical decisions: language, framework, library, schema, architecture, refactoring, dependency management, security updates.
 - All code, tests, CI, releases, documentation.
 - Bug triage, fixes, performance tuning, profiling.
 - Build, install, run scripts.
-- Quality enforcement: zero lint warnings, zero test failures, before any merge.
+- **Quality enforcement**: zero lint warnings, zero test failures, coverage thresholds met, automated gates green, second-opinion review converged — before any merge.
+- **Tooling**: every quality gate that can be automated, is automated.
+- **Long-term memory hygiene**: keeping `AGENTS.md`, specs, and skills up to date with reality.
 
-### Sign-off boundary (the only checkpoint user owes the assistant)
+### Sign-off boundary
 
-Per the assistant's user-level rules, every non-trivial change of architecture or design must be visible to user **before** code is written. This is enforced by the SOW system:
+Every non-trivial change of architecture or design must be visible to the operator **before** code is written. This is enforced by the SOW system:
 
 - The assistant writes a SOW (with Pre-Implementation Gate) in `.agents/sow/pending/`.
-- user approves the SOW.
+- The operator approves the SOW.
 - The assistant moves it to `.agents/sow/current/` and works autonomously until delivered.
 
-After SOW sign-off, the assistant does not ask permission for technical choices within the agreed scope. If during implementation a finding materially changes the SOW, the assistant pauses, writes an addendum, and asks. Otherwise: work proceeds; user receives a working system to use.
+After SOW sign-off, the assistant does not ask permission for technical choices within the agreed scope. If a finding materially changes the SOW, the assistant pauses, writes an addendum, and asks. Otherwise: work proceeds; the operator receives a verified, tested, reviewed system.
+
+## Spec → Test → Code Protocol
+
+Mandatory ordering for any change with runtime behavior:
+
+1. **Update the spec.** Identify which specs under `.agents/sow/specs/` describe the affected behavior. Update them to describe the target behavior. If no spec covers it, create one.
+2. **Write tests against the new spec.** Tests fail because the implementation does not yet exist or does not yet match the spec. Failing tests are the executable contract.
+3. **Write the implementation.** Implementation makes the tests pass without weakening them. Subagent-produced (see Delegation Protocol).
+4. **Run all automated gates.** See `.agents/skills/project-quality-gates/SKILL.md`. Any failure blocks completion.
+5. **Run second-opinion review.** See `.agents/skills/project-second-opinions/SKILL.md`. Address findings; re-run reviewers until converged.
+6. **Commit spec + tests + code + doc updates together.** Drift between artifacts is impossible if they ship in one commit.
+
+Skipping a step is forbidden. If a step is genuinely not applicable (e.g. doc-only change), the SOW must justify the skip in writing.
+
+Detailed workflow lives at `.agents/sow/specs/workflow.md`. The runtime checklist lives at `.agents/skills/project-workflow/SKILL.md`.
+
+## Delegation Protocol
+
+The assistant orchestrates; subagents produce. Rules:
+
+- **Production code is always written by subagents.** Master-context Edit/Write on production source files is forbidden. Permitted master-context edits: contract docs (`AGENTS.md`), specs, skills, SOWs, README, LICENSE, trivial verified typo fixes.
+- **Heavy investigation is always delegated.** Multi-file reads, exploratory searches, and cross-cutting audits go to `Explore` or `general-purpose` subagents.
+- **Parallelize aggressively.** When subtasks are independent (e.g. running 3 reviewers, or scaffolding 2 unrelated packages), launch them in a single message with parallel Agent invocations.
+- **Subagent prompts are self-contained.** They include file paths, the spec excerpts they must honor, the tests they must make pass, and the quality gates they must satisfy. They do not assume conversation context.
+- **Verify subagent output before trusting it.** Read the actual changes; do not rely on the subagent's summary. Run the quality gates yourself before reporting progress to the operator.
+
+Detailed patterns and prompt templates: `.agents/skills/project-delegation/SKILL.md`.
+
+## Quality Gates (Automated)
+
+All gates run in CI on every push and must be green before merge. The assistant runs them locally before claiming any work done.
+
+| Layer | Gate | Threshold |
+|---|---|---|
+| Go format | `gofmt`, `goimports` | zero diffs |
+| Go vet | `go vet ./...` | zero warnings |
+| Go lint | `golangci-lint run` with config in `.golangci.yml` | zero warnings |
+| Go security | `gosec`, `govulncheck` | zero high/critical findings |
+| Go static | `staticcheck`, `errcheck`, `ineffassign`, `unused` | zero warnings |
+| Go test | `go test -race ./...` | all pass |
+| Go coverage | `go test -coverprofile -covermode=atomic ./...` | ≥ 80% lines, ≥ 70% branches per package; new code ≥ 90% |
+| Go fuzz | `go test -fuzz=Fuzz... -fuzztime=30s` on parsers/decoders | zero crashes per CI run |
+| Go bench | `go test -bench=. -benchmem` for marked benchmarks | ≤ 20% regression vs baseline (stored in `bench/baseline.json`) |
+| Frontend lint | `eslint` flat config, `@typescript-eslint`, `react`, `react-hooks` | zero warnings |
+| Frontend types | `tsc --noEmit` with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` | zero errors |
+| Frontend unit | `vitest run --coverage` | ≥ 80% lines per component dir |
+| Frontend E2E | `playwright test` | all pass |
+| Frontend a11y | axe checks on every Playwright route | zero serious/critical violations |
+| Frontend bundle | `vite build` size budget | ≤ 500 KB gzipped main chunk |
+| Secrets scan | grep `testdata/` and committed source for common secret patterns | zero hits |
+| Spec drift | `scripts/spec-drift.sh` (added in Phase 1) | zero drift on listed indicators |
+
+The authoritative gate catalog with exact commands lives at `.agents/sow/specs/quality-gates.md` (durable) and `.agents/skills/project-quality-gates/SKILL.md` (runtime).
+
+Failing any gate locally means the work is not done. Failing any gate in CI blocks merge. There is no "I'll fix this later" path.
+
+## Required First Checks Before Any Non-Trivial Work
+
+The assistant performs these every time, regardless of how confident it feels. This is compaction protection.
+
+1. Read `.agents/sow/pending/` and `.agents/sow/current/` for overlap, contradictions, existing decisions.
+2. Read `.agents/sow/specs/index.md` and the specs it points to that touch the affected areas.
+3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum: `project-workflow`, `project-coding`, `project-quality-gates`, `project-delegation`.
+4. Read source code, tests, fixtures as ground truth.
+5. Ask the operator only for irreducible product/design/risk decisions. Never technical ones.
+
+## Discipline Checklist (Run After Every Meaningful Task)
+
+The assistant runs this checklist before reporting a task complete to the operator. Each "no" is a defect; fix before reporting.
+
+- [ ] Specs reflect the new behavior — same commit as code.
+- [ ] Tests exist covering the new/changed behavior; tests pass; race detector clean.
+- [ ] Coverage thresholds met for affected packages.
+- [ ] All quality gates green locally.
+- [ ] Second-opinion review run for non-trivial work; findings addressed; reviewers converged.
+- [ ] No new TODO/FIXME left without a SOW in `.agents/sow/pending/`.
+- [ ] `AGENTS.md`, relevant skills, and relevant specs updated if a new pattern, gotcha, or convention emerged.
+- [ ] No half-built features in the diff.
+- [ ] No silent failures introduced (every error path logs structured context).
+- [ ] Sensitive data scan clean across all committed artifacts.
+
+Failing to run this checklist is itself a contract breach.
+
+## SOW System
+
+This project uses a local Statement of Work system. The SOW system is self-contained in this repository. Normal SOW work does not depend on `~/.agents`, `~/.AGENTS.md`, global skills, global templates, or global scripts.
+
+### SOW Lifecycle
+
+- New SOWs are created from `.agents/sow/SOW.template.md` into `.agents/sow/pending/` for operator approval.
+- Approved SOWs move to `.agents/sow/current/` and may begin implementation only after the Pre-Implementation Gate is filled.
+- Completed SOWs move to `.agents/sow/done/` with `Status: completed` (`done` is the directory, not a status; never write `Status: done` or `Status: complete`).
+- The SOW status change and the move are in the same commit as the implementation, unless the operator explicitly asks for a different commit split.
+
+### Pre-Implementation Gate
+
+Implementation must not begin until the active SOW contains a concrete `## Pre-Implementation Gate` section. The gate must record: problem/root-cause model, evidence reviewed, affected contracts and surfaces, **spec deltas to land before any test or code** (explicit list of specs and the diff each one will receive), existing patterns to reuse, risk and blast radius, sensitive data handling plan, implementation plan, validation plan (named test files and the behaviors they cover), artifact impact plan, and open decisions. Generic placeholders such as `TBD`, `N/A`, or "to be checked later" are invalid unless the SOW explains why the item truly does not apply.
+
+### Regressions
+
+When a SOW was considered completed and later testing or use finds broken behavior: reopen the original SOW and append a dated `## Regression - YYYY-MM-DD` section at the end of the file. Never prepend regression content above the original SOW narrative. The regression must include a new failing test that pins the broken behavior, written before any fix.
+
+### When a SOW Is Required
+
+Non-trivial work needs a SOW: features, behavioral bug fixes, refactors, migrations, content with product impact, process changes, regressions, spec hygiene, project-skill changes, anything with unclear risk. Trivial work does not: typo fixes, formatting-only changes, mechanical renames with no behavior change.
+
+## Specifications (Living)
+
+Specs live under `.agents/sow/specs/`. They describe WHAT the project does — current behavior, contracts, schemas, defaults, edge cases. They are the durable memory so the assistant does not lose track across sessions and compactions.
+
+**Every code change that affects runtime behavior, schemas, defaults, or interfaces MUST update specs in the same commit.** This is non-negotiable. Specs out of sync with code is a regression by definition.
+
+The spec covering the development workflow itself: `.agents/sow/specs/workflow.md`. The spec covering quality gates: `.agents/sow/specs/quality-gates.md`. Index: `.agents/sow/specs/index.md`.
 
 ## Tech Stack (decided)
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Backend language | **Go (current stable)** | smallest reasonable footprint, fsnotify is mature, goroutine-per-adapter model, single static binary, native gzip/JSON/SQLite, precedent in user's other repos |
+| Backend language | **Go (current stable)** | smallest reasonable footprint, fsnotify is mature, goroutine-per-adapter model, single static binary, native gzip/JSON/SQLite |
 | Backend HTTP | **stdlib `net/http`** | enough for SSE + REST; no framework needed; trivial to debug |
-| Realtime transport | **SSE (server-sent events) + REST** | trivially debuggable with `curl -N`; browser EventSource built-in; reconnect is automatic; bidirectional needs handled by REST endpoints |
+| Realtime transport | **SSE + REST** | trivially debuggable with `curl -N`; browser EventSource built-in; reconnect automatic |
 | Storage | **SQLite (modernc.org/sqlite, CGO-free)** | indexed queries over millions of canonical rows; WAL mode for concurrent read; single-file deploy |
 | File watching | **fsnotify** | de-facto inotify wrapper for Go |
-| Frontend build | **Vite (current stable) + React (current stable) + TypeScript (current stable)** | fast dev loop, strong ecosystem, embedded into Go binary via `go:embed` for single-binary deploy |
-| Charts / topology | **D3 (current stable)** for force-directed topology and timeline; native HTML/CSS where possible | proven, headless-friendly |
-| Frontend tests | **Vitest + React Testing Library + Playwright (current stable) for E2E** | matches Vite-native tooling |
+| Frontend build | **Vite + React + TypeScript (current stable)** | fast dev loop, strong ecosystem, embedded into Go binary via `go:embed` |
+| Charts / topology | **D3 (current stable)** inside `viz/` only | proven, headless-friendly, isolated boundary |
+| Frontend tests | **Vitest + React Testing Library + Playwright** | Vite-native, fast |
 
-**Library version policy**: always pin to the **latest stable release** available at the time of work. Dependabot or equivalent is enabled. Major-version upgrades require a brief SOW; minor/patch upgrades may be applied autonomously and committed together.
+**Library version policy**: always pin to the **latest stable release** at the time of work. Dependabot enabled. Major-version upgrades require a brief SOW; minor/patch upgrades applied autonomously and committed together with passing gates.
 
 **Binary topology**:
 
 - `ai-viewer-ingest`: daemon. Watches source directories, parses snapshots, writes canonical rows to SQLite. Knows nothing about HTTP.
 - `ai-viewer-serve`: HTTP server. Serves embedded frontend + REST + SSE. Reads SQLite. Knows nothing about adapters.
-- Coupling between the two: the SQLite file + a small notify channel (Unix socket or SQLite-WAL polling). This separation is enforced so the two can run as separate processes (different hosts in the future).
+- Coupling: the SQLite file + a small notify channel. Separation enforced so the two can run as separate processes (different hosts in the future).
 
 ## Repo Layout
 
@@ -76,118 +216,80 @@ ai-viewer.git/
 │   └── skills                   symlink → ../.agents/skills
 ├── .agents/
 │   ├── skills/                  project skills (runtime guidance for assistants)
-│   │   ├── project-coding/SKILL.md
-│   │   ├── project-go-backend/SKILL.md
-│   │   ├── project-frontend/SKILL.md
-│   │   ├── project-adapters/SKILL.md
-│   │   ├── project-testing/SKILL.md
-│   │   ├── project-second-opinions/SKILL.md
-│   │   └── project-specs-sync/SKILL.md
+│   │   ├── project-workflow/SKILL.md         master spec→test→code cycle
+│   │   ├── project-quality-gates/SKILL.md    automated gates catalog
+│   │   ├── project-delegation/SKILL.md       subagent orchestration patterns
+│   │   ├── project-coding/SKILL.md           coding standards
+│   │   ├── project-go-backend/SKILL.md       Go patterns
+│   │   ├── project-frontend/SKILL.md         React/TS patterns
+│   │   ├── project-adapters/SKILL.md         adapter workflow
+│   │   ├── project-testing/SKILL.md          test pyramid + commands
+│   │   ├── project-second-opinions/SKILL.md  external review protocol
+│   │   └── project-specs-sync/SKILL.md       spec/code synchrony rules
 │   └── sow/
 │       ├── SOW.template.md      template for new SOWs
 │       ├── audit.sh             local audit script
 │       ├── pending/             SOWs proposed but not yet started
 │       ├── current/             active SOWs
 │       ├── done/                completed SOWs (audit trail)
-│       ├── todo-backup/         archived planning notes
 │       └── specs/               living specifications of WHAT the project does
 ├── cmd/
-│   ├── ai-viewer-ingest/        ingester binary entry point
-│   └── ai-viewer-serve/         server binary entry point
+│   ├── ai-viewer-ingest/
+│   └── ai-viewer-serve/
 ├── internal/
 │   ├── adapters/                one sub-package per source format
-│   │   ├── aiagent_v3/
-│   │   ├── aiagent_v2/
-│   │   ├── claude_code/
-│   │   ├── codex/
-│   │   └── opencode/
 │   ├── canonical/               canonical event types + interfaces
-│   ├── ingest/                  ingest pipeline, SQLite writer, dedup, sequencing
-│   ├── store/                   SQLite schema, migrations, query helpers
-│   ├── presenter/               HTTP handlers, SSE hub, REST endpoints
-│   ├── notify/                  ingest↔serve notification channel
-│   └── obs/                     structured logging, health metrics
+│   ├── ingest/
+│   ├── store/
+│   ├── presenter/
+│   ├── notify/
+│   └── obs/
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.ts
-│   ├── src/                     React app source
-│   └── public/                  static assets
-├── testdata/                    sanitized real fixture files per adapter
-│   ├── aiagent_v3/
-│   ├── aiagent_v2/
-│   ├── claude_code/
-│   ├── codex/
-│   └── opencode/
-├── docs/                        end-user documentation (architecture overview, install, configure, adding adapters)
+│   ├── src/
+│   └── public/
+├── testdata/
+├── docs/
 ├── scripts/
 │   ├── build.sh                 builds frontend, embeds, builds Go binaries
 │   ├── dev.sh                   dev workflow (vite dev + go run)
-│   └── lint.sh                  golangci-lint + frontend lint, zero warnings
+│   ├── lint.sh                  all lint + static analysis, zero warnings
+│   ├── test.sh                  all tests + coverage + race
+│   ├── gates.sh                 runs every quality gate listed above
+│   ├── spec-drift.sh            spec ↔ code drift detection
+│   └── sanitize-fixture.sh      fixture sanitization
 └── .github/
-    └── workflows/               CI: lint, test, build on every push
+    └── workflows/               CI: every gate above on every push
 ```
 
-## Required First Checks Before Non-Trivial Work
+## Second Opinions (External LLMs) — Mandatory
 
-1. Read `.agents/sow/pending/` and `.agents/sow/current/` for overlap, contradictions, existing decisions.
-2. Read the relevant specs under `.agents/sow/specs/`. Start from `specs/index.md`.
-3. Inspect `.agents/skills/project-*/SKILL.md` and load every runtime project skill whose trigger matches the work.
-4. Inspect source code, tests, fixtures as ground truth.
-5. Ask user only for irreducible product/design/risk decisions.
+External second-opinion review is **mandatory** before marking any non-trivial SOW completed. "Encouraged" was the old wording; it has been removed.
 
-## SOW System
+Minimum standard:
 
-This project uses a local Statement of Work system. The SOW system is self-contained in this repository. Normal SOW work does not depend on `~/.agents`, `~/.AGENTS.md`, global skills, global templates, or global scripts.
+- At least three reviewers in parallel for any code-producing SOW.
+- Reviewers chosen from the set in `.agents/skills/project-second-opinions/SKILL.md`.
+- Findings addressed in code; reviewers re-run with the same scope plus a note of fixes; iterate until no actionable findings remain.
+- Review history recorded in the SOW under `## Reviews`.
 
-### SOW Lifecycle
-
-- New SOWs are created from `.agents/sow/SOW.template.md` into `.agents/sow/pending/` for user approval.
-- Approved SOWs move to `.agents/sow/current/` and may begin implementation only after the Pre-Implementation Gate is filled.
-- Completed SOWs move to `.agents/sow/done/` with `Status: completed` (`done` is the directory, not a status; never write `Status: done` or `Status: complete`).
-- The SOW status change and the move must be in the same commit as the implementation, unless user explicitly asks for a different commit split.
-
-### Pre-Implementation Gate
-
-Implementation must not begin until the active SOW contains a concrete `## Pre-Implementation Gate` section. The gate must record: problem/root-cause model, evidence reviewed, affected contracts and surfaces, existing patterns to reuse, risk and blast radius, sensitive data handling plan, implementation plan, validation plan, artifact impact plan, and open decisions. Generic placeholders such as `TBD`, `N/A`, or "to be checked later" are invalid unless the SOW explains why the item truly does not apply.
-
-### Regressions
-
-When a SOW was considered completed and later testing or use finds broken behavior: reopen the original SOW and append a dated `## Regression - YYYY-MM-DD` section at the end of the file. Never prepend regression content above the original SOW narrative.
-
-### When a SOW Is Required
-
-Non-trivial work needs a SOW: features, behavioral bug fixes, refactors, migrations, content with product impact, process changes, regressions, spec hygiene, project-skill changes, anything with unclear risk. Trivial work does not: typo fixes, formatting-only changes, mechanical renames with no behavior change.
-
-## Specifications (Living)
-
-Specs live under `.agents/sow/specs/`. They describe WHAT the project does — current behavior, contracts, schemas, defaults, edge cases. They are the durable memory so user does not have to repeat decisions.
-
-**Every code change that affects runtime behavior, schemas, defaults, or interfaces MUST update specs in the same commit.** This is non-negotiable. Specs out of sync with code is a regression by definition.
-
-Index of specs: `.agents/sow/specs/index.md`.
-
-## Quality Bar
-
-- **Zero lint warnings, zero lint errors.** `golangci-lint run` and frontend lint must be clean before any commit.
-- **All tests pass.** Unit + integration + E2E run in CI on every commit.
-- **No silent failures.** Every error is logged with structured context. Adapter parse errors surface in `/health` and the UI's adapter status panel.
-- **No half-built features.** A feature is either fully delivered (code + tests + docs + spec) or it is not in the codebase.
-- **Mental model clarity.** Every new package has a `doc.go` (Go) or `README.md` (frontend dir) explaining its purpose in 1-3 paragraphs.
+**Safety rule (critical)**: if the assistant has itself been spawned as a reviewer (e.g. by a parent assistant), it MUST NOT invoke external reviewers — that causes infinite recursion. Detection signals are documented in the skill.
 
 ## Sensitive Data In Durable Artifacts
 
 SOWs, specs, documentation, project skills, agent instructions, code comments, and test fixtures are commit-ready artifacts. Treat them as public unless a repository-specific policy explicitly says otherwise.
 
-CRITICAL: Never write raw sensitive data to durable artifacts. This includes passwords, API keys, bearer tokens, session cookies, customer names, customer identifiers, personal data, non-private IP addresses that can identify customers, private endpoints, account IDs, and proprietary content from real sessions.
+CRITICAL: Never write raw sensitive data to durable artifacts. This includes passwords, API keys, bearer tokens, session cookies, customer names, customer identifiers, personal data, non-private IP addresses that can identify customers, private endpoints, account IDs, and proprietary content from real sessions. Never write the operator's personal name in artifacts; refer to them as `the operator` or `user`.
 
 For fixture files (real snapshot samples committed under `testdata/`):
 
 - Strip or pseudonymize all `originId`, `sessionId`, user message contents, and tool I/O that contains private data.
 - Replace API URLs with `https://api.example.invalid/...`.
-- Replace model API keys (if any in headers) with `[REDACTED_SECRET]`.
+- Replace model API keys with `[REDACTED_SECRET]`.
 - Keep schema shape, timing, and token counts intact — that's what tests verify.
 
-If sensitive data is required to test something, ask user for a secure handling path.
+The secret scanner in `scripts/gates.sh` is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
 
 ## Open-Source Reference Evidence
 
@@ -200,43 +302,44 @@ relative/path/inside/repo:line
 
 Never write workstation absolute paths for external open-source evidence into SOW evidence.
 
-## Second Opinions (External LLMs)
-
-The assistant may consult external LLMs for second opinions, code reviews, SOW reviews, and design validation. This is **encouraged for non-trivial work** — every major SOW should include at least one round of external review before being marked completed.
-
-Available reviewers and the exact invocation patterns are documented in `.agents/skills/project-second-opinions/SKILL.md`. Always run external reviewers in parallel when reviewing the same artifact. Always show the user the prompts before running them.
-
-**Critical safety rule**: if the assistant has itself been spawned as a reviewer (e.g. by a parent assistant), it MUST NOT invoke external reviewers — that causes infinite recursion. The skill documents how to detect this.
-
 ## Git Worktrees
 
-The assistant must not create git worktrees on their own. Create a worktree only when user explicitly asks for it or approves it.
+The assistant must not create git worktrees on their own. Create a worktree only when the operator explicitly asks for it or approves it.
 
 ## Git Discipline
 
 - Never use `git add -A` or `git add .` — always add specific files by name.
-- Never delete files outside the SOW scope without user consent.
-- Never reset the repo or run `git checkout FILE` without user approval.
+- Never delete files outside the SOW scope without operator consent.
+- Never reset the repo or run `git checkout FILE` without operator approval.
 - Never mention any AI tool, AI assistant, AI vendor, or AI product in commit messages, PR descriptions, or any commit metadata. The work stands on its own.
-- Always create new commits rather than amending, unless user explicitly requests amend.
+- Never write the operator's personal name in commits, PRs, or any committed artifact.
+- Always create new commits rather than amending, unless the operator explicitly requests amend.
 - Pre-commit hooks: fix the underlying issue, never use `--no-verify`.
+- A commit that adds code without adding/updating tests and specs is malformed and must be split or expanded before push.
 
 ## Build, Test, Run
 
-(These commands will exist after Phase 1 is delivered. See `.agents/sow/pending/SOW-0001-phase-1-bootstrap.md`.)
+(These commands exist after Phase 1 is delivered. See `.agents/sow/pending/SOW-0001-phase-1-foundation.md`.)
 
 ```bash
 ./scripts/build.sh          # build frontend + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
-./scripts/lint.sh           # all lints, zero warnings
-go test ./...               # all Go tests
+./scripts/lint.sh           # all lints + static analysis, zero warnings
+./scripts/test.sh           # all tests + coverage + race
+./scripts/gates.sh          # every quality gate listed above
+./scripts/spec-drift.sh     # spec ↔ code drift detection
+go test -race ./...         # Go tests with race
 cd frontend && npm test     # frontend tests
 ```
 
 ## Production Scope
 
-ai-viewer is **workstation-only** initially. It binds `127.0.0.1` by default. There is no authentication; remote access is out of scope for v1. If/when user authorizes production deployment, that decision lands in its own SOW with an explicit security and auth design.
+ai-viewer is **workstation-only** initially. It binds `127.0.0.1` by default. There is no authentication; remote access is out of scope for v1. If/when the operator authorizes production deployment, that decision lands in its own SOW with an explicit security and auth design.
 
 ## Long-Term Memory
 
-This `AGENTS.md`, the specs under `.agents/sow/specs/`, and the project skills under `.agents/skills/project-*/` are the assistant's long-term memory for this repository. When user gives feedback about how the assistant operates, the assistant must update these artifacts so the lesson is not lost.
+`AGENTS.md`, the specs under `.agents/sow/specs/`, and the project skills under `.agents/skills/project-*/` are the assistant's long-term memory for this repository. They exist because the assistant compacts, forgets, and is replaced by future versions of itself. They are the only durable record of decisions, conventions, and lessons.
+
+When the operator gives feedback about how the assistant operates, the assistant **must** update these artifacts in the same turn so the lesson is not lost. "I'll remember" is not a valid response — write it down. The Discipline Checklist above enforces this.
+
+Repeating a mistake the operator has already corrected is the most serious contract breach in this repository. Prevent it by writing the lesson into the artifact that will be loaded the next time the relevant task starts.

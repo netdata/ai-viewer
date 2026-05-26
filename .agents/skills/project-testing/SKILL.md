@@ -5,6 +5,12 @@ description: Run, write, and maintain ai-viewer tests across Go backend and Reac
 
 # Testing
 
+## Core Principle
+
+**Untested code is broken code.** The operator does not manually test for the assistant. Every behavior the project ships has at least one automated test exercising it. Manual UI walkthroughs are diagnostics for the assistant; they are not proof of correctness. If a behavior cannot be tested, the design is wrong — refactor until it can be.
+
+Tests are written **before** the implementation (see `project-workflow`). A failing test is the executable contract; the implementation makes it pass without weakening it.
+
 ## Test Commands
 
 ```bash
@@ -45,10 +51,34 @@ cd frontend && npm run e2e -- --ui       # playwright UI mode
 | Adapter unit | `internal/adapters/<name>/*_test.go` | every commit |
 | Canonical/ingest/store unit | `internal/*/  *_test.go` | every commit |
 | Presenter handler | `internal/presenter/*_test.go` | every commit |
+| Go fuzz (parsers/decoders) | `internal/adapters/<name>/fuzz_test.go`, `internal/canonical/fuzz_test.go` | 30s every commit, 5min nightly |
+| Go property-based (canonical mapping) | `internal/canonical/property_test.go` (rapid-go) | every commit |
 | Go E2E (ingest → store → server) | `tests/e2e/*_test.go` | every commit |
+| Performance benchmark | `internal/adapters/<name>/bench_test.go`, `internal/store/bench_test.go`, etc. | every commit, fails on > 20% regression |
 | Frontend component | `frontend/src/**/*.test.tsx` | every commit |
-| Frontend E2E | `frontend/tests/*.spec.ts` | subset every commit, full on `main` |
-| Performance benchmark | `internal/adapters/<name>/bench_test.go` | every commit, fails on > 20% regression |
+| Frontend E2E (Playwright) | `frontend/tests/*.spec.ts` | every commit |
+| Frontend a11y (axe) | embedded in Playwright | every commit |
+| Mutation testing (recommended) | `internal/canonical/`, `internal/ingest/`, adapters | quarterly |
+
+## Coverage Thresholds (enforced)
+
+| Scope | Threshold |
+|---|---|
+| Repository-wide lines | ≥ 80% |
+| Per-package on changed code | ≥ 80% lines, ≥ 70% branches |
+| New code in the PR | ≥ 90% lines |
+| Frontend component directory | ≥ 80% lines |
+
+`scripts/check-coverage.sh` enforces these against `coverage.out` and the PR diff. Lowering a threshold to land a PR is a contract breach; either add tests or split the PR.
+
+## Mandatory Test Kinds
+
+- **Every adapter exposes at least one `FuzzXxx` target** covering its parse path.
+- **`internal/canonical` exposes a `FuzzXxx` target** for each decoder it owns.
+- **Performance-critical paths have benchmarks** with a baseline in `bench/baseline.txt`. Benchmarks run with `-count=5` for variance.
+- **Concurrency-touching code is tested with `-race -count=10` locally**, `-count=3` in CI, `-count=20` nightly.
+- **Frontend E2E covers golden paths AND error states** (network failure, empty list, malformed SSE event). axe runs on every route.
+- **Every UI change has at least one Playwright assertion** that proves the behavior end-to-end. Component tests alone are not sufficient for user-visible behavior.
 
 ## Fixture Management
 
@@ -95,14 +125,20 @@ describe('SessionRow', () => {
 
 ## CI Gates (zero tolerance)
 
-A PR cannot land if:
+The full catalog lives in `project-quality-gates`. A PR cannot land if any gate fails:
 
-- Any Go test fails (with race detector enabled).
-- Any frontend test fails.
-- Any lint warning exists.
+- Any Go test fails (race detector enabled).
+- Any frontend test or Playwright spec fails.
+- Any lint warning exists (Go or frontend).
+- Coverage threshold missed on changed code.
+- Any fuzz target crashed during its run.
 - Any benchmark regresses > 20% from baseline.
 - Any committed fixture trips the secret scanner.
-- Any spec is stale relative to code (the spec-sync skill helps here).
+- Any spec is stale relative to code (`scripts/spec-drift.sh`).
+- Axe accessibility violations at serious/critical level.
+- Frontend bundle exceeds size budget.
+
+**Never** add `t.Skip`, `// nolint`, `it.skip`, or `test.skip` to land a PR. Either fix the underlying issue or open a SOW that explicitly justifies the suppression with an expiry condition.
 
 ## Debugging Failing Tests
 
@@ -119,3 +155,23 @@ A PR cannot land if:
 4. Run `go test ./internal/adapters/<adapter> -update-golden` to generate `expected.jsonl`.
 5. **Review the golden file manually.** Does every event look right? Are timestamps reasonable? Are sub-agent links correct?
 6. Commit fixture + golden + a test case in `adapter_test.go` if not auto-discovered.
+
+## Reporting Honest Test Status
+
+When reporting to the operator, never say "code works" without:
+
+- The test file paths covering the new behavior.
+- The gate command outputs (or `./scripts/gates.sh` summary).
+- The external review status.
+
+Honest phrasings:
+
+- "Code written, tests passing, gates green, review pending." — work is mid-flight.
+- "Code written, tests passing, gates green, review converged — ready." — work is done.
+- "Code written, behavior X not yet covered by a test — not ready." — work is incomplete.
+
+## Cross-References
+
+- Workflow: `.agents/skills/project-workflow/SKILL.md`
+- Gates: `.agents/skills/project-quality-gates/SKILL.md`
+- Spec: `.agents/sow/specs/testing-strategy.md`

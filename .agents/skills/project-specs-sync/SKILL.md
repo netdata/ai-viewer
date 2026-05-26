@@ -7,9 +7,20 @@ description: Keep ai-viewer specs synchronized with code. Use whenever a code ch
 
 ## Why
 
-Specs under `.agents/sow/specs/` are the **durable memory** of what ai-viewer does. The user does not have to repeat decisions because specs preserve them. When code drifts from specs, the system silently betrays itself: future SOWs base plans on a spec that no longer matches reality.
+Specs under `.agents/sow/specs/` are the **assistant's durable memory** of what ai-viewer does. The operator does not read specs. The assistant writes specs for itself — for the next session, the next compaction, the next reviewer. When code drifts from specs, the assistant is silently betraying future-self: future SOWs base plans on a spec that no longer matches reality.
 
-**Rule**: every code change affecting behavior updates the relevant spec **in the same commit**. No exceptions.
+## Core Rule: Specs Lead
+
+**Specs change first, before tests, before code.** This is the inverse of the common "document at the end" pattern. The reasoning: a spec that describes the *target* behavior turns into the executable contract — tests are written against the spec, code makes the tests pass against the spec. If the spec lags, the implementation has nothing to be judged against.
+
+The order on any non-trivial change:
+
+1. Spec update lands first (in the SOW Pre-Implementation Gate's `Spec Deltas` section, then in the actual spec file).
+2. Failing tests are written against the new spec.
+3. Implementation makes the tests pass.
+4. All four (spec + tests + code + docs) ship in a single commit.
+
+Drift between spec and code is a regression by definition.
 
 ## When Specs Must Update
 
@@ -42,22 +53,28 @@ If the relevant spec doesn't exist: **create it in the same commit**. If multipl
 
 ## Process
 
-Before opening any SOW that involves code change:
+When opening any SOW that involves a code change:
 
-1. List specs the SOW will touch (in the SOW's `## Artifact Impact Plan`).
-2. Plan the spec update as part of the implementation chunks, not as a final cleanup step.
+1. The Pre-Implementation Gate **must** contain a `## Spec Deltas` heading listing every spec the SOW will touch, with a short diff description per spec (what changes, what stays).
+2. The implementation plan in the SOW has the spec update as **the first chunk**, not the last.
+
+Before any test or any line of code:
+
+1. Apply the spec delta. The spec now describes the target behavior.
+2. Re-read the spec end to end to confirm internal consistency.
 
 During implementation:
 
-1. Update specs as you change code, not after.
+1. Specs are immutable for the duration of the chunk — if implementation reveals the spec is wrong, pause, update the spec, then resume tests/code.
 2. Use spec citations (file path + line) in code comments only when the code embodies a non-obvious spec decision.
 
 Before marking SOW completed:
 
-1. Read every spec listed in the Artifact Impact Plan.
-2. Confirm it reflects the new code.
-3. Refresh any examples that became stale.
-4. Bump version/dated notes only where the spec explicitly versions itself.
+1. Read every spec listed in `Spec Deltas`.
+2. Confirm it reflects the **final** code (the spec may have iterated during implementation).
+3. Refresh examples that became stale.
+4. Run `./scripts/spec-drift.sh` and confirm zero drift.
+5. Bump dated notes only where the spec explicitly versions itself.
 
 ## Spec Drift Detection (manual until automated)
 
@@ -94,7 +111,14 @@ Direct, factual, declarative. Bullet points over prose. Tables for structured co
 
 If you discover divergence:
 
-1. Determine which is right (usually code; specs do drift).
-2. If code is right: update spec to match in the next commit, note the drift in the commit message.
-3. If spec is right (e.g. the code accidentally regressed): fix the code, add a test that pins the behavior the spec describes.
-4. Either way, record the discrepancy in the active SOW (or create a new one).
+1. Determine which is right.
+2. If the spec is right (e.g. the code accidentally regressed): fix the code, add a test that pins the behavior the spec describes.
+3. If the code is right and the divergence is small: update spec to match in the next commit, note the drift in the commit message.
+4. If the code is right and the divergence reflects a real undocumented decision: open a SOW to capture the rationale and update the spec — drift this large suggests a decision was made without being documented.
+5. Either way, record the discrepancy in the active SOW (or create a new one). Drift is never silently absorbed.
+
+## Cross-References
+
+- Workflow: `.agents/skills/project-workflow/SKILL.md`
+- Coding: `.agents/skills/project-coding/SKILL.md`
+- Gates (includes spec-drift check): `.agents/skills/project-quality-gates/SKILL.md`

@@ -1,10 +1,15 @@
 # Specifications Index
 
-This directory contains the **living specifications** of ai-viewer: what it does, how it does it, what contracts it honors. Specs are the durable memory of the project so the operator does not have to repeat decisions.
+This directory contains the **living specifications** of ai-viewer: what it does, how it does it, what contracts it honors. Specs are the assistant's **durable memory** — the operator does not read them; the assistant writes them for itself across sessions, compactions, and future versions of itself.
 
-**Rule**: every code change that affects runtime behavior, schemas, defaults, or interfaces must update the relevant spec in the same commit. Drift between code and specs is a regression.
+**Rule**: specs change **first**, before tests, before code. Every change affecting runtime behavior, schemas, defaults, or interfaces updates the relevant spec in the same commit as the code. Drift between code and specs is a regression by definition.
 
 ## Layout
+
+### Process (how we build)
+
+- [workflow.md](workflow.md) — the development workflow: spec→test→code→review→gates→commit. The durable record of the discipline contract.
+- [quality-gates.md](quality-gates.md) — every automated gate enforced in CI and locally; commands, thresholds, and rationale.
 
 ### Foundations
 
@@ -43,8 +48,11 @@ This directory contains the **living specifications** of ai-viewer: what it does
 
 ## Spec Authoring Rules
 
-- Specs describe **current behavior**, not aspirational future behavior. Aspirational work lives in SOWs, not specs.
-- When a SOW lands, the spec is updated **in the same commit**.
+- Specs describe **current behavior** (after the commit lands), not aspirational long-term futures. Aspirational work belongs in SOWs.
+- **Specs lead** — they are updated before tests are written, and before code is written. The SOW Pre-Implementation Gate records spec deltas explicitly.
+- When a SOW lands, the spec is updated **in the same commit** as the code.
 - Specs cite file paths and (where stable) line numbers as evidence.
 - Specs do not duplicate code; they explain WHY a contract exists, the invariants, the edge cases that motivated the design.
-- Specs MUST NOT contain raw sensitive data. See AGENTS.md for the redaction rules.
+- Specs MUST NOT contain raw sensitive data or the operator's personal name. See AGENTS.md for the redaction rules.
+- `TBD`, `N/A`, "to be confirmed later" are invalid unless the spec explains why the item truly does not apply.
+- `scripts/spec-drift.sh` is the automated drift detector; running it is part of `./scripts/gates.sh`.

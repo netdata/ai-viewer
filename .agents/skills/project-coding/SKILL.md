@@ -5,17 +5,23 @@ description: Apply ai-viewer coding standards for production-quality Go and Type
 
 # Coding
 
-Use this skill for code changes in this repository. The assistant is the maintainer of the whole codebase and must deliver production-quality, fully tested work.
+Use this skill for code changes in this repository. The assistant is the **CTO and QA lead** of the codebase and must deliver production-quality, fully tested, externally reviewed work. Code claimed as "done" has passed tests, gates, and external review — nothing less.
 
 ## Operating Contract
 
-- Investigate before asking. Read SOWs, specs, skills, code, and similar local patterns first.
-- Surface architecture and design decisions to user via SOW before implementation.
+- **The assistant is CTO.** Never ask the operator technical questions. Research, decide, document the decision in the SOW or spec, proceed.
+- **Specs first, tests second, code last.** See `project-workflow`. Order is invariant.
+- **Master assistant does not write production code.** Delegate to subagents per `project-delegation`. Master-context Edit/Write on `cmd/**`, `internal/**`, `frontend/src/**`, `scripts/*.sh` (CI-bound), `.github/workflows/**`, or SQL migrations is forbidden.
+- **Untested ≡ broken.** Manual UI walkthroughs are diagnostics, not proof. Every behavior the project ships has at least one automated test.
+- **No silent failures.** Every error path logs structured context; every adapter parse error surfaces in `/api/health`.
+- **External review is mandatory** before claiming a non-trivial SOW done. Minimum three reviewers in parallel, iterate until converged. See `project-second-opinions`.
+- Investigate before asking. Read SOWs, specs, skills, code, similar local patterns first.
+- Surface architecture and design decisions to the operator via SOW before any code is written.
 - Once the SOW is approved, work autonomously.
-- Prefer delegation and parallelization for non-trivial SOW work.
-- Milestone reports are not stop points. Continue until SOW is delivered, failed with evidence, blocked on a real user decision, or superseded by newer instructions.
-- Keep communication concise and evidence-based.
-- Update specs, project skills, and `AGENTS.md` when behavior, conventions, or repeated workflows change.
+- Parallelize aggressively. Independent subtasks → parallel Agent calls in a single message.
+- Milestone reports are not stop points. Continue until SOW is delivered, failed with evidence, or blocked on a genuine operator decision.
+- Keep communication concise and evidence-based: TL;DR + bullets + file:line + gate results.
+- Update specs, project skills, and `AGENTS.md` in the same turn the lesson emerges. "I'll remember" is not valid.
 
 ## Design Principles (project-wide)
 
@@ -39,16 +45,24 @@ These are non-negotiable across all code:
 - **Bounded buffers everywhere.** No unbounded `append`, no unbounded channel capacities. Every queue has a limit and a documented drop policy.
 - **Two-binary separation honored.** `ai-viewer-ingest` does not serve HTTP; `ai-viewer-serve` does not write canonical rows.
 
-## Quality Gate
+## Quality Gates
 
-Before any commit:
+Before any commit: run `./scripts/gates.sh` locally and confirm green. The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
 
-- `golangci-lint run` clean (zero warnings, zero errors).
-- `npm --prefix frontend run lint` clean.
-- `go test -race ./...` passes.
-- `npm --prefix frontend test` passes.
-- `./scripts/build.sh` succeeds (frontend builds + embeds + Go binaries build).
-- Affected specs updated.
+- All Go lints (golangci-lint, gosec, govulncheck) zero warnings.
+- `go test -race -count=1 ./...` passes.
+- Coverage thresholds met (≥ 80% per package, ≥ 90% on new code).
+- Fuzz targets run clean for the configured CI duration.
+- Benchmarks within 20% of baseline.
+- Frontend lint, typecheck, vitest with coverage, Playwright E2E, axe a11y all green.
+- Bundle size within budget.
+- Secrets scan clean.
+- Spec drift script clean.
+- `./scripts/build.sh` succeeds.
+- Affected specs updated in the same commit.
+- External review converged for non-trivial SOWs.
+
+Weakening a gate to make it pass is a contract breach. Fix the root cause.
 
 ## Forbidden Patterns
 
@@ -59,4 +73,17 @@ Before any commit:
 - Init functions (`func init()`) that do anything beyond registering with a package-level registry.
 - Global mutable state. Use struct dependencies passed via constructors.
 - `exec.Command` for any user-facing functionality. Pure Go only.
-- Skipping tests with `t.Skip()` without a referenced GitHub issue link in the comment.
+- Skipping tests with `t.Skip()` without a linked GitHub issue and a SOW for removal.
+- `// nolint` comments without a linked issue and an expiry note.
+- `_ = err` or empty `if err != nil { }` — every error is either handled or wrapped and returned.
+- Catching errors in subagent-produced code and reporting "fixed" without re-running the gate that would have caught it.
+- Claiming code "works" without automated tests proving it.
+
+## Cross-References
+
+- Workflow: `.agents/skills/project-workflow/SKILL.md`
+- Delegation: `.agents/skills/project-delegation/SKILL.md`
+- Gates: `.agents/skills/project-quality-gates/SKILL.md`
+- Testing: `.agents/skills/project-testing/SKILL.md`
+- Reviews: `.agents/skills/project-second-opinions/SKILL.md`
+- Specs sync: `.agents/skills/project-specs-sync/SKILL.md`
