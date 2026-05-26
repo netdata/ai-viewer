@@ -42,7 +42,13 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	defer func() { _ = watcher.Close() }()
 
 	watchDir := filepath.Join(root, sessionDir)
-	if mkErr := os.MkdirAll(watchDir, 0o755); mkErr != nil {
+	// 0o750 keeps the operator's source tree restrictive (gosec G301):
+	// owner full, group read+exec only, world none. We create the dir
+	// defensively when the operator points the ingester at a fresh
+	// sessions-dir; the writer (ai-agent) sets its own perms on session
+	// files. AGENTS.md "read-only on sources" applies to file content,
+	// not to creating the parent directory that the watcher attaches to.
+	if mkErr := os.MkdirAll(watchDir, 0o750); mkErr != nil {
 		return fmt.Errorf("aiagent_v3: ensure %s: %w", watchDir, mkErr)
 	}
 	if addErr := watcher.Add(watchDir); addErr != nil {
