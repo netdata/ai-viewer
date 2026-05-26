@@ -1,20 +1,32 @@
 // Package aiagent_v2 implements the canonical.Adapter for the ai-agent
 // v2 single-file gzipped-JSON snapshot format.
 //
-// In v2 each session is stored as a single gzipped JSON document keyed by
-// originId. The adapter watches the configured root for new or updated
-// .json.gz files, parses the snapshot in full, and emits canonical events
-// derived from its fields. v2 records cumulative token and cost counters;
-// the adapter converts them to deltas before emitting so the canonical
-// stream remains delta-only.
+// In v2 each session is persisted as a single `<originId>.json.gz` file
+// at the root of the configured sessions directory. The producer
+// (`ai-agent.git/src/persistence.ts`) gzips a `{version, reason, opTree}`
+// envelope into a `.tmp-<pid>-<ts>` companion and atomically renames it
+// into place; every snapshot writes the full session tree, so the file
+// is rewritten on every checkpoint. All descendants of one root share
+// the same filename (children inherit the parent's originTxnId), so a
+// single file may carry the parent session plus an arbitrary nested tree
+// of embedded sub-agent sessions.
 //
-// This package currently ships only the skeleton landed in SOW-0001
-// Chunk 4: Name, Format, the package init that registers the factory
-// with internal/adapters, and Scan/Tail/ParseCursor stubs that return a
-// sentinel "not implemented" error. The real parser, fixtures, and
-// golden tests land in SOW-0001 Chunk 8.
+// The adapter walks the directory non-recursively for `*.json.gz`
+// (ignoring v3 subdirectories and `*.tmp-*` orphans), decompresses each
+// snapshot, parses the opTree into canonical events, recursively
+// descends into `op.childSession` to surface embedded sub-agents, and
+// emits events into the canonical channel. Large snapshots (compressed
+// over a configurable threshold) are routed through a streaming decoder
+// that walks the JSON token-by-token to bound peak memory.
 //
-// See .agents/sow/specs/adapter-aiagent-v2.md for the format reference
-// and .agents/sow/specs/adapter-contract.md for the universal adapter
+// The cursor records `(content_hash, mtime_ns, size)` per file. Because
+// v2 rewrites the whole file on every snapshot a byte-offset cursor is
+// meaningless; content hashing lets the adapter skip re-emission when a
+// filesystem touch changes mtime but not bytes. The ingester's SourceSeq
+// HWM absorbs duplicates whenever a re-scan re-emits unchanged content.
+//
+// See `.agents/sow/specs/adapter-aiagent-v2.md` for the format
+// reference (snapshot shape, edge cases, sub-agent embedding semantics)
+// and `.agents/sow/specs/adapter-contract.md` for the universal adapter
 // rules.
 package aiagent_v2

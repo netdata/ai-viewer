@@ -1179,6 +1179,207 @@ sub-section once Chunk 7 is reviewed.
 
 Next: Chunk 8 — v2 adapter implementation.
 
+### Chunk 8 — v2 adapter implementation (2026-05-26)
+
+Landed on branch `sow-0001-chunk-8-v2-adapter` (PR # pending):
+
+- `internal/adapters/aiagent_v2/{adapter,cursor,parser,mapper,
+  scanner,tailer,streamer,doc}.go` — full v2 ai-agent `.json.gz`
+  adapter implementing `canonical.Adapter`. Replaces the skeleton
+  landed in Chunk 4.
+- `internal/adapters/aiagent_v2/{adapter,cursor,parser,mapper,
+  scanner,tailer,streamer,golden,helpers,fuzz,coverage,coverage2,
+  coverage3}_test.go` — unit + golden + fuzz tests. Aggregate
+  ~2200 lines of test code against ~1100 lines of production code.
+- `internal/adapters/aiagent_v2/cmd/genfixtures/main.go` — Go
+  program that builds the 10 synthetic `.json.gz` fixtures
+  deterministically. Operator-runnable via
+  `scripts/genfixtures-v2.sh`; CI does NOT invoke. Pinned
+  timestamps + UUIDs guarantee byte-identical regeneration.
+- `scripts/genfixtures-v2.sh` — one-line wrapper that runs the Go
+  generator under the project's standard `set -euo pipefail` +
+  IFS guard.
+- `testdata/aiagent_v2/{happy_v2_single_turn,happy_v1_legacy,
+  embedded_sub_agent,multi_descendant_same_file,init_turn_zero,
+  system_op_kind,tool_chars_accounting,final_report,zero_byte,
+  tmp_file}/` — 10 synthetic fixtures + `expected.jsonl` golden
+  files (operator-portable via `<ROOT>` placeholder substitution
+  in golden encoder).
+
+Notable design decisions:
+
+- **Content-hash cursor.** v2 rewrites the whole file on every
+  snapshot, so a byte-offset cursor (the v3 approach) is
+  meaningless. The cursor pins `(content_hash, mtime_ns, size)`
+  per file: stat-only short-circuit when both mtime+size match;
+  content-hash short-circuit when mtime advances without bytes
+  changing (filesystem touch); full reparse + re-emit otherwise.
+  The ingester's per-source `SourceSeq` HWM absorbs duplicates
+  when a re-scan re-emits unchanged content because every event's
+  `SourceSeq` is FNV-64 of `(originId, opTree path)` and is
+  deterministic across rescans.
+- **Streamer at 50 MiB compressed.** Files above the threshold
+  route through `readSnapshotStreaming`, which feeds the gzip
+  reader through `io.TeeReader` into a `json.NewDecoder` and a
+  sha256 hasher in parallel. Avoids the worst-case 2× peak from
+  `ioutil.ReadAll` on the operator's 151 MB compressed (≈ 1+ GB
+  decompressed) max outlier. `TestStreamer_AgreesWithNonStreaming`
+  proves the streaming path produces byte-identical canonical
+  events to the whole-tree path on the same fixture; any
+  divergence breaks the test before merge.
+- **Embedded sub-agent walk with depth cap 32.** Recursive descent
+  into `op.childSession` synthesizes a `SessionStartedEvent` for
+  every child (Kind=sub_agent, ParentNativeID=parent traceId,
+  RootNativeID=root file traceId). Exceeding the cap surfaces a
+  per-record error via the adapter's `OnError` callback and the
+  descent stops; observed real data depth tops out around 6.
+- **Zero-byte + `.tmp-*` defenses.** `.tmp-*` files match a
+  substring filter in `isSnapshotName` and are never opened;
+  zero-byte files emit a `SourceErrorEvent` (severity WRN) and
+  advance the cursor's mtime so the warning fires once per
+  rewrite.
+- **Tail debounce + "re-read once if mtime advanced" rule.** An
+  active v2 session can rewrite its `.json.gz` dozens of times
+  per minute. The tailer coalesces fsnotify events over a 250 ms
+  window, then for each dirty file runs `processFile`, re-stats,
+  and reprocesses ONCE more iff mtime advanced during the read.
+  No spin loop is possible; a fast producer is bounded to two
+  reads per dirty-flush cycle.
+- **Op-kind mapping preserves `system`.** Per the canonical-events
+  spec `OpSystem` is first-class. The mapper translates v2
+  `op.kind="system"` directly to `canonical.OpSystem` and stores
+  the original kind string in `OpStartedEvent.Extras.original_kind`
+  for diagnostic visibility on every op.
+- **Tool ops use chars accounting.** `tool` accounting entries
+  carry `charactersIn` / `charactersOut`; the mapper populates
+  `OpFinalizedEvent.CharsIn` / `CharsOut` (canonical's existing
+  fields for this case) and leaves `BytesIn` / `BytesOut` at the
+  request/response `size` values.
+- **Session status decision tree.** `success=true` →
+  StatusCompleted; `success=false` → StatusFailed (+ ERR
+  LogEntryEvent carrying the free-text error string);
+  `endedAt` set without `success` → StatusInterrupted; no turns
+  + no steps → StatusAbandoned; otherwise → StatusRunning.
+- **Steps share canonical `turns` table.** v2 step indices land
+  at `seq = stepIndexOffset(10000) + step.index` so they never
+  collide with turn indices in the same session. Step kind
+  surfaces via a `SessionUpdatedEvent` with extras
+  `step.<index>.kind`.
+
+Pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+
+```
+go mod tidy                            # no changes
+gofmt -l .                             # zero output
+$HOME/go/bin/goimports -l .            # zero output
+go vet ./...                           # zero warnings
+go build ./...                         # exit 0
+go test -race -count=1 -coverprofile=/tmp/cov.out ./...
+# repo total 88.0%; aiagent_v2 package 91.3% (above the new-code
+# ≥90% threshold per quality-gates.md). Other packages unchanged.
+go test -race -fuzz=FuzzParseSnapshot -fuzztime=30s ./internal/adapters/aiagent_v2
+# 526,073 execs across the seed corpus + 171 newly-interesting
+# corpus entries discovered during the 30 s run; zero crashes.
+golangci-lint run --timeout=5m         # 0 issues
+$HOME/go/bin/gosec ./internal/adapters/aiagent_v2/...  # 0 issues
+shellcheck -x -s bash scripts/sanitize-fixture.sh scripts/test/sanitize-fixture-test.sh scripts/genfixtures-v2.sh
+bash scripts/test/sanitize-fixture-test.sh   # 13 pass, 0 fail (unchanged from Chunk 5)
+```
+
+Coverage per package (from `go tool cover -func=/tmp/cov.out`):
+
+- `internal/adapters` 100.0% (unchanged)
+- `internal/adapters/aiagent_v2` **91.3%** (was 100% as skeleton;
+  the real implementation maintains the new-code ≥ 90% bar)
+- `internal/adapters/aiagent_v3` 91.5% (unchanged)
+- `internal/canonical` 100.0% (unchanged)
+- `internal/ingest` 90.3% (unchanged)
+- `internal/store` 90.9% (unchanged)
+
+Streamer vs whole-tree agreement:
+`TestStreamer_AgreesWithNonStreaming` asserts byte-identical
+event slices between `readSnapshotStreaming` and
+`readSnapshotWhole` on the same fixture. Pass.
+
+Spec / code observations during implementation:
+
+- The spec's `adapter-aiagent-v2.md` is already evidence-based
+  (rewritten in SOW-0002); no spec deltas needed. The adapter
+  follows it line-by-line: filename-shares-by-descendants,
+  embedded-only sub-agents, content-hash cursor, atomic-rename
+  semantics, depth-32 cap, char-vs-byte accounting, V1-vs-V2
+  schema tolerance, `system` op kind, and zero-byte / `.tmp-*`
+  edge cases.
+- `canonical-events.md`'s "turn 0 reserved for init turns
+  (ai-agent v2 may emit)" guarantee is honoured: the mapper
+  emits `TurnStartedEvent` with `Seq=0` for the v2 init turn so
+  the operator's UI can choose to hide or surface it without
+  losing fidelity.
+
+Items punted with reason:
+
+- **Resolver pass for cross-file sub-agent linkage** lives in
+  `internal/ingest` (Chunk 7), not in the adapter. The v2
+  adapter emits child `SessionStartedEvent` events synthesized
+  from `op.childSession` so the parent → child link is always
+  present in the embedded case; the resolver picks up the
+  rarer `childSessionRef` case once the referenced child is
+  ingested from elsewhere.
+- **Legacy inline payload side-cache** (spec §Canonical Model
+  Gaps item 10) is not implemented. The adapter records
+  `request.size` / `response.size` as `BytesIn` / `BytesOut` on
+  the op and stores the original op kind in extras; payload
+  body extraction for v2 inline blobs lands in a follow-up SOW
+  if the operator surfaces a UI need for it.
+
+Reviewer iteration 2 (2026-05-27): qwen surfaced 2 P1s + 2 P2s, all
+in mapper.go. Applied atomically:
+
+1. PayloadRefEvent emitted for op.request.payload.ref and
+   op.response.payload.ref (qwen P1) — uses extractPayloadRef helper;
+   file:// URI built via the same traversal guard pattern as v3.
+   Inline (no-ref) payloads deferred to a follow-up SOW (spec
+   §Canonical Model Gaps item 10).
+2. OpReasoning event nested under the LLM op when op.reasoning.final
+   is set (qwen P1) — emitted as OpStartedEvent + OpFinalizedEvent
+   pair with ReasoningKind='summary' and ParentOpSeq = the LLM op's
+   seq. Reasoning text NOT mirrored as LogEntryEvent (would bloat
+   events; the spec doesn't require it).
+3. SessionStartedEvent.Model populated from first LLM op via DFS
+   pre-pass (qwen P2) — sessions.model now populated for v2.
+4. CtxUsed includes OutputTokens in addition to InputTokens +
+   TokensCacheRead (qwen P2) — matches the "total context window
+   consumed" definition; doc comment updated.
+
+One qwen P2 (Cursor.After treats file deletion as regression)
+accepted as intentional and documented — re-scan is safe due to
+content-hash dedup; behaviour is conservative-by-design.
+
+Tests updated to assert the new event emissions
+(`mapper_fixes_test.go`); golden fixtures refreshed via
+`-update-golden` because SessionStarted.Model is now populated
+and CtxUsed includes OutputTokens. Coverage for
+`internal/adapters/aiagent_v2`: 92.3% (up from 91.3%, above
+the new-code ≥90% bar).
+
+Pre-PR gates (iteration 2):
+
+```
+go mod tidy                            # no changes
+gofmt -l .                             # zero output
+$HOME/go/bin/goimports -l .            # zero output
+go vet ./...                           # zero warnings
+go build ./...                         # exit 0
+go test -race -count=1 -coverprofile=/tmp/cov.out ./...
+# total 88.1%; aiagent_v2 92.2% (up from 91.3%, above ≥90% bar)
+golangci-lint run --timeout=5m         # 0 issues
+$HOME/go/bin/gosec ./...               # 0 issues
+```
+
+Next: Chunk 9 — v2 backfill perf measurement against the
+operator's 294,316 real files (target < 60 min wall, expected
+5-10 min with 8 workers per SOW-0002 analysis).
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
