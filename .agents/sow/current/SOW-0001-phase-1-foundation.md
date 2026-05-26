@@ -196,7 +196,18 @@ Open decisions (closed by `### User Decisions (recorded 2026-05-26)` in the Requ
 
 ## Implementation
 
-(Filled as chunks complete. One sub-section per chunk, with: commit refs, evidence, deviations from plan.)
+### Chunk 1 — Spec deltas (2026-05-26)
+
+Landed in PR #2 (commit pending merge).
+
+- **New**: `.agents/sow/specs/pricing.md` (~280 lines). Per-model JSON schema embedded via `go:embed`; refresh script contract; cost computation algorithm; source-recorded-cost-takes-precedence rule; Phase 1 acceptance "zero unknown-pricing warnings on backfill".
+- **Updated**: `.agents/sow/specs/frontend-architecture.md` Theming section — full theme resolution algorithm with manual-override precedence, OS-preference fallback, no-flash inline script, three-state Auto/Dark/Light header control, tests enumerated.
+- **Updated**: `.agents/sow/specs/ui-pages.md` Theme section — corrected the bootstrap-era "Dark mode default" claim to "OS preference is the default"; clarified the three-state control; keyboard shortcut `t` cycles Auto→Dark→Light.
+- **Updated**: `.agents/sow/specs/index.md` — adds `pricing.md` to Cross-cutting section.
+
+No code changes in this chunk. Deviations from plan: none. Adapter-v2/v3 spec refinements anticipated in the original plan are unnecessary — SOW-0002's evidence-based rewrites already cover the 5-second resolver-pass behavior and fast-path child-side `parentSessionId` lookup.
+
+Next: Chunk 2 — CI scaffolding.
 
 ## Validation
 

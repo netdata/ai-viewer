@@ -67,9 +67,11 @@ Table of `catalog_agents`. Same shape, scoped to agents.
 
 ## Theme
 
-- **Dark mode default** (sessions are usually viewed late at night when debugging).
-- Light mode toggle in header. System-preference detection on first load.
-- Color tokens defined in `frontend/src/theme/tokens.css`. Status colors: green (completed), amber (running), red (failed), gray (unknown).
+- **OS preference is the default** — the app reads `prefers-color-scheme` and matches the operating system. Auto-switches when the OS toggles its preference.
+- A three-state theme control in the header — **Auto** (follow OS), **Dark**, **Light** — persists the operator's choice in `localStorage`. Auto-mode has no `localStorage` entry; explicit choices override OS.
+- Dark and light are first-class equals; both are polished. Neither is the "real" one with the other as a stripped-down sibling.
+- Color tokens defined in `frontend/src/theme/tokens.css` (see `frontend-architecture.md` for the resolution algorithm and inline-script no-flash trick).
+- Status colors: green (completed), amber (running), red (failed/interrupted/abandoned distinguished by icon + label), gray (unknown).
 - Font: system stack (SF Pro / Segoe UI / Inter); monospace for IDs and timestamps (JetBrains Mono / Menlo).
 
 ## Realtime UX Rules
@@ -83,11 +85,11 @@ Table of `catalog_agents`. Same shape, scoped to agents.
 ## Keyboard Shortcuts
 
 - `/` — focus the global search/filter
-- `t` — toggle theme
+- `t` — cycle theme control (Auto → Dark → Light → Auto)
 - `?` — show keyboard shortcuts modal
 - `Esc` — close any open modal
 
-More to be added as needs emerge (user-driven via feedback).
+More to be added as needs emerge (operator-driven via feedback).
 
 ## Phase Mapping
 

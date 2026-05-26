@@ -102,32 +102,93 @@ One subscription per active page. Filter changes → new subscription, old one c
 
 ## Theming
 
-`theme/tokens.css`:
+**Operator decision (2026-05-26): theme matches the operating system by default; a manual override is available and persisted.**
+
+Dark and light are first-class equals — both are polished, neither is the "real" one with the other as an afterthought.
+
+### Token file
+
+`theme/tokens.css` defines CSS custom properties under two selectors. Dark is the `:root` default; light overrides via `[data-theme="light"]`. The single `data-theme` attribute on `<html>` is the switch.
 
 ```css
 :root {
+  /* DARK (default) */
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --border: #30363d;
   --text-primary: #c9d1d9;
+  --text-secondary: #8b949e;
   --accent: #58a6ff;
   --success: #3fb950;
   --warning: #d29922;
   --error: #f85149;
+  --info: #a5a5ff;
   /* … */
 }
 
 :root[data-theme="light"] {
   --bg-primary: #ffffff;
   --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eaeef2;
+  --border: #d0d7de;
   --text-primary: #1f2328;
+  --text-secondary: #59636e;
   --accent: #0969da;
   --success: #1a7f37;
   --warning: #9a6700;
   --error: #cf222e;
+  --info: #5a5aff;
 }
 ```
 
-Toggle: write `data-theme` to `<html>`, persist in `localStorage`. Default to `prefers-color-scheme`.
+### Theme resolution algorithm
+
+The theme provider (`state/theme.ts`) resolves the active theme on every render using this precedence:
+
+1. **Manual override**: if `localStorage.aiViewerTheme === 'dark' | 'light'` is set, that value is the active theme.
+2. **OS preference**: otherwise, `window.matchMedia('(prefers-color-scheme: dark)')` decides — `dark` if matches, `light` otherwise.
+
+The `data-theme` attribute on `<html>` is updated by the provider on:
+
+- Initial mount (sets the resolved value).
+- `localStorage` write (manual override changes).
+- `matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ...)` — OS changes its preference (user enables Night Shift, system dark-mode toggle flips, etc.). Only re-applies when no manual override is set; if the operator has explicitly chosen a theme, it stays.
+
+### User control
+
+The header includes a three-state theme control:
+
+- **Auto** (default) — follows OS preference. No `localStorage` entry. Auto-switches when the OS preference changes.
+- **Dark** — `localStorage.aiViewerTheme = 'dark'`. Locks dark regardless of OS.
+- **Light** — `localStorage.aiViewerTheme = 'light'`. Locks light regardless of OS.
+
+A "Reset to auto" affordance clears the override. The current state is announced via the toggle's `aria-label`.
+
+### Server-side / SSR considerations
+
+ai-viewer renders client-side only — the Go binary serves a static HTML shell with the React app. To avoid a flash-of-wrong-theme on first paint, the shell `index.html` includes a tiny inline script that runs before React mounts:
+
+```html
+<script>
+(function () {
+  try {
+    var pref = localStorage.getItem('aiViewerTheme');
+    var resolved = pref || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', resolved);
+  } catch (e) { /* localStorage disabled */ }
+})();
+</script>
+```
+
+This inline script is the **only** JS that runs synchronously before React; everything else loads as a module.
+
+### Tests
+
+- Vitest unit test on the resolution algorithm: every combination of `localStorage` value × `matchMedia` value → expected active theme.
+- Playwright E2E with axe: visits each route under both `dark` and `light` (forced via `localStorage`), asserts zero serious/critical a11y violations.
+- Playwright E2E: changes the manual override; asserts the `data-theme` attribute updates and the chosen color tokens flow through (sampling computed style on a key element per theme).
+- Playwright E2E: simulates OS preference change while no override is set; asserts the theme auto-switches.
 
 ## Performance Budgets
 
