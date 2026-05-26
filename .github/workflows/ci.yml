@@ -1,0 +1,425 @@
+# ai-viewer CI workflow.
+#
+# Role
+#   This workflow is the substrate for every automated quality gate
+#   enumerated in .agents/sow/specs/quality-gates.md. Each gate in that
+#   spec maps to a step inside one of the four jobs below. The workflow
+#   itself does not invent gates; it executes the commands defined by
+#   the project skills and aggregate scripts (scripts/lint.sh,
+#   scripts/test.sh, scripts/gates.sh) once they exist.
+#
+# Conditional-skip pattern
+#   The repository is bootstrapped spec-first. On any given commit a job
+#   may have no source code to act on (no go.mod, no frontend, no
+#   gates.sh). Each job opens with a presence check; if the relevant
+#   tree is absent, the job emits a no-op marker and exits green. As
+#   each future SOW lands the relevant tree, the job's body runs end to
+#   end without any workflow edit. This keeps the contract stable while
+#   the project grows.
+#
+# Job-name contract
+#   The four job IDs below (lint, test, frontend, gates) are the
+#   contract for branch-protection required status checks. SOW-0013
+#   will register these exact names via the GitHub branch-protection
+#   API. Renaming a job is a breaking change to that contract and
+#   requires a SOW.
+#
+# Extending
+#   Future quality SOWs (SOW-0009 onwards) extend this workflow by
+#   adding steps to the relevant existing job. A new job is added only
+#   when a new top-level concern emerges (e.g. a release job, a
+#   benchmarks-only nightly schedule). New job names follow the same
+#   contract rule: register them in branch protection in the same SOW
+#   that introduces them.
+#
+# Deferred to subsequent SOWs
+#   Some gates from .agents/sow/specs/quality-gates.md are not enforced
+#   in this initial workflow. They land in:
+#     - SOW-0009 — .golangci.yml + standalone-gosec config + pinned tool
+#                  versions (replacing go install @latest patterns below)
+#     - SOW-0010 — scripts/check-coverage.sh + branch coverage +
+#                  race -count=3 stress + coverage diff PR comment
+#     - SOW-0011 — fuzz targets + property tests + benchstat baseline
+#                  enforcement (replaces benchtime=1x smoke run below)
+#     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
+#                  enforcement (replaces bundle-size report below)
+#     - SOW-0013 — scripts/{gates,scan-secrets,spec-drift}.sh +
+#                  CodeQL workflow + Dependabot config
+#   Each of those SOWs adds steps to existing jobs OR adds new jobs.
+#   They do not require renaming the four current jobs.
+#
+# Out of scope here
+#   Dependabot config, CodeQL workflow, deployment and release
+#   pipelines, and nightly schedules all land in their own SOWs and
+#   their own workflow files. This file covers push and pull-request
+#   CI only.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# Cancel superseded PR runs to save CI minutes. Master runs are never
+# cancelled so the audit trail of every merged commit is preserved.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect Go module
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -f .golangci.yml || -f .golangci.yaml ]]; then
+            echo "golangci=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "golangci=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice (no Go module yet)
+        if: steps.detect.outputs.go != 'true'
+        run: echo "No go.mod present; lint job is a no-op on this commit."
+
+      - name: Set up Go
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Verify go.mod and go.sum
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: gofmt
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          diff=$(gofmt -l .)
+          if [[ -n "$diff" ]]; then
+            echo "gofmt diff in:"
+            echo "$diff"
+            exit 1
+          fi
+
+      - name: goimports
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          diff=$(goimports -l .)
+          if [[ -n "$diff" ]]; then
+            echo "goimports diff in:"
+            echo "$diff"
+            exit 1
+          fi
+
+      - name: go vet
+        if: steps.detect.outputs.go == 'true'
+        run: go vet ./...
+
+      - name: golangci-lint
+        if: steps.detect.outputs.go == 'true' && steps.detect.outputs.golangci == 'true'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: govulncheck
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: gosec
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -severity medium -confidence medium ./...
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect Go module
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice (no Go module yet)
+        if: steps.detect.outputs.go != 'true'
+        run: echo "No go.mod present; test job is a no-op on this commit."
+
+      - name: Set up Go
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Build
+        if: steps.detect.outputs.go == 'true'
+        run: go build ./...
+
+      - name: Test with race detector and coverage
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          go test -race -count=1 \
+            -coverprofile=coverage.out \
+            -covermode=atomic \
+            ./...
+
+      - name: Coverage summary
+        if: steps.detect.outputs.go == 'true'
+        run: go tool cover -func=coverage.out | tail -1
+
+      - name: Upload coverage artifact
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-coverage-${{ github.run_id }}
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Detect benchmarks
+        if: steps.detect.outputs.go == 'true'
+        id: bench
+        shell: bash
+        run: |
+          if grep -rEq '^func Benchmark[A-Z]' --include='*_test.go' . ; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run benchmarks (smoke)
+        if: steps.detect.outputs.go == 'true' && steps.bench.outputs.present == 'true'
+        run: |
+          go test -run=^$ -bench=. -benchmem -benchtime=1x -count=1 ./... \
+            | tee bench-current.txt
+
+      - name: Upload bench artifact
+        if: steps.detect.outputs.go == 'true' && steps.bench.outputs.present == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ github.run_id }}
+          path: bench-current.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect frontend
+        id: detect
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          if [[ -f frontend/package.json ]]; then
+            echo "fe=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fe=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice (no frontend yet)
+        if: steps.detect.outputs.fe != 'true'
+        working-directory: ${{ github.workspace }}
+        run: echo "No frontend/package.json present; frontend job is a no-op on this commit."
+
+      - name: Set up Node
+        if: steps.detect.outputs.fe == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        if: steps.detect.outputs.fe == 'true'
+        run: npm ci
+
+      - name: Lint
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run lint -- --max-warnings=0
+
+      - name: Type check
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run typecheck
+
+      - name: Unit tests with coverage
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run test -- --run --coverage
+
+      - name: Upload frontend coverage
+        if: steps.detect.outputs.fe == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-coverage-${{ github.run_id }}
+          path: frontend/coverage/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cache Playwright browsers
+        if: steps.detect.outputs.fe == 'true'
+        id: pw-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+
+      - name: Detect Playwright
+        if: steps.detect.outputs.fe == 'true'
+        id: pw
+        shell: bash
+        run: |
+          if node -e "const p=require('./package.json'); process.exit((p.scripts && p.scripts.e2e) ? 0 : 1)"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Playwright (browsers + OS deps)
+        if: steps.detect.outputs.fe == 'true' && steps.pw.outputs.present == 'true'
+        run: npx playwright install --with-deps
+
+      - name: E2E (Playwright + axe)
+        if: steps.detect.outputs.fe == 'true' && steps.pw.outputs.present == 'true'
+        run: npm run e2e
+
+      - name: Build
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run build
+
+      - name: Bundle size report
+        if: steps.detect.outputs.fe == 'true'
+        shell: bash
+        run: |
+          mkdir -p ../bundle-report
+          if [[ -d dist ]]; then
+            du -ab dist | sort -nr > ../bundle-report/sizes.txt
+            ( cd dist && find . -type f \( -name '*.js' -o -name '*.css' \) \
+              | while read -r f; do
+                  gz=$(gzip -c "$f" | wc -c)
+                  raw=$(wc -c < "$f")
+                  printf '%s\t%s\t%s\n' "$raw" "$gz" "$f"
+                done ) | sort -nr > ../bundle-report/gzipped.tsv
+          else
+            echo "dist/ missing after build" >&2
+            exit 1
+          fi
+
+      - name: Upload bundle-size report
+        if: steps.detect.outputs.fe == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-size-${{ github.run_id }}
+          path: bundle-report/
+          if-no-files-found: error
+          retention-days: 14
+
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect aggregate scripts
+        id: detect
+        shell: bash
+        run: |
+          for s in gates scan-secrets spec-drift; do
+            f="scripts/${s}.sh"
+            if [[ -f "$f" ]]; then
+              echo "${s//-/_}=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${s//-/_}=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Skip notice (no aggregate scripts yet)
+        if: steps.detect.outputs.gates != 'true' && steps.detect.outputs.scan_secrets != 'true' && steps.detect.outputs.spec_drift != 'true'
+        run: echo "No scripts/gates.sh, scripts/scan-secrets.sh, or scripts/spec-drift.sh present; gates job is a no-op on this commit."
+
+      - name: Set up Go (for gates that shell out to go tools)
+        if: hashFiles('go.mod') != ''
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Set up Node (for gates that shell out to node tools)
+        if: hashFiles('frontend/package.json') != ''
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Secrets scan
+        if: steps.detect.outputs.scan_secrets == 'true'
+        run: |
+          chmod +x scripts/scan-secrets.sh
+          ./scripts/scan-secrets.sh
+
+      - name: Spec drift
+        if: steps.detect.outputs.spec_drift == 'true'
+        run: |
+          chmod +x scripts/spec-drift.sh
+          ./scripts/spec-drift.sh
+
+      - name: Aggregate gates
+        if: steps.detect.outputs.gates == 'true'
+        run: |
+          chmod +x scripts/gates.sh
+          ./scripts/gates.sh

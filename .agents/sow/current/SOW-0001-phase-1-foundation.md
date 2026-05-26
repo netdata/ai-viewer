@@ -148,7 +148,7 @@ Implementation plan (ordered chunks):
 
 1. **Spec deltas (lands FIRST, no code)**: new `.agents/sow/specs/pricing.md` (pricing JSON schema + refresh-script contract); update `.agents/sow/specs/frontend-architecture.md` and `.agents/sow/specs/ui-pages.md` for OS-theme matching + manual override; refine `adapter-aiagent-v3.md` / `adapter-aiagent-v2.md` for any small gaps not covered by SOW-0002. Per the discipline contract, specs change first.
 2. **CI scaffolding**: `.github/workflows/ci.yml` running Go lint+test, frontend lint+test, build. First green on the bootstrap-only repo. Foundation for every gate that lands in SOW-0009 — SOW-0013.
-3. **Go module setup**: `go.mod`, `internal/canonical/` package with Event types from `canonical-events.md`, `internal/store/` with migration `0001_initial.sql` creating the v1 schema from `data-model.md`.
+3. **Go module setup**: `go.mod`, `internal/canonical/` package with Event types from `canonical-events.md`, `internal/store/` with migration `0001_initial.sql` creating the v1 schema from `data-model.md`. **Co-land `.golangci.yml`** in the same commit so the lint job activates the full Go linter chain the moment `go.mod` appears (per glm reviewer recommendation on Chunk 2). The starting `.golangci.yml` is minimal — `govet`, `errcheck`, `staticcheck`, `unused`, `gosimple`, `ineffassign`, `gofmt`, `goimports`. SOW-0009 extends it to the full linter set with version pinning.
 4. **Adapter scaffolding**: `internal/adapters/registry.go`, `internal/adapters/aiagent_v3/adapter.go` skeleton, `internal/adapters/aiagent_v2/adapter.go` skeleton; both with TODO bodies and the `canonical.Adapter` interface compile-checked.
 5. **Sanitization tooling**: `scripts/sanitize-fixture.sh` for stripping sensitive content from real samples before committing. Mandatory before any `testdata/` commit.
 6. **v3 adapter implementation**: complete the Scan + Tail + cursor; fixtures + golden tests for all mandatory scenarios from `adapter-aiagent-v3.md`. ISO-8601 → microsecond conversion at the boundary. Fast-path parent linkage via child-side `parentSessionId` (96.8% observed).
@@ -208,6 +208,91 @@ Landed in PR #2 (commit pending merge).
 No code changes in this chunk. Deviations from plan: none. Adapter-v2/v3 spec refinements anticipated in the original plan are unnecessary — SOW-0002's evidence-based rewrites already cover the 5-second resolver-pass behavior and fast-path child-side `parentSessionId` lookup.
 
 Next: Chunk 2 — CI scaffolding.
+
+### Chunk 2 — CI scaffolding (2026-05-26)
+
+Landed in PR #<N> (replace after master merge):
+
+- New: `.github/workflows/ci.yml` (386 lines). Four jobs: `lint`,
+  `test`, `frontend`, `gates`. Conditional bodies that skip when the
+  relevant tree is absent — `go.mod` for the Go jobs,
+  `frontend/package.json` for the frontend job, `scripts/gates.sh` /
+  `scripts/scan-secrets.sh` / `scripts/spec-drift.sh` for the gates
+  job. First green on the spec-only master. Stable job names ready
+  to be registered as required status checks by SOW-0013.
+
+Trigger model: push to `master`, `pull_request` against `master`,
+`workflow_dispatch` for debugging. Concurrency: cancel-in-progress on
+PRs only via `cancel-in-progress: ${{ github.event_name ==
+'pull_request' }}`; master runs preserved for audit.
+
+Action versions pinned to current latest stable majors (verified via
+`gh release view` on 2026-05-26): `actions/checkout@v6`,
+`actions/setup-go@v6`, `actions/setup-node@v6`, `actions/cache@v5`,
+`actions/upload-artifact@v7`, `golangci/golangci-lint-action@v9`.
+This supersedes the lower pins suggested in the chunk brief; the
+SOW's library version policy is "latest stable at the time of work".
+
+Validation: `python3 -c "yaml.safe_load(...)"` parses cleanly;
+`actionlint v1.7.12` reports zero findings.
+
+Deviations from plan: action versions raised to latest stable (see
+above). No structural deviations.
+
+Reviewer iteration 1 (2026-05-26): two external reviewers (codex,
+qwen) converged on five actionable fixes to the initial workflow,
+applied in-place to `.github/workflows/ci.yml` (425 lines after):
+
+1. **Standalone `goimports` step in `lint`** (codex, qwen) — added
+   after `gofmt`. `quality-gates.md` requires `goimports -l .` →
+   zero output as a standalone gate; the bundled goimports inside
+   `golangci-lint` was conditional on `.golangci.yml` existing
+   (which it does not until SOW-0009 lands).
+2. **Standalone `gosec` step in `lint`** (codex, qwen) — added
+   after `govulncheck`. Same conditionality reasoning: `gosec
+   -severity medium -confidence medium ./...` is mandated by
+   `quality-gates.md` and was gated behind the absent
+   `.golangci.yml` until this fix.
+3. **`go mod tidy` verification step in `lint`** (codex, qwen) —
+   added between `Set up Go` and `gofmt`. Runs `go mod tidy` then
+   `git diff --exit-code go.mod go.sum`. Catches stale dependency
+   tracking before it lands on master.
+4. **Always install Playwright OS dependencies** (codex, qwen) —
+   collapsed the previous cache-miss-gated install + bare E2E step
+   into a single `Install Playwright (browsers + OS deps)` step
+   that always runs `npx playwright install --with-deps`. Browser
+   binaries are still cached via `actions/cache@v5`; the
+   `--with-deps` flag is idempotent on binaries but always
+   reapplies OS package state. Avoids mysterious E2E failures on a
+   cache hit on a fresh runner image.
+5. **Deferred-gates block in workflow header** (codex, qwen) —
+   added a "Deferred to subsequent SOWs" subsection between
+   "Extending" and "Out of scope here" that names every gate from
+   `quality-gates.md` not enforced in this initial workflow and
+   maps each to its target SOW (SOW-0009 through SOW-0013). Future
+   readers see the whole gate roadmap from the workflow file
+   itself.
+
+Validation after fixes: `python3 -c 'import yaml;
+yaml.safe_load(open(...))'` parses cleanly; all four job names
+unchanged (`lint`, `test`, `frontend`, `gates`); all pinned action
+versions unchanged.
+
+Reviewer iteration 2 (2026-05-26): the third reviewer (glm, run as
+substitute for gemini which returned empty output on this session)
+completed independently after the five fixes above had landed. Its
+report: 0 critical/high, 1 medium and 2 low — all overlapping with
+the codex/qwen findings already addressed, plus three informational
+notes. **One new process recommendation accepted**: "ensure
+`.golangci.yml` co-lands with `go.mod` in Chunk 3". The
+Implementation plan above is amended to require `.golangci.yml` in
+the same commit as `go.mod`; this closes the lint/security gap that
+would otherwise let unlinted Go code merge between Chunk 3 landing
+and SOW-0009 landing. Convergence reached: no actionable findings
+remain. gemini availability follow-up logged for the operator's
+local LLM infrastructure (out of scope for this SOW).
+
+Next: Chunk 3 — Go module + canonical + store.
 
 ## Validation
 
