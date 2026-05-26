@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: drafted at bootstrap; awaits user approval before moving to current/.
+Sub-state: moved to current/ on 2026-05-26 after operator approval. SOW-0002 (cross-format data model analysis) is a prerequisite and lands in done/ in the same commit. Implementation begins at Chunk 1 (spec deltas for UI/pricing/adapter behavior); Chunk 2 (CI scaffolding) lands second so the spec deltas are not gated on workflow setup.
 
 ## Requirements
 
@@ -146,26 +146,28 @@ Sensitive data handling plan:
 
 Implementation plan (ordered chunks):
 
-1. **CI scaffolding**: `.github/workflows/ci.yml` running Go lint+test, frontend lint+test, build. Initial commit makes CI green on the bootstrap-only repo.
-2. **Go module setup**: `go.mod`, `internal/canonical/` package with Event types, `internal/store/` with migration 0001 creating the v1 schema.
-3. **Adapter scaffolding**: `internal/adapters/registry.go`, `internal/adapters/aiagent_v3/adapter.go` skeleton, `internal/adapters/aiagent_v2/adapter.go` skeleton; both with TODO bodies.
-4. **Sanitization tooling**: `scripts/sanitize-fixture.sh` for stripping sensitive content from real samples before committing.
-5. **v3 adapter implementation**: complete the Scan + Tail + cursor; fixtures + golden tests for all mandatory scenarios.
-6. **v3 → ingest → store path**: complete `internal/ingest/`, wire v3 adapter, test end-to-end on a small fixture.
-7. **v2 adapter implementation**: confirm field names against real samples, write parser, fixtures, golden tests. Particular attention to debounce on active files.
-8. **v2 backfill perf measurement**: timed full scan of operator's `~/.ai-agent/sessions/`. If > 60 min, pause and discuss.
-9. **Server scaffolding**: `cmd/ai-viewer-serve/`, `internal/presenter/`, basic /api/health, /api/sources.
-10. **REST endpoints**: /api/sessions, /api/sessions/:id, /api/sessions/:id/logs, /api/stats (Phase 1 subset).
-11. **SSE hub**: subscriptions, event push, keepalive, reconnect support.
-12. **Frontend scaffolding**: Vite + React app, theme tokens, layout, FilterBar.
-13. **Frontend pages**: SessionsList, SessionDetail (Overview + Logs tabs), Sources.
-14. **SSE integration in frontend**: real-time list updates.
-15. **Build pipeline**: `scripts/build.sh` builds frontend, embeds, builds Go binaries.
-16. **E2E test**: ingest → server → browser asserting realtime update via Playwright.
-17. **systemd user units + install script**.
-18. **Operator runbook stub**: `docs/runbook.md` for the Phase 1 surfaces.
-19. **External review round**: codex + gemini + glm + qwen, full repo + diff.
-20. **Address review findings**, re-review, mark SOW completed, move to done/.
+1. **Spec deltas (lands FIRST, no code)**: new `.agents/sow/specs/pricing.md` (pricing JSON schema + refresh-script contract); update `.agents/sow/specs/frontend-architecture.md` and `.agents/sow/specs/ui-pages.md` for OS-theme matching + manual override; refine `adapter-aiagent-v3.md` / `adapter-aiagent-v2.md` for any small gaps not covered by SOW-0002. Per the discipline contract, specs change first.
+2. **CI scaffolding**: `.github/workflows/ci.yml` running Go lint+test, frontend lint+test, build. First green on the bootstrap-only repo. Foundation for every gate that lands in SOW-0009 — SOW-0013.
+3. **Go module setup**: `go.mod`, `internal/canonical/` package with Event types from `canonical-events.md`, `internal/store/` with migration `0001_initial.sql` creating the v1 schema from `data-model.md`.
+4. **Adapter scaffolding**: `internal/adapters/registry.go`, `internal/adapters/aiagent_v3/adapter.go` skeleton, `internal/adapters/aiagent_v2/adapter.go` skeleton; both with TODO bodies and the `canonical.Adapter` interface compile-checked.
+5. **Sanitization tooling**: `scripts/sanitize-fixture.sh` for stripping sensitive content from real samples before committing. Mandatory before any `testdata/` commit.
+6. **v3 adapter implementation**: complete the Scan + Tail + cursor; fixtures + golden tests for all mandatory scenarios from `adapter-aiagent-v3.md`. ISO-8601 → microsecond conversion at the boundary. Fast-path parent linkage via child-side `parentSessionId` (96.8% observed).
+7. **v3 → ingest → store path**: complete `internal/ingest/`, wire v3 adapter, test end-to-end on a small fixture. 5-second resolver pass for cross-session linkage.
+8. **v2 adapter implementation**: parser, debounce on active rewrites, content-hash cursor (since v2 rewrites the whole file). Streaming gzip + streaming JSON for files > 50 MB. Skip zero-byte and `.tmp-*` files. Embedded sub-agent walk.
+9. **v2 backfill perf measurement**: timed full scan of operator's `~/.ai-agent/sessions/` (294,316 files, 25.4 GB). Per SOW-0002 analysis the target is < 60 min; bench expects 5-10 min with 8 workers. If > 60 min, pause and discuss.
+10. **Pricing data + refresh script**: `internal/pricing/pricing.json` initial seed; `scripts/refresh-pricing.sh` invoking an external CLI AI tool; pricing computed-by-default on ops where source doesn't record cost (claude-code, codex; see `pricing.md`).
+11. **Server scaffolding**: `cmd/ai-viewer-serve/`, `internal/presenter/`, basic `/api/health`, `/api/sources`.
+12. **REST endpoints**: `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/logs`, `/api/stats` (Phase 1 subset).
+13. **SSE hub**: subscriptions, event push, keepalive, reconnect support.
+14. **Frontend scaffolding**: Vite + React app, theme tokens, OS-prefers-color-scheme detection + manual override, layout, FilterBar.
+15. **Frontend pages**: SessionsList, SessionDetail (Overview + Logs tabs), Sources.
+16. **SSE integration in frontend**: real-time list updates.
+17. **Build pipeline**: `scripts/build.sh` builds frontend, embeds, builds Go binaries.
+18. **E2E test**: ingest → server → browser asserting realtime update via Playwright.
+19. **systemd user units + install script**.
+20. **Operator runbook stub**: `docs/runbook.md` for the Phase 1 surfaces.
+21. **External review round**: codex + gemini + glm + qwen, full repo + diff.
+22. **Address review findings**, re-review, mark SOW completed, move to done/.
 
 Validation plan:
 
