@@ -1,0 +1,42 @@
+# Build artifacts
+/bin/
+/dist/
+/ai-viewer
+/ai-viewer-ingest
+/ai-viewer-serve
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+*.tsbuildinfo
+
+# SQLite runtime data
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Private per-user overrides
+AGENTS.local.md
+CLAUDE.local.md
+CRUSH.local.md
+
+# Local environment
+.env
+.env.local
+
+# Local fixture caches (real session data; never commit)
+/testdata-local/
