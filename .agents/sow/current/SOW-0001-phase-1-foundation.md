@@ -655,6 +655,56 @@ Next: Chunk 4 — adapter scaffolding (`internal/adapters/registry.go`
 plus v3/v2 skeletons), to land after this chunk's external review
 converges.
 
+### Chunk 4 — Adapter scaffolding (2026-05-26)
+
+Landed on branch `sow-0001-chunk-4-adapter-scaffolding` (PR # pending):
+
+- `internal/adapters/{doc.go,registry.go,export_test.go,
+  registry_test.go,registry_init_test.go}` — thread-safe registry,
+  init-time registration pattern, snapshot/reset/restore test
+  helpers that keep package-level mutations isolated, and a
+  blank-import integration test that proves the init wiring fires
+  end to end. The registry uses `sync.RWMutex` even though writes
+  only occur at init; this is documentation of the read/write
+  contract for downstream callers and a guard against future
+  runtime-registration use cases.
+- `internal/adapters/aiagent_v3/{doc.go,adapter.go,adapter_test.go}`
+  — v3 skeleton with compile-time `var _ canonical.Adapter =
+  (*Adapter)(nil)` conformance and Scan/Tail/ParseCursor bodies
+  that return `errNotImplemented`. The constructor rejects an
+  empty root and substitutes a no-op `OnError` so adapter code
+  can call it unconditionally. Real implementation lands in
+  Chunk 6.
+- `internal/adapters/aiagent_v2/{doc.go,adapter.go,adapter_test.go}`
+  — v2 skeleton; same shape as v3. Real implementation lands in
+  Chunk 8.
+
+Factory signature follows the canonical contract from Chunk 3
+(`func(location string, opts AdapterOptions) (Adapter, error)`).
+The factories in both subpackages delegate to a typed `New`
+constructor so direct Go callers and registry callers share a
+single validation path. Duplicate registration, empty format
+name, and nil factory all panic at init so misconfigured
+processes refuse to start instead of silently shadowing
+adapters.
+
+No spec changes. No deviations from plan. No new dependencies.
+
+Gates run locally on the branch tip:
+
+- `go mod tidy` — no changes.
+- `gofmt -l .` — clean.
+- `goimports -l .` — clean.
+- `go vet ./...` — clean.
+- `go build ./...` — clean.
+- `go test -race -count=1 ./...` — 5 packages pass; adapter
+  packages all at 100.0% coverage; canonical 100%; store 90.4%
+  (unchanged); repo total 92.9% (up from 90.3%).
+- `golangci-lint run --timeout=5m` — 0 issues.
+- `govulncheck ./...` — 0 vulnerabilities in called code.
+
+Next: Chunk 5 — sanitization tooling.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
