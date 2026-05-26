@@ -1,0 +1,2 @@
+{"version":3,"recordType":"session_start","seq":1,"ts":"2026-05-26T14:00:00.000Z","originId":"55555555-5555-5555-5555-555555555555","sessionId":"55555555-5555-5555-5555-555555555555","agentId":"interactive","callPath":"cli:interactive","headendId":"cli","capturePayloads":true,"attributes":{"ledgerPath":"session/55555555-5555-5555-5555-555555555555.jsonl"}}
+{"version":3,"recordType":"turn_start","seq":2,"ts":"2026-05-26T14:00:01.000Z","originId":"55555555-5555-5555-5555-555555555555","sessionId":"55555555-5555-5555-5555-555555555555","turn":1}

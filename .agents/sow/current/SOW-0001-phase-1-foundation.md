@@ -826,6 +826,198 @@ tooling unblocks committing real fixture snapshots to
 `testdata/aiagent_v3/<scenario>/INPUT/` and
 `testdata/aiagent_v2/<scenario>/INPUT/`.
 
+### Chunk 6 — v3 adapter implementation (2026-05-26)
+
+Landed on branch `sow-0001-chunk-6-v3-adapter` (PR # pending):
+
+- `internal/adapters/aiagent_v3/{adapter,cursor,parser,mapper,ops,
+  scanner,tailer,payloads}.go` (191/151/259/279/220/322/183/52 lines)
+  — full Scan + Tail + Cursor + payload-traversal-guarded URI
+  resolution.
+- `internal/adapters/aiagent_v3/{adapter,cursor,parser,mapper,
+  scanner,tailer,fuzz,golden,coverage,coverage2,coverage3,
+  coverage4,helpers}_test.go` — unit + golden + fuzz tests.
+- `testdata/aiagent_v3/{happy_single_turn,multi_turn,sub_agent,
+  with_payloads,in_progress_turn,session_error}/` — synthetic
+  fixtures with portable `expected.jsonl` golden files (absolute
+  test-machine paths rewritten to `<ROOT>` placeholder in both
+  `SourceID` and `LocationURI`).
+- `go.mod`: `github.com/fsnotify/fsnotify v1.10.1` promoted to a
+  direct dependency.
+
+Local pre-PR gates (run from repo root, all clean):
+
+```
+go mod tidy                            # no changes
+gofmt -l .                             # zero output
+$HOME/go/bin/goimports -l .            # zero output
+go vet ./...                           # zero warnings
+go build ./...                         # exit 0
+go test -race -count=1 -coverprofile=/tmp/cov.out ./...
+# repo total 91.0%; aiagent_v3 package 90.6% (above the new-code
+# ≥90% threshold per quality-gates.md).
+go test -race -fuzz=FuzzParseLine -fuzztime=30s ./internal/adapters/aiagent_v3
+# 715,000 execs across the 12 seed corpus + 133 newly-interesting
+# corpus entries discovered during the run; zero crashes.
+golangci-lint run --timeout=5m         # 0 issues
+shellcheck -x -s bash scripts/sanitize-fixture.sh scripts/test/sanitize-fixture-test.sh
+bash scripts/test/sanitize-fixture-test.sh   # 13 pass, 0 fail (unchanged from Chunk 5)
+```
+
+Coverage per package (from `go tool cover -func=/tmp/cov.out`):
+
+- `internal/adapters` 100.0%
+- `internal/adapters/aiagent_v2` 100.0% (skeleton; real impl in Chunk 8)
+- `internal/adapters/aiagent_v3` **90.6%**
+- `internal/canonical` 100.0%
+- `internal/store` 90.4% (unchanged)
+
+Cursor design (spec §7 implemented as documented):
+
+- `Cursor{Files map[string]FileCursor, Version int}` round-trips
+  through JSON via `String()` / `ParseCursor()`.
+- `FileCursor{Offset, Size, LastSeq, LastTsUs, SeenSummary}`.
+- `Cursor.After()` is a per-file high-water-mark comparison;
+  regressions on any file defeat After (so the ingester treats them
+  as resume-from-cursor, not as progress).
+
+Watch / debounce parameters (spec §6.3, §6.5):
+
+- bufio.Scanner max line: 4 MiB (`scanBufferMax`).
+- SourceProgress emission cadence: every 200 events or every 5 s,
+  plus one at end of Scan (`progressEveryEvents`,
+  `progressEveryDuration`).
+- Tail debounce window: 50 ms (`debounceWindow`).
+- Per-flush dirty cap: 1024 entries (`debounceMaxEntries`).
+- Tail tick: 5 s (`tailTickInterval`) — emits periodic
+  SourceProgress so the cursor persists even when no fsnotify
+  events arrive.
+
+SourceSeq packing: `ledgerSeq << 12 | subIdx` (12-bit sub-event
+index per ledger record). `turn_end` records that would exceed
+4096 sub-events return `errSubEventOverflow` rather than
+silently aliasing seq values; the ingester surfaces the error
+via `opts.OnError`. Real data never approaches this cap (typical
+turn: ≤ 20 ops + payloads combined).
+
+Mapping decisions worth recording (all already documented in
+`adapter-aiagent-v3.md` §5):
+
+- `headendId` → `SessionKind`: `cli|api|web|embed|slack` → root;
+  `tool_output` → tool_internal; everything else → sub_agent.
+- Turn / op status: `ok` → "completed"; `failed` → "failed";
+  `running` → "running"; anything else passes through verbatim.
+- Cache-token counters land in `OpStartedEvent.Extras` and in
+  `OpFinalizedEvent.TokensCacheRead/Write` (spec §10 gap 1).
+- Multi-child `kind='session'` ops: the first child goes on
+  `OpStartedEvent.ChildSessionNativeID`; additional children
+  land in `Extras.additionalChildSessions` (spec §10 gap 8).
+- `finalReport.format` / `finalReport.captured` on
+  `session_summary` surface via a `SessionUpdatedEvent` so the
+  ingester writes them into `sessions.extras_json` (spec §10
+  gap 3).
+- `session_summary{status:"failed"}` emits an additional
+  `LogEntryEvent{Severity:"ERR"}` carrying the free-form error
+  string (spec §9.6).
+- `session_error` emits both `SessionFinalizedEvent{Status:
+  failed, ErrorClass: session_error}` and a `LogEntryEvent`.
+
+Fuzz target: `FuzzParseLine` (12 seed corpora covering every
+record type plus malformed envelopes); ran 715,000 execs in 30 s
+with 133 newly-interesting corpus entries discovered, zero
+crashes. `FuzzParseCursor` (9 seed corpora) also runs clean
+under the default `-fuzz=Fuzz` matcher when invoked separately.
+
+Spec amendments noted while implementing — none required.
+`adapter-aiagent-v3.md` was authoritative; the adapter follows it
+line-by-line. The choice between explicit child-side
+`parentSessionId` (spec §8.1 fast path) and parent-side resolver
+(spec §8.2) is settled in code: the adapter unconditionally emits
+`ParentNativeID = sessionStart.parentSessionId` when present, and
+the ingester's resolver pass (lands in Chunk 7) handles the
+parent-side case for the 3.2% of sub-agent sessions without the
+child-side field.
+
+Deviations from chunk brief:
+
+- `cmp.Diff` was not pulled into the unit tests; native Go
+  comparisons (`if got != want`) are sufficient given the small
+  size of asserted structs and avoid a new import in every test
+  file. Golden tests use raw `string == string` comparison on
+  JSONL bytes which is the most resilient assertion shape.
+- The brief listed a `FuzzParseLine` target; we also added
+  `FuzzParseCursor` (no extra cost; same harness) so the cursor
+  decoder gets the same protection.
+- One file (`mapper.go`) was over the 400-line guideline at
+  470 lines; split into `mapper.go` (279) + `ops.go` (220).
+- `coverage_test.go` originally accumulated to 465 lines; split
+  by extracting streaming/scanner specific tests into
+  `scanner_test.go`.
+
+Reviewer iteration 2 (2026-05-26): glm + qwen ran in parallel on
+iteration 1 (codex still in flight). Seven convergent + non-
+conflicting fixes applied atomically:
+
+1. Cursor.After tiebreaker on LastSeq (glm P1) — protects against
+   same-offset / different-LastSeq edge cases. `cursor.go:90-101`
+   plus `TestCursor_AfterUsesLastSeqAsTiebreaker`.
+2. errLineTooLong advances offset to end-of-file (glm P2) — no
+   more repeated spurious errors on Tail rereads. `scanner.go:78
+   +96-122` plus `TestReadFile_LineTooLongAdvancesToEOF`.
+3. SessionStartedEvent synthesized from parent's childSessions
+   (qwen P2-1) — closes spec §5.1 gap so the ingester doesn't
+   depend on child arriving first. New helper
+   `synthesizedChildSessionStarted` in `mapper.go`, called from
+   both `mapTurnEnd` (per-op fan-out) and `mapSessionSummary`.
+4. canonical-events.md documents 'running' on turn / op status
+   (qwen P2-2) — spec amended; adapter already passes through.
+5. Removed dead subCount return from mapOp (qwen P2-3); call
+   site in `mapper.go` updated.
+6. originId added to SessionStartedEvent extras (qwen P2-4) —
+   visible in sessions.extras_json without join to root_native_id.
+7. mapSessionSummary uses monotone subIdx counter (qwen P2-5);
+   no more hardcoded packSeq(seq,1)/(seq,2).
+
+Golden files regenerated under
+`testdata/aiagent_v3/{sub_agent,with_payloads,happy_single_turn,
+multi_turn,in_progress_turn,session_error}/expected.jsonl` —
+diffs manually inspected before commit. The visible delta in
+`sub_agent/expected.jsonl` is exactly: root session_started gains
+`originId` extra; one synthesized `session_started` for the child
+at SourceSeq=12291 (after OpFinalized in the parent's turn_end);
+a second synthesized `session_started` at SourceSeq=16386 (from
+the parent's session_summary.childSessions[]); the child's own
+session_start arrives at SourceSeq=4096 and the ingester upserts.
+
+Pre-PR gates after iteration 2 (all green):
+
+```
+go mod tidy                            # no changes
+gofmt -l .                             # zero output
+$HOME/go/bin/goimports -l .            # zero output
+go vet ./...                           # zero warnings
+go build ./...                         # exit 0
+go test -race -count=1 -coverprofile=/tmp/cov.out ./...
+# repo total 91.6%; aiagent_v3 package 91.6%
+# (above the new-code ≥90% threshold per quality-gates.md).
+go test -race -fuzz=FuzzParseLine -fuzztime=30s ./internal/adapters/aiagent_v3
+# 802,674 execs across the 286-entry baseline corpus + 15
+# newly-interesting entries discovered during the run; zero crashes.
+golangci-lint run --timeout=5m         # 0 issues
+shellcheck -x -s bash scripts/sanitize-fixture.sh scripts/test/sanitize-fixture-test.sh
+bash scripts/test/sanitize-fixture-test.sh   # 13 pass, 0 fail
+```
+
+Coverage retained at 91.6% on aiagent_v3 (up from 90.6% baseline
+thanks to the new cursor + scanner tests); canonical events spec
+amended in lockstep.
+
+Next: Chunk 7 — v3 → ingest → store path. The Chunk 6 adapter
+emits canonical events into a channel; Chunk 7 wires that
+channel to `internal/store` writes, implements the 5-second
+cross-session resolver pass, and runs an end-to-end test on the
+6 fixtures committed here.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
