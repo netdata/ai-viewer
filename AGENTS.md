@@ -68,6 +68,8 @@ Every non-trivial change of architecture or design must be visible to the operat
 
 After SOW sign-off, the assistant does not ask permission for technical choices within the agreed scope. If a finding materially changes the SOW, the assistant pauses, writes an addendum, and asks. Otherwise: work proceeds; the operator receives a verified, tested, reviewed system.
 
+**SOW sign-off is the ONLY approval gate.** The operator does NOT approve pull requests, code reviews, branch protection settings, dependency upgrades, or any other in-implementation step. PR review is performed by external LLM reviewers (see `project-second-opinions` skill) plus the assistant's own discipline checklist. The assistant **opens AND merges its own PRs** via `gh pr merge --merge --delete-branch` after external review converges. Asking the operator to "approve" a PR is a contract breach.
+
 ## Spec → Test → Code Protocol
 
 Mandatory ordering for any change with runtime behavior:
@@ -316,6 +318,27 @@ The assistant must not create git worktrees on their own. Create a worktree only
 - Always create new commits rather than amending, unless the operator explicitly requests amend.
 - Pre-commit hooks: fix the underlying issue, never use `--no-verify`.
 - A commit that adds code without adding/updating tests and specs is malformed and must be split or expanded before push.
+
+## Branch Protection and Merge Workflow
+
+The canonical branch protection on `master` for this repo (and any new operator repo created at the operator's direction) is:
+
+- `enforce_admins: true` — destructive-action protection applies to admins.
+- `allow_force_pushes: false`
+- `allow_deletions: false`
+- `required_pull_request_reviews: null` — **NO** manual-approval gate. The operator does not review PRs.
+- `required_status_checks: null` initially; populated with CI job names once SOW-0013 lands.
+
+The merge workflow:
+
+1. Assistant creates a feature branch and pushes work.
+2. Assistant opens a PR (`gh pr create`) — for clean history + SOC2 audit trail.
+3. Assistant runs external LLM reviewers per `project-second-opinions` skill on non-trivial code-producing PRs.
+4. Assistant addresses findings; iterates until reviewers converge.
+5. Assistant merges itself: `gh pr merge <num> --merge --delete-branch`.
+6. Assistant continues work — no operator step.
+
+Asking the operator to approve a PR is forbidden. The operator's approval gate is the SOW, not the PR.
 
 ## Build, Test, Run
 

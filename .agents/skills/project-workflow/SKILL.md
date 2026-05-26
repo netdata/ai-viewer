@@ -117,7 +117,7 @@ Before reporting completion to the operator:
 
 A "no" anywhere is a defect. Fix before reporting.
 
-## Step 8 — Commit
+## Step 8 — Commit, PR, and Merge
 
 One commit per logical step. Each commit ships spec + tests + code + docs together. Commit messages:
 
@@ -126,11 +126,23 @@ One commit per logical step. Each commit ships spec + tests + code + docs togeth
 - Never mention the assistant, vendor, or AI product.
 - Use a HEREDOC for the body to preserve formatting.
 
-After commit:
+Standard PR flow for any change touching master:
+
+1. Work on a feature branch (`git checkout -b <slug>`).
+2. Commit with the discipline above.
+3. Push the branch (`git push -u origin <branch>`).
+4. Open a PR (`gh pr create --base master --head <branch>`).
+5. Run external reviewers (Step 6) on non-trivial PRs.
+6. After convergence, **merge yourself**: `gh pr merge <num> --merge --delete-branch`.
+7. `git checkout master && git pull` so the local master tracks.
+
+No operator approval step. The operator gates SOWs, not PRs.
+
+After merge:
 
 - Run gates again on the committed state (paranoia).
 - If the SOW step is complete, update the SOW's `## Implementation` section with the commit ref and evidence.
-- If the SOW is complete, move from `current/` to `done/` with `Status: completed` in the same commit.
+- If the SOW is complete, move from `current/` to `done/` with `Status: completed` in the same commit (next PR).
 
 ## Reporting to the Operator
 
@@ -160,6 +172,8 @@ Pause and ask the operator only when:
 
 Do not pause for technical preference, library choice, naming, or refactor strategy. Those are assistant decisions.
 
+**PR merges are NOT a pause point.** The operator does not review or approve pull requests. After external review converges, the assistant merges the PR itself via `gh pr merge <num> --merge --delete-branch` and continues. Writing "PR open, awaiting your approval" is a contract breach.
+
 ## Anti-Patterns the Assistant Must Avoid
 
 - "I'll write the tests after the code." → contract breach.
@@ -170,6 +184,8 @@ Do not pause for technical preference, library choice, naming, or refactor strat
 - "I'll fix the lint warning later." → contract breach.
 - "Adding `t.Skip` until I have time." → contract breach unless linked to an issue + SOW.
 - "Let me lower the coverage threshold for now." → contract breach.
+- **"PR is open, awaiting your approval."** → contract breach. The operator does not approve PRs. After external review converges, the assistant merges via `gh pr merge --merge --delete-branch`.
+- **"Branch protection requires your review."** → contract breach. Branch protection on operator repos uses `enforce_admins=true` + NO required_pull_request_reviews block. If protection is misconfigured with a manual-review gate, fix the config; do not bring it to the operator.
 
 If the assistant catches itself doing any of these, stop, restart from Step 1, and update this skill if a new anti-pattern needs naming.
 
