@@ -3,6 +3,7 @@ package aiagent_v3
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -15,7 +16,7 @@ var _ canonical.Adapter = (*Adapter)(nil)
 
 func newTestAdapter(t *testing.T) *Adapter {
 	t.Helper()
-	a, err := New("/tmp/aiagent_v3_test_root", canonical.AdapterOptions{})
+	a, err := New(t.TempDir(), canonical.AdapterOptions{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -59,47 +60,126 @@ func TestAdapter_NameAndFormat(t *testing.T) {
 	}
 }
 
-func TestAdapter_ScanReturnsNotImplemented(t *testing.T) {
+func TestAdapter_ScanEmptyRootIsNoop(t *testing.T) {
 	t.Parallel()
 
 	a := newTestAdapter(t)
-	out := make(chan canonical.Event, 1)
-	err := a.Scan(context.Background(), nil, out)
-	if err == nil {
-		t.Fatalf("Scan: expected error, got nil")
+	out := make(chan canonical.Event, 8)
+	if err := a.Scan(context.Background(), nil, out); err != nil {
+		t.Fatalf("Scan: %v", err)
 	}
-	if !errors.Is(err, errNotImplemented) {
-		t.Fatalf("Scan: expected error wrapping errNotImplemented, got %v", err)
+	// One SourceProgress (final flush) is expected.
+	close(out)
+	count := 0
+	for ev := range out {
+		count++
+		if _, ok := ev.(canonical.SourceProgressEvent); !ok {
+			t.Fatalf("unexpected event on empty Scan: %T", ev)
+		}
+	}
+	if count == 0 {
+		t.Fatalf("Scan: expected at least one SourceProgress event")
 	}
 }
 
-func TestAdapter_TailReturnsNotImplemented(t *testing.T) {
+func TestAdapter_ScanRespectsCanceledCtx(t *testing.T) {
 	t.Parallel()
 
 	a := newTestAdapter(t)
-	out := make(chan canonical.Event, 1)
-	err := a.Tail(context.Background(), out)
-	if err == nil {
-		t.Fatalf("Tail: expected error, got nil")
-	}
-	if !errors.Is(err, errNotImplemented) {
-		t.Fatalf("Tail: expected error wrapping errNotImplemented, got %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out := make(chan canonical.Event, 8)
+	if err := a.Scan(ctx, nil, out); err != nil {
+		t.Fatalf("Scan: expected nil error on cancelled ctx, got %v", err)
 	}
 }
 
-func TestAdapter_ParseCursorReturnsNotImplemented(t *testing.T) {
+func TestAdapter_ParseCursorEmptyYieldsEmpty(t *testing.T) {
 	t.Parallel()
 
 	a := newTestAdapter(t)
 	cur, err := a.ParseCursor("")
-	if err == nil {
-		t.Fatalf("ParseCursor: expected error, got nil")
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
 	}
-	if cur != nil {
-		t.Fatalf("ParseCursor: expected nil cursor, got %v", cur)
+	if cur == nil {
+		t.Fatalf("ParseCursor: expected non-nil cursor")
 	}
-	if !errors.Is(err, errNotImplemented) {
-		t.Fatalf("ParseCursor: expected error wrapping errNotImplemented, got %v", err)
+	c, ok := cur.(Cursor)
+	if !ok {
+		t.Fatalf("ParseCursor: wrong concrete type %T", cur)
+	}
+	if len(c.Files) != 0 {
+		t.Fatalf("ParseCursor empty: expected zero files, got %d", len(c.Files))
+	}
+}
+
+func TestAdapter_ParseCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	a := newTestAdapter(t)
+	original := newCursor()
+	original.Files["one.jsonl"] = FileCursor{Offset: 42, Size: 100, LastSeq: 7}
+	encoded := original.String()
+
+	got, err := a.ParseCursor(encoded)
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	c, ok := got.(Cursor)
+	if !ok {
+		t.Fatalf("ParseCursor: wrong concrete type %T", got)
+	}
+	if c.Files["one.jsonl"].Offset != 42 {
+		t.Fatalf("round-trip lost offset: %+v", c.Files["one.jsonl"])
+	}
+	if c.Version != cursorVersion {
+		t.Fatalf("unexpected version %d", c.Version)
+	}
+}
+
+func TestAdapter_ParseCursorRejectsBadJSON(t *testing.T) {
+	t.Parallel()
+
+	a := newTestAdapter(t)
+	if _, err := a.ParseCursor("{not json"); err == nil {
+		t.Fatalf("ParseCursor: expected error on malformed JSON")
+	}
+}
+
+func TestAdapter_ParseCursorRejectsUnknownVersion(t *testing.T) {
+	t.Parallel()
+
+	a := newTestAdapter(t)
+	if _, err := a.ParseCursor(`{"version":99,"files":{}}`); err == nil {
+		t.Fatalf("ParseCursor: expected error on unknown version")
+	}
+}
+
+func TestAdapter_SnapshotCursorMatchesFileSizes(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, sessionDir)
+	if err := mkdirAll(dir); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "x.jsonl")
+	if err := writeFileBytes(path, []byte("hello\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cur, err := a.snapshotCursor()
+	if err != nil {
+		t.Fatalf("snapshotCursor: %v", err)
+	}
+	got := cur.Files["x.jsonl"]
+	if got.Offset != int64(len("hello\n")) || got.Size != int64(len("hello\n")) {
+		t.Fatalf("unexpected snapshot cursor: %+v", got)
 	}
 }
 
@@ -114,7 +194,7 @@ func TestFactory_RejectsEmptyLocation(t *testing.T) {
 func TestFactory_BuildsAdapter(t *testing.T) {
 	t.Parallel()
 
-	a, err := Factory("/some/root", canonical.AdapterOptions{})
+	a, err := Factory(t.TempDir(), canonical.AdapterOptions{})
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
 	}

@@ -145,7 +145,10 @@ jobs:
         if: steps.detect.outputs.go == 'true' && steps.detect.outputs.golangci == 'true'
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned to dodge transient upstream issue where 'latest'
+          # resolves to a release tag whose binary tarball is 404.
+          # SOW-0009 lands the full version-pinning policy.
+          version: v2.11.4
           args: --timeout=5m
 
       - name: govulncheck

@@ -121,7 +121,7 @@ type TurnFinalizedEvent struct {
     EventBase
     SessionNativeID string
     Seq             int
-    Status          string    // 'completed' | 'failed' | 'aborted'
+    Status          string    // 'running' | 'completed' | 'failed' | 'aborted'
     ErrorClass      string
     EndTs           int64
     TokensIn        int64
@@ -131,6 +131,8 @@ type TurnFinalizedEvent struct {
     CostUSD         float64   // 0.0 when adapter cannot compute (no native cost + no pricing table hit)
 }
 ```
+
+**Turn `running` status**: emitted by adapters that observe a mid-turn checkpoint (e.g. ai-agent v3 can write a `turn_end` record with `status='running'` before the turn truly ends — rare; not observed in committed real data but supported by the producer). The ingester transitions `running` → terminal (`'completed' | 'failed' | 'aborted'`) when the final `turn_end` (or equivalent) arrives. UIs should treat `running` as "in progress" rather than terminal.
 
 Notes:
 
@@ -173,7 +175,7 @@ type OpFinalizedEvent struct {
     SessionNativeID  string
     TurnSeq          int
     Seq              int
-    Status           string    // 'completed' | 'failed' | 'cancelled' | 'truncated'
+    Status           string    // 'running' | 'completed' | 'failed' | 'cancelled' | 'truncated'
     ErrorClass       string
     ErrorMessage     string
     EndTs            int64
@@ -190,6 +192,8 @@ type OpFinalizedEvent struct {
     CtxMax           int64     // model max context (LLM ops)
 }
 ```
+
+**Op `running` status**: emitted when a `turn_end` (or equivalent) checkpoint observes an op that has not finished yet. The ingester transitions `running` → terminal (`'completed' | 'failed' | 'cancelled' | 'truncated'`) when the final `turn_end` is observed and the op carries a terminal status. UIs treat `running` as in-progress rather than terminal, matching the turn-level semantics above.
 
 Notes on op kinds:
 

@@ -15,11 +15,12 @@ import (
 // to keep grep-discoverability sharp.
 const Format = "aiagent_v3"
 
-// errNotImplemented is the sentinel returned by Scan, Tail, and
-// ParseCursor in this skeleton chunk. Callers detect "real behaviour has
-// not landed yet" with errors.Is. The real parser lands in SOW-0001
-// Chunk 6.
-var errNotImplemented = errors.New("aiagent_v3 adapter: not implemented (lands in SOW-0001 Chunk 6)")
+// sourceIDPrefix is prepended to the configured filesystem root to
+// produce the canonical events' SourceID (e.g.
+// "aiagent_v3:/home/op/.ai-agent/sessions"). The ingester later
+// composes its own sources.id; the SourceID we emit is used only for
+// log attribution and dedup keyed on (SourceID, SourceSeq).
+const sourceIDPrefix = Format + ":"
 
 // Adapter is the ai-agent v3 source adapter. Construction is via New
 // (typed callers) or Factory (registry callers).
@@ -29,8 +30,9 @@ var errNotImplemented = errors.New("aiagent_v3 adapter: not implemented (lands i
 // followed by a single Tail goroutine; concurrent Scan+Tail on the same
 // instance is not part of the contract (see specs/adapter-contract.md).
 type Adapter struct {
-	root   string
-	logger *slog.Logger
+	root     string
+	sourceID string
+	logger   *slog.Logger
 	// onError surfaces non-fatal per-record parse errors. Never nil after
 	// construction; New and Factory substitute a no-op when the caller
 	// passes nil so adapter code can call it unconditionally.
@@ -58,7 +60,12 @@ func New(root string, opts canonical.AdapterOptions) (*Adapter, error) {
 	if onError == nil {
 		onError = func(error) {}
 	}
-	return &Adapter{root: root, logger: logger, onError: onError}, nil
+	return &Adapter{
+		root:     root,
+		sourceID: sourceIDPrefix + root,
+		logger:   logger,
+		onError:  onError,
+	}, nil
 }
 
 // Name implements canonical.Adapter. v3 returns the format constant
@@ -69,26 +76,103 @@ func (a *Adapter) Name() string { return Format }
 // Format implements canonical.Adapter.
 func (a *Adapter) Format() string { return Format }
 
-// Scan implements canonical.Adapter. Real implementation lands in
-// SOW-0001 Chunk 6. The current skeleton returns the sentinel
-// errNotImplemented so the ingester can detect that this adapter is
-// wired but not yet functional.
-func (a *Adapter) Scan(_ context.Context, _ canonical.Cursor, _ chan<- canonical.Event) error {
-	return fmt.Errorf("aiagent_v3: Scan: %w", errNotImplemented)
+// Scan implements canonical.Adapter. Walks <root>/session/*.jsonl,
+// reads each file from its cursor offset to EOF, and emits canonical
+// events to `out`. Returns when caught up to the current state of the
+// source or when ctx is cancelled. The caller owns `out`; Scan never
+// closes it.
+func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error {
+	start, err := a.coerceCursor(since)
+	if err != nil {
+		return err
+	}
+	_, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	if sErr != nil {
+		if errors.Is(sErr, context.Canceled) || errors.Is(sErr, context.DeadlineExceeded) {
+			return nil
+		}
+		return fmt.Errorf("aiagent_v3: scan: %w", sErr)
+	}
+	return nil
 }
 
-// Tail implements canonical.Adapter. Lands in SOW-0001 Chunk 6.
-func (a *Adapter) Tail(_ context.Context, _ chan<- canonical.Event) error {
-	return fmt.Errorf("aiagent_v3: Tail: %w", errNotImplemented)
+// Tail implements canonical.Adapter. Subscribes to fsnotify events on
+// <root>/session/ and emits canonical events as new records appear.
+// Returns when ctx is cancelled.
+func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
+	// Tail starts from an empty cursor; the ingester is responsible for
+	// running Scan first and persisting the cursor before calling Tail.
+	// We re-derive the per-file offsets from disk by treating tail as
+	// "follow what arrives after now" — but to be safe and to allow the
+	// ingester to call Tail without a preceding Scan, we initialise the
+	// cursor from the current file sizes so we don't re-emit existing
+	// data when Tail is started cold. See spec §6.1 and §7.2.
+	cur, err := a.snapshotCursor()
+	if err != nil {
+		return fmt.Errorf("aiagent_v3: tail snapshot: %w", err)
+	}
+	return tailLoop(ctx, a.root, a.sourceID, cur, out, a.onError)
 }
 
-// ParseCursor implements canonical.Adapter. Lands in SOW-0001 Chunk 6.
-// The real implementation will return a zero Cursor for the empty string
-// (first-run case); the skeleton always errors so callers cannot
-// accidentally treat the placeholder as a working resume point.
+// ParseCursor implements canonical.Adapter. Empty input yields the
+// zero Cursor for first-run callers; non-empty input is decoded as
+// JSON. Per the contract, the returned Cursor is opaque to the
+// ingester and used only via Cursor.String() and Cursor.After().
 func (a *Adapter) ParseCursor(stored string) (canonical.Cursor, error) {
-	_ = stored
-	return nil, fmt.Errorf("aiagent_v3: ParseCursor: %w", errNotImplemented)
+	c, err := ParseCursor(stored)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// coerceCursor accepts either a Cursor produced by this adapter, a nil
+// canonical.Cursor (first run), or any other concrete type — in the
+// latter case it returns an empty cursor so the ingester's "I lost
+// track" path simply re-scans from offset 0. Per the contract, the
+// returned cursor is never nil.
+func (a *Adapter) coerceCursor(c canonical.Cursor) (Cursor, error) {
+	if c == nil {
+		return newCursor(), nil
+	}
+	if typed, ok := c.(Cursor); ok {
+		if typed.Files == nil {
+			typed.Files = map[string]FileCursor{}
+		}
+		if typed.Version == 0 {
+			typed.Version = cursorVersion
+		}
+		return typed, nil
+	}
+	// Be lenient with cursors from a different adapter — start fresh
+	// rather than fail Scan outright. This matches the contract's
+	// "empty MUST yield zero Cursor" semantics extended to "alien
+	// cursors are treated as empty".
+	return newCursor(), nil
+}
+
+// snapshotCursor builds a cursor from current on-disk file sizes so
+// Tail (without a preceding Scan) does not re-emit historical events.
+// Per spec §6.1 Tail subscribes to changes from now on; existing
+// content is the responsibility of Scan.
+func (a *Adapter) snapshotCursor() (Cursor, error) {
+	files, err := listLedgers(a.root)
+	if err != nil {
+		return Cursor{}, err
+	}
+	cur := newCursor()
+	for _, name := range files {
+		fc := FileCursor{}
+		size, sErr := fileSize(a.root, name)
+		if sErr != nil {
+			a.onError(fmt.Errorf("aiagent_v3: snapshot size %s: %w", name, sErr))
+			continue
+		}
+		fc.Offset = size
+		fc.Size = size
+		cur = cur.withFile(name, fc)
+	}
+	return cur, nil
 }
 
 // Factory adapts New to canonical.AdapterFactory so the registry can
