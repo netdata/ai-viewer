@@ -25,7 +25,7 @@ Each row is one configured source the ingester watches.
 
 ```sql
 CREATE TABLE sources (
-    id              TEXT PRIMARY KEY,           -- e.g. "aiagent-v3:/home/costa/.ai-agent/sessions"
+    id              TEXT PRIMARY KEY NOT NULL,  -- e.g. "aiagent-v3:/home/user/.ai-agent/sessions"
     format          TEXT NOT NULL,              -- 'aiagent_v3'|'aiagent_v2'|'claude_code'|'codex'|'opencode'
     location        TEXT NOT NULL,              -- filesystem path or DSN
     cursor          TEXT,                       -- opaque per-adapter cursor (JSON)
@@ -36,11 +36,17 @@ CREATE TABLE sources (
 );
 ```
 
+`NOT NULL` is explicit on every `TEXT PRIMARY KEY` column because SQLite's
+default rowid tables allow NULL in TEXT PK columns (only `INTEGER PRIMARY
+KEY` — the rowid alias — is implicitly NOT NULL). Without the marker a
+malformed ingest insert could land a NULL id and corrupt cross-table
+references.
+
 ### sessions
 
 ```sql
 CREATE TABLE sessions (
-    id                TEXT PRIMARY KEY,         -- canonical session id (hash of source_id + native_id)
+    id                TEXT PRIMARY KEY NOT NULL, -- canonical session id (hash of source_id + native_id)
     source_id         TEXT NOT NULL REFERENCES sources(id),
     native_id         TEXT NOT NULL,            -- originId/sessionId/uuid from the source format
     parent_session_id TEXT REFERENCES sessions(id),
@@ -90,7 +96,7 @@ Notes:
 
 ```sql
 CREATE TABLE turns (
-    id                TEXT PRIMARY KEY,
+    id                TEXT PRIMARY KEY NOT NULL,
     session_id        TEXT NOT NULL REFERENCES sessions(id),
     seq               INTEGER NOT NULL,         -- 0-based: 0 reserved for init turns (ai-agent v2); 1+ for normal turns
     start_ts          INTEGER NOT NULL,
@@ -117,7 +123,7 @@ The universal span. Every LLM call, tool call, child-session attachment, reasoni
 
 ```sql
 CREATE TABLE ops (
-    id              TEXT PRIMARY KEY,
+    id              TEXT PRIMARY KEY NOT NULL,
     turn_id         TEXT NOT NULL REFERENCES turns(id),
     session_id      TEXT NOT NULL REFERENCES sessions(id),  -- denormalized for fast filter
     parent_op_id    TEXT REFERENCES ops(id),                -- for nested ops
@@ -195,23 +201,26 @@ CREATE INDEX idx_payload_refs_op ON payload_refs(op_id);
 
 ### log_entries
 
-Structured log lines attached to a session/turn/op, surfaced in the per-session detail page.
+Structured log lines attached to a session/turn/op, surfaced in the per-session detail page. The table also stores source-level log entries that have no session attached — most notably the rows written from `SourceErrorEvent` (parse errors surfaced in `/api/health`). For those rows `session_id` is `NULL` and `source_id` references `sources(id)`. The `CHECK` constraint enforces that at least one of `session_id` and `source_id` is set so every row has a navigable owner in the UI.
 
 ```sql
 CREATE TABLE log_entries (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    session_id  TEXT REFERENCES sessions(id),  -- NULL for source-level entries
+    source_id   TEXT REFERENCES sources(id),   -- set when session_id is NULL
     turn_id     TEXT REFERENCES turns(id),
     op_id       TEXT REFERENCES ops(id),
     ts          INTEGER NOT NULL,
     severity    TEXT NOT NULL,               -- 'DBG'|'INF'|'WRN'|'ERR'
     source      TEXT NOT NULL,               -- adapter name or subsystem
     message     TEXT NOT NULL,
-    extras_json TEXT
+    extras_json TEXT,
+    CHECK (session_id IS NOT NULL OR source_id IS NOT NULL)
 );
 
 CREATE INDEX idx_log_session_ts ON log_entries(session_id, ts);
-CREATE INDEX idx_log_severity ON log_entries(severity, ts) WHERE severity IN ('WRN','ERR');
+CREATE INDEX idx_log_source_ts  ON log_entries(source_id, ts) WHERE source_id IS NOT NULL;
+CREATE INDEX idx_log_severity   ON log_entries(severity, ts) WHERE severity IN ('WRN','ERR');
 ```
 
 ### Catalog tables (denormalized rollups)
@@ -295,7 +304,7 @@ CREATE TABLE catalog_cwds (
 
 ```sql
 CREATE TABLE schema_meta (
-    key     TEXT PRIMARY KEY,
+    key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
 -- key='version' value='1', key='created_at' value=...
