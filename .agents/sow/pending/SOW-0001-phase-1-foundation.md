@@ -50,6 +50,37 @@ Unknowns:
 8. CI: GitHub Actions workflow runs lint + tests on every push; zero warnings, zero failures. **Verification**: workflow green on the bootstrap commit and on every Phase 1 PR.
 9. Specs under `.agents/sow/specs/` are updated to reflect every divergence discovered during implementation (especially the v2 field names). **Verification**: diff of specs alongside code in each commit.
 
+### User Decisions (recorded 2026-05-26)
+
+These were the open product decisions surfaced to the operator after milestone discussion. The operator's calls are now the binding scope for Phase 1.
+
+1. **Repository visibility — public from day one.**
+   Rationale: external eyes from day one; matches the operator's preference for open development of tools like this. The repo `netdata/ai-viewer` is created public; all subsequent visibility/permissions decisions live in their own SOW if changed.
+   Implication: every commit, comment, and artifact must assume a public audience. Sensitive-data discipline (`AGENTS.md` "Sensitive Data In Durable Artifacts") is non-negotiable. Fixture sanitization is mandatory before any `testdata/` commit.
+
+2. **UI theme — match the operating system.**
+   Rationale: the operator wants the viewer to feel native to whichever environment runs it (dark workstation, light workstation, auto-switching).
+   Implementation directive: the frontend uses `prefers-color-scheme` media query for the default; an in-app manual override is exposed in the UI (persisted in `localStorage`) so the operator can pin a theme when desired. Dark and light are first-class — equally polished, not "dark is the real one + a light afterthought".
+   Spec impact: update `.agents/sow/specs/frontend-architecture.md` and `.agents/sow/specs/ui-pages.md` in Chunk 1 to capture this.
+
+3. **Cost / pricing data — static + shell refresh script.**
+   Rationale: AGENTS.md mandates zero outbound network calls from the ingester or server. Live pricing APIs are therefore out. A static pricing table baked into the binary keeps runtime offline; a maintenance script keeps the table current.
+   Implementation directive:
+   - Pricing data lives in a versioned JSON file, e.g. `internal/pricing/pricing.json`, embedded via `go:embed`.
+   - Schema: per-provider, per-model, per-unit price (input tokens, output tokens, cached-input where applicable), currency, effective date, citation URL.
+   - `scripts/refresh-pricing.sh` invokes an external CLI AI tool (`claude`, `codex`, `gemini`, `opencode`, or any compatible CLI selectable by env var or argument) to fetch current public pricing, validates the response is well-formed JSON matching the schema, and writes back to the file.
+   - The script never runs at build, install, or runtime — only when an operator explicitly runs it. Updates land via PR (so the diff is visible).
+   - The script must not silently overwrite — produces a diff for human review (`git diff`) and exits without commit.
+   Spec impact: new spec `.agents/sow/specs/pricing.md` created in Chunk 1, plus update to `.agents/sow/specs/canonical-events.md` to reference how cost is computed from the pricing file at ingest time.
+
+4. **Sub-agent linkage — ingestion-side, via parent's listing of children.**
+   Rationale: the parent session already records its children's IDs in the opTree (`childSessionRef`, `childSessionSummary` per `ai-agent.git/.agents/sow/specs/snapshots.md`). The ingester resolves parent → child by walking parents. No new ai-agent feature is needed for Phase 1 to work.
+   Implementation directive: the v3 and v2 adapters emit `SessionStartedEvent` events with `ParentNativeID` populated **when the parent session has already been parsed**. When the child is parsed before the parent (file mtimes are independent), the child is emitted with `ParentNativeID = ""` and the ingester's resolver pass (every 5 s) backfills the link once the parent appears. This was already in the SOW's R6 mitigation and remains the approach.
+   Cross-repo follow-up: an explicit `parent_session_id` field on the child's v3 `session_start` record (defense in depth) is opened as a separate SOW in `ai-agent.git/.agents/sow/pending/SOW-0029-20260526-evidence-explicit-parent-id-on-child.md`. Once that lands, the ai-viewer v3 adapter will prefer the explicit child-side field when present and fall back to parent-side discovery when absent. **Phase 1 ships without requiring the explicit field** — it is an enhancement, not a blocker.
+   Spec impact: update `.agents/sow/specs/adapter-aiagent-v3.md` and `.agents/sow/specs/adapter-aiagent-v2.md` in Chunk 1 to describe the resolver pass and the future fast-path.
+
+These four decisions close the original "Open decisions" list below. The Open decisions section is preserved as historical context but no longer gates implementation start.
+
 ## Analysis
 
 Sources checked (at SOW drafting):
@@ -152,11 +183,14 @@ Artifact impact plan:
 - README: update Status section from "Pre-alpha" to "v0.1 — Phase 1 complete".
 - New: `docs/runbook.md`, `docs/architecture-overview.md` (operator-facing summary of the architecture spec), `SECURITY.md`.
 
-Open decisions (none blocking implementation; user may override):
+Open decisions (closed by `### User Decisions (recorded 2026-05-26)` in the Requirements section above; preserved here as history):
 
-- Port 7710 — keep or change if conflict found. Default: 7710.
-- Repo visibility — public from day 1 vs. private until Phase 1 complete. Default: public (per bootstrap discussion).
-- GitHub Actions vs other CI — default GitHub Actions (matches operator's other repos).
+- Port 7710 — kept as default.
+- Repo visibility — **public** (decided).
+- GitHub Actions vs other CI — GitHub Actions (matches operator's other repos).
+- UI theme strategy — **match the operating system** with manual override (decided).
+- Pricing data approach — **static JSON embedded in binary, refreshed by `scripts/refresh-pricing.sh` using a CLI AI tool** (decided).
+- Sub-agent linkage approach — **ingester resolver pass using parent-side child references**; cross-repo SOW-0029 in ai-agent.git adds explicit child-side `parent_session_id` as future fast-path (decided).
 
 ## Implementation
 
