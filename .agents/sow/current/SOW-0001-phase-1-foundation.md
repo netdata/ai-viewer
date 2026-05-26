@@ -705,6 +705,127 @@ Gates run locally on the branch tip:
 
 Next: Chunk 5 — sanitization tooling.
 
+### Chunk 5 — Sanitization tooling (2026-05-26)
+
+Delivered the operator-run pre-commit sanitizer required by AGENTS.md
+"Sensitive Data In Durable Artifacts" and `specs/security.md`
+"Sensitive Data In Fixtures". Bash + jq only; no Go production code.
+
+Files produced (file paths absolute under repo root):
+
+- `scripts/sanitize-fixture.sh` — main entry point. Pure bash, `set
+  -euo pipefail`, `IFS=$'\n\t'`. CLI per the chunk spec
+  (`--format`, `--input`, `--output`, `--id-seed`, `--dry-run`,
+  `--diff`, `--force`, `--help`). All progress to stderr; sanitized
+  output paths printed to stdout one-per-line for `xargs`
+  composability. Per-format routing to `process_v3_input` /
+  `process_v2_input`. Two-pass redaction: jq-structural rewrite via
+  the rules library, then sed-based text rewrites for $HOME paths,
+  emails, API URLs, bearer tokens, `sk-`/`xox[bpas]-`/`AKIA…`/`ghp_`
+  secret patterns, and JSON `"api_key"`/`"secret"`/`"password"`/
+  `"token"` fields (case-insensitive via explicit character classes
+  so the regex stays POSIX-ERE portable). UUID mapping uses
+  `sha256("${id-seed}:${original}")[:32]` formatted 8-4-4-4-12 —
+  pure function of `(seed, id)` so two runs are byte-identical and
+  parent↔child linkage is preserved across the file.
+- `scripts/lib/sanitize-rules.jq` — jq library module loaded via
+  `-L`/`include`. Defines `sanitize_v3_record` (per-line ledger
+  records) and `sanitize_v2_snapshot` (whole-tree snapshot).
+  `remap_uuids_in_string` rewrites UUID substrings inside compound
+  strings (e.g. `payloadRefs[].path = "payloads/<uuid>/turn-…"`)
+  using `$id_map`. The v2 walker uses jq's `walk` builtin instead of
+  mutually-recursive `def` (which jq does not support) and detects
+  op nodes vs session nodes by structural shape (`opId`+`kind`
+  without `traceId` ⇒ op; `traceId`+`turns` ⇒ session).
+- `scripts/test/sanitize-fixture-test.sh` — plain-bash harness. 13
+  test cases. Each scenario produces output into a per-case
+  `mktemp` directory and either `diff -ru` against the
+  scenario's `EXPECTED/` tree (golden tests) or asserts the exit
+  code + a stderr substring (behavior-only tests). Output is
+  `PASS scenario` / `FAIL scenario` with embedded diff/stderr on
+  failure; non-zero exit when any case fails.
+- `scripts/test/fixtures/aiagent_v3/01_happy_path/` — single-file
+  ledger covering session_start + turn_start + turn_end (with
+  ops + accounting + warnings + errors) + session_summary.
+- `scripts/test/fixtures/aiagent_v3/02_sub_agent/` — sub-agent
+  ledger with `parentSessionId` set and a `session_summary` with
+  `status:"failed"` + free-form `error` string (proves cross-record
+  UUID linkage and wholesale error-message redaction).
+- `scripts/test/fixtures/aiagent_v3/03_with_payloads/` — directory
+  input with `session/<sessionId>.jsonl` + crafted gzipped payload
+  under `payloads/<sessionId>/turn-0001/llm-0001-request.http.gz`
+  containing both a fake user message and an `sk-…` token. Proves
+  payload bodies are wholesale-replaced with
+  `[REDACTED_PAYLOAD_BODY]` and the path UUID component is
+  remapped consistently.
+- `scripts/test/fixtures/aiagent_v3/05_already_sanitized/` —
+  re-running on already-sanitized output is a no-op for the
+  `[REDACTED_…]` placeholders (idempotent); a warning is emitted
+  to stderr. (The UUIDs deliberately re-map under a second hash
+  pass — that is expected behavior, not a leak.)
+- `scripts/test/fixtures/aiagent_v3/06_clean_input/` — fixture
+  with no sensitive content; script must pass through cleanly
+  (only UUID remapping).
+- `scripts/test/fixtures/aiagent_v3/07_zero_byte/` — zero-byte
+  input; script emits a warning and exits 0 without producing
+  output (no jq invocation on empty input).
+- `scripts/test/fixtures/aiagent_v3/08_malformed/` — input
+  containing invalid JSON; script exits 1 with a helpful error
+  citing the file and line number.
+- `scripts/test/fixtures/aiagent_v2/04_deep_optree/` — v2 single
+  gzipped snapshot covering: root SessionNode + turn 0 (init) +
+  turn 1 + step 0 (internal) + an LLM op with accounting,
+  reasoning, request, response, logs, and an embedded
+  `attributes.api_key` value; a session-kind op with an embedded
+  `childSession` (nested SessionNode) containing its own turns
+  + ops + tool accounting + URL + command field. Proves
+  recursive descent through `walk`, structural shape detection,
+  and the `finalReport`/`pluginMetas` wholesale-redaction rules.
+
+Gates run locally on branch `sow-0001-chunk-5-sanitization`:
+
+- `shellcheck -x -s bash scripts/sanitize-fixture.sh
+  scripts/test/sanitize-fixture-test.sh` — clean (0 warnings,
+  shellcheck 0.11.0).
+- `bash scripts/test/sanitize-fixture-test.sh` — 13 cases pass,
+  0 fail.
+- `go vet ./...` — clean (no Go code touched but verified).
+- `go test -race -count=1 ./...` — 5 packages pass, unchanged.
+- `golangci-lint run --timeout=5m` — 0 issues.
+- `gofmt -l .` — clean.
+- `goimports -l .` — clean.
+
+Notes / discoveries during implementation:
+
+- jq does not support mutually-recursive `def`; the initial v2
+  draft hit this. Switched to `walk` with structural-shape
+  detection, which actually models the v2 producer better
+  (childSession is just another SessionNode anywhere in the
+  tree).
+- jq `-f` / `--from-file` expects a complete program, not a
+  library of `def` blocks. The library is loaded via
+  `-L "$(dirname $RULES_LIB)" 'include "sanitize-rules";
+  <entrypoint>'` instead.
+- sed regex separators: when the pattern contains `|` (for ERE
+  alternation) the `|` separator clashes; switched the
+  field-name pattern to `@` while keeping the rest on `|` so
+  the URL/secret patterns remain readable.
+- `gzip -n -c` (strip name + mtime headers) is required for
+  byte-identical determinism across runs of payload writes.
+- Empty arrays must remain empty (e.g. `errors: []` → `[]`),
+  not get replaced by a single placeholder element — fixed in
+  the v3 turn_end rule with a `length > 0` guard.
+
+No spec changes (the script is operator tooling, not part of the
+serving runtime contract). No new Go dependencies. No outbound
+network calls.
+
+Next: Chunk 6 — adapter implementations (aiagent_v3 + aiagent_v2
+parsing → canonical events) feeding the SQLite store. Sanitization
+tooling unblocks committing real fixture snapshots to
+`testdata/aiagent_v3/<scenario>/INPUT/` and
+`testdata/aiagent_v2/<scenario>/INPUT/`.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
