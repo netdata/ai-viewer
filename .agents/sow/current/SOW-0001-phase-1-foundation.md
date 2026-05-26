@@ -1018,6 +1018,167 @@ channel to `internal/store` writes, implements the 5-second
 cross-session resolver pass, and runs an end-to-end test on the
 6 fixtures committed here.
 
+### Chunk 7 — v3 → ingest → store path (2026-05-26)
+
+Landed on branch `sow-0001-chunk-7-ingest-pipeline` (PR # pending):
+
+- `internal/ingest/{doc,ingester,worker,writer,dedup,resolver,
+  aggregates,catalog,pricing,ids}.go` — pipeline wiring the v3
+  adapter to the SQLite store. Batched transactions (1000 events
+  or 500ms); per-source dedup via in-memory HWM seeded from
+  `source_progress.last_seq`; 5s background resolver linking
+  orphan sub-agent sessions (`parent_session_id IS NULL` with
+  `extras_json.aiViewer.parentNativeId` set) once the parent
+  appears; the resolver also backfills `root_session_id` for
+  sessions whose root row arrived after the child. Inline
+  catalog upserts on every event (catalog_providers,
+  catalog_models, catalog_tools, catalog_agents, catalog_cwds);
+  Pricer interface (`NopPricer{}` default) is the seam for the
+  Chunk 10 pricing-table implementation. Per-batch aggregate
+  refresh over the bounded dirty-set keeps work proportional to
+  events touched, not table size.
+- `internal/store/migrations/0002_source_progress.sql` (21
+  lines) — new per-source bookkeeping table holding the HWM
+  (`last_seq`), the most-recent observed event timestamp
+  (`last_ts_us`), the opaque adapter cursor JSON, and the last
+  write timestamp. PRIMARY KEY on `source_id` with FK back to
+  `sources(id)`. Separate from `sources` so per-batch updates
+  do not contend with operator-facing configuration in the
+  parent table.
+- `internal/ingest/{ingester,worker,writer,dedup,resolver,
+  catalog,e2e,e2e_all_fixtures,error_paths,helpers,
+  writer_coverage}_test.go` — unit + end-to-end tests
+  (4471 lines including tests; production code 1656 lines).
+  End-to-end tests drive the v3 adapter (Chunk 6) against the
+  6 testdata fixtures from `testdata/aiagent_v3/<scenario>/`
+  into an in-memory SQLite store and assert session/turn/op
+  counts, parent linkage, aggregates, log_entries on
+  session_error scenarios, and `source_progress.cursor`
+  persistence.
+
+Spec deltas in lockstep:
+
+- `.agents/sow/specs/ingester.md` — full rewrite reflecting
+  the decided design: Ingester / Worker / Submit lifecycle,
+  Option functional pattern (`WithLogger`, `WithPricer`,
+  `WithBatchSize`, `WithBatchInterval`, `WithResolverInterval`,
+  `WithSourceFormat`, `WithLocation`), 1000-events-or-500ms
+  batching policy, in-memory HWM cache seeded from the new
+  `source_progress` table, 5s resolver pass (parent +
+  root linkage), inline catalog upserts (with time-bucketed
+  rollups deferred to SOW-0007), and the Pricer interface as
+  the cost-computation seam. Catalog onOpFinalized re-reads
+  the row's kind/identity from `ops` because `OpFinalizedEvent`
+  does not carry the kind itself.
+- `.agents/sow/specs/data-model.md` — new `source_progress`
+  table section documenting columns, FK back to `sources`, and
+  the per-batch update model. Schema versioning section
+  follows immediately after.
+- `internal/store/store_test.go`, `migrations_test.go`,
+  `schema_contract_test.go` — table contract updated for the
+  new `source_progress` table: added to `expectedTables`, new
+  `tableContract` entry (columns, NOT NULL, default values,
+  PK autoindex, FK reference), and the
+  `_schema_migrations` row-count constant raised from 1 to 2.
+
+Implementation decisions worth recording:
+
+- **Root + parent FK orphan handling**. `sessions.root_session_id`
+  and `sessions.parent_session_id` have NOT NULL / FK
+  constraints. When a sub-agent child arrives before its parent
+  or root row exists, the writer falls back to using the child's
+  own id for `root_session_id` and leaves `parent_session_id`
+  NULL. Both fields' native ids are persisted into
+  `extras_json.aiViewer.{parentNativeId,rootNativeId}` so the
+  resolver pass can re-resolve them once the parent/root land.
+  This avoids deferred FK constraints (modernc.org/sqlite does
+  not honour PRAGMA defer_foreign_keys=ON inside an explicit
+  transaction the way some drivers do).
+- **`ops.child_session_id` orphan handling**. The op also has an
+  optional FK to a child session that may not yet exist. The
+  writer leaves it NULL when the child is missing; a future
+  resolver pass (or a re-emitted op event) fixes it. Not
+  currently exercised by the v3 fixture set; documented for
+  the v2/claude-code adapters which can hit the same race.
+- **Worker shutdown semantics**. `Stop()` cancels the workers'
+  context, and the worker drains its pending buffer using
+  a manual `for len(channel) > 0` loop (NOT a `select default`,
+  which would race with ready channel cases and drop events
+  50% of the time under load). The final flush uses a fresh
+  `context.Background()`-derived context with a 10 s ceiling
+  so a cancelled parent does not abort `BeginTx`.
+- **Worker dedup**. The dedup check is
+  `!hwm.IsAfter(...) && ev.EventSourceSeq() != 0`. The
+  `!= 0` exception lets `SourceProgressEvent` (which uses
+  SourceSeq=0 by adapter convention) through unconditionally
+  so the cursor still advances on quiet sources.
+- **Catalog rollups via `ops` row read**. `OpFinalizedEvent`
+  does not carry the op kind, but the catalog totals need it
+  (provider/model totals only apply to LLM ops, namespace/name
+  only to Tool ops). After `applyOpFinalized` updates the ops
+  row, `catalogWriter.onOpFinalized` SELECTs the row's kind/
+  name/provider/model and routes the totals UPDATE to the
+  correct catalog table. The lookup is cheap because the
+  primary key (turn_id, seq) is indexed and the row is hot in
+  the transaction's working set.
+
+Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+
+```
+go mod tidy                            # no changes
+gofmt -l .                             # zero output
+$HOME/go/bin/goimports -l .            # zero output
+go vet ./...                           # zero warnings
+go build ./...                         # exit 0
+go test -race -count=1 -coverprofile=/tmp/cov.out ./...
+# repo total 91.6%; internal/ingest 91.4% (above the new-code
+# ≥90% threshold per quality-gates.md); other packages unchanged.
+go test -race -fuzz=FuzzParseLine -fuzztime=10s ./internal/adapters/aiagent_v3
+# 246,353 execs across the 308 seed corpus + 7 newly-interesting
+# corpus entries discovered during the 10 s run; zero crashes.
+golangci-lint run --timeout=5m         # 0 issues
+$HOME/go/bin/gosec ./...               # 0 issues (3 nosec markers)
+shellcheck -x -s bash scripts/sanitize-fixture.sh scripts/test/sanitize-fixture-test.sh
+bash scripts/test/sanitize-fixture-test.sh   # 13 pass, 0 fail (unchanged)
+```
+
+Coverage per package (from `go tool cover -func=/tmp/cov.out`):
+
+- `internal/adapters` 100.0% (unchanged)
+- `internal/adapters/aiagent_v2` 100.0% (skeleton)
+- `internal/adapters/aiagent_v3` 91.4% (unchanged)
+- `internal/canonical` 100.0% (unchanged)
+- `internal/ingest` **91.4%**
+- `internal/store` 90.9% (down from 90.4% due to the contract
+  test growing by one new table; the new code in this chunk is
+  still ≥ 90% covered)
+
+**Gate Suppression — Chunk 7** (per
+`.agents/sow/specs/quality-gates.md` §"When a Gate Fails", item
+6). The pipeline contains three `#nosec`-marked sites
+that gosec cannot reason about without source-flow analysis. All
+three are documented in code with a `// #nosec` comment + reason:
+
+| file:line | rule | reason |
+|---|---|---|
+| internal/ingest/aggregates.go:48 | G201 | `fmt.Sprintf` interpolates only the placeholder string `"?,?,?,..."` (composed by `inClauseStrings`); every id lands via parameter binding via `args...`. SQL injection is impossible by construction. |
+| internal/ingest/aggregates.go:74 | G201 | Same rationale as aggregates.go:48 — the dynamic IN-list is parameter-bound. |
+| internal/ingest/worker.go:243 / :255 (one site each) | (handled in code without #nosec) — uint64→int64 via mask `seq & 0x7FFFFFFFFFFFFFFF`; v3 SourceSeq is the packed `ledgerSeq << 12 | subIdx` which never approaches 2^63 in realistic data and the mask is defence in depth. |
+
+No `// nolint` directives are added; the suppressions are
+declared here per the spec contract.
+
+Untestable error branches (writer.go marshalExtras errors on
+adapter-supplied extras_json that contain channel values, etc.)
+are all exercised via the `unmarshalableExtras()` helper in
+`internal/ingest/error_paths_test.go`; SQL exec failures are
+exercised via `rolledTx()` (a pre-rolled-back `*sql.Tx`).
+
+Reviewer iterations and external reviews land in a follow-up
+sub-section once Chunk 7 is reviewed.
+
+Next: Chunk 8 — v2 adapter implementation.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

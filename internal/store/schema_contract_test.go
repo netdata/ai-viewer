@@ -532,6 +532,20 @@ func expectedSchema() []tableContract {
 			indexes: nil,
 			fks:     nil,
 		},
+		{
+			table: "source_progress",
+			cols: []column{
+				{Name: "source_id", Type: "TEXT", NotNull: true, PKOrder: 1},
+				{Name: "last_seq", Type: "INTEGER", NotNull: true, DfltVal: "0"},
+				{Name: "last_ts_us", Type: "INTEGER", NotNull: true, DfltVal: "0"},
+				{Name: "cursor", Type: "TEXT"},
+				{Name: "updated_at", Type: "INTEGER", NotNull: true},
+			},
+			indexes: nil,
+			fks: []fkRef{
+				{From: "source_id", Table: "sources", To: "id"},
+			},
+		},
 	}
 }
 
@@ -637,6 +651,7 @@ func TestSchema_CompositeUniqueAutoindexes(t *testing.T) {
 		"catalog_agents":    {{"source_format", "name"}},          // composite PK
 		"catalog_cwds":      {{"source_format", "cwd"}},           // composite PK
 		"schema_meta":       {{"key"}},                            // PK autoindex
+		"source_progress":   {{"source_id"}},                      // PK autoindex
 	}
 
 	for table, want := range expected {
