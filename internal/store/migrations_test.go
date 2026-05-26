@@ -42,8 +42,11 @@ func TestUp_NilLogger(t *testing.T) {
 		`SELECT COUNT(*) FROM _schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count _schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("_schema_migrations rows: want 1, got %d", count)
+	// Grows by one for every NNNN_*.sql under migrations/. Update in
+	// lockstep with each new migration.
+	const expectedMigrations = 2
+	if count != expectedMigrations {
+		t.Fatalf("_schema_migrations rows: want %d, got %d", expectedMigrations, count)
 	}
 }
 
@@ -69,8 +72,11 @@ func TestUp_DoubleCall(t *testing.T) {
 		`SELECT COUNT(*) FROM _schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("count _schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("_schema_migrations rows: want 1, got %d", count)
+	// Grows by one for every NNNN_*.sql under migrations/. Update in
+	// lockstep with each new migration.
+	const expectedMigrations = 2
+	if count != expectedMigrations {
+		t.Fatalf("_schema_migrations rows: want %d, got %d", expectedMigrations, count)
 	}
 }
 

@@ -34,6 +34,7 @@ var expectedTables = []string{
 	"payload_refs",
 	"schema_meta",
 	"sessions",
+	"source_progress",
 	"sources",
 	"turns",
 }
@@ -141,8 +142,12 @@ func TestOpen_Idempotent(t *testing.T) {
 			`SELECT COUNT(*) FROM _schema_migrations`).Scan(&count); err != nil {
 			t.Fatalf("round %d: count _schema_migrations: %v", round, err)
 		}
-		if count != 1 {
-			t.Fatalf("round %d: _schema_migrations rows: want 1, got %d", round, count)
+		// expectedMigrations grows by one each time a new SQL file is
+		// added under migrations/. Update the constant in lockstep with
+		// the new migration so this contract test stays meaningful.
+		const expectedMigrations = 2
+		if count != expectedMigrations {
+			t.Fatalf("round %d: _schema_migrations rows: want %d, got %d", round, expectedMigrations, count)
 		}
 
 		// Inserting the same schema_meta version twice would be a defect

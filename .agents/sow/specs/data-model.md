@@ -300,6 +300,27 @@ CREATE TABLE catalog_cwds (
 );
 ```
 
+### source_progress
+
+Per-source ingest bookkeeping introduced in migration `0002`. Holds the high-water-mark sequence and most recent adapter cursor JSON so the ingester can dedup re-emitted events on resume and resume scanning from the right offset.
+
+```sql
+CREATE TABLE source_progress (
+    source_id  TEXT PRIMARY KEY NOT NULL REFERENCES sources(id),
+    last_seq   INTEGER NOT NULL DEFAULT 0,
+    last_ts_us INTEGER NOT NULL DEFAULT 0,
+    cursor     TEXT,
+    updated_at INTEGER NOT NULL
+);
+```
+
+Notes:
+
+- `last_seq` is the per-source monotonic high-water-mark advanced atomically with the batch that wrote the matching events.
+- `last_ts_us` records the Ts of the most recent observed event for diagnostics; the ingester does not use it for dedup.
+- `cursor` mirrors the adapter's opaque JSON cursor; updated from `SourceProgressEvent` so a restart re-enters the source at the right offset.
+- The table is separate from `sources` (which holds operator-facing configuration) so per-batch updates do not contend with operator metadata. Spec'd in `ingester.md` §Dedup.
+
 ### Schema versioning
 
 ```sql
