@@ -238,7 +238,7 @@ Emitted periodically by an adapter to checkpoint its cursor. The ingester persis
 
 ### SourceErrorEvent
 
-Emitted when an adapter hits a parse error. The ingester increments `sources.parse_errors` and writes a `log_entries` row with severity `ERR` (no session attached). Surfaced in `/api/health` and the Sources UI panel.
+Emitted when an adapter hits a parse error. The ingester increments `sources.parse_errors` and writes a `log_entries` row with severity `ERR`. When a `SourceErrorEvent` is converted to a `log_entries` row, the row has `session_id = NULL` and `source_id = <the source id>`; the `CHECK (session_id IS NOT NULL OR source_id IS NOT NULL)` constraint on `log_entries` enforces that one of the two is present. Surfaced in `/api/health` and the Sources UI panel.
 
 ## Cross-Format Mapping (Summary)
 

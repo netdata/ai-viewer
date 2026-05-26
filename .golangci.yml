@@ -1,0 +1,38 @@
+# golangci-lint v2 configuration for ai-viewer.
+#
+# This is the minimal foundation co-landing with go.mod in SOW-0001 Chunk 3.
+# The full linter set (gosec, errorlint, gocritic, revive, gocyclo, gofumpt,
+# misspell, nilerr, prealloc, unconvert, unparam, whitespace, bodyclose,
+# noctx) lands in SOW-0009. Do not weaken; only extend.
+#
+# Notes on v2 vs v1:
+#   - `gosimple` is merged into `staticcheck` in v2 and must not be listed.
+#   - `gofmt`/`goimports` are formatters, not linters; they live under the
+#     `formatters:` section.
+#   - The `version: "2"` declaration is required.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    generated: lax
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
