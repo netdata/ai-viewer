@@ -37,7 +37,14 @@
 //
 // The Pricer interface is the seam for cost computation. The default
 // NopPricer returns 0 so adapter-supplied costs flow through unchanged.
-// Chunk 10 plugs in the real pricer backed by internal/pricing/pricing.json.
+// The production binary (Chunk 11) plugs in *pricing.Pricer from
+// internal/pricing, which loads internal/pricing/pricing.json at process
+// startup and selects per-op price tiers by the op's start_ts (the
+// value persisted in ops.start_ts, in UNIX-microseconds UTC) —
+// historical sessions priced with the tier that was in effect when the
+// op STARTED, not when it finalized. An op that straddles a
+// price-change date is always charged at the rate in effect at start
+// time, which matches every vendor's billing model.
 //
 // # Catalog updates
 //

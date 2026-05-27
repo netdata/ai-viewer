@@ -32,7 +32,11 @@ only writer (per `data-model.md` §single-writer invariant).
 // New constructs an Ingester wrapping db. The pricer plugs in cost
 // calculation for ops where the source did not record cost (see
 // pricing.md). Pass NopPricer{} when pricing data is not available
-// (SOW-0001 Chunk 7); Chunk 10 wires in the real Pricer.
+// (SOW-0001 Chunk 7). Chunk 10 lands the Pricer interface + the
+// concrete *pricing.Pricer; Chunk 11 wires `pricing.New()` into the
+// production binary via the `ingest.WithPricer(...)` option. The
+// ingester code does NOT change between Chunk 10 and Chunk 11 — only
+// the constructor argument moves at the call site.
 func New(db *sql.DB, opts ...Option) (*Ingester, error)
 
 // Start begins the resolver goroutine. Must be called once before any
@@ -157,27 +161,62 @@ Time-bucketed rollups for hour-/day-grained analytics (per `data-model.md` §Agg
 
 ## Cost Computation
 
-Cost computation is staged behind the `Pricer` interface:
+Cost computation is staged behind two interfaces in `internal/ingest`:
 
 ```go
+// Pricer is the minimum contract: a cost lookup keyed by
+// (provider, model, tsUS, token counts). tsUS is the op's start
+// timestamp in UNIX-microseconds UTC; pricers that carry temporal
+// tiers use it to pick the price tier that was in effect when the
+// session ran. tsUS<=0 means "timestamp unknown"; the production
+// pricer defaults to the most-recent tier in that case.
 type Pricer interface {
-    Cost(provider, model string, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) float64
+    Cost(provider, model string, tsUS int64, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) float64
 }
 
+// DetailedPricer is an optional extension. When the wired pricer
+// implements it, the writer routes lookups through CostWithDetail so
+// miss events can be deduped + surfaced via the standard SourceError
+// channel.
+type DetailedPricer interface {
+    Pricer
+    CostWithDetail(provider, model string, tsUS, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) (cost float64, hit bool, missKind string)
+}
+
+// NopPricer is the default — returns 0 unconditionally so
+// adapter-supplied costs flow through unchanged and ops without
+// recorded cost remain at zero (visible as "cost unknown" in the UI).
+// NopPricer deliberately does NOT satisfy DetailedPricer.
 type NopPricer struct{}
 func (NopPricer) Cost(...) float64 { return 0 }
 ```
 
-Per-op rule:
+Per-op rule (writer.go `applyOpFinalized` / `priceOp`):
 
 ```go
 cost := ev.CostUSD
-if cost == 0 {
-    cost = pricer.Cost(provider, model, ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
+if cost == 0 && isPriceableOp(opRow) {
+    if dp, ok := pricer.(DetailedPricer); ok {
+        cost, hit, missKind := dp.CostWithDetail(provider, model, opStartUS,
+            ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
+        if !hit { emitPricingMiss(sourceID, provider, model, missKind) }
+    } else {
+        cost = pricer.Cost(provider, model, opStartUS,
+            ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
+    }
 }
 ```
 
-In Chunk 7 the constructor defaults to `NopPricer{}`; Chunk 10 wires in the real implementation backed by `internal/pricing/pricing.json`. The ingester code does not change between the two — only the constructor argument.
+In Chunk 7 the constructor defaulted to `NopPricer{}`; Chunk 10 lands
+the `internal/ingest.Pricer` + `DetailedPricer` interfaces and the
+concrete `*internal/pricing.Pricer` that satisfies them. The
+production binary continues to default to `NopPricer{}` at Chunk 10
+(see `internal/ingest/ingester.go:131`); **Chunk 11** wires
+`pricing.New()` into the production binary by passing the returned
+`*Pricer` through `ingest.WithPricer(...)`. The ingester code itself
+does not change between Chunk 7 and Chunk 11 — only the constructor
+argument moves at the call site. See `pricing.md` §"Pricer Go types"
+for the matching concrete-type contract.
 
 ## Notify Channel
 

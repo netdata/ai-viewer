@@ -194,8 +194,30 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	}
 	committed = true
 
+	// Promote per-batch pending pricing-miss dedup keys into the
+	// lifetime map ONLY after the tx durably commits. If commit fails
+	// (above) or any earlier step returned an error, the deferred
+	// rollback fires and resetBatch (run by the caller after flush
+	// returns) discards pendingMissDedup so the next batch with the
+	// same (provider, model, missKind) re-emits the (now-missing)
+	// warning. Codex iter-9 P2#1.
+	wr.promotePendingMissDedup()
+
 	if wr.batchMaxSeq > 0 {
 		w.hwm.Advance(w.sourceID, wr.batchMaxSeq)
+	}
+	// Surface any best-effort observability errors the writer
+	// collected during the batch (e.g. failed pricing-miss WRN
+	// inserts). These do NOT fail the batch — the op rows still
+	// committed — but suppressing them silently violates the "no
+	// silent failures" rule, so we structured-log each one with
+	// the source identity.
+	if w.logger != nil {
+		for _, oerr := range wr.drainObservabilityErrs() {
+			w.logger.Warn("worker: observability hook failed",
+				"source_id", w.sourceID,
+				"err", oerr)
+		}
 	}
 	return nil
 }

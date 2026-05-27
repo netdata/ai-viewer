@@ -1,0 +1,383 @@
+{
+  "version": 2,
+  "schema_url": "https://github.com/netdata/ai-viewer/blob/master/internal/pricing/pricing.schema.json",
+  "generated_at": "2026-05-27T00:00:00Z",
+  "generated_by": "manual_seed (Chunk 10 initial seed; will be refreshed by scripts/refresh-pricing.sh)",
+  "currency": "USD",
+  "providers": [
+    {
+      "name": "anthropic",
+      "aliases": ["claude"],
+      "models": [
+        {
+          "name": "claude-opus-4-7",
+          "aliases": ["claude-opus-4.7"],
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 5.00,
+                "output_per_million": 25.00,
+                "cache_read_per_million": 0.50,
+                "cache_write_per_million": 6.25,
+                "cache_write_5m_per_million": 6.25,
+                "cache_write_1h_per_million": 10.00,
+                "reasoning_per_million": 25.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-opus-4-5",
+          "aliases": ["claude-opus-4.5"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2025-11-01",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 5.00,
+                "output_per_million": 25.00,
+                "cache_read_per_million": 0.50,
+                "cache_write_per_million": 6.25,
+                "cache_write_5m_per_million": 6.25,
+                "cache_write_1h_per_million": 10.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-sonnet-4-5",
+          "aliases": ["claude-sonnet-4.5", "claude-4-5-sonnet"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2025-10-01",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 3.00,
+                "output_per_million": 15.00,
+                "cache_read_per_million": 0.30,
+                "cache_write_per_million": 3.75,
+                "cache_write_5m_per_million": 3.75,
+                "cache_write_1h_per_million": 6.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-sonnet-4",
+          "aliases": ["claude-4-sonnet"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2025-05-01",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 3.00,
+                "output_per_million": 15.00,
+                "cache_read_per_million": 0.30,
+                "cache_write_per_million": 3.75,
+                "cache_write_5m_per_million": 3.75,
+                "cache_write_1h_per_million": 6.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-haiku-4-5",
+          "aliases": ["claude-haiku-4.5"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2025-10-01",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 1.00,
+                "output_per_million": 5.00,
+                "cache_read_per_million": 0.10,
+                "cache_write_per_million": 1.25,
+                "cache_write_5m_per_million": 1.25,
+                "cache_write_1h_per_million": 2.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-3-7-sonnet",
+          "aliases": ["claude-3.7-sonnet"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2025-02-01",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 3.00,
+                "output_per_million": 15.00,
+                "cache_read_per_million": 0.30,
+                "cache_write_per_million": 3.75,
+                "cache_write_5m_per_million": 3.75,
+                "cache_write_1h_per_million": 6.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-3-5-sonnet",
+          "aliases": ["claude-3.5-sonnet", "claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2024-06-20",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 3.00,
+                "output_per_million": 15.00,
+                "cache_read_per_million": 0.30,
+                "cache_write_per_million": 3.75,
+                "cache_write_5m_per_million": 3.75,
+                "cache_write_1h_per_million": 6.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-3-5-haiku",
+          "aliases": ["claude-3.5-haiku", "claude-3-5-haiku-20241022"],
+          "ctx_max": 200000,
+          "tiers": [
+            {
+              "effective_date": "2024-11-04",
+              "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.80,
+                "output_per_million": 4.00,
+                "cache_read_per_million": 0.08,
+                "cache_write_per_million": 1.00,
+                "cache_write_5m_per_million": 1.00,
+                "cache_write_1h_per_million": 1.60
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "openai",
+      "aliases": ["oai"],
+      "models": [
+        {
+          "name": "gpt-5",
+          "aliases": ["gpt5"],
+          "ctx_max": 400000,
+          "tiers": [
+            {
+              "effective_date": "2025-08-01",
+              "citation_url": "https://openai.com/api/pricing/",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 1.25,
+                "output_per_million": 10.00,
+                "cache_read_per_million": 0.125,
+                "reasoning_per_million": 10.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5-mini",
+          "aliases": ["gpt5-mini"],
+          "ctx_max": 400000,
+          "tiers": [
+            {
+              "effective_date": "2025-08-01",
+              "citation_url": "https://openai.com/api/pricing/",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.25,
+                "output_per_million": 2.00,
+                "cache_read_per_million": 0.025,
+                "reasoning_per_million": 2.00
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-4o",
+          "aliases": ["gpt4o", "gpt-4o-2024-08-06"],
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2024-08-06",
+              "citation_url": "https://openai.com/api/pricing/",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 2.50,
+                "output_per_million": 10.00,
+                "cache_read_per_million": 1.25
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-4-turbo",
+          "aliases": ["gpt-4-turbo-2024-04-09"],
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2024-04-09",
+              "citation_url": "https://openai.com/api/pricing/",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 10.00,
+                "output_per_million": 30.00
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "google",
+      "aliases": ["gemini"],
+      "models": [
+        {
+          "name": "gemini-2-5-pro",
+          "aliases": ["gemini-2.5-pro"],
+          "ctx_max": 2097152,
+          "tiers": [
+            {
+              "effective_date": "2025-06-01",
+              "citation_url": "https://ai.google.dev/gemini-api/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 1.25,
+                "output_per_million": 10.00,
+                "cache_read_per_million": 0.125
+              }
+            }
+          ]
+        },
+        {
+          "name": "gemini-2-5-flash",
+          "aliases": ["gemini-2.5-flash"],
+          "ctx_max": 1048576,
+          "tiers": [
+            {
+              "effective_date": "2025-06-01",
+              "citation_url": "https://ai.google.dev/gemini-api/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.30,
+                "output_per_million": 2.50,
+                "cache_read_per_million": 0.03
+              }
+            }
+          ]
+        },
+        {
+          "name": "gemini-2-0-flash",
+          "aliases": ["gemini-2.0-flash"],
+          "ctx_max": 1048576,
+          "tiers": [
+            {
+              "effective_date": "2025-02-01",
+              "citation_url": "https://ai.google.dev/gemini-api/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.10,
+                "output_per_million": 0.40,
+                "cache_read_per_million": 0.025
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "deepseek",
+      "models": [
+        {
+          "name": "deepseek-chat",
+          "aliases": ["deepseek-v3", "deepseek-v4-flash"],
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-04-26",
+              "citation_url": "https://api-docs.deepseek.com/quick_start/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.14,
+                "output_per_million": 0.28,
+                "cache_read_per_million": 0.0028
+              }
+            },
+            {
+              "effective_date": "2025-02-01",
+              "citation_url": "https://api-docs.deepseek.com/quick_start/pricing-details-usd",
+              "source": "manual_archive",
+              "prices": {
+                "input_per_million": 0.27,
+                "output_per_million": 1.10,
+                "cache_read_per_million": 0.07
+              }
+            }
+          ]
+        },
+        {
+          "name": "deepseek-reasoner",
+          "aliases": ["deepseek-r1"],
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-04-26",
+              "citation_url": "https://api-docs.deepseek.com/quick_start/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.14,
+                "output_per_million": 0.28,
+                "cache_read_per_million": 0.0028
+              }
+            },
+            {
+              "effective_date": "2025-02-01",
+              "citation_url": "https://api-docs.deepseek.com/quick_start/pricing-details-usd",
+              "source": "manual_archive",
+              "prices": {
+                "input_per_million": 0.55,
+                "output_per_million": 2.19,
+                "cache_read_per_million": 0.14
+              }
+            }
+          ]
+        },
+        {
+          "name": "deepseek-coder",
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2024-06-01",
+              "citation_url": "https://api-docs.deepseek.com/quick_start/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 0.27,
+                "output_per_million": 1.10,
+                "cache_read_per_million": 0.07
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -283,3 +283,115 @@ func TestWorker_OnErrCallbackFires(t *testing.T) {
 		t.Fatal("onErr not invoked")
 	}
 }
+
+// TestWorker_FlushPromotesPendingMissDedupAfterCommit pins codex iter-10
+// P2: the rollback/dedup writer-level tests call promotePendingMissDedup
+// manually, so a developer who removed wr.promotePendingMissDedup from
+// worker.flush (worker.go:204) would still see them pass. This test
+// drives the *worker* end-to-end for two batches that each carry the
+// SAME missing (provider, model) tuple; only ONE WRN row may land,
+// proving the lifetime dedup map was populated by the worker's
+// post-commit promotion call. Mutation check (verified iter-11):
+// commenting out wr.promotePendingMissDedup() fails this test with
+// "expected 1 WRN row after two committed batches, got 2".
+func TestWorker_FlushPromotesPendingMissDedupAfterCommit(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	pricer := &fakeDetailPricer{miss: "unknown_provider_model"}
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithPricer(pricer),
+		WithBatchSize(3),                  // one batch per triplet of events
+		WithBatchInterval(10*time.Second), // size triggers, not the timer
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	ch := make(chan canonical.Event, 8)
+	if err := i.Submit("aiagent_v3:/tmp", ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	defer close(ch)
+
+	// Batch 1: session + op start + op finalized for an unknown
+	// (provider, model). The OpFinalized triggers emitPricingMiss
+	// which writes ONE WRN row and stages a pendingMissDedup entry.
+	// The flush at batchSize=3 commits, then promotePendingMissDedup
+	// runs (worker.go:204) and copies the staged entry into the
+	// lifetime map.
+	ch <- canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	}
+	ch <- canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup-vendor", Model: "doesnotexist-1",
+	}
+	ch <- canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 100, TokensOut: 50, EndTs: 1200, Status: "completed",
+	}
+
+	// Wait for batch 1 to durably commit: one op row and one WRN row.
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM ops`) == 1 &&
+			scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`) == 1
+	}) {
+		t.Fatalf("batch 1 did not commit; ops=%d WRN=%d",
+			scanInt(t, db, `SELECT COUNT(*) FROM ops`),
+			scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`))
+	}
+
+	// Batch 2: same SESSION, same (provider, model), new op. If the
+	// worker dropped its promotePendingMissDedup() call, the lifetime
+	// dedup map would still be empty here and emitPricingMiss would
+	// write a SECOND WRN row.
+	ch <- canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 4, Ts: 2100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 2, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup-vendor", Model: "doesnotexist-1",
+	}
+	ch <- canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 5, Ts: 2200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 2,
+		TokensIn: 100, TokensOut: 50, EndTs: 2200, Status: "completed",
+	}
+	// Third event fills the size=3 batch and triggers flush #2.
+	ch <- canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 6, Ts: 2300},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 3, ParentOpSeq: -1,
+		Kind: canonical.OpTool, Name: "noop",
+	}
+
+	// Wait for batch 2 to commit (ops count grows from 1 to 3).
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM ops`) == 3
+	}) {
+		t.Fatalf("batch 2 did not commit; ops=%d",
+			scanInt(t, db, `SELECT COUNT(*) FROM ops`))
+	}
+
+	// The exact assertion the mutation test relies on. With the fix,
+	// the second flush's writer (the worker reuses the same *writer
+	// across batches) already has the (madeup-vendor, doesnotexist-1)
+	// key in its lifetime pricingMissDedup map → emitPricingMiss
+	// short-circuits → only the batch-1 WRN row exists.
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`); got != 1 {
+		t.Errorf("expected 1 WRN row after two committed batches, got %d (worker.flush must call promotePendingMissDedup after tx.Commit; see worker.go:204)", got)
+	}
+	// parse_errors must also stay at 1 — emitPricingMiss bumps it
+	// alongside the WRN insert, and the dedup must suppress both.
+	if got := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); got != 1 {
+		t.Errorf("expected parse_errors=1 after two committed batches, got %d", got)
+	}
+}
