@@ -55,24 +55,37 @@ Build pipeline: `scripts/build.sh` runs `npm --prefix frontend run build`, copie
 ## Routing
 
 ```
-GET  /                          → frontend index.html
-GET  /assets/*                  → embedded frontend assets
-GET  /api/health                → JSON health status
-GET  /api/sources               → list sources, ingest cursors, parse error counts
-GET  /api/sessions              → list sessions with filters and pagination
-GET  /api/sessions/:id          → session detail with turns and ops
-GET  /api/sessions/:id/logs     → log entries for a session
-GET  /api/sessions/:id/topology → topology graph for a session (nodes, edges)
-GET  /api/sessions/:id/timeline → ordered spans for the timeline view
-GET  /api/stats                 → cross-session statistics with filters
-GET  /api/catalog/tools         → catalog_tools, with filters
-GET  /api/catalog/models        → catalog_models, with filters
-GET  /api/catalog/agents        → catalog_agents, with filters
-GET  /api/payloads/:ref         → resolves payload_ref → streams the bytes (gz-decompressed inline if requested)
-POST /api/subscriptions         → create an SSE subscription with a filter
-DELETE /api/subscriptions/:id   → cancel
-GET  /api/events?sub=:id        → SSE event stream
+GET  /                          → frontend index.html                                       (live)
+GET  /assets/*                  → embedded frontend assets                                  (live)
+GET  /api/health                → JSON health status                                        (live)
+GET  /api/sources               → list sources, ingest cursors, parse error counts          (live)
+GET  /api/sessions              → list sessions with filters and pagination                 (Chunks 12+ — not yet implemented)
+GET  /api/sessions/:id          → session detail with turns and ops                         (Chunks 12+ — not yet implemented)
+GET  /api/sessions/:id/logs     → log entries for a session                                 (Chunks 12+ — not yet implemented)
+GET  /api/sessions/:id/topology → topology graph for a session (nodes, edges)               (Chunks 12+ — not yet implemented)
+GET  /api/sessions/:id/timeline → ordered spans for the timeline view                       (Chunks 12+ — not yet implemented)
+GET  /api/stats                 → cross-session statistics with filters                     (Chunks 12+ — not yet implemented)
+GET  /api/catalog/tools         → catalog_tools, with filters                               (Chunks 12+ — not yet implemented)
+GET  /api/catalog/models        → catalog_models, with filters                              (Chunks 12+ — not yet implemented)
+GET  /api/catalog/agents        → catalog_agents, with filters                              (Chunks 12+ — not yet implemented)
+GET  /api/payloads/:ref         → streams payload bytes (gz-decompressed inline if asked)   (Chunks 12+ — not yet implemented)
+POST /api/subscriptions         → create an SSE subscription with a filter                  (Chunk 13 — not yet implemented)
+DELETE /api/subscriptions/:id   → cancel                                                    (Chunk 13 — not yet implemented)
+GET  /api/events?sub=:id        → SSE event stream                                          (Chunk 13 — not yet implemented)
 ```
+
+Chunk 11 of SOW-0001 ships only the four routes marked "live"; the
+catch-all `/api/*` handler returns a structured `NOT_FOUND` envelope
+naming the chunk in which the missing route will land, so future
+operators reading the response see the implementation roadmap at the
+error site. Anything not in the live set MUST NOT be added to a
+client (UI, curl scripts) until the corresponding chunk merges.
+
+Every route that supports `GET` also supports `HEAD` and returns the
+same status code + headers with an empty body, per RFC 9110 §9.3.2.
+Tests guard parity for `/`, `/assets/*`, `/api/health`, and
+`/api/sources` — this is the contract `curl -I` and HTTP cache
+intermediaries rely on. Future routes inherit the same expectation.
 
 Full schemas: `rest-api.md`.
 

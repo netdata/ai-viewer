@@ -36,19 +36,35 @@ Manjaro-friendly install script (matches the user's environment) provided at `sc
 
 ## Source Auto-Discovery
 
-If `ai-viewer-ingest` is started with no `--source` flags, it probes:
+If `ai-viewer-ingest` is started with no `--source` flags, it probes
+the default locations of every adapter the binary was compiled
+against. Each existing location becomes a source; missing locations
+are silently skipped.
 
-| Format | Probe |
-|---|---|
-| aiagent_v3 | `~/.ai-agent/sessions/session/` exists |
-| aiagent_v2 | `~/.ai-agent/sessions/*.json.gz` exists |
-| claude_code | `~/.claude/projects/` exists |
-| codex | `~/.codex/sessions/` exists |
-| opencode | `~/.local/share/opencode/opencode.db` exists |
+Phase 1 (Chunk 11 onward) ships only the `aiagent_v3` and `aiagent_v2`
+adapters, so only the first two rows of the table below are wired into
+the binary. The remaining rows are reserved for future Phase 2 SOWs
+that introduce the matching adapter packages.
+
+| Format | Probe | Status |
+|---|---|---|
+| aiagent_v3 | `~/.ai-agent/sessions/session/` exists | live (Chunk 11) |
+| aiagent_v2 | `~/.ai-agent/sessions/` exists | live (Chunk 11) |
+| claude_code | `~/.claude/projects/` exists | adapter pending (Phase 2 SOW) |
+| codex | `~/.codex/sessions/` exists | adapter pending (Phase 2 SOW) |
+| opencode | `~/.local/share/opencode/opencode.db` exists | adapter pending (Phase 2 SOW) |
+
+The Chunk 11 v2 probe checks for the parent `sessions/` directory
+rather than the glob `*.json.gz` documented earlier: a freshly-bootstrapped
+ai-agent install creates the directory before any session has been
+written, so the parent-directory probe captures the intent ("the
+operator has used ai-agent v2 on this machine") without false negatives
+on a brand-new install.
 
 Each existing location becomes a source. Logged at startup.
 
-`--source` flags, if any, **replace** auto-discovery (no merge). Explicit > implicit.
+`--source` flags, if any, **replace** auto-discovery (no merge).
+Explicit > implicit.
 
 ## Configuration File
 

@@ -21,20 +21,42 @@ JSON over HTTP. All endpoints return `application/json` except `/api/payloads/:r
 
 ```json
 {
-  "status": "ok" | "degraded",
+  "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
-  "db_path": "...",
   "schema_version": 1,
   "uptime_s": 12345,
+  "db_path": "...",
+  "db_size_bytes": 12345678,
   "sources": [
-    { "id":"...", "format":"aiagent_v3", "enabled":true, "parse_errors":0, "last_seen_at":<us>, "lag_us":<int> }
+    { "id":"...", "format":"aiagent_v3", "location":"...", "enabled":true,
+      "last_seen_at":<us>, "lag_us":<int>, "parse_errors":0, "last_seq":12345 }
   ]
 }
 ```
 
+The status union and the per-source fields here MUST match
+observability.md §`/api/health`; that spec is the canonical reference
+for the contract (degraded/down rules, `last_seq` semantics, etc.).
+This REST spec only documents the wire shape so client authors do not
+have to cross-read the observability spec to know which fields exist.
+
+`last_seq` is the adapter's opaque per-source high-water mark — see
+observability.md §`/api/health` for the per-adapter semantics. It is
+NOT a portable event count; the field was renamed from the original
+`events_ingested_total` in iteration 2 of SOW-0001 Chunk 11. The
+`db_size_bytes` and per-source `location` fields landed in iteration 5
+of the same chunk as a spec ↔ code parity fix once codex flagged they
+were emitted by the binary but absent from this spec.
+
 ### GET /api/sources
 
 Full source list with cursor metadata. Used by the Sources admin panel.
+Each item carries the per-source `last_seq` (opaque adapter
+high-water mark, identical semantics to `/api/health.sources[].last_seq`),
+the persisted `cursor`, and the `updated_at` timestamp of the last
+writer commit. HEAD is supported on both `/api/health` and
+`/api/sources` and returns the same status + headers with an empty
+body, per RFC 9110 §9.3.2.
 
 ### GET /api/sessions
 

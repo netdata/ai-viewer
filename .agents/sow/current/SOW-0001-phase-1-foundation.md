@@ -3350,6 +3350,1228 @@ for commit + PR + merge.
 
 Next: Chunk 11 — Server scaffolding.
 
+### Chunk 11 — Server scaffolding (2026-05-27)
+
+Landed on branch `sow-0001-chunk-11-server-scaffolding`. Both binaries
+become operational; `internal/presenter` exists with the two endpoints
+the chunk brief mandates (`/api/health`, `/api/sources`); the
+production binary wires `pricing.New()` per the deferred item from
+Chunk 10.
+
+Files created (production):
+
+- `internal/presenter/doc.go` (21), `presenter.go` (221),
+  `options.go` (55), `errors.go` (99), `middleware.go` (350),
+  `embed.go` (179), `health.go` (223), `sources.go` (127). Presenter
+  type carries the read-only `*sql.DB`, the structured logger, the
+  build version, the absolute db path, the process start time, the
+  embedded frontend `fs.FS`, and a clock injection seam. `Handler()`
+  returns the chained `loggingMiddleware → recoverMiddleware →
+  bodyLimitMiddleware → gzipMiddleware → mux` stack. The mux exposes
+  GET `/`, GET `/assets/...`, GET `/api/health`, GET `/api/sources`,
+  and a `/api/...` catch-all that returns a structured `NOT_FOUND`
+  envelope citing the chunk that will land the requested route.
+- `cmd/ai-viewer-serve/main.go` (341) + `frontend_dist/index.html` (2)
+  — the serve binary embeds `frontend_dist/` via `//go:embed
+  all:frontend_dist`, opens the store via `store.OpenReader`, verifies
+  `schema_meta.version` via `presenter.CheckSchema`, constructs the
+  presenter, and runs `http.Server.ListenAndServe` with a 30 s
+  `Shutdown` on SIGTERM/SIGINT. `--bind` defaults to
+  `127.0.0.1:7710`; the binary refuses any non-loopback address per
+  security.md §"Hard Rules".
+- `cmd/ai-viewer-ingest/main.go` (518) — the ingest binary opens the
+  store via `store.OpenWriter` (runs migrations), constructs
+  `*pricing.Pricer` via `pricing.New()`, builds the ingester via
+  `ingest.WithPricer(pricer)` + `WithLogger(logger)`, resolves the
+  source list (explicit `--source` replaces auto-discovery), and
+  spawns one goroutine per adapter that calls `Scan` followed by
+  `Tail`. SIGTERM/SIGINT cancels the adapter context, waits up to 5 s
+  for the adapter goroutines to drain, then calls `ing.Stop()`.
+
+Files created (tests):
+
+- `internal/presenter/presenter_test.go` (194),
+  `health_test.go` (261), `sources_test.go` (164),
+  `middleware_test.go` (255), `embed_test.go` (165),
+  `coverage_test.go` (467). Tests use a `fstest.MapFS` to inject a
+  synthetic frontend so the package is testable without the cmd
+  binary's `go:embed` declaration. SQLite is `:memory:` per test;
+  every health/source assertion seeds rows via raw SQL so the JSON
+  contract is the only thing exercised.
+
+Design decisions worth recording:
+
+- **`fs.FS` injection over per-package `go:embed`.** The presenter
+  package cannot `go:embed` files in a parent directory (Go embed is
+  scoped to the package source tree). Routing the embed declaration
+  through `cmd/ai-viewer-serve/main.go` and injecting the resulting
+  `fs.FS` via `Options.FrontendFS` keeps the placeholder
+  `index.html` next to the binary that ships it, and lets unit tests
+  swap in any `fs.FS` (the test helper uses `fstest.MapFS`). The
+  serve binary verifies `frontend_dist/index.html` is present at
+  boot so a misconfigured build fails fast rather than at the first
+  request.
+- **`/api/health` always returns 200.** Even when every internal
+  query errors (DB closed, schema mismatch surfaces elsewhere), the
+  handler returns the JSON envelope with `status: "down"` so an
+  operator's dashboard can still parse the response. A 5xx here
+  would render the endpoint useless for triage. Schema-version
+  mismatches are caught at boot by `presenter.CheckSchema` and exit
+  the binary non-zero; they never reach the handler.
+- **Per-handler method gating.** `http.ServeMux`'s default 404 for
+  the wrong method would leak into the same envelope shape used for
+  missing resources. Each handler explicitly returns
+  `METHOD_NOT_ALLOWED` so the UI can distinguish "no such endpoint"
+  from "you used the wrong verb".
+- **Body-size cap at 1 MB.** No POST endpoints exist in Chunk 11;
+  the cap is defence in depth for the SSE subscription handler that
+  lands in Chunk 13.
+- **gzip threshold 1 KB.** Below the threshold the localhost
+  network is much faster than the gzip cycle; above it the
+  compression ratio is worth the CPU. `/api/events` is explicitly
+  exempt (SSE framing breaks under chunked gzip).
+- **Localhost-only is enforced at parse-flags time.** Passing
+  `--bind 0.0.0.0:7710` returns exit code 2 with the
+  security.md-citing error message before any TCP listener opens.
+  Phase 2 will introduce `--allow-non-localhost` together with the
+  auth design SOW.
+- **No SPA fallback on /assets/.** A missing asset surfaces as
+  `NOT_FOUND` rather than masquerading as the SPA shell. SPA-style
+  client routing applies only to GET `/`; that's the only route
+  that returns `index.html`.
+- **Schema version constant pinned in the presenter package.**
+  `presenter.SchemaVersion = 1` matches
+  `internal/store/migrations/0001_initial.sql:278`. When migration
+  `0003_…sql` lands, both constants bump together.
+
+Spec drift fixes (in this chunk):
+
+- `.agents/sow/specs/presenter.md` §Routing — every endpoint not
+  shipped by Chunk 11 is now flagged `(Chunks 12+ — not yet
+  implemented)` next to the route description. A paragraph after the
+  table cites the catch-all `NOT_FOUND` handler that names the
+  target chunk in the JSON envelope.
+- `.agents/sow/specs/deployment.md` §"Source Auto-Discovery" — table
+  rewritten to mark `aiagent_v3` and `aiagent_v2` as `live (Chunk
+  11)` and `claude_code`/`codex`/`opencode` as
+  `adapter pending (Phase 2 SOW)`. The probe column for `aiagent_v2`
+  was relaxed from the `*.json.gz` glob to the parent-directory
+  check the binary actually performs; the rationale is documented
+  inline.
+
+Items punted with reason (tracked):
+
+- The integration smoke run against the operator's real
+  `~/.ai-agent/sessions/` surfaced FOREIGN KEY constraint failures
+  inside the ingest writer when payload_ref / log_entry events
+  arrive before their parent op row in unusual orderings. This is
+  a pre-existing ingester defect surfaced — not introduced — by
+  Chunk 11 wiring the production binary against the real corpus
+  for the first time. A follow-up SOW lands in
+  `.agents/sow/pending/` to add deferred-FK + parent-resolver
+  paths for the orphan payload-ref / orphan log-entry cases. The
+  chunk's brief explicitly tracks "outside Chunk 11's scope" items
+  this way; the `/api/health` `parse_errors` counter surfaces the
+  rate end-to-end so the operator never loses visibility while the
+  fix is in flight.
+- SSE hub + notify socket are Chunk 13 work. The presenter's
+  middleware already carves `/api/events` out of gzip so the
+  framing constraints are documented today.
+
+Pre-PR gates (run from `$REPO_ROOT`):
+
+```
+go mod tidy                                            # no diff
+gofmt -l .                                             # zero output
+$HOME/go/bin/goimports -l .                            # zero output
+go vet ./...                                           # zero warnings
+go build ./...                                         # exit 0 — BOTH binaries
+go test -race -count=1 -coverprofile=/tmp/cov-chunk11.out ./...
+                                                       # all pass
+golangci-lint run --timeout=5m                         # 0 issues
+$HOME/go/bin/gosec ./...                               # 0 issues (8 nosec from earlier chunks; no new)
+shellcheck -x -s bash scripts/refresh-pricing.sh \
+                       scripts/lib/pricing-sources.sh \
+                       scripts/lib/pricing-validate-input.sh \
+                       scripts/sanitize-fixture.sh \
+                       scripts/test/*.sh \
+                       scripts/genfixtures-v2.sh \
+                       scripts/bench-v2-backfill.sh    # exit 0
+bash scripts/test/sanitize-fixture-test.sh             # 13 pass, 0 fail
+bash scripts/test/pricing-merge-test.sh                # 61 pass, 0 fail
+bash scripts/test/refresh-pricing-test.sh              # 20 pass, 0 fail
+jq -e -f scripts/lib/pricing-validate.jq \
+        internal/pricing/pricing.json                  # exit 0
+```
+
+Coverage per package (from `go tool cover
+-func=/tmp/cov-chunk11.out`):
+
+| Package | Coverage | Δ vs Chunk 10 |
+|---|---|---|
+| `internal/adapters` | 100.0% | unchanged |
+| `internal/adapters/aiagent_v2` | 91.5% | unchanged (±0.1) |
+| `internal/adapters/aiagent_v3` | 91.5% | unchanged (±0.1) |
+| `internal/canonical` | 100.0% | unchanged |
+| `internal/ingest` | 91.5% | unchanged from Chunk 10 iter-11 baseline |
+| `internal/presenter` | **91.6%** | new (≥ 90% new-code bar met) |
+| `internal/pricing` | 94.1% | unchanged |
+| `internal/store` | 90.9% | unchanged |
+
+Integration smoke (manual, run twice — once with empty source list,
+once against the operator's real `~/.ai-agent/sessions/`):
+
+```bash
+# Empty-corpus run (no sources reachable, --source points at /tmp)
+$ /tmp/ai-viewer-serve --db .../index.db --bind 127.0.0.1:7710 ...
+$ curl -s http://127.0.0.1:7710/api/health | jq .
+{
+  "status": "ok",
+  "version": "<git-sha>",
+  "schema_version": 1,
+  "uptime_s": 2,
+  "db_path": ".../index.db",
+  "db_size_bytes": 241664,
+  "sources": []
+}
+$ curl -s http://127.0.0.1:7710/api/sources | jq .
+{ "items": [] }
+```
+
+Both endpoints respond 200 with well-shaped JSON. A real-corpus run
+against the operator's workstation populated both lists with the two
+auto-discovered sources (aiagent_v3 + aiagent_v2 against
+`~/.ai-agent/sessions`), confirming the source-list join and
+auto-discovery wiring end-to-end. The real-corpus run surfaced the
+pre-existing FK constraint issue noted in "Items punted" above; the
+endpoints continued to respond cleanly throughout.
+
+No new `// nosec` or `// nolint` suppressions added. The pre-existing
+Chunks 3/7 suppression table remains valid; Chunk 11 adds nothing to
+it.
+
+Note for the master assistant: the integration run flagged
+ingester FOREIGN KEY constraint failures on the live corpus.
+Follow-up SOW (orphan payload_ref / orphan log_entry handling)
+to be filed in `.agents/sow/pending/` before SOW-0001 closes; not
+a Chunk 11 regression and not part of Chunk 11's gate.
+
+**Master review iteration 2 (2026-05-27)**:
+
+The master's integration smoke surfaced three findings; iter-2
+addresses the two real bugs introduced by Chunk 11 and files a
+follow-up SOW for the pre-existing third.
+
+- **iter2-1 — JSON field rename `events_ingested_total` → `last_seq`
+  (real bug).** Integration smoke returned
+  `"events_ingested_total": 9221862743101029667` for the v2 source.
+  The v2 adapter packs `SourceSeq` as `FNV-64(originId, opTree path)` —
+  an opaque 64-bit hash, never a count. For v3 it happens to be
+  `ledgerSeq << 12 | subIdx` and correlates with event count; for
+  v2 the value is meaningless as a count. The field is renamed in
+  both `/api/health.sources[]` and `/api/sources.items[]` to
+  `last_seq`. `observability.md`, `rest-api.md`, and the in-code
+  `healthSource` / `sourceItem` doc comments now document the
+  semantics explicitly (per-adapter, NOT portable, do NOT compare
+  across formats). A new `TestHealth_LastSeqJSONFieldName` test
+  pins the JSON contract — asserts the body contains `"last_seq"`
+  and never contains `events_ingested_total`. No schema migration
+  or new event-count column; that would be out of Chunk 11 scope
+  and is left for a future SOW if the operator wants a portable
+  count.
+
+- **iter2-2 — `HEAD /` (and every other live GET route) now answers
+  200 instead of 405 (real bug).** RFC 9110 §9.3.2 mandates that
+  every resource which supports GET must answer HEAD with identical
+  headers and an empty body. The pre-iter-2 implementation gated
+  routes on `r.Method != http.MethodGet` and rejected HEAD.
+  `rootHandler`, `handleHealth`, `handleSources`, `serveAsset` now
+  accept both GET and HEAD; `serveIndex`, `serveAsset`, and the
+  shared `writeJSON` helper skip the body when `r.Method == HEAD`
+  but write the same status + headers. A new
+  `TestPresenter_HeadRouteParity` table-driven test asserts
+  status-code parity, Content-Type parity, and X-Request-ID
+  presence for `/`, `/assets/app.js`, `/api/health`, and
+  `/api/sources`, and verifies HEAD bodies are empty.
+  `presenter.md §Routing` documents the contract for future routes.
+
+- **iter2-3 — FK constraint failure on real corpus (pre-existing,
+  filed as SOW-0015).** SOW filed at
+  `.agents/sow/pending/SOW-0015-20260527-ingest-fk-constraint-orphan-events.md`
+  marked P1 because it blocks SOW-0001 Phase 1 acceptance criterion
+  #3 (full backfill <60min). The SOW carries the problem statement,
+  the four hypotheses the master assistant already identified,
+  the required investigation plan (structured per-event +
+  per-insert logging on a 100-session subset), and the acceptance
+  criteria (zero FK failures + regression test). The schema's FK
+  is correct; this is an event-ordering or dedup bug. Not
+  attempted in Chunk 11 per the iteration-2 brief.
+
+Re-run gate output (verbatim):
+
+```
+$ gofmt -l internal/presenter/ cmd/
+(no output)
+$ go vet ./...
+(no output)
+$ golangci-lint run ./...
+0 issues.
+$ go test -race -count=1 ./...
+?   	github.com/netdata/ai-viewer/cmd/ai-viewer-ingest	[no test files]
+?   	github.com/netdata/ai-viewer/cmd/ai-viewer-serve	[no test files]
+ok  	github.com/netdata/ai-viewer/internal/adapters	1.008s
+ok  	github.com/netdata/ai-viewer/internal/adapters/aiagent_v2	82.357s
+?   	github.com/netdata/ai-viewer/internal/adapters/aiagent_v2/cmd/backfillbench	[no test files]
+?   	github.com/netdata/ai-viewer/internal/adapters/aiagent_v2/cmd/genfixtures	[no test files]
+ok  	github.com/netdata/ai-viewer/internal/adapters/aiagent_v3	6.027s
+ok  	github.com/netdata/ai-viewer/internal/canonical	1.011s
+ok  	github.com/netdata/ai-viewer/internal/ingest	3.336s
+ok  	github.com/netdata/ai-viewer/internal/presenter	1.955s
+ok  	github.com/netdata/ai-viewer/internal/pricing	1.061s
+ok  	github.com/netdata/ai-viewer/internal/store	1.804s
+$ go test -coverprofile=/tmp/cov-presenter.out -covermode=atomic ./internal/presenter/...
+ok  	github.com/netdata/ai-viewer/internal/presenter	coverage: 91.3% of statements
+```
+
+Integration smoke (real corpus, tmp state-dir, both binaries built
+fresh from this iteration):
+
+```
+$ curl -s http://127.0.0.1:7710/api/health | python3 -m json.tool
+{
+    "status": "degraded",
+    "version": "05a109feb6c9",
+    ...
+    "sources": [
+        { "id": "aiagent_v3:$HOME/.ai-agent/sessions", ...
+          "parse_errors": 5, "last_seq": 45059 },
+        { "id": "aiagent_v2:$HOME/.ai-agent/sessions", ...
+          "parse_errors": 1, "last_seq": 9221862743101029667 }
+    ]
+}
+$ curl -sI http://127.0.0.1:7710/
+HTTP/1.1 200 OK
+Cache-Control: no-cache
+Content-Type: text/html; charset=utf-8
+X-Request-Id: 45adb20ab0e28e72
+$ curl -sI http://127.0.0.1:7710/api/health
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+X-Request-Id: 9460a27733d38d58
+$ curl -sI http://127.0.0.1:7710/api/sources
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+X-Request-Id: 4bb65549a28718ef
+```
+
+The v2 source's `last_seq` of `9.22e18` (~ 2^63 region) is the
+exact failure mode that motivated the rename — that value would
+have been displayed as `events_ingested_total` pre-iter-2 and
+misled any operator looking at the field.
+
+Coverage on `internal/presenter` ticks from 90.9% (iter-1) to 91.3%
+(iter-2) — well above the 90% gate. No new `// nosec` or
+`// nolint` suppressions added.
+
+**Reviewer iteration 3 (2026-05-27)**: three parallel reviewers
+(codex, glm, minimax) returned with seven Chunk-11-scoped findings
+plus one cross-reference back to SOW-0015. All seven fixes landed
+in this iteration; the v2-HWM root-cause analysis is captured in
+SOW-0015 (out of Chunk-11 scope per the iter-3 brief). The fix
+ledger:
+
+- **iter3-1 — cursor resume on startup (codex P1#2)**:
+  `cmd/ai-viewer-ingest/main.go:159-163` wires
+  `sqlCursorLookup{db: ws.DB()}` into the per-source startup; the
+  helper itself lives at `cmd/ai-viewer-ingest/sources.go:122-148`
+  alongside `loadSourceCursor` which round-trips the persisted
+  `source_progress.cursor` through the adapter's `ParseCursor`. A
+  missing row → nil cursor → full re-scan; a corrupt cursor logs
+  WARN and also falls back to nil. Pinned by five unit tests in
+  `cmd/ai-viewer-ingest/main_test.go:264-330` covering nil lookup,
+  empty stored, lookup error, corrupt JSON, and the round-trip via
+  the real `aiagent_v3` adapter. Smoke confirms: after one run with
+  an event written, restarting the binary logs
+  `"resuming from persisted cursor","stored_len":63` and
+  `"resume":true` on the adapter scan line.
+- **iter3-2 — OnError → SourceErrorEvent (codex P2#3)**:
+  `cmd/ai-viewer-ingest/sources.go:225-249` (`newOnErrorHandler`)
+  replaces the log-only OnError with a handler that also pushes a
+  `canonical.SourceErrorEvent{SourceID, SourceSeq:0, Ts: now,
+  Message}` onto the events channel feeding the worker. The send
+  is non-blocking (`select default` drops with a WARN) so a
+  saturated worker cannot stall adapter goroutines. The worker
+  applies SourceErrorEvent via `internal/ingest/writer.go:724
+  applySourceError` (existing Chunk-10 path) which bumps
+  `sources.parse_errors` and inserts a source-scoped
+  `log_entries` row. Smoke (corrupt `*.jsonl` injected under v3
+  session/ dir):
+  ```
+  "parse_errors": 2,
+  "status": "degraded"
+  ```
+- **iter3-3 — `recentParseErrorCount` filter (codex P2#4)**:
+  `internal/presenter/health.go:200-221` now restricts the count
+  to rows with `source_id IS NOT NULL AND session_id IS NULL`
+  matching the exact shape `applySourceError` emits. Session-
+  scoped tool/agent errors (which carry session_id NOT NULL) no
+  longer flip status to degraded. New test
+  `TestHealth_SessionScopedErrorsDoNotDegrade` at
+  `internal/presenter/health_test.go:139-205` inserts both a
+  session-scoped ERR and (separately) a source-scoped ERR and
+  asserts only the latter degrades the status; the existing
+  `TestHealth_DegradedOnParseErrors` was updated to match the new
+  semantics explicitly. Smoke confirms degraded triggers on
+  source-scoped parse_errors=2 with no session_id NOT NULL rows
+  present.
+- **iter3-4 — `SetMaxOpenConns(1)` for the writer (codex P2#5)**:
+  `internal/store/store.go:133` now always pins the writer pool
+  to a single connection, regardless of memory vs on-disk DSN.
+  SQLite WAL allows many readers but only one writer; the prior
+  memory-only gating allowed concurrent BeginTx on on-disk DBs to
+  produce SQLITE_BUSY races that the no-retry ingest policy
+  converted into dropped batches. Readers (`OpenReader`) keep
+  the default pool of 8. New test
+  `TestOpenWriter_PinsMaxOpenConnsOnDisk` at
+  `internal/store/store_test.go:213-263` (a) asserts
+  `db.Stats().MaxOpenConnections == 1`, and (b) holds one Conn()
+  while a second goroutine's bounded-context Conn() times out
+  with `context.DeadlineExceeded` — pinning the at-most-one
+  guarantee.
+- **iter3-5 — `assertLocalhost` literal-IP-only (minimax P1)**:
+  `cmd/ai-viewer-serve/main.go:259-289` now accepts only the
+  literal `127.0.0.1` and `::1`. The string `"localhost"` is
+  explicitly rejected with a message citing the `/etc/hosts`
+  risk; empty host (`":7710"`) is rejected with a message
+  explaining it would bind every interface. `.agents/sow/specs/
+  security.md` §"Hard Rules" #3 is updated to match. Smoke:
+  ```
+  $ ai-viewer-serve --bind localhost:7710
+  ai-viewer-serve: --bind "localhost:7710" rejected: literal
+  'localhost' is not accepted because /etc/hosts may resolve it
+  to a non-loopback IP; use 127.0.0.1:<port> or [::1]:<port>
+  (security.md §Hard Rules)
+  exit=2
+  ```
+- **iter3-6 — cmd binary tests (codex P3#7, promoted)**: new
+  test files at `cmd/ai-viewer-ingest/main_test.go` (340 lines)
+  and `cmd/ai-viewer-serve/main_test.go` (169 lines) pin
+  parseFlags exit-code contract (--version, -h, bad bind, empty
+  bind, repeated --source, empty --source), assertLocalhost (six
+  cases), parseSourceFlag (seven cases including multi-colon and
+  every error path), resolveSources (explicit replaces auto-
+  discovery, dedup, malformed bubbling), autoDiscoverSources
+  with a fake HOME, and loadSourceCursor (five paths). Coverage
+  on the two cmd packages is now 32.9% (ingest) / 26.4% (serve);
+  the residual is the un-unit-testable lifecycle code in `run()`
+  that the integration smoke covers end-to-end.
+- **iter3-7 — SOW-0015 v2 HWM hypothesis (codex P1#1)**:
+  `.agents/sow/pending/SOW-0015-20260527-ingest-fk-constraint-orphan-events.md`
+  Pre-Implementation Gate now opens with a "Primary hypothesis"
+  block citing `internal/adapters/aiagent_v2/mapper.go:621-642`
+  (FNV-64 SourceSeq), `internal/ingest/worker.go:133` (scalar
+  HWM dedup), and `internal/ingest/dedup.go:65` (`seq >
+  c.hwm[sourceID]`). The block walks through the failure
+  mechanism — first batch sets a high random HWM, second batch's
+  smaller-hash OpStarted is dropped, downstream PayloadRef
+  triggers FK 787 — and documents the caveat that the iter-1
+  smoke also captured 5 v3 FK errors which may be a separate
+  defect. A concrete acceptance criterion (a synthetic
+  v2-shaped two-batch test) is added so the SOW closer has a
+  failing test to gate the fix against. Per the iter-3 brief
+  the actual fix stays out of Chunk-11 scope.
+
+**Other findings explicitly DEFERRED in iter-3** (matches the
+brief's deferral list):
+
+- glm P2-01 (WriteTimeout) — deferred to Chunk 13 SSE work; SSE
+  long-lived streams need careful per-route handling.
+- glm P2-02 (loggingResponseWriter WriteHeader delegation) —
+  cosmetic; Go's stdlib already drops duplicate WriteHeader calls,
+  no functional impact.
+- glm P2-04 (gzip buffers full response) — already commented in
+  middleware.go; payload-streaming handlers in Chunk 12+ will
+  bypass via dedicated routes.
+- glm P2-05 (recoverMiddleware writeJSONError safety) — confirmed
+  safe; Go's ResponseWriter and json.Encoder return errors rather
+  than panicking.
+- minimax P2 (source location not re-checked) — explicitly low-
+  risk on a single-user workstation; not filed as a follow-up
+  SOW because the existing smoke fail-loudly behavior is
+  adequate.
+- codex P3#6 (HEAD parity gzip) — cosmetic; HEAD bodies are
+  empty so compression policy does not matter.
+- glm P3 cosmetic findings — no change.
+
+**Gates after iter-3** (re-run with the same scope as iter-2):
+
+```
+$ gofmt -l .
+(no output)
+$ go vet ./...
+(no output)
+$ golangci-lint run ./...
+0 issues.
+$ go test -race ./... -count=1
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-ingest        1.017s
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-serve         1.018s
+ok  github.com/netdata/ai-viewer/internal/adapters           1.011s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v2   85.949s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v3    6.029s
+ok  github.com/netdata/ai-viewer/internal/canonical          1.017s
+ok  github.com/netdata/ai-viewer/internal/ingest             3.436s
+ok  github.com/netdata/ai-viewer/internal/presenter          2.155s
+ok  github.com/netdata/ai-viewer/internal/pricing            1.059s
+ok  github.com/netdata/ai-viewer/internal/store              1.979s
+```
+
+Coverage: `internal/presenter` holds at 91.3%; `internal/store`
+edges from 90.9% to 90.8% (the new test exercises an error path
+that does not bump line count proportionally); the two cmd
+packages cross from 0% to 32.9% / 26.4%. No new `// nosec`,
+`// nolint`, or `--no-verify` suppressions.
+
+Files changed in iter-3:
+
+- `cmd/ai-viewer-ingest/main.go` (split: 518→361 lines; helpers
+  moved to sources.go).
+- `cmd/ai-viewer-ingest/sources.go` (new: 293 lines — owns the
+  configuredSource type, resolveSources, parseSourceFlag,
+  autoDiscoverSources, startSource, runAdapter, the
+  cursorLookup interface + sqlCursorLookup, loadSourceCursor,
+  newOnErrorHandler).
+- `cmd/ai-viewer-ingest/main_test.go` (new: 340 lines).
+- `cmd/ai-viewer-serve/main.go` (assertLocalhost tightening).
+- `cmd/ai-viewer-serve/main_test.go` (new: 169 lines).
+- `internal/presenter/health.go` (recentParseErrorCount filter).
+- `internal/presenter/health_test.go` (existing
+  TestHealth_DegradedOnParseErrors updated; new
+  TestHealth_SessionScopedErrorsDoNotDegrade).
+- `internal/store/store.go` (SetMaxOpenConns(1) unconditional).
+- `internal/store/store_test.go` (new
+  TestOpenWriter_PinsMaxOpenConnsOnDisk + `time` import).
+- `.agents/sow/specs/security.md` (literal-IP-only rule).
+- `.agents/sow/pending/SOW-0015-…` (primary hypothesis added).
+
+Integration smoke output (key excerpts):
+
+```
+$ ai-viewer-serve --bind localhost:7710
+ai-viewer-serve: --bind "localhost:7710" rejected: literal
+'localhost' is not accepted because /etc/hosts may resolve it to a
+non-loopback IP; use 127.0.0.1:<port> or [::1]:<port>
+(security.md §Hard Rules)
+exit=2
+
+# After injecting a corrupt v3 ledger to fire OnError:
+$ curl -s http://127.0.0.1:17710/api/health
+{
+  "status": "degraded",
+  ...
+  "sources": [{
+    "id": "aiagent_v3:/tmp/ai-viewer-smoke.../sessions",
+    ...
+    "parse_errors": 2,
+    "last_seq": 0
+  }]
+}
+
+# On binary restart the ingest log carries:
+{"msg":"ai-viewer-ingest: resuming from persisted cursor",
+ "stored_len":63,"source":"aiagent_v3:...sessions",...}
+{"msg":"ai-viewer-ingest: adapter scan starting","resume":true,...}
+```
+
+**Reviewer iteration 4 (2026-05-27)**: codex iter-3 returned with one
+P1, four P2s, and two P3s scoped to Chunk 11. minimax and glm
+returned CLEAN with only cosmetic P2s already deferred in iter-3.
+Every Chunk-11-scoped finding is addressed here; the v2 HWM root
+cause stays out of Chunk-11 scope per the iter-3 brief and is owned
+by SOW-0015 (acceptance test design tightened below).
+
+The fix ledger:
+
+- **iter4-1 — Source MkdirAll violates read-only-on-sources
+  invariant (codex P1)**:
+  `internal/adapters/aiagent_v3/tailer.go:44` and
+  `internal/adapters/aiagent_v2/tailer.go:51` previously called
+  `os.MkdirAll(watchDir, 0o750)` on the source tree before
+  attaching the fsnotify watcher. security.md §"Hard Rules" #1
+  ("read-only on sources — no code path writes to a source") is a
+  hard invariant; even a defensive mkdir on the parent is a
+  violation. Both tailers now `os.Stat` the watch dir and on
+  ENOENT surface a structured error via `onError` (which the
+  ingester lifts to a `SourceErrorEvent` → `/api/health.parse_errors`,
+  iter3-2 wiring) and return cleanly — the adapter goroutine
+  exits, the daemon keeps running for other sources. New
+  regression tests pin the no-mkdir invariant:
+  `internal/adapters/aiagent_v3/tailer_test.go
+  TestTailer_RefusesToCreateMissingSourceDir` and
+  `internal/adapters/aiagent_v2/tailer_test.go
+  TestTailer_RefusesToCreateMissingSourceDir` both assert the
+  directory is NOT created and OnError fires at least once. The
+  old `TestTail_CreatesMissingSessionDir` (which encoded the
+  inverted behavior) was rewritten in
+  `internal/adapters/aiagent_v3/coverage3_test.go` to
+  `TestTail_DoesNotCreateMissingSessionDir` so the regression
+  budget stays balanced.
+- **iter4-2 — OnError dropped on full channel (codex P2)**:
+  `cmd/ai-viewer-ingest/sources.go newOnErrorHandler` previously
+  carried a `select default: log+drop` branch which silently
+  under-reported parse_errors under load. The default arm is
+  removed; the send is now BLOCKING with a `ctx.Done()` escape so
+  backpressure pauses the adapter (correct behavior) and only
+  ingester shutdown can drop an event. Two new regression tests
+  in `cmd/ai-viewer-ingest/main_test.go`:
+  `TestOnErrorHandler_BlocksThenLandsOnceDrained` pumps 100
+  errors into a 4-cap channel with a parallel drainer and asserts
+  every one lands; `TestOnErrorHandler_DropsOnShutdown` confirms
+  the handler returns on ctx cancel even when the channel is full
+  (no goroutine leak).
+- **iter4-3 — Operator-name paths in SOW Chunk 11 sub-sections
+  (codex P2)**: AGENTS.md §"Sensitive Data In Durable Artifacts"
+  forbids writing the operator's personal name into committed
+  artifacts. The workstation absolute paths embedded in earlier
+  Chunk 11 sub-sections (gates command + iter-2 smoke output)
+  contained that name. Three occurrences inside the Chunk 11
+  sub-sections were sanitized: one `Pre-PR gates (run from ...)`
+  line (replaced with `$REPO_ROOT`) and two `"id":` JSON
+  examples inside the iter-2 smoke output (replaced with
+  `aiagent_v3:$HOME/.ai-agent/sessions` /
+  `aiagent_v2:$HOME/.ai-agent/sessions`). The iter-4 sub-section
+  itself uses `$REPO_ROOT` throughout. Prior-chunk sub-sections
+  are immutable history and not touched here (see hygiene note
+  below).
+- **iter4-4 — SOW-0015 acceptance test design flaw (codex P2)**:
+  The iter-3 draft test in
+  `.agents/sow/pending/SOW-0015-20260527-ingest-fk-constraint-orphan-events.md:189-200`
+  picked event SourceSeqs that, under the v2 HWM bug, would have
+  resulted in BOTH parent and child being dedup-dropped — passing
+  the test by accident with zero FK errors and zero rows
+  inserted, proving nothing. The acceptance criterion is
+  rewritten so the parent's SourceSeq falls BELOW the seeded HWM
+  (will be dropped under the bug) and the child's falls ABOVE
+  (will reach the writer and fail FK). Three assertions now pin
+  the correct shape: `SELECT COUNT(*) FROM ops` must be `1`,
+  `SELECT COUNT(*) FROM payload_refs` must be `1`, and the
+  worker log must not contain `FOREIGN KEY constraint failed`.
+  Today all three fail simultaneously; after the fix all three
+  hold. The `ops` row existence is the load-bearing assertion —
+  absence-of-FK alone is too weak.
+- **iter4-5 — `OpenReader` missing `SetMaxOpenConns(8)` (codex P2)**:
+  `internal/store/store.go:202 OpenReader` opened the read-only
+  handle without pinning the pool. Go's default is unbounded;
+  `.agents/sow/specs/presenter.md:23` pins it to 8. The fix adds
+  `db.SetMaxOpenConns(8)` immediately after `sql.Open` (before
+  the Ping so a pool-size regression cannot mask other errors).
+  New test `TestOpenReader_PinsMaxOpenConnsToEight` in
+  `internal/store/store_test.go` opens a reader and asserts
+  `db.Stats().MaxOpenConnections == 8`.
+- **iter4-6 — `coverage_test.go` exceeded the 400-line budget
+  (codex P3)**: The 467-line file in
+  `internal/presenter/coverage_test.go` was split by area into
+  three new files plus a residual cross-cutting file. Final line
+  counts: `coverage_embed_test.go` (138 — index/asset/MIME/extension
+  helpers), `coverage_middleware_test.go` (120 — gzip / response
+  writer / parseAcceptWeight / writeJSONError / toAttrs),
+  `coverage_health_test.go` (93 — db-size probe / parse-error
+  counter / collectSources / nullableInt), and the rewritten
+  `coverage_test.go` (164 — DB-unavailable, schema_meta errors,
+  method-gating, not-implemented, custom-logger). Every test
+  name is preserved; the test inventory is unchanged in count.
+- **iter4-7 — Stale "tests not added in Chunk 11" comment (codex
+  P3)**: `cmd/ai-viewer-serve/main.go:61` carried a leftover
+  comment from before iter-3 added `main_test.go`. Updated to
+  point at the actual unit-test file and clarify which path is
+  unit-tested vs covered by integration smoke.
+
+**Other findings explicitly DEFERRED in iter-4** (matches the
+iter-3 deferral list — minimax and glm iter-3 returned CLEAN with
+only the same cosmetic P2s):
+
+- glm P2 (WriteTimeout) — Chunk 13 SSE work; SSE streams need
+  per-route handling.
+- glm P2 (gzip buffers full response) — already commented in
+  middleware.go; payload-streaming handlers in Chunk 12+ will
+  bypass via dedicated routes.
+- minimax P2 (source location re-stat) — low risk on a
+  single-user workstation.
+- HEAD parity gzip cosmetic — HEAD bodies are empty so the
+  compression policy is moot.
+
+**Gates after iter-4** (re-run with the same scope as iter-3):
+
+```
+$ gofmt -l .
+(no output)
+$ $HOME/go/bin/goimports -l .
+(no output)
+$ go vet ./...
+(no output)
+$ golangci-lint run --timeout=5m
+0 issues.
+$ $HOME/go/bin/gosec ./...
+Issues : 0 (8 nosec from prior chunks, no new in iter-4)
+$ go test -race -count=1 ./...
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-ingest           1.068s
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-serve            1.016s
+ok  github.com/netdata/ai-viewer/internal/adapters              1.010s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v2  85.121s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v3   6.026s
+ok  github.com/netdata/ai-viewer/internal/canonical             1.014s
+ok  github.com/netdata/ai-viewer/internal/ingest                3.308s
+ok  github.com/netdata/ai-viewer/internal/presenter             2.041s
+ok  github.com/netdata/ai-viewer/internal/pricing               1.055s
+ok  github.com/netdata/ai-viewer/internal/store                 2.073s
+```
+
+Coverage per package (`go test -coverprofile`):
+
+| Package | iter-4 | Δ vs iter-3 |
+|---|---|---|
+| `cmd/ai-viewer-ingest` | 35.9% | +3.0% (new OnError tests) |
+| `cmd/ai-viewer-serve` | 26.4% | unchanged |
+| `internal/adapters/aiagent_v2` | 91.2% | -0.3% (new read-only-on-sources branch) |
+| `internal/adapters/aiagent_v3` | 91.6% | +0.1% (new test added) |
+| `internal/ingest` | 90.7% | unchanged |
+| `internal/presenter` | 91.3% | unchanged (tests split, not changed) |
+| `internal/store` | 90.9% | unchanged (new reader-pool test) |
+
+No new `// nosec`, `// nolint`, or `--no-verify` suppressions.
+
+Files changed in iter-4:
+
+- `internal/adapters/aiagent_v3/tailer.go` (MkdirAll → Stat
+  + OnError on missing dir).
+- `internal/adapters/aiagent_v3/tailer_test.go` (added
+  `TestTailer_RefusesToCreateMissingSourceDir` + `os` import).
+- `internal/adapters/aiagent_v3/coverage3_test.go` (rewrote
+  `TestTail_CreatesMissingSessionDir` →
+  `TestTail_DoesNotCreateMissingSessionDir`).
+- `internal/adapters/aiagent_v2/tailer.go` (MkdirAll → Stat
+  + OnError on missing dir).
+- `internal/adapters/aiagent_v2/tailer_test.go` (added
+  `TestTailer_RefusesToCreateMissingSourceDir`).
+- `cmd/ai-viewer-ingest/sources.go` (newOnErrorHandler
+  default-drop → blocking + ctx escape).
+- `cmd/ai-viewer-ingest/main_test.go` (added
+  `TestOnErrorHandler_BlocksThenLandsOnceDrained`,
+  `TestOnErrorHandler_DropsOnShutdown` + `time` import).
+- `internal/store/store.go` (OpenReader
+  `SetMaxOpenConns(8)`).
+- `internal/store/store_test.go` (added
+  `TestOpenReader_PinsMaxOpenConnsToEight`).
+- `cmd/ai-viewer-serve/main.go` (refreshed stale `run()`
+  comment).
+- `internal/presenter/coverage_test.go` (split — was 467
+  lines, now 164).
+- `internal/presenter/coverage_embed_test.go` (new — 138
+  lines, embed/asset tests).
+- `internal/presenter/coverage_middleware_test.go` (new —
+  120 lines, middleware tests).
+- `internal/presenter/coverage_health_test.go` (new — 93
+  lines, health internals).
+- `.agents/sow/current/SOW-0001-phase-1-foundation.md`
+  (sanitized three operator-name path occurrences inside Chunk
+  11 sub-sections to `$REPO_ROOT` / `$HOME`).
+- `.agents/sow/pending/SOW-0015-20260527-ingest-fk-constraint-orphan-events.md`
+  (rewrote acceptance test to assert row existence with the
+  parent-below-HWM / child-above-HWM design).
+
+**Project hygiene note (carried over)**: grepping for the operator's
+home-directory prefix in
+`.agents/sow/current/SOW-0001-phase-1-foundation.md` after iter-4
+fixes still surfaces NINE occurrences — every one is inside an
+earlier-chunk sub-section (Chunks 3/4/5/6/7/8/9/10/11-iter-1)
+that has already been merged to master and is treated as
+immutable history. Master decided NOT to rewrite history in this
+iteration because (a) rewriting committed SOW prose would
+require a `git rebase`-class operation that AGENTS.md classifies
+as destructive and (b) the recurrence-prevention discipline is
+"sanitize before append", which is now enforced for iter-4
+onwards. A separate doc-cleanup SOW should sweep historical
+occurrences in one pass; until then, every new SOW entry MUST
+substitute `$REPO_ROOT` / `$HOME` / `~` before saving. This
+note is reproduced in any future iter sub-section so the
+discipline survives compaction.
+
+**Reviewer iteration 5 (2026-05-27)**: codex iter-4 returned with two
+P2s and one P3, all scoped to spec ↔ code parity inside Chunk 11
+(no behavioural defects, no new P1s). minimax and glm iter-4 came back
+CLEAN with no actionable findings. iter-5 lifts the code up to the
+specs rather than loosening them; tests pin every fix.
+
+The fix ledger:
+
+- **iter5-1 — `/api/health` REST spec is stale vs implementation
+  (codex iter-4 P2)**: `.agents/sow/specs/rest-api.md:24` documented
+  the status union as `"ok" | "degraded"` only, omitted the
+  implemented `db_size_bytes` field, and omitted the per-source
+  `location` field. `internal/presenter/health.go:14` returns
+  `"down"` as a third status, `health.go:37` emits `db_size_bytes`,
+  and `health.go:57` emits `location` for each source. The fix
+  updates the rest-api.md example JSON to mirror the
+  `healthResponse` + `healthSource` struct shape exactly and cites
+  observability.md §`/api/health` as the canonical reference so the
+  two specs stay aligned. No code change required; the existing
+  health and parity tests
+  (`internal/presenter/health_test.go:347` for `"down"`,
+  `coverage_health_test.go` for `db_size_bytes`,
+  `presenter_test.go TestPresenter_HeadRouteParity` for the source
+  shape) already pin the implementation against the now-correct
+  spec.
+- **iter5-2 — Middleware logging contract violations (codex iter-4
+  P2)**: observability.md §"Structured Logging" requires every
+  per-request HTTP log line to include `client_ip`;
+  `internal/presenter/middleware.go:63` logged
+  method/path/status/duration_us/bytes_out/request_id only. Same
+  area, observability.md §"Trace IDs" pins the `request_id` format
+  to UUID-v4 but `middleware.go:338 newRequestID` returned a
+  16-hex-char string (8 bytes of crypto/rand entropy). The
+  pragmatic CTO call was to lift the code up to the spec on both
+  axes: (a) extract the remote IP via `net.SplitHostPort(r.RemoteAddr)`
+  and add a `client_ip` slog attribute (port stripped, IPv6
+  brackets stripped, falls back to the raw `RemoteAddr` on parse
+  failure so the field is always present); (b) emit RFC 4122 §4.4
+  UUID-v4 strings — pure stdlib via `crypto/rand.Read(b[:16])` +
+  setting the version/variant bits + a manual 8-4-4-4-12 hex
+  layout so the hot path stays allocation-light and we avoid
+  promoting `github.com/google/uuid` from `indirect` to direct
+  (a `go.mod` change is out of iter-5 scope). The X-Request-ID
+  response header value matches the new format. Tests:
+  `TestNewRequestIDIsUUIDV4AndUnique` (regex pin on RFC 4122
+  shape, 64-iteration uniqueness),
+  `TestLoggingMiddlewareLogsClientIPAndUUIDRequestID` (asserts
+  `client_ip="127.0.0.1"` for a request from `127.0.0.1:12345`
+  plus `request_id` matching X-Request-ID and the UUID-v4 regex),
+  `TestClientIPFromRequest` (covers IPv4:port, `[::1]:port`,
+  non-host-port shape, and the `nil` request case so the helper
+  cannot panic on misuse). Deliberate non-decision: we do NOT
+  consult `X-Forwarded-For` or `X-Real-IP` in v1 — the presenter
+  binds 127.0.0.1 and there is no trusted proxy in the threat
+  model; honouring client-supplied headers without an allow-list
+  is a log-spoofing primitive. Documented in the `clientIPFromRequest`
+  doc-comment so the constraint survives compaction.
+- **iter5-3 — HEAD error responses still write JSON bodies (codex
+  iter-4 P3)**: `internal/presenter/errors.go:68 writeJSONError`
+  unconditionally encoded the error envelope, so HEAD requests
+  routed through `embed.go:83` (missing asset) or `presenter.go:155`
+  (deferred `/api/*` route) leaked the JSON body, violating
+  presenter.md §"Routing" and RFC 9110 §9.3.2 (HEAD = same
+  headers as GET, empty body). The fix mirrors the existing
+  `writeJSON` HEAD branch: when `r.Method == http.MethodHead`,
+  write the status code and Content-Type header but skip the body.
+  Every call site already passes `r`, so no signature change.
+  Tests: `TestWriteJSONErrorHEADHasEmptyBody` (unit test against
+  the helper directly: 404 status, non-empty Content-Type, zero
+  body bytes) and `TestHEAD_DeferredRouteReturns404WithEmptyBody`
+  (end-to-end through the full middleware chain: `HEAD /api/sessions`
+  via `Presenter.Handler()` returns 404 + JSON Content-Type +
+  empty body).
+
+**Gates after iter-5** (re-run with the same scope as iter-4):
+
+```
+$ gofmt -l .
+(no output)
+$ $HOME/go/bin/goimports -l .
+(no output)
+$ go vet ./...
+(no output)
+$ golangci-lint run --timeout=5m
+0 issues.
+$ $HOME/go/bin/gosec ./...
+Issues : 0 (8 nosec from prior chunks, no new in iter-5)
+$ go test -race -count=1 ./...
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-ingest           1.065s
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-serve            1.019s
+ok  github.com/netdata/ai-viewer/internal/adapters              1.010s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v2  85.980s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v3   6.031s
+ok  github.com/netdata/ai-viewer/internal/canonical             1.014s
+ok  github.com/netdata/ai-viewer/internal/ingest                3.470s
+ok  github.com/netdata/ai-viewer/internal/presenter             2.138s
+ok  github.com/netdata/ai-viewer/internal/pricing               1.084s
+ok  github.com/netdata/ai-viewer/internal/store                 1.997s
+```
+
+Coverage per package (`go test -cover` per pkg):
+
+| Package | iter-5 | Δ vs iter-4 |
+|---|---|---|
+| `cmd/ai-viewer-ingest` | 35.9% | unchanged |
+| `cmd/ai-viewer-serve` | 26.4% | unchanged |
+| `internal/adapters/aiagent_v2` | 91.2% | unchanged |
+| `internal/adapters/aiagent_v3` | 91.7% | +0.1% |
+| `internal/ingest` | 91.5% | +0.8% |
+| `internal/presenter` | 91.7% | +0.4% (new client_ip / UUID / HEAD-empty tests) |
+| `internal/store` | 90.9% | unchanged |
+
+No new `// nosec`, `// nolint`, or `--no-verify` suppressions.
+
+Files changed in iter-5:
+
+- `.agents/sow/specs/rest-api.md` (status union → ok|degraded|down,
+  added `db_size_bytes` + per-source `location` to the example,
+  added cross-reference to observability.md as the canonical
+  contract).
+- `internal/presenter/middleware.go` (added `net` import; logging
+  middleware emits `client_ip` slog attr; new `clientIPFromRequest`
+  helper with IPv4/IPv6/parse-failure handling; `newRequestID`
+  rewritten to RFC 4122 §4.4 UUID-v4 via pure stdlib).
+- `internal/presenter/middleware_test.go` (added `regexp` import;
+  renamed `TestNewRequestIDIsHexAndUnique` →
+  `TestNewRequestIDIsUUIDV4AndUnique`; added
+  `TestLoggingMiddlewareLogsClientIPAndUUIDRequestID` and
+  `TestClientIPFromRequest`).
+- `internal/presenter/errors.go` (`writeJSONError` skips body on
+  HEAD, matching `writeJSON`).
+- `internal/presenter/coverage_middleware_test.go` (added
+  `TestWriteJSONErrorHEADHasEmptyBody`).
+- `internal/presenter/coverage_test.go` (added
+  `TestHEAD_DeferredRouteReturns404WithEmptyBody`).
+- `.agents/sow/current/SOW-0001-phase-1-foundation.md` (this
+  sub-section).
+
+Sample output proving each fix (captured by a throw-away test that
+was deleted after the run; the persistent unit tests cover the same
+shape):
+
+```
+=== iter5-2: UUID-v4 request IDs ===
+  request_id: e378189c-47a0-4e62-a4d0-c140a605f554
+  request_id: a25cf27d-916f-47a8-a249-d69bbae896ba
+  request_id: 267fedb8-78b3-4a7c-8266-617dea2c1bd3
+=== iter5-2: HTTP log line with client_ip ===
+  log: {"time":"...","level":"INFO","msg":"http request","method":"GET","path":"/api/health","status":200,"duration_us":14,"bytes_out":11,"client_ip":"127.0.0.1","request_id":"0dbdabdb-fc37-449a-87ff-ea662cf9571b"}
+  X-Request-ID: 0dbdabdb-fc37-449a-87ff-ea662cf9571b
+=== iter5-3: HEAD error empty body ===
+  status=404 content-type="application/json; charset=utf-8" body="" (len=0)
+```
+
+**Project hygiene note (carried over)**: every new SOW prose paragraph
+in this iter substitutes `$REPO_ROOT` / `$HOME` for workstation
+absolute paths so the operator-name discipline is preserved. The
+nine historical occurrences in earlier-chunk sub-sections remain
+unrewritten per the iter-4 hygiene note (immutable history; sweep
+deferred to a dedicated doc-cleanup SOW).
+
+Next: Chunk 12 — REST endpoints.
+
+### Chunk 11 iter-6 — request_id propagated to error+panic logs (2026-05-27)
+
+Tightly-scoped parity iteration addressing the single iter-5 codex P2
+("request-scoped error/panic logs still do not satisfy the trace-ID
+contract"). iter-5 minimax and iter-5 glm came back CLEAN. iter-6
+touches the presenter middleware + error helpers only; no behaviour
+outside `internal/presenter` changes.
+
+The fix ledger:
+
+- **iter6-1 (codex iter-5 P2): request_id missing from
+  error/panic/frontend-error log lines**: observability.md:101-103
+  requires every per-request log line to carry the UUID-v4
+  `request_id`. iter-5 emitted it on the access log only, leaving
+  three surfaces non-compliant:
+  1. `recoverMiddleware`'s panic log (`middleware.go:151-157` in
+     iter-5) — emitted with `panic`, `path`, `method`, `stack`, no
+     `request_id`.
+  2. `writeJSONError`'s warning log (`errors.go:56-67` in iter-5) —
+     every 4xx/5xx response logged status/code/path/method but no
+     `request_id`.
+  3. The deferred-route + asset-error JSON encoder failure logs in
+     `errors.go:74-77`/`107-109` and the frontend serving error log
+     in `embed.go:185-193`.
+
+  Additionally, the iter-5 `loggingMiddleware` access log was emitted
+  POST-handler (not deferred), so a panicking handler produced a
+  panic log AND a 500 response but NO access log — a request that
+  crashed left no per-request trace line at all.
+
+  The fix is structural, not cosmetic:
+
+  1. Extracted the request-ID context key/helpers and `newRequestID`
+     out of `middleware.go` into a new sibling file
+     `internal/presenter/reqctx.go` so the line ceiling
+     (middleware.go ≤ 400) survives the new defer + helpers.
+     middleware.go drops from 398 to 358 lines; reqctx.go is 77.
+  2. `loggingMiddleware` now `defer`s the access log emit. The defer
+     captures `lw`, `rid`, `ctx`, `start` from the surrounding
+     closure so status, bytes_out and request_id reflect the final
+     response — including the 500 written by `recoverMiddleware`
+     after a panic.
+  3. Reordered the middleware chain in `presenter.go` so
+     `loggingMiddleware` is OUTERMOST (`logging → recover →
+     bodyLimit → gzip`). With logging outer, its deferred emit
+     unwinds AFTER `recoverMiddleware`'s defer has absorbed any
+     panic and written its 500 envelope through `lw`, so the access
+     log line shows `status=500` and `bytes_out=70` for crashed
+     requests instead of the previous default of 200 / 0.
+  4. Added `slog.String("request_id", requestIDFromContext(ctx))` to
+     the panic log (`middleware.go:144-156`), the `writeJSONError`
+     warning log + JSON-encode-failure error log (`errors.go:56-78`),
+     the `writeJSON` JSON-encode-failure error log (`errors.go:106-110`),
+     and the frontend-error log (`embed.go:185-196`). Every
+     request-scoped log line now carries the field.
+  5. Hardened `requestIDFromContext` with a nil-ctx guard so a
+     misconfigured test harness or future caller that forgets to
+     thread the context cannot panic — the function returns "" and
+     the log line still emits.
+
+  Tests pinning the contract:
+  - `middleware_test.go::TestPanic_AccessLogStillEmitted` — drives a
+    panicking handler through the production chain order
+    (logging-OUTER, recover-INNER). Asserts (a) HTTP 500, (b)
+    `X-Request-ID` is UUID-v4, (c) BOTH the `"presenter: handler
+    panic"` ERROR line AND the `"http request"` INFO line are
+    present in the log buffer, (d) both carry the same `request_id`
+    matching `X-Request-ID`, (e) the access log shows `status=500`
+    (not the stale lw default).
+  - `coverage_middleware_test.go::TestWriteJSONError_IncludesRequestID`
+    — seeds a known UUID via `withRequestID`, invokes the helper
+    directly, asserts the structured WARN log line carries the same
+    `request_id`.
+  - `middleware_test.go::TestRequestIDFromContext` extended to
+    include the nil-ctx case via a `emptyContext()` helper (avoids
+    staticcheck SA1012 on a bare `nil` literal — no new
+    `//nolint` / `//nosec` suppressions; the helper documents the
+    contract instead).
+  - `middleware_test.go::TestLoggingMiddleware_NilLoggerSafe` — pins
+    that the deferred emit short-circuits cleanly when the logger
+    is nil, so a misconfigured caller cannot crash the server on
+    the new defer path.
+
+  Deliberate non-decisions: (a) we keep the per-request UUID v4
+  generated on EVERY request (no skip for HEAD / CORS / static
+  asset 304s) so log correlation is uniform; the cost is one
+  `rand.Read(16)` per request, well below noise on a 127.0.0.1
+  presenter. (b) `gzipMiddleware` remains innermost — its
+  bufferingResponseWriter caches the body for length inspection
+  and only flushes after the handler returns normally; on a panic
+  the gzip buffer is discarded and `recoverMiddleware` writes the
+  500 envelope directly through `lw`, which is the right
+  behaviour (no half-compressed bytes on the wire).
+
+**Gates after iter-6** (same scope as iter-5):
+
+```
+$ gofmt -l .
+(no output)
+$ $HOME/go/bin/goimports -l .
+(no output)
+$ go vet ./...
+(no output)
+$ golangci-lint run --timeout=5m
+0 issues.
+$ $HOME/go/bin/gosec ./...
+Issues : 0 (8 nosec from prior chunks, no new in iter-6)
+$ go test -race -count=1 ./...
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-ingest           1.070s
+ok  github.com/netdata/ai-viewer/cmd/ai-viewer-serve            1.023s
+ok  github.com/netdata/ai-viewer/internal/adapters              1.011s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v2  95.158s
+ok  github.com/netdata/ai-viewer/internal/adapters/aiagent_v3   6.037s
+ok  github.com/netdata/ai-viewer/internal/canonical             1.016s
+ok  github.com/netdata/ai-viewer/internal/ingest                3.511s
+ok  github.com/netdata/ai-viewer/internal/presenter             2.150s
+ok  github.com/netdata/ai-viewer/internal/pricing               1.103s
+ok  github.com/netdata/ai-viewer/internal/store                 2.179s
+```
+
+Coverage per package (`go test -cover` per pkg):
+
+| Package | iter-6 | Δ vs iter-5 |
+|---|---|---|
+| `internal/presenter` | 91.8% | +0.1% (new request_id + nil-logger + nil-ctx tests) |
+
+All other packages unchanged from iter-5 (iter-6 touched no other
+code paths).
+
+No new `// nosec`, `// nolint`, or `--no-verify` suppressions.
+
+Files changed in iter-6:
+
+- `internal/presenter/reqctx.go` (NEW — 77 lines; ctxKey,
+  `requestIDFromContext`, `withRequestID`, `newRequestID` extracted
+  from middleware.go so the file budget survives the new defer +
+  helpers).
+- `internal/presenter/middleware.go` (358 lines; deferred access-log
+  emit; access log no longer dropped on panic; ctxKey/newRequestID
+  moved out).
+- `internal/presenter/presenter.go` (middleware chain reordered:
+  logging OUTERMOST, then recover, then bodyLimit, then gzip; doc
+  comment expanded to explain the ordering contract).
+- `internal/presenter/errors.go` (`writeJSONError` adds
+  `request_id`; both JSON-encode-failure error logs add
+  `request_id`).
+- `internal/presenter/embed.go` (`logFrontendError` adds
+  `request_id`; comment updated).
+- `internal/presenter/middleware_test.go` (added
+  `TestPanic_AccessLogStillEmitted`,
+  `TestLoggingMiddleware_NilLoggerSafe`,
+  `emptyContext` helper for the nil-ctx case in
+  `TestRequestIDFromContext`).
+- `internal/presenter/coverage_middleware_test.go` (added
+  `TestWriteJSONError_IncludesRequestID`).
+- `.agents/sow/current/SOW-0001-phase-1-foundation.md` (this
+  sub-section).
+
+Sample log output proving panic + access + error logs all carry the
+same request_id (captured via a throw-away test that was deleted
+after the run; the persistent unit tests cover the same shape):
+
+```
+Successful 404 (handler calls writeJSONError):
+  {"level":"WARN","msg":"not found","status":404,"code":"NOT_FOUND","path":"/missing","method":"GET","request_id":"04c4228f-ea6a-47fc-94b8-969a7dea92c0"}
+  {"level":"INFO","msg":"http request","method":"GET","path":"/missing","status":404,"duration_us":102,"bytes_out":53,"client_ip":"127.0.0.1","request_id":"04c4228f-ea6a-47fc-94b8-969a7dea92c0"}
+
+Panicking handler (recover writes 500):
+  {"level":"ERROR","msg":"presenter: handler panic","panic":"demo-panic","path":"/explodes","method":"GET","request_id":"bc936e69-d45b-4c86-9538-ec06c800268f","stack":"..."}
+  {"level":"WARN","msg":"internal server error","status":500,"code":"INTERNAL_ERROR","path":"/explodes","method":"GET","request_id":"bc936e69-d45b-4c86-9538-ec06c800268f"}
+  {"level":"INFO","msg":"http request","method":"GET","path":"/explodes","status":500,"duration_us":41,"bytes_out":70,"client_ip":"127.0.0.1","request_id":"bc936e69-d45b-4c86-9538-ec06c800268f"}
+```
+
+All three log lines for the panicking request share the same
+`request_id` (`bc936e69-d45b-4c86-9538-ec06c800268f`) and that ID
+matches the X-Request-ID response header — the grep recipe
+`request_id="bc936e69-..."` returns every line associated with the
+crashed request, closing codex iter-5 P2.
+
+**Project hygiene note (carried over)**: every new SOW prose
+paragraph in this iter substitutes `$REPO_ROOT` / `$HOME` for
+workstation absolute paths so the operator-name discipline is
+preserved.
+
+**Reviewer iteration 7 (2026-05-27)**: codex iter-6 came back with a
+single residual P2 — `request_id` was still absent from the seven
+DB-error log sites in `internal/presenter/health.go` and
+`internal/presenter/sources.go` that iter-6 missed. iter-6 closed
+the middleware + JSON-encoder + frontend-error surfaces but left the
+adapter-style "structured DB-error log" call sites unchanged, so a
+500/503 served by `handleSources` or a `health` query failure could
+not be grepped back to its access log line. minimax iter-6 and glm
+iter-6 were CLEAN; this iter-7 is scoped to that one finding plus
+its supporting test.
+
+iter-7 fix ledger:
+
+- **iter7-1 (codex iter-6 P2): request_id missing from DB-error log
+  sites**: added `slog.String("request_id", requestIDFromContext(ctx))`
+  alongside the existing `slog.Any("err", ...)` on every one of the
+  seven sites. The complete list, all pointing at
+  `$REPO_ROOT/internal/presenter/`:
+
+  1. `health.go:106` — `"presenter: health source query failed"`
+     (sources rollup query at `/api/health`).
+  2. `health.go:114` — `"presenter: health parse-error query failed"`
+     (recent parse-error count at `/api/health`).
+  3. `health.go:238` — `"presenter: page_count probe failed"`
+     (`PRAGMA page_count` for db_size_bytes).
+  4. `health.go:243` — `"presenter: page_size probe failed"`
+     (`PRAGMA page_size` for db_size_bytes).
+  5. `sources.go:73` — `"presenter: sources query failed"`
+     (top-level QueryContext at `/api/sources`).
+  6. `sources.go:94` — `"presenter: sources row scan failed"`
+     (per-row Scan inside the iteration).
+  7. `sources.go:125` — `"presenter: sources row iteration failed"`
+     (rows.Err() after the loop).
+
+  Every site continues to use `ctx` (the per-handler context
+  obtained from `r.Context()` via `context.WithTimeout`) — that
+  context is the same one `loggingMiddleware` decorated with the
+  request id, so `requestIDFromContext(ctx)` always returns the
+  same UUID-v4 that the X-Request-ID response header carries. No
+  signature changes, no new context plumbing, no new
+  `// nosec`/`// nolint` suppressions.
+
+  Test pinning the contract (smallest of the seven paths chosen, per
+  task instructions — the closed-DB approach exercises
+  `sources.go:73` deterministically without any error injection
+  scaffolding):
+  - `internal/presenter/sources_test.go::TestSources_DBErrorLogCarriesRequestID`
+    — constructs a `Presenter` with a `captureLogger` JSON handler
+    at debug level, calls `store.Close()` BEFORE the HTTP request so
+    `QueryContext` returns `sql: database is closed`, issues a GET
+    `/api/sources`, asserts (a) HTTP 503 with `DB_UNAVAILABLE`
+    envelope, (b) `X-Request-ID` is UUID-v4, (c) the
+    `"presenter: sources query failed"` ERROR log line is present
+    AND its `request_id` field equals the X-Request-ID header. A
+    deliberate mutation (removing the new attribute from
+    `sources.go:73`) makes the test fail with
+    `error log request_id = "", want "..."` — confirming the test
+    catches the regression.
+
+  Deliberate non-decisions: (a) we did not add an analogous test
+  for each of the other six sites; the request_id plumbing path is
+  identical (every site reads from the same `ctx` value created in
+  the same handler and decorated by the same middleware), so the
+  single end-to-end pin captures the contract that matters
+  (request_id reaches LogAttrs through ctx). Adding six more
+  closed-DB tests would be redundant. (b) `health.go`'s `Debug`
+  level page-count/page-size probes were brought into parity for
+  consistency even though `/api/health` does not return their
+  failure mode on the wire — keeping the request_id discipline
+  uniform across every LogAttrs site that takes the per-handler
+  ctx avoids future drift when a site changes severity.
+
+Gates after iter-7 (same scope as iter-6):
+
+```
+$ gofmt -l .
+(no output)
+$ $HOME/go/bin/goimports -l .
+(no output)
+$ go vet ./...
+(no output)
+$ golangci-lint run --timeout=5m
+0 issues.
+$ $HOME/go/bin/gosec ./...
+Issues : 0 (8 nosec from prior chunks, no new in iter-7)
+$ go test -race -count=1 ./...
+ok  	github.com/netdata/ai-viewer/cmd/ai-viewer-ingest           1.159s
+ok  	github.com/netdata/ai-viewer/cmd/ai-viewer-serve            1.054s
+ok  	github.com/netdata/ai-viewer/internal/adapters              1.054s
+ok  	github.com/netdata/ai-viewer/internal/adapters/aiagent_v2 138.730s
+ok  	github.com/netdata/ai-viewer/internal/adapters/aiagent_v3   6.219s
+ok  	github.com/netdata/ai-viewer/internal/canonical             1.095s
+ok  	github.com/netdata/ai-viewer/internal/ingest                7.375s
+ok  	github.com/netdata/ai-viewer/internal/presenter             3.744s
+ok  	github.com/netdata/ai-viewer/internal/pricing               1.340s
+ok  	github.com/netdata/ai-viewer/internal/store                 3.250s
+$ go test -cover -count=1 ./internal/presenter/
+ok  	github.com/netdata/ai-viewer/internal/presenter	0.098s	coverage: 91.8% of statements
+```
+
+Coverage per package (`go test -cover` per pkg):
+
+| Package | iter-7 | Δ vs iter-6 |
+|---|---|---|
+| `internal/presenter` | 91.8% | +0.0% (new closed-DB test exercises the existing 503/log path; the seven added `slog.String` calls are unconditional statements covered by the same path) |
+
+All other packages unchanged from iter-6 (iter-7 touched no other
+code paths).
+
+No new `// nosec`, `// nolint`, or `--no-verify` suppressions.
+
+Files changed in iter-7:
+
+- `$REPO_ROOT/internal/presenter/health.go` (4 LogAttrs sites: added
+  `slog.String("request_id", requestIDFromContext(ctx))` at lines
+  106/114/238/243 — still ≤ 400 lines).
+- `$REPO_ROOT/internal/presenter/sources.go` (3 LogAttrs sites: added
+  the same attribute at lines 73/94/125 — still ≤ 400 lines).
+- `$REPO_ROOT/internal/presenter/sources_test.go` (added
+  `TestSources_DBErrorLogCarriesRequestID`; brought in the
+  `context`, `io`, `log/slog`, `strings`, `testing/fstest`, `time`,
+  and `internal/store` imports the new test needs).
+- `$REPO_ROOT/.agents/sow/current/SOW-0001-phase-1-foundation.md`
+  (this sub-section).
+
+Closes codex iter-6 P2. minimax iter-6 + glm iter-6 had no findings
+to address.
+
+Next: Chunk 12 — REST endpoints.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

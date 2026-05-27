@@ -48,11 +48,29 @@ The single source of truth for "is this thing alive and what state is it in":
       "last_seen_at":<us>,
       "lag_us":<int>,           // now - last_seen_at
       "parse_errors":0,
-      "events_ingested_total":12345
+      "last_seq":12345          // adapter's opaque high-water mark
     }
   ]
 }
 ```
+
+`last_seq` is the adapter's opaque per-source high-water mark
+(`source_progress.last_seq`). **Semantics depend on the adapter and
+last_seq is NOT a portable event count:**
+
+- `aiagent_v3` packs `ledgerSeq << 12 | subIdx`, so it grows roughly
+  linearly with events emitted by that source — operators can
+  approximate "events ingested" by comparing two snapshots of the
+  same source.
+- `aiagent_v2` packs FNV-64(`originId`, opTree path), which is an
+  opaque 64-bit hash — it bears no relation to event count and the
+  value can be very large (e.g. ~9.2e18).
+
+Do NOT compare `last_seq` across formats; the only portable meaning is
+"the most recent cursor position the writer committed". A separate
+true `events_ingested_total` counter is future work and not yet
+plumbed; the field was renamed in iteration 2 of SOW-0001 Chunk 11
+once a real-corpus run surfaced the misleading v2 values.
 
 `status` is `degraded` when:
 

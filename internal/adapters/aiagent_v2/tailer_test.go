@@ -202,6 +202,48 @@ func TestSortStrings(t *testing.T) {
 	}
 }
 
+// TestTailer_RefusesToCreateMissingSourceDir asserts the tailer never
+// mkdirs into the source tree (security.md §"Hard Rules" #1 — read-only
+// on sources). When the watch root is absent we want a clean, fast
+// shutdown with the cause surfaced via OnError, NOT a silently-created
+// directory.
+func TestTailer_RefusesToCreateMissingSourceDir(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	root := filepath.Join(parent, "missing-source-root")
+	// Important: do NOT mkdir root — that is the test invariant.
+
+	var captured []error
+	a, err := New(root, canonical.AdapterOptions{
+		OnError: func(e error) { captured = append(captured, e) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Tail(ctx, out) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Tail returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Tail did not return within 2s of missing source root")
+	}
+
+	if _, statErr := os.Stat(root); statErr == nil {
+		t.Fatalf("tailer created %s — violates security.md §Hard Rules #1", root)
+	}
+	if len(captured) == 0 {
+		t.Fatal("expected at least one OnError invocation describing the missing source root")
+	}
+}
+
 func TestResetDebounce(t *testing.T) {
 	t.Parallel()
 	timer := time.NewTimer(debounceWindow)

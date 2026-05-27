@@ -42,14 +42,17 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	defer func() { _ = watcher.Close() }()
 
 	watchDir := filepath.Join(root, sessionDir)
-	// 0o750 keeps the operator's source tree restrictive (gosec G301):
-	// owner full, group read+exec only, world none. We create the dir
-	// defensively when the operator points the ingester at a fresh
-	// sessions-dir; the writer (ai-agent) sets its own perms on session
-	// files. AGENTS.md "read-only on sources" applies to file content,
-	// not to creating the parent directory that the watcher attaches to.
-	if mkErr := os.MkdirAll(watchDir, 0o750); mkErr != nil {
-		return fmt.Errorf("aiagent_v3: ensure %s: %w", watchDir, mkErr)
+	// security.md §"Hard Rules" #1 — read-only on sources. No code path
+	// writes to a source tree, NOT EVEN the watch directory. If the
+	// directory does not exist we surface a SourceErrorEvent via
+	// onError (lifts to /api/health.parse_errors) and return cleanly:
+	// the adapter has nothing to watch, but the daemon keeps running
+	// for any other configured source. The operator (or the ai-agent
+	// process they point us at) is responsible for creating the
+	// session directory.
+	if _, statErr := os.Stat(watchDir); statErr != nil {
+		onError(fmt.Errorf("aiagent_v3: watch dir %s not present (read-only on sources, no mkdir): %w", watchDir, statErr))
+		return nil
 	}
 	if addErr := watcher.Add(watchDir); addErr != nil {
 		return fmt.Errorf("aiagent_v3: watch %s: %w", watchDir, addErr)

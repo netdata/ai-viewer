@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -208,6 +209,88 @@ func TestOpen_JournalModeWAL(t *testing.T) {
 	}
 	if mode != "wal" {
 		t.Fatalf("PRAGMA journal_mode: want %q, got %q", "wal", mode)
+	}
+}
+
+// TestOpenWriter_PinsMaxOpenConnsOnDisk pins the writer pool to a
+// single connection. SQLite WAL allows many readers but only ONE
+// writer; without this pin a multi-source ingester would experience
+// SQLITE_BUSY races at BeginTx that the no-retry policy converts into
+// dropped batches. The test confirms both the on-disk case (the one
+// that regressed under iter-2 — previously gated on isMemoryDSN) and
+// asserts that a second concurrent acquisition blocks via the pool
+// rather than succeeding (codex iter-3 P2#5).
+func TestOpenWriter_PinsMaxOpenConnsOnDisk(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dsn := filepath.Join(dir, "single-writer.db")
+	s, err := store.OpenWriter(context.Background(), dsn, silentLogger())
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := s.DB().Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	}
+
+	// Acquire one conn and verify the pool grants no second.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c1, err := s.DB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire first conn: %v", err)
+	}
+	defer func() { _ = c1.Close() }()
+
+	gotSecond := make(chan error, 1)
+	go func() {
+		c2ctx, c2cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer c2cancel()
+		c2, err := s.DB().Conn(c2ctx)
+		if err == nil {
+			_ = c2.Close()
+		}
+		gotSecond <- err
+	}()
+	err = <-gotSecond
+	if err == nil {
+		t.Fatal("expected second Conn() to time out while first is held, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded from blocked second Conn, got %v", err)
+	}
+}
+
+// TestOpenReader_PinsMaxOpenConnsToEight pins the reader pool size to
+// the value documented in presenter.md §"SQLite Access" (8). Go's
+// database/sql default is unbounded, which would surface as a runtime
+// regression vs the spec (codex iter-3 P2#5).
+func TestOpenReader_PinsMaxOpenConnsToEight(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dsn := filepath.Join(dir, "reader-pool.db")
+
+	// Bootstrap the file via a writer + close so the reader has
+	// something to open.
+	ws, err := store.OpenWriter(context.Background(), dsn, silentLogger())
+	if err != nil {
+		t.Fatalf("OpenWriter (bootstrap): %v", err)
+	}
+	if err := ws.Close(); err != nil {
+		t.Fatalf("close writer bootstrap: %v", err)
+	}
+
+	rs, err := store.OpenReader(context.Background(), dsn, silentLogger())
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	t.Cleanup(func() { _ = rs.Close() })
+
+	if got := rs.DB().Stats().MaxOpenConnections; got != 8 {
+		t.Fatalf("OpenReader MaxOpenConnections = %d, want 8 (presenter.md §SQLite Access)", got)
 	}
 }
 
