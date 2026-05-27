@@ -1,0 +1,35 @@
+backfillbench: reading from /home/costa/.ai-agent/sessions (read-only). Cold page cache will skew the first run; consider `cat /home/costa/.ai-agent/sessions/*.json.gz > /dev/null` (read-only) to warm before benching.
+[00:00:10] files=23485/294316 (8.0%) 2348 files/s  175.6 MB/s compressed  143169 events/s  rss=4444 MB  errs=0  zero=2
+[00:00:20] files=48038/294316 (16.3%) 2402 files/s  196.2 MB/s compressed  158589 events/s  rss=5042 MB  errs=0  zero=4
+[00:00:30] files=73302/294316 (24.9%) 2443 files/s  197.8 MB/s compressed  162544 events/s  rss=5042 MB  errs=0  zero=4
+[00:00:40] files=96418/294316 (32.8%) 2410 files/s  198.9 MB/s compressed  162287 events/s  rss=5042 MB  errs=0  zero=5
+[00:00:50] files=121748/294316 (41.4%) 2435 files/s  199.0 MB/s compressed  165990 events/s  rss=5042 MB  errs=0  zero=10
+[00:01:00] files=145882/294316 (49.6%) 2431 files/s  201.2 MB/s compressed  168664 events/s  rss=5042 MB  errs=0  zero=10
+[00:01:10] files=165725/294316 (56.3%) 2367 files/s  197.4 MB/s compressed  165046 events/s  rss=6069 MB  errs=0  zero=12
+[00:01:20] files=187198/294316 (63.6%) 2340 files/s  200.7 MB/s compressed  165434 events/s  rss=6073 MB  errs=0  zero=18
+[00:01:30] files=206799/294316 (70.3%) 2298 files/s  199.1 MB/s compressed  162218 events/s  rss=6073 MB  errs=0  zero=22
+[00:01:40] files=227230/294316 (77.2%) 2272 files/s  198.6 MB/s compressed  161403 events/s  rss=6073 MB  errs=0  zero=22
+[00:01:50] files=247333/294316 (84.0%) 2248 files/s  196.2 MB/s compressed  159089 events/s  rss=6073 MB  errs=0  zero=26
+[00:02:00] files=265994/294316 (90.4%) 2216 files/s  194.3 MB/s compressed  156860 events/s  rss=6073 MB  errs=0  zero=27
+[00:02:10] files=289847/294316 (98.5%) 2230 files/s  197.3 MB/s compressed  158117 events/s  rss=6073 MB  errs=0  zero=29
+
+BackfillV2_RealCorpus summary
+=============================
+root              : /home/costa/.ai-agent/sessions
+workers           : 16 (NumCPU=16)
+wall_time         : 2m11.665s
+files_scanned     : 294316
+files_processed   : 294316
+files_zero_byte   : 29
+files_skipped_tmp : 2 (.tmp-*)
+files_skipped_dot : 0 (dotfiles)
+files_errored     : 0 (stat/scan I/O error)
+streamed_files    : 22 (compressed > 52428800 bytes)
+parse_errors      : 0 (per-record SourceErrorEvents + onError)
+events_emitted    : 20869087
+bytes_compressed  : 27272835000 (25.40 GB)
+files_per_sec     : 2235.3
+throughput_MB_s   : 197.54 (compressed)
+peak_rss_MB       : 6073.4
+
+BackfillV2_RealCorpus    wall=2m12s files=294316 files_per_sec=2235 bytes=27272835000B throughput=198MB/s peak_rss=6073MB workers=16

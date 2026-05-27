@@ -1,0 +1,17 @@
+# ai-viewer benchmark baseline
+# Hardware: 12th Gen Intel(R) Core(TM) i9-12900K (16 logical CPUs), 125 GiB RAM, NVMe SSD
+# Method: synthetic Go bench from `go test -bench` (single warm run); real-corpus from
+#         a single warm run of `scripts/bench-v2-backfill.sh` against
+#         ~/.ai-agent/sessions (294,316 files, 25.4 GB compressed). Page cache state at
+#         the time of the run is documented in bench/v2-backfill-2026-05-27.txt.
+# Quality gate: per .agents/sow/specs/quality-gates.md §Go Benchmarks, future runs
+#               compare via `benchstat bench/baseline.txt bench-current.txt` and must
+#               not regress > 20% on any metric without a SOW that explicitly accepts.
+
+# Synthetic in-package Go bench (1,024 synthetic v2 .json.gz fixtures, mixed sizes
+# including a few > 50 MiB to exercise the streamer). i9-12900K, GOMAXPROCS=16.
+BenchmarkScan_SyntheticCorpus-16       8       138781449 ns/op    57.16 MB/s    106657 events/sec    7206 files/sec    4.453 peak_heap_mb    134795306 B/op    225804 allocs/op
+
+# Real-corpus end-to-end backfill. Operator workstation, page cache cold at start
+# (no pre-warm). Hard SOW-0001 gate: < 60 min.
+BackfillV2_RealCorpus    wall=2m11.665s    files=294316    files_per_sec=2235.3    bytes=25.40GB_compressed    throughput=197.54MB/s    peak_rss=6073MB    workers=16    streamed=22    zero_byte=29    tmp_skip=2    parse_errors=0    events=20869087

@@ -1380,6 +1380,112 @@ Next: Chunk 9 — v2 backfill perf measurement against the
 operator's 294,316 real files (target < 60 min wall, expected
 5-10 min with 8 workers per SOW-0002 analysis).
 
+### Chunk 9 — v2 backfill perf measurement (2026-05-27)
+
+Landed in PR #<N>:
+
+- `internal/adapters/aiagent_v2/bench_test.go` — Go in-package
+  benchmark `BenchmarkScan_SyntheticCorpus` against a 1,024-file
+  synthetic corpus (mixed sizes, including >50 MiB streamer
+  fixtures). Reports events/sec, files/sec, throughput in MB/s,
+  peak heap, allocs/op. Runs in CI under
+  `go test -bench=. -benchmem`.
+- `internal/adapters/aiagent_v2/bench_helpers.go` — exports a
+  minimal `ScanFileForBench` helper so the cmd harness can reuse
+  the same per-file parse+map path without leaking the adapter's
+  contract.
+- `internal/adapters/aiagent_v2/cmd/backfillbench/main.go` —
+  operator-runnable harness; reads `--root` (defaults to
+  `~/.ai-agent/sessions`), shards files across `--workers`
+  goroutines (default `runtime.NumCPU()`), drains events into
+  `/dev/null` to isolate pure read+parse cost. Reports progress
+  every `--progress-interval`. Read-only — never writes the
+  source tree.
+- `scripts/bench-v2-backfill.sh` — wrapper for the operator.
+- `bench/README.md` — operator doc.
+- `bench/baseline.txt` — frozen baseline numbers used by future
+  `benchstat` runs to enforce the ≤ 20% regression gate from
+  quality-gates.md §Go Benchmarks.
+- `bench/v2-backfill-2026-05-27.txt` — full output of the
+  measurement run.
+
+Design call: parallelism lives in the **harness**, not the v2
+adapter. The v2 adapter's public API stays sequential (unchanged
+since Chunk 8); the harness shards file paths and runs one
+worker per logical CPU. This keeps the adapter contract clean
+(no `Workers` option to bikeshed) and lets the operator scale
+the bench by adjusting `--workers` alone.
+
+Measurement result on the operator's workstation
+(i9-12900K, 125 GiB RAM, 16 workers, single warm run with cold
+page cache at start):
+
+| metric | value |
+|---|---|
+| files scanned | 294,316 |
+| files processed | 294,316 |
+| files skipped (zero-byte) | 29 (matches SOW-0002 prediction) |
+| files skipped (.tmp-*) | 2 |
+| files errored | 0 (stat/scan I/O) |
+| files streamed (>50 MiB compressed) | 22 |
+| parse errors | 0 |
+| events emitted | 20,869,087 |
+| bytes processed (compressed) | 25.40 GB |
+| throughput | 197.54 MB/s compressed |
+| files/sec | 2,235.3 |
+| **wall time** | **2 min 11.7 s** |
+| peak RSS | 6.07 GB |
+
+Synthetic Go bench (one warm run, same machine):
+
+| metric | value |
+|---|---|
+| ns/op | 138,781,449 |
+| events/sec | 106,657 |
+| files/sec | 7,206 |
+| throughput | 57.16 MB/s |
+| peak heap | 4.45 MB |
+
+**Gate: PASS by 27×.** The 60-min SOW-0001 hard gate is met
+with a wide margin. No bottleneck analysis needed; no design
+change required. The v2 adapter is approved for downstream use
+in the ingester at production scale.
+
+Two notes for future SOWs (not blocking Phase 1):
+
+- Peak RSS at 6 GB on the real run is much higher than the
+  synthetic bench's 4 MB heap. This is operator-bench-only
+  cost: 16 workers each accumulate per-file event slices in
+  memory before draining; the ingester's batched-transaction
+  worker (Chunk 7) bounds this with its 1000-event /
+  500ms batch cap. For an actual ingest run the steady-state
+  RSS will be much lower. Worth a follow-up SOW to add a
+  bounded-channel pressure check end-to-end across adapter +
+  ingester at the same scale.
+- The 22 streamed files all completed without crash and
+  contributed to the 25 GB throughput aggregate. The
+  streamer threshold of 50 MiB compressed remains correct.
+
+Pre-PR gates:
+
+```
+go mod tidy                            # no changes
+gofmt -l .                             # clean
+goimports -l .                         # clean
+go vet ./...                           # clean
+go build ./...                         # exit 0
+go test -race -count=1 ./...           # all pass
+go test -bench=BenchmarkScan_SyntheticCorpus -benchmem -count=1 ./internal/adapters/aiagent_v2  # see baseline.txt
+golangci-lint run --timeout=5m         # 0 issues
+gosec ./...                            # 0 issues
+shellcheck -x -s bash scripts/bench-v2-backfill.sh  # clean
+```
+
+Coverage unchanged (bench harness + cmd are operator-runnable
+0% by design; same pattern as cmd/genfixtures).
+
+Next: Chunk 10 — pricing data + refresh script.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
