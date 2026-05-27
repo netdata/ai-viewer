@@ -15,9 +15,19 @@ import (
 //
 // Each method runs against a *sql.Tx so the catalog row update commits
 // or rolls back with the rest of the batch.
-type catalogWriter struct{}
+//
+// catalogWriter holds an optional pricer reference so onOpStarted can
+// seed `catalog_models.ctx_max` from the embedded pricing table on
+// first sight of a (provider, model). Per pricing.md §"Field
+// semantics" the table's ctx_max is the catalog seed; the op's own
+// CtxMax (recorded on OpFinalized) still takes precedence on
+// subsequent updates. Pricers without ctx_max metadata (NopPricer,
+// most test fakes) are no-ops here. (Iter-8 fix iter8-4.)
+type catalogWriter struct {
+	pricer Pricer
+}
 
-func newCatalogWriter() *catalogWriter { return &catalogWriter{} }
+func newCatalogWriter(pricer Pricer) *catalogWriter { return &catalogWriter{pricer: pricer} }
 
 // onSessionStarted populates catalog_agents and catalog_cwds when the
 // session start event carries enough information.
@@ -60,14 +70,26 @@ func (c *catalogWriter) onOpStarted(ctx context.Context, tx *sql.Tx, ev canonica
 			}
 		}
 		if ev.Provider != "" && ev.Model != "" {
+			// Iter-8 fix iter8-4: seed ctx_max from the pricing table
+			// when the pricer carries metadata. The COALESCE on
+			// ON CONFLICT keeps an existing non-null ctx_max (set by a
+			// prior OpFinalized recording the op's own CtxMax)
+			// untouched — the table seeds, the op refines.
+			ctxMaxSeed := sql.NullInt64{}
+			if mp, ok := c.pricer.(MetadataPricer); ok && mp != nil {
+				if cm, hit := mp.CtxMax(ev.Provider, ev.Model); hit && cm > 0 {
+					ctxMaxSeed = sql.NullInt64{Int64: cm, Valid: true}
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO catalog_models (provider, name, first_seen, last_seen, call_count)
-VALUES (?, ?, ?, ?, 1)
+INSERT INTO catalog_models (provider, name, ctx_max, first_seen, last_seen, call_count)
+VALUES (?, ?, ?, ?, ?, 1)
 ON CONFLICT (provider, name) DO UPDATE SET
     first_seen = MIN(catalog_models.first_seen, excluded.first_seen),
     last_seen  = MAX(catalog_models.last_seen, excluded.last_seen),
+    ctx_max    = COALESCE(catalog_models.ctx_max, excluded.ctx_max),
     call_count = catalog_models.call_count + 1
-`, ev.Provider, ev.Model, ev.Ts, ev.Ts); err != nil {
+`, ev.Provider, ev.Model, ctxMaxSeed, ev.Ts, ev.Ts); err != nil {
 				return fmt.Errorf("catalog_models upsert: %w", err)
 			}
 		}
@@ -149,6 +171,14 @@ WHERE name = ? AND alias = ?
 			}
 		}
 		if provider.Valid && model.Valid && provider.String != "" && model.String != "" {
+			// Iter-9 fix iter9-1: per data-model.md:260, :395 the
+			// catalog ctx_max is the MAX of all observed values —
+			// the pricing seed (set by onOpStarted) is a floor, not
+			// a ceiling. An adapter that observes a LARGER ctx_max
+			// must update the catalog row, otherwise the seed pins
+			// the column forever. The CASE WHEN gate keeps the
+			// pre-iter-9 behaviour for ops that record no CtxMax
+			// (the column declares NULLIF(?, 0) in writer.go:472).
 			if _, err := tx.ExecContext(ctx, `
 UPDATE catalog_models SET
     failure_count            = failure_count + ?,
@@ -158,9 +188,11 @@ UPDATE catalog_models SET
     total_tokens_cache_write = total_tokens_cache_write + ?,
     total_cost_usd           = total_cost_usd + ?,
     total_duration_us        = total_duration_us + ?,
+    ctx_max                  = CASE WHEN ? > 0 THEN MAX(COALESCE(ctx_max, 0), ?) ELSE ctx_max END,
     last_seen                = MAX(last_seen, ?)
 WHERE provider = ? AND name = ?
-`, failureInc, ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite, ev.CostUSD, durUS, ev.EndTs,
+`, failureInc, ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite, ev.CostUSD, durUS,
+				ev.CtxMax, ev.CtxMax, ev.EndTs,
 				provider.String, model.String); err != nil {
 				return fmt.Errorf("catalog_models totals: %w", err)
 			}

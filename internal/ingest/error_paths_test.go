@@ -262,7 +262,7 @@ func TestCatalog_OnOpFinalized_RolledTx(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	ctx, tx := rolledTx(t, db)
-	c := newCatalogWriter()
+	c := newCatalogWriter(NopPricer{})
 	err := c.onOpFinalized(ctx, tx, "any-op-id", canonical.OpFinalizedEvent{
 		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
 	})
@@ -286,7 +286,7 @@ func TestCatalog_OnSessionStarted_RolledTx(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	ctx, tx := rolledTx(t, db)
-	c := newCatalogWriter()
+	c := newCatalogWriter(NopPricer{})
 	err := c.onSessionStarted(ctx, tx, "fmt", canonical.SessionStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
 		NativeID:  "s", AgentName: "agent",
@@ -308,7 +308,7 @@ func TestCatalog_OnOpStarted_RolledTx(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	ctx, tx := rolledTx(t, db)
-	c := newCatalogWriter()
+	c := newCatalogWriter(NopPricer{})
 	// LLM branch with provider+model.
 	err := c.onOpStarted(ctx, tx, canonical.OpStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},

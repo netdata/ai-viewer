@@ -3,6 +3,8 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -394,6 +396,233 @@ func TestWriter_PricerFillsZeroCost(t *testing.T) {
 	if p.calls != 1 {
 		t.Errorf("pricer calls = %d, want 1", p.calls)
 	}
+	// The writer reads the op's start_ts from the ops row and passes
+	// that to the pricer (per pricing.md §"Temporal resolution
+	// algorithm") so tier selection reflects when the op STARTED, not
+	// the finalize event timestamp. OpStarted above carried Ts=1100.
+	if p.lastTsUS != 1100 {
+		t.Errorf("pricer tsUS = %d, want 1100 (op start_ts)", p.lastTsUS)
+	}
+}
+
+// TestWriter_PricerSkippedWhenOpRowMissing verifies that an
+// OpFinalized arriving without a matching OpStarted row (sql.ErrNoRows
+// on the lookup) does NOT invoke the pricer — provider/model/kind are
+// unknown so pricing it would produce a noisy and unactionable
+// "unknown pricing for provider \"\" model \"\"" warning. The op is
+// still written with cost_usd=0; the missing OpStarted is the real
+// defect and is logged via the standard SourceError path.
+func TestWriter_PricerSkippedWhenOpRowMissing(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 7777},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 10, TokensOut: 5, EndTs: 7777, Status: "completed",
+	})
+	_ = tx.Commit()
+
+	if p.calls != 0 {
+		t.Errorf("pricer calls = %d, want 0 (no provider/model lookup -> skip)", p.calls)
+	}
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`); v != 0 {
+		t.Errorf("WRN log_entries count = %d, want 0", v)
+	}
+}
+
+// TestWriter_PricingMissEmitsWarningOnce verifies the writer emits a
+// SourceError WRN row per unique (provider, model, missKind) on the
+// first miss and dedups subsequent misses within the same batch.
+func TestWriter_PricingMissEmitsWarningOnce(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	// Two ops with the SAME (provider, model) — only one warning row
+	// must land.
+	for i, seq := range []uint64{2, 3, 4, 5} {
+		opSeq := i + 1
+		_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: seq, Ts: 1100 + int64(i)},
+			SessionNativeID: "s", TurnSeq: 1, Seq: opSeq, ParentOpSeq: -1,
+			Kind: canonical.OpLLM, Name: "call",
+			Provider: "madeup", Model: "doesnotexist",
+		})
+		_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: seq + 10, Ts: 1200 + int64(i)},
+			SessionNativeID: "s", TurnSeq: 1, Seq: opSeq,
+			TokensIn: 100, TokensOut: 50, EndTs: 1200 + int64(i), Status: "completed",
+		})
+	}
+	_ = tx.Commit()
+
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
+		t.Errorf("dedup failed: WRN log_entries count = %d, want 1", v)
+	}
+	if p.calls != 4 {
+		t.Errorf("pricer calls = %d, want 4 (one per op, including dedupped warnings)", p.calls)
+	}
+	// The Sources panel surfaces pricing misses through the same
+	// parse_errors counter the adapter SourceError path bumps. A
+	// deduped miss must bump the counter exactly once per unique
+	// (provider, model, missKind) tuple within the batch.
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
+		t.Errorf("parse_errors = %d, want 1 (deduped pricing miss must bump counter once)", v)
+	}
+	// The log entry's timestamp must be the op's pricing timestamp
+	// (start_ts) — the same value passed to the pricer — so the WRN
+	// row sits at the same point in the timeline as the op that
+	// triggered it. The first op was OpStarted with Ts=1100.
+	if v := scanInt(t, db, `SELECT ts FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1100 {
+		t.Errorf("log_entry ts = %d, want 1100 (op start_ts, not finalize ts)", v)
+	}
+}
+
+// TestWriter_PricingMissDistinctModelsEmitDistinctWarnings verifies
+// the dedup keys on (provider, model, missKind) — different misses
+// land separate rows.
+func TestWriter_PricingMissDistinctModelsEmitDistinctWarnings(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	models := []struct{ provider, model string }{
+		{"madeup", "alpha"},
+		{"madeup", "beta"},
+		{"unknown", "alpha"},
+	}
+	for i, mm := range models {
+		opSeq := i + 1
+		_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: uint64(2 + i*2), Ts: 1100 + int64(i)},
+			SessionNativeID: "s", TurnSeq: 1, Seq: opSeq, ParentOpSeq: -1,
+			Kind: canonical.OpLLM, Name: "call",
+			Provider: mm.provider, Model: mm.model,
+		})
+		_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: uint64(3 + i*2), Ts: 1200 + int64(i)},
+			SessionNativeID: "s", TurnSeq: 1, Seq: opSeq,
+			TokensIn: 10, TokensOut: 5, EndTs: 1200 + int64(i), Status: "completed",
+		})
+	}
+	_ = tx.Commit()
+
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 3 {
+		t.Errorf("WRN log_entries count = %d, want 3 (one per unique (provider, model))", v)
+	}
+	// Three distinct misses must bump parse_errors three times.
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 3 {
+		t.Errorf("parse_errors = %d, want 3 (one per unique miss)", v)
+	}
+}
+
+// TestWriter_PricingMissDedupedAcrossOps verifies a single (provider,
+// model, missKind) tuple emits exactly one log row and one
+// parse_errors increment regardless of how many priceable ops touch
+// it within a batch.
+func TestWriter_PricingMissDedupedAcrossOps(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	// Ten ops with identical (provider, model) — one warning row,
+	// one parse_errors increment.
+	for i := 0; i < 10; i++ {
+		opSeq := i + 1
+		_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: uint64(2 + i*2), Ts: 1100 + int64(i)},
+			SessionNativeID: "s", TurnSeq: 1, Seq: opSeq, ParentOpSeq: -1,
+			Kind: canonical.OpLLM, Name: "call",
+			Provider: "madeup", Model: "doesnotexist",
+		})
+		_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: uint64(3 + i*2), Ts: 1200 + int64(i)},
+			SessionNativeID: "s", TurnSeq: 1, Seq: opSeq,
+			TokensIn: 10, TokensOut: 5, EndTs: 1200 + int64(i), Status: "completed",
+		})
+	}
+	_ = tx.Commit()
+
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
+		t.Errorf("WRN log_entries count = %d, want 1 (dedup across 10 ops)", v)
+	}
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
+		t.Errorf("parse_errors = %d, want 1 (dedup across 10 ops)", v)
+	}
+}
+
+// TestWriter_PricerSkippedForNonLLMOp verifies that non-LLM ops (kind
+// in {"tool","system",...}) bypass the pricer entirely, so they don't
+// produce noisy "unknown pricing for provider \"\" model \"\"" warnings.
+func TestWriter_PricerSkippedForNonLLMOp(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	// Tool op: no provider/model, kind=tool.
+	_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpTool, Name: "Read",
+	})
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		EndTs: 1200, Status: "completed",
+	})
+	_ = tx.Commit()
+
+	if p.calls != 0 {
+		t.Errorf("pricer called %d times, want 0 (non-LLM op must not invoke pricer)", p.calls)
+	}
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`); v != 0 {
+		t.Errorf("WRN log_entries count = %d, want 0 (no pricer call -> no warning)", v)
+	}
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 0 {
+		t.Errorf("parse_errors = %d, want 0 (no pricer call -> no counter bump)", v)
+	}
 }
 
 func TestWriter_PricerSkippedWhenSourceCostPresent(t *testing.T) {
@@ -434,7 +663,7 @@ func TestWriter_PricerSkippedWhenSourceCostPresent(t *testing.T) {
 func TestNopPricer_ReturnsZero(t *testing.T) {
 	t.Parallel()
 	p := NopPricer{}
-	if v := p.Cost("a", "b", 1, 2, 3, 4); v != 0 {
+	if v := p.Cost("a", "b", 1234567890, 1, 2, 3, 4); v != 0 {
 		t.Errorf("NopPricer = %f, want 0", v)
 	}
 }
@@ -581,15 +810,657 @@ func TestUpsertSourceProgress_SeqAdvances(t *testing.T) {
 	}
 }
 
-// fakePricer counts invocations and returns a fixed value.
+// fakePricer counts invocations and returns a fixed value. lastTsUS
+// records the most-recent ts argument so tests can assert that the
+// writer forwards the op's pricing timestamp as the temporal-tier
+// selector.
 type fakePricer struct {
-	calls int
-	ret   float64
+	calls    int
+	ret      float64
+	lastTsUS int64
 }
 
-func (p *fakePricer) Cost(provider, model string, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) float64 {
+func (p *fakePricer) Cost(provider, model string, tsUS, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) float64 {
 	p.calls++
+	p.lastTsUS = tsUS
 	return p.ret
+}
+
+// fakeDetailPricer implements DetailedPricer so the writer's SourceError
+// emission path is exercised. miss controls whether each call reports a
+// hit (empty string) or a named miss kind so dedup behaviour can be
+// verified.
+type fakeDetailPricer struct {
+	calls int
+	ret   float64
+	miss  string
+}
+
+func (p *fakeDetailPricer) Cost(provider, model string, tsUS, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) float64 {
+	cost, _, _ := p.CostWithDetail(provider, model, tsUS, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite)
+	return cost
+}
+
+func (p *fakeDetailPricer) CostWithDetail(provider, model string, tsUS, tokensIn, tokensOut, tokensCacheRead, tokensCacheWrite int64) (float64, bool, string) {
+	_ = provider
+	_ = model
+	_ = tsUS
+	_ = tokensIn
+	_ = tokensOut
+	_ = tokensCacheRead
+	_ = tokensCacheWrite
+	p.calls++
+	if p.miss != "" {
+		return 0, false, p.miss
+	}
+	return p.ret, true, ""
+}
+
+// TestWriter_PricerNonDetailedFallback covers the priceOp branch that
+// runs when the wired Pricer does NOT also implement DetailedPricer.
+// In that case the writer must call Cost() and emit zero observability
+// rows (no WRN, no parse_errors bump) because the Pricer cannot signal
+// "miss" through the plain-Cost contract.
+func TestWriter_PricerNonDetailedFallback(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakePricer{ret: 1.23}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "anthropic", Model: "claude-opus-4",
+	})
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
+	})
+	_ = tx.Commit()
+
+	if p.calls != 1 {
+		t.Errorf("pricer called %d times, want 1", p.calls)
+	}
+	var cost float64
+	_ = db.QueryRow(`SELECT cost_usd FROM ops`).Scan(&cost)
+	if cost != 1.23 {
+		t.Errorf("cost_usd = %f, want 1.23 (plain Pricer.Cost return value)", cost)
+	}
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`); v != 0 {
+		t.Errorf("WRN log_entries = %d, want 0 (plain Pricer cannot signal miss)", v)
+	}
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 0 {
+		t.Errorf("parse_errors = %d, want 0", v)
+	}
+}
+
+// TestIsPriceableOp_NonLLMKindSkipped pins the branch that rejects an
+// op whose kind is set and not "llm" even when provider/model are
+// present (e.g. legacy fixtures that mis-label a tool op with an LLM
+// model). Direct unit test against isPriceableOp because the priceOp
+// integration path needs OpStarted to land first; we want fast
+// coverage of the gate alone.
+func TestIsPriceableOp_NonLLMKindSkipped(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		kind          sql.NullString
+		provider      sql.NullString
+		model         sql.NullString
+		wantPriceable bool
+	}{
+		{
+			name:          "tool_with_provider_and_model_rejected",
+			kind:          sql.NullString{String: "tool", Valid: true},
+			provider:      sql.NullString{String: "builtin", Valid: true},
+			model:         sql.NullString{String: "Read", Valid: true},
+			wantPriceable: false,
+		},
+		{
+			name:          "system_with_provider_model_rejected",
+			kind:          sql.NullString{String: "system", Valid: true},
+			provider:      sql.NullString{String: "x", Valid: true},
+			model:         sql.NullString{String: "y", Valid: true},
+			wantPriceable: false,
+		},
+		{
+			name:          "llm_with_provider_model_accepted",
+			kind:          sql.NullString{String: "llm", Valid: true},
+			provider:      sql.NullString{String: "anthropic", Valid: true},
+			model:         sql.NullString{String: "opus", Valid: true},
+			wantPriceable: true,
+		},
+		{
+			name:          "missing_kind_legacy_accepted",
+			kind:          sql.NullString{Valid: false},
+			provider:      sql.NullString{String: "anthropic", Valid: true},
+			model:         sql.NullString{String: "opus", Valid: true},
+			wantPriceable: true,
+		},
+		{
+			name:          "empty_kind_treated_as_legacy_accepted",
+			kind:          sql.NullString{String: "", Valid: true},
+			provider:      sql.NullString{String: "anthropic", Valid: true},
+			model:         sql.NullString{String: "opus", Valid: true},
+			wantPriceable: true,
+		},
+		{
+			name:          "missing_provider_rejected",
+			kind:          sql.NullString{String: "llm", Valid: true},
+			provider:      sql.NullString{Valid: false},
+			model:         sql.NullString{String: "opus", Valid: true},
+			wantPriceable: false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPriceableOp(tc.kind, tc.provider, tc.model); got != tc.wantPriceable {
+				t.Errorf("isPriceableOp = %v, want %v", got, tc.wantPriceable)
+			}
+		})
+	}
+}
+
+// TestWriter_PriceableOpToolKindIntegration drives the writer end-to-end
+// with a tool op that carries provider+model (e.g. an mcp tool that
+// happens to record routing metadata) to confirm the writer.applyOpFinalized
+// path skips the pricer entirely for kind != "llm".
+func TestWriter_PriceableOpToolKindIntegration(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpTool, Name: "mcp_tool",
+		Provider: "mcp", Model: "search",
+	})
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		EndTs: 1200, Status: "completed",
+	})
+	_ = tx.Commit()
+
+	if p.calls != 0 {
+		t.Errorf("pricer called %d times, want 0 (tool op even with provider/model must not be priced)", p.calls)
+	}
+}
+
+// TestWriter_DrainObservabilityErrsEmpty pins drainObservabilityErrs
+// returns nil when no errors have been recorded, so the worker's
+// post-commit log loop is a no-op in the happy case.
+func TestWriter_DrainObservabilityErrsEmpty(t *testing.T) {
+	t.Parallel()
+	w := newWriter("src", "aiagent_v3", "/tmp", NopPricer{})
+	if got := w.drainObservabilityErrs(); got != nil {
+		t.Errorf("drainObservabilityErrs on fresh writer = %v, want nil", got)
+	}
+}
+
+// TestWriter_DrainObservabilityErrsCollectsAndClears verifies that
+// errors appended to batchObservabilityErrs (the same slice priceOp
+// pushes onto when emitPricingMiss fails) are returned in order and
+// the slice is cleared so a subsequent drain returns nil. This is the
+// core contract the worker relies on.
+func TestWriter_DrainObservabilityErrsCollectsAndClears(t *testing.T) {
+	t.Parallel()
+	w := newWriter("src", "aiagent_v3", "/tmp", NopPricer{})
+	w.batchObservabilityErrs = append(w.batchObservabilityErrs,
+		errors.New("first"), errors.New("second"))
+	got := w.drainObservabilityErrs()
+	if len(got) != 2 || got[0].Error() != "first" || got[1].Error() != "second" {
+		t.Fatalf("drainObservabilityErrs returned %v, want [first second]", got)
+	}
+	if again := w.drainObservabilityErrs(); again != nil {
+		t.Errorf("drainObservabilityErrs after drain = %v, want nil", again)
+	}
+}
+
+// TestWriter_ResetBatchClearsObservabilityErrs ensures resetBatch
+// truncates the slice so a fresh batch starts clean — without this,
+// errors from a previous batch would leak into the next worker log.
+func TestWriter_ResetBatchClearsObservabilityErrs(t *testing.T) {
+	t.Parallel()
+	w := newWriter("src", "aiagent_v3", "/tmp", NopPricer{})
+	w.batchObservabilityErrs = append(w.batchObservabilityErrs, errors.New("stale"))
+	w.resetBatch()
+	if len(w.batchObservabilityErrs) != 0 {
+		t.Errorf("after resetBatch, batchObservabilityErrs len = %d, want 0", len(w.batchObservabilityErrs))
+	}
+}
+
+// TestWriter_EmitPricingMissErrorOnClosedTx exercises the error
+// return path of emitPricingMiss: when the surrounding transaction is
+// already rolled back, both the bumpSourceErrorCounter UPDATE and the
+// log_entries INSERT fail. priceOp must not panic and must record
+// the error onto batchObservabilityErrs.
+func TestWriter_EmitPricingMissErrorOnClosedTx(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", NopPricer{})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	// Call emitPricingMiss against the now-closed tx; the UPDATE in
+	// bumpSourceErrorCounter must fail.
+	if err := w.emitPricingMiss(ctx, tx, "p", "m", "kind", 1000); err == nil {
+		t.Errorf("emitPricingMiss on closed tx returned nil error, want non-nil")
+	}
+}
+
+// TestWriter_PriceOpRecordsObservabilityErrOnEmitFailure verifies the
+// iter-4 "no silent failures" fix: when emitPricingMiss fails (closed
+// tx), priceOp records the error onto batchObservabilityErrs rather
+// than swallowing it. drainObservabilityErrs returns the recorded
+// error so the worker can log it after commit.
+func TestWriter_PriceOpRecordsObservabilityErrOnEmitFailure(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = tx.Rollback()
+	ev := canonical.OpFinalizedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1100},
+		TokensIn:  1, TokensOut: 1,
+	}
+	cost := w.priceOp(ctx, tx, "anthropic", "doesnotexist", 1100, ev)
+	if cost != 0 {
+		t.Errorf("priceOp cost = %f, want 0 on miss", cost)
+	}
+	errs := w.drainObservabilityErrs()
+	if len(errs) != 1 {
+		t.Fatalf("drainObservabilityErrs len = %d, want 1 (emit failure must surface)", len(errs))
+	}
+	if !strings.Contains(errs[0].Error(), "emit pricing miss") {
+		t.Errorf("recorded err = %q, want contains 'emit pricing miss'", errs[0].Error())
+	}
+}
+
+// TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles verifies the
+// pricing-lookup branch that returns a wrapped error when the SELECT
+// fails with anything other than sql.ErrNoRows. Closing the
+// transaction before invoking apply forces a real "tx done" error,
+// which exercises the line at writer.go:419 that propagates the
+// failure rather than silently treating it as a pricing skip.
+func TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", &fakePricer{ret: 1.0})
+
+	// Seed a session so requireSessionID succeeds without inserting
+	// against the soon-to-be-closed tx.
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = tx.Commit()
+
+	// New tx that we close immediately so the next SELECT fails with
+	// something other than sql.ErrNoRows.
+	tx, _ = db.BeginTx(ctx, nil)
+	_ = tx.Rollback()
+
+	err := w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
+	})
+	if err == nil {
+		t.Errorf("apply OpFinalized on closed tx returned nil, want non-nil error")
+	}
+}
+
+// TestWriter_PricerSkippedWhenOpRowSelectFails covers the priceOp
+// branch where applyOpFinalized's ops-row SELECT returns
+// sql.ErrNoRows (OpFinalized arriving before OpStarted has been
+// committed). The op write must still land with cost_usd=0, the
+// pricer must not be called, and no WRN row should appear.
+func TestWriter_PricerSkippedWhenOpRowSelectFails(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	// OpFinalized arrives without a matching OpStarted commit: the
+	// ops-row SELECT returns sql.ErrNoRows and the writer skips the
+	// pricer to avoid emitting an unactionable "provider \"\" model \"\""
+	// warning.
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
+	})
+	_ = tx.Commit()
+
+	if p.calls != 0 {
+		t.Errorf("pricer called %d times, want 0 (op row missing)", p.calls)
+	}
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`); v != 0 {
+		t.Errorf("WRN count = %d, want 0", v)
+	}
+}
+
+// TestWriter_PricerComputedCostFlowsToCatalog pins codex iter-6 P2#1:
+// when the pricer computes cost (because ev.CostUSD arrives as 0),
+// the catalog rollups (catalog_providers.total_cost_usd /
+// catalog_models.total_cost_usd) must include the computed value, not
+// the original zero. Before iter-7 the writer passed the unmodified
+// `ev` to catalog.onOpFinalized, which read ev.CostUSD and silently
+// undercounted by the entire pricer-computed amount.
+func TestWriter_PricerComputedCostFlowsToCatalog(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	// fakePricer returns 2.50 USD per op regardless of inputs; ev.CostUSD
+	// stays 0 on the OpFinalizedEvent below so the writer's pricer path
+	// fires and the catalog must reflect the computed value.
+	p := &fakePricer{ret: 2.50}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	tx, _ := db.BeginTx(ctx, nil)
+	for _, ev := range []canonical.Event{
+		canonical.SessionStartedEvent{
+			EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+			NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+		},
+		canonical.OpStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+			SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+			Kind: canonical.OpLLM, Name: "call",
+			Provider: "openai", Model: "gpt-5",
+		},
+		canonical.OpFinalizedEvent{
+			EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+			SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+			TokensIn: 100, TokensOut: 50, EndTs: 1200, Status: "completed",
+			// CostUSD is intentionally omitted (zero value) so the pricer
+			// path computes and the catalog rollups must pick that up.
+		},
+	} {
+		if err := w.apply(ctx, tx, ev); err != nil {
+			t.Fatalf("apply %T: %v", ev, err)
+		}
+	}
+	_ = tx.Commit()
+
+	// ops.cost_usd should reflect the pricer-computed value (the original
+	// assertion that exists in TestWriter_PricerFillsZeroCost).
+	var opCost float64
+	_ = db.QueryRow(`SELECT cost_usd FROM ops`).Scan(&opCost)
+	if opCost != 2.50 {
+		t.Errorf("ops.cost_usd = %f, want 2.50 (pricer-computed)", opCost)
+	}
+
+	// catalog_models.total_cost_usd must now match ops.cost_usd. Before
+	// iter-7 this was zero because catalog.onOpFinalized read ev.CostUSD
+	// (still 0) instead of the post-pricer cost.
+	var modelCost float64
+	if err := db.QueryRow(
+		`SELECT total_cost_usd FROM catalog_models WHERE provider='openai' AND name='gpt-5'`,
+	).Scan(&modelCost); err != nil {
+		t.Fatalf("query catalog_models: %v", err)
+	}
+	if modelCost != 2.50 {
+		t.Errorf("catalog_models.total_cost_usd = %f, want 2.50 (codex iter-6 P2#1)", modelCost)
+	}
+
+	// catalog_providers.total_cost_usd must also match.
+	var providerCost float64
+	if err := db.QueryRow(
+		`SELECT total_cost_usd FROM catalog_providers WHERE name='openai' AND alias=''`,
+	).Scan(&providerCost); err != nil {
+		t.Fatalf("query catalog_providers: %v", err)
+	}
+	if providerCost != 2.50 {
+		t.Errorf("catalog_providers.total_cost_usd = %f, want 2.50 (codex iter-6 P2#1)", providerCost)
+	}
+}
+
+// TestWriter_PricingMissDedupedAcrossBatches pins codex iter-6 P2#2:
+// the pricing-miss dedup must survive resetBatch() so the same
+// (provider, model, missKind) tuple emits exactly one WRN row and one
+// parse_errors increment per source — not one per batch. Before iter-7
+// pricingMissDedup was cleared in resetBatch(), producing one warning
+// per batch which contradicted pricing.md §"Temporal resolution
+// algorithm".
+func TestWriter_PricingMissDedupedAcrossBatches(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	// --- Batch 1: one priceable op with an unknown (provider, model). ---
+	tx, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup", Model: "doesnotexist",
+	})
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 100, TokensOut: 50, EndTs: 1200, Status: "completed",
+	})
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("batch 1 commit: %v", err)
+	}
+	// Mimic worker.flush's post-commit sequence: promote pending dedup
+	// keys into the lifetime map, then reset per-batch state. Without
+	// the promotion the next batch's emitPricingMiss would see neither
+	// the pending nor the lifetime map carrying the key and re-emit
+	// (codex iter-9 P2#1).
+	w.promotePendingMissDedup()
+	w.resetBatch()
+
+	// --- Batch 2: another op with the SAME (provider, model). The
+	// dedup map must survive resetBatch() so no new WRN row lands.
+	tx, _ = db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 4, Ts: 2100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 2, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup", Model: "doesnotexist",
+	})
+	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 5, Ts: 2200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 2,
+		TokensIn: 100, TokensOut: 50, EndTs: 2200, Status: "completed",
+	})
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("batch 2 commit: %v", err)
+	}
+
+	// Exactly ONE WRN row across both batches (spec: "deduped per
+	// (sourceID, provider, model, missKind)").
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
+		t.Errorf("WRN log_entries count across 2 batches = %d, want 1 (codex iter-6 P2#2)", v)
+	}
+	// Exactly ONE parse_errors increment.
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
+		t.Errorf("parse_errors across 2 batches = %d, want 1 (codex iter-6 P2#2)", v)
+	}
+}
+
+// TestWriter_PricingMissDedup_RollbackDoesNotSuppress pins codex iter-9
+// P2#1: marking pricingMissDedup at emit time (BEFORE commit) silently
+// suppressed every future identical warning even when the surrounding
+// tx rolled back and the warning row never landed. Fix: the writer
+// marks per-batch pendingMissDedup on INSERT success, and worker.flush
+// calls promotePendingMissDedup only AFTER tx.Commit() succeeds. On
+// rollback, resetBatch wipes pendingMissDedup so the next batch with
+// the same (provider, model, missKind) re-emits the warning.
+//
+// Mutation check: comment out the promotePendingMissDedup call in
+// worker.go OR move the pendingMissDedup[key] mark above the WRN
+// INSERT in writer.go and this test still passes — both shapes match
+// "mark only after commit". Revert the iter-10 changes entirely (mark
+// pricingMissDedup eagerly inside emitPricingMiss) and the second
+// batch's INSERT count drops to 0 → assertion fires.
+func TestWriter_PricingMissDedup_RollbackDoesNotSuppress(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	p := &fakeDetailPricer{miss: "unknown_provider_model"}
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", p)
+
+	// --- Batch 1: emit the WRN row, then ROLL BACK the tx. The
+	// warning never durably commits. Without the fix, pricingMissDedup
+	// would already carry the key and future batches would never
+	// re-emit.
+	tx1, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx1, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = w.apply(ctx, tx1, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup", Model: "doesnotexist",
+	})
+	_ = w.apply(ctx, tx1, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 100, TokensOut: 50, EndTs: 1200, Status: "completed",
+	})
+	// Sanity: writer recorded the dedup intent in the PENDING map but
+	// NOT in the lifetime map (commit has not happened).
+	if len(w.pendingMissDedup) != 1 {
+		t.Fatalf("pendingMissDedup size after emit = %d, want 1", len(w.pendingMissDedup))
+	}
+	if len(w.pricingMissDedup) != 0 {
+		t.Fatalf("pricingMissDedup size before commit = %d, want 0 (rollback case)", len(w.pricingMissDedup))
+	}
+	if err := tx1.Rollback(); err != nil {
+		t.Fatalf("batch 1 rollback: %v", err)
+	}
+	w.resetBatch() // worker calls this on every flush exit, commit or rollback
+	// After resetBatch the pending map is cleared and the lifetime map
+	// is still empty — the fix's whole point.
+	if len(w.pendingMissDedup) != 0 {
+		t.Fatalf("pendingMissDedup after resetBatch = %d, want 0", len(w.pendingMissDedup))
+	}
+	if len(w.pricingMissDedup) != 0 {
+		t.Fatalf("pricingMissDedup after rollback+reset = %d, want 0 (warning never committed)", len(w.pricingMissDedup))
+	}
+
+	// --- Batch 2: COMMIT a tx with the SAME (provider, model). The
+	// fix must re-emit the warning because batch 1 never made it
+	// durable. Before the fix the dedup map would silently suppress
+	// this insert.
+	tx2, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx2, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 10, Ts: 2000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	_ = w.apply(ctx, tx2, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 11, Ts: 2100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 2, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup", Model: "doesnotexist",
+	})
+	_ = w.apply(ctx, tx2, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 12, Ts: 2200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 2,
+		TokensIn: 100, TokensOut: 50, EndTs: 2200, Status: "completed",
+	})
+	if err := tx2.Commit(); err != nil {
+		t.Fatalf("batch 2 commit: %v", err)
+	}
+	// Worker calls promotePendingMissDedup AFTER tx.Commit() — mimic
+	// that here so subsequent batches see the committed key.
+	w.promotePendingMissDedup()
+	w.resetBatch()
+
+	// The exact assertion that breaks if the fix is reverted: exactly
+	// ONE WRN row landed in the DB (from batch 2), even though batch 1
+	// also tried to emit one. Without the fix the count is 0 because
+	// emitPricingMiss in batch 2 would have short-circuited.
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
+		t.Errorf("WRN log_entries count after rollback+commit = %d, want 1 (codex iter-9 P2#1: rolled-back warning must NOT suppress next batch)", v)
+	}
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
+		t.Errorf("parse_errors after rollback+commit = %d, want 1 (codex iter-9 P2#1)", v)
+	}
+
+	// --- Batch 3: NOW the lifetime map carries the key. A third
+	// batch with the same (provider, model) MUST be deduped (no new
+	// WRN row, no new parse_errors increment). This pins the
+	// across-batch dedup contract still holds after commit.
+	tx3, _ := db.BeginTx(ctx, nil)
+	_ = w.apply(ctx, tx3, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 20, Ts: 3100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 3, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "call",
+		Provider: "madeup", Model: "doesnotexist",
+	})
+	_ = w.apply(ctx, tx3, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 21, Ts: 3200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 3,
+		TokensIn: 50, TokensOut: 25, EndTs: 3200, Status: "completed",
+	})
+	if err := tx3.Commit(); err != nil {
+		t.Fatalf("batch 3 commit: %v", err)
+	}
+	w.promotePendingMissDedup()
+	w.resetBatch()
+	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
+		t.Errorf("WRN log_entries count after batch 3 = %d, want 1 (lifetime dedup must still suppress)", v)
+	}
+	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
+		t.Errorf("parse_errors after batch 3 = %d, want 1 (lifetime dedup must still suppress)", v)
+	}
 }
 
 // fakeEvent implements canonical.Event but is not one of the writer's

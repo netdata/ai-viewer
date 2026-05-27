@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/netdata/ai-viewer/blob/master/internal/pricing/pricing.schema.json",
+  "title": "ai-viewer pricing data",
+  "description": "Schema for internal/pricing/pricing.json (schema version 2). See .agents/sow/specs/pricing.md.",
+  "type": "object",
+  "required": [
+    "version",
+    "schema_url",
+    "generated_at",
+    "generated_by",
+    "currency",
+    "providers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Schema version. v2 introduces temporal price tiers."
+    },
+    "schema_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "generated_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "currency": {
+      "type": "string",
+      "const": "USD"
+    },
+    "providers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/provider" }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "required": ["name", "models"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+          }
+        },
+        "models": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/model" }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["name", "tiers"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+          }
+        },
+        "ctx_max": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tier" }
+        }
+      }
+    },
+    "tier": {
+      "type": "object",
+      "required": ["effective_date", "citation_url", "source", "prices"],
+      "additionalProperties": false,
+      "properties": {
+        "effective_date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "citation_url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prices": { "$ref": "#/$defs/prices" }
+      }
+    },
+    "prices": {
+      "type": "object",
+      "required": ["input_per_million", "output_per_million"],
+      "additionalProperties": false,
+      "properties": {
+        "input_per_million":          { "type": "number", "minimum": 0 },
+        "output_per_million":         { "type": "number", "minimum": 0 },
+        "cache_read_per_million":     { "type": "number", "minimum": 0 },
+        "cache_write_per_million":    { "type": "number", "minimum": 0 },
+        "cache_write_5m_per_million": { "type": "number", "minimum": 0 },
+        "cache_write_1h_per_million": { "type": "number", "minimum": 0 },
+        "reasoning_per_million":      { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

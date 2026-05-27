@@ -1,0 +1,7 @@
+# Diagnostic dumps written by scripts/refresh-pricing.sh when the
+# proposed JSON fails validation. These contain the raw merged output
+# the operator inspects to triage the failure; they must NOT be
+# committed. The refresh script never writes anywhere else under this
+# directory (the only authoritative file is pricing.json which IS
+# committed).
+.proposed-failed-validation-*.json

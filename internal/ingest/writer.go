@@ -41,6 +41,46 @@ type writer struct {
 	// batch (used by Chunk 11 to publish notify-pings; recorded here so
 	// the seam is in place).
 	affectedSessionIDs map[string]struct{}
+	// pricingMissDedup tracks (provider, model, missKind) tuples for
+	// which a SourceError WRN has already been emitted AND DURABLY
+	// COMMITTED for THIS SOURCE, across the lifetime of the worker
+	// (cross-batch). Per pricing.md §"Temporal resolution algorithm"
+	// misses are deduped per (sourceID, provider, model, missKind) —
+	// one warning, not one per batch (codex iter-6 P2#2). The map is
+	// owned by the writer and survives resetBatch(). Memory bound:
+	// per source × per unique (provider, model, missKind) — typically
+	// a handful of entries.
+	//
+	// Keys land here only after the surrounding batch commits — see
+	// pendingMissDedup below and promotePendingMissDedup. Marking on
+	// emit (pre-commit) would suppress all future warnings for the
+	// same tuple even if the warning row was rolled back (codex iter-9
+	// P2#1).
+	pricingMissDedup map[pricingMissKey]struct{}
+	// pendingMissDedup buffers (provider, model, missKind) keys whose
+	// WRN row + parse_errors bump have been INSERTed within the
+	// current open transaction but not yet committed. On successful
+	// commit the worker calls promotePendingMissDedup which merges
+	// these into pricingMissDedup. On rollback or error the worker
+	// calls resetBatch which discards them, so the next batch with
+	// the same tuple re-emits the (now-missing) warning.
+	pendingMissDedup map[pricingMissKey]struct{}
+	// batchObservabilityErrs collects errors from best-effort
+	// observability writes (e.g. emitPricingMiss) that we do NOT want
+	// to abort the surrounding op write for. The worker drains this
+	// slice at flush time and surfaces each entry through its logger,
+	// satisfying the project "no silent failures" rule without losing
+	// the priced op. Cleared at resetBatch().
+	batchObservabilityErrs []error
+}
+
+// pricingMissKey identifies a pricing-miss SourceError dedup slot.
+// Lower-cased so case variants (e.g. "Anthropic" vs "anthropic") fold
+// to one warning per source-batch.
+type pricingMissKey struct {
+	provider string
+	model    string
+	kind     string
 }
 
 func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
@@ -49,22 +89,65 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 		sourceFormat:       sourceFormat,
 		location:           location,
 		pricer:             pricer,
-		catalog:            newCatalogWriter(),
+		catalog:            newCatalogWriter(pricer),
 		dirtySessionIDs:    make(map[string]struct{}),
 		dirtyTurnIDs:       make(map[string]struct{}),
 		affectedSessionIDs: make(map[string]struct{}),
+		pricingMissDedup:   make(map[pricingMissKey]struct{}),
+		pendingMissDedup:   make(map[pricingMissKey]struct{}),
 	}
 }
 
-// resetBatch clears per-batch state. Called by the worker after each
-// successful commit so the writer can be re-used for the next batch.
+// resetBatch clears per-batch state. Called by the worker on EVERY
+// flush() exit (commit OR rollback) so the writer can be re-used for
+// the next batch. pricingMissDedup is deliberately NOT cleared — it
+// lives for the lifetime of the worker so an unknown (provider, model)
+// emits one warning per source, not one per batch (codex iter-6 P2#2,
+// pricing.md §"Temporal resolution algorithm" — "deduped per
+// (sourceID, provider, model, missKind)").
+//
+// pendingMissDedup IS cleared here. On rollback this drops the
+// uncommitted dedup intentions so the next batch with the same
+// (provider, model, missKind) re-emits the (now-missing) warning. On
+// commit, promotePendingMissDedup runs FIRST (in worker.flush after
+// tx.Commit()) so the entries are moved into pricingMissDedup before
+// resetBatch wipes the pending map — see codex iter-9 P2#1.
 func (w *writer) resetBatch() {
 	clear(w.dirtySessionIDs)
 	clear(w.dirtyTurnIDs)
 	clear(w.affectedSessionIDs)
+	clear(w.pendingMissDedup)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
+	w.batchObservabilityErrs = w.batchObservabilityErrs[:0]
+}
+
+// promotePendingMissDedup merges per-batch pending dedup keys into the
+// lifetime dedup map. Called by worker.flush AFTER tx.Commit() succeeds
+// so a rolled-back warning never silences future warnings (codex iter-9
+// P2#1). The pending map is left intact (resetBatch clears it next) so
+// this method is idempotent against repeated calls.
+func (w *writer) promotePendingMissDedup() {
+	for k := range w.pendingMissDedup {
+		w.pricingMissDedup[k] = struct{}{}
+	}
+}
+
+// drainObservabilityErrs returns and clears the per-batch slice of
+// best-effort observability errors so the worker can surface them
+// through its logger after a successful commit. Errors collected here
+// are NOT propagated as op-write failures — they describe a missed
+// observability hook (e.g. pricing-miss WRN insert), not a data
+// integrity defect.
+func (w *writer) drainObservabilityErrs() []error {
+	if len(w.batchObservabilityErrs) == 0 {
+		return nil
+	}
+	out := make([]error, len(w.batchObservabilityErrs))
+	copy(out, w.batchObservabilityErrs)
+	w.batchObservabilityErrs = w.batchObservabilityErrs[:0]
+	return out
 }
 
 // apply dispatches one event to its kind-specific writer.
@@ -361,21 +444,43 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 	opID := canonicalOpID(turnID, ev.Seq)
 	cost := ev.CostUSD
 	if cost == 0 && w.pricer != nil {
-		// Resolve provider/model from the row we know exists (or will
-		// exist) for the matching OpStartedEvent. We do not require
-		// they be set — providers without recorded cost AND without
-		// known pricing yield zero, which is correct.
-		var provider, model sql.NullString
+		// Resolve provider/model/kind and start_ts from the row we know
+		// exists (or will exist) for the matching OpStartedEvent. The
+		// kind column gates the pricer call: only kind='llm' ops carry
+		// token counts that make sense to price. start_ts drives the
+		// temporal tier selection so an op straddling a price-change
+		// date is priced against the tier that was in effect when the
+		// op STARTED, not ended (the finalize event timestamp).
+		var provider, model, kind sql.NullString
+		var startTs sql.NullInt64
 		// sql.ErrNoRows is expected (op start may have been ingested in
 		// a prior batch that's been pruned, or skipped for dedup). Any
 		// other error means the database is unhealthy and silently
 		// returning zero cost would violate the "no silent failures"
 		// invariant in AGENTS.md.
-		if lookupErr := tx.QueryRowContext(ctx, `SELECT provider, model FROM ops WHERE id = ?`, opID).
-			Scan(&provider, &model); lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		if lookupErr := tx.QueryRowContext(ctx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
+			Scan(&provider, &model, &kind, &startTs); lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
 			return fmt.Errorf("ingest writer: lookup op %s for pricing: %w", opID, lookupErr)
 		}
-		cost = w.pricer.Cost(provider.String, model.String, ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
+		// Skip pricing for non-LLM ops (kind != 'llm') and for ops
+		// without a provider/model pair — pricing those produces noisy
+		// "unknown pricing for provider \"\" model \"\"" warnings that
+		// are not actionable. Non-LLM ops legitimately have zero cost
+		// (they did not consume tokens). When the OpStarted row is
+		// missing entirely (sql.ErrNoRows), all four columns scan to
+		// their zero value and isPriceableOp returns false, so we
+		// never reach priceOp without a real (provider, model).
+		if isPriceableOp(kind, provider, model) {
+			// ops.start_ts is NOT NULL per the schema; the guard
+			// against zero is defence-in-depth in case a future
+			// migration relaxes the constraint, and to match the
+			// documented behaviour in pricing.md.
+			pricingTs := ev.Ts
+			if startTs.Valid && startTs.Int64 > 0 {
+				pricingTs = startTs.Int64
+			}
+			cost = w.priceOp(ctx, tx, provider.String, model.String, pricingTs, ev)
+		}
 	}
 	durUS := sql.NullInt64{}
 	if ev.EndTs > 0 && ev.Ts > 0 && ev.EndTs >= ev.Ts {
@@ -411,8 +516,142 @@ WHERE id = ?
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
-	if err := w.catalog.onOpFinalized(ctx, tx, opID, ev); err != nil {
+	// Forward the RESOLVED cost (post-pricer) to the catalog rollups so
+	// catalog_providers.total_cost_usd / catalog_models.total_cost_usd
+	// stay in sync with ops.cost_usd. The pricer mutates `cost` in this
+	// function but does NOT touch ev.CostUSD; passing the unmodified ev
+	// to onOpFinalized would silently undercount catalog rollups for
+	// every op whose cost was computed (codex iter-6 P2#1).
+	evForCatalog := ev
+	evForCatalog.CostUSD = cost
+	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog); err != nil {
 		return err
+	}
+	return nil
+}
+
+// isPriceableOp reports whether the op identified by (kind, provider,
+// model) should be passed to the pricer. Non-LLM ops (tool, system,
+// session) carry no token counts and have empty provider/model; pricing
+// them produces noisy and unactionable "unknown pricing for provider \"\"
+// model \"\"" warnings. Ops without a recorded kind but with both
+// provider and model present are treated as priceable for defence in
+// depth (legacy adapters that pre-date the kind column).
+func isPriceableOp(kind, provider, model sql.NullString) bool {
+	if !provider.Valid || provider.String == "" {
+		return false
+	}
+	if !model.Valid || model.String == "" {
+		return false
+	}
+	if kind.Valid && kind.String != "" && kind.String != string(canonical.OpLLM) {
+		return false
+	}
+	return true
+}
+
+// priceOp invokes the pricer and, when the pricer supports it (i.e.
+// implements DetailedPricer), emits a deduped SourceError WRN log
+// entry on miss per pricing.md §"Temporal resolution algorithm". The
+// dedup key is (provider, model, missKind) for the lifetime of the
+// worker (i.e. per source) so the same unknown-pricing warning is
+// not repeated for every op of an unknown model, even across batches.
+// tsUS is the op's start_ts — the value the pricer uses to pick a
+// tier, and the value the log entry records so the warning sits at
+// the same point in the timeline as the priced op.
+func (w *writer) priceOp(ctx context.Context, tx *sql.Tx, provider, model string, tsUS int64, ev canonical.OpFinalizedEvent) float64 {
+	if dp, ok := w.pricer.(DetailedPricer); ok {
+		cost, hit, missKind := dp.CostWithDetail(provider, model, tsUS, ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
+		if !hit {
+			// Failing to write a WRN row or bump the per-source error
+			// counter is a non-fatal observability gap, not a
+			// data-integrity defect: the op cost still lands as zero
+			// and returning the error here would abort the entire op
+			// write. We record the error on a per-batch slice the
+			// worker drains and logs after commit so the failure
+			// surfaces in structured logs — satisfying the project
+			// "no silent failures" rule without sacrificing the op.
+			if logErr := w.emitPricingMiss(ctx, tx, provider, model, missKind, tsUS); logErr != nil {
+				w.batchObservabilityErrs = append(w.batchObservabilityErrs,
+					fmt.Errorf("emit pricing miss (provider=%q model=%q miss=%q): %w",
+						provider, model, missKind, logErr))
+			}
+		}
+		return cost
+	}
+	return w.pricer.Cost(provider, model, tsUS, ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite)
+}
+
+// emitPricingMiss writes a WRN log entry naming the unknown (provider,
+// model) pair AND bumps sources.parse_errors so the miss surfaces in
+// the Sources panel's "errors recently" counter via the same path the
+// adapter SourceError events use. Both writes are deduped per
+// (provider, model, missKind) for the LIFETIME of the worker (i.e.
+// per source) so a single unknown model that fires on every op of
+// every batch produces exactly one log row and one parse_errors
+// increment — matching pricing.md §"Temporal resolution algorithm".
+//
+// This function is best-effort observability: a returned error must
+// never abort the surrounding op write (see priceOp's caller comment).
+// The error paths (failed UPDATE, failed marshal, failed INSERT) are
+// intentionally lightly covered — they only fire when the tx itself
+// is already broken, in which case the surrounding flush() will
+// roll back and the missed observability hook is the least of the
+// caller's problems. See the SOW-0001 Gate Suppression entry that
+// records this waiver.
+func (w *writer) emitPricingMiss(ctx context.Context, tx *sql.Tx, provider, model, missKind string, tsUS int64) error {
+	key := pricingMissKey{
+		provider: strings.ToLower(provider),
+		model:    strings.ToLower(model),
+		kind:     missKind,
+	}
+	// Lifetime map records committed warnings; pending map records
+	// warnings INSERTed in the current open tx but not yet committed.
+	// Either is sufficient to skip re-emission within the same batch.
+	if _, seen := w.pricingMissDedup[key]; seen {
+		return nil
+	}
+	if _, seen := w.pendingMissDedup[key]; seen {
+		return nil
+	}
+
+	if err := w.bumpSourceErrorCounter(ctx, tx, tsUS); err != nil {
+		return err
+	}
+
+	msg := fmt.Sprintf("unknown pricing for provider %q model %q (%s)", provider, model, missKind)
+	extras, err := json.Marshal(map[string]any{
+		"provider":  provider,
+		"model":     model,
+		"miss_kind": missKind,
+	})
+	if err != nil {
+		return fmt.Errorf("writer: marshal pricing-miss extras: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
+VALUES (NULL, ?, NULL, NULL, ?, 'WRN', ?, ?, ?)
+`, w.sourceID, tsUS, w.sourceFormat, msg, string(extras)); err != nil {
+		return fmt.Errorf("writer: insert pricing-miss log: %w", err)
+	}
+	// Mark the key only AFTER the INSERT succeeds. The mark lives in
+	// the per-batch pending map so a subsequent commit failure leaves
+	// pricingMissDedup untouched and the next batch with the same
+	// (provider, model) re-emits the warning (codex iter-9 P2#1).
+	w.pendingMissDedup[key] = struct{}{}
+	return nil
+}
+
+// bumpSourceErrorCounter is the shared low-level UPDATE that
+// applySourceError and emitPricingMiss both call so the Sources panel
+// surfaces parse errors and pricing misses through the same metric.
+// Both call sites must agree on what counts as a "recent error".
+func (w *writer) bumpSourceErrorCounter(ctx context.Context, tx *sql.Tx, tsUS int64) error {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE sources SET parse_errors = parse_errors + 1, last_seen_at = MAX(COALESCE(last_seen_at, 0), ?)
+WHERE id = ?
+`, tsUS, w.sourceID); err != nil {
+		return fmt.Errorf("writer: bump parse_errors: %w", err)
 	}
 	return nil
 }
@@ -479,13 +718,12 @@ func (w *writer) applySourceProgress(ev canonical.SourceProgressEvent) error {
 }
 
 // applySourceError records a parse error against the source: increments
-// sources.parse_errors and writes a log_entries row with session_id NULL.
+// sources.parse_errors (via the shared bumpSourceErrorCounter so
+// pricing misses and parse errors land in the same counter) and writes
+// a log_entries row with session_id NULL.
 func (w *writer) applySourceError(ctx context.Context, tx *sql.Tx, ev canonical.SourceErrorEvent) error {
-	if _, err := tx.ExecContext(ctx, `
-UPDATE sources SET parse_errors = parse_errors + 1, last_seen_at = MAX(COALESCE(last_seen_at, 0), ?)
-WHERE id = ?
-`, ev.Ts, w.sourceID); err != nil {
-		return fmt.Errorf("writer: bump parse_errors: %w", err)
+	if err := w.bumpSourceErrorCounter(ctx, tx, ev.Ts); err != nil {
+		return err
 	}
 	extras, err := json.Marshal(map[string]any{
 		"file":   ev.File,

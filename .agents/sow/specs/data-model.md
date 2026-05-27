@@ -257,7 +257,7 @@ CREATE TABLE catalog_models (
     total_tokens_cache_write INTEGER NOT NULL DEFAULT 0,
     total_cost_usd    REAL NOT NULL DEFAULT 0.0,
     total_duration_us INTEGER NOT NULL DEFAULT 0,
-    ctx_max           INTEGER,                       -- discovered from ops; updated when adapters observe a max
+    ctx_max           INTEGER,                       -- layered: pricing-metadata floor seeded on first OpStarted; raised by adapter observations (see Context-Window-Percent below)
     PRIMARY KEY (provider, name)
 );
 
@@ -392,7 +392,15 @@ For statistics views over an arbitrary timeframe:
 
 ## Context-Window-Percent
 
-For LLM ops where the model's max context is known (`catalog_models.ctx_max`), the UI computes `ctx_used / ctx_max` as a percentage. When `ctx_max` is unknown the UI shows the raw token count instead. Adapters seed `catalog_models.ctx_max` from `ops.ctx_max` observations; the value is updated on `MAX(ctx_max)` increases only (never decreased).
+For LLM ops where the model's max context is known (`catalog_models.ctx_max`), the UI computes `ctx_used / ctx_max` as a percentage. When `ctx_max` is unknown the UI shows the raw token count instead.
+
+`catalog_models.ctx_max` is populated by a **layered** strategy — pricing metadata acts as a floor, adapter observations raise it from there, and the value never decreases:
+
+1. **Pricing-metadata seed (floor).** On the first `OpStarted` for a (provider, model) pair the ingester's `catalogWriter` calls the `MetadataPricer` interface — declared in the ingest package as `internal/ingest.MetadataPricer` and satisfied by `*internal/pricing.Pricer` via its `CtxMax(provider, model string) (int64, bool)` method — to obtain `MaxInputTokens` for that model from the embedded `internal/pricing/pricing.json` catalog. The seed lands via `COALESCE(catalog_models.ctx_max, excluded.ctx_max)` so an already-known value is never overwritten by a smaller pricing-table number — the catalog row's existing value wins.
+2. **Adapter-observation raise.** When an `OpFinalizedEvent` carries `CtxMax > 0` (e.g. ai-agent v3 records the actual context window used for the call), the ingester runs `ctx_max = CASE WHEN ? > 0 THEN MAX(COALESCE(ctx_max, 0), ?) ELSE ctx_max END`. Observations strictly climb; a smaller observation never lowers the value.
+3. **Net effect.** The stored `ctx_max` is the maximum of (pricing-seed-floor, all observed `ev.CtxMax`). If pricing has no entry for the model, the value starts NULL and is set on the first observation. If the source never reports `CtxMax`, the value stays at the pricing-seed.
+
+Code references: `internal/ingest/catalog.go:64-95` (seed-on-OpStarted in `catalogWriter.onOpStarted`) and `internal/ingest/catalog.go:173-199` (observation-raise in `catalogWriter.onOpFinalized`). The interface contract lives in `internal/ingest/pricing.go` (`MetadataPricer`); the loader at `internal/pricing/loader.go` provides the default implementation.
 
 ## References
 
