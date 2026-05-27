@@ -130,14 +130,20 @@ func OpenWriter(ctx context.Context, dsn string, logger *slog.Logger) (*Store, e
 		return nil, fmt.Errorf("open sqlite %q: %w", dsn, err)
 	}
 
-	// modernc.org/sqlite is concurrent-safe but the writer is
-	// single-threaded; downstream code that needs strict single-writer
-	// semantics may set MaxOpenConns separately. We pin to one
-	// connection for ":memory:" so tests share the same DB across the
-	// pool (otherwise each opened conn is a fresh DB).
-	if isMemoryDSN(dsn) {
-		db.SetMaxOpenConns(1)
-	}
+	// Pin the writer pool to a single connection unconditionally. SQLite
+	// WAL allows many concurrent readers but only ONE writer at a time;
+	// when the ingester runs N source goroutines (one per source per
+	// AGENTS.md tech-stack note), N parallel BeginTx attempts on a
+	// multi-conn pool produce SQLITE_BUSY locking errors that the
+	// ingester's no-retry policy converts into dropped batches. The
+	// single-conn pool serialises BeginTx at the database/sql layer so
+	// every transaction either commits or returns a real error — never
+	// silently loses data to lock contention. The same setting is also
+	// what lets ":memory:" tests see the same DB across pooled handles
+	// (otherwise every opened conn is a separate in-memory database).
+	// Readers use OpenReader (mode=ro) which keeps the default pool
+	// size of 8; concurrent reads remain unbounded. Codex iter-3 P2#5.
+	db.SetMaxOpenConns(1)
 
 	// sql.Open does not contact the database. Ping forces a real open
 	// so missing-file or permission errors surface here rather than at
@@ -197,6 +203,16 @@ func OpenReader(ctx context.Context, dsn string, logger *slog.Logger) (*Store, e
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q (ro): %w", dsn, err)
 	}
+
+	// presenter.md §"SQLite Access" pins the reader pool size to 8.
+	// Go's database/sql default is unbounded, which on a single-user
+	// localhost workstation translates into one fresh file descriptor +
+	// PRAGMA-replay round per concurrent request — wasteful, and
+	// unbounded burst pressure under a busy SSE fan-out. Pin to the
+	// spec'd value so the presenter has a predictable read concurrency
+	// envelope. SQLite WAL keeps reads non-blocking across this pool.
+	// Codex iter-3 P2#5.
+	db.SetMaxOpenConns(8)
 
 	// sql.Open is lazy: it returns a *sql.DB without contacting the
 	// driver. We want OpenReader to fail at the open call when the

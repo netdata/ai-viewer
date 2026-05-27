@@ -2,6 +2,7 @@ package aiagent_v3
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -179,6 +180,54 @@ func TestTail_EmitsPeriodicProgress(t *testing.T) {
 	}
 	if sp := ev.(canonical.SourceProgressEvent); sp.Cursor == "" {
 		t.Fatalf("progress cursor empty")
+	}
+}
+
+// TestTailer_RefusesToCreateMissingSourceDir asserts the tailer never
+// mkdirs into the source tree (security.md §"Hard Rules" #1 — read-only
+// on sources). When the watch dir is absent we want a clean, fast
+// shutdown with the cause surfaced via OnError so /api/health flags it,
+// NOT a silently-created directory.
+func TestTailer_RefusesToCreateMissingSourceDir(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	watchDir := filepath.Join(root, sessionDir)
+	// Important: do NOT mkdir the watch dir — that is the test invariant.
+
+	var captured []error
+	a, err := New(root, canonical.AdapterOptions{
+		OnError: func(e error) { captured = append(captured, e) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Tail(ctx, out) }()
+
+	// Tail must return promptly when the source dir is absent — no
+	// fsnotify watch was registered, so there is nothing to do.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Tail returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Tail did not return within 2s of missing source dir")
+	}
+
+	// The dir must NOT have been created — that would violate the
+	// read-only-sources invariant.
+	if _, statErr := os.Stat(watchDir); statErr == nil {
+		t.Fatalf("tailer created %s — violates security.md §Hard Rules #1", watchDir)
+	}
+
+	// OnError must have fired so /api/health surfaces the issue.
+	if len(captured) == 0 {
+		t.Fatal("expected at least one OnError invocation describing the missing source dir")
 	}
 }
 

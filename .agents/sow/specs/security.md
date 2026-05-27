@@ -24,7 +24,7 @@ Out of scope:
 
 1. **Read-only on sources.** All file opens for source data use `os.O_RDONLY`. SQLite source connections use `?mode=ro`. There is no code path that writes to a source.
 2. **No outbound network calls.** The ingester and server make zero outgoing HTTP, DNS, or any other network call. Adapters do not fetch anything from the network (cost lookup is from a static table, not an API). CI enforces this with a test that runs the binary under a network-blocked context.
-3. **Localhost bind.** The default bind is `127.0.0.1`. Binding to anything else requires `--allow-non-localhost` flag (Phase 2; v1 does not even accept that flag).
+3. **Localhost bind.** The default bind is `127.0.0.1:7710`. The `--bind` flag accepts ONLY literal loopback IPs (`127.0.0.1` or `::1`). The string `"localhost"` is REJECTED at flag-parse time because `/etc/hosts` (and NSS/DNS) can be manipulated to point it at a non-loopback IP, which would silently expose the server. An empty host (`:7710`) is also rejected because the Go HTTP server treats it as `0.0.0.0:7710` — bound to every interface. Binding to a non-loopback IP requires `--allow-non-localhost` (Phase 2; v1 does not even accept that flag).
 4. **Bounded parsing.** Every adapter parser has explicit limits:
    - max line length: 16 MB (anything larger logged as SourceError and skipped)
    - max event payload depth: 64 (anything deeper logged and skipped)

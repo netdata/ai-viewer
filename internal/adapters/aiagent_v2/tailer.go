@@ -48,11 +48,15 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	}
 	defer func() { _ = watcher.Close() }()
 
-	// 0o750 matches the v3 adapter: owner full, group read+exec, world
-	// none. Created defensively when the operator points the ingester
-	// at a fresh sessions directory.
-	if mkErr := os.MkdirAll(root, 0o750); mkErr != nil {
-		return fmt.Errorf("aiagent_v2: ensure %s: %w", root, mkErr)
+	// security.md §"Hard Rules" #1 — read-only on sources. No code path
+	// writes to a source tree, NOT EVEN the watch root. If the
+	// directory does not exist we surface a SourceErrorEvent via
+	// onError (lifts to /api/health.parse_errors) and return cleanly:
+	// the adapter has nothing to watch, but the daemon keeps running
+	// for any other configured source.
+	if _, statErr := os.Stat(root); statErr != nil {
+		onError(fmt.Errorf("aiagent_v2: watch root %s not present (read-only on sources, no mkdir): %w", root, statErr))
+		return nil
 	}
 	if addErr := watcher.Add(root); addErr != nil {
 		return fmt.Errorf("aiagent_v2: watch %s: %w", root, addErr)

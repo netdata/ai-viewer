@@ -68,10 +68,15 @@ func TestStreamLines_LastSeqNotUpdatedWhenStale(t *testing.T) {
 	}
 }
 
-// TestTail_MkdirAllOnAbsentSessionDir: when session/ does not exist
-// yet, Tail creates it before adding the watcher (spec §6.1). Watcher
-// must end up watching the new directory.
-func TestTail_CreatesMissingSessionDir(t *testing.T) {
+// TestTail_DoesNotCreateMissingSessionDir asserts the read-only-on-
+// sources invariant (security.md §"Hard Rules" #1, codex iter-3 P1
+// addressed in iter-4): when session/ does not exist, Tail surfaces a
+// SourceError via OnError and returns cleanly — it MUST NOT create
+// the directory. The dedicated regression test in tailer_test.go
+// pins the OnError + early-return behavior; this case stays here so
+// the prior coverage3_test slot remains active and the dirExists
+// helper retains a user.
+func TestTail_DoesNotCreateMissingSessionDir(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -79,16 +84,19 @@ func TestTail_CreatesMissingSessionDir(t *testing.T) {
 	out := make(chan canonical.Event, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = a.Tail(ctx, out) }()
-	// Poll briefly for the directory creation.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if dirExists(filepath.Join(root, sessionDir)) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		_ = a.Tail(ctx, out)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Tail did not return promptly with missing session dir")
 	}
-	t.Fatalf("Tail did not create session/ within 2s")
+	if dirExists(filepath.Join(root, sessionDir)) {
+		t.Fatalf("Tail created session/ — violates read-only-on-sources invariant")
+	}
 }
 
 func dirExists(p string) bool {
