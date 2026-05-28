@@ -38,6 +38,13 @@ type Presenter struct {
 	nowFn         func() time.Time
 	frontend      fs.FS
 
+	// notBuiltLogOnce guards the single Info log emitted when GET / falls
+	// back to the not-built notice (the embedded FS has no index.html).
+	// Logged once so a dev-time unbuilt UI is visible without flooding the
+	// log on every request (observability.md §Structured Logging;
+	// presenter.md §"serveIndex contract").
+	notBuiltLogOnce sync.Once
+
 	// hub fans matched notify events out to connected SSE clients; subs is
 	// the REST-facing subscription registry kept consistent with the hub.
 	hub  *notify.Hub
@@ -235,6 +242,13 @@ func (p *Presenter) Handler() http.Handler {
 
 	// Frontend routes.
 	mux.HandleFunc("/assets/", p.serveAsset)
+	// Root public files Vite copies from frontend/public/ to dist/ root
+	// (e.g. /favicon.svg). Each gets an explicit exact route so unexpected
+	// root paths still fall through to rootHandler's NOT_FOUND rather than a
+	// catch-all (presenter.md §"Root public assets").
+	for _, name := range publicRootFiles {
+		mux.HandleFunc("/"+name, p.servePublicFile)
+	}
 	mux.HandleFunc("/", p.rootHandler)
 
 	chain := chainMiddleware(mux,

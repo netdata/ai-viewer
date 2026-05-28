@@ -10,16 +10,21 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/netdata/ai-viewer/internal/store"
 )
 
-// TestServeIndex_MissingEmbedReturns500 asserts the handler reports an
-// internal error when the embedded FS lacks index.html. Provides
-// coverage for the missing-file branch.
-func TestServeIndex_MissingEmbedReturns500(t *testing.T) {
+// TestServeIndex_EmptyEmbedServesNotice asserts that an entirely empty
+// embedded FS (no index.html and not even a .gitkeep) still degrades to
+// the not-built notice at 200 rather than 500. As of SOW-0001 Chunk 17
+// (D2) a wired-but-unbuilt frontend is a recoverable dev-time state; the
+// 500 path is reserved for p.frontend == nil (see
+// TestEmbedDisabledReturns404). This pins the boundary that any FS value
+// other than nil is treated as "wired, maybe unbuilt".
+func TestServeIndex_EmptyEmbedServesNotice(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, err := store.OpenWriter(ctx, ":memory:", nil)
@@ -31,7 +36,7 @@ func TestServeIndex_MissingEmbedReturns500(t *testing.T) {
 	p, err := New(Options{
 		DB:         s.DB(),
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		FrontendFS: fstest.MapFS{}, // no index.html
+		FrontendFS: fstest.MapFS{}, // wired but empty: no index.html
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -39,8 +44,11 @@ func TestServeIndex_MissingEmbedReturns500(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (not-built notice)", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "scripts/build.sh") {
+		t.Fatalf("body must point at scripts/build.sh; body = %q", rr.Body.String())
 	}
 }
 

@@ -68,6 +68,37 @@ The two binaries communicate **only via the SQLite file**: the canonical rows pl
                  Browser
 ```
 
+The `GET /` → `go:embed` arrow above is the single-binary serve model: one
+`ai-viewer-serve` process serves both the `/api` + SSE surface and the built
+React SPA same-origin, with no separate web server and no Node at runtime.
+`scripts/build.sh` produces this binary (see `deployment.md`).
+
+### Embed-dir git policy
+
+`cmd/ai-viewer-serve/frontend_dist/` is embedded with `//go:embed
+all:frontend_dist`. Its git policy keeps the tree clean across builds:
+
+- A single tracked sentinel `cmd/ai-viewer-serve/frontend_dist/.gitkeep` keeps
+  the `all:` embed compiling on a clean checkout (the `all:` prefix embeds
+  dotfiles, so a `.gitkeep`-only directory is a valid non-empty embed).
+- `.gitignore` ignores everything under that directory except the sentinel
+  (`/cmd/ai-viewer-serve/frontend_dist/*` then
+  `!/cmd/ai-viewer-serve/frontend_dist/.gitkeep`).
+- `scripts/build.sh` writes the whole built `dist/` tree there (`index.html`,
+  `assets/`, and root public files such as `favicon.svg`); because those are
+  git-ignored, `git status` is always clean after a release build — no tracked
+  file is ever overwritten by the build.
+
+### Not-built degrade
+
+`ai-viewer-serve` never refuses to start because the UI is not built. On a
+clean checkout (the `.gitkeep`-only state, e.g. `go run ./cmd/ai-viewer-serve`
+during development while the UI runs under `vite dev`), `embeddedFrontend()`
+returns the embedded FS unconditionally and `GET /` serves a small built-in
+notice (`200`, `Cache-Control: no-cache`) telling the operator to run
+`scripts/build.sh`, while `/api/*` stays fully functional. The not-built state
+is logged once at `Info`. See `presenter.md` §"serveIndex contract".
+
 ## Why two binaries
 
 - **Process isolation.** A crash in the ingester does not bring down the UI; a crash in the server does not lose ingest progress.

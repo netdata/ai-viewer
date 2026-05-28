@@ -104,11 +104,13 @@ You are implementing a slice of ai-viewer per SOW `<path>`.
 [FORBIDDEN]
 - Editing AGENTS.md, .agents/sow/specs/**, .agents/skills/** (master owns these).
 - Editing the failing tests to make them pass artificially.
-- Running external second-opinion reviewers (master orchestrates those).
+- Running external second-opinion reviewers (codex/glm/minimax/etc.). **The master runs the single mandatory review round on the final integrated state — the implementation subagent never runs reviewers.**
 - Committing or pushing (master orchestrates git).
 ```
 
 Always quote the spec passages verbatim in the prompt — never let the subagent infer behavior from the file name.
+
+**The `[FORBIDDEN]` block is non-optional in every implementation prompt — especially the "do not run external reviewers" line.** A spawned subagent inherits `AGENTS.md`, which mandates external review before any work is called done. So an implementation prompt that *omits* the carve-out does not make the subagent skip review — it makes the subagent dutifully run codex/glm/minimax **itself**, and then the master runs them **again** on the same final state. That double-review is pure waste (slow, costly) and muddies ownership: review is the master's QA gate on code it did not write, not a step the author runs on its own work. Always paste the `[FORBIDDEN]` block; if a prompt is trimmed, the reviewer line is the one that must survive.
 
 ## Subagent Prompt Template (Investigation)
 
@@ -180,7 +182,7 @@ Conversely, do not spawn a subagent for a one-line typo fix. Trivial verified ed
 - **Trusting the subagent's summary without reading the diff.** That's how regressions enter the codebase.
 - **Serial subagent calls when parallel was possible.** Wastes the operator's time.
 - **Restarting a stuck subagent from scratch when SendMessage would refine.** Loses momentum.
-- **Spawning external reviewers from inside a subagent.** Infinite recursion. Only the master spawns reviewers.
+- **Letting an implementation subagent run external reviewers.** Two failure modes: (1) a *reviewer* subagent spawning reviewers is infinite recursion; (2) an *implementation* subagent running codex/glm/minimax duplicates the master's mandatory round on the same final state — slow, costly, and it makes the author grade its own homework instead of the master QA-gating code it did not write. Only the master runs reviewers. The implementation prompt's `[FORBIDDEN]` block must say so (see the template above).
 
 ## Cross-References
 

@@ -37,10 +37,12 @@ import (
 	"github.com/netdata/ai-viewer/internal/store"
 )
 
-// frontendFS holds the Vite build output. Replaced by scripts/build.sh
-// (Chunk 17) before each release build. A placeholder index.html lives
-// under frontend_dist/ so the binary always compiles even before the
-// real frontend is built.
+// frontendFS holds the Vite build output. scripts/build.sh writes the
+// real index.html + assets/ under frontend_dist/ before a release build.
+// On a clean checkout the directory holds only the tracked .gitkeep
+// sentinel; the `all:` prefix embeds that dotfile so the binary always
+// compiles even before the frontend is built (serveIndex then degrades to
+// a not-built notice — see embeddedFrontend and presenter.md).
 //
 //go:embed all:frontend_dist
 var frontendFS embed.FS
@@ -112,11 +114,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	frontend, err := embeddedFrontend()
-	if err != nil {
-		logger.Error("ai-viewer-serve: embedded frontend setup failed", "err", err)
-		return 1
-	}
+	frontend := embeddedFrontend()
 
 	// hub is the in-memory SSE fan-out. The serve binary owns it so it can
 	// deliver a graceful-shutdown `disconnect` before closing it (see
@@ -272,7 +270,7 @@ func resolveStateDir(p string) (string, error) {
 // silently expose the server. An empty host is also rejected because
 // the Go HTTP server treats ":7710" as 0.0.0.0:7710 — bound to every
 // interface. The operator must spell out a literal loopback IP so the
-// security posture is unambiguous (minimax iter-3 P1).
+// security posture is unambiguous.
 func assertLocalhost(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -293,15 +291,16 @@ func assertLocalhost(addr string) error {
 		"only literal 127.0.0.1 and ::1 are accepted (security.md §Hard Rules)", addr)
 }
 
-// embeddedFrontend returns an fs.FS scoped to the frontend_dist
-// directory. The placeholder index.html lives at
-// frontend_dist/index.html; scripts/build.sh (Chunk 17) replaces the
-// directory contents with the Vite output.
-func embeddedFrontend() (fs.FS, error) {
-	if _, err := frontendFS.ReadFile("frontend_dist/index.html"); err != nil {
-		return nil, fmt.Errorf("embedded frontend_dist/index.html missing: %w", err)
-	}
-	return frontendFS, nil
+// embeddedFrontend returns the embedded frontend FS. It cannot fail: the
+// `all:` embed always captures the tracked .gitkeep sentinel, so frontendFS
+// is never empty even on a clean checkout where scripts/build.sh has not yet
+// written the real index.html + assets/. A binary built without running the
+// frontend build must still start and serve /api; when index.html is absent
+// the presenter's serveIndex degrades to a built-in "UI not built" notice at
+// GET / (presenter.md §"serveIndex contract"). An unbuilt UI is therefore a
+// recoverable dev-time state the caller never treats as fatal.
+func embeddedFrontend() fs.FS {
+	return frontendFS
 }
 
 // serveHTTP wires up the HTTP server, the read-only notify poller, signal

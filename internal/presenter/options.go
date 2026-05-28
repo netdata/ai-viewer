@@ -51,8 +51,11 @@ type Options struct {
 	// FrontendFS holds the embedded frontend assets rooted at
 	// `frontend_dist/`. The serve binary owns the embed declaration and
 	// passes the resulting fs.FS in. Tests inject a synthetic FS via
-	// fstest.MapFS. nil disables the frontend routes (every "/" or
-	// "/assets/..." request returns 404 with NOT_FOUND).
+	// fstest.MapFS. nil means the frontend was never wired: "/" returns a
+	// 500 INTERNAL_ERROR and "/assets/..." returns 404 NOT_FOUND. A wired
+	// FS that simply lacks index.html (the .gitkeep-only clean checkout)
+	// is NOT disabled — "/" degrades to the built-in not-built notice
+	// (presenter.md §"serveIndex contract").
 	FrontendFS fs.FS
 
 	// Hub is the in-memory SSE fan-out the subscription routes and the

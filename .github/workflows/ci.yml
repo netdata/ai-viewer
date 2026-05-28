@@ -18,11 +18,13 @@
 #   the project grows.
 #
 # Job-name contract
-#   The four job IDs below (lint, test, frontend, gates) are the
+#   The job IDs below (lint, test, frontend, embed-smoke, gates) are the
 #   contract for branch-protection required status checks. SOW-0013
 #   will register these exact names via the GitHub branch-protection
 #   API. Renaming a job is a breaking change to that contract and
-#   requires a SOW.
+#   requires a SOW. `embed-smoke` (SOW-0001 Chunk 17) is the new
+#   top-level concern that proves the single binary serves the built UI;
+#   SOW-0013 registers it alongside the original four.
 #
 # Extending
 #   Future quality SOWs (SOW-0009 onwards) extend this workflow by
@@ -365,6 +367,81 @@ jobs:
           path: bundle-report/
           if-no-files-found: error
           retention-days: 14
+
+  embed-smoke:
+    # Proves the SOW-0001 Chunk 17 milestone: scripts/build.sh produces a
+    # single ai-viewer-serve binary that serves the REAL built UI
+    # same-origin with /api. Boots the binary against a seeded temp DB and
+    # asserts GET / returns the built index.html (hashed asset ref, not the
+    # not-built notice), a hashed asset is served with a long cache, and
+    # /api/health is up. Also asserts the build leaves a clean git tree
+    # (only the .gitkeep sentinel is tracked under frontend_dist/).
+    name: embed-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect build prerequisites
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f go.mod && -f frontend/package.json && -f scripts/build.sh ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice (build pipeline not present yet)
+        if: steps.detect.outputs.ready != 'true'
+        run: echo "go.mod, frontend/package.json, or scripts/build.sh absent; embed-smoke is a no-op on this commit."
+
+      - name: Set up Go
+        if: steps.detect.outputs.ready == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Set up Node
+        if: steps.detect.outputs.ready == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build single binary (frontend + embed + go build)
+        if: steps.detect.outputs.ready == 'true'
+        run: bash scripts/build.sh
+
+      - name: Assert clean git tree after build
+        if: steps.detect.outputs.ready == 'true'
+        shell: bash
+        run: |
+          # scripts/build.sh writes git-ignored output under frontend_dist/;
+          # the build must not modify any tracked file. The only tracked path
+          # there is the .gitkeep sentinel.
+          dirty="$(git status --porcelain cmd/ai-viewer-serve/frontend_dist/)"
+          if [[ -n "$dirty" ]]; then
+            echo "build dirtied tracked files under frontend_dist/:" >&2
+            echo "$dirty" >&2
+            exit 1
+          fi
+          echo "frontend_dist/ tree clean after build (only .gitkeep tracked)."
+
+      - name: Serve the built UI and assert it is real
+        if: steps.detect.outputs.ready == 'true'
+        shell: bash
+        # Seed a temp DB, boot the freshly built binary, and curl-assert it
+        # serves the REAL built UI (hashed asset, long cache) and /api. The
+        # logic lives in scripts/embed-smoke.sh so it runs identically on a
+        # developer workstation; CI uses the default port (7710).
+        run: bash scripts/embed-smoke.sh
 
   gates:
     name: gates

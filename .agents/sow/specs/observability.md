@@ -20,6 +20,10 @@ Mandatory log moments:
 - Every SQLite error.
 - Source disabled / re-enabled.
 - Server startup: bind address, embedded frontend SHA.
+- Frontend not built: a single `Info` line when `GET /` is served with the
+  built-in not-built notice (the embedded FS has no `index.html`), instructing
+  the operator to run `scripts/build.sh`. Logged once so a dev-time unbuilt
+  state is visible without flooding the log on every request.
 - Graceful shutdown progress.
 
 Prohibited log patterns:

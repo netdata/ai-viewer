@@ -9,6 +9,8 @@ description: Invoke external LLMs (codex, gemini, glm, kimi, mimo, minimax, qwen
 
 External second-opinion review is **mandatory** — not "encouraged" — for any non-trivial work. The assistant does not trust itself; review converges before "done" is uttered.
 
+**The orchestrator (master) runs review — exactly once per iteration, on the final integrated state — never the implementation subagent.** Review is the master's QA gate on code it did not author; an implementation subagent running reviewers on its own work both duplicates the master's mandatory round (the master will run it again → 2× the slow, costly review of identical code) and collapses the author/reviewer separation. Because spawned subagents inherit `AGENTS.md` (which mandates this review), the master MUST explicitly forbid reviewers in every implementation delegation prompt — see `project-delegation` skill, the `[FORBIDDEN]` block. If a subagent reports it "ran reviewers," that round does not substitute for the master's: treat the subagent's findings as a useful head start, then run the one official round on the final state and do not re-run beyond convergence.
+
 Mandatory before marking any of these SOWs `completed`:
 
 - Any code-producing SOW (new feature, bug fix beyond a one-liner, refactor).

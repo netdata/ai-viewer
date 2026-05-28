@@ -6024,6 +6024,200 @@ Final gates (frontend, master-verified after iter-4): `eslint --max-warnings 0`
 (budget ≤500 KB). No operator home-path, no secrets, no inline colors; no `e2e`
 script (E2E is Chunk 18).
 
+### Chunk 17 — build pipeline + go:embed single binary (Pre-Implementation Gate, 2026-05-28)
+
+**Goal / fit-for-purpose.** The operator runs ONE binary (`ai-viewer-serve`)
+and gets the live UI at `http://127.0.0.1:7710/` — no separate web server, no
+node at runtime. This is the milestone that turns Chunks 11-15 (REST+SSE backend
++ React SPA) into a single self-contained artifact.
+
+**Problem / current state (evidence).** The serve binary ALREADY has the embed
+plumbing from the Chunk-11 scaffold; what is missing is the build script that
+produces the real bundle, the git policy for the embed dir, and a CI proof that
+the binary actually serves the built UI:
+- `cmd/ai-viewer-serve/main.go:45` — `//go:embed all:frontend_dist` into
+  `frontendFS embed.FS`.
+- `cmd/ai-viewer-serve/main.go:300-305` — `embeddedFrontend()` returns an ERROR
+  when `frontend_dist/index.html` is missing; `main.go:115-119` treats that as
+  FATAL (`return 1`), so the binary refuses to start without an index.html.
+- The only committed embed file is the stale placeholder
+  `cmd/ai-viewer-serve/frontend_dist/index.html` (says "Frontend lands in Chunk
+  14") — `git ls-files` confirms it is the sole tracked file there.
+- `internal/presenter/presenter.go:143,237-238,266-277` — presenter takes the
+  FS via `Options.FrontendFS fs.FS`; `/` → `rootHandler`→`serveIndex`,
+  `/assets/` → `serveAsset`. `internal/presenter/options.go:53-56` — tests
+  inject a synthetic FS, so serving tests do NOT depend on the committed file.
+- `internal/presenter/embed_test.go` — `serveIndex`/`serveAsset`/`safeAssetPath`
+  /`contentTypeForAsset` are covered against a synthetic FS;
+  `TestEmbedDisabledReturns404` pins `p.frontend == nil` → `/` 500, `/assets/*`
+  404.
+- `frontend/vite.config.ts` — `build.outDir: 'dist'`, no `base` (defaults to
+  `/`, so asset URLs are root-relative `/assets/...` = correct same-origin).
+- `.gitignore` — `/frontend/dist/`, `/bin/`, `/dist/` already ignored;
+  `cmd/ai-viewer-serve/frontend_dist/` is NOT ignored.
+- No `scripts/build.sh` / `dev.sh` yet (only bench/fixture/pricing scripts).
+- `.github/workflows/ci.yml` — `test` job runs `go build ./...` independently of
+  the `frontend` job; it compiles today only because the placeholder exists.
+- `go.mod` — `module github.com/netdata/ai-viewer`, `go 1.26` (embed fine).
+
+**Decisions (CTO calls — technical, documented here, not operator questions).**
+- **D1 — embed-dir git policy = gitignore-all-but-`.gitkeep` + graceful serve.**
+  `git rm` the committed placeholder `index.html`; add a tracked
+  `cmd/ai-viewer-serve/frontend_dist/.gitkeep`; `.gitignore` gains
+  `/cmd/ai-viewer-serve/frontend_dist/*` then `!/cmd/ai-viewer-serve/frontend_dist/.gitkeep`.
+  Rationale: `go:embed all:frontend_dist` still compiles (it embeds `.gitkeep`);
+  `scripts/build.sh` populates the real `index.html` + `assets/` (all
+  gitignored) → **`git status` is ALWAYS clean after a release build** (no
+  tracked file is overwritten). Rejected alternative: keep the committed
+  `index.html` and gitignore only `assets/` — every release build would leave
+  the tracked `index.html` modified (dirty tree, risk of committing build
+  output). `go:embed all:` matches dotfiles so a `.gitkeep`-only dir is a valid
+  non-empty embed.
+- **D2 — serve degrades, never fatals, when the UI is not built.**
+  `embeddedFrontend()` stops erroring on a missing `index.html` (returns the
+  scoped FS unconditionally); `serveIndex` serves a small built-in notice
+  ("ai-viewer UI not built — run scripts/build.sh", HTTP 200, `Cache-Control:
+  no-cache`) when the FS has no `index.html`, while `/api/*` stays fully
+  functional. Rationale: `go run ./cmd/ai-viewer-serve` (dev, no build) must
+  still serve `/api` (the UI runs under `vite dev` in dev); and an
+  unbuilt-binary user gets a clear instruction, not a crash or 500. `p.frontend
+  == nil` (test-only misconfig) keeps returning 500.
+- **D3 — `scripts/build.sh` + `scripts/dev.sh` only.** `build.sh`: `cd frontend
+  && npm ci && npm run build` → sync `frontend/dist/` into
+  `cmd/ai-viewer-serve/frontend_dist/` (clear stale, copy index.html + assets/)
+  → `go build` both binaries into `bin/`. Uses the transparent `run()` wrapper
+  (global CLAUDE.md). `dev.sh`: run `vite dev` + `go run ./cmd/ai-viewer-serve`
+  together (vite proxies `/api` → `:7710`). `lint.sh`/`test.sh`/`gates.sh`/
+  `spec-drift.sh` are a separate developer-ergonomics concern — OUT of scope
+  here; if not delivered they get a follow-up SOW in `pending/` (tech-debt-paid
+  rule). CI already runs the gates inline, so they are not blocking.
+- **D4 — CI proves the milestone.** Add a CI step/job that runs `scripts/build.sh`
+  then boots `bin/ai-viewer-serve` against a seeded temp DB and asserts: `GET /`
+  returns the REAL built index.html (references a hashed `/assets/*` bundle, not
+  the notice), `GET /assets/<hashed>` → 200 with long-cache, `GET /api/health`
+  → 200. Without this, the chunk's core value is unverified. The existing `test`
+  job's `go build ./...` keeps working (embeds `.gitkeep`).
+
+**Affected contracts / surfaces.** `cmd/ai-viewer-serve/main.go`
+(`embeddedFrontend`, startup), `internal/presenter/embed.go` (`serveIndex`
+notice path), `.gitignore`, `.github/workflows/ci.yml`, new `scripts/build.sh`
++ `scripts/dev.sh`, removal of the committed placeholder. No REST/SSE/schema
+changes. No frontend source changes.
+
+**Spec deltas to land BEFORE tests/code.**
+- `deployment.md` — document `scripts/build.sh` (what it builds, the embed copy,
+  `bin/` outputs) and `scripts/dev.sh`; state the single-binary serve model.
+- `architecture.md` — confirm the "GET / (embedded frontend) ← go:embed"
+  diagram matches; add the `.gitkeep`/gitignore embed-dir policy + the
+  not-built notice degrade.
+- `presenter.md` — `serveIndex` contract: serves built `index.html` when
+  present, else the built-in "not built" notice (200, no-cache); `serveAsset`
+  unchanged; SPA fallback unchanged.
+- `observability.md`/`security.md` — only if the notice path needs a log line
+  (it should `Info`-log once that the UI is unbuilt); confirm localhost-only
+  unchanged.
+
+**Existing patterns to reuse.** The presenter `Options.FrontendFS` injection +
+synthetic-FS tests (embed_test.go); the `run()` transparency wrapper for shell
+scripts; the Chunk-11 cmd smoke-test style in `cmd/ai-viewer-serve/main_test.go`
+for any Go-level startup test; the CI `frontend` job's `npm ci`/Node setup as
+the template for the build-and-smoke step ordering.
+
+**Risk / blast radius.** Low-to-moderate. The risky bit is the startup-behavior
+change (D2): a binary that previously refused to start now starts and serves a
+notice — verified by tests. CI risk (D4 ordering) is contained: the new smoke
+step builds the frontend before booting the binary; the existing Go jobs are
+untouched (still embed `.gitkeep`). Removing the committed placeholder cannot
+break compilation because `.gitkeep` keeps the embed non-empty (assert in CI).
+
+**Sensitive data plan.** None introduced. `build.sh`/`dev.sh` contain no secrets;
+the notice HTML is static; no operator home-path (scripts use repo-relative
+paths + `$(dirname)`); the smoke seeds a temp DB, not the operator's real one.
+
+**Implementation plan (spec → tests → code, subagent-produced).**
+1. Land the spec deltas above.
+2. Tests first: extend `internal/presenter/embed_test.go`
+   (`TestServeIndex_NoIndexServesNotice`: FS without index.html → 200 + notice
+   body + `no-cache`; keep `TestServeIndex_*Returned` for the present case via
+   synthetic FS; keep `TestEmbedDisabledReturns404` for nil); extend
+   `cmd/ai-viewer-serve/main_test.go` (`embeddedFrontend()` returns FS, no error,
+   when index.html absent).
+3. Code: `embeddedFrontend` no-fatal; `serveIndex` notice branch + a one-time
+   Info log; `.gitignore` + `.gitkeep` + `git rm` placeholder; `scripts/build.sh`
+   + `scripts/dev.sh`; CI build+smoke step.
+4. Gate set: `gofmt`/`vet`/`golangci-lint`/`staticcheck`/`go test -race ./...`
+   (Go) + run `scripts/build.sh` locally and curl-smoke the real binary +
+   `frontend/` gate set unchanged. Then external review (codex+glm+minimax) to
+   convergence; commit spec+tests+code+scripts+CI together; PR; CI green; merge.
+
+**Validation plan (named).** `internal/presenter/embed_test.go`
+(notice-when-no-index, present-index, nil-frontend); `cmd/ai-viewer-serve/main_test.go`
+(embeddedFrontend non-fatal); a local + CI build-and-serve smoke (real
+index.html with a hashed asset ref at `/`, `/assets/<hashed>` 200 long-cache,
+`/api/health` 200). The "clean git tree after build" property is asserted by a
+CI `git status --porcelain` check post-build.
+
+**Artifact impact.** `cmd/ai-viewer-serve/frontend_dist/` becomes a generated
+dir (only `.gitkeep` tracked); `bin/` already ignored. The release binary is a
+build artifact, never committed. Producer = `scripts/build.sh`; refresh event =
+re-run build; serving route = `serveIndex`/`serveAsset` reading the embedded FS;
+no on-demand generation in any request handler.
+
+**Open decisions.** None blocking — D1-D4 settled above. (Deferred, tracked
+separately: the remaining `scripts/{lint,test,gates,spec-drift}.sh`; Playwright
+E2E in Chunk 18; systemd unit in Chunk 19.)
+
+### Chunk 17 — implementation + review (2026-05-29)
+
+Delivered all four decisions. `serveIndex` is now 3-state (nil→500,
+index.html→serve, `fs.ErrNotExist`→built-in "UI not built" notice 200/no-cache,
+logged once via `sync.Once`); `embeddedFrontend()` never fatals; `/favicon.svg`
++ root public files served via `servePublicFile` (traversal-guarded, no SPA
+fallback). Embed-dir policy: committed placeholder `index.html` removed, tracked
+`.gitkeep` sentinel + `.gitignore` ignore-all-but-sentinel, so `go:embed
+all:frontend_dist` compiles on a clean checkout and a release build leaves the
+tree clean. `scripts/build.sh` (npm ci + vite build → sync into embed dir →
+`go build` both binaries to `bin/`), `scripts/dev.sh` (temp-built serve binary +
+`exec vite`, PID-tracked cleanup — kills only its own PIDs), and (review fix D)
+`scripts/embed-smoke.sh` (extracted from CI, locally runnable). CI `embed-smoke`
+job builds + asserts clean tree + boots the binary + curls `/`, `/assets/<hash>`,
+`/favicon.svg`, `/api/health`.
+
+Master verification (not just subagent report): `gofmt`/`go vet`/`golangci-lint`
+all 0, `go test -race ./...` all pass; ran `scripts/build.sh` + booted the real
+binary — `/` serves the real hashed `index.html` (not the notice),
+`/assets/<hash>` 200 immutable, `/favicon.svg` 200, `/api/health` 200; clean git
+tree after build (built output gitignored, only `.gitkeep` tracked). Earlier LSP
+DuplicateDecl/unused diagnostics were stale (single-file symbols; gates clean).
+
+**Review — orchestrator round (codex + glm + minimax), converged → milestone met.**
+All three: production-quality, no P1, no correctness/security issues. Findings
+were polish, all applied: (1) `embeddedFrontend()` simplified to `fs.FS` (dead
+always-nil error dropped) + caller + test; (2) added `HEAD /favicon.svg` test
+(HEAD-parity contract); (3) `publicRootFiles` → fixed-size array; (4) CI smoke
+extracted to `scripts/embed-smoke.sh`. codex P2 (`.gitkeep` must be committed or
+a clean checkout's embed is empty → `go build` fails) handled by explicitly
+staging `cmd/ai-viewer-serve/frontend_dist/.gitkeep` in the commit.
+- **Process correction (operator-flagged):** the implementation subagent had ALSO
+  run codex+glm itself before this round — double review. Root cause: the
+  delegation prompt omitted the `[FORBIDDEN]` "no reviewers" carve-out, so the
+  subagent (inheriting AGENTS.md's review mandate) self-reviewed. Fixed durably:
+  `project-delegation` + `project-second-opinions` skills now make the carve-out
+  non-optional and state the orchestrator runs review once; recorded in memory.
+
+**Hygiene finding (operator-directed removal).** A repo-wide scan found ~50
+committed comments across `cmd/`/`internal/`/`scripts/` attributing fixes to AI
+reviewers by name ("codex iter-N P#", "minimax iter-3 P1", "glm P2-2", "qwen
+P2-4") — a standing breach of the no-AI-attribution rule on a public repo
+(legitimate domain uses — `pricing.json` model names, `codex`/`opencode` session
+formats — are NOT touched). The two Chunk-17-touched files (`main.go`,
+`main_test.go`) are cleaned in this commit; the remaining ~48 are scrubbed in
+SOW-0017 (own PR) plus a scan gate to prevent reappearance.
+
+**Deferred (tracked):** SPA deep-link fallback for client routes (`/sessions/:id`
+on hard reload → JSON 404) — pre-existing Chunk-11 behavior, scoped out per this
+gate, filed as SOW-0016.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

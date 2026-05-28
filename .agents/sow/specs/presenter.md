@@ -206,12 +206,61 @@ The frontend's Vite-built `dist/` directory is embedded via `go:embed`:
 var frontendFS embed.FS
 ```
 
-Build pipeline: `scripts/build.sh` runs `npm --prefix frontend run build`, copies output to `cmd/ai-viewer-serve/frontend_dist/`, then `go build`. Documented in `deployment.md`.
+The `all:` prefix embeds dotfiles, so the directory is never empty: a tracked
+`cmd/ai-viewer-serve/frontend_dist/.gitkeep` keeps the embed compiling on a
+clean checkout before any frontend build runs. Everything else under that
+directory is build output, git-ignored, and produced by `scripts/build.sh`
+(see `deployment.md` and `architecture.md` §"Embed-dir git policy").
+
+Build pipeline: `scripts/build.sh` runs `npm run build` in `frontend/`, copies the output to `cmd/ai-viewer-serve/frontend_dist/`, then `go build`. Documented in `deployment.md`.
+
+### serveIndex contract
+
+`GET /` and `HEAD /` are answered by `serveIndex`, which has three states:
+
+- **Built UI present** — `index.html` exists in the embedded FS: respond `200`
+  with `Content-Type: text/html; charset=utf-8` and `Cache-Control: no-cache`
+  so the browser re-fetches the shell after a redeploy and picks up the new
+  hashed asset names. `HEAD` carries the same headers with an empty body
+  (RFC 9110 §9.3.2).
+- **UI not built** — the FS is wired (`p.frontend != nil`) but `index.html` is
+  absent (the `.gitkeep`-only state, e.g. `go run ./cmd/ai-viewer-serve`
+  without a prior `scripts/build.sh`): respond `200` with the same
+  `text/html`/`no-cache` headers and a small built-in notice instructing the
+  operator to run `scripts/build.sh`. The server logs this once at `Info` and
+  keeps every `/api/*` route fully functional — the absence of a built UI is a
+  recoverable dev-time state, not a fatal error. The serve binary's
+  `embeddedFrontend()` therefore never fails on a missing `index.html`.
+- **Frontend disabled** — `p.frontend == nil` (a test/wiring misconfiguration
+  the production binary cannot reach, since it always embeds the FS): respond
+  `500` with the structured `INTERNAL_ERROR` envelope.
+
+`serveAsset` and the SPA-fallback behavior are unchanged: `/assets/*` serves the
+hashed bundle with a long immutable cache and returns `404` on a miss (no SPA
+fallback for asset paths). Only `/` falls back to the SPA shell / notice. Both
+the built `index.html` and the not-built notice set an explicit `Content-Length`
+so `HEAD /` advertises the same body length a `GET /` would return.
+
+### Root public assets
+
+Vite copies `frontend/public/*` to the root of `dist/` (not under `assets/`).
+The built `index.html` references these at the site root — Phase 1 ships
+`favicon.svg`. `scripts/build.sh` therefore copies the ENTIRE `dist/` tree into
+the embed dir (not only `index.html` + `assets/`), and the presenter serves
+each referenced root file from an explicit route (`GET /favicon.svg`) via
+`servePublicFile`. That handler reads a single, traversal-safe basename from the
+embed root, returns the file with a content-typed `200` and a short
+revalidating cache (`no-cache`, since these names are not content-hashed), and
+returns `404` on a miss (no SPA fallback). Adding a new root public file (e.g.
+`robots.txt`) is one new mux registration plus a build-output copy — it is NOT
+served by a catch-all, so an unexpected root path still 404s rather than leaking
+the SPA shell.
 
 ## Routing
 
 ```
-GET  /                          → frontend index.html                                       (live)
+GET  /                          → frontend index.html (or not-built notice)                 (live)
+GET  /favicon.svg               → embedded root public asset                                (live)
 GET  /assets/*                  → embedded frontend assets                                  (live)
 GET  /api/health                → JSON health status                                        (live)
 GET  /api/sources               → list sources, ingest cursors, parse error counts          (live)
