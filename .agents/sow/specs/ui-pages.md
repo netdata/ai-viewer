@@ -108,3 +108,104 @@ More to be added as needs emerge (operator-driven via feedback).
 | 3 | `/topology`, `/tools`, `/models`, `/agents` cross-session analytics |
 | 4 | claude-code, codex, opencode adapters |
 | 5 | Polish, advanced filters, keyboard shortcuts modal, deep search |
+
+## Phase-1 Implemented Behavior
+
+The pages delivered in Phase 1 implement the following concrete behavior. This
+section is the durable record of WHAT the shipped UI does (the forward-looking
+sections above describe the eventual target); reviewers and the next session
+read this to know the current contract without re-reading the code.
+
+### `/` — SessionsList (live)
+
+- Data: `useSessions(filters, 'root')` — `filters` come from `useFilters()`
+  (the global FilterBar drives them via the URL). Root sessions only.
+- Renders a `<table>` of `SessionRow` (agent, model, start, duration, status,
+  turns, ops, tokens in/out, cost, failures). A leading cell shows the
+  `child_session_count` as a drill-down affordance: when `> 0` it links to the
+  session **detail** page (`/sessions/:id`), whose Overview lists the session's
+  `child_sessions`; when `0` it is a plain dash. (The link must not emit a
+  `?root=` query — no list filter consumes `root`; only `group` is parsed by
+  `readFilters`, and `/api/sessions` has no `root`/`root_session_id` filter.)
+- **Keyset pagination**: a "Load more" control (the shared `LoadMore`
+  primitive) appends the next page using `next_cursor`. Implemented with
+  TanStack `useInfiniteQuery`; pages are concatenated, never reset on cursor
+  (the cursor contract in `rest-api.md` forbids replaying a cursor under a
+  changed query — a filter change starts a fresh query, which mints a fresh
+  first page). The control is hidden when no `next_cursor` is present.
+- States: distinct **loading** (`LoadingState`), **error** (`ErrorState`
+  showing the `ApiError.message`), and **empty** (`EmptyState`) renders. A row
+  click navigates to `/sessions/:id` (id `encodeURIComponent`-encoded — done by
+  `SessionRow`'s `<Link>`).
+- Live: `useLiveUpdates(subscriptionFilter)` keeps exactly one SSE subscription
+  open for the active filter; `session_changed` / `resync` frames invalidate
+  the `['sessions']` key and the list refetches.
+
+### `/sessions/:id` — SessionDetail (live)
+
+- Data: `useSessionDetail(id)`. The active tab is stored in the URL query param
+  `?tab=` (so a tab is shareable / back-button friendly), defaulting to
+  `overview`; an unknown `?tab=` value falls back to `overview`.
+- **404**: when the detail query fails with `ApiError.status === 404` (unknown
+  id), the page renders a clean "session not found" state instead of the tabs.
+- **Overview tab**: header (agent / model / status badge) plus per-session
+  aggregate `StatCard`s (tokens in, tokens out, cost, turns, ops, failures)
+  read from the **detail response** `session` row — NOT `/api/stats`
+  (cross-session only; see `rest-api.md` §GET /api/stats). Plus a tools-used
+  summary derived from the response's ops (`kind === 'tool'`), aggregated by
+  op `name` with call + failure counts. Plus a **child-sessions** section
+  listing `detail.child_sessions` (agent, model, status, ops, failures, cost),
+  each row linking to that child's detail page `/sessions/:child.id`; rendered
+  only when the session has children (a leaf session shows no child-sessions
+  section). This is the drill-down target the SessionsList child-count link
+  promises (§`/` SessionsList).
+- **Logs tab**: `useSessionLogs(id, { severities })` with a severity
+  multi-select (DBG/INF/WRN/ERR) and a "Load more" control. Renders log rows
+  (ts, severity, source, op id, message) via the `LogRow` primitive. The
+  severity set is local tab state; selecting none = all severities (an empty
+  `severity` set omits the param, per the present-but-empty rule in
+  `rest-api.md`). Distinct loading / error / empty states.
+- **Trace / Topology / Timeline tabs**: `ComingSoon` (Phase 2).
+- Live: `useLiveUpdates({ session_id: id })` invalidates `['session', id]` on
+  `session_changed`, so the open session refreshes in place.
+
+### `/sources` — Sources (live)
+
+- Data: `useSources()` + `useHealth()`. Renders an overall health badge
+  (`ok` / `degraded` / `down` from `/api/health`) and a `<table>` of sources
+  (id, format, enabled, parse_errors, lag, last_seq). Lag is rendered from the
+  health row's `lag_us` (the sources list itself carries no lag field).
+- States: loading / error / empty.
+- **Independent error surfacing (no silent failures, AGENTS.md §6)**: the two
+  queries fail independently. A `/api/health` failure renders a health-error
+  banner (showing the `ApiError.message`) ABOVE the still-rendered sources
+  table — health being unavailable is never hidden behind dashes for lag. A
+  `/api/sources` failure renders the `ErrorState` for the table. If only one
+  query fails, the other still renders.
+- **Stale health is suppressed on error**: when `useHealth` is in an error
+  state (`isError`), the status badge and health-derived lag are suppressed
+  even if a prior successful `health.data` is still cached — TanStack Query
+  retains the last good payload across a failed background refetch (which is
+  the live `source_status_changed` path). The error banner is then the sole
+  health indicator and every lag cell falls back to '—'. This prevents a
+  contradictory UI (red banner beside a stale green badge / stale lag).
+- Live: `useLiveUpdates({})` — a `source_status_changed` frame invalidates both
+  `['sources']` and `['health']`.
+
+### Shared UI primitives (Phase 1)
+
+- `Tabs` — accessible tablist driven by a controlled active key. Implements the
+  WAI-ARIA tabs pattern: **roving tabindex** (the selected tab has `tabIndex=0`,
+  all others `tabIndex=-1`) and keyboard navigation — `ArrowLeft`/`ArrowRight`
+  move selection between tabs (wrapping at the ends), `Home`/`End` jump to the
+  first/last tab; each arrow/Home/End also calls `onSelect` and focuses the
+  newly-selected tab. Each tab carries `id=tab-<key>` and
+  `aria-controls=tabpanel-<key>`; the caller's single panel is
+  `role=tabpanel`, `id=tabpanel-<active>`, `aria-labelledby=tab-<active>`, and
+  `aria-live="polite"` so a content change on tab switch is announced.
+- `LogRow` — one log-entry row.
+- `LoadMore` — a button that triggers fetching the next keyset page; shows a
+  busy label while fetching; renders nothing when there is no next page.
+- `LoadingState` / `ErrorState` / `EmptyState` — small status primitives shared
+  by every page. `ErrorState` surfaces the `ApiError.message` (no silent
+  failures — AGENTS.md).

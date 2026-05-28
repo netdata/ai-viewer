@@ -1,0 +1,27 @@
+.loading,
+.empty {
+  padding: var(--space-6) var(--space-4);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.errorTitle {
+  color: var(--error);
+}
+
+.errorMessage {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  word-break: break-word;
+}

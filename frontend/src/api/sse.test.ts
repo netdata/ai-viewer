@@ -210,7 +210,7 @@ describe('connectSse handshake', () => {
 });
 
 describe('frame → invalidation', () => {
-  it('session_changed invalidates [session,id] and [sessions]', async () => {
+  it('session_changed invalidates [session,id], [sessions] and the [logs,id] family', async () => {
     installFetch({ subId: 'sub-1' });
     const spy = fakeQueryClient();
     await connectSse(spy.client, {});
@@ -220,6 +220,10 @@ describe('frame → invalidation', () => {
     );
     expect(keyInvalidated(spy, ['session', 's7'])).toBe(true);
     expect(keyInvalidated(spy, ['sessions'])).toBe(true);
+    // Logs belong to the session: the open Logs tab (cached under
+    // ['logs', id, severities]) must refresh on a session_changed frame. The
+    // invalidation uses the ['logs', id] prefix so any severities sub-key matches.
+    expect(keyInvalidated(spy, ['logs', 's7'])).toBe(true);
   });
 
   it('stats_invalidated invalidates [stats]', async () => {

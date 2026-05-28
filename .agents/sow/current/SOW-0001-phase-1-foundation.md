@@ -5921,6 +5921,109 @@ re-add the `e2e` script + specs; configure the `webServer` to boot the Go
 `ai-viewer-serve` binary serving the embedded SPA against a seeded temp DB; and
 fix the CI ordering so `build` runs BEFORE the e2e step.
 
+### Chunk 15 — frontend pages + live SSE (2026-05-28)
+
+Implements the Phase-1 pages and wires them to live SSE (folds in what the plan
+called Chunk 16's live-refresh, since the pages are only useful once live). The
+design specs (`ui-pages.md` Phase-1 routes, `frontend-architecture.md`) already
+existed and the Chunk-14 scaffold left clean placeholders plus the tested API +
+SSE clients, so this chunk is **additive page wiring** — no scaffold rework.
+Gate/scope was the pre-existing design specs; the durable "what shipped" record
+is the new `ui-pages.md` §"Phase-1 Implemented Behavior" section.
+
+Built:
+- **Pages.** `/` SessionsList (root sessions table, child-count drill-down,
+  keyset "Load more", loading/error/empty); `/sessions/:id` SessionDetail
+  (URL `?tab=`; 404 state; Overview = detail-response aggregates + tools-used
+  summary derived from ops; Logs = severity multi-select + keyset pagination;
+  Trace/Topology/Timeline = `ComingSoon`); `/sources` (per-source table + health
+  badge, independent error surfacing).
+- **Hooks/state.** `useSessionsInfinite`/`fetchSessionsPage` + `useSessionLogs`
+  (TanStack `useInfiniteQuery`, keyset, empty-string first-page sentinel);
+  `useLiveUpdates(filter)` (one SSE subscription per mounted view, re-subscribes
+  only on filter *content* change via `JSON.stringify`, aborts+closes on unmount
+  /change, swallows `SseCanceledError`); `filtersToSubscription` (URL filters →
+  SSE filter; omits empties; drops `q` since SSE has no free-text field — the
+  list query still sends `q`).
+- **Shared primitives.** `Tabs` (WAI-ARIA roving tabindex + Arrow/Home/End +
+  panel `aria-live`), `LogRow`, `LoadMore`, `StatusViews`
+  (Loading/Error/Empty), `SessionRow` refactor (`SessionRowBody`).
+
+Spec deltas landed with the code: `ui-pages.md` gained the whole "Phase-1
+Implemented Behavior" section (SessionsList / SessionDetail / Sources concrete
+contracts + shared primitives, incl. the stale-health-suppression rule below);
+`frontend-architecture.md` gained the `useLiveUpdates` + `useSessionLogs`
+contracts; `sse-protocol.md` touched for the client-side wiring.
+
+**Review (codex + glm + minimax, 3 iterations → CONVERGENCE).**
+- iter-1: codex found 1×P1 + 2×P2 + 1×P3 — Logs tab not live (the
+  `session_changed` handler invalidated `['session']`/`['sessions']` but not
+  `['logs', id]`); `/sources` swallowed `health.isError` (silent failure); the
+  child-count affordance linked to a dead `/?root=<id>` (no list filter consumes
+  `root`); `ComingSoon` used an inline `style={{color}}`. glm found 2×P3 a11y
+  (Tabs lacked roving tabindex + keyboard nav; tabpanel lacked `aria-live`).
+  minimax converged.
+- iter-2 fixes (all verified): `sse.ts` `session_changed` also invalidates
+  `['logs', id]` (TanStack default prefix-match hits `['logs', id, severities]`);
+  `Sources` renders a `role=alert` health-error banner ABOVE the still-rendered
+  table (queries fail independently); child-expander links to `/sessions/:id`
+  (Overview lists `child_sessions`; no `?root=`); `ComingSoon` + (same-pattern
+  sweep) `NotFound` colors → CSS modules (zero inline colors remain); `Tabs`
+  roving tabindex + Arrow(wrapping)/Home/End with focus move + panel `aria-live`.
+  232 tests.
+- iter-2 review: glm + minimax converged. **codex found a REAL P2** the other
+  two rubber-stamped: `/sources` still showed a **stale** health badge AND stale
+  lag on a FAILED background refetch — TanStack Query v5 keeps the last
+  successful `data` while setting `isError:true`, and the badge/lag read
+  `health.data` unconditionally, so a red "Health unavailable" banner rendered
+  beside a stale green badge + stale lag. The live `source_status_changed` path
+  is exactly a background refetch, so this was reachable in normal use. glm +
+  minimax both asserted "the badge disappears on error" — true only on the
+  INITIAL load (no data yet), false on refetch. Multi-reviewer adjudication on
+  verified ground truth mattered again. All three also agreed: drop the
+  deprecated `DOMException.ABORT_ERR` branch in `isAbortError` (TS 6385).
+- iter-3 fixes: `Sources.tsx` badge gated on `health.data && !health.isError`;
+  lag map `(health.isError ? [] : health.data?.sources ?? [])` so lag falls back
+  to '—' on error (banner is then the sole health indicator). New regression
+  test supplies BOTH stale `data` AND `isError:true` and asserts no badge + lag
+  '—' (the existing iter-2 test only covered initial-load error, no data).
+  `isAbortError` simplified to `err instanceof DOMException && err.name ===
+  'AbortError'` (TS 6385 gone; abort tests already drive the `.name` path;
+  `openSubscription` catch also guards `signal?.aborted`). 233 tests. Spec:
+  `ui-pages.md` §/sources gained the "Stale health is suppressed on error"
+  bullet.
+- iter-3 review: glm + minimax converged (zero findings). **codex found a real
+  P2** the other two missed AGAIN: the iter-2 expander fix repointed the
+  child-count link to `/sessions/:id` and the spec + comment now promise that
+  detail Overview "lists the session's `child_sessions`", but `OverviewTab`
+  never rendered them — a root row showing "3 child sessions" linked to a page
+  with no children visible (a half-built feature, AGENTS.md §8). glm even traced
+  OverviewTab's data reads and still missed it; adjudicated on ground truth.
+- iter-4 fix: `OverviewTab` renders a **Child sessions** `<section>` (labelled
+  region; table = Agent as `<Link to=/sessions/:child.id>`, Model, Status badge,
+  Ops, Failures, Cost) from `detail.child_sessions`, ONLY when there are
+  children (leaf session → no section). CSS mirrors `.tools*` (custom properties
+  only). `ui-pages.md` Overview bullet now owns the contract. New tests: one
+  with ≥1 child asserting agent/model/status + link `href=/sessions/child-1`,
+  one asserting no section when `child_sessions: []`. 235 tests.
+- iter-4 review: **all three converged.** codex "No actionable findings —
+  convergence reached" (ran typecheck/lint/test itself: 235 pass) + verified the
+  child-sessions fix and that every iter-2/iter-3 fix still holds. minimax:
+  convergence; explicitly re-checked "all spec-promised surfaces are rendered;
+  no dead affordances". glm: convergence; traced EVERY bullet in `ui-pages.md`
+  §"Phase-1 Implemented Behavior" and confirmed each has corresponding code +
+  test (the child-sessions gap was the only such miss; now closed). Four review
+  rounds; codex carried the signal in rounds 1-3 (logs-not-live → stale-health
+  → child-drilldown), glm+minimax converged early each round — multi-reviewer
+  adjudication on ground truth, not majority vote, surfaced every real defect.
+
+Final gates (frontend, master-verified after iter-4): `eslint --max-warnings 0`
+0; `tsc --noEmit` 0 (no TS 6385); `vitest run --coverage` **235 tests pass**,
+97.42% lines / 93.53% branches (OverviewTab.tsx 100% lines, Sources.tsx
+100%/92.3%, sse.ts 98.7%/96.55%); `vite build` main chunk **92.79 KB gzipped**
+(budget ≤500 KB). No operator home-path, no secrets, no inline colors; no `e2e`
+script (E2E is Chunk 18).
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

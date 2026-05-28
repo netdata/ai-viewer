@@ -1,0 +1,74 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.agent {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.model {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.toolsTitle,
+.childrenTitle {
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--space-3);
+}
+
+.noTools {
+  color: var(--text-secondary);
+}
+
+.toolsTable,
+.childrenTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.toolsTable thead th,
+.childrenTable thead th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+.toolsTable tbody td,
+.childrenTable tbody td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-size-base);
+}
+
+.toolName,
+.childModel {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

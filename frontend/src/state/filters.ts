@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import type { SubscriptionFilterRequest } from '../api/types';
 
 // Filters live in the URL so every view is shareable (ui-pages.md §Global
 // Layout, frontend-architecture.md §State Management — "No filter state in
@@ -154,6 +155,41 @@ function setOrDeleteNumber(
   } else {
     params.set(key, String(value));
   }
+}
+
+/**
+ * filtersToSubscription maps the URL-synced Filters into the SSE subscription
+ * filter shape (POST /api/subscriptions — rest-api.md). Only non-empty
+ * dimensions are included; empty arrays / undefined scalars are omitted (an
+ * absent key = no constraint, and the server rejects a present-but-empty array).
+ * `q` has no subscription equivalent (the SSE filter has no free-text field),
+ * so it is intentionally dropped — the live stream is scoped by the structured
+ * dimensions; the list query still applies `q` on refetch.
+ */
+export function filtersToSubscription(filters: Filters): SubscriptionFilterRequest {
+  const sub: SubscriptionFilterRequest = {};
+  if (filters.agents.length > 0) {
+    sub.agents = filters.agents;
+  }
+  if (filters.models.length > 0) {
+    sub.models = filters.models;
+  }
+  if (filters.tools.length > 0) {
+    sub.tools = filters.tools;
+  }
+  if (filters.status.length > 0) {
+    sub.status = filters.status;
+  }
+  if (filters.sources.length > 0) {
+    sub.sources = filters.sources;
+  }
+  if (filters.from !== undefined || filters.to !== undefined) {
+    const range: { from?: number; to?: number } = {};
+    if (filters.from !== undefined) range.from = filters.from;
+    if (filters.to !== undefined) range.to = filters.to;
+    sub.time_range = range;
+  }
+  return sub;
 }
 
 export interface UseFiltersResult {

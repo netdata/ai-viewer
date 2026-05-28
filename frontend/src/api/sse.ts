@@ -163,12 +163,12 @@ export class SseConnection {
   }
 }
 
-/** isAbortError narrows the DOMException fetch throws when its signal aborts. */
+/** isAbortError narrows the DOMException fetch throws when its signal aborts.
+ *  `.name === 'AbortError'` is the modern check supported by every target
+ *  runtime (browsers with AbortController + jsdom); the legacy numeric
+ *  `.code === ABORT_ERR` is deprecated and intentionally not used. */
 function isAbortError(err: unknown): boolean {
-  return (
-    err instanceof DOMException &&
-    (err.name === 'AbortError' || err.code === DOMException.ABORT_ERR)
-  );
+  return err instanceof DOMException && err.name === 'AbortError';
 }
 
 /**
@@ -232,6 +232,11 @@ export async function connectSse(
     onSessionChanged: (e) => {
       void queryClient.invalidateQueries({ queryKey: ['session', e.session_id] });
       void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      // Logs belong to the session (a log write marks the session dirty
+      // server-side), so the open Logs tab must refresh too. Logs are cached
+      // under ['logs', id, severities]; the ['logs', id] prefix partial-matches
+      // every severities sub-key so any open severity filter live-refreshes.
+      void queryClient.invalidateQueries({ queryKey: ['logs', e.session_id] });
       extra.onSessionChanged?.(e);
     },
     onStatsInvalidated: (e) => {
