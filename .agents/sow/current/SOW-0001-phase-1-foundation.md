@@ -4572,6 +4572,874 @@ to address.
 
 Next: Chunk 12 — REST endpoints.
 
+### Chunk 12 — REST endpoints (2026-05-27)
+
+Landed on branch `sow-0001-chunk-12-rest-endpoints`. The four read-side
+REST endpoints in `rest-api.md` go live, replacing their `notImplemented`
+catch-all coverage: `GET /api/sessions` (list + filters + keyset
+pagination), `GET /api/sessions/:id` (detail with turns/ops/payloads/
+children), `GET /api/sessions/:id/logs` (severity filter + pagination),
+and `GET /api/stats` (cross-session aggregates). All read-only via the
+`OpenReader` handle; all queries parameterized; HEAD parity on every
+route.
+
+Files created (production):
+
+- `internal/presenter/filters.go` (275) — `sessionFilter` parse +
+  validation (time range, array filters accepting both repeated and
+  comma-separated syntaxes, q, group, sort, order, limit, cursor) and
+  `whereClause(alias)` which renders a parameterized WHERE fragment +
+  bound args. Every operator value is a `?` placeholder; the `tools`
+  filter is an `EXISTS (SELECT 1 FROM ops ...)` subquery. `q` uses
+  `LIKE ? ESCAPE '\'` with the wildcards escaped. 400 on `from>to`,
+  `limit>1000`, `limit<1`, unknown sort/order/group, non-integer
+  from/to/limit.
+- `internal/presenter/cursor.go` (66) — opaque base64url-JSON keyset
+  cursor `(ts, id)`; `encode`/`decodeCursor`/`isZero`. Malformed token
+  → `errBadCursor` → 400.
+- `internal/presenter/query.go` (~120) — `withQueryTimeout` (30 s per
+  presenter.md), `writeDBError` (DeadlineExceeded → 504 `TIMEOUT`, else
+  503 `DB_UNAVAILABLE`; both log request_id), `writeBadFilter`,
+  `payloadURL`, `isNoRows`.
+- `internal/presenter/sessions_list.go` (~140) — list handler;
+  `limit+1` fetch detects next page; row-value keyset narrowing
+  (`(start_ts, id) < / > (?, ?)`) per order; `child_session_count` via
+  correlated subquery.
+- `internal/presenter/session_detail.go` (~228) + `session_detail_ops.go`
+  (~210) — detail handler; `loadSession` (404 on `sql.ErrNoRows`),
+  `loadChildSessions`, and the turns→ops→payload_refs assembler that runs
+  THREE bounded queries (turns, all session ops, all payload_refs joined
+  on `ops.session_id`) and groups in Go (no N+1). `payload_refs` always
+  serialises as `[]` not null; `url` is `/api/payloads/<id>`.
+- `internal/presenter/session_logs.go` (~215) — logs handler; existence
+  probe → 404; severity validated against the closed `{DBG,INF,WRN,ERR}`
+  set (400 on unknown); keyset pagination on `(ts, id)`; `extras_json`
+  decoded into `extras` (nil on NULL/malformed).
+- `internal/presenter/stats.go` (~155) + `stats_breakdowns.go` (~175) —
+  stats handler; the matching-session set is one parameterized subquery
+  reused by every breakdown. `totals` from the session rollup columns
+  (duration_us = Σ(end_ts−start_ts) where end_ts known); `by_status` /
+  `by_source` / `by_agent` group sessions; `by_model` / `by_tool` roll
+  up the llm/tool ops whose `session_id IN (<set>)`. `pct_*` computed in
+  Go so each breakdown's shares sum to 1.0. All breakdown arrays
+  initialise to `[]`.
+
+Files changed (production):
+
+- `internal/presenter/presenter.go` — registered the four routes
+  (`/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/logs`,
+  `/api/stats`); updated the `Handler()` route doc and the
+  `notImplemented` chunk hint (now `13+`).
+- `internal/presenter/errors.go` — added `CodeTimeout = "TIMEOUT"`.
+
+Files created (tests):
+
+- `sessions_testseed_test.go`, `sessions_list_test.go`,
+  `session_detail_test.go`, `session_logs_test.go`, `stats_test.go`,
+  `cursor_test.go`, `filters_test.go`, `stats_breakdowns_test.go`,
+  `chunk12_errors_test.go`. Table-driven against an in-memory store
+  seeded with a small graph (root + 2 children, 2 turns, 4 mixed-kind/
+  status ops, 2 payload_refs, 3 varied-severity logs). Cover happy-path
+  shapes, every filter, keyset pagination round-trips (no overlap/gap),
+  400/404 paths, severity filter, stats pct_* summation, HEAD parity,
+  the 504 timeout branch (past-deadline context), and the DB-error
+  branches (closed-DB presenter + direct loader/breakdown calls).
+- Stale Chunk-11 tests updated: `presenter_test.go`,
+  `coverage_test.go` repointed their "deferred route" assertions from
+  `/api/sessions` (now live) to `/api/sessions/{id}/topology` (still
+  deferred, Chunk 14), and bumped the chunk hint to `13+`.
+
+Design decisions worth recording:
+
+- **Routing style: single in-handler gating, no method verbs.** Go 1.22+
+  `ServeMux` `{id}` wildcards are used for path params (read via
+  `r.PathValue("id")`), but the patterns are registered WITHOUT a method
+  verb so every handler keeps the same in-handler method-gating style as
+  `/api/health`/`/api/sources` (one routing style across the surface, per
+  the chunk brief). Verified that more-specific wildcard patterns take
+  precedence over the `/api/` subtree catch-all, so
+  `/api/sessions/{id}/topology` still falls through to `notImplemented`.
+- **Keyset (seek) pagination, not offset.** The opaque cursor carries the
+  last row's `(start_ts|ts, id)` tuple; the next page selects rows
+  strictly after it via SQLite row-value comparison `(a, b) < / > (?, ?)`
+  (verified the driver honours row-value comparison and applies INTEGER
+  affinity to the log id). Deep pages stay O(log n) and remain stable
+  under concurrent writes — no row skipped or repeated when new rows land
+  between fetches. `limit+1` rows detect the next page without a COUNT.
+- **Filter binding safety.** `whereClause` only ever concatenates static
+  SQL fragments and `?` placeholders; every operator value is bound via
+  args. A unit test asserts no raw user value appears in the rendered SQL
+  and that placeholder count equals arg count. No SQL-injection surface.
+- **N+1 avoidance in detail.** Turns/ops/payloads load in three bounded
+  queries grouped in Go, not per-turn/per-op fetches.
+- **30 s query guard.** Every handler wraps its queries in
+  `context.WithTimeout(30s)`; a `DeadlineExceeded` maps to 504 `TIMEOUT`,
+  any other query error to 503 `DB_UNAVAILABLE` (matching the existing
+  `/api/sources` failure path). request_id is logged on every failure.
+
+Spec deltas (in this chunk):
+
+- `presenter.md` §Routing — `/api/sessions`, `/api/sessions/:id`,
+  `/api/sessions/:id/logs`, `/api/stats` flipped to `(live)`; topology
+  and timeline re-marked `(Chunks 14+ …)`. Added a paragraph documenting
+  the wildcard-routing style + catch-all precedence, and a new
+  §"Filters, pagination, and cursors (Chunk 12)" under SQLite Access
+  describing the shared filter parser, keyset cursor, and the
+  504/503 timeout mapping.
+- `errors.go` — `CodeTimeout` added (504); documented in the constant's
+  comment. No `rest-api.md` field/shape diverged from the implementation,
+  so no `rest-api.md` body changes were needed beyond the existing
+  schema (which the response structs match field-for-field).
+
+Gate Suppression (new this chunk):
+
+- `#nosec G201 G202 G701` inline on the eight dynamic-query construction/
+  execution sites across `sessions_list.go`, `session_logs.go`,
+  `stats.go`, `stats_breakdowns.go`. Rationale: the concatenated
+  fragments are static SQL + `?`-placeholders only; every user value is
+  bound via args (see `filters.go`). gosec's taint analysis cannot prove
+  this. Mirrors the existing precedent at
+  `internal/ingest/aggregates.go:50` (`#nosec G201 -- placeholders are
+  ?-marks only`). A `filters_test.go` assertion pins the
+  no-interpolation invariant the suppression relies on.
+
+Gate output (verbatim):
+
+```
+$ go mod tidy ; gofmt -l . ; goimports -l . ; go vet ./...
+(no output — clean)
+$ go build ./...
+(clean)
+$ golangci-lint run --timeout=5m ./...
+0 issues.
+$ gosec ./...                                  # full
+  Issues : 0
+$ gosec -severity medium -confidence medium ./...   # CI profile
+  Issues : 0
+$ shellcheck -x -s bash scripts/*.sh scripts/lib/*.sh scripts/test/*.sh
+(clean)
+$ bash scripts/test/sanitize-fixture-test.sh   # EXIT=0
+$ bash scripts/test/pricing-merge-test.sh      # EXIT=0
+$ bash scripts/test/refresh-pricing-test.sh    # EXIT=0
+$ go test -race -count=1 ./...
+ok  internal/presenter   coverage: 90.7% of statements
+ok  internal/store        coverage: 90.9%
+ok  internal/ingest       coverage: 91.8%
+(all packages pass)
+```
+
+Coverage (new + package):
+
+| Package / scope | Coverage |
+|---|---|
+| `internal/presenter` (overall) | 90.7% |
+| new Chunk-12 statements | ≥ 90% (package gate met) |
+
+Integration smoke (40-session slice of `~/.ai-agent/sessions` ingested
+as `aiagent_v2` into a TEMP db — never the operator's real db; ingest +
+serve PIDs killed afterwards):
+
+```
+$ curl /api/sessions?limit=2
+items: 2  next_cursor: set
+item0: {id, kind:root, agent_name:feed-enrichment, model:neda-thinker,
+        status:completed, turn_count:6, op_count:23, child_session_count:0}
+$ curl -I /api/sessions          → 200, body 0 bytes (HEAD parity)
+$ curl /api/sessions/<id>
+session.id=<id> kind=root  turns:6  child_sessions:0
+turn0 seq:0 ops:2  op0:{kind:system,status:completed} payload_refs:0
+$ curl /api/sessions/<id>/logs?limit=2
+items: 2  next_cursor: set
+item0: {ts, severity:DBG, source:aiagent_v2, message:"session initialized…"}
+$ curl /api/sessions/<id>/logs?severity=ERR,WRN
+items: 3  severities: [ERR, WRN]
+$ curl /api/stats
+totals: {session_count:40, turn_count:111, op_count:256, failures:13}
+by_model rows:5  by_tool rows:7  by_status:[(completed,35),(failed,5)]
+sum(pct_of_cost): 1.0
+$ curl -I /api/stats             → 200, body 0 bytes
+$ curl /api/sessions/does-not-exist-xyz   → 404
+$ curl '/api/sessions?from=9&to=1'
+  → 400 {"error":{"code":"BAD_REQUEST","message":"'from' is after 'to'"}}
+```
+
+(`payload_refs=0` is expected for the v2 slice: v2's legacy inline
+base64 bodies are not addressable as refs, per data-model.md
+Cross-Format Compatibility Matrix.)
+
+Next: Chunk 13 — SSE hub.
+
+### Chunk 12 iteration 2 (review findings, 2026-05-27)
+
+Iteration-1 of Chunk 12 went to external review: minimax converged with no
+actionable findings; codex returned 2×P2 + 2×P3; glm corroborated the
+cursor-validation P2. This iteration fixes all four on branch
+`sow-0001-chunk-12-rest-endpoints` (no commit/push by this iteration).
+
+- **iter2-1 (P2, codex) — cursor bound to sort+order.** The cursor used to
+  carry only `(ts, id)` (`internal/presenter/cursor.go:20`) while
+  `parseSessionFilter` accepted `order` independently
+  (`filters.go:110`), so replaying a `desc`-issued cursor with
+  `?order=asc` flipped the row-value comparison and could duplicate/skip
+  rows. Fix: `pageCursor` now carries `Sort`+`Order`
+  (`cursor.go`); the sessions list mints the cursor with the live
+  `f.sort`/`f.order` (`sessions_list.go` `buildSessionsResponse`) and
+  `parseCursorParam` (`filters.go`) rejects a cursor whose `Sort`/`Order`
+  ≠ the request with 400 `BAD_REQUEST` ("cursor does not match the current
+  sort/order; restart pagination"). The logs endpoint has a fixed
+  `(ts, asc)` ordering, so its cursors are minted/validated against the
+  `logsSort`/`logsOrder` constants (`session_logs.go`) — a sessions cursor
+  cannot be replayed against logs and vice-versa.
+  Evidence RED→GREEN: `TestSessions_CursorOrderMismatch400` (replay
+  desc-cursor with `order=asc` → 400; replay with matching order → next
+  page `s2,s1`) and `TestSessionLogs_CrossEndpointCursorRejected`.
+
+- **iter2-2 (P2, codex + glm) — strict cursor decode → 400.**
+  `decodeCursor` used `json.Unmarshal` (the comment falsely claimed
+  `DisallowUnknownFields`), so `cursor=e30` (`{}`) and `{"ts":123}`
+  (missing id) were silently accepted. Fix: `decodeCursor` now uses a
+  `json.Decoder` with `DisallowUnknownFields`, rejects trailing bytes
+  (`dec.Token()` must hit `io.EOF`), and requires a non-zero `TS`,
+  non-empty `ID`, non-empty `Sort`, and non-empty `Order`; any miss →
+  `errBadCursor` → 400. An empty/absent `cursor` is still "first page"
+  (callers never decode `""`). `cursor_test.go` was rewritten to the new
+  contract (the old test that asserted `{}` is acceptable encoded the
+  wrong contract and was removed): `{}`, missing id, zero ts, missing
+  sort/order, unknown-field, trailing-junk, two-objects, bad-base64 → all
+  error; complete cursor round-trips. HTTP-level coverage in
+  `TestSessions_CursorMalformed400` (empty `cursor=` → first page; bad
+  base64 / empty-object / missing-id / unknown-field / trailing-junk →
+  400).
+
+- **iter2-3 (P3, codex; spec drift) — empty-only array filter → 400.**
+  `parseArrayParam` silently dropped empties so `?models=,` behaved like
+  "no filter", contradicting `presenter.md`/`rest-api.md` §Conventions.
+  Fix: `parseRequiredNonEmptyArray` (`filters.go`) rejects a key that is
+  present (`url.Values.Has`) but parses to zero non-empty values with 400
+  (`filter "models" is present but empty`); a present key with ≥1
+  non-empty value is accepted even with empty segments (`?models=a,`
+  keeps `a`); an absent key is no constraint. Followed the spec (reject),
+  not relaxed it. Evidence: `TestParseSessionFilter_EmptyArrayFilterRejected`
+  (reject/accept tables) + new HTTP cases in `TestSessions_BadRequests`.
+
+- **iter2-4 (P3, codex) — function/file length budget.** Split
+  `parseSessionFilter` (was ~68 lines) into `parseTimeRange` /
+  `parseArrayFilters` / `parseScalarFilters` / `parseCursorParam` (all
+  ≤28); `handleSessionsList` (was ~102) into `buildSessionListQuery` /
+  `querySessions` / `scanSessionListItem` / `buildSessionsResponse` (all
+  ≤31); `queryLogs` (was 65) into `buildLogsQuery` / `queryLogs` /
+  `logsPage` (all ≤27). Split `sessions_list_test.go` (was 405) →
+  342 lines + new `sessions_pagination_test.go` (158). All four split
+  targets now ≤60-line functions / ≤400-line files; behaviour unchanged
+  (full suite green).
+
+Spec deltas (this iteration):
+
+- `presenter.md` §"Filters, pagination, and cursors" — cursor now carries
+  `sort`+`order`; documented the `(sort, order)` binding + mismatch 400,
+  the strict-decode 400 conditions (bad base64 / non-object / trailing
+  bytes / unknown field / missing required field), and that an empty
+  cursor is "first page". Sharpened the empty-array-filter rule to
+  per-key "present but all-empty → 400".
+- `rest-api.md` §Conventions — added the cursor `(sort, order)` binding +
+  malformed-cursor 400 to the Pagination bullet, and the present-but-empty
+  array-key 400 to the Filter-array bullet.
+
+Gates (this iteration, verbatim):
+
+```
+$ gofmt -l . ; goimports -l . ; go vet ./... ; go build ./...
+(clean)
+$ go test -race -count=1 ./...
+ok  internal/presenter   coverage: 91.3% of statements
+(all packages pass)
+$ golangci-lint run --timeout=5m ./...
+0 issues.
+$ gosec ./...
+  Issues : 0
+$ shellcheck -x -s bash scripts/*.sh scripts/lib/*.sh scripts/test/*.sh
+(clean)
+```
+
+`internal/presenter` coverage 91.3% (≥90% gate); all new fix functions
+(`decodeCursor`, `parseCursorParam`, `parseRequiredNonEmptyArray`,
+`parseLogPaging`, the split helpers) at 100% line coverage.
+
+Live curl smoke (throwaway temp db + serve binary, both removed after):
+
+```
+$ curl '/api/sessions?limit=2'         → cursor decodes to
+  {"ts":4000,"id":"sD","sort":"start_ts","order":"desc"}
+$ curl '/api/sessions?limit=2&order=desc&cursor=<c>'   → 200, page sC,sB
+$ curl '/api/sessions?limit=2&order=asc&cursor=<c>'    → 400 BAD_REQUEST
+  "cursor does not match the current sort/order; restart pagination"
+$ curl '/api/sessions?cursor=not-base64!!'             → 400 "cursor is malformed"
+$ curl '/api/sessions?cursor=<{ts,sort,order} no id>'  → 400 "cursor is malformed"
+$ curl '/api/sessions?models='                         → 400
+  "filter \"models\" is present but empty"
+```
+
+### Chunk 12 iteration 3 (review findings, 2026-05-27)
+
+Iteration-2 of Chunk 12 went to external review: minimax converged but had
+only verified the narrower sort/order cursor binding; codex found 1×P2 +
+2×P3. This iteration fixes all on branch `sow-0001-chunk-12-rest-endpoints`
+(no commit/push/external-review by this iteration).
+
+- **iter3-1 (P2, codex — keyset-pagination correctness): cursor bound to a
+  fingerprint of the FULL query, not just sort/order.** iter-2 bound the
+  cursor to `sort`+`order` only (`filters.go` `parseCursorParam`,
+  `session_logs.go` `parseLogPaging`). The keyset `(ts, id)` watermark is
+  meaningful only against the result set the cursor was minted on, so
+  minting on `/api/sessions?group=root&limit=1` and replaying with
+  `?group=all&cursor=…` (or changing any of `from`/`to`/`agents`/`models`/
+  `tools`/`status`/`sources`/`q`) was accepted and silently skipped/
+  duplicated rows; same class on logs when `severity` changed between
+  pages. minimax converged on the narrower sort/order check and missed this
+  full-filter gap; codex caught it.
+  Fix: `pageCursor` now carries an `FP` fingerprint field
+  (`$REPO_ROOT/internal/presenter/cursor.go`). A single helper computes it
+  for both minting and validation so the two can never drift:
+  - sessions — `sessionFilter.fingerprint()`
+    (`$REPO_ROOT/internal/presenter/fingerprint.go`) hashes `group`, `from`,
+    the operator-**supplied** `to` (`toRaw`, NOT the now-default — otherwise
+    every page would mint against a fresh `now` and reject the next page),
+    `sort`, `order`, `q`, and each array dimension **sorted** (so
+    `?models=a,b` == `?models=b,a`); `limit` and `cursor` excluded. FNV-64a
+    → hex via shared `hashKey`. Minted in `buildSessionsResponse`
+    (`sessions_list.go`), validated in `parseCursorParam` (`filters.go`).
+    Because the fingerprint covers sort+order it subsumes the iter-2
+    sort/order-only guard, which was removed (single source of truth — no
+    double-reporting).
+  - logs — new `logFilter{id, severities}` with `fingerprint()`
+    (`$REPO_ROOT/internal/presenter/session_logs.go`) hashes the path `:id`,
+    the **sorted** severity set, and the fixed `(ts, asc)` ordering. Minted
+    in `logsPage`, validated in `parseLogPaging`. The explicit cross-endpoint
+    `(ts, asc)` ordering check is kept and runs BEFORE the fingerprint
+    compare, so a foreign sessions cursor gets the precise "does not match
+    this endpoint's ordering" message (distinct return conditions → no
+    double-reporting).
+  - `FP` is validated semantically (the comparison), not as a structural
+    `decodeCursor` requirement, so the existing strict-decode tests
+    (`cursor_test.go`) and cross-endpoint test were unaffected; a tampered/
+    absent `FP` fails the comparison against the live (always non-empty)
+    fingerprint → 400.
+  Evidence RED→GREEN (all asserted 200 before, 400 after):
+  `TestSessions_CursorFingerprintGroupMismatch400` (group=root cursor →
+  group=all = 400, group=root = 200),
+  `TestSessions_CursorFingerprintFilterChange` (models=a → models=a,b = 400,
+  models=a = 200), `TestSessions_CursorFingerprintOrderInsensitive`
+  (models=a,b → models=b,a = 200), `TestSessions_CursorFingerprintTimeWindow`
+  (from=X → different from = 400, same from = 200),
+  `TestSessionLogs_CursorFingerprintSeverityMismatch400` (severity=ERR,WRN →
+  severity=ERR = 400, reversed WRN,ERR = 200). Pre-existing iter-2 tests
+  (`TestSessions_CursorOrderMismatch400`,
+  `TestSessionLogs_CrossEndpointCursorRejected`,
+  `TestSessions_CursorMalformed400`, `TestCursor_*`) still pass.
+
+- **iter3-2 (P3, codex + minimax): function-length budget.** codex flagged
+  `TestSessions_PaginationKeyset` (63) and `seedGraph` (68). Split:
+  the keyset test now reuses two extracted helpers (`seedFiveRoots`,
+  `assertNoOverlap`) and is ≤45 lines; `seedGraph` delegates to
+  `seedGraphOps` and `seedGraphPayloadsAndLogs` and is ≤32 lines. minimax
+  additionally claimed `loadOps`/`attachPayloadRefs`
+  (`session_detail_ops.go`) were >60 — VERIFIED FALSE against the committed
+  code: brace-counting puts them at 39 and 47 lines respectively (already
+  within budget after iter-2's `fillOpNullables` extraction), so they were
+  left unchanged rather than churned. The iter3-1 fingerprint additions
+  pushed `filters.go` to 429 lines (>400 file budget); the fingerprint
+  concern was extracted into a new `$REPO_ROOT/internal/presenter/
+  fingerprint.go` (98 lines), bringing `filters.go` to 357. Final line
+  counts of the four split functions: `TestSessions_PaginationKeyset` 45,
+  `seedGraph` 32, `loadOps` 39 (unchanged), `attachPayloadRefs` 47
+  (unchanged). All presenter funcs touched this iteration ≤60.
+
+- **iter3-3 (P3, codex; spec drift): presenter.md prepared-statement
+  cache.** `presenter.md` §SQLite Access claimed "All queries are
+  parameterized prepared statements held in a package-level cache," but
+  Chunk 12 (and `stats.go`, `session_logs.go`) execute dynamically-
+  assembled (still fully `?`-bound) SQL directly via `QueryContext`/
+  `QueryRowContext` — the variable `IN (...)` arity + optional predicates
+  create many shapes that a fixed prepared-statement cache does not fit.
+  Updated the spec to state queries are parameterized (no user-value
+  interpolation) and filter/list queries are assembled per request and
+  executed directly, not cached; fixed-shape preparation is left to a
+  future optimization SOW. The SQL-injection-safety statement was kept
+  strong.
+
+Spec deltas (this iteration):
+
+- `presenter.md` §SQLite Access — replaced the prepared-statement-cache
+  claim with the dynamic-parameterized-query reality (iter3-3).
+- `presenter.md` §"Filters, pagination, and cursors" — cursor now carries
+  `fp`; documented the full-query fingerprint binding (what is hashed,
+  sorted array dims, supplied-`to`-not-now-default, FNV-64a), the
+  single-helper mint/validate invariant, that it subsumes the sort/order
+  guard, that logs keep the explicit ordering check, and that `fp` is
+  caller-validated (semantic) rather than a structural decode requirement.
+- `rest-api.md` §Conventions — Pagination bullet now describes the
+  full-query fingerprint binding (group flip / filter change / severity
+  change → 400; reordered same-set → 200; `limit` may change).
+
+Gates (this iteration, verbatim):
+
+```
+$ gofmt -l . ; goimports -l . ; go vet ./... ; go build ./...
+(clean)
+$ go test -race -count=1 ./...
+ok  internal/presenter   coverage: 91.8% of statements
+(all packages pass)
+$ golangci-lint run --timeout=5m ./...
+0 issues.
+$ gosec ./...
+  Files : 65   Lines : 13648   Issues : 0
+$ shellcheck -x -s bash scripts/*.sh scripts/lib/*.sh scripts/test/*.sh
+(clean, exit 0)
+```
+
+`internal/presenter` coverage 91.8% (≥90% gate); all new/changed functions
+(`sessionFilter.fingerprint`, `logFilter.fingerprint`, `hashKey`,
+`writeSortedDim`, `microsPtrKey`, `parseCursorParam`, `parseLogPaging`,
+`buildLogsQuery`, `logsPage`, `buildSessionsResponse`) at 100% line coverage.
+
+Live curl smoke (throwaway temp db built via the three migration files +
+the serve binary, both removed after):
+
+```
+$ curl '/api/sessions?group=root&limit=1'                  → cursor decodes to
+  {"ts":…,"id":"rootC","sort":"start_ts","order":"desc","fp":"194659f8cda77703"}
+$ curl '/api/sessions?group=all&limit=1&cursor=<c>'        → 400 BAD_REQUEST
+  "cursor does not match the current query filters; restart pagination"
+$ curl '/api/sessions?group=root&limit=1&cursor=<c>'       → 200
+$ curl '/api/sessions?models=a,b&limit=1&cursor=<a-only c>' → 400 (filter superset)
+$ curl '/api/sessions?models=a&limit=1&cursor=<a-only c>'   → 200
+$ curl '/api/sessions?models=b,a&limit=1&cursor=<a,b c>'    → 200 (reordered, same set)
+$ curl '/api/sessions/rootA/logs?severity=ERR&limit=1&cursor=<ERR,WRN c>' → 400
+$ curl '/api/sessions/rootA/logs?severity=WRN,ERR&limit=1&cursor=<ERR,WRN c>' → 200
+$ curl '/api/sessions/rootA/logs?cursor=<sessions cursor>' → 400
+  "cursor does not match this endpoint's ordering; restart pagination"
+```
+
+### Chunk 12 iteration 4 (review findings, 2026-05-27)
+
+Iteration-3 of Chunk 12 went to external review: codex found 1×P2 + 2×P3.
+The glm and minimax iteration-3 runs were truncated this round (output did
+not complete; no findings captured), so only codex's findings drive this
+iteration. All three fixed on branch `sow-0001-chunk-12-rest-endpoints` (no
+commit/push/external-review by this iteration).
+
+- **iter4-1 (P2, codex — fingerprint separator collision): length-prefixed
+  fingerprint encoding + control-char rejection.** The iter-3 fingerprint
+  joined sorted array values with `\x1e` and fields with `\x1f`
+  (`$REPO_ROOT/internal/presenter/fingerprint.go:20` comment claimed those
+  bytes "cannot appear in hashed values"), but the parser
+  (`$REPO_ROOT/internal/presenter/filters.go:252` `parseArrayParam`) only
+  trimmed/dropped empty values — it never rejected or escaped control bytes.
+  A crafted value carrying a raw `\x1e` could therefore make two DIFFERENT
+  filter sets serialize to the identical byte stream and hash identically,
+  e.g. `?models=a\x1eb,c` vs `?models=a,b\x1ec`, defeating the iter-3 cursor
+  guard (a changed filter would pass validation → pagination skip/dup). Fixed
+  two ways (defense in depth):
+  - **Collision-proof encoding** (`fingerprint.go`): replaced separator
+    joining with **length-prefixed** encoding. New `writeLP(b, s)` writes
+    `<byte-len>:<value>`; `writeSortedDim` writes the dimension name, the
+    element count, then each sorted element via `writeLP`. Every token is
+    self-delimiting, so no value content (control byte or otherwise) can
+    forge a field/element boundary — the collision class is removed
+    regardless of validation. `logFilter.fingerprint()`
+    (`$REPO_ROOT/internal/presenter/session_logs.go`) was migrated to the
+    SAME helpers (dropping its inline `\x1f`/`\x1e` join and the now-unused
+    `slices` import). The false "separators cannot appear" comment was
+    replaced with a description of length-prefixing.
+    Before (separator-join, pre-iter4):
+    `g=root\x1f…\x1fmodels=<v1>\x1e<v2>…` — value bytes blur boundaries.
+    After (length-prefixed): `1:g4:root…6:models2:<c>1:a3:a\x1eb` — each token
+    carries its own byte length; the example sets above now hash distinctly.
+  - **Control-char rejection** (`filters.go` `rejectControlChars`): a filter
+    value (any array element across `agents`/`models`/`tools`/`status`/
+    `sources`, plus `q`) containing an ASCII control character (`< 0x20`) is
+    a 400 `BAD_REQUEST` ("filter \"<key>\" value contains control
+    characters"). Control bytes never appear in legitimate names/search text,
+    so this keeps junk out of the SQL and the fingerprint with a loud error.
+  RED→GREEN evidence: a standalone reproduction of the OLD separator-join
+  encoding confirmed `{"a\x1eb","c"}` and `{"a","b\x1ec"}` produced the
+  IDENTICAL FNV hash `fdf505a623853b81` (collision = true). The new encoding
+  makes them DISTINCT — pinned by `TestFingerprint_SeparatorCollisionResolved`
+  (`$REPO_ROOT/internal/presenter/fingerprint_test.go`, GREEN), with
+  `TestFingerprint_CrossDimensionNoBleed`,
+  `TestFingerprint_EmptyVsSingleEmptyElement`,
+  `TestFingerprint_OrderInsensitive`, and
+  `TestLogFingerprint_SeverityOrderInsensitive` covering the surrounding
+  properties. Control-char rejection pinned by
+  `TestParseSessionFilter_ControlCharsRejected` (parser, 400) and
+  `TestSessions_ControlCharFilterRejected` (full HTTP path, 400 for
+  `models=a%1Eb`, `agents=x%1Fy`, `q=foo%1Ebar`).
+
+- **iter4-2 (P3, codex — empty `?severity=` inconsistent with array-filter
+  rule): logs severity now follows the present-but-empty → 400 rule.**
+  `rest-api.md` §Conventions says a present array key whose every element is
+  empty → `BAD_REQUEST`; the session array filters enforce this
+  (`filters.go` `parseRequiredNonEmptyArray`), but logs `severity`
+  (`session_logs.go` `parseSeverities`) ran `parseArrayParam`, which dropped
+  empties → nil → silent "no filter" → 200. Fixed: `parseSeverities` now
+  takes `url.Values` and delegates to the shared `parseRequiredNonEmptyArray`,
+  so `?severity=` / `?severity=,` is a 400 ("filter \"severity\" is present
+  but empty") while an ABSENT key still means "all severities". RED→GREEN: the
+  old code returned 200 for `?severity=` (drop-empties → no filter); the new
+  code returns 400, pinned by `TestSessionLogs_EmptySeverityRejected`
+  (`$REPO_ROOT/internal/presenter/session_logs_test.go`) which also asserts
+  absent severity stays 200. Spec was already correct (reject) — code was
+  brought to match; the spec was NOT relaxed.
+
+- **iter4-3 (P3, codex — file-size budget): split
+  `internal/presenter/middleware_test.go` (425 → ≤400).** The pre-existing
+  Chunk-11 test file exceeded the ≤400-line rule. Split by concern: the five
+  gzip tests (`TestGzipMiddlewareCompressesLargeBodies`,
+  `…SkipsSmallBodies`, `…SkipsEventStream`, `…SkipsWithoutAcceptEncoding`,
+  `TestClientAcceptsGzip`) moved verbatim into a new
+  `$REPO_ROOT/internal/presenter/middleware_gzip_test.go` (126 lines); the
+  logging/recover/bodylimit/request-id/client-ip tests stay in
+  `middleware_test.go` (308 lines). All test names and assertions are
+  identical; the only code change is the `compress/gzip` import dropping from
+  the original file. No coverage change.
+
+Spec deltas (this iteration):
+
+- `rest-api.md` §Conventions — Filter-array-params bullet now states the
+  present-but-empty rule applies to logs `?severity=` too, and that a filter
+  value (array element or `q`) carrying an ASCII control char (`< 0x20`) is a
+  `BAD_REQUEST` (iter4-1 + iter4-2).
+- `presenter.md` §"Filters, pagination, and cursors" — documented the
+  empty-severity rule (parseSeverities reuses the shared array parser), the
+  control-char rejection (`rejectControlChars`, defense in depth), and that
+  the fingerprint's canonical string is built with **length-prefixed**
+  (collision-proof), NOT separator-joined, encoding (iter4-1 + iter4-2).
+
+Gates (this iteration, verbatim):
+
+```
+$ gofmt -l . ; goimports -l . ; go vet ./... ; go build ./...
+(clean)
+$ go test -race -count=1 ./...
+ok  internal/presenter   coverage: 91.7% of statements
+(all packages pass)
+$ golangci-lint run --timeout=5m
+0 issues.
+$ gosec ./...
+(exit 0, no issues)
+$ shellcheck -x -s bash scripts/*.sh scripts/lib/*.sh scripts/test/*.sh
+(clean, exit 0)
+```
+
+`internal/presenter` coverage 91.7% (≥90% gate); the new/changed functions
+(`writeLP`, `writeSortedDim`, `sessionFilter.fingerprint`,
+`logFilter.fingerprint`, `rejectControlChars`, `parseSeverities`) all at 100%
+line coverage. All presenter `*.go` files ≤400 lines (largest `filters.go`
+383; `middleware_test.go` now 308, `middleware_gzip_test.go` 126); all
+changed functions ≤60 lines (largest touched `handleSessionLogs` 48,
+structurally unchanged). `scripts/spec-drift.sh` is not yet implemented (a
+later Phase-1 chunk) so that gate was not run.
+
+Live curl smoke (throwaway temp db built via the three migration files + the
+serve binary on 127.0.0.1, both removed after; server killed by saved PID):
+
+```
+$ curl '/api/sessions?models=a%1Eb'        → 400 BAD_REQUEST
+  "filter \"models\" value contains control characters"
+$ curl '/api/sessions?agents=x%1Fy'        → 400 BAD_REQUEST
+  "filter \"agents\" value contains control characters"
+$ curl '/api/sessions?q=foo%1Ebar'         → 400 BAD_REQUEST ("q" …)
+$ curl '/api/sessions?models=a%1Eb,c'      → 400  (crafted collision pair)
+$ curl '/api/sessions?models=a,b%1Ec'      → 400  (crafted collision pair)
+$ curl '/api/sessions/rootA/logs?severity='  → 400 BAD_REQUEST
+  "filter \"severity\" is present but empty"
+$ curl '/api/sessions/rootA/logs?severity=,' → 400
+$ curl '/api/sessions/rootA/logs?limit=2'     → 200  (absent severity = all)
+$ curl '/api/sessions?models=b,a&cursor=<a,b c>'   → 200  (reordered same set)
+$ curl '/api/sessions?models=a,b,c&cursor=<a,b c>' → 400  (changed set)
+$ curl '/api/sessions/rootA/logs?severity=WRN,ERR&cursor=<ERR,WRN c>' → 200
+$ curl '/api/sessions/rootA/logs?severity=ERR&cursor=<ERR,WRN c>'     → 400
+```
+
+### Chunk 12 iteration 5 (review findings, 2026-05-28)
+
+Iteration-4 of Chunk 12 went to external review (codex + glm + minimax in
+parallel). **minimax and glm both converged** with no actionable findings
+(glm explicitly verified all three iter-4 fixes and reported "Convergence
+reached"; an injected stale read of the iter-1 glm output briefly looked
+like a fresh `DisallowUnknownFields` P2, but the live code already uses
+`json.NewDecoder(...).DisallowUnknownFields()` and glm's actual iter-4
+verdict was clean). **codex found 2×P2** — both real and both fixed on
+branch `sow-0001-chunk-12-rest-endpoints`.
+
+- **iter5-1 (P2, codex — fingerprint not collision-proof after hashing):
+  cursor `fp` now stores the canonical string itself, not an FNV-64
+  digest.** iter-4's length-prefixing made the *pre-hash* byte stream
+  unambiguous, but `hashKey` still folded it into a 64-bit FNV-1a hex digest
+  (`$REPO_ROOT/internal/presenter/fingerprint.go` `hashKey`), and a 64-bit
+  digest is finite — two distinct canonical strings *can* hash equal, so the
+  spec's "distinct filter sets can never collide" was an overclaim (a
+  collision would let a changed filter pass the cursor guard → pagination
+  skip/dup). Fixed by removing the hash entirely:
+  - `sessionFilter.fingerprint()` (`fingerprint.go:60`) and
+    `logFilter.fingerprint()` (`$REPO_ROOT/internal/presenter/session_logs.go:129`)
+    now `return b.String()` — the canonical length-prefixed string — and the
+    validators (`parseCursorParam`, `parseLogPaging`) compare those strings
+    **byte-for-byte**. Distinct filter sets can now *never* collide: the
+    property is exact by construction, not a probabilistic bound.
+  - `hashKey` and the `hash/fnv` import were deleted (`fingerprint.go`
+    110→99 lines). The cursor is an opaque localhost token that only echoes
+    back filter values the client already sent, so the larger `fp` payload
+    is immaterial.
+  - Spec updated in lockstep (`presenter.md` §"Filters, pagination, and
+    cursors": "stable hash (FNV-64a → hex)" → "canonical length-prefixed
+    string … compared byte-for-byte … never collide … exact by
+    construction").
+
+- **iter5-2 (P2, codex — control-char rejection bypassed by leading/trailing
+  trim): `rejectControlChars` now runs on the RAW value before
+  `TrimSpace`.** `\t`/`\n`/`\r` are whitespace, and the iter-4 code trimmed
+  *before* validating (`q` at `filters.go:90-91`; array dims via
+  `parseArrayParam`'s `TrimSpace` then a post-trim loop), so a
+  leading/trailing control byte was silently trimmed away and accepted —
+  `?q=%09abc`, `?models=%09a`, `?severity=%09ERR` all passed despite the
+  spec requiring any byte `< 0x20` → 400. Fixed:
+  - `q` (`filters.go:90-94`): check `rejectControlChars("q", qRaw)` on
+    `v.Get("q")` **before** `strings.TrimSpace`.
+  - Array dims + logs `severity`: pushed the raw check into the shared
+    `parseRequiredNonEmptyArray` (`filters.go:243-247`) — it now iterates the
+    raw `v[key]` entries and rejects control bytes *before* split/trim, so
+    every array dimension and the logs `severity` param are covered by one
+    rule. The now-redundant post-trim loop in `parseArrayFilters` was
+    removed. Checking the raw entry before the comma-split is correct: comma
+    is `0x2C`, so a control byte anywhere (leading, trailing, interior) is
+    caught.
+  - Spec updated (`presenter.md`): the control-char rule now states it runs
+    on the raw value before any `TrimSpace`, with the bypass examples.
+
+Tests (written failing first, then green): `fingerprint_test.go`
+`TestFingerprint_IsCanonicalStringNotHash` + `TestLogFingerprint_…` (assert
+`fp` carries readable length-prefixed tokens, not a fixed-width hex digest);
+`sessions_pagination_test.go` `TestSessions_ControlCharRawBeforeTrim`
+(`q`/`models`/`agents` leading & trailing control bytes → 400; spaces still
+trimmed → 200); `session_logs_test.go`
+`TestSessionLogs_SeverityControlCharRawBeforeTrim` (severity control bytes →
+400; absent severity → all). All pre-existing pagination/cursor/filter tests
+unchanged (HTTP round-trips are `fp`-format-agnostic).
+
+**Gates after iter-5** (same scope as iter-4): `gofmt`/`goimports` clean;
+`go build ./...` clean; `go vet ./internal/presenter/` clean;
+`golangci-lint run ./internal/presenter/...` 0 issues; `go test -race
+./internal/presenter/...` all pass; `internal/presenter` coverage 91.7%
+(≥90% gate); all presenter `*.go` ≤400 lines (largest
+`sessions_pagination_test.go` 394, `filters.go` 389). Three gopls
+`modernize` hints (`rangeint` at `sessions_pagination_test.go:15,215`;
+`stringsseq` at `filters.go:283`) are pre-existing (untouched by iter-5),
+not enabled in `.golangci.yml`, and therefore non-gating; left as-is to keep
+the iter-5 commit scoped to the two findings.
+
+### Chunk 12 iteration 6 (review findings, 2026-05-28)
+
+Iteration-5 of Chunk 12 went to external review (codex + glm + minimax in
+parallel, same full-package scope + iter-5 fix notes). **minimax converged**
+(no findings, "ready to merge"). **glm converged** ("Convergence reached …
+production-quality and ready to merge"; its two P2s were explicitly rated
+optional polish). **codex found 2×P2 + 1×P3** — it was reviewing the WHOLE
+package (per the never-narrow-scope rule), so it surfaced robustness gaps
+beyond the iter-5 fixes. Both P2s confirmed implemented by all three (no-hash
+fingerprint + raw-before-trim control chars). Four items addressed this
+iteration (codex's 3 + glm's overlapping/optional P2-1):
+
+- **iter6-1 (P2, codex + glm — logs cursor `id` not validated as int64):
+  logs keyset id is now a validated `int64`, bound with integer semantics.**
+  The logs keyset `id` is the `log_entries.id` INTEGER column, but
+  `decodeCursor` only checked `ID != ""`, and `buildLogsQuery` bound the
+  string `cursor.ID` into `(ts, id) > (?, ?)`, relying on SQLite string→int
+  affinity. A fingerprint-matching logs cursor carrying `id:"abc"` was
+  accepted and silently produced a wrong/empty boundary page instead of a
+  loud 400 — contradicting the package contract that a malformed cursor is
+  `BAD_REQUEST`. Fixed in `$REPO_ROOT/internal/presenter/session_logs.go`:
+  a new `logsCursor` struct (`ts int64`, `id int64`, `present bool`) holds
+  the validated watermark, distinct from the wire-shape `pageCursor` (string
+  id, used unchanged by the TEXT-keyed sessions endpoint). `parseLogPaging`
+  now `strconv.ParseInt(cur.ID, 10, 64)` after the fingerprint check and
+  returns `BAD_REQUEST` on a non-decimal id; `buildLogsQuery`/`queryLogs`
+  take `logsCursor` and bind `cursor.id` as an int64, so the comparison is
+  integer, not affinity-coerced. Spec: `presenter.md` cursor
+  structural-rejection paragraph documents the int64-id rule.
+- **iter6-2 (P2, codex — recover middleware wrote a 500 over an
+  already-started response): recover now guards on the wrapped writer's
+  `wrote()` flag.** `recoverMiddleware`
+  (`$REPO_ROOT/internal/presenter/middleware.go`) logged the panic (good)
+  then called `writeJSONError(…500…)` UNCONDITIONALLY, contradicting its own
+  comment — a panic after a partial write would append a JSON error to the
+  partially-sent body and emit a superfluous `WriteHeader`. Added
+  `(*loggingResponseWriter).wrote()` exposing the existing `wroteHeader`
+  flag; recover now skips the structured 500 (logs-and-returns) when the
+  response has already started. logging is the outermost middleware so the
+  `w` recover holds IS the `*loggingResponseWriter`; the guard type-asserts
+  `interface{ wrote() bool }`. Honors AGENTS.md §"No silent failures" and
+  future-proofs the Chunk-13 SSE streaming handlers. Spec: `presenter.md`
+  "Recover panic" bullet now states the not-yet-started condition.
+- **iter6-3 (P2, glm — path `:id` control chars; P3, codex — stale test
+  comments).** (a) `handleSessionDetail` and `handleSessionLogs` now
+  `rejectControlChars("id", r.PathValue("id"))` on the RAW path value before
+  `TrimSpace`, via the existing `p.writeBadFilter` envelope path — a control
+  byte in the path is a `BAD_REQUEST`, not a doomed lookup → 404, making the
+  control-char rule uniform across every user value (query + path). Spec:
+  `presenter.md` control-char paragraph + `rest-api.md` extended to name the
+  path `:id`. (b) Three stale "before hashing" test comments
+  (`fingerprint_test.go`, `sessions_pagination_test.go`,
+  `session_logs_test.go`) changed to "before encoding" to match the iter-5
+  no-hash design.
+
+**Declined with reasoning** (documented so a later round does not re-litigate):
+glm P3-1 (`parseAcceptWeight` hand-rolled q-value float parse) — works
+correctly and intentionally avoids a `strconv` import; no defect. glm P3-2
+(`gzipMiddleware` buffers the full body before compressing) — bounded by the
+`limit+1` model (~500 KB worst case at `limit=1000`) on a localhost
+single-user tool; streaming gzip would be an architecture change for zero
+benefit at this scale.
+
+Tests (failing first, then green): `session_logs_test.go`
+`TestSessionLogs_CursorNonNumericIDRejected` (forged cursor with `id:"abc"`
++ matching fingerprint → 400; before: 200 via silent SQLite coercion),
+`TestSessionLogs_PathControlCharRejected` (before: 404);
+`session_detail_test.go` `TestSessionDetail_PathControlCharRejected` (before:
+404); `middleware_test.go` `TestRecover_NoSecondWriteAfterPartialResponse`
+(before: body = `partial-body` + appended `{"error":…}` envelope) and
+`TestRecover_500EnvelopeWhenNothingWritten` (the not-yet-written branch).
+Pre-existing valid-cursor/pagination tests still green.
+
+**Gates after iter-6** (same scope): `gofmt`/`goimports` clean; `go build
+./...` clean; `go vet ./internal/presenter/` clean; `golangci-lint run
+./internal/presenter/...` 0 issues; `go test -race -count=1 ./...` all 10
+packages pass; `internal/presenter` coverage 91.8% (≥90% gate; changed code
+— `wrote`, both `recoverMiddleware` branches, `parseLogPaging`,
+`buildLogsQuery` — at 100%); all presenter `*.go` ≤400 lines (largest
+`sessions_pagination_test.go` 394). The new behaviors are validated by
+httptest against the real `Handler()` middleware chain on a real temp SQLite
+file — stronger evidence here than a curl smoke, since the recover-guard fix
+can only be exercised by an in-process mid-write panic. Six gopls `modernize`
+hints (`rangeint`/`stringsseq` in `middleware.go`, `middleware_test.go`,
+`sessions_pagination_test.go`) remain pre-existing and non-gating
+(not in `.golangci.yml`); left as-is to keep the iter-6 diff scoped.
+
+### Chunk 12 iteration 7 (review findings, 2026-05-28)
+
+Iteration-6 went to external review (codex + glm + minimax, same full-package
+scope + iter-6 fix notes). **minimax converged** (no findings, ready to
+merge). **glm converged** (zero P1, zero P2, two P3 style observations, ready
+to merge). **codex found 1×P2** — a strict-cursor/spec-drift item it surfaced
+while reviewing the whole package. Fixed:
+
+- **iter7-1 (P2, codex — sessions cursor accepted forged/tampered
+  `sort`/`order` when `fp` matched): explicit `sort`/`order` guard added to
+  `parseCursorParam`.** `decodeCursor` only required `Sort`/`Order` non-empty,
+  and `parseCursorParam`
+  (`$REPO_ROOT/internal/presenter/filters.go`) validated only
+  `cur.FP != f.fingerprint()`. Because the fingerprint covers sort+order a
+  normally-minted cursor was always fine, but a cursor carrying the CORRECT
+  live `fp` yet a tampered `Sort`/`Order` was silently accepted — the spec
+  said a cursor MUST carry a matching `sort`/`order`, and the logs endpoint
+  already enforced its fixed ordering explicitly. Added, BEFORE the fingerprint
+  check, `if cur.Sort != f.sort || cur.Order != f.order { return
+  wrapBadFilter("cursor does not match this query's ordering; restart
+  pagination") }`, mirroring the logs endpoint and giving a precise
+  ordering-mismatch message. Not an injection/corruption fix (the sessions
+  keyset direction uses the live `f.order`, never `cur.Order` — confirmed at
+  `sessions_list.go:88-93`), so the keyset query was left untouched; this is a
+  defense-in-depth guard that makes sessions uniform with logs and matches the
+  spec. The fix also surfaced a latent spec inaccuracy — `presenter.md`
+  claimed the cursor's `sort`/`order` "drive the keyset SQL comparison
+  direction"; corrected to state the direction is driven by the live
+  `f.order` and the cursor's `sort`/`order` are a validated guard.
+
+**Declined with reasoning** (both glm P3s, neither blocks merge): glm P3-1
+(`itoa` in `presenter.go` duplicates `strconv.Itoa`) — a per-file
+import-avoidance choice in Chunk-11 code, works and is tested; out of the
+Chunk-12 diff scope. glm P3-2 (`parseAcceptWeight` hand-rolled q-value parse)
+— already assessed in iter-5; correct and intentional.
+
+Test (failing first, then green): `sessions_cursor_guard_test.go`
+`TestSessions_CursorTamperedOrderRejected` — mints a real next_cursor under
+the default desc ordering, decodes it, tampers `Order="asc"` (then
+`Sort="junk"`) while leaving `fp` unchanged, re-encodes, and replays against
+the same desc query → 400 `BAD_REQUEST` (before the fix: 200, silently
+accepted). The unmodified-cursor control still paginates (200, correct next
+page). The new test was placed in its own file so `sessions_pagination_test.go`
+stays ≤400 lines.
+
+**Gates after iter-7** (same scope): `gofmt`/`goimports` clean; `go build
+./...` clean; `go vet` clean; `golangci-lint run ./internal/presenter/...` 0
+issues; `go test -race -count=1 ./internal/presenter/...` all pass;
+`internal/presenter` coverage 91.8% (≥90% gate); all presenter `*.go` ≤400
+lines (largest `filters.go` 399). Three pre-existing gopls `modernize` hints
+remain non-gating. The behavior is validated by httptest against the real
+`Handler()` chain on a real temp SQLite file.
+
+### Chunk 12 iteration 8 (review findings, 2026-05-28)
+
+Iteration-7 went to external review (codex + glm + minimax, same full-package
+scope + iter-7 fix note). **codex found NO code-behavior defect** (first round
+with zero behavioral findings) — only 2 documentation-accuracy items.
+**glm converged** ("zero P1, zero P2, one P3 test-coverage suggestion …
+production-quality and ready to merge"). **minimax converged** ("no blockers,
+convergence reached, ready to merge"). All three confirmed the iter-7 ordering
+guard correct with no false positives. Three doc/test polish items addressed:
+
+- **iter8-A (codex P2 — spec overclaimed keyset concurrent-write behavior):**
+  `presenter.md` said keyset pagination means "no row skipped or repeated when
+  new rows land between page fetches", which oversells it — a row inserted
+  AHEAD of the cursor (e.g. a newer session under DESC) is correctly not
+  back-filled into an in-progress traversal. Reworded to the precise guarantee:
+  rows at or behind the cursor are never skipped/duplicated (vs OFFSET, which
+  shifts already-traversed rows); rows inserted ahead appear on a fresh query
+  from page 1, not mid-traversal. Spec-only (master), no code change.
+- **iter8-B (codex P3 — stale `cursor.go` comment):** the `pageCursor` struct
+  doc still said `Sort`/`Order` "drive the keyset SQL comparison direction",
+  contradicting iter-7. Corrected to: `Sort`/`Order` are an explicit guard so
+  the handler rejects a cursor whose ordering ≠ the active query (mirroring the
+  logs fixed-ordering check); the keyset direction itself comes from the live
+  request's `order`. A package-wide sweep for other stale "drive direction" or
+  "fingerprint is hashed" comments found none (the remaining `fnv` references —
+  aiagent_v2 opTree packing, Vite embed hashes — are unrelated and accurate).
+- **iter8-C (glm P3 — no handler-level `toRaw` test):** added
+  `TestSessions_CursorToRawMismatchRejected` in `sessions_cursor_guard_test.go`.
+  It pins `?to=fixedTime` so the test genuinely ISOLATES the `toRaw` bind (a
+  naive `?to=newest` would 400 under both correct and buggy code; with
+  `?to=fixedTime` a buggy now-defaulted fingerprint would collide and wrongly
+  accept the stale cursor). Mint page 1 with `?to=fixedTime` → replay WITHOUT
+  `?to` → 400 (toRaw mismatch); positive control replay WITH the same `?to` →
+  200, correct next page `[s2,s1]`. Proven FAIL-before (temporarily binding
+  `f.to`) / PASS-after; `fingerprint.go` confirmed byte-identical
+  (`microsPtrKey(f.toRaw)`) afterward.
+
+**minimax note** (no action): a style preference about comments on public
+function declarations — an opinion, not a defect.
+
+**Gates after iter-8** (same scope): `gofmt`/`goimports` clean (goimports run
+via `~/go/bin/goimports` — confirmed present, not on PATH); `go build ./...`
+clean; `go vet` clean; `golangci-lint run ./internal/presenter/...` 0 issues;
+`go test -race -count=1 ./internal/presenter/...` all pass; coverage 91.8%
+(≥90% gate); all presenter `*.go` ≤400 lines (`filters.go` 399 unchanged,
+`sessions_cursor_guard_test.go` 126). Only two files changed (`cursor.go`
+comment, `sessions_cursor_guard_test.go` new test) plus the spec.
+
+**Iteration-8 review result — CONVERGENCE.** The iter-8 changes went to
+external review (codex + glm + minimax, same full-package scope). All THREE
+reviewers returned "convergence reached / production-quality / ready to merge"
+with **zero actionable P1/P2/P3 findings** — the first round where every
+reviewer is clean. codex (the persistent finder across iters 4-7) explicitly:
+"no actionable P1/P2/P3 findings … convergence reached." glm: "production-
+quality and ready to merge … no actionable defect remains." minimax:
+"convergence reached … production-ready." Chunk 12 is review-complete and
+ready to commit/merge. Full pre-merge gate sweep (whole repo): `gofmt`/
+`goimports` clean, `go vet ./...` clean, `go build ./...` clean,
+`golangci-lint run` 0 issues, `gosec ./...` 0 issues (65 files, 23 verified
+nosec), `govulncheck ./...` 0 reachable vulnerabilities, `go test -race
+-count=1 ./...` all 10 packages pass, `internal/presenter` coverage 91.8%.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

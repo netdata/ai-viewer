@@ -117,7 +117,9 @@ func TestNotImplementedReportsChunk(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/abc", nil)
+	// /api/sessions/{id}/topology is still deferred (Chunk 14); it falls
+	// through the live session routes to the notImplemented catch-all.
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/abc/topology", nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	var env errorEnvelope
@@ -127,22 +129,23 @@ func TestNotImplementedReportsChunk(t *testing.T) {
 	if env.Error.Code != CodeNotFound {
 		t.Fatalf("code = %q", env.Error.Code)
 	}
-	if v, _ := env.Error.Details["chunk"].(string); v != "12+" {
+	if v, _ := env.Error.Details["chunk"].(string); v != "13+" {
 		t.Fatalf("chunk = %v", env.Error.Details["chunk"])
 	}
 }
 
 // TestHEAD_DeferredRouteReturns404WithEmptyBody pins the HEAD contract
 // on the error path through the full middleware chain: a HEAD request
-// to a deferred /api/sessions route returns 404 with the JSON
-// Content-Type header set but an empty response body. Codex iter-4 P3
-// flagged that without this guard, HEAD to error paths leaked the
-// JSON envelope, violating presenter.md §"Routing".
+// to a still-deferred route returns 404 with the JSON Content-Type
+// header set but an empty response body. Codex iter-4 P3 flagged that
+// without this guard, HEAD to error paths leaked the JSON envelope,
+// violating presenter.md §"Routing". As of Chunk 12 the deferred route
+// used here is the topology sub-route (Chunk 14).
 func TestHEAD_DeferredRouteReturns404WithEmptyBody(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
-	req := httptest.NewRequest(http.MethodHead, "/api/sessions", nil)
+	req := httptest.NewRequest(http.MethodHead, "/api/sessions/abc/topology", nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
