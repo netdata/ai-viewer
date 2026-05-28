@@ -188,7 +188,12 @@ func (p *Presenter) servePublicFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	if _, err := w.Write(data); err != nil {
+	// The body is trusted embedded build output: servePublicFile is wired
+	// ONLY on exact publicRootFiles routes (e.g. /favicon.svg), so `name` is
+	// never request-varied, and the bytes are baked into the binary at build
+	// time — the response is never request-controlled. gosec's G705 taint
+	// analysis cannot see the exact-match mux routing and flags the write.
+	if _, err := w.Write(data); err != nil { // #nosec G705 -- trusted embedded build output, not request-controlled
 		p.logFrontendError(r, "writing public file", err)
 	}
 }
