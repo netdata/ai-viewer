@@ -5817,6 +5817,96 @@ sweep before merge: `gofmt`/`goimports` clean, `go vet`/`go build` clean,
 `golangci-lint run` 0 issues, `gosec ./...` 0, `govulncheck ./...` 0,
 `go test -race ./...` all 11 packages pass.
 
+### Chunk 14 — frontend scaffolding (2026-05-28)
+
+Created `frontend/` from scratch per `frontend-architecture.md` + `ui-pages.md`
+(the design specs already existed; this chunk implements the scaffold against
+them). The Go REST + SSE backend (Chunks 11-13) is the contract the client
+consumes; `api/types.ts` mirrors the ACTUAL presenter wire JSON (cross-checked
+against `internal/presenter/*.go`, not just the spec), with Go pointer/omitempty
+nullability and open string-union enums so unknown future values render rather
+than crash.
+
+Stack (latest stable at install, pinned): React 19.2.6, react-dom, react-router
+7.15.1, @tanstack/react-query 5.100.14, Vite 8.0.14, TypeScript 6.0.3 (strict +
+`noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`), Vitest 4 + RTL,
+Playwright 1.60 (config only; E2E is Chunk 18), ESLint 9.39 + typescript-eslint
+8.60 + react/react-hooks plugins. **ESLint pinned to 9.x, not 10.x** — a
+documented CTO call: `eslint-plugin-react@7.37.5` caps its peer at `eslint
+^9.7`, so the latest-stable *compatible set* is 9.x; no `--force`/`--legacy-peer-deps`.
+Revisit when the React plugin supports ESLint 10.
+
+Fully wired: theme (`state/theme.ts` — pure `resolveTheme(override, osDark)`:
+manual override in `localStorage.aiViewerTheme` → OS `prefers-color-scheme`;
+`data-theme` on `<html>`; no-flash inline script; OS-change listener honoring an
+explicit lock; `ThemeToggle` Auto/Dark/Light with aria); URL-synced filters
+(`useFilters()` over React Router search params; array dims comma-joined per the
+REST contract; no filter state in components); `FilterBar`; typed API client
+(`api/client.ts` — relative `/api` base, error-envelope→`ApiError`, AbortSignal,
+204); SSE client (`api/sse.ts` — POST `/api/subscriptions` → `EventSource(/api/events?sub=)`
+→ parse all 5 frames → TanStack `invalidateQueries` per event → `close()`
+best-effort DELETE; browser Last-Event-ID reconnect); endpoint hooks
+(`useSessions`/`useSessionDetail`/`useStats`/`useSources`/`useHealth`); `Layout`
+shell + router; `format.ts`. Clean placeholders (structured for trivial additive
+wiring next): `SessionsList`/`SessionDetail`(Overview+Logs)/`Sources` Phase-1
+pages; Phase-2 routes (Topology/Tools/Models/Agents, D3 viz) render `ComingSoon`.
+
+Same-origin: the Go binary serves the SPA + `/api` on one host:port, so the
+fetch base is relative `/api` (no operator host/path hardcoded — confirmed no
+operator home-path anywhere in `frontend/`). Dev: Vite proxies `/api` → `127.0.0.1:7710` (matches
+the serve binary's default bind).
+
+Gates (run in `frontend/`, master-verified): `npm install` clean (310 pkgs);
+`tsc --noEmit` 0 errors; `eslint . --max-warnings 0` 0 warnings; `vitest run
+--coverage` 69 tests pass, 96.34% lines / 93.28% branches (all impl dirs ≥80%);
+`vite build` succeeds, main chunk **84.51 KB gzipped** (budget ≤500 KB). No
+secrets/operator paths.
+
+**Review (codex + glm + minimax, 3 iterations → CONVERGENCE).**
+- iter-1: sound foundation; codex found 3×P2 + 1×P3 (HEAD/empty-body in
+  `client.ts`; a `connectSse` unmount/abort leak race; the SSE client untested
+  AND excluded from the coverage gate; malformed SSE frames silently dropped);
+  glm found the same SSE abort race + `StatusBadge` `?? ''` hiding a CSS-class
+  typo + a `ThemeToggle` aria-label-churn P3; minimax converged (its "P1" was a
+  self-corrected `lag_us` false alarm).
+- iter-2 fixes (all verified): `connectSse` now rejects/tears down on abort at
+  every timing (`SseCanceledError` + post-POST `signal.aborted` guard + one-shot
+  abort listener; idempotent `close()`); a fake-`EventSource` `sse.test.ts`
+  added and `sse.ts`/`sessions.ts`/`stats.ts`/`sources.ts` brought INTO the
+  coverage gate (`sse.ts` 98.68% — was excluded); `client.ts` `HEAD` + bodiless
+  (204/`Content-Length:0`) → `undefined`; malformed frames → `onMalformedEvent`
+  /`console.warn` (no silent drop); `StatusBadge` explicit `resolveStatusClass`
+  (dev assertion on a missing class); `ThemeToggle` resolved-theme via an
+  `aria-live` region. Spec deltas landed in `frontend-architecture.md` (SSE
+  cancellation/malformed contract, client empty-body).
+- iter-2 review: glm + minimax converged; codex found a REAL contract bug —
+  `useStats(filters, sessionId)` sent `session_id` to `/api/stats`, but the
+  backend (`stats.go` `parseSessionFilter`) has NO `session_id` filter and
+  silently ignored it (the test only asserted URL construction → false
+  confidence). Verified against the backend; glm/minimax both missed it
+  (multi-reviewer adjudication mattered again).
+- iter-3 fix: `useStats`/`fetchStats`/`statsQueryKey` are now CROSS-SESSION
+  ONLY (no `session_id` anywhere); per-session Overview aggregates will come
+  from `useSessionDetail` (`GET /api/sessions/:id` carries them). `ui-pages.md`
+  §Overview corrected (per-session by-model/by-tool breakdowns deferred to a
+  Phase-2 `/api/stats?session_id` enhancement). Also strict integer parsing of
+  URL time params in `filters.ts` (`/^-?\d+$/` + `Number.isSafeInteger`;
+  `from=123abc`/`1.2`/unsafe → treated as absent, not truncated). 130 tests.
+- iter-3 review: **all three converged.** glm: "no P1/P2/P3". codex:
+  "frontend contract convergence reached" (its only item = the PRE-EXISTING
+  operator-home example paths in older durable specs — explicitly "not a
+  frontend scaffold blocker"; tracked as a separate hygiene follow-up).
+  minimax: convergence + a "medium" type nit on `SubscriptionFilterRequest
+  .session_id?: string | null` — verified a FALSE POSITIVE: the SSE filter
+  shape (`sse-protocol.md`) explicitly allows `session_id: null` (null = no
+  constraint), so the nullable request field is spec-correct; the response
+  `NormalizedFilter` correctly uses `?: string` (omitempty).
+
+Final gates (frontend, master-verified after iter-3): `tsc --noEmit` 0; `eslint
+--max-warnings 0` 0; `vitest run --coverage` 130 tests pass, ~97.6% lines /
+93.3% branches (`sse.ts` 98.68%, `stats.ts` 100%); `vite build` 84.56 KB
+gzipped. No operator home-path, no secrets in `frontend/`.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

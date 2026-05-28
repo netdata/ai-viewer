@@ -1,0 +1,39 @@
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+// Vitest config kept separate from vite.config.ts so the production build
+// never pulls in test-only globals/jsdom. Coverage is scoped to the source
+// dirs implemented in this chunk; placeholder pages and Phase-2 stubs are
+// excluded so the gate measures real, exercised code (AGENTS.md gate:
+// >= 80% lines on implemented component/lib dirs).
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    css: true,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'text-summary', 'html'],
+      include: [
+        'src/state/**/*.ts',
+        'src/lib/**/*.ts',
+        'src/api/client.ts',
+        'src/api/sse.ts',
+        'src/api/sessions.ts',
+        'src/api/stats.ts',
+        'src/api/sources.ts',
+        'src/components/FilterBar/**/*.{ts,tsx}',
+        'src/components/SessionRow/StatusBadge.tsx',
+        'src/components/ThemeToggle/**/*.{ts,tsx}',
+      ],
+      thresholds: {
+        lines: 80,
+        statements: 80,
+        functions: 80,
+        branches: 75,
+      },
+    },
+  },
+});
