@@ -50,9 +50,24 @@ The single source of truth for "is this thing alive and what state is it in":
       "parse_errors":0,
       "last_seq":12345          // per-source observability counter (max SourceSeq seen); NOT a dedup gate
     }
-  ]
+  ],
+  "notify": {
+    "last_seq":67890,           // last notify.seq the poller applied (0 before the first row)
+    "lag_us":<int>              // now - ts_us of the last applied notify row; 0 when idle (no rows applied yet)
+  },
+  "sse": {
+    "subscriptions":3           // active SSE subscriptions held by the hub (incl. those in the 60 s reconnect window)
+  }
 }
 ```
+
+`notify.last_seq` is the high-water `notify.seq` the read-only poller has
+applied (it starts the cursor at `MAX(seq)` on boot, so `last_seq` advances
+only with changes that occur while serve is running); `notify.lag_us` is `now`
+minus the `ts_us` of that last applied row and is `0` when the poller has not
+yet applied any row. `sse.subscriptions` is the count of active subscriptions
+the hub holds. These three fields are the operator's window into the
+ingester→serve notify path (`presenter.md` §SSE Hub; `data-model.md` §notify).
 
 `last_seq` is a per-source observability counter: the max `SourceSeq`
 seen for that source (`source_progress.last_seq`). It is **NOT a dedup
@@ -136,4 +151,4 @@ Lives at `docs/runbook.md` (created during Phase 1). Covers:
 - "Ingester is lagging" → check inotify limits, disk space, adapter logs.
 - "Parse errors spiking" → expand source detail in UI, inspect log lines, check source format upgrade.
 - "Server returns 500 on /api/sessions" → check SQLite size, check WAL contention, restart server.
-- "SSE events not arriving" → check `/api/health`, check notify socket, check browser EventSource console.
+- "SSE events not arriving" → check `/api/health`, check the notify-table poller is advancing (`notify.last_seq` increasing as the ingester commits), check browser EventSource console.

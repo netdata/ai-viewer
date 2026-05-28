@@ -214,6 +214,60 @@ Streams the payload bytes. Headers:
 
 Query: `?decompress=1` forces inline decompression for clients that can't handle gzip.
 
-### POST /api/subscriptions / DELETE /api/subscriptions/:id / GET /api/events
+### POST /api/subscriptions
 
-See `sse-protocol.md`.
+Creates an SSE subscription. Request body:
+
+```json
+{ "filter": { ...REST-style filter... } }
+```
+
+The `filter` is validated and normalized with the **same rules as the list
+endpoints** (`time_range`, `sources`, `agents`, `models`, `tools`, `status`,
+`session_id`, `root_session_id`; unknown fields rejected; present-but-empty
+array → `BAD_REQUEST`; ASCII control char `< 0x20` in any value →
+`BAD_REQUEST`). A bad filter returns `400`. Response `200`:
+
+```json
+{ "id": "sub-<32 hex>", "filter_normalized": { ... } }
+```
+
+`id` is `sub-` followed by 32 lowercase hex characters (128-bit crypto-random).
+If the cryptographic RNG fails (effectively never on Linux) the server returns
+`500 INTERNAL_ERROR` rather than a weak/non-spec id — it never hands out a
+predictable id. While the server is shutting down (SSE hub closed) new
+subscription creation returns `503 SERVICE_UNAVAILABLE` rather than a
+subscription that would not receive events. The code is `SERVICE_UNAVAILABLE`
+(not `DB_UNAVAILABLE`): the database is fine; the server is unable to serve the
+request and the client should retry later.
+
+The shutting-down check and the subscription creation (hub registration plus
+registry insert) execute as **one critical section** under the presenter's SSE
+lifecycle mutex, so they cannot interleave with `ShutdownSSE`. This closes a
+time-of-check/time-of-use gap: an atomic flag checked once and then read again
+across the create call would still permit shutdown to run in between, leaving
+either a `200` whose subscription the closed hub already dropped (never
+attaches, never receives events) or an orphan registry entry with no hub
+channel. With the mutex the outcome is binary: a create either completes fully
+(subscription live in both the hub and the registry) before shutdown is
+observed, or it sees the shutting-down state and returns `503` having mutated
+nothing. See `presenter.md` §Graceful Shutdown for the lock-ordering contract.
+
+### DELETE /api/subscriptions/:id
+
+Cancels a subscription. Returns `204 No Content`. **Idempotent** — deleting an
+unknown or already-expired `id` is still `204`.
+
+### GET /api/events?sub=:id
+
+Opens the SSE stream for a subscription. On success returns `200` with
+`Content-Type: text/event-stream`. A missing or malformed `sub` returns `400`;
+an unknown or expired `sub` returns `404`; a second concurrent stream for a
+subscription that already has an active stream returns `409` (one stream per
+subscription — see `sse-protocol.md`). `HEAD` returns the same headers with an
+empty body (`200` if the subscription exists, `404` if not) without opening a
+stream or touching the subscription lifecycle. Gzip is **not** applied to
+`/api/events` (the stream is sent uncompressed so events flush immediately).
+
+See `sse-protocol.md` for the subscription lifecycle, filter shape, event-frame
+format, the five event types, `Last-Event-ID` replay, and backpressure.

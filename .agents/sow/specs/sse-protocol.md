@@ -19,6 +19,21 @@ One SSE endpoint at `GET /api/events?sub=<subscription_id>`. Subscriptions are c
 3. DELETE /api/subscriptions/sub-abc123     (optional explicit cleanup)
 ```
 
+The subscription `id` is `sub-` followed by 32 lowercase hex characters
+(128-bit crypto-random), e.g. `sub-1f3c…` (32 hex digits). It is opaque to
+clients; do not parse or construct it.
+
+**At most ONE active `/api/events` stream per subscription.** A subscription is
+single-consumer: while one stream is connected, a second concurrent
+`GET /api/events?sub=<id>` for the same subscription is rejected with
+`409 CONFLICT` (the normal reconnect flow is serial — the old stream's
+connection closes, the subscription stays alive for 60 s, then the new stream
+attaches). This prevents two connections from splitting one subscription's
+events. `HEAD /api/events?sub=<id>` returns the stream headers with an empty
+body — `200` if the subscription exists, `404` if not — and does NOT open a
+stream, consume the channel, or touch the connect/disconnect lifecycle
+(reconnect-retention timer).
+
 ## Filter Shape
 
 ```json
@@ -35,6 +50,13 @@ One SSE endpoint at `GET /api/events?sub=<subscription_id>`. Subscriptions are c
 ```
 
 All fields are optional; omitted = no constraint. `time_range.to == null` means "open-ended into the future" (the typical real-time case).
+
+The filter is validated and normalized with the **same rules as the REST list
+filters** (`rest-api.md` §Conventions): unknown fields are rejected; an array
+field that is present but empty (e.g. `"models": []`) is a `BAD_REQUEST`; and
+any value containing an ASCII control character (byte `< 0x20`) is a
+`BAD_REQUEST`. The normalized filter is echoed back as `filter_normalized` on
+the `POST /api/subscriptions` response.
 
 ## Event Envelope
 
@@ -57,10 +79,13 @@ The `id:` field is also set on each message to enable `Last-Event-ID` reconnect.
 Emitted when any row of a matching session is inserted or updated.
 
 ```json
-{ "session_id": "<canonical_id>", "root_session_id": "<canonical_id>", "ts": <us> }
+{ "session_id": "<canonical_id>", "root_session_id": "<canonical_id>", "ts": <us>, "dropped": <n> }
 ```
 
-The client decides whether to re-fetch full session detail.
+The client decides whether to re-fetch full session detail. `dropped` is the
+per-subscription backpressure drop counter (see §Backpressure); it is included
+ONLY when non-zero, signalling the client missed `dropped` events and should
+re-fetch its full view. Clients that don't track it can ignore it.
 
 ### `stats_invalidated`
 
@@ -94,7 +119,7 @@ Emitted at graceful server shutdown.
 
 - Browser `EventSource` reconnects automatically on disconnect.
 - Server respects `Last-Event-ID` header: replays any events buffered for the subscription since that ID (buffer size: 100 most recent events per subscription).
-- If the buffer is exhausted (client was offline too long): server sends a `resync` event telling the client to re-fetch its current view from REST.
+- If the buffer cannot prove coverage of the gap — the client was offline too long (oldest retained event ID is already greater than `Last-Event-ID`) OR the `Last-Event-ID` is unparseable or ahead of the newest retained ID (a stale/forged value) — the server sends a `resync` event telling the client to re-fetch its current view from REST.
 
 ```
 event: resync
@@ -106,6 +131,16 @@ data: { "reason": "buffer_overflow" }
 - Each SSE client has a buffered channel (capacity 256 events).
 - If the channel is full when an event arrives: the server drops the oldest event and increments a per-subscription `dropped` counter. The client sees a counter in subsequent `session_changed` events and may re-fetch its full view.
 - Slow clients do not block other clients or the SSE hub goroutine.
+
+## Transport (server-internal)
+
+The server learns of changes by **polling the SQLite `notify` table** that the
+ingester writes (see `data-model.md` §notify and `architecture.md` §"Notify
+channel"): a read-only poller goroutine reads new `notify` rows (`WHERE seq >
+<cursor>`, ~1 s interval) and fans matching changes onto subscription channels.
+This transport is entirely server-internal and invisible to clients — the wire
+contract above (subscriptions, event frames, `Last-Event-ID`) is unchanged
+regardless of how the server is notified.
 
 ## Debuggability
 

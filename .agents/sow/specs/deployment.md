@@ -9,7 +9,7 @@ Single user, single workstation, two long-running processes. systemd user units 
 | Purpose | Default | Configurable |
 |---|---|---|
 | SQLite index | `~/.local/share/ai-viewer/index.db` | `--db` |
-| State / notify socket | `~/.local/share/ai-viewer/` | `--state-dir` |
+| State dir | `~/.local/share/ai-viewer/` | `--state-dir` |
 | Logs (when run by systemd) | journald via stdout | systemd handles it |
 | Config file (optional) | `~/.config/ai-viewer/config.yaml` | `--config` |
 | Bind address | `127.0.0.1:7710` | `--bind` |

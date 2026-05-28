@@ -369,6 +369,29 @@ Notes:
 - `cursor` mirrors the adapter's opaque JSON cursor; updated from `SourceProgressEvent` so a restart re-enters the source at the right offset. This is the durable resume point.
 - The table is separate from `sources` (which holds operator-facing configuration) so per-batch updates do not contend with operator metadata. Spec'd in `ingester.md` §Dedup.
 
+### notify
+
+Append-only change log introduced in migration `0004`. It is the **notify channel** between the two binaries: the ingester (the sole writer) appends one or more rows inside the SAME transaction as each batch commit, and the serve process (read-only) polls `WHERE seq > <cursor>` to learn what changed and fan out SSE events. Living inside the shared SQLite file keeps the two-binary coupling to exactly "the SQLite file" (no second IPC channel). See `sse-protocol.md` and `architecture.md` §"Notify channel".
+
+```sql
+CREATE TABLE notify (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_us           INTEGER NOT NULL,
+    kind            TEXT NOT NULL,          -- 'session_changed' | 'stats_invalidated' | 'source_status_changed'
+    session_id      TEXT,                   -- set when kind='session_changed'
+    root_session_id TEXT,                   -- set when kind='session_changed'
+    source_id       TEXT                    -- set when kind='source_status_changed'
+);
+```
+
+Notes:
+
+- `seq` is `AUTOINCREMENT` (not just `ROWID`) so values are **strictly monotonic and never reused**, even after pruning deletes low rows. Serve's poll cursor is a `seq` high-water mark; reuse would make it skip rows. `WHERE seq > ?` uses the primary-key index — no extra index needed.
+- **Atomicity**: rows are inserted in the same `*sql.Tx` as the data they describe, so serve can never observe a `notify` row before the row it refers to is visible (no notify-before-data race).
+- **Producer rules** (`ingester.md` §Notify channel): one `session_changed` row per canonical session ID in the batch's `affectedSessionIDs` (carrying its `root_session_id` and the batch commit `ts_us`); at most one `stats_invalidated` row per batch when catalog rollups changed; one `source_status_changed` row when a source's `parse_errors` count or `enabled` flag changed.
+- **Pruning**: the ingester deletes `notify` rows older than a bounded retention window as part of its write cycle so the table stays small; the data is disposable transport, not history. Serve keeps its cursor in memory and jumps to `MAX(seq)` on startup (it only delivers changes that occur while a client is connected; clients reconcile historical state through the REST API), so pruning consumed rows is always safe.
+- **Read-only serve**: serve never writes or prunes `notify` — it only `SELECT`s. All writes/prunes are the ingester's, honoring the read-only-serve contract (`architecture.md`).
+
 ### Schema versioning
 
 ```sql
@@ -376,7 +399,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='3', key='created_at' value=...
+-- key='version' value='4', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
@@ -390,6 +413,10 @@ Migration history:
   and bumps `schema_meta.version` to `'3'`. The matching binary version
   is `presenter.SchemaVersion` (servers refuse to start on mismatch), so
   the two bump in lockstep.
+- `0004_notify.sql` — adds the `notify` change-log table (the ingester→serve
+  notify channel; see §notify) and bumps `schema_meta.version` to `'4'`.
+  `presenter.SchemaVersion` moves to `4` in the same change so serve refuses
+  to start against an older DB.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB

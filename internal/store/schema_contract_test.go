@@ -449,6 +449,28 @@ func expectedSchema() []tableContract {
 			},
 		},
 		{
+			// notify: the ingester→serve change-log (migration 0004).
+			// seq is INTEGER PRIMARY KEY AUTOINCREMENT — values are
+			// strictly monotonic and never reused after prune so serve's
+			// poll cursor never skips a row. No secondary index: WHERE
+			// seq > ? rides the PK. No foreign keys: session_id /
+			// source_id are loose references into disposable transport
+			// rows that the ingester prunes, so a deleted session must
+			// not block a notify insert. Source of truth:
+			// .agents/sow/specs/data-model.md §notify.
+			table: "notify",
+			cols: []column{
+				{Name: "seq", Type: "INTEGER", PKOrder: 1},
+				{Name: "ts_us", Type: "INTEGER", NotNull: true},
+				{Name: "kind", Type: "TEXT", NotNull: true},
+				{Name: "session_id", Type: "TEXT"},
+				{Name: "root_session_id", Type: "TEXT"},
+				{Name: "source_id", Type: "TEXT"},
+			},
+			indexes: nil,
+			fks:     nil,
+		},
+		{
 			table: "catalog_providers",
 			cols: []column{
 				{Name: "name", Type: "TEXT", NotNull: true, PKOrder: 1},

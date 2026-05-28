@@ -6,15 +6,19 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
+
+	"github.com/netdata/ai-viewer/internal/notify"
 )
 
 // SchemaVersion is the canonical schema version the binary was built
 // against. Bumped together with internal/store/migrations/NNNN_*.sql.
 // Servers refuse to start when the on-disk schema_meta.version is
-// different — see CheckSchema below. SOW-0015 migration 0003 sets
-// schema_meta.version='3'; this constant moves in lockstep.
-const SchemaVersion = 3
+// different — see CheckSchema below. SOW-0001 Chunk 13 migration 0004
+// adds the notify change-log table and sets schema_meta.version='4';
+// this constant moves in lockstep.
+const SchemaVersion = 4
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema
 // version disagrees with the binary's expected version. The main()
@@ -33,7 +37,65 @@ type Presenter struct {
 	schemaVersion int
 	nowFn         func() time.Time
 	frontend      fs.FS
+
+	// hub fans matched notify events out to connected SSE clients; subs is
+	// the REST-facing subscription registry kept consistent with the hub.
+	hub  *notify.Hub
+	subs *subscriptionManager
+
+	// sseLifecycleMu serializes SSE-subscription creation against SSE
+	// shutdown. It guards sseShuttingDown and spans the whole
+	// check-shutting-down → create (hub.Add + registry insert) critical
+	// section in createSubscriptionLifecycle, and the state flip in
+	// ShutdownSSE. Without it an atomic flag checked once and then read again
+	// across create still leaves a TOCTOU window: ShutdownSSE could run
+	// between the check and the create, yielding a 200 for a subscription the
+	// closed hub already dropped, or an orphan registry entry with no hub
+	// channel (presenter.md §SSE Lifecycle Mutex; rest-api.md §POST
+	// /api/subscriptions).
+	//
+	// Lock-ordering: sseLifecycleMu → (hub.mu via hub.Add) →
+	// subscriptionManager.mu. ShutdownSSE never holds sseLifecycleMu while
+	// calling hub.Shutdown, and neither the OnRemove hook nor the notify
+	// poller acquires sseLifecycleMu, so no cycle can form.
+	sseLifecycleMu sync.Mutex
+	// sseShuttingDown is set true under sseLifecycleMu at the start of
+	// ShutdownSSE (before the hub is closed) so a POST /api/subscriptions
+	// racing the shutdown window returns 503 instead of minting a
+	// subscription the closed hub would drop.
+	sseShuttingDown bool
+
+	// notifyPollInterval drives runNotifyPoller; sseKeepalive is the SSE
+	// keepalive-comment cadence; notifyNow is the poller/coalesce clock
+	// (injected by tests, defaults to time.Now.UTC).
+	notifyPollInterval time.Duration
+	sseKeepalive       time.Duration
+	notifyNow          func() time.Time
+
+	// notifyMu guards the poller's high-water state. notifyCursor is the
+	// seq the poller has consumed (advances every poll); lastAppliedSeq /
+	// lastAppliedTS are the seq + ts_us of the most recent applied row,
+	// surfaced by /api/health. statsCoalesce tracks the last stats_invalidated
+	// emit time per subscription so the poller can rate-limit to ≈1/s.
+	notifyMu       sync.Mutex
+	notifyCursor   int64
+	lastAppliedSeq int64
+	lastAppliedTS  int64
+	statsCoalesce  map[string]time.Time
 }
+
+// defaultNotifyPollInterval is the notify-table poll cadence
+// (sse-protocol.md §Transport: "~1 s interval").
+const defaultNotifyPollInterval = time.Second
+
+// defaultSSEKeepalive is the idle keepalive-comment cadence
+// (sse-protocol.md §Event Types §keepalive: "every 15 s").
+const defaultSSEKeepalive = 15 * time.Second
+
+// statsCoalesceWindow is the minimum spacing between stats_invalidated
+// events delivered to a single subscription (sse-protocol.md
+// §stats_invalidated: "rate-limited to ~1 per second").
+const statsCoalesceWindow = time.Second
 
 // New constructs a Presenter from the provided options. Returns an
 // error when a required option is missing; the caller is expected to
@@ -61,16 +123,52 @@ func New(opts Options) (*Presenter, error) {
 		schemaVersion = SchemaVersion
 	}
 
-	return &Presenter{
-		db:            opts.DB,
-		logger:        logger,
-		version:       opts.Version,
-		dbPath:        opts.DBPath,
-		startedAt:     startedAt,
-		schemaVersion: schemaVersion,
-		nowFn:         now,
-		frontend:      opts.FrontendFS,
-	}, nil
+	hub := opts.Hub
+	if hub == nil {
+		hub = notify.New(notify.Options{})
+	}
+	pollInterval := opts.NotifyPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultNotifyPollInterval
+	}
+
+	p := &Presenter{
+		db:                 opts.DB,
+		logger:             logger,
+		version:            opts.Version,
+		dbPath:             opts.DBPath,
+		startedAt:          startedAt,
+		schemaVersion:      schemaVersion,
+		nowFn:              now,
+		frontend:           opts.FrontendFS,
+		hub:                hub,
+		subs:               newSubscriptionManager(hub),
+		notifyPollInterval: pollInterval,
+		sseKeepalive:       defaultSSEKeepalive,
+		notifyNow:          now,
+		statsCoalesce:      make(map[string]time.Time),
+	}
+	// Wire per-subscription cleanup: whenever the hub drops a subscription
+	// (retention expiry OR explicit Remove), forget its server-side filter
+	// and coalesce state so neither leaks past the hub's lifetime. The hook
+	// runs without the hub lock held and must NOT call back into hub.Remove
+	// (the removal already happened); onSubRemoved touches only the
+	// presenter's own maps.
+	hub.SetOnRemove(p.onSubRemoved)
+	return p, nil
+}
+
+// onSubRemoved is the hub's OnRemove hook: it drops a dropped subscription's
+// presenter-side state (the registry filter entry and the poller's
+// statsCoalesce timestamp). It must never call hub.Remove — the hub already
+// removed the subscription before invoking this hook, and a callback would
+// be redundant. Touching only presenter-owned locks here (the manager mutex
+// via forget, then notifyMu) keeps the lock-ordering one-directional:
+// manager.mu / notifyMu are always acquired AFTER the hub lock is released,
+// never while holding it.
+func (p *Presenter) onSubRemoved(id string) {
+	p.subs.forget(id)
+	p.forgetStatsCoalesce(id)
 }
 
 // now returns the current time from the injected clock. Tests inject a
@@ -130,6 +228,9 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions/{id}", p.handleSessionDetail)
 	mux.HandleFunc("/api/sessions/{id}/logs", p.handleSessionLogs)
 	mux.HandleFunc("/api/stats", p.handleStats)
+	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
+	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)
+	mux.HandleFunc("/api/events", p.handleEvents)
 	mux.HandleFunc("/api/", p.notImplemented)
 
 	// Frontend routes.
@@ -182,9 +283,9 @@ func (p *Presenter) rootHandler(w http.ResponseWriter, r *http.Request) {
 // route. The handler intentionally does NOT use
 // http.StatusNotImplemented because that maps to "the server does not
 // support this method at all", whereas these routes are scheduled to
-// land in later chunks. As of Chunk 12 the still-pending routes are
-// topology/timeline (Chunk 14), catalog/payloads, and the SSE
-// subscription surface (Chunk 13).
+// land in later chunks. As of Chunk 13 the still-pending routes are
+// topology/timeline (Chunk 14) and catalog/payloads; the SSE
+// subscription surface (subscriptions/events) is now live.
 func (p *Presenter) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, r, p.logger, http.StatusNotFound,
 		CodeNotFound, "endpoint not yet implemented in this chunk",

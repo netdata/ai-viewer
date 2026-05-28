@@ -5440,6 +5440,383 @@ ready to commit/merge. Full pre-merge gate sweep (whole repo): `gofmt`/
 nosec), `govulncheck ./...` 0 reachable vulnerabilities, `go test -race
 -count=1 ./...` all 10 packages pass, `internal/presenter` coverage 91.8%.
 
+### Chunk 13 — SSE hub (Pre-Implementation Gate, 2026-05-28)
+
+**Problem / goal.** Deliver the real-time push transport: `GET /api/events` (SSE)
++ subscription management, fed by an `internal/notify` fan-out the ingester
+signals when it commits new canonical rows. Closes SOW-0001 plan item 13
+("SSE hub: subscriptions, event push, keepalive, reconnect support") and the
+goal "Real-time: file-watch the source directories; push updates to the browser
+without polling" (browser gets SSE push; internal serve→DB poll is an
+implementation detail, not browser polling).
+
+**Evidence reviewed.** `sse-protocol.md` (full client contract: subscription
+lifecycle, filter shape, event envelope, 5 event types, Last-Event-ID replay,
+256-cap backpressure, 60s reconnect retention); `presenter.md` §SSE Hub /
+Routing / Middlewares / Graceful Shutdown / Configuration; `architecture.md`
+notify path; `ingester.md` §Notify Channel + §Batching; `internal/ingest/writer.go:42-45`
+(`affectedSessionIDs` seam already collected per batch); `cmd/ai-viewer-serve/main.go`
+(`http.Server` has ReadHeaderTimeout 10s + IdleTimeout 60s, NO WriteTimeout;
+`presenter.New(Options{...})`); `cmd/ai-viewer-ingest/main.go` (no notify
+producer yet); `internal/store/migrations/` (latest 0003, version 3);
+sessions schema has `root_session_id TEXT NOT NULL`. Middleware already done in
+Chunk 11: gzip carve-out for `/api/events`, `loggingResponseWriter.Flush()`
+passthrough.
+
+**Operator decision (2026-05-28).** Notify transport = **SQLite `notify` table
+(poll)**, not the previously-specced Unix socket (SOW line 33 pre-authorized a
+poll fallback; operator confirmed via AskUserQuestion). Rationale: simplest,
+robust to either-binary restart/start-order, atomic with the data commit,
+trivially testable, respects read-only-serve, keeps two-binary coupling to "the
+SQLite file", and works over a shared-file network mount where a socket would
+not (future cross-host option). Cost: ~1s added latency (acceptable for a
+localhost explorer); a tiny 1/s idle query.
+
+**Design (locked).**
+- **Migration `0004_notify.sql`**: `notify(seq INTEGER PK AUTOINCREMENT, ts_us,
+  kind, session_id, root_session_id, source_id)`; bumps `schema_meta.version`
+  to 4; `presenter.SchemaVersion` → 4 in lockstep. (Full schema in
+  `data-model.md` §notify.)
+- **Producer (`internal/ingest`)**: in the worker's flush, INSIDE the existing
+  batch `*sql.Tx` (atomic), append: one `session_changed` per id in
+  `affectedSessionIDs` (with root_session_id + commit ts_us); ≤1
+  `stats_invalidated` per batch when catalog rollups changed; one
+  `source_status_changed` when a source's parse_errors/enabled changed. Prune
+  `notify` rows older than a bounded retention (e.g. 5 min) once per flush
+  cycle. The `notify.Publisher` no-op seam (if present) is replaced by the
+  table writer.
+- **`internal/notify` package (NEW)**: `Hub` (single goroutine owning the
+  `subscription_id → *subscription` map); `subscription{filter, ch chan event
+  (cap 256), buf ring(100) for Last-Event-ID replay, dropped counter,
+  disconnectTimer}`; `Subscribe(filter) (id, normalized)`, `Unsubscribe(id)`,
+  `Attach(id, lastEventID) (<-chan, replay, error)`, `Detach(id)` (starts 60s
+  retention timer). Goroutine-safe; slow clients never block the hub (drop-oldest
+  + dropped counter per `sse-protocol.md` §Backpressure).
+- **Poller (serve, read-only)**: goroutine; on boot sets cursor = `MAX(seq)`;
+  every ~1s `SELECT seq,ts_us,kind,session_id,root_session_id,source_id FROM
+  notify WHERE seq > ? ORDER BY seq`; for each row, evaluate match per active
+  subscription and enqueue events. **Filter match reuses Chunk-12
+  `sessionFilter.whereClause`**: `SELECT 1 FROM sessions s WHERE s.id=? AND
+  (<whereClause>) LIMIT 1` (identical semantics to REST; correct by
+  construction). Matching runs in the poller (off the hub's fan-out hot path).
+  `stats_invalidated` → all subs (coalesced to ~1/s on emit); `source_status_changed`
+  → subs whose `sources` filter admits that source.
+- **Presenter handlers (NEW, in `internal/presenter`)**: `POST /api/subscriptions`
+  (parse+normalize filter reusing Chunk-12 filter parsing incl. control-char/
+  empty-array rules; 1 MB body cap already set; return `{id, filter_normalized}`),
+  `DELETE /api/subscriptions/{id}` (idempotent 204/200), `GET /api/events?sub={id}`
+  (SSE: `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+  `Connection: keep-alive`; replay Last-Event-ID buffer; stream from channel;
+  `: keepalive` every 15s; clear write deadline via
+  `http.NewResponseController(w).SetWriteDeadline(time.Time{})`; detect client
+  gone via `r.Context().Done()`; on return Detach (60s retention)). Unknown/expired
+  `sub` → `BAD_REQUEST`/`NOT_FOUND` per envelope.
+- **WriteTimeout (resolves glm Chunk-11 deferral)**: leave `http.Server.WriteTimeout`
+  unset (0) — a global write deadline would kill long-lived SSE; normal handlers
+  remain bounded by the 30s query context. SSE explicitly clears any deadline via
+  ResponseController (defensive/future-proof). Documented in presenter.md.
+- **Wiring**: `presenter.Options` gains a `*notify.Hub`; `cmd/ai-viewer-serve`
+  constructs the Hub, starts the poller goroutine (read-only DB handle), passes
+  the Hub to the presenter, and on shutdown emits `disconnect` to all SSE clients
+  then stops the poller (graceful-shutdown step updated).
+
+**Spec deltas to land BEFORE tests/code** (this gate + these files, same commit
+class): `data-model.md` §notify + migration 0004 + version 4 (DONE);
+`architecture.md` notify path socket→table (DONE) + remove residual socket
+mentions; `presenter.md` §SSE Hub (poller not socket), §Routing (mark
+subscriptions/events live), §Graceful Shutdown, §Configuration (drop
+`notify.sock`; `--state-dir` retained for other state), §Middlewares
+(WriteTimeout note); `ingester.md` §Notify Channel (table producer + prune,
+replace socket), §TL;DR; `sse-protocol.md` (subscription_id format `sub-<32 hex>`;
+filter validation reuses REST rules; transport note = notify table); `rest-api.md`
+(subscription request/response schemas + status codes); `observability.md`
+(`/api/health` notify fields: poller last-applied seq + lag; active subscription
+count; per-sub dropped counter; runbook line socket→table); `deployment.md`
+(state/notify row socket→table).
+
+**Existing patterns to reuse.** Chunk-12 `sessionFilter` parse + `whereClause`
+(filter normalization + match); `writeJSONError`/envelope + `writeBadFilter`;
+`loggingResponseWriter.Flush()`; gzip `/api/events` carve-out; the worker's
+batch-tx flush seam + `affectedSessionIDs`; `newRequestID`/structured logging;
+migration runner + `_schema_migrations`.
+
+**Risk / blast radius.** New package + migration + a producer change in the hot
+ingest path (notify INSERT/prune must not slow batches materially nor break
+atomicity) + 3 new public routes + a long-lived streaming handler. Blast radius
+contained: read-only serve; no change to existing REST handlers except the
+`Options` field + route registration; migration is additive. Main risks:
+(1) goroutine leaks / not closing SSE on client disconnect → mitigate with
+context-driven teardown + race tests; (2) hub blocking on a slow client →
+buffered drop-oldest; (3) poller holding a read txn too long → short point
+queries; (4) notify table growth → ingester prune; (5) migration 0004 fails on
+a pre-existing DB → index.db is disposable (documented).
+
+**Sensitive-data plan.** No new fixtures with real data; SSE/notify tests use
+synthetic sessions (s1/s2, rootA) like Chunk-12. No secrets, no operator name.
+
+**Validation plan (named tests + behaviors).**
+- `internal/store/*`: migration 0004 applies; version=4; `notify` table shape.
+- `internal/ingest/*`: `notify` rows appended atomically per batch (rollback →
+  no rows); one row per affected session w/ root+ts; stats/source-status rows;
+  prune removes old rows; AUTOINCREMENT monotonic across prune.
+- `internal/notify/*` (NEW): Hub Subscribe/Unsubscribe; filter match true/false;
+  fan-out to matching subs only; backpressure drop-oldest + dropped counter;
+  Last-Event-ID replay from ring; 60s retention then drop; concurrency (`-race`)
+  many subs + publishes.
+- `internal/presenter/*`: POST creates sub (filter normalized; bad filter →400;
+  control-char/empty-array →400 reusing Chunk-12 rules); DELETE idempotent;
+  GET /api/events streams `text/event-stream`, emits a `session_changed` after a
+  matching notify row, keepalive frame, `id:` set, unknown sub →404/400, HEAD
+  parity where applicable, method gating; gzip still skips `/api/events`;
+  ResponseController deadline-clear; client-disconnect teardown (no goroutine
+  leak under `-race`). Poller: cursor starts at MAX(seq); delivers only new rows.
+- End-to-end (serve-level, httptest + real temp SQLite): ingester writes a
+  session + notify row → poller → SSE client receives `session_changed`.
+- `/api/health` exposes notify poller seq/lag + subscription count.
+
+**Artifact impact.** Generated artifact = the live SSE stream + the `notify`
+table (produced by ingester atomically with batches, pruned by ingester, served
+read-only by the poller→hub→`/api/events`). Producer: ingest worker flush.
+Refresh: every batch commit. Repair: notify is disposable transport; on serve
+restart the cursor jumps to MAX(seq) and clients reconcile via REST; on
+index.db delete, full re-ingest. Served by: `GET /api/events` reading the Hub
+(fed by the read-only poll), never generating on demand.
+
+**Open decisions.** Transport — RESOLVED (table). subscription_id format —
+`sub-` + 32 hex chars (128-bit crypto-random). stats_invalidated rate-limit —
+coalesce to ≤1/s at emit. All others covered above.
+
+### Chunk 13 — SSE hub (implementation, 2026-05-28)
+
+Delivered in two delegated layers, both spec→test→code, master-verified.
+
+**Foundation (`internal/store`, `internal/ingest`, `internal/notify`):**
+- Migration `0004_notify.sql` (append-only `notify(seq PK AUTOINCREMENT, ts_us,
+  kind, session_id, root_session_id, source_id)`); `schema_meta.version` → 4;
+  `presenter.SchemaVersion` → 4 in lockstep.
+- Ingester producer (`internal/ingest/notify_producer.go` + `worker.flush`
+  wiring): appends `notify` rows INSIDE the batch `*sql.Tx`, before commit
+  (atomic; deferred rollback → zero notify rows on error) — one
+  `session_changed` per `affectedSessionIDs` id (root read back from the
+  in-tx `sessions` row; one shared `commitTS`), ≤1 `stats_invalidated` per
+  non-empty batch, one `source_status_changed` when `bumpSourceErrorCounter`
+  fired. Prunes rows older than `notifyRetention = 5m` once per flush.
+- `internal/notify.Hub` (pure, no DB/HTTP): `Add/Remove/Has/IDs/Deliver/
+  Attach/Detach/Dropped/Shutdown`. 256-cap per-sub channel, drop-OLDEST +
+  `dropped` counter (slow clients never block the hub or other subs);
+  100-event replay ring; `Attach` returns `(ch, replay, covered, ok)` —
+  `covered=false` (buffer gap) drives a `resync`; coverage decided by
+  `oldest_retained_id ≤ lastEventID` (IDs are hub-wide, so not `+1`); 60s
+  reconnect retention via injectable clock/timer. Coverage 95.6%, `-race`
+  clean.
+
+**Integration (`internal/presenter`, `cmd/ai-viewer-serve`):**
+- `subscription_filter.go`: `subscriptionFilter` embeds the Chunk-12
+  `sessionFilter` and calls `whereClause("s")` VERBATIM (SSE matching ≡ REST
+  matching by construction), with `group=all` (children match) and NO
+  now-default on `to` (omitted = open-ended future). `session_id`/
+  `root_session_id` are cheap Go equality checks on the event before the
+  parameterized `SELECT 1 FROM sessions s WHERE s.id=? AND (<whereClause>)
+  LIMIT 1`. JSON parse uses `DisallowUnknownFields`; reuses the Chunk-12
+  control-char / empty-array / from>to → 400 rules.
+- `notify_poller.go` (read-only): cursor = `MAX(seq)` at boot; ~1s poll
+  `WHERE seq > ?`; matches each subscription off the hub's path; `hub.Deliver`
+  on match; `stats_invalidated` coalesced ≤1/s per sub; stops on ctx cancel.
+- `events_sse.go`: `GET /api/events` sets `text/event-stream` + `no-cache` +
+  `X-Accel-Buffering: no`, flushes headers, clears the write deadline via
+  `http.NewResponseController` (ErrNotSupported tolerated), sends `resync` on
+  gap, replays buffered events, then streams selecting on `ctx.Done()` / the
+  channel / a 15s `: keepalive` ticker; `defer hub.Detach` arms the 60s
+  retention on return (client-disconnect teardown — no goroutine leak, proven
+  under `-race`).
+- `subscriptions.go`: `POST` (validate+normalize → `{id, filter_normalized}`),
+  `DELETE` (204, idempotent), `sub-`+32-hex crypto id, hub mirroring.
+- Wiring: `presenter.Options.Hub` + `NotifyPollInterval`; serve constructs the
+  Hub, starts the poller on a shutdown-cancelled ctx; graceful shutdown
+  delivers `disconnect {reason:server_shutdown,retry_after_ms:2000}` to all
+  subs then `hub.Shutdown()` before `srv.Shutdown(30s)`. `http.Server.WriteTimeout`
+  intentionally unset (0). `/api/health` gains `notify.last_seq`,
+  `notify.lag_us`, `sse.subscriptions`.
+
+**Gates (master-verified, whole repo):** `gofmt`/`goimports` clean; `go vet`
+clean; `golangci-lint run` 0 issues; `gosec ./...` 0 (73 files, 23 nosec);
+`govulncheck` 0 reachable; `go test -race -count=1 ./...` all 11 packages pass;
+`internal/presenter` 93.0%, `internal/notify` 95.6%. Read-only-serve confirmed
+(no write SQL in poller/SSE/subscription code); `internal/presenter` does not
+import `internal/ingest`. All new files ≤400 lines; functions ≤60.
+
+**Real-socket smoke (curl over TCP):** built both binaries; backfilled the v3
+`happy_single_turn` fixture → v4 DB (notify max_seq=2); started read-only serve
+on `127.0.0.1:17710` (`/api/health` reports `schema_version:4` + the source);
+`POST /api/subscriptions {"filter":{}}` → `sub-a06feae44a71c4a01c0cda9a5acae83f`
++ `filter_normalized:{}`; opened `curl -N /api/events?sub=…`; injected a live
+`notify` `session_changed` row (seq 3 > boot cursor 2); within the poll
+interval the client received the spec-correct frame `event: session_changed\n
+data: {root_session_id,session_id,ts}\nid: 1`. Processes killed by saved PID.
+
+### Chunk 13 iteration 2 (review findings, 2026-05-28)
+
+Iteration-1 external review (codex + glm + minimax) split: **codex found
+3×P1 + 5×P2 + 2×P3**; **glm and minimax both said "ready to merge" (0 P1)**.
+Adjudication: codex's P1s are REAL — they are LOGIC races (lifecycle, channel
+ownership, stale timer) that the race detector cannot catch, which is exactly
+why the two `-race`-running reviewers missed them. The multi-reviewer +
+adjudication discipline prevented shipping real concurrency bugs. All codex
+findings + minimax's one real item fixed (spec→test→code, failing repro test
+per finding):
+
+- **P1-1 (lifecycle leak)**: subscription expiry/removal only cleaned the hub,
+  leaking the presenter filter registry + `statsCoalesce` (poller kept matching
+  dead subs; health overcounted). Added `Hub.OnRemove(id)` fired on expiry AND
+  explicit Remove, invoked AFTER releasing `hub.mu` (deadlock-safe; the
+  presenter hook takes only manager/notify locks, never re-enters the hub —
+  lock order documented one-directional). `onSubRemoved` drops the registry +
+  coalesce entry; health counts stay consistent.
+- **P1-2 (HEAD mutation / shared channel)**: `Attach` now returns an
+  `AttachStatus` {`AttachUnknown`→404, `AttachOK`→stream, `AttachBusy`→409
+  `CodeConflict`}; a subscription is single-consumer (2nd concurrent GET → 409).
+  HEAD uses non-mutating `hub.Has` (200/404) — no Attach/Detach, no lifecycle
+  touch. `defer Detach` only on `AttachOK`.
+- **P1-3 (stale retention timer)**: per-subscription `gen` counter + the timer
+  captures `(s, gen)`; `expire` removes only if `h.subs[id]==s && s.gen==gen &&
+  !attached` — defeats both same-object fast-cycle and same-id Remove+re-Add
+  races.
+- **P2-4** create-before-add race (hub.add before registry publish);
+  **P2-5** forged/future `Last-Event-ID` → `covered=false` → resync;
+  **P2-6** `dropped` surfaced in `session_changed` when >0 (spec §Backpressure);
+  **P2-7** filter JSON requires `io.EOF` after decode (no trailing garbage);
+  **P2-8** per-match SQL bounded by `notifyPollTimeout`.
+- **P3-9** statsCoalesce cleanup (via OnRemove + fanOut drop on `Deliver==false`);
+  **P3-10** SSE `writeEvent`/`writeResync`/`writeKeepalive` return write/flush
+  errors (via `*http.ResponseController`) and `streamLoop` exits on any.
+- **minimax P2** (graceful-shutdown order): code stops the poller BEFORE
+  `Server.Shutdown` (safer — no events produced during teardown); fixed
+  `presenter.md §Graceful Shutdown` to match (spec drift, not a code defect).
+- **+2 extra real defects** the fix subagent's own reviewer caught and fixed:
+  ID monotonicity under concurrent `Deliver` (`nextID()` moved INSIDE `hub.mu`
+  so id-mint + replay-ring append are atomic); statsCoalesce leak on a
+  gone-sub deliver.
+
+**Spec deltas (master):** `sse-protocol.md` (`dropped` field; one-stream/409;
+HEAD no-lifecycle-mutation; future-`Last-Event-ID` → resync), `rest-api.md`
+(`/api/events` 409 + HEAD), `presenter.md` (graceful-shutdown order).
+
+**Deferred (follow-up filed):** `newSubscriptionID` returns a non-spec fallback
+id if `crypto/rand` ever fails — pre-existing, unreachable on Linux, outside the
+iter-2 finding set; tracked for a proper "return error → 500" fix.
+
+**Gates after iter-2 (master-verified):** `gofmt`/`goimports` clean; `go vet`
+clean; `golangci-lint run` 0 issues; `gosec` 0 (73 files); `govulncheck` 0;
+`go test -race -count=2 ./internal/notify/... ./internal/presenter/...` stable;
+full `go test -race ./...` all 11 packages pass; coverage `internal/notify`
+96.8%, `internal/presenter` 92.9%. All changed files ≤400 lines; functions ≤60.
+
+### Chunk 13 iteration 3 (review findings, 2026-05-28)
+
+Iteration-2 review: **all iter-1 concurrency P1s confirmed FIXED** by all three
+reviewers (codex + glm + minimax). Remaining were hardening only — no
+concurrency blockers. codex: 0 P1, 2 P2 + 1 P3; glm: convergence (0 P1/P2);
+minimax: 1 P1 (the newSubscriptionID item) + latent P2s. Fixed:
+
+- **newSubscriptionID → error → 500** (consensus of ALL THREE; minimax P1;
+  "no silent failures"). `newSubscriptionID() (string, error)` (entropy source
+  is an overridable package `randReader`); on `crypto/rand` failure returns the
+  error with NO fallback — the prior code minted a predictable, non-spec
+  `sub-<timestamp>` id. `subscriptionManager.create() (string, error)` (no
+  side-effect on failure); the POST handler returns `500 INTERNAL_ERROR`.
+- **`loggingResponseWriter.Unwrap()` + `FlushError()`** (codex P2): the SSE
+  handler's `http.NewResponseController(w)` could not reach the underlying
+  writer's `SetWriteDeadline`/`FlushError` through the logging wrapper, so the
+  iter-1 write-deadline-clear + write-error-exit hardening was INEFFECTIVE.
+  Added `Unwrap()` (controller walks to the inner writer) + `FlushError()`
+  (delegates to underlying `FlushError`→`Flusher`→`ErrNotSupported`); `Flush()`
+  kept. Now the SSE flush path propagates real errors and `streamLoop` exits.
+- **Shutdown-race 503** (codex P3): `Presenter.sseShuttingDown atomic.Bool` set
+  FIRST in `ShutdownSSE()`; `POST /api/subscriptions` short-circuits to `503
+  SERVICE_UNAVAILABLE` once shutdown has begun, so it never mints a subscription
+  the about-to-close hub would drop. A dedicated `CodeUnavailable =
+  "SERVICE_UNAVAILABLE"` was added (not the misleading `DB_UNAVAILABLE` the
+  database is fine during shutdown — observability.md §self-documenting errors).
+
+**Adjudicated OUT (with reasoning, so a later round doesn't re-litigate):**
+minimax "404-vs-405 on wrong method" — verified a MISREAD: the registered
+handlers DO gate method → 405 (events_sse.go:46, subscriptions.go:172/202); the
+404 catch-all only covers unregistered/not-yet-implemented paths (codex + glm
+confirmed 405 correctness). minimax "201-vs-200 for POST" — code and spec agree
+on 200 (no drift; deliberate). glm `admitsSource` linear scan — n≤5, glm itself
+said no-action. disconnect/resync `id:` field — debatable cosmetic (those are
+control frames).
+
+**Spec deltas (master):** `rest-api.md` POST `/api/subscriptions` documents the
+`500` (RNG-failure, never a weak id) and `503 SERVICE_UNAVAILABLE` (shutdown)
+cases; `errors.go` const catalog (authoritative per observability.md) gains
+`CodeUnavailable`.
+
+**Gates after iter-3 (master-verified, whole repo):** `gofmt`/`goimports`
+clean; `go vet ./...` clean; `golangci-lint run` 0 issues; `gosec ./...` 0;
+`govulncheck` 0; `go test -race -count=2 ./internal/presenter/...
+./internal/notify/...` stable; full `go test -race ./...` all 11 packages pass;
+`internal/presenter` coverage 93.1%. All changed files ≤400 lines; functions
+≤60.
+
+### Chunk 13 iteration 4 (review findings, 2026-05-28)
+
+Iteration-3 review: the iter-3 fixes (newSubscriptionID→500, `Unwrap`/`FlushError`)
+were confirmed correct by all three reviewers. ONE outstanding item: a **TOCTOU
+in the shutdown-503 guard** — codex rated it **P1**, glm **P3** ("ship it"),
+minimax called it safe (a MISREAD: `atomic.Load` makes the load atomic but does
+NOT serialize the load→`create()` sequence). Adjudication: the race is REAL
+(codex + glm both identify it; minimax wrong) so it was fixed, not waved through.
+
+- **iter4 (shutdown TOCTOU)**: the `sseShuttingDown` flag was checked once
+  before `create()`, so shutdown could interleave — `hub.Add` no-ops
+  post-shutdown while the registry insert still runs (200 with a dead sub), or
+  `hub.Add` succeeds then `hub.Shutdown` deletes it before the insert (orphan).
+  Fixed by replacing the `atomic.Bool` with a `Presenter.sseLifecycleMu` that
+  serializes the two halves: `createSubscriptionLifecycle` holds the mutex
+  across `[check flag → create (hub.Add + registry insert)]` as one critical
+  section; `ShutdownSSE` flips the flag UNDER the same mutex, then (outside it)
+  `broadcastDisconnect` + `hub.Shutdown` + a new `subscriptionManager.clear()`.
+  The registry clear is a SECOND load-bearing piece: `hub.Shutdown` deletes
+  subs without firing `OnRemove` (by design), which previously stranded ALL
+  registry entries post-shutdown (and skewed `/api/health` `sse.subscriptions`);
+  the mutex guarantees every in-flight create finishes its insert before the
+  flag flip → before `clear()`, so the registry ends empty/consistent with the
+  empty hub. Both halves proven load-bearing by disable-experiments (each
+  reverts the invariant on its own). Lock order documented one-directional:
+  `sseLifecycleMu → hub.mu → manager.mu`; nothing takes `sseLifecycleMu` while
+  holding `hub.mu`, and `hub.Shutdown` is never called under it. Race-reproducing
+  test (`subscriptions_lifecycle_race_test.go`, a nil-in-prod `createHook` seam
+  drives `ShutdownSSE` into the window) pins "the registry never holds an id the
+  hub does not"; failing-before / passing-after under `-race`.
+
+**Specs (master):** `presenter.md` new §"SSE Lifecycle Mutex" (mechanism,
+registry clear, lock order, post-shutdown invariant); `rest-api.md` POST
+`/api/subscriptions` notes the single critical section.
+
+**Gates after iter-4 (master-verified):** `gofmt`/`goimports` clean; `go vet`
+clean; `golangci-lint run` 0; `go test -race -count=2 ./internal/presenter/...
+./internal/notify/...` stable; full `go test -race ./...` all 11 packages pass;
+`internal/presenter` coverage 93.1%. Files ≤400; functions ≤60.
+
+**Iteration-4 review result — CONVERGENCE (all three reviewers).** The iter-4
+fix went to external review (codex + glm + minimax, full-package scope). All
+three returned convergence: codex "the original shutdown-create TOCTOU is
+closed … no remaining orphan path … convergence reached" (its only item was a
+spec-wording overclaim in the §SSE Lifecycle Mutex section — "no window for a
+200 with a dead subscription" — which I corrected to the accurate invariant:
+the mutex guarantees consistency/no-orphan, NOT shutdown-survival of a
+just-created sub; doc-only, no code change); glm "no P1, P2, or P3 findings …
+production-quality and ready to merge"; minimax "No remaining issues.
+Convergence reached. Production-quality and ready to merge." All three
+independently verified the lock order `sseLifecycleMu → hub.mu → manager.mu` is
+one-directional with no deadlock. Chunk 13 is review-complete after 4 fix
+rounds (iter-1 three real concurrency P1s → iter-2 hardening → iter-3
+newSubscriptionID/Unwrap/503 → iter-4 shutdown TOCTOU). Final whole-repo gate
+sweep before merge: `gofmt`/`goimports` clean, `go vet`/`go build` clean,
+`golangci-lint run` 0 issues, `gosec ./...` 0, `govulncheck ./...` 0,
+`go test -race ./...` all 11 packages pass.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

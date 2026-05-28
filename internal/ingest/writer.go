@@ -40,9 +40,17 @@ type writer struct {
 	// whether to write cursor at flush.
 	hasCursor bool
 	// affectedSessionIDs records canonical session IDs touched by this
-	// batch (used by Chunk 11 to publish notify-pings; recorded here so
-	// the seam is in place).
+	// batch. emitNotify (notify_producer.go) writes one session_changed
+	// notify row per id so the serve poller can fan a change out to
+	// matching SSE subscriptions. Cleared after each flush.
 	affectedSessionIDs map[string]struct{}
+	// sourceStatusChanged flips to true when this batch changed the
+	// source's parse_errors count or enabled flag (the only mutation
+	// today is the parse_errors bump in bumpSourceErrorCounter, shared
+	// by applySourceError and emitPricingMiss). emitNotify writes one
+	// source_status_changed notify row when set. Cleared after each
+	// flush. See ingester.md §Notify Channel.
+	sourceStatusChanged bool
 	// pricingMissDedup tracks (provider, model, missKind) tuples for
 	// which a SourceError WRN has already been emitted AND DURABLY
 	// COMMITTED for THIS SOURCE, across the lifetime of the worker
@@ -150,6 +158,7 @@ func (w *writer) resetBatch() {
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
+	w.sourceStatusChanged = false
 	w.batchObservabilityErrs = w.batchObservabilityErrs[:0]
 }
 
@@ -683,6 +692,9 @@ WHERE id = ?
 `, tsUS, w.sourceID); err != nil {
 		return fmt.Errorf("writer: bump parse_errors: %w", err)
 	}
+	// parse_errors moved → the Sources panel's error counter changed, so
+	// emitNotify must publish a source_status_changed row for this batch.
+	w.sourceStatusChanged = true
 	return nil
 }
 
