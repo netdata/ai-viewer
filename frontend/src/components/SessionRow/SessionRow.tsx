@@ -23,9 +23,15 @@ function durationUs(s: SessionListItem): number | null {
   return s.end_ts === null ? null : s.end_ts - s.start_ts;
 }
 
-export function SessionRow({ session }: SessionRowProps) {
+/**
+ * SessionRowBody renders the column CELLS only (no <tr>), so a parent <tr> can
+ * prepend extra leading columns (e.g. the SessionsList child-expander) without
+ * forking the canonical column order. SessionRow wraps it in a <tr> for
+ * standalone use (and its component test).
+ */
+export function SessionRowBody({ session }: SessionRowProps) {
   return (
-    <tr className={styles.row}>
+    <>
       <td className={styles.agent}>
         <Link to={`/sessions/${encodeURIComponent(session.id)}`}>
           {session.agent_name || session.native_id}
@@ -43,6 +49,14 @@ export function SessionRow({ session }: SessionRowProps) {
       <td className={styles.num}>{formatNumber(session.tokens_out)}</td>
       <td className={styles.num}>{formatCost(session.cost_usd)}</td>
       <td className={styles.num}>{formatNumber(session.failure_count)}</td>
+    </>
+  );
+}
+
+export function SessionRow({ session }: SessionRowProps) {
+  return (
+    <tr className={styles.row}>
+      <SessionRowBody session={session} />
     </tr>
   );
 }

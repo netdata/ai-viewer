@@ -1,29 +1,59 @@
-import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { ComingSoon } from '../../components/ComingSoon';
+import { Tabs, type TabSpec } from '../../components/Tabs';
+import { LoadingState, ErrorState, EmptyState } from '../../components/StatusViews';
+import { useSessionDetail } from '../../api/sessions';
+import { useLiveUpdates } from '../../state/useLiveUpdates';
+import { ApiError } from '../../api/client';
 import { OverviewTab } from './OverviewTab';
 import { LogsTab } from './LogsTab';
 import styles from './SessionDetail.module.css';
 
 // Session detail page (ui-pages.md §/sessions/:id). Phase-1 tabs Overview + Logs
-// are real (placeholder bodies wired to the id); Trace/Topology/Timeline are
-// scaffolded as Phase-2 tabs rendering ComingSoon. The active tab is local UI
-// state (frontend-architecture.md §State Management). The session id comes from
-// the route; the data hooks (useSessionDetail) drop into the tab bodies.
+// are real; Trace/Topology/Timeline are Phase-2 ComingSoon. The active tab lives
+// in the URL (?tab=) so it is shareable; an unknown value falls back to overview.
+// An unknown id (404) renders a clean "not found" state instead of the tabs. The
+// open session is live-refreshed over SSE (session_changed → ['session', id]).
 
 type TabKey = 'overview' | 'trace' | 'topology' | 'timeline' | 'logs';
 
-const TABS: ReadonlyArray<{ key: TabKey; label: string; phase2?: boolean }> = [
+const TABS: ReadonlyArray<TabSpec<TabKey>> = [
   { key: 'overview', label: 'Overview' },
-  { key: 'trace', label: 'Trace', phase2: true },
-  { key: 'topology', label: 'Topology', phase2: true },
-  { key: 'timeline', label: 'Timeline', phase2: true },
+  { key: 'trace', label: 'Trace' },
+  { key: 'topology', label: 'Topology' },
+  { key: 'timeline', label: 'Timeline' },
   { key: 'logs', label: 'Logs' },
 ];
 
+const TAB_KEYS = new Set<TabKey>(TABS.map((t) => t.key));
+
+/** parseTab coerces the URL ?tab= value to a known key (default overview). */
+function parseTab(raw: string | null): TabKey {
+  return raw !== null && TAB_KEYS.has(raw as TabKey) ? (raw as TabKey) : 'overview';
+}
+
 export function SessionDetail() {
   const { id = '' } = useParams<{ id: string }>();
-  const [tab, setTab] = useState<TabKey>('overview');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = parseTab(searchParams.get('tab'));
+
+  const { data, isPending, isError, error } = useSessionDetail(id);
+
+  // Live refresh of the open session; session_changed invalidates ['session', id].
+  useLiveUpdates({ session_id: id });
+
+  const setTab = (next: TabKey): void => {
+    setSearchParams(
+      (prev) => {
+        const sp = new URLSearchParams(prev);
+        sp.set('tab', next);
+        return sp;
+      },
+      { replace: true },
+    );
+  };
+
+  const notFound = isError && error instanceof ApiError && error.status === 404;
 
   return (
     <section aria-labelledby="session-detail-title">
@@ -31,34 +61,34 @@ export function SessionDetail() {
         Session <code className={styles.id}>{id}</code>
       </h1>
 
-      <div className={styles.tabs} role="tablist" aria-label="Session views">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.key}
-            className={tab === t.key ? `${styles.tab} ${styles.tabActive}` : styles.tab}
-            onClick={() => {
-              setTab(t.key);
-            }}
+      {notFound ? (
+        <EmptyState>Session not found.</EmptyState>
+      ) : isPending ? (
+        <LoadingState label="Loading session…" />
+      ) : isError ? (
+        <ErrorState error={error} title="Failed to load session" />
+      ) : (
+        <>
+          <Tabs tabs={TABS} active={tab} onSelect={setTab} ariaLabel="Session views" />
+          <div
+            role="tabpanel"
+            id={`tabpanel-${tab}`}
+            aria-labelledby={`tab-${tab}`}
+            aria-live="polite"
+            className={styles.panel}
           >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      <div role="tabpanel" className={styles.panel}>
-        {tab === 'overview' && <OverviewTab sessionId={id} />}
-        {tab === 'logs' && <LogsTab sessionId={id} />}
-        {tab === 'trace' && <ComingSoon title="Trace (APM)" note="Span tree — Phase 2." />}
-        {tab === 'topology' && (
-          <ComingSoon title="Topology" note="Force-directed actor graph — Phase 2." />
-        )}
-        {tab === 'timeline' && (
-          <ComingSoon title="Timeline" note="Time-axis span lanes — Phase 2." />
-        )}
-      </div>
+            {tab === 'overview' && <OverviewTab detail={data} />}
+            {tab === 'logs' && <LogsTab sessionId={id} />}
+            {tab === 'trace' && <ComingSoon title="Trace (APM)" note="Span tree — Phase 2." />}
+            {tab === 'topology' && (
+              <ComingSoon title="Topology" note="Force-directed actor graph — Phase 2." />
+            )}
+            {tab === 'timeline' && (
+              <ComingSoon title="Timeline" note="Time-axis span lanes — Phase 2." />
+            )}
+          </div>
+        </>
+      )}
     </section>
   );
 }

@@ -91,6 +91,10 @@ es.addEventListener('session_changed', (e) => {
   const { session_id } = JSON.parse(e.data);
   queryClient.invalidateQueries({ queryKey: ['session', session_id] });
   queryClient.invalidateQueries({ queryKey: ['sessions'] }); // list refresh
+  // Logs belong to the session: a log write marks the session dirty, so the
+  // open Logs tab must refresh too. The key family is ['logs', id, severities];
+  // a partial-match on ['logs', session_id] invalidates every severity sub-key.
+  queryClient.invalidateQueries({ queryKey: ['logs', session_id] });
 });
 es.addEventListener('stats_invalidated', () => {
   queryClient.invalidateQueries({ queryKey: ['stats'] });
@@ -100,11 +104,51 @@ es.addEventListener('resync', () => queryClient.invalidateQueries());
 
 One subscription per active page. Filter changes → new subscription, old one cancelled (server expires it after 60 s of no client anyway).
 
-**Cancellation / teardown contract.** `connectSse(queryClient, filter, handlers?, signal?)` must leave NO leaked EventSource or undeleted server subscription under any unmount/filter-change/StrictMode-double-invoke timing. Because subscription creation is async (a POST that resolves before the EventSource opens), the wrapper: rejects with an `SseCanceledError` sentinel if the `AbortSignal` fires during the POST; after the POST resolves, re-checks `signal.aborted` and, if set, `close()`s the just-created connection (best-effort `DELETE /api/subscriptions/:id`) before returning; and registers a one-shot `abort` listener so an abort arriving after `open()` still tears the stream down. `close()` is idempotent. The SSE client is unit-tested with a fake `EventSource` (all five frames → the correct `invalidateQueries` keys, plus every cancellation timing) and is INCLUDED in the coverage gate — it is load-bearing and must not be excluded.
+**Cancellation / teardown contract.** `connectSse(queryClient, filter, handlers?, signal?)` must leave NO leaked EventSource or undeleted server subscription under any unmount/filter-change/StrictMode-double-invoke timing. Because subscription creation is async (a POST that resolves before the EventSource opens), the wrapper: rejects with an `SseCanceledError` sentinel if the `AbortSignal` fires during the POST; after the POST resolves, re-checks `signal.aborted` and, if set, `close()`s the just-created connection (best-effort `DELETE /api/subscriptions/:id`) before returning; and registers a one-shot `abort` listener so an abort arriving after `open()` still tears the stream down. `close()` is idempotent. The SSE client is unit-tested with a fake `EventSource` (all five frames → the correct `invalidateQueries` keys — including `session_changed` invalidating the `['logs', id]` family alongside `['session', id]` and `['sessions']` — plus every cancellation timing) and is INCLUDED in the coverage gate — it is load-bearing and must not be excluded.
 
 **Malformed frames.** A frame whose `data` is not valid JSON is never silently dropped (AGENTS.md §"No silent failures"): it is routed to an optional `onMalformedEvent` handler, else `console.warn`ed with the event name; the stream stays alive (a single bad frame does not kill the connection).
 
 **API client empty-body.** `api/client.ts` supports `HEAD` and treats any bodiless success (`HEAD`, `204`, or `Content-Length: 0`) as `undefined` rather than attempting a JSON parse, so HEAD parity (`/api/health`, `/api/sources`, `/api/events`) and the `204` from subscription `DELETE` are handled without throwing.
+
+**`useLiveUpdates(filter)` — the per-view connection lifecycle hook.** Pages do
+not call `connectSse` directly; they call `useLiveUpdates(filter)`
+(`state/useLiveUpdates.ts`). The hook owns the connection lifecycle in a
+`useEffect` keyed on a stable serialization of the subscription `filter`:
+
+- On mount / filter change it creates an `AbortController`, calls
+  `connectSse(queryClient, filter, {}, controller.signal)`, and stores the
+  resolved `SseConnection`.
+- The effect cleanup `abort()`s the controller AND `close()`s any connection
+  already resolved. Aborting drives the Chunk-14 cancellation contract: an
+  abort during the in-flight POST rejects with `SseCanceledError` (swallowed by
+  the hook — cancellation is not an error), and an abort after `open()` tears
+  the stream down via the one-shot abort listener. `close()` is idempotent, so
+  the belt-and-suspenders close is safe.
+- A `connectSse` rejection that is NOT `SseCanceledError` is surfaced via
+  `console.warn` (no silent failure) and does not throw out of the effect.
+- Exactly ONE active subscription exists per mounted view at any time;
+  re-subscription on filter change is automatic because the effect re-runs when
+  its serialized-filter dependency changes. StrictMode's double-invoke is
+  covered by the same abort-safe teardown.
+
+The hook returns nothing observable to the page (the SSE client already maps
+events → `invalidateQueries`); its sole job is lifecycle management. It is
+unit-tested by mocking `connectSse` and asserting: one call on mount, the
+controller aborted + `close()` called on unmount, and a re-subscription (new
+`connectSse` call with the new filter) on a filter change.
+
+**`useSessionLogs(id, opts)` — keyset log pagination.** `api/logs.ts` adds
+`fetchSessionLogs(id, { severities?, cursor?, limit? })` hitting
+`GET /api/sessions/:id/logs?severity=...&cursor=...&limit=...` and a
+`useSessionLogs(id, { severities? })` hook built on TanStack
+`useInfiniteQuery`. Query key: `['logs', id, severities]` (the severity set is
+part of the key because the server binds the cursor to the session id + the
+severity set — `rest-api.md` §Conventions). `getNextPageParam` returns the
+response `next_cursor` (or `undefined` to stop). The present-but-empty severity
+rule is honored: an empty `severities` array omits the `severity` param
+entirely (= all severities), so the client never sends the `?severity=`
+`BAD_REQUEST` form. `id` and `severities` are passed straight through; pages
+flatten `data.pages[].items` for rendering.
 
 ## Theming
 

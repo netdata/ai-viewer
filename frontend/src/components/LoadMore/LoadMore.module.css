@@ -1,0 +1,26 @@
+.wrap {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4) 0;
+}
+
+.button {
+  appearance: none;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  padding: var(--space-2) var(--space-6);
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

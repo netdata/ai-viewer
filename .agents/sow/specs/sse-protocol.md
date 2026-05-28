@@ -87,6 +87,11 @@ per-subscription backpressure drop counter (see §Backpressure); it is included
 ONLY when non-zero, signalling the client missed `dropped` events and should
 re-fetch its full view. Clients that don't track it can ignore it.
 
+A session's logs are part of the session: a log write marks the session row
+dirty, so this frame also re-fetches the open session's logs. The reference
+client invalidates `['session', session_id]`, `['sessions']`, and the
+`['logs', session_id]` key family (partial-match across severity sub-keys).
+
 ### `stats_invalidated`
 
 Emitted (rate-limited to ~1 per second) when catalog rollups change so the analytics pages know to re-fetch.

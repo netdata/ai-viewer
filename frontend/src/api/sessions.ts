@@ -1,4 +1,10 @@
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import {
+  useQuery,
+  useInfiniteQuery,
+  type UseQueryResult,
+  type UseInfiniteQueryResult,
+  type InfiniteData,
+} from '@tanstack/react-query';
 import { get, buildQuery } from './client';
 import type { Filters } from '../state/filters';
 import type { SessionDetailResponse, SessionListResponse } from './types';
@@ -12,10 +18,17 @@ export function sessionsQueryKey(filters: Filters, group: 'root' | 'all') {
   return ['sessions', group, filters] as const;
 }
 
-/** filtersToQuery maps the URL-synced Filters into the list query string. */
+/**
+ * filtersToQuery maps the URL-synced Filters into the list query string. An
+ * optional keyset `cursor` is appended for pages after the first (an empty /
+ * absent cursor means "first page" — rest-api.md §Conventions); the cursor is
+ * bound server-side to the exact filter+group it was minted under, so it is only
+ * ever replayed against the identical query.
+ */
 export function filtersToQuery(
   filters: Filters,
   group: 'root' | 'all',
+  cursor?: string,
 ): string {
   return buildQuery({
     agents: filters.agents,
@@ -27,6 +40,7 @@ export function filtersToQuery(
     to: filters.to,
     q: filters.q,
     group,
+    cursor: cursor !== undefined && cursor !== '' ? cursor : undefined,
   });
 }
 
@@ -42,7 +56,7 @@ export function fetchSessions(
   );
 }
 
-/** useSessions is the query hook for the session list page. */
+/** useSessions is the single-page query hook for the session list. */
 export function useSessions(
   filters: Filters,
   group: 'root' | 'all' = 'root',
@@ -50,6 +64,42 @@ export function useSessions(
   return useQuery({
     queryKey: sessionsQueryKey(filters, group),
     queryFn: ({ signal }) => fetchSessions(filters, group, signal),
+  });
+}
+
+/** fetchSessionsPage GETs one keyset page of the list (optionally with a cursor). */
+export function fetchSessionsPage(
+  filters: Filters,
+  group: 'root' | 'all',
+  cursor: string,
+  signal?: AbortSignal,
+): Promise<SessionListResponse> {
+  return get<SessionListResponse>(
+    `/sessions${filtersToQuery(filters, group, cursor)}`,
+    signal,
+  );
+}
+
+/**
+ * useSessionsInfinite is the keyset-paginated list hook the SessionsList page
+ * uses for its "Load more" control. Pages are appended (never reset on cursor —
+ * a filter change mints a fresh query and a fresh first page, which is the only
+ * safe way to replay the server's query-bound cursor, rest-api.md §Conventions).
+ * Query key matches useSessions (['sessions', group, filters]) so the SSE
+ * session_changed/resync invalidations refresh it.
+ */
+export function useSessionsInfinite(
+  filters: Filters,
+  group: 'root' | 'all' = 'root',
+): UseInfiniteQueryResult<InfiniteData<SessionListResponse>, Error> {
+  return useInfiniteQuery({
+    queryKey: sessionsQueryKey(filters, group),
+    queryFn: ({ pageParam, signal }) =>
+      fetchSessionsPage(filters, group, pageParam, signal),
+    // '' = first page (empty cursor); a non-string initial param confuses
+    // useInfiniteQuery's page tracking, and the request omits an empty cursor.
+    initialPageParam: '',
+    getNextPageParam: (last: SessionListResponse) => last.next_cursor ?? undefined,
   });
 }
 

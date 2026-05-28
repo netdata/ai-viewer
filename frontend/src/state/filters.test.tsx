@@ -3,6 +3,7 @@ import { renderHook, act } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import {
   applyPatch,
+  filtersToSubscription,
   readFilters,
   useFilters,
   type Filters,
@@ -153,5 +154,48 @@ describe('useFilters', () => {
     expect(result.current.filters.models).toEqual([]);
     expect(result.current.filters.from).toBeUndefined();
     expect(result.current.filters.q).toBeUndefined();
+  });
+});
+
+const EMPTY: Filters = { agents: [], models: [], tools: [], status: [], sources: [] };
+
+describe('filtersToSubscription', () => {
+  it('maps an empty filter set to an empty subscription filter (no constraints)', () => {
+    expect(filtersToSubscription(EMPTY)).toEqual({});
+  });
+
+  it('includes only non-empty array dimensions', () => {
+    const sub = filtersToSubscription({
+      ...EMPTY,
+      agents: ['nedi'],
+      models: [],
+      status: ['failed', 'running'],
+      sources: ['src-a'],
+    });
+    expect(sub).toEqual({
+      agents: ['nedi'],
+      status: ['failed', 'running'],
+      sources: ['src-a'],
+    });
+    // Empty dimensions are omitted, never sent as a present-but-empty array.
+    expect('models' in sub).toBe(false);
+    expect('tools' in sub).toBe(false);
+  });
+
+  it('builds a time_range from from/to when either is set', () => {
+    expect(filtersToSubscription({ ...EMPTY, from: 100 })).toEqual({
+      time_range: { from: 100 },
+    });
+    expect(filtersToSubscription({ ...EMPTY, to: 200 })).toEqual({
+      time_range: { to: 200 },
+    });
+    expect(filtersToSubscription({ ...EMPTY, from: 100, to: 200 })).toEqual({
+      time_range: { from: 100, to: 200 },
+    });
+  });
+
+  it('drops q (the SSE filter has no free-text field)', () => {
+    const sub = filtersToSubscription({ ...EMPTY, q: 'nedi', agents: ['a'] });
+    expect(sub).toEqual({ agents: ['a'] });
   });
 });

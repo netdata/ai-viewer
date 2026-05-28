@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import {
   fetchSessionDetail,
   fetchSessions,
+  fetchSessionsPage,
   filtersToQuery,
   sessionsQueryKey,
   useSessionDetail,
   useSessions,
+  useSessionsInfinite,
 } from './sessions';
 import { fetchStats, statsQueryKey, useStats } from './stats';
 import { fetchHealth, fetchSources, useHealth, useSources } from './sources';
@@ -106,6 +108,70 @@ describe('sessions data layer', () => {
     const { result } = renderHook(() => useSessionDetail('s1'), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.session.id).toBe('s1');
+  });
+});
+
+describe('sessions keyset pagination', () => {
+  /** captureSeq replies with successive bodies from `responses` (last repeats). */
+  function captureSeq(responses: unknown[]): { calls: string[] } {
+    const calls: string[] = [];
+    let i = 0;
+    const mock = vi.fn((url: string) => {
+      calls.push(url);
+      const body = responses[Math.min(i, responses.length - 1)];
+      i += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'ok',
+        headers: { get: () => null },
+        json: () => Promise.resolve(body),
+      } as unknown as Response);
+    });
+    vi.stubGlobal('fetch', mock);
+    return { calls };
+  }
+
+  it('filtersToQuery appends a non-empty cursor but omits an empty one', () => {
+    expect(filtersToQuery(EMPTY, 'root')).not.toContain('cursor');
+    expect(filtersToQuery(EMPTY, 'root', '')).not.toContain('cursor');
+    expect(filtersToQuery(EMPTY, 'root', 'cur-2')).toContain('cursor=cur-2');
+  });
+
+  it('fetchSessionsPage GETs the list with the cursor', async () => {
+    const { calls } = captureSeq([{ items: [] }]);
+    await fetchSessionsPage(EMPTY, 'root', 'cur-2');
+    expect(calls[0]).toBe('/api/sessions?group=root&cursor=cur-2');
+  });
+
+  it('useSessionsInfinite shares the list query key (SSE invalidation target)', async () => {
+    captureSeq([{ items: [{ id: 'a' }] }]);
+    const { result } = renderHook(() => useSessionsInfinite(EMPTY, 'root'), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    // First page omits the cursor (empty sentinel).
+    expect(result.current.data?.pages[0]?.items[0]?.id).toBe('a');
+  });
+
+  it('useSessionsInfinite appends the next page via next_cursor, then stops', async () => {
+    const { calls } = captureSeq([
+      { items: [{ id: 'a' }], next_cursor: 'cur-2' },
+      { items: [{ id: 'b' }] },
+    ]);
+    const { result } = renderHook(() => useSessionsInfinite(EMPTY, 'root'), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.hasNextPage).toBe(true);
+
+    let merged!: Awaited<ReturnType<typeof result.current.fetchNextPage>>;
+    await act(async () => {
+      merged = await result.current.fetchNextPage();
+    });
+
+    // First page had no cursor; second replayed cur-2.
+    expect(calls[0]).toBe('/api/sessions?group=root');
+    expect(calls[1]).toBe('/api/sessions?group=root&cursor=cur-2');
+    expect(merged.data?.pages).toHaveLength(2);
+    expect(merged.data?.pages[1]?.items[0]?.id).toBe('b');
+    expect(merged.hasNextPage).toBe(false);
   });
 });
 
