@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-A long-running daemon. Loads source configs, runs one adapter per source, fans events into a single ingest pipeline that dedups, resolves links, and writes batched transactions into SQLite. Emits notify-pings to the server.
+A long-running daemon. Loads source configs, runs one adapter per source, fans events into a single ingest pipeline that dedups, resolves links, and writes batched transactions into SQLite. Appends rows to the SQLite `notify` table (same transaction as each batch) for the server to poll.
 
 ## Lifecycle
 
@@ -283,17 +283,31 @@ for the matching concrete-type contract.
 
 ## Notify Channel
 
-After each successful SQLite commit, the ingester sends a small message to the server over a Unix domain socket at `<state-dir>/notify.sock`:
+The notify channel between the two binaries is the SQLite `notify` table
+(`data-model.md` §notify), not a separate IPC channel. As **part of** each batch
+transaction (not after it), the ingester INSERTs `notify` rows so they commit
+**atomically** with the data they describe — the server can never observe a
+`notify` row before the canonical rows it refers to are visible:
 
-```json
-{"type":"batch_commit","affected_sessions":["<id>","<id>"],"ts":<us>}
-```
+- one `session_changed` row per canonical session ID in the batch's
+  `affectedSessionIDs`, carrying its `root_session_id` and the batch commit
+  `ts_us`;
+- at most one `stats_invalidated` row per batch, emitted only when the batch
+  changed catalog rollups;
+- one `source_status_changed` row when a source's `parse_errors` count or
+  `enabled` flag changed.
 
-The server's SSE hub subscribes to this socket and fans the message out to interested SSE clients. If the socket is not connected (server not running), the ingester drops the message — clients will get the data on next subscribe.
+The ingester is the sole writer of `notify`. Once per flush cycle it also
+**prunes** `notify` rows older than a bounded retention window (≈5 min) so the
+table stays small — the rows are disposable transport, not history. The server
+(`presenter.md` §SSE Hub) is read-only against this table: a poller goroutine
+reads `WHERE seq > <cursor>` and fans the changes out to matching SSE clients
+(`sse-protocol.md`). On serve restart the poller jumps its cursor to `MAX(seq)`,
+so pruning already-consumed rows is always safe (clients reconcile historical
+state through the REST API).
 
-Fallback: if Unix socket setup fails, fall back to "poll WAL mtime every 250 ms" on the server side. Spec'd here so the server has a defined fallback path.
-
-The notify wiring is **not in Chunk 7**; it lands with the server scaffolding in Chunk 11. Chunk 7 leaves a no-op `notify.Publisher` interface so the seam exists.
+The `notify.Publisher` seam introduced in earlier chunks is now realized by
+this in-transaction table writer; there is no separate IPC publisher.
 
 ## Configuration
 
@@ -301,7 +315,7 @@ CLI flags (also accepts env vars and a YAML config file):
 
 ```
 --db <path>                SQLite path (default ~/.local/share/ai-viewer/index.db)
---state-dir <path>         where notify.sock lives (default ~/.local/share/ai-viewer/)
+--state-dir <path>         state directory (default ~/.local/share/ai-viewer/). The notify channel is the SQLite `notify` table, so no IPC channel file lives here. Flag retained for other state.
 --source <format>:<path>   add a source. May be repeated.
   e.g. --source aiagent_v3:/home/costa/.ai-agent/sessions
        --source aiagent_v2:/home/costa/.ai-agent/sessions

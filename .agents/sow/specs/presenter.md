@@ -12,7 +12,7 @@ main()
   ├─ open SQLite (read-only mode for safety; WAL allows concurrent writer)
   ├─ run migration check (refuse to start if schema_meta.version > supported)
   ├─ start SSE hub goroutine
-  ├─ start notify-socket subscriber goroutine
+  ├─ start notify-table poller goroutine (read-only; cursor starts at MAX(seq))
   ├─ register HTTP routes
   ├─ ListenAndServe on bind addr
   └─ wait for SIGTERM/SIGINT → graceful shutdown
@@ -164,16 +164,38 @@ the existing `/api/sources` failure path.
 Single goroutine that owns:
 
 - A map of `subscription_id → subscriber_state` (in-memory only; lost on restart).
-- An events channel from the notify-socket subscriber.
+- The change feed from the **notify-table poller** (a separate read-only
+  goroutine — see below — reading the SQLite `notify` table, not an IPC channel).
 - An events channel from each connected SSE client (for keepalives).
 
-When a notify message arrives, the hub:
-
-1. Looks up affected sessions in the message.
-2. For each subscription, checks if any affected session matches the subscription's filter.
-3. Pushes a minimal `event` to matching clients via their SSE channel.
+The notify-table poller is a separate read-only goroutine that polls
+`SELECT … FROM notify WHERE seq > <cursor> ORDER BY seq` roughly once per
+second (cursor starts at `MAX(seq)` on boot). For each change row it evaluates
+each subscription's filter by **reusing the Chunk-12 `sessionFilter.whereClause`**
+— `SELECT 1 FROM sessions s WHERE s.id=? AND (<whereClause>) LIMIT 1` — so SSE
+matching is identical to REST list matching by construction. This per-row
+match evaluation runs **in the poller, off the hub's fan-out path**; the hub
+only enqueues the resulting minimal events onto each matching subscription's
+channel. (`stats_invalidated` rows fan out to all subscriptions, coalesced to
+≈1/s on emit; `source_status_changed` rows fan out to subscriptions whose
+`sources` filter admits that source.)
 
 The SSE message does NOT carry the full session data — only `{"type":"session_changed","session_id":"..."}`. The client decides whether to re-fetch the full session detail via REST. This keeps SSE messages tiny and keeps the SQL load on REST endpoints where caching and pagination already live.
+
+Backpressure, replay, and retention (see `sse-protocol.md` for the client
+contract):
+
+- **Backpressure** — each subscription has a buffered channel capped at 256
+  events. When it is full the hub drops the oldest event and increments a
+  per-subscription `dropped` counter; slow clients never block the hub or
+  other subscriptions.
+- **Last-Event-ID replay** — each subscription keeps a 100-event ring of its
+  most recent events; on reconnect with `Last-Event-ID` the hub replays the
+  buffered events after that ID (or signals a `resync` when the ring has rolled
+  past it).
+- **Reconnect retention** — a subscription survives 60 s after its client
+  disconnects so a reconnecting browser keeps the same buffer; after 60 s with
+  no client the subscription is dropped.
 
 ## Embedded Frontend
 
@@ -203,21 +225,22 @@ GET  /api/catalog/tools         → catalog_tools, with filters                 
 GET  /api/catalog/models        → catalog_models, with filters                              (Chunks 12+ — not yet implemented)
 GET  /api/catalog/agents        → catalog_agents, with filters                              (Chunks 12+ — not yet implemented)
 GET  /api/payloads/:ref         → streams payload bytes (gz-decompressed inline if asked)   (Chunks 12+ — not yet implemented)
-POST /api/subscriptions         → create an SSE subscription with a filter                  (Chunk 13 — not yet implemented)
-DELETE /api/subscriptions/:id   → cancel                                                    (Chunk 13 — not yet implemented)
-GET  /api/events?sub=:id        → SSE event stream                                          (Chunk 13 — not yet implemented)
+POST /api/subscriptions         → create an SSE subscription with a filter                  (live)
+DELETE /api/subscriptions/:id   → cancel                                                    (live)
+GET  /api/events?sub=:id        → SSE event stream                                          (live)
 ```
 
 Chunk 11 of SOW-0001 shipped the first four "live" routes (`/`,
 `/assets/...`, `/api/health`, `/api/sources`); Chunk 12 added
 `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/logs`, and
-`/api/stats`. The catch-all `/api/*` handler returns a structured
-`NOT_FOUND` envelope naming the chunk in which a still-missing route
-(topology, timeline, catalog, payloads, subscriptions, events) will
-land, so future operators reading the response see the implementation
-roadmap at the error site. Anything not in the live set MUST NOT be
-added to a client (UI, curl scripts) until the corresponding chunk
-merges.
+`/api/stats`; Chunk 13 added the SSE surface — `POST /api/subscriptions`,
+`DELETE /api/subscriptions/:id`, and `GET /api/events?sub=:id`. The
+catch-all `/api/*` handler returns a structured `NOT_FOUND` envelope
+naming the chunk in which a still-missing route (topology, timeline,
+catalog, payloads) will land, so future operators reading the response
+see the implementation roadmap at the error site. Anything not in the
+live set MUST NOT be added to a client (UI, curl scripts) until the
+corresponding chunk merges.
 
 Path-parameter routing uses Go 1.22+ `http.ServeMux` wildcard patterns
 (`/api/sessions/{id}`, `/api/sessions/{id}/logs`); the `{id}` segment is
@@ -243,20 +266,79 @@ Full schemas: `rest-api.md`.
 - **Gzip**: response bodies > 1 KB gzipped when client supports it (excluding SSE).
 - **CORS**: not enabled in v1 (localhost-only). Documented as a Phase 2 concern.
 - **Auth**: none in v1 (localhost-only bind). Phase 2 SOW will define auth design.
+- **WriteTimeout**: `http.Server.WriteTimeout` is intentionally unset (0) because SSE streams are long-lived — a global write deadline would kill an idle-but-healthy `/api/events` connection. Normal handlers stay bounded by the 30 s per-request query context (the `queryTimeout`), and the SSE handler additionally clears its own write deadline per-connection via `http.NewResponseController(w).SetWriteDeadline(time.Time{})`. (This resolves the Chunk-11 glm WriteTimeout deferral.)
 
 ## Graceful Shutdown
 
-1. Stop accepting new connections (`http.Server.Shutdown`).
-2. Close all SSE client channels with a `disconnect` event so browsers reconnect cleanly.
-3. Wait for in-flight handlers (with 30 s timeout).
-4. Close SQLite, close notify socket.
+1. Stop the notify-table poller FIRST (cancel its context and wait for it to
+   exit) so no new events are produced while the SSE clients are being torn
+   down — this avoids a race where the poller delivers onto channels that are
+   about to close.
+2. Deliver a `disconnect` event to every active SSE subscription, then close
+   all SSE client channels (`hub.Shutdown`) so the long-lived stream handlers
+   return and the browser reconnects cleanly.
+3. Stop accepting new connections and wait for in-flight handlers to drain
+   (`http.Server.Shutdown` with a 30 s timeout).
+4. Close SQLite.
 5. Exit 0.
+
+### SSE Lifecycle Mutex (create vs. shutdown)
+
+`ShutdownSSE` and `POST /api/subscriptions` share a dedicated presenter mutex
+(`sseLifecycleMu`) that serializes subscription creation against shutdown:
+
+- `ShutdownSSE` acquires the mutex, records the shutting-down state, releases
+  the mutex, and only THEN runs `broadcastDisconnect` + `hub.Shutdown`. The
+  long-running hub close happens **outside** the mutex so it never blocks an
+  in-flight create beyond the instant needed to flip the state.
+- `POST /api/subscriptions` parses and validates the filter first (no lock —
+  a bad filter is a `400` regardless of shutdown). It then acquires the mutex,
+  checks the shutting-down state, and either returns `503` (release, mutate
+  nothing) or calls the registry `create` (hub registration + registry insert)
+  and releases the mutex only after `create` returns.
+
+Because the state flip and the create both happen under the same mutex, the
+check-then-create pair is atomic with respect to shutdown: a create that begins
+before shutdown completes fully (hub + registry consistent) and a create that
+begins after shutdown sees the state and returns `503`. The guaranteed
+invariant is consistency, NOT shutdown-survival: there is never a `200` for a
+subscription the hub did not register, and never an orphan (a registry entry
+without a matching hub subscription, or vice-versa) — `hub.Shutdown` + the
+registry `clear()` run after the flag flip, by which point every in-flight
+create has finished its insert. A subscription created in the instant just
+before shutdown is validly registered (a correct `200`) and is then torn down
+together with all others by the shutdown sequence (disconnect broadcast → hub
+close → registry clear); the client handles that exactly like any other
+mid-stream shutdown (reconnect/`retry_after_ms`, then re-fetch). The mutex does
+NOT promise that a successful `POST` remains attachable across an immediately
+following graceful shutdown — that stronger semantic is neither needed nor
+provided.
+
+After `hub.Shutdown` removes every subscription channel, `ShutdownSSE` also
+clears the subscription registry (`subscriptionManager.clear`). `hub.Shutdown`
+deletes subscriptions WITHOUT firing the `OnRemove` hook (the process is going
+away), so without this step the registry would keep reporting subscriptions the
+closed hub no longer holds — a stale `/api/health` `sse.subscriptions` count and
+an orphan entry for any create that completed in the instant before the flag
+flipped. The clear runs OUTSIDE `sseLifecycleMu`, and because the mutex forces
+every in-flight create to finish its hub-registration + registry insert before
+the flag flip (hence before `hub.Shutdown` and the clear), the registry ends
+empty and consistent with the empty hub. A create arriving after the flag flip
+returns `503` and inserts nothing. Net post-shutdown invariant: the registry
+holds no id the hub does not also hold (after a full shutdown both are empty).
+
+**Lock-ordering contract (deadlock safety):** the only nesting is
+`sseLifecycleMu` → (`hub.mu` via `hub.Add`) → (`subscriptionManager.mu`). The
+hub's `OnRemove` hook (`onSubRemoved`) and the notify poller never acquire
+`sseLifecycleMu`, and `ShutdownSSE` never holds `sseLifecycleMu` while calling
+`hub.Shutdown`. No code path acquires `sseLifecycleMu` while already holding
+`hub.mu`, `subscriptionManager.mu`, or `notifyMu`, so no cycle can form.
 
 ## Configuration
 
 ```
 --db <path>                SQLite path (must exist; ingester creates it)
---state-dir <path>         where notify.sock lives
+--state-dir <path>         state directory (reserved; serve does not use an IPC channel — the notify channel is the SQLite `notify` table). Flag kept for symmetry with the ingester.
 --bind <addr>              default 127.0.0.1:7710
 --log-level <level>        default info
 ```

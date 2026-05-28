@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"time"
+
+	"github.com/netdata/ai-viewer/internal/notify"
 )
 
 // Options carries the cross-cutting dependencies the presenter needs at
@@ -52,4 +54,16 @@ type Options struct {
 	// fstest.MapFS. nil disables the frontend routes (every "/" or
 	// "/assets/..." request returns 404 with NOT_FOUND).
 	FrontendFS fs.FS
+
+	// Hub is the in-memory SSE fan-out the subscription routes and the
+	// notify poller drive. nil means New constructs a default hub (so
+	// existing tests that omit it still get working SSE routes); the serve
+	// binary passes an explicit hub so it can deliver the shutdown
+	// `disconnect` event before closing the hub.
+	Hub *notify.Hub
+
+	// NotifyPollInterval is how often runNotifyPoller polls the notify
+	// table. Zero falls back to defaultNotifyPollInterval (~1s). Injected
+	// short by tests that exercise the poll loop directly.
+	NotifyPollInterval time.Duration
 }

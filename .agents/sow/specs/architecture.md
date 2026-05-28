@@ -7,7 +7,7 @@ Two cooperating Go binaries:
 1. **`ai-viewer-ingest`** — a daemon that watches one or more source directories/databases, runs per-format adapters, and writes a normalized event stream into a canonical SQLite database.
 2. **`ai-viewer-serve`** — an HTTP server that reads the canonical SQLite database, serves the embedded frontend, exposes REST endpoints for queries, and pushes realtime updates via Server-Sent Events.
 
-The two binaries communicate **only via the SQLite file plus a small notify channel** (Unix domain socket or SQLite WAL polling). This forces strong separation of concerns and lets the two run on different hosts in the future.
+The two binaries communicate **only via the SQLite file**: the canonical rows plus an append-only `notify` table the ingester writes (in the same transaction as each batch) and the serve process polls (`WHERE seq > cursor`, ~1 s). There is no second IPC channel — keeping the coupling to exactly "the SQLite file" forces strong separation of concerns and lets the two run on different hosts in the future. See `data-model.md` §notify.
 
 ## Goals That Shape This Design
 
@@ -41,11 +41,11 @@ The two binaries communicate **only via the SQLite file plus a small notify chan
 │  │   - idempotent upserts (natural-identity dedup at SQL layer)│  │
 │  │   - resolve parent/child links                            │   │
 │  │   - write to SQLite in batched txns                       │   │
-│  │   - emit notify-channel ping                              │   │
+│  │   - append `notify` rows in the SAME txn; prune old rows   │   │
 │  └───────────────────────────────────────────────────────────┘   │
-└───────────────────┬────────────────────────────┬─────────────────┘
-                    │ SQLite file (WAL mode)     │ Unix socket
-                    ▼                            ▼ "rows changed"
+└───────────────────┬───────────────────────────────────────────────┘
+                    │ SQLite file (WAL mode): canonical rows +
+                    ▼ append-only `notify` table (serve polls seq>cursor)
 ┌─────────────────────────────────────────────────────────────────┐
 │                      ai-viewer-serve                             │
 │  ┌───────────────────────────────────────────────────────────┐   │
@@ -71,7 +71,7 @@ The two binaries communicate **only via the SQLite file plus a small notify chan
 ## Why two binaries
 
 - **Process isolation.** A crash in the ingester does not bring down the UI; a crash in the server does not lose ingest progress.
-- **Independent deployability.** The ingester can run on the host where snapshots live (e.g. `agent-events`), while the server runs on the workstation, sharing only the SQLite file over a network mount or rsync — a future option, not v1.
+- **Independent deployability.** The ingester can run on the host where snapshots live (e.g. `agent-events`), while the server runs on the workstation, sharing only the SQLite file over a network mount or rsync — a future option, not v1. Because the notify channel is a table inside that same file (rather than an IPC channel), it works over a shared-file mount where a local IPC channel would not.
 - **Forced separation of concerns.** The ingester cannot accidentally serve HTTP; the server cannot accidentally write canonical rows. The boundary is the schema.
 - **Easier to reason about.** Two small mental models instead of one large one.
 

@@ -119,13 +119,35 @@ func (lw *loggingResponseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// Flush implements http.Flusher when the inner writer supports it. SSE
-// handlers (landing in Chunk 13) rely on this passthrough.
-func (lw *loggingResponseWriter) Flush() {
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController can
+// walk to the real underlying writer for SetWriteDeadline/SetReadDeadline
+// and FlushError. Without it the controller stops at this wrapper and those
+// operations return http.ErrNotSupported even when the underlying writer
+// supports them — making the SSE handler's write-deadline clear ineffective
+// and hiding flush errors (presenter.md §Middlewares).
+func (lw *loggingResponseWriter) Unwrap() http.ResponseWriter { return lw.ResponseWriter }
+
+// FlushError flushes buffered data to the client and returns any error.
+// It prefers the underlying writer's FlushError (the interface
+// http.ResponseController itself uses) so a real flush failure propagates
+// and the SSE stream loop can tear down; it falls back to http.Flusher
+// (Flush + nil) and finally http.ErrNotSupported when neither is available.
+func (lw *loggingResponseWriter) FlushError() error {
+	if fe, ok := lw.ResponseWriter.(interface{ FlushError() error }); ok {
+		return fe.FlushError()
+	}
 	if f, ok := lw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
+		return nil
 	}
+	return http.ErrNotSupported
 }
+
+// Flush implements http.Flusher so existing Flusher callers are unaffected.
+// It delegates to FlushError and discards the error (Flush has no return);
+// callers that need the error use http.ResponseController, which now reaches
+// FlushError via Unwrap. SSE handlers rely on this passthrough.
+func (lw *loggingResponseWriter) Flush() { _ = lw.FlushError() }
 
 // wrote reports whether the response has already started (a status code
 // or body byte was written). recoverMiddleware reads this via an

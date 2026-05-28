@@ -17,12 +17,23 @@ const (
 	// CodeNotFound is returned when the requested resource does not
 	// exist.
 	CodeNotFound = "NOT_FOUND"
+	// CodeConflict is returned (HTTP 409) when a request conflicts with the
+	// current state of a resource — e.g. a second concurrent SSE stream for
+	// a subscription that already has an active stream (one stream per
+	// subscription; see sse-protocol.md).
+	CodeConflict = "CONFLICT"
 	// CodeInternalError is the catch-all for unexpected server-side
 	// failures. Always accompanied by a log line with full context.
 	CodeInternalError = "INTERNAL_ERROR"
 	// CodeDBUnavailable is returned when SQLite refuses a query (file
 	// missing, locked beyond busy_timeout, etc.).
 	CodeDBUnavailable = "DB_UNAVAILABLE"
+	// CodeUnavailable is returned (HTTP 503) when the server is shutting
+	// down or temporarily unable to serve the request; the client should
+	// retry later. Distinct from DB_UNAVAILABLE: the database is fine — it
+	// is the service that cannot serve right now (e.g. POST
+	// /api/subscriptions once the SSE hub has begun shutting down).
+	CodeUnavailable = "SERVICE_UNAVAILABLE"
 	// CodeSchemaMismatch is returned when the database schema_meta
 	// version disagrees with the binary's expected version. Surfaces at
 	// startup; never thrown from a handler at request time.

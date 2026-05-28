@@ -36,6 +36,24 @@ type healthResponse struct {
 	DBPath        string         `json:"db_path"`
 	DBSizeBytes   int64          `json:"db_size_bytes"`
 	Sources       []healthSource `json:"sources"`
+	Notify        healthNotify   `json:"notify"`
+	SSE           healthSSE      `json:"sse"`
+}
+
+// healthNotify is the notify-poller window in /api/health per
+// observability.md §`/api/health`. LastSeq is the high-water notify.seq the
+// read-only poller has applied (0 before the first row, since the cursor
+// starts at MAX(seq) on boot); LagUS is now − ts_us of that last applied
+// row, and 0 when the poller has not applied any row.
+type healthNotify struct {
+	LastSeq int64 `json:"last_seq"`
+	LagUS   int64 `json:"lag_us"`
+}
+
+// healthSSE reports the active SSE subscription count (including those in
+// the 60s reconnect-retention window) per observability.md §`/api/health`.
+type healthSSE struct {
+	Subscriptions int `json:"subscriptions"`
 }
 
 // healthSource is the per-source health row reported alongside the
@@ -118,6 +136,8 @@ func (p *Presenter) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp.DBSizeBytes = p.dbSizeBytesOrZero(ctx)
+	resp.Notify = p.collectNotifyHealth(now)
+	resp.SSE = healthSSE{Subscriptions: p.subs.count()}
 
 	switch {
 	case queriesFailed >= totalQueries:
@@ -129,6 +149,23 @@ func (p *Presenter) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, r, p.logger, http.StatusOK, resp)
+}
+
+// collectNotifyHealth derives the notify-poller window from the poller's
+// last-applied seq/ts. LagUS is now − lastTS, clamped at 0, and is 0 when
+// no row has been applied (lastTS == 0). This is a pure in-memory read; the
+// poller updates the fields under its own lock (notify_poller.go).
+func (p *Presenter) collectNotifyHealth(now time.Time) healthNotify {
+	lastSeq, lastTS := p.notifyHealth()
+	out := healthNotify{LastSeq: lastSeq}
+	if lastTS > 0 {
+		lag := now.UnixMicro() - lastTS
+		if lag < 0 {
+			lag = 0
+		}
+		out.LagUS = lag
+	}
+	return out
 }
 
 // collectSources returns the source rows used by /api/health and a

@@ -181,6 +181,19 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 		return err
 	}
 
+	// Append the batch's notify change-log rows and prune stale ones,
+	// both inside this same tx so they commit atomically with the data
+	// (a rollback above leaves the notify table untouched) and remain
+	// the ingester's writes (serve is read-only against notify). commitTS
+	// is a single timestamp shared by every notify row in this batch.
+	commitTS := time.Now().UTC().UnixMicro()
+	if err := wr.emitNotify(ctx, tx, commitTS); err != nil {
+		return err
+	}
+	if err := pruneNotify(ctx, tx, commitTS); err != nil {
+		return err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
