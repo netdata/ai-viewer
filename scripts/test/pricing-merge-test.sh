@@ -2,8 +2,8 @@
 #
 # pricing-merge-test.sh — covers scripts/lib/pricing-merge.jq and the
 # validate filter at scripts/lib/pricing-validate.jq. Verifies the
-# iter-2 fixes for the new-provider bug (qwen P1) and ctx_max update
-# during merge (qwen P3).
+# iter-2 fixes for the new-provider bug and ctx_max update
+# during merge.
 #
 # These are smoke-level checks the operator can run locally; they
 # exercise the jq filters in isolation against synthetic inputs so a
@@ -178,7 +178,7 @@ else
 fi
 
 # --- merge: case-fold normalises new provider+model names --------
-# Codex iter-4 P2: DB seeds like `Anthropic / Claude-3-5-Sonnet`
+# DB seeds like `Anthropic / Claude-3-5-Sonnet`
 # must not propagate to the merged JSON as a case-variant entry that
 # the Go loader (case-insensitive duplicate check) later rejects.
 # pricing-merge.jq lowercases NEW provider+model names in apply_record.
@@ -331,7 +331,7 @@ else
   pass "validate::rejects_unknown_prices_key"
 fi
 
-# --- iter7-3: aliases array + optional price numeric (codex iter-6 P2#3) ---
+# --- iter7-3: aliases array + optional price numeric ---
 # Build a strict-mode doc from a snippet inserted into either the
 # provider object (placeholder "__PROV__") or the model object
 # ("__MODEL__") or the prices object ("__PRICES__"). expect_reject /
@@ -392,7 +392,7 @@ else
 fi
 
 # --- iter8-2: providers/models/tiers must be REAL arrays --------------
-# Codex iter-7 P2#2: the validator previously checked length and
+# The validator previously checked length and
 # iterated `.providers[]` but never verified `type == "array"`. An
 # input like `providers: {}` returned false silently (because {} has
 # length 0); `providers: "x"` or `providers: 42` died with an

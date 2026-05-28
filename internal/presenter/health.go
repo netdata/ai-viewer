@@ -247,7 +247,7 @@ ORDER BY s.created_at, s.id
 // at internal/ingest/writer.go inserts NULL session_id, NULL turn_id,
 // NULL op_id with a non-NULL source_id; applyLogEntry inserts a
 // session_id of the affected session and a NULL source_id. Filtering on
-// both columns is therefore unambiguous (codex iter-3 P2#4).
+// both columns is therefore unambiguous.
 func (p *Presenter) recentParseErrorCount(ctx context.Context, now time.Time) (int64, error) {
 	since := now.Add(-recentParseErrorWindow).UnixMicro()
 	var count int64

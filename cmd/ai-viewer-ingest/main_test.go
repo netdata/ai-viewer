@@ -12,7 +12,7 @@
 //   - loadSourceCursor: nil-lookup short-circuit, empty stored,
 //     lookup-error fallback, and round-trip via the real aiagent_v3
 //     adapter — pinning the cursor-resume path required by ingester.md
-//     §17 (codex iter-3 P1#2).
+//     §17.
 package main
 
 import (
@@ -325,7 +325,7 @@ func TestLoadSourceCursor_CorruptStoredFallsBackToNil(t *testing.T) {
 
 // TestOnErrorHandler_BlocksThenLandsOnceDrained asserts that the
 // OnError handler returned by newOnErrorHandler is BLOCKING when the
-// events channel is full (codex iter-3 P2, tightened iter-4). Under a
+// events channel is full. Under a
 // saturated worker the adapter goroutine should pause, not silently
 // drop SourceErrorEvents. We pump 100 errors into a 4-cap channel, run
 // a drainer in parallel, and assert every single event makes it

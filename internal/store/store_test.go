@@ -220,7 +220,7 @@ func TestOpen_JournalModeWAL(t *testing.T) {
 // dropped batches. The test confirms both the on-disk case (the one
 // that regressed under iter-2 — previously gated on isMemoryDSN) and
 // asserts that a second concurrent acquisition blocks via the pool
-// rather than succeeding (codex iter-3 P2#5).
+// rather than succeeding.
 func TestOpenWriter_PinsMaxOpenConnsOnDisk(t *testing.T) {
 	t.Parallel()
 
@@ -267,7 +267,7 @@ func TestOpenWriter_PinsMaxOpenConnsOnDisk(t *testing.T) {
 // TestOpenReader_PinsMaxOpenConnsToEight pins the reader pool size to
 // the value documented in presenter.md §"SQLite Access" (8). Go's
 // database/sql default is unbounded, which would surface as a runtime
-// regression vs the spec (codex iter-3 P2#5).
+// regression vs the spec.
 func TestOpenReader_PinsMaxOpenConnsToEight(t *testing.T) {
 	t.Parallel()
 

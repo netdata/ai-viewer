@@ -143,7 +143,6 @@ func (p *Pricer) Stats() Stats {
 // non-zero context-window value even when the adapter does not
 // record CtxMax on the OpStartedEvent. The op's own CtxMax (recorded
 // on OpFinalized) still takes precedence on subsequent updates.
-// Iter-8 fix iter8-4 (codex iter-7 P2#4).
 func (p *Pricer) CtxMax(provider, model string) (int64, bool) {
 	entry := p.resolveModel(provider, model)
 	if entry == nil {

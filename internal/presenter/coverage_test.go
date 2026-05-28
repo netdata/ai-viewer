@@ -137,8 +137,8 @@ func TestNotImplementedReportsChunk(t *testing.T) {
 // TestHEAD_DeferredRouteReturns404WithEmptyBody pins the HEAD contract
 // on the error path through the full middleware chain: a HEAD request
 // to a still-deferred route returns 404 with the JSON Content-Type
-// header set but an empty response body. Codex iter-4 P3 flagged that
-// without this guard, HEAD to error paths leaked the JSON envelope,
+// header set but an empty response body. Without this guard, HEAD to
+// error paths leaked the JSON envelope,
 // violating presenter.md §"Routing". As of Chunk 12 the deferred route
 // used here is the topology sub-route (Chunk 14).
 func TestHEAD_DeferredRouteReturns404WithEmptyBody(t *testing.T) {

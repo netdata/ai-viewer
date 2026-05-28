@@ -113,7 +113,7 @@ func TestParseSessionFilter_EmptyArrayFilterRejected(t *testing.T) {
 }
 
 // TestParseSessionFilter_ControlCharsRejected asserts that a filter value (or
-// q) carrying an ASCII control character is a 400 (codex iter-4 P2 defense in
+// q) carrying an ASCII control character is a 400 (defense in
 // depth). Control bytes never appear in legitimate agent/model/tool/status/
 // source names or search text; rejecting them keeps junk out of the SQL and
 // the cursor fingerprint. \x1e/\x1f (the old fingerprint separators) and \x00

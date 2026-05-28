@@ -160,7 +160,7 @@ func TestSessionLogs_BadSeverity(t *testing.T) {
 // TestSessionLogs_EmptySeverityRejected asserts logs severity follows the
 // SAME present-but-empty rule as the session array filters (rest-api.md
 // §Conventions): `?severity=` or `?severity=,` is a 400, not a silent
-// "no filter" (codex iter-4 P3). An ABSENT severity key remains "all
+// "no filter". An ABSENT severity key remains "all
 // severities" and is verified by the other logs tests (e.g. _Pagination,
 // which passes no severity and expects 200).
 func TestSessionLogs_EmptySeverityRejected(t *testing.T) {
@@ -189,7 +189,7 @@ func TestSessionLogs_EmptySeverityRejected(t *testing.T) {
 	}
 }
 
-// TestSessionLogs_SeverityControlCharRawBeforeTrim pins codex iter-5 for the
+// TestSessionLogs_SeverityControlCharRawBeforeTrim pins the
 // logs endpoint: ?severity carries a control byte that is also whitespace
 // (\t=0x09, \r=0x0D), which a trim-first order would erase and silently accept.
 // The shared parseRequiredNonEmptyArray now rejects control chars on the RAW
@@ -308,7 +308,7 @@ func TestSessionLogs_CursorFingerprintSeverityMismatch400(t *testing.T) {
 	}
 }
 
-// TestSessionLogs_CursorNonNumericIDRejected pins codex iter-6 P2 / glm P2-2:
+// TestSessionLogs_CursorNonNumericIDRejected pins that
 // the logs keyset id is the log_entries.id INTEGER column, so a cursor whose
 // decoded id is not a decimal int64 must be a loud 400 (BAD_REQUEST) rather
 // than being bound into the (ts, id) > (?, ?) keyset comparison as a string,
@@ -340,7 +340,7 @@ func TestSessionLogs_CursorNonNumericIDRejected(t *testing.T) {
 	}
 }
 
-// TestSessionLogs_PathControlCharRejected pins glm iter-6 P2-1 for the logs
+// TestSessionLogs_PathControlCharRejected pins the logs
 // endpoint: a control byte in the path :id (e.g. a%09b => "a\tb") must be a
 // loud 400 (BAD_REQUEST) checked on the RAW PathValue before TrimSpace, not a
 // silent doomed lookup that returns 404. Mirrors the query-value control-char

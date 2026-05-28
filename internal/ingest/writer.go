@@ -56,7 +56,7 @@ type writer struct {
 	// COMMITTED for THIS SOURCE, across the lifetime of the worker
 	// (cross-batch). Per pricing.md §"Temporal resolution algorithm"
 	// misses are deduped per (sourceID, provider, model, missKind) —
-	// one warning, not one per batch (codex iter-6 P2#2). The map is
+	// one warning, not one per batch. The map is
 	// owned by the writer and survives resetBatch(). Memory bound:
 	// per source × per unique (provider, model, missKind) — typically
 	// a handful of entries.
@@ -64,8 +64,7 @@ type writer struct {
 	// Keys land here only after the surrounding batch commits — see
 	// pendingMissDedup below and promotePendingMissDedup. Marking on
 	// emit (pre-commit) would suppress all future warnings for the
-	// same tuple even if the warning row was rolled back (codex iter-9
-	// P2#1).
+	// same tuple even if the warning row was rolled back.
 	pricingMissDedup map[pricingMissKey]struct{}
 	// pendingMissDedup buffers (provider, model, missKind) keys whose
 	// WRN row + parse_errors bump have been INSERTed within the
@@ -140,8 +139,8 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 // flush() exit (commit OR rollback) so the writer can be re-used for
 // the next batch. pricingMissDedup is deliberately NOT cleared — it
 // lives for the lifetime of the worker so an unknown (provider, model)
-// emits one warning per source, not one per batch (codex iter-6 P2#2,
-// pricing.md §"Temporal resolution algorithm" — "deduped per
+// emits one warning per source, not one per batch (pricing.md
+// §"Temporal resolution algorithm" — "deduped per
 // (sourceID, provider, model, missKind)").
 //
 // pendingMissDedup IS cleared here. On rollback this drops the
@@ -149,7 +148,7 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 // (provider, model, missKind) re-emits the (now-missing) warning. On
 // commit, promotePendingMissDedup runs FIRST (in worker.flush after
 // tx.Commit()) so the entries are moved into pricingMissDedup before
-// resetBatch wipes the pending map — see codex iter-9 P2#1.
+// resetBatch wipes the pending map — see promotePendingMissDedup.
 func (w *writer) resetBatch() {
 	clear(w.dirtySessionIDs)
 	clear(w.dirtyTurnIDs)
@@ -164,8 +163,8 @@ func (w *writer) resetBatch() {
 
 // promotePendingMissDedup merges per-batch pending dedup keys into the
 // lifetime dedup map. Called by worker.flush AFTER tx.Commit() succeeds
-// so a rolled-back warning never silences future warnings (codex iter-9
-// P2#1). The pending map is left intact (resetBatch clears it next) so
+// so a rolled-back warning never silences future warnings. The pending
+// map is left intact (resetBatch clears it next) so
 // this method is idempotent against repeated calls.
 func (w *writer) promotePendingMissDedup() {
 	for k := range w.pendingMissDedup {
@@ -560,7 +559,7 @@ WHERE id = ?
 	// stay in sync with ops.cost_usd. The pricer mutates `cost` in this
 	// function but does NOT touch ev.CostUSD; passing the unmodified ev
 	// to onOpFinalized would silently undercount catalog rollups for
-	// every op whose cost was computed (codex iter-6 P2#1).
+	// every op whose cost was computed.
 	evForCatalog := ev
 	evForCatalog.CostUSD = cost
 	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog); err != nil {
@@ -676,7 +675,7 @@ VALUES (NULL, ?, NULL, NULL, ?, 'WRN', ?, ?, ?)
 	// Mark the key only AFTER the INSERT succeeds. The mark lives in
 	// the per-batch pending map so a subsequent commit failure leaves
 	// pricingMissDedup untouched and the next batch with the same
-	// (provider, model) re-emits the warning (codex iter-9 P2#1).
+	// (provider, model) re-emits the warning.
 	w.pendingMissDedup[key] = struct{}{}
 	return nil
 }

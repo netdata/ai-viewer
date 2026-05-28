@@ -103,7 +103,7 @@ def valid_prices:
   and (.input_per_million  | nn_number)
   and (.output_per_million | nn_number)
   # Optional price fields: schema declares them as numbers when present.
-  # Codex iter-6 P2#3: explicit-null was previously accepted because
+  # Explicit-null was previously accepted because
   # earlier wording used `(.X == null) or (.X | nn_number)`, which is
   # true for null. Use `has(...) | not` to distinguish "field absent"
   # (legal) from "field set to null" (rejected, since the schema
@@ -124,7 +124,7 @@ def valid_tier:
 def valid_model:
   only_keys(["name", "aliases", "ctx_max", "tiers"])
   and (.name | safe_name)
-  # Codex iter-6 P2#3: schema declares aliases as an array; the prior
+  # Schema declares aliases as an array; the prior
   # `(.aliases // [])` form silently accepted `aliases: null` and any
   # non-array value (e.g. `42`). When the key is present it must be a
   # real array of safe-name strings; when absent the model has no

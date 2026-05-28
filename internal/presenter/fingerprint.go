@@ -24,8 +24,8 @@ import (
 // boundary. Because the cursor stores and compares the full string rather
 // than a fixed-width digest, two distinct filter sets can never collide: the
 // property is exact by construction, not a probabilistic bound. (Earlier
-// iterations hashed the string with FNV-64a; codex iter-4 noted a 64-bit
-// digest is finite and can collide, so iter-5 carries the string directly.
+// iterations hashed the string with FNV-64a; a 64-bit digest is finite
+// and can collide, so the cursor now carries the string directly.
 // The cursor is an opaque localhost token echoing back values the client
 // already sent, so its size is immaterial.) The parser still rejects control
 // characters in filter values as defense in depth (filters.go).

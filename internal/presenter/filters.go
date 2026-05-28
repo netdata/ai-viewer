@@ -193,7 +193,7 @@ func parseScalarFilters(v url.Values, f *sessionFilter) error {
 // uniform; see presenter.md §"Filters, pagination, and cursors"). The
 // fingerprint then catches every other filter change (group/time/q/array
 // filters) so a mid-pagination query change is a loud client error, not
-// silent duplicate/skip corruption (codex iter3 P2).
+// silent duplicate/skip corruption.
 // parseTimeRange/parseArrayFilters/parseScalarFilters must run first so
 // f.sort/f.order and the fingerprint reflect the live request.
 func parseCursorParam(v url.Values, f *sessionFilter) error {

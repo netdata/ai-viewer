@@ -205,7 +205,7 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	// rollback fires and resetBatch (run by the caller after flush
 	// returns) discards pendingMissDedup so the next batch with the
 	// same (provider, model, missKind) re-emits the (now-missing)
-	// warning. Codex iter-9 P2#1.
+	// warning.
 	wr.promotePendingMissDedup()
 
 	if wr.batchMaxSeq > 0 {

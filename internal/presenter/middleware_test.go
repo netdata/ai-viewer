@@ -166,8 +166,7 @@ var uuidV4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][
 // TestNewRequestIDIsUUIDV4AndUnique asserts the request-id helper
 // produces RFC 4122 §4.4 UUID-v4 strings that don't collide on the
 // first 64 calls. Pins observability.md §"Trace IDs"; the previous
-// 16-hex-char output was caught as spec drift by codex iter-4 and
-// fixed in iter-5.
+// 16-hex-char output was caught as spec drift and fixed.
 func TestNewRequestIDIsUUIDV4AndUnique(t *testing.T) {
 	t.Parallel()
 	seen := map[string]struct{}{}
@@ -187,7 +186,7 @@ func TestNewRequestIDIsUUIDV4AndUnique(t *testing.T) {
 // per-request structured log line satisfies the observability.md
 // §"Structured Logging" contract: `client_ip` is present and stripped
 // of the port; `request_id` matches the UUID-v4 shape and matches the
-// X-Request-ID response header. Pins codex iter-4 P2 fix.
+// X-Request-ID response header.
 func TestLoggingMiddlewareLogsClientIPAndUUIDRequestID(t *testing.T) {
 	t.Parallel()
 	logger, buf := captureLogger()
@@ -224,9 +223,9 @@ func TestLoggingMiddlewareLogsClientIPAndUUIDRequestID(t *testing.T) {
 // observability.md §"Trace IDs": when a handler panics, BOTH the
 // panic log line AND the deferred access log line MUST be emitted and
 // MUST carry the same request_id (mirroring the X-Request-ID response
-// header). Codex iter-5 P2 caught that the pre-defer logging
-// middleware silently dropped the access log on the panic path and
-// that the panic log omitted request_id altogether.
+// header). The pre-defer logging middleware silently dropped the
+// access log on the panic path and the panic log omitted request_id
+// altogether.
 func TestPanic_AccessLogStillEmitted(t *testing.T) {
 	t.Parallel()
 	logger, buf := captureLogger()
@@ -280,7 +279,7 @@ func TestPanic_AccessLogStillEmitted(t *testing.T) {
 	}
 }
 
-// TestRecover_NoSecondWriteAfterPartialResponse pins codex iter-6 P2: when a
+// TestRecover_NoSecondWriteAfterPartialResponse pins that when a
 // handler has ALREADY written status+body and THEN panics, the recover
 // middleware must NOT append a 500 JSON envelope over the partially-sent body
 // or emit a superfluous WriteHeader(500). It reads the wrapped

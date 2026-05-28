@@ -161,12 +161,12 @@ func (l sqlCursorLookup) LookupCursor(ctx context.Context, sourceID string) (str
 // the adapter's OnError callback that is wired both to a structured log
 // line AND to a SourceErrorEvent pushed onto the same events channel so
 // /api/health surfaces the parse error via sources.parse_errors and a
-// log_entries row (iter3-2: codex P2#3).
+// log_entries row.
 //
 // The persisted source_progress.cursor (if any) is loaded and passed to
 // Scan so the binary resumes from the last committed checkpoint instead
-// of replaying the entire history on every restart (iter3-1: codex
-// P1#2). Cursor corruption logs a WARN and falls back to a full
+// of replaying the entire history on every restart. Cursor corruption
+// logs a WARN and falls back to a full
 // re-scan; the spec mandates that the daemon keeps making progress
 // rather than refusing to start.
 func startSource(ctx context.Context, wg *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger) error {
@@ -238,12 +238,12 @@ func loadSourceCursor(ctx context.Context, adapter canonical.Adapter, lookup cur
 // newOnErrorHandler returns the OnError callback wired into the
 // adapter. Non-fatal adapter parse errors flow through here; the
 // handler emits a structured WARN log AND pushes a SourceErrorEvent
-// onto the events channel so /api/health surfaces the failure (codex
-// iter-3 P2#3, tightened in iter-4 to a guaranteed send).
+// onto the events channel so /api/health surfaces the failure
+// (a guaranteed send).
 //
-// The send is BLOCKING (with ctx.Done() escape) — codex iter-3 P2
-// flagged the previous `default: drop` branch as a silent-failure
-// path that could under-report parse_errors under load. Backpressure
+// The send is BLOCKING (with ctx.Done() escape): the previous
+// `default: drop` branch was a silent-failure path that could
+// under-report parse_errors under load. Backpressure
 // from a saturated worker should pause the adapter goroutine, not lose
 // the event. Cancellation of ctx is the only way to drop a
 // SourceErrorEvent here, and that path runs only on ingester

@@ -292,7 +292,7 @@ func TestSessions_CursorFingerprintTimeWindow(t *testing.T) {
 
 // TestSessions_ControlCharFilterRejected asserts the full GET /api/sessions
 // path rejects a filter value carrying a control character with 400
-// BAD_REQUEST (codex iter-4 P2 defense in depth). %1E is the percent-encoded
+// BAD_REQUEST (defense in depth). %1E is the percent-encoded
 // record separator that the old fingerprint scheme used as an element
 // delimiter; the parser now rejects it before it can reach the SQL or the
 // cursor fingerprint.
@@ -314,7 +314,7 @@ func TestSessions_ControlCharFilterRejected(t *testing.T) {
 	}
 }
 
-// TestSessions_ControlCharRawBeforeTrim pins codex iter-5: the control-char
+// TestSessions_ControlCharRawBeforeTrim pins that the control-char
 // check runs on the RAW query value BEFORE TrimSpace. A leading/trailing
 // control byte that is also whitespace (\t=0x09, \n=0x0A, \r=0x0D) would be
 // erased by a trim-first order and silently accepted; checking the raw value

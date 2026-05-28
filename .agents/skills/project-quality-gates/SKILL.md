@@ -173,6 +173,16 @@ Patterns checked: `[A-Za-z0-9_-]{32,}` near keywords `key|token|secret|password|
 
 Threshold: zero hits.
 
+### AI-Attribution Scan
+
+```bash
+scripts/scan-ai-attribution.sh
+```
+
+Greps `cmd/`, `internal/`, `scripts/` (tests included) for comments that attribute code to an external AI reviewer by name — a reviewer name adjacent to an iteration/priority tag (`<name> iter-N`, `<name> P<digit>`) or an attribution verb (`per`/`pins <name>`, `<name> flagged/…`). The pattern REQUIRES a reviewer name, so legitimate domain terms (priced model names like `gemini-2.5-pro`, the `codex`/`opencode` session formats the tool ingests, the deepseek redaction rule) never match; the script self-excludes (it enumerates the names in its own pattern). Enforces the no-AI-attribution rule on the public repo — the work stands on its own. Runs in the CI `gates` job.
+
+Threshold: zero hits.
+
 ### Spec Drift
 
 ```bash

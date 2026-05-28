@@ -12,8 +12,8 @@ import (
 // per-request UUID-v4 minting and the typed context.Value key so every
 // log line emitted during a request can be correlated by `request_id`.
 // Per observability.md §"Trace IDs" every HTTP request log line MUST
-// carry the same UUID-v4; codex iter-5 P2 flagged that error and panic
-// logs were missing the field and this file is part of the fix.
+// carry the same UUID-v4; error and panic logs were missing the field
+// and this file is part of the fix.
 
 // ctxKey is a private type so context keys cannot collide with other
 // packages.

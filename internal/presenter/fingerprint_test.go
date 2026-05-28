@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestFingerprint_IsCanonicalStringNotHash pins codex iter-5: the cursor FP
+// TestFingerprint_IsCanonicalStringNotHash pins that the cursor FP
 // carries the canonical length-prefixed STRING itself, not a fixed-width
 // digest. A 64-bit hash is finite, so distinct canonical strings could collide
 // — the fingerprint therefore returns b.String() directly. The assertions here
@@ -53,7 +53,7 @@ func TestLogFingerprint_IsCanonicalStringNotHash(t *testing.T) {
 	}
 }
 
-// TestFingerprint_SeparatorCollisionResolved pins codex iter-4 P2: under the
+// TestFingerprint_SeparatorCollisionResolved pins that under the
 // old separator-join encoding two DIFFERENT array sets whose values embedded
 // the record separator (\x1e) could serialize to the identical byte stream
 // and therefore hash identically, letting a changed filter pass cursor
