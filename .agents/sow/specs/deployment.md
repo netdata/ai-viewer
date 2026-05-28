@@ -34,6 +34,49 @@ Manjaro-friendly install script (matches the user's environment) provided at `sc
 - `systemctl --user enable --now ai-viewer-{ingest,serve}.service`.
 - No root needed.
 
+## Build Pipeline
+
+ai-viewer ships as a **single binary that serves the UI**: `ai-viewer-serve`
+embeds the built React SPA via `go:embed` and serves it same-origin alongside
+the `/api` + SSE routes. No separate web server, no Node at runtime.
+
+### `scripts/build.sh`
+
+The release build. From the repo root, in order:
+
+1. Resolve the repo root from the script's own directory (repo-relative; no
+   absolute machine paths).
+2. `cd frontend && npm ci && npm run build` (`npm ci` because
+   `frontend/package-lock.json` is committed; falls back to `npm install` only
+   if the lock file is absent). Output lands in `frontend/dist/`.
+3. Sync the build output into the embed directory: clear everything under
+   `cmd/ai-viewer-serve/frontend_dist/` **except** the tracked `.gitkeep`
+   sentinel, then copy the **whole** `frontend/dist/` tree in (`index.html`,
+   `assets/`, AND the root public files Vite copies from `frontend/public/`
+   such as `favicon.svg` — all of which the built `index.html` references at
+   the site root). The copied files are git-ignored (see `architecture.md`
+   §"Embed-dir git policy"), so the tree stays clean.
+4. `go build -o bin/ai-viewer-serve ./cmd/ai-viewer-serve` and
+   `go build -o bin/ai-viewer-ingest ./cmd/ai-viewer-ingest`.
+5. Print the resulting `bin/` paths.
+
+Outputs: `bin/ai-viewer-serve` and `bin/ai-viewer-ingest` (both git-ignored;
+the release binaries are build artifacts, never committed). Running
+`bin/ai-viewer-serve` then serves the real UI at `http://127.0.0.1:7710/`.
+
+### `scripts/dev.sh`
+
+The development loop. Builds `ai-viewer-serve` to a temp binary and runs that
+directly (so the tracked PID is the real server, not a `go run` wrapper whose
+child would survive a kill), alongside the Vite dev server in `frontend/`.
+Vite proxies `/api` to `127.0.0.1:7710` (per `frontend/vite.config.ts`) so the
+same relative fetch URLs work in dev and in the single-binary build. Both
+child processes are tracked by PID and killed on exit (only those PIDs; never
+`pkill`/`killall`); the temp build dir is removed on exit too. In this mode the
+Go binary usually has no built UI embedded; it serves the not-built notice at
+`/` while the live UI is the Vite dev server (see `architecture.md`
+§"Not-built degrade").
+
 ## Source Auto-Discovery
 
 If `ai-viewer-ingest` is started with no `--source` flags, it probes

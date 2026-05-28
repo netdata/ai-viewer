@@ -5,11 +5,12 @@
 //     bind → 2, missing --bind value → 2).
 //   - assertLocalhost: ONLY 127.0.0.1 and ::1 are accepted; "localhost"
 //     is rejected by name; empty host (":7710") is rejected;
-//     non-loopback IPs are rejected (codex iter-3 P3#7, minimax iter-3
-//     P1).
+//     non-loopback IPs are rejected.
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -165,5 +166,35 @@ func TestParseFlags_DefaultBindAccepted(t *testing.T) {
 	}
 	if parsed.bind != defaultBind {
 		t.Fatalf("default bind = %q, want %q", parsed.bind, defaultBind)
+	}
+}
+
+// TestEmbeddedFrontend_NonFatalWithoutIndex pins the SOW-0001 Chunk 17
+// (D2) startup contract: embeddedFrontend() returns a usable fs.FS even
+// when the embedded frontend_dist/ has no index.html. On a clean checkout
+// the embed dir holds only the tracked .gitkeep sentinel (scripts/build.sh
+// writes the real index.html + assets/), so the binary must NOT refuse to
+// start — it serves the not-built notice at / while /api stays live. The
+// returned FS is still usable: the .gitkeep the `all:` embed captured is
+// openable.
+func TestEmbeddedFrontend_NonFatalWithoutIndex(t *testing.T) {
+	t.Parallel()
+	fsys := embeddedFrontend()
+	if fsys == nil {
+		t.Fatal("embeddedFrontend() returned nil fs.FS")
+	}
+	// On a clean checkout there is no built index.html; assert the
+	// non-fatal state explicitly so a future regression that re-adds the
+	// fatal check is caught.
+	if _, err := fs.ReadFile(fsys, "frontend_dist/index.html"); !errors.Is(err, fs.ErrNotExist) {
+		// A built tree (e.g. CI after scripts/build.sh) legitimately has
+		// index.html present; only fail on an unexpected error kind.
+		if err != nil {
+			t.Fatalf("unexpected error reading index.html: %v", err)
+		}
+	}
+	// The .gitkeep sentinel keeps the `all:` embed non-empty and openable.
+	if _, err := fs.ReadFile(fsys, "frontend_dist/.gitkeep"); err != nil {
+		t.Fatalf("embedded frontend_dist/.gitkeep not readable: %v", err)
 	}
 }
