@@ -1,0 +1,45 @@
+.group {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.button {
+  appearance: none;
+  border: none;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.button + .button {
+  border-left: 1px solid var(--border);
+}
+
+.button:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+/* Visually hidden but exposed to assistive tech (resolved-theme live region). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>ai-viewer</title>
+    <script>
+      // No-flash theme resolution. Runs synchronously before React mounts so
+      // the first paint already carries the correct data-theme. This is the
+      // ONLY synchronous script; everything else loads as a module.
+      // Mirrors state/theme.ts resolveTheme(): manual override wins, else OS.
+      (function () {
+        try {
+          var pref = localStorage.getItem('aiViewerTheme');
+          var resolved =
+            pref === 'dark' || pref === 'light'
+              ? pref
+              : window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+          document.documentElement.setAttribute('data-theme', resolved);
+        } catch (e) {
+          /* localStorage disabled — default to dark via :root */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

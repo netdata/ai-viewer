@@ -100,6 +100,12 @@ es.addEventListener('resync', () => queryClient.invalidateQueries());
 
 One subscription per active page. Filter changes → new subscription, old one cancelled (server expires it after 60 s of no client anyway).
 
+**Cancellation / teardown contract.** `connectSse(queryClient, filter, handlers?, signal?)` must leave NO leaked EventSource or undeleted server subscription under any unmount/filter-change/StrictMode-double-invoke timing. Because subscription creation is async (a POST that resolves before the EventSource opens), the wrapper: rejects with an `SseCanceledError` sentinel if the `AbortSignal` fires during the POST; after the POST resolves, re-checks `signal.aborted` and, if set, `close()`s the just-created connection (best-effort `DELETE /api/subscriptions/:id`) before returning; and registers a one-shot `abort` listener so an abort arriving after `open()` still tears the stream down. `close()` is idempotent. The SSE client is unit-tested with a fake `EventSource` (all five frames → the correct `invalidateQueries` keys, plus every cancellation timing) and is INCLUDED in the coverage gate — it is load-bearing and must not be excluded.
+
+**Malformed frames.** A frame whose `data` is not valid JSON is never silently dropped (AGENTS.md §"No silent failures"): it is routed to an optional `onMalformedEvent` handler, else `console.warn`ed with the event name; the stream stays alive (a single bad frame does not kill the connection).
+
+**API client empty-body.** `api/client.ts` supports `HEAD` and treats any bodiless success (`HEAD`, `204`, or `Content-Length: 0`) as `undefined` rather than attempting a JSON parse, so HEAD parity (`/api/health`, `/api/sources`, `/api/events`) and the `204` from subscription `DELETE` are handled without throwing.
+
 ## Theming
 
 **Operator decision (2026-05-26): theme matches the operating system by default; a manual override is available and persisted.**

@@ -35,7 +35,15 @@ The global filter bar is always visible and applies to every page; routes interp
 
 Tab layout:
 
-1. **Overview** — header with agent/model/status; per-session statistics tailored from `/api/stats?session_id=...`.
+1. **Overview** — header with agent/model/status; session-level statistics
+   (tokens in/out, cost, turn/op/failure counts) read from the session-detail
+   response `GET /api/sessions/:id` (the session row already carries these
+   aggregates) plus a tools-used summary derivable from its ops. NOTE:
+   `/api/stats` does NOT support a `session_id` filter (it is the cross-session
+   analytics endpoint); per-session *breakdowns* (e.g. this session's cost
+   by-model/by-tool) are a Phase-2 enhancement that would require adding
+   `session_id` support to `/api/stats`. Phase 1 uses the detail-endpoint
+   aggregates only.
 2. **Topology** — D3 force-directed: nodes are agents and tools that participated; node size encodes the user-selected metric (cost/tokens/duration/calls/ctx-pct); node color encodes failures; node icon distinguishes agent vs tool. Tooltip shows high-level stats per actor.
 3. **Trace (APM)** — spans laid out as nested rows (parent op → children → child sessions). One row per op. Color and width encode duration; failures are red. Expanding a row shows its log lines and payload links.
 4. **Timeline** — video-editor style. Horizontal time axis; one lane per session (root + children stacked). Spans drawn as bars; overlap is intentional (parallel sub-agents are visible). Pan + zoom; shift+wheel zooms time.

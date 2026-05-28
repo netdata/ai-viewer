@@ -1,0 +1,76 @@
+/*
+ * Theme tokens. Dark is the :root default; light overrides under
+ * [data-theme="light"]. The single data-theme attribute on <html> is the
+ * switch (set by the no-flash inline script in index.html and kept in sync by
+ * state/theme.ts). See frontend-architecture.md §Theming — the base color set
+ * is copied verbatim from the spec; spacing/radius/typography/status tokens are
+ * derived here so components never hard-code values.
+ */
+
+:root {
+  /* DARK (default) */
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --border: #30363d;
+  --text-primary: #c9d1d9;
+  --text-secondary: #8b949e;
+  --accent: #58a6ff;
+  --success: #3fb950;
+  --warning: #d29922;
+  --error: #f85149;
+  --info: #a5a5ff;
+
+  /* Status mapping (ui-pages.md §Theme): completed=green, running=amber,
+     failed/interrupted/abandoned=red, unknown=gray. */
+  --status-completed: var(--success);
+  --status-running: var(--warning);
+  --status-failed: var(--error);
+  --status-unknown: var(--text-secondary);
+
+  /* Spacing scale (4px base). */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Radii. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* Typography. System UI stack for chrome; monospace for ids/timestamps. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Menlo', 'SF Mono', ui-monospace, monospace;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.875rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.5rem;
+
+  /* Elevation / focus. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --focus-ring: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--accent);
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eaeef2;
+  --border: #d0d7de;
+  --text-primary: #1f2328;
+  --text-secondary: #59636e;
+  --accent: #0969da;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --error: #cf222e;
+  --info: #5a5aff;
+
+  --shadow-1: 0 1px 2px rgba(31, 35, 40, 0.12);
+
+  color-scheme: light;
+}
