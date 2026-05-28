@@ -30,6 +30,10 @@ const (
 	// CodeMethodNotAllowed is returned when the route exists but the
 	// HTTP method is not supported (e.g. POST to /api/health).
 	CodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
+	// CodeTimeout is returned (HTTP 504) when a read query exceeds the
+	// 30 s query deadline. Distinct from DB_UNAVAILABLE so the UI can
+	// tell "the database is gone" from "this query was too slow".
+	CodeTimeout = "TIMEOUT"
 )
 
 // errorEnvelope is the JSON shape every error response carries. The

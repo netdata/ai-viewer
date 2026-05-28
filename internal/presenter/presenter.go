@@ -82,12 +82,16 @@ func (p *Presenter) now() time.Time { return p.nowFn() }
 // presenter's middlewares around a fresh ServeMux carrying every
 // registered route.
 //
-// Chunk 11 of SOW-0001 registers only:
+// As of Chunk 12 of SOW-0001 the registered routes are:
 //
-//   - GET /                serves the embedded SPA shell
-//   - GET /assets/...      serves embedded frontend assets
-//   - GET /api/health      ok/degraded/down + per-source diagnostics
-//   - GET /api/sources     full source list with cursors
+//   - GET /                       serves the embedded SPA shell
+//   - GET /assets/...             serves embedded frontend assets
+//   - GET /api/health             ok/degraded/down + per-source diagnostics
+//   - GET /api/sources            full source list with cursors
+//   - GET /api/sessions           filtered, keyset-paginated session list
+//   - GET /api/sessions/{id}      session detail (turns, ops, payloads, children)
+//   - GET /api/sessions/{id}/logs severity-filtered, paginated log entries
+//   - GET /api/stats              cross-session aggregates over the filtered set
 //
 // Every other route declared in presenter.md returns NOT_FOUND until
 // the relevant chunk lands. The middleware chain wraps the whole mux
@@ -113,9 +117,19 @@ func (p *Presenter) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// API routes. Strict method gating is done inside each handler so
-	// the JSON error envelope is consistent across the surface.
+	// the JSON error envelope is consistent across the surface. Path
+	// parameters use Go 1.22+ ServeMux `{id}` wildcards read via
+	// r.PathValue; the patterns carry no method verb so every handler
+	// keeps the same in-handler gating style (one routing style across
+	// the surface). More-specific patterns take precedence over the
+	// `/api/` catch-all, so unimplemented sub-routes (topology, timeline)
+	// still fall through to notImplemented.
 	mux.HandleFunc("/api/health", p.handleHealth)
 	mux.HandleFunc("/api/sources", p.handleSources)
+	mux.HandleFunc("/api/sessions", p.handleSessionsList)
+	mux.HandleFunc("/api/sessions/{id}", p.handleSessionDetail)
+	mux.HandleFunc("/api/sessions/{id}/logs", p.handleSessionLogs)
+	mux.HandleFunc("/api/stats", p.handleStats)
 	mux.HandleFunc("/api/", p.notImplemented)
 
 	// Frontend routes.
@@ -163,16 +177,18 @@ func (p *Presenter) rootHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // notImplemented is the catch-all for routes documented in
-// presenter.md but not yet implemented in Chunk 11. Returns a
-// structured NOT_FOUND so the operator immediately sees which chunk
-// will land the missing route. The handler intentionally does NOT use
+// presenter.md but not yet implemented. Returns a structured NOT_FOUND
+// so the operator immediately sees which chunk will land the missing
+// route. The handler intentionally does NOT use
 // http.StatusNotImplemented because that maps to "the server does not
 // support this method at all", whereas these routes are scheduled to
-// land in Chunks 12+.
+// land in later chunks. As of Chunk 12 the still-pending routes are
+// topology/timeline (Chunk 14), catalog/payloads, and the SSE
+// subscription surface (Chunk 13).
 func (p *Presenter) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, r, p.logger, http.StatusNotFound,
 		CodeNotFound, "endpoint not yet implemented in this chunk",
-		map[string]any{"path": r.URL.Path, "method": r.Method, "chunk": "12+"})
+		map[string]any{"path": r.URL.Path, "method": r.Method, "chunk": "13+"})
 }
 
 // CheckSchema verifies the SQLite store's schema_meta.version row

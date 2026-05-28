@@ -127,6 +127,12 @@ func (lw *loggingResponseWriter) Flush() {
 	}
 }
 
+// wrote reports whether the response has already started (a status code
+// or body byte was written). recoverMiddleware reads this via an
+// interface assertion so it does not append a 500 envelope over a
+// partially-sent body. See presenter.md §Middlewares §"Recover panic".
+func (lw *loggingResponseWriter) wrote() bool { return lw.wroteHeader }
+
 // recoverMiddleware catches panics in downstream handlers, logs the
 // stack trace at error level, and returns a structured 500 to the
 // client. Per AGENTS.md §"No silent failures", a recovered panic is
@@ -151,9 +157,17 @@ func recoverMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 						slog.String("stack", string(stack)),
 					)
 				}
-				// If the handler has not yet written, send a structured
-				// error. Otherwise the connection is already in an
-				// undefined state — best we can do is log and return.
+				// Only send the structured 500 when the response has NOT
+				// started. If the handler already wrote status/body before
+				// panicking (e.g. a future streaming handler), appending a
+				// JSON error would corrupt the partially-sent body and emit
+				// a superfluous WriteHeader — the panic is already logged
+				// above, so the safe action is to return. The wrapped
+				// *loggingResponseWriter (logging is the outermost
+				// middleware) exposes wrote() for this decision.
+				if rw, ok := w.(interface{ wrote() bool }); ok && rw.wrote() {
+					return
+				}
 				writeJSONError(w, r, logger, http.StatusInternalServerError,
 					CodeInternalError, "internal server error", nil)
 			}()

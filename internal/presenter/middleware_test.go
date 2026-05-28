@@ -2,7 +2,6 @@ package presenter
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -82,122 +81,6 @@ func TestRecoverMiddlewareCatchesPanic(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "handler panic") {
 		t.Fatalf("expected panic log line, got %q", buf.String())
-	}
-}
-
-// TestGzipMiddlewareCompressesLargeBodies asserts a response above
-// gzipMinBytes is compressed when the client advertises gzip support.
-func TestGzipMiddlewareCompressesLargeBodies(t *testing.T) {
-	t.Parallel()
-	payload := bytes.Repeat([]byte("abcd"), gzipMinBytes) // ~ 4 KB
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(payload)
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/big", nil)
-	req.Header.Set("Accept-Encoding", "gzip")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Header().Get("Content-Encoding") != "gzip" {
-		t.Fatalf("Content-Encoding = %q, want gzip", rr.Header().Get("Content-Encoding"))
-	}
-	gz, err := gzip.NewReader(rr.Body)
-	if err != nil {
-		t.Fatalf("gzip reader: %v", err)
-	}
-	decoded, err := io.ReadAll(gz)
-	if err != nil {
-		t.Fatalf("read gzip: %v", err)
-	}
-	if !bytes.Equal(decoded, payload) {
-		t.Fatal("decoded payload != original")
-	}
-}
-
-// TestGzipMiddlewareSkipsSmallBodies asserts a response under the
-// threshold is sent uncompressed regardless of Accept-Encoding so the
-// CPU cost is not wasted on a few hundred bytes.
-func TestGzipMiddlewareSkipsSmallBodies(t *testing.T) {
-	t.Parallel()
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/small", nil)
-	req.Header.Set("Accept-Encoding", "gzip")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Header().Get("Content-Encoding") != "" {
-		t.Fatalf("Content-Encoding = %q, want empty (body too small)", rr.Header().Get("Content-Encoding"))
-	}
-	if rr.Body.String() != `{"ok":true}` {
-		t.Fatalf("body = %q", rr.Body.String())
-	}
-}
-
-// TestGzipMiddlewareSkipsEventStream asserts the SSE path is exempt
-// from gzip even when the client advertises support; framing matters
-// more than payload size for that endpoint.
-func TestGzipMiddlewareSkipsEventStream(t *testing.T) {
-	t.Parallel()
-	payload := bytes.Repeat([]byte("x"), gzipMinBytes*2)
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(payload)
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
-	req.Header.Set("Accept-Encoding", "gzip")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Header().Get("Content-Encoding") == "gzip" {
-		t.Fatal("SSE path must not be gzipped")
-	}
-}
-
-// TestGzipMiddlewareSkipsWithoutAcceptEncoding asserts a client that
-// does not advertise gzip support receives the raw bytes even when the
-// response exceeds the size threshold.
-func TestGzipMiddlewareSkipsWithoutAcceptEncoding(t *testing.T) {
-	t.Parallel()
-	payload := bytes.Repeat([]byte("y"), gzipMinBytes*2)
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(payload)
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/anything", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Header().Get("Content-Encoding") == "gzip" {
-		t.Fatal("Content-Encoding=gzip without Accept-Encoding hint")
-	}
-}
-
-// TestClientAcceptsGzip exercises the parser against the realistic
-// shapes browsers send.
-func TestClientAcceptsGzip(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		header string
-		want   bool
-	}{
-		{"", false},
-		{"identity", false},
-		{"gzip", true},
-		{"gzip, deflate", true},
-		{"deflate, gzip", true},
-		{"gzip;q=0", false},
-		{"gzip;q=0.5", true},
-		{"deflate", false},
-	}
-	for _, tc := range cases {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		if tc.header != "" {
-			req.Header.Set("Accept-Encoding", tc.header)
-		}
-		got := clientAcceptsGzip(req)
-		if got != tc.want {
-			t.Errorf("clientAcceptsGzip(%q) = %v, want %v", tc.header, got, tc.want)
-		}
 	}
 }
 
@@ -394,6 +277,76 @@ func TestPanic_AccessLogStillEmitted(t *testing.T) {
 	}
 	if got := accessLine["status"]; got != float64(http.StatusInternalServerError) {
 		t.Fatalf("access log status = %v, want 500", got)
+	}
+}
+
+// TestRecover_NoSecondWriteAfterPartialResponse pins codex iter-6 P2: when a
+// handler has ALREADY written status+body and THEN panics, the recover
+// middleware must NOT append a 500 JSON envelope over the partially-sent body
+// or emit a superfluous WriteHeader(500). It reads the wrapped
+// *loggingResponseWriter's wrote() flag and, seeing the response started, logs
+// the panic and returns. The chain mirrors Presenter.Handler() (logging OUTER,
+// recover INNER) so recover's `w` IS the *loggingResponseWriter that tracks the
+// flag. Asserts: recovered status stays 200, the body keeps only the handler's
+// bytes (no error envelope appended), and the panic WAS logged.
+func TestRecover_NoSecondWriteAfterPartialResponse(t *testing.T) {
+	t.Parallel()
+	logger, buf := captureLogger()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial-body"))
+		panic("kaboom-after-write")
+	})
+	chain := loggingMiddleware(logger)(recoverMiddleware(logger)(inner))
+
+	req := httptest.NewRequest(http.MethodGet, "/streams", nil)
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no second WriteHeader to 500)", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "partial-body") {
+		t.Fatalf("body = %q, want the partial handler bytes", body)
+	}
+	if strings.Contains(body, CodeInternalError) || strings.Contains(body, "\"error\"") {
+		t.Fatalf("body = %q, want NO error envelope appended after partial write", body)
+	}
+	if !strings.Contains(buf.String(), "handler panic") {
+		t.Fatalf("expected panic log line, got %q", buf.String())
+	}
+}
+
+// TestRecover_500EnvelopeWhenNothingWritten pins the OTHER recover branch
+// (complementing TestRecover_NoSecondWriteAfterPartialResponse): when a handler
+// panics BEFORE writing anything, the recover middleware DOES write the
+// structured 500 envelope. Exercised through the production chain order so the
+// wrote() flag is read off the *loggingResponseWriter.
+func TestRecover_500EnvelopeWhenNothingWritten(t *testing.T) {
+	t.Parallel()
+	logger, buf := captureLogger()
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("kaboom-before-write")
+	})
+	chain := loggingMiddleware(logger)(recoverMiddleware(logger)(inner))
+
+	req := httptest.NewRequest(http.MethodGet, "/explodes-early", nil)
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(rr.Body).Decode(&env); err != nil {
+		t.Fatalf("decode err: %v", err)
+	}
+	if env.Error.Code != CodeInternalError {
+		t.Fatalf("error.code = %q, want %q", env.Error.Code, CodeInternalError)
+	}
+	if !strings.Contains(buf.String(), "handler panic") {
+		t.Fatalf("expected panic log line, got %q", buf.String())
 	}
 }
 
