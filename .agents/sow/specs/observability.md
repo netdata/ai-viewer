@@ -35,7 +35,7 @@ The single source of truth for "is this thing alive and what state is it in":
 {
   "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
-  "schema_version": 1,
+  "schema_version": 3,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,
@@ -48,15 +48,17 @@ The single source of truth for "is this thing alive and what state is it in":
       "last_seen_at":<us>,
       "lag_us":<int>,           // now - last_seen_at
       "parse_errors":0,
-      "last_seq":12345          // adapter's opaque high-water mark
+      "last_seq":12345          // per-source observability counter (max SourceSeq seen); NOT a dedup gate
     }
   ]
 }
 ```
 
-`last_seq` is the adapter's opaque per-source high-water mark
-(`source_progress.last_seq`). **Semantics depend on the adapter and
-last_seq is NOT a portable event count:**
+`last_seq` is a per-source observability counter: the max `SourceSeq`
+seen for that source (`source_progress.last_seq`). It is **NOT a dedup
+gate** (dedup is a SQL-layer guarantee — see ingester.md §Dedup and
+Idempotency) and **NOT a portable event count. Semantics depend on the
+adapter:**
 
 - `aiagent_v3` packs `ledgerSeq << 12 | subIdx`, so it grows roughly
   linearly with events emitted by that source — operators can

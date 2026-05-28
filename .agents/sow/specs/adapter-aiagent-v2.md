@@ -244,13 +244,13 @@ Defined at `ai-agent.git/src/session-tree.ts:66-82`. `agentsRun` counts the root
 
 ## Mapping to Canonical Events
 
-The translation is harder than v3 because the v2 file is a **snapshot of full state at one moment**, not an append-only ledger. The adapter therefore behaves as a deterministic projection: for each file scan, walk the full opTree and emit one canonical event per node. The ingester is responsible for upsert/dedup via stable `SourceSeq` values; replaying the same file produces the same events with the same `SourceSeq`, so the ingester's high-water-mark logic deduplicates trivially.
+The translation is harder than v3 because the v2 file is a **snapshot of full state at one moment**, not an append-only ledger. The adapter therefore behaves as a deterministic projection: for each file scan, walk the full opTree and emit one canonical event per node. Replaying the same file produces the same events; the ingester is idempotent at the SQL layer (every table upserts on a natural identity, so re-emitted rows never duplicate — see `ingester.md` §Dedup and Idempotency and SOW-0015). The deterministic `SourceSeq` is a stable per-node identifier and an observability counter, **not** a dedup gate.
 
 ### Conventions
 
 - Timestamps: opTree `startedAt`/`endedAt` are milliseconds. Canonical `Ts`/`EndTs` are microseconds. Multiply by 1000.
 - `SourceID`: a stable identifier for this v2 source, e.g. `aiagent_v2:/home/<user>/.ai-agent/sessions`.
-- `SourceSeq`: monotonic per source. Strategy: for each (file, opTree-node) emit a `SourceSeq` computed as `xxhash64("v2:" + <originId> + ":" + <pathInTree>)` where `pathInTree` is the opTree's stable path (`opTree.id` and concatenated turn/step/op indices, e.g. `"T:0/O:0"`, `"S:0/O:1"`, `"T:1/O:2/child/T:0/O:0"`). xxhash64 over uint64 is collision-safe within 2^32 events per source.
+- `SourceSeq`: a stable per-(file, opTree-node) identifier (deterministic across rescans), NOT monotonic per source and NOT a dedup gate — see `ingester.md` §Dedup and Idempotency. Strategy: for each (file, opTree-node) emit a `SourceSeq` computed as `xxhash64("v2:" + <originId> + ":" + <pathInTree>)` where `pathInTree` is the opTree's stable path (`opTree.id` and concatenated turn/step/op indices, e.g. `"T:0/O:0"`, `"S:0/O:1"`, `"T:1/O:2/child/T:0/O:0"`). xxhash64 over uint64 is collision-safe within 2^32 events per source.
 - Stable native IDs:
   - Session native_id = `opTree.traceId` (root) or `childSession.traceId` (sub-agent).
   - Turn native_id = `<session.traceId>:T:<turn.index>`.
@@ -316,9 +316,9 @@ Skip logic on backfill or watch-driven scan:
 1. Stat the file. If size == 0, emit `SourceError` (cite path, "empty file") and skip.
 2. If cursor has an entry AND cursor.mtime_us == stat.mtime_us AND cursor.size == stat.size → skip.
 3. Otherwise read first 64 KiB and compute `content_sha`. If cursor entry exists AND `content_sha` matches → update cursor mtime/size, skip re-emission.
-4. Otherwise: re-parse, emit all events (the ingester's HWM dedup absorbs duplicates), then write the new cursor row.
+4. Otherwise: re-parse, emit all events (the ingester's SQL-layer idempotent upserts absorb duplicates), then write the new cursor row.
 
-Because event `SourceSeq` is computed deterministically from `(originId, opTreePath)`, replaying produces the SAME `SourceSeq` values as the original emission. The ingester compares each event against the per-source high-water-mark (`canonical-events.md`); only NEW events (e.g. ops added since the last scan) pass through. Therefore the adapter is safe to re-emit every event on every scan; this is the deliberate trade-off for v2's snapshot-not-ledger nature.
+Because event `SourceSeq` is computed deterministically from `(originId, opTreePath)`, replaying produces the SAME `SourceSeq` values as the original emission. Re-emitted events upsert onto the same canonical rows (every writer table has a natural-identity key with `ON CONFLICT`), so duplicates collapse at the SQL layer — there is no per-source high-water-mark gate (a scalar HWM is incompatible with one `sourceID` aggregating many per-file-sequenced files; see `ingester.md` §Dedup and Idempotency and SOW-0015). Therefore the adapter is safe to re-emit every event on every scan; this is the deliberate trade-off for v2's snapshot-not-ledger nature.
 
 Cursor checkpointing: the adapter emits a `SourceProgressEvent` every N files during backfill (proposed N=1000) and after each watch-driven scan. The ingester persists `cursor` into the `sources` table per `data-model.md`.
 
@@ -334,7 +334,7 @@ The adapter therefore:
 
 If a future v2 file contains `childSessionRef` (without `childSession`) — produced when the v3 path was active but a v2 snapshot was still being written for compatibility — the adapter emits the session-kind op but does NOT recurse. The ingester records the link by native_id and reconciles when the referenced session is ingested from elsewhere. In the operator's current dataset this is rare (0/50 random samples). The adapter MUST be defensive: a `childSessionRef` whose `sessionId` is never observed elsewhere is fine — the child session row remains a stub (`status: 'unknown'`).
 
-If the same child traceId appears BOTH embedded in a parent AND as its own file (theoretical — never observed in operator data), the adapter MUST emit child events from both passes; the ingester's HWM dedup absorbs duplicates because `SourceSeq` is computed from `(originId-of-the-file-being-scanned, opTreePath-in-that-file)`. Note: the SAME canonical session row is updated from both passes — `sessions.native_id` is the child's traceId, identical in both emissions, and the ingester upserts by `(source_id, native_id)`.
+If the same child traceId appears BOTH embedded in a parent AND as its own file (theoretical — never observed in operator data), the adapter MUST emit child events from both passes; the ingester's SQL-layer idempotent upserts absorb duplicates because `SourceSeq` is computed from `(originId-of-the-file-being-scanned, opTreePath-in-that-file)`. Note: the SAME canonical session row is updated from both passes — `sessions.native_id` is the child's traceId, identical in both emissions, and the ingester upserts by `(source_id, native_id)`.
 
 ## Edge Cases
 
@@ -370,7 +370,7 @@ If the same child traceId appears BOTH embedded in a parent AND as its own file 
 
 10. **`payload.ref` paths escaping `<sessions-dir>`.** A malformed ref like `path: "../../../../etc/passwd"` would resolve outside the sessions root. The adapter MUST validate that the resolved absolute path is a descendant of `<sessions-dir>`; otherwise emit `SourceError` and skip the ref. This mirrors `readEvidencePayload` (`ai-agent.git/src/evidence/reader.ts`) which rejects path-escaping refs.
 
-11. **Concurrent shared-filename writes (root + descendants).** Because all descendants of a root session share the same filename, multiple producer processes (or one process with concurrent sub-agents) may racingly rename to the same final path. POSIX rename is atomic, so partial reads are impossible; the adapter just sees a different snapshot on each event. The adapter must accept that the file's CONTENT may flip between "child-only opTree" and "parent-with-children opTree" depending on which write was most recent — the parent's final write typically wins, but during execution the file may transiently show a child subtree. Re-scanning emits all events; the ingester's HWM and stable `SourceSeq` ensure no duplication. Per-session canonical rows converge to the final state once the parent's `final` snapshot lands.
+11. **Concurrent shared-filename writes (root + descendants).** Because all descendants of a root session share the same filename, multiple producer processes (or one process with concurrent sub-agents) may racingly rename to the same final path. POSIX rename is atomic, so partial reads are impossible; the adapter just sees a different snapshot on each event. The adapter must accept that the file's CONTENT may flip between "child-only opTree" and "parent-with-children opTree" depending on which write was most recent — the parent's final write typically wins, but during execution the file may transiently show a child subtree. Re-scanning emits all events; the ingester's SQL-layer idempotent upserts (keyed on natural identity) ensure no duplication. Per-session canonical rows converge to the final state once the parent's `final` snapshot lands.
 
 ## Performance Considerations
 

@@ -8,7 +8,7 @@ The canonical event model is **deliberately wider than any single source format*
 
 ## Event Types
 
-Defined in `internal/canonical/events.go`. All events carry: `SourceID string`, `SourceSeq uint64` (monotonic-per-source dedup key), `Ts int64` (microseconds UTC).
+Defined in `internal/canonical/events.go`. All events carry: `SourceID string`, `SourceSeq uint64` (monotonic per file; observability counter, NOT a dedup key — see §Ordering Guarantees, §Idempotency, and ingester.md §Dedup and Idempotency), `Ts int64` (microseconds UTC).
 
 ```go
 type Event interface {
@@ -266,11 +266,11 @@ The full per-format projection lives in each adapter spec. High-level cross-walk
 
 - Within a single session, the adapter MUST emit events in chronological order (turn 1 start before turn 2 start, etc.).
 - Across sessions, no ordering guarantee is required. The ingester orders by `Ts`.
-- `SourceSeq` is monotonic **per source** and used only for dedup, not ordering.
+- `SourceSeq` is monotonic **per file**, not per source. The ingester records the max seen per source in `source_progress.last_seq` as an observability counter only — it is NOT used for ordering or dedup.
 
 ## Idempotency
 
-- Every event has a stable `SourceSeq`. The ingester maintains a high-water-mark per source and discards events with `SourceSeq <= hwm`.
+- `SourceSeq` is NOT a dedup gate: one source aggregates many independently-sequenced files, so a per-source scalar watermark would drop valid events (SOW-0015). Idempotency is enforced at the SQL layer — every writer table uses idempotent upserts keyed on a natural identity, so re-emitted events never duplicate rows. See `ingester.md` §Dedup and Idempotency.
 - `*Finalized` events are upserts: if the corresponding `*Started` arrives later, the ingester reconciles (`Ts` from Started, fields from Finalized).
 - Re-scanning the same source files MUST NOT produce duplicate rows.
 - For snapshot-based sources (ai-agent v2 rewrites the whole file on every snapshot): the adapter computes per-session content deltas using `(seq, contentHash)` cursors so re-reading the same file produces zero new events when nothing changed.

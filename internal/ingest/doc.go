@@ -6,7 +6,7 @@
 // Architecture
 //
 //	adapter.Scan/Tail → chan canonical.Event → worker → batched tx →
-//	    SQLite + dedup HWM + aggregates + catalog + parent resolver
+//	    SQLite (idempotent upserts) + aggregates + catalog + parent resolver
 //
 // One worker goroutine per source drains its channel into a per-source
 // in-memory accumulator. Each accumulator flushes when it reaches the
@@ -16,13 +16,19 @@
 // re-computes aggregates over the dirty session/turn set, persists
 // source_progress, and commits.
 //
-// # Dedup
+// # Dedup and idempotency
 //
-// The ingester maintains a per-source high-water-mark loaded at Start
-// from source_progress.last_seq. Events with SourceSeq <= hwm are
-// dropped before any SQL is issued. The HWM advances atomically with
-// the batch commit so a kill-9 between batches resumes at the right
-// offset on restart.
+// There is no per-source scalar high-water-mark event-drop: one sourceID
+// aggregates many independently-sequenced files, so a scalar watermark
+// silently drops valid events and orphans FK children (SOW-0015).
+// Instead, resume-skipping is the adapter cursor's job (per-file offsets
+// loaded from source_progress.cursor), and event-level idempotency is a
+// SQL-layer guarantee — every writer table uses idempotent upserts
+// (ON CONFLICT) keyed on a natural identity, so re-emitted events never
+// duplicate rows regardless of ordering. source_progress.last_seq is
+// retained only as an observability counter (max SourceSeq seen),
+// surfaced via /api/health. See .agents/sow/specs/ingester.md
+// §Dedup and Idempotency.
 //
 // # Parent linkage
 //

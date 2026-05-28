@@ -41,9 +41,9 @@ type healthResponse struct {
 // healthSource is the per-source health row reported alongside the
 // global status.
 //
-// LastSeq is the adapter's opaque per-source high-water mark from
-// source_progress.last_seq. Semantics depend on the adapter and are
-// NOT a portable event count:
+// LastSeq is the adapter's opaque per-source observability counter (max
+// SourceSeq seen) from source_progress.last_seq; NOT a dedup gate.
+// Semantics depend on the adapter and are NOT a portable event count:
 //   - aiagent_v3 packs `ledgerSeq << 12 | subIdx`, so it grows
 //     roughly linearly with events emitted by that source.
 //   - aiagent_v2 packs FNV-64(originId, opTree path), which is an

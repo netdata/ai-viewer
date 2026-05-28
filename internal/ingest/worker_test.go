@@ -85,11 +85,18 @@ func TestWorker_FlushesAtInterval(t *testing.T) {
 	}
 }
 
-// TestWorker_DedupHWMDropsReplays verifies the HWM-based dedup.
-func TestWorker_DedupHWMDropsReplays(t *testing.T) {
+// TestWorker_LowSeqEventsNotDropped pins SOW-0015's new contract: the
+// per-source last_seq counter is NOT a dedup gate. Events whose
+// SourceSeq is at or below a previously-persisted last_seq still flow to
+// the writer (one sourceID aggregates many per-file sequences, so a
+// scalar watermark cannot dedup). All four sessions persist, and the
+// counter advances to the batch maximum. SQL-layer idempotency — not a
+// watermark — prevents duplicate rows on re-scan (see
+// TestWorker_ReScanIdempotency).
+func TestWorker_LowSeqEventsNotDropped(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	// Seed source_progress so HWM=10 is already in place.
+	// Seed source_progress so the observability counter starts at 10.
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, `INSERT INTO sources (id, format, location, created_at) VALUES ('aiagent_v3:/tmp', 'aiagent_v3', '/tmp', 0)`); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -100,7 +107,7 @@ func TestWorker_DedupHWMDropsReplays(t *testing.T) {
 
 	i, err := New(db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2),
+		WithBatchSize(4),
 		WithBatchInterval(time.Second),
 	)
 	if err != nil {
@@ -112,25 +119,24 @@ func TestWorker_DedupHWMDropsReplays(t *testing.T) {
 	defer func() { _ = i.Stop() }()
 
 	ch := make(chan canonical.Event, 8)
-	// SourceSeq=5 — below HWM, dropped.
+	// SourceSeq=5 — at/below the seeded counter; MUST still be written.
 	ch <- canonical.SessionStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 5, Ts: 500},
-		NativeID:  "dropped", RootNativeID: "dropped", Kind: canonical.KindRoot,
+		NativeID:  "below-counter", RootNativeID: "below-counter", Kind: canonical.KindRoot,
 	}
-	// SourceSeq=10 — equal to HWM, dropped.
+	// SourceSeq=10 — equal to the seeded counter; MUST still be written.
 	ch <- canonical.SessionStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 10, Ts: 1000},
-		NativeID:  "also-dropped", RootNativeID: "also-dropped", Kind: canonical.KindRoot,
+		NativeID:  "equal-counter", RootNativeID: "equal-counter", Kind: canonical.KindRoot,
 	}
-	// SourceSeq=11 — written.
 	ch <- canonical.SessionStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 11, Ts: 1100},
-		NativeID:  "kept", RootNativeID: "kept", Kind: canonical.KindRoot,
+		NativeID:  "above1", RootNativeID: "above1", Kind: canonical.KindRoot,
 	}
-	// SourceSeq=12 — written; trips batchSize=2.
+	// SourceSeq=12 — trips batchSize=4.
 	ch <- canonical.SessionStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 12, Ts: 1200},
-		NativeID:  "kept2", RootNativeID: "kept2", Kind: canonical.KindRoot,
+		NativeID:  "above2", RootNativeID: "above2", Kind: canonical.KindRoot,
 	}
 	if err := i.Submit("aiagent_v3:/tmp", ch); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -138,15 +144,15 @@ func TestWorker_DedupHWMDropsReplays(t *testing.T) {
 	defer close(ch)
 
 	if !waitFor(2*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 2
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 4
 	}) {
-		t.Fatalf("dedup did not run; sessions=%d", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
+		t.Fatalf("low-seq events were dropped; sessions=%d, want 4", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
 	}
-	if scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='dropped'`) != 0 {
-		t.Errorf("dropped event was written")
+	if scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='below-counter'`) != 1 {
+		t.Errorf("event below the counter was dropped (SOW-0015 regression)")
 	}
 	if got := i.HWM("aiagent_v3:/tmp"); got != 12 {
-		t.Errorf("HWM after batch = %d, want 12", got)
+		t.Errorf("observability counter after batch = %d, want 12", got)
 	}
 }
 

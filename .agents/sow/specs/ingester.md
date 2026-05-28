@@ -12,7 +12,7 @@ main()
   ├─ open SQLite (OpenWriter), run migrations
   ├─ construct Ingester(db, pricer, logger)
   ├─ Ingester.Start(ctx)
-  │     ├─ load per-source HWM cache from source_progress
+  │     ├─ load per-source observability seq counter from source_progress.last_seq
   │     └─ start background resolver goroutine (5 s ticker)
   ├─ for each source:
   │    ├─ instantiate adapter via registry (ParseCursor from source_progress.cursor)
@@ -40,7 +40,8 @@ only writer (per `data-model.md` §single-writer invariant).
 func New(db *sql.DB, opts ...Option) (*Ingester, error)
 
 // Start begins the resolver goroutine. Must be called once before any
-// Submit. Returns an error if the HWM cache cannot be loaded.
+// Submit. Returns an error if the per-source seq counter cannot be
+// loaded from source_progress.
 func (i *Ingester) Start(ctx context.Context) error
 
 // Submit attaches a source's event channel to the ingester. One worker
@@ -81,37 +82,99 @@ Flush:
 1. `db.BeginTx(ctx, nil)`.
 2. Apply every event in arrival order via per-kind UPSERTs (writer.go).
 3. Recompute session/turn aggregates over the dirty set (aggregates.go).
-4. `UPDATE source_progress SET last_seq=MAX(last_seq, batch_max_seq), cursor=last_cursor, updated_at=now()`.
+4. `UPDATE source_progress SET last_seq=MAX(last_seq, batch_max_seq), cursor=last_cursor, updated_at=now()`. `last_seq` is an observability counter (max `SourceSeq` seen), not a dedup gate — see §Dedup and Idempotency.
 5. `tx.Commit()`.
 
 On error: `tx.Rollback()`, log a structured error via `opts.OnError` (or default `logger.Error`), advance past the offending batch and continue. The offending events are NOT retried — they are logged for operator triage. A SourceErrorEvent is also written for visibility in `/api/health` (Chunk 11).
 
-## Dedup
+## Dedup and Idempotency
 
-The ingester maintains an in-memory **per-source high-water-mark (HWM)**:
+Dedup has two independent layers with a strict division of labour. **No
+per-source scalar high-water-mark gates events.**
 
-```go
-type Ingester struct {
-    hwm map[string]uint64 // sourceID -> last_seq
-    ...
-}
-```
+### Why no scalar high-water-mark
 
-Loaded at `Start()` from `source_progress.last_seq`. Updated atomically with each batch commit.
+A single `sourceID` aggregates every session file under a source root
+(e.g. `aiagent_v3:/<root>/.ai-agent/sessions` covers hundreds of files).
+A per-source scalar high-water-mark assumes `SourceSeq` is monotonic
+across everything under that `sourceID` — but it is not, for either
+adapter:
 
-Per-event check:
+- **aiagent_v2**: `SourceSeq = FNV-64(originId::path)` — a content hash,
+  non-monotonic by design (it is a stable identifier for idempotent
+  re-scans, not an ordering).
+- **aiagent_v3**: `SourceSeq = packSeq(ledgerSeq, subIdx) = ledgerSeq<<12 |
+  subIdx` — monotonic only **per file**. Each file's ledger restarts at
+  1, so values are non-monotonic across files under one `sourceID`.
 
-```go
-if ev.EventSourceSeq() <= hwm[ev.EventSourceID()] {
-    drop // already seen
-}
-```
+A scalar HWM therefore silently drops valid events: once events from one
+file advance the HWM, lower-valued events from another file are dropped.
+When the dropped event is the `OpStartedEvent` that creates the `ops`
+row, a surviving child `PayloadRefEvent`/`LogEntryEvent` with a higher
+`SourceSeq` then trips `FOREIGN KEY constraint failed (787)` because its
+parent `ops` row was never written. This is a structural mismatch, not a
+tuning problem; it cannot be fixed by a format-aware "monotonic" flag
+because v3 is also non-monotonic at the source-root level. The scalar
+HWM event-drop is therefore removed.
 
-`source_progress.last_seq` is the durable HWM; `source_progress.cursor` is the durable resume point. The two advance together inside the batch transaction so a restart resumes correctly even if the binary is killed mid-flush.
+### Layer 1 — resume skipping is the adapter cursor's job
 
-`SourceProgressEvent` carries no `SourceSeq` (it sits at zero by convention) — it only updates `source_progress.cursor` and `updated_at` without advancing the HWM.
+Resume after a restart is handled entirely by the adapter **cursor**, not
+by any ingest-side watermark:
 
-Idempotency at the SQL layer: every `*Started`/`*Updated`/`*Finalized` event uses `INSERT ... ON CONFLICT DO UPDATE` with `COALESCE` on update so a replayed event after a crash produces the same row state. Re-emitted events from a re-scan are caught by the HWM first; the UPSERT is the second line of defence.
+- aiagent_v3 tracks per-file byte offsets in its `Cursor.Files`.
+- aiagent_v2 tracks per-file content state.
+
+The cursor is loaded at startup from `source_progress.cursor` and passed
+to `Scan`. Each adapter emits each file's events once in adapter order
+(`OpStarted` before its `PayloadRef`/`LogEntry`), so within a single
+`Scan` the parent `ops` row always exists before any child insert in the
+same batch.
+
+`SourceProgressEvent` carries no `SourceSeq` (it sits at zero by
+convention) — it only updates `source_progress.cursor` and `updated_at`.
+
+### Layer 2 — event-level idempotency is a SQL-layer guarantee
+
+Every writer table absorbs re-emission (a Tail re-read on mtime advance,
+or a re-scan of a changed file) at the SQL layer:
+
+- `sessions`, `turns`, `ops` use `INSERT ... ON CONFLICT DO UPDATE` with
+  `COALESCE` on update, keyed on their natural identity (`(source_id,
+  native_id)`, `(session_id, seq)`, `(turn_id, seq)`).
+- `payload_refs` and `log_entries` (migration `0003`) carry
+  natural-identity UNIQUE indexes and insert with `ON CONFLICT DO
+  NOTHING`:
+  - `payload_refs`: UNIQUE `(op_id, kind, location_uri)` — an op has at
+    most one payload per `(kind, location)`.
+  - `log_entries`: UNIQUE expression index over
+    `(COALESCE(session_id,''), COALESCE(source_id,''),
+    COALESCE(op_id,''), COALESCE(turn_id,''), ts, severity, source,
+    message, COALESCE(extras_json,''))`. The `COALESCE` sentinels make
+    re-emitted NULL-owner rows collide (raw SQL NULLs are distinct in a
+    UNIQUE index). `turn_id` is part of the key so two genuinely-distinct
+    turn-scoped log lines (turn set, op NULL) in different turns of the
+    same session are not false-deduped. `extras_json` is the last keyed
+    column so the key covers every persisted content column — a log row
+    is a duplicate iff it is byte-identical, and two logs identical except
+    for their extras (e.g. v2 stores the source `path` in extras) stay
+    distinct. Omitting any persisted column reintroduces false-dedup data
+    loss; the writer's `ON CONFLICT` target matches this expression list
+    character-for-character.
+
+This promotes the "idempotent ingest" invariant from a fragile
+dedup-layer optimisation to a SQL-layer guarantee that holds regardless
+of event ordering or batch boundaries. The natural-identity canonical
+IDs (`canonicalOpID`, etc.) are deterministic across runs, so a replayed
+event resolves to the same row.
+
+### `source_progress.last_seq` is an observability counter only
+
+`source_progress.last_seq` still records the maximum `SourceSeq` seen per
+source (advanced atomically with the batch that wrote it) and is surfaced
+via `/api/health`. It is **never** read as a dedup gate. `cursor` remains
+the durable resume point and advances together with the batch inside the
+same transaction.
 
 ## Link Resolution
 

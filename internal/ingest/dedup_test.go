@@ -62,28 +62,6 @@ func TestHWMCache_LoadNegativeClamped(t *testing.T) {
 	}
 }
 
-func TestHWMCache_IsAfter(t *testing.T) {
-	t.Parallel()
-	c := newHWMCache()
-	c.Advance("src", 100)
-	cases := []struct {
-		seq  uint64
-		want bool
-	}{
-		{0, false},
-		{1, false},
-		{99, false},
-		{100, false},
-		{101, true},
-		{200, true},
-	}
-	for _, tc := range cases {
-		if got := c.IsAfter("src", tc.seq); got != tc.want {
-			t.Errorf("IsAfter(seq=%d) = %v, want %v", tc.seq, got, tc.want)
-		}
-	}
-}
-
 func TestHWMCache_AdvanceMonotonic(t *testing.T) {
 	t.Parallel()
 	c := newHWMCache()

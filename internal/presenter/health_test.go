@@ -266,8 +266,9 @@ func TestHealth_SourceLastSeenAtNullStaysOK(t *testing.T) {
 
 // TestHealth_ReportsSourceProgressJoin asserts the per-source last_seq
 // reflects source_progress.last_seq when the row is present. last_seq is
-// the adapter's opaque high-water mark, NOT a portable event count —
-// see healthSource doc comment for the semantics per adapter.
+// the adapter's opaque observability counter (max SourceSeq seen), NOT a
+// dedup gate and NOT a portable event count — see healthSource doc
+// comment for the semantics per adapter.
 func TestHealth_ReportsSourceProgressJoin(t *testing.T) {
 	t.Parallel()
 	p, db, cleanup := newTestPresenter(t)

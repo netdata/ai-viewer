@@ -23,7 +23,7 @@ JSON over HTTP. All endpoints return `application/json` except `/api/payloads/:r
 {
   "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
-  "schema_version": 1,
+  "schema_version": 3,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,
@@ -40,10 +40,11 @@ for the contract (degraded/down rules, `last_seq` semantics, etc.).
 This REST spec only documents the wire shape so client authors do not
 have to cross-read the observability spec to know which fields exist.
 
-`last_seq` is the adapter's opaque per-source high-water mark — see
-observability.md §`/api/health` for the per-adapter semantics. It is
-NOT a portable event count; the field was renamed from the original
-`events_ingested_total` in iteration 2 of SOW-0001 Chunk 11. The
+`last_seq` is a per-source observability counter (the max `SourceSeq`
+seen for that source) — see observability.md §`/api/health` for the
+per-adapter semantics. It is NOT a dedup gate and NOT a portable event
+count; the field was renamed from the original `events_ingested_total`
+in iteration 2 of SOW-0001 Chunk 11. The
 `db_size_bytes` and per-source `location` fields landed in iteration 5
 of the same chunk as a spec ↔ code parity fix once codex flagged they
 were emitted by the binary but absent from this spec.
@@ -52,7 +53,9 @@ were emitted by the binary but absent from this spec.
 
 Full source list with cursor metadata. Used by the Sources admin panel.
 Each item carries the per-source `last_seq` (opaque adapter
-high-water mark, identical semantics to `/api/health.sources[].last_seq`),
+observability counter = max SourceSeq seen; NOT a dedup gate and NOT a
+portable event count — identical semantics to
+`/api/health.sources[].last_seq`),
 the persisted `cursor`, and the `updated_at` timestamp of the last
 writer commit. HEAD is supported on both `/api/health` and
 `/api/sources` and returns the same status + headers with an empty

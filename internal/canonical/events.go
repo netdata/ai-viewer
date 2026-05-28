@@ -101,8 +101,13 @@ type Event interface {
 	EventKind() EventKind
 	// EventSourceID returns the source the event originated from.
 	EventSourceID() string
-	// EventSourceSeq returns the monotonic-per-source sequence number
-	// used as the dedup key.
+	// EventSourceSeq returns the SourceSeq identifier. SourceSeq is a
+	// deterministic, stable-across-rescans per-event identifier. v3 packs a
+	// monotonic-per-file sequence; v2 is a content hash (not monotonic). It
+	// is an observability counter (max seen recorded in
+	// source_progress.last_seq), NOT a dedup gate or ordering key — dedup is
+	// a SQL-layer guarantee. See the SourceSeq field doc on EventBase and
+	// ingester.md §Dedup and Idempotency.
 	EventSourceSeq() uint64
 	// EventTs returns the event timestamp in UNIX-microseconds (UTC).
 	EventTs() int64
@@ -117,8 +122,12 @@ type EventBase struct {
 	// SourceID identifies the source the event was produced from
 	// (e.g. "aiagent-v3:/home/user/.ai-agent/sessions").
 	SourceID string
-	// SourceSeq is monotonic per source and used for dedup, not
-	// ordering. The ingester maintains a high-water-mark per source.
+	// SourceSeq is a deterministic, stable-across-rescans per-event
+	// identifier. v3 packs a monotonic-per-file sequence; v2 is a content
+	// hash (not monotonic). It is an observability counter (max seen
+	// recorded in source_progress.last_seq), NOT a dedup gate or ordering
+	// key — dedup is a SQL-layer guarantee (idempotent upserts); resume is
+	// the adapter Cursor's job. See ingester.md §Dedup and Idempotency.
 	SourceSeq uint64
 	// Ts is the event timestamp in UNIX-microseconds (UTC). The
 	// ingester orders events by Ts within a session.

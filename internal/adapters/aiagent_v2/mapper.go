@@ -620,8 +620,11 @@ func endTsOrStarted(node opTree) int64 {
 
 // baseEvent constructs the canonical EventBase for an event whose
 // per-file-path identity is `path`. SourceSeq is FNV-64 of
-// `originId::path` so the same opTree node yields the same SourceSeq
-// across rescans, enabling the ingester's HWM dedup.
+// `originId::path` — a deterministic, stable-across-rescans per-node
+// identifier (observability counter; NOT a dedup gate). Re-emission on
+// rescan is absorbed by the ingester's SQL-layer idempotent upserts,
+// which key on each table's natural identity, not on SourceSeq. See
+// ingester.md §Dedup and Idempotency.
 func baseEvent(ctx *mapContext, path string, ts int64) canonical.EventBase {
 	return canonical.EventBase{
 		SourceID:  ctx.sourceID,

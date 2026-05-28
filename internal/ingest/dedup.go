@@ -7,21 +7,29 @@ import (
 	"sync"
 )
 
-// hwmCache is the per-source high-water-mark cache. The ingester loads
-// it at Start() from source_progress.last_seq and updates it atomically
-// with every batch commit. Events with SourceSeq <= cached value are
-// dropped before any SQL touches the database.
+// hwmCache is the per-source max-SourceSeq observability counter. The
+// ingester loads it at Start() from source_progress.last_seq and
+// advances it atomically with every batch commit so the running maximum
+// surfaces via /api/health.
+//
+// It is NOT a dedup gate. A per-source scalar high-water-mark cannot
+// dedup events because one sourceID aggregates many independently
+// sequenced files (SourceSeq is per-file, not per-source); using it to
+// drop events silently lost valid rows and orphaned FK children
+// (SOW-0015). Resume-skipping is the adapter cursor's job; event-level
+// idempotency is a SQL-layer guarantee. See ingester.md §Dedup and
+// Idempotency.
 //
 // The cache is keyed by sourceID (the canonical Event.SourceID()).
-// Concurrent access is safe via sync.RWMutex — workers read on every
-// event, writers (one per batch commit) take the write lock briefly.
+// Concurrent access is safe via sync.RWMutex — Advance takes the write
+// lock briefly per batch commit; Get reads it for observability.
 type hwmCache struct {
 	mu  sync.RWMutex
 	hwm map[string]uint64
 }
 
-// newHWMCache returns an empty cache. Load() populates it from the
-// database.
+// newHWMCache returns an empty observability counter cache. Load()
+// populates it from the database.
 func newHWMCache() *hwmCache {
 	return &hwmCache{hwm: make(map[string]uint64)}
 }
@@ -60,17 +68,9 @@ func (c *hwmCache) Load(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// IsAfter reports whether seq is strictly greater than the cached HWM
-// for sourceID. Returns true for any sourceID not yet seen (HWM=0).
-func (c *hwmCache) IsAfter(sourceID string, seq uint64) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return seq > c.hwm[sourceID]
-}
-
-// Advance updates the cached HWM for sourceID to max(current, seq).
-// Workers call this after a batch commit so dropped events from the
-// next batch are caught at IsAfter.
+// Advance updates the cached max-seq counter for sourceID to
+// max(current, seq). Workers call this after a batch commit so the
+// counter mirrors source_progress.last_seq for observability.
 func (c *hwmCache) Advance(sourceID string, seq uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -79,8 +79,9 @@ func (c *hwmCache) Advance(sourceID string, seq uint64) {
 	}
 }
 
-// Get returns the current HWM for sourceID; 0 if not yet seen. Used by
-// tests to verify the dedup state after a batch.
+// Get returns the current max-seq counter for sourceID; 0 if not yet
+// seen. Surfaced via Ingester.HWM for /api/health and used by tests to
+// verify the counter advanced after a batch.
 func (c *hwmCache) Get(sourceID string) uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

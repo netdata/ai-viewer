@@ -377,7 +377,7 @@ When a new `session` row appears (delta on `session` table):
   - `Model = json_extract(session.model, '$.id')` if non-NULL
   - `Extras = { providerID, variant, project_id, directory, version, slug, title }`
 - `Ts = session.time_created * 1000` (convert ms→µs)
-- `SourceSeq = monotonic counter` (see Idempotency)
+- `SourceSeq = deterministic per-event identifier` (stable across rescans; observability counter, not a dedup gate — see Idempotency)
 
 When `session.time_updated` changes for a row already known:
 
@@ -482,7 +482,7 @@ Op | Source field |
 
 7. **`event` / `event_sequence` tables empty.** They exist in the schema but are unused on the operator's DB. The adapter ignores them. If opencode starts populating `event` in a future version, the adapter logs an INF and continues; a follow-up SOW will integrate it (it may give us monotonic per-session sequence numbers we currently synthesize).
 
-8. **Compaction reshapes data.** When opencode compacts a session, message and part rows can change (text/tool output get summarized, marker `compaction` parts get inserted). The adapter detects this via `time_updated` and `time_compacting`. Strategy: when `time_compacting` becomes non-NULL the adapter pauses delta reads for that session until `time_compacting` returns to NULL, then re-reads the whole session's messages and parts and emits `SessionUpdatedEvent`+re-emits ops with new content (the ingester deduplicates by SourceSeq). Compaction is rare (432 out of 127k messages = 0.3%).
+8. **Compaction reshapes data.** When opencode compacts a session, message and part rows can change (text/tool output get summarized, marker `compaction` parts get inserted). The adapter detects this via `time_updated` and `time_compacting`. Strategy: when `time_compacting` becomes non-NULL the adapter pauses delta reads for that session until `time_compacting` returns to NULL, then re-reads the whole session's messages and parts and emits `SessionUpdatedEvent`+re-emits ops with new content (the ingester absorbs the re-emission via SQL-layer idempotent upserts, not a `SourceSeq` gate). Compaction is rare (432 out of 127k messages = 0.3%).
 
 9. **Cross-process WAL inheritance.** If opencode crashes mid-transaction, the WAL file may contain uncommitted pages. SQLite handles this transparently on the next open: any reader sees only committed pages. We rely on this — never call `wal_checkpoint`.
 

@@ -14,7 +14,8 @@ import (
 // writer applies one canonical event to one *sql.Tx. The writer is
 // stateless — every method is a function of (tx, event, sourceID,
 // sourceFormat). State that spans events within a batch (dirty sets,
-// HWM advance) is owned by the worker that drives this writer.
+// the max-SourceSeq observability counter) is owned by the worker that
+// drives this writer.
 type writer struct {
 	sourceID     string
 	sourceFormat string
@@ -27,7 +28,8 @@ type writer struct {
 	dirtySessionIDs map[string]struct{}
 	dirtyTurnIDs    map[string]struct{}
 	// batchMaxSeq tracks the maximum SourceSeq applied in the current
-	// batch so the worker can advance the HWM atomically.
+	// batch so the worker can advance the observability counter
+	// (source_progress.last_seq) atomically. NOT a dedup gate.
 	batchMaxSeq uint64
 	// lastCursor records the most recent SourceProgressEvent.Cursor
 	// applied in the current batch so source_progress.cursor advances
@@ -73,6 +75,34 @@ type writer struct {
 	// the priced op. Cleared at resetBatch().
 	batchObservabilityErrs []error
 }
+
+// logEntryOnConflict is the ON CONFLICT clause appended to every
+// log_entries INSERT. The conflict target repeats the expression list of
+// idx_log_entries_identity (migration 0003) so a re-emitted row collides
+// instead of duplicating. The COALESCE sentinels make NULL-owner rows
+// (source-level parse errors / pricing misses, or session-level logs)
+// match on replay — raw SQL NULLs are distinct in a UNIQUE index. turn_id
+// is part of the target: turn-scoped logs with op_id NULL but distinct
+// turns must NOT collapse into one row. The expression list MUST match
+// idx_log_entries_identity character-for-character (SQLite requires the
+// conflict target to match the index expression). See ingester.md §Dedup
+// and Idempotency.
+//
+// INVARIANT: this conflict target MUST list every persisted log_entries
+// content column (everything except the autoincrement id). A log row is a
+// duplicate iff it is byte-identical; omitting any persisted column
+// reintroduces false-dedup data loss (see SOW-0015 iter-2 turn_id,
+// iter-4 extras_json). When adding a column to the log_entries INSERT,
+// add it here AND to idx_log_entries_identity in the same commit.
+const logEntryOnConflict = `
+ON CONFLICT (
+    COALESCE(session_id, ''),
+    COALESCE(source_id, ''),
+    COALESCE(op_id, ''),
+    COALESCE(turn_id, ''),
+    ts, severity, source, message,
+    COALESCE(extras_json, '')
+) DO NOTHING`
 
 // pricingMissKey identifies a pricing-miss SourceError dedup slot.
 // Lower-cased so case variants (e.g. "Anthropic" vs "anthropic") fold
@@ -454,7 +484,7 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 		var provider, model, kind sql.NullString
 		var startTs sql.NullInt64
 		// sql.ErrNoRows is expected (op start may have been ingested in
-		// a prior batch that's been pruned, or skipped for dedup). Any
+		// a prior batch, or not yet arrived in this scan). Any
 		// other error means the database is unhealthy and silently
 		// returning zero cost would violate the "no silent failures"
 		// invariant in AGENTS.md.
@@ -631,7 +661,7 @@ func (w *writer) emitPricingMiss(ctx context.Context, tx *sql.Tx, provider, mode
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (NULL, ?, NULL, NULL, ?, 'WRN', ?, ?, ?)
-`, w.sourceID, tsUS, w.sourceFormat, msg, string(extras)); err != nil {
+`+logEntryOnConflict, w.sourceID, tsUS, w.sourceFormat, msg, string(extras)); err != nil {
 		return fmt.Errorf("writer: insert pricing-miss log: %w", err)
 	}
 	// Mark the key only AFTER the INSERT succeeds. The mark lives in
@@ -663,9 +693,14 @@ func (w *writer) applyPayloadRef(ctx context.Context, tx *sql.Tx, ev canonical.P
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	opID := canonicalOpID(turnID, ev.OpSeq)
+	// ON CONFLICT DO NOTHING on the natural identity
+	// (op_id, kind, location_uri) makes the write idempotent: re-emitting
+	// the same payload (Tail re-read, file re-scan) never duplicates the
+	// row. See migration 0003 and ingester.md §Dedup and Idempotency.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes, sha256)
 VALUES (?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, ''))
+ON CONFLICT (op_id, kind, location_uri) DO NOTHING
 `,
 		opID, ev.PayloadKind, ev.Format, ev.Compression, ev.LocationURI,
 		ev.OriginalBytes, ev.StoredBytes, ev.SHA256,
@@ -701,7 +736,7 @@ func (w *writer) applyLogEntry(ctx context.Context, tx *sql.Tx, ev canonical.Log
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
-`, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras); err != nil {
+`+logEntryOnConflict, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras); err != nil {
 		return fmt.Errorf("writer: insert log_entry: %w", err)
 	}
 	w.markDirtySession(sessionID)
@@ -735,7 +770,7 @@ func (w *writer) applySourceError(ctx context.Context, tx *sql.Tx, ev canonical.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (NULL, ?, NULL, NULL, ?, 'ERR', ?, ?, ?)
-`, w.sourceID, ev.Ts, w.sourceFormat, ev.Message, string(extras)); err != nil {
+`+logEntryOnConflict, w.sourceID, ev.Ts, w.sourceFormat, ev.Message, string(extras)); err != nil {
 		return fmt.Errorf("writer: insert source error log: %w", err)
 	}
 	return nil
