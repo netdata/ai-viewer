@@ -5907,6 +5907,20 @@ Final gates (frontend, master-verified after iter-3): `tsc --noEmit` 0; `eslint
 93.3% branches (`sse.ts` 98.68%, `stats.ts` 100%); `vite build` 84.56 KB
 gzipped. No operator home-path, no secrets in `frontend/`.
 
+**CI fix (post-PR).** The first PR-16 CI run failed the `frontend` job: the CI
+workflow runs `npm run e2e` (Playwright) whenever `package.json` has an `e2e`
+script, and the scaffold defined one — but there are NO E2E specs yet (Chunk 18)
+and the playwright `webServer` (`npm run preview`) timed out at 120 s (CI also
+runs `build` AFTER e2e, so `dist/` was absent). Fix: removed the `e2e` script
+from `package.json` so CI's "Detect Playwright" step sees it absent and SKIPS
+the Playwright install + E2E steps until Chunk 18; trimmed `playwright.config.ts`
+to a skeleton (no `webServer`; baseURL points at the serve binary's `:7710`).
+Lesson recorded: run the EXACT CI gate set locally (incl. `npm run e2e`), not
+just typecheck/lint/test/build. **Chunk-18 follow-ups** (the proper E2E chunk):
+re-add the `e2e` script + specs; configure the `webServer` to boot the Go
+`ai-viewer-serve` binary serving the embedded SPA against a seeded temp DB; and
+fix the CI ordering so `build` runs BEFORE the e2e step.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

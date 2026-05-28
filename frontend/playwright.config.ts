@@ -1,9 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Config only for Chunk 14 — actual E2E specs (theme a11y under dark/light,
-// OS-preference switching, route smoke) land in Chunk 18. Tests live under
-// frontend/tests/. The webServer block boots the Vite preview of the built
-// app so E2E runs against production output; CI will build first.
+// Config skeleton only (Chunk 14). The actual E2E specs (theme a11y under
+// dark/light, OS-preference switching, route + realtime smoke) and the `e2e`
+// npm script land in Chunk 18 — together with a `webServer` block that boots
+// the Go `ai-viewer-serve` binary serving the embedded SPA against a seeded
+// temp DB (the real end-to-end target), NOT a bare `vite preview`. There is
+// intentionally NO `e2e` script in package.json yet, so CI skips the Playwright
+// step until Chunk 18 lands specs. Tests will live under frontend/tests/.
 export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
@@ -11,16 +14,10 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: 'http://127.0.0.1:7710',
     trace: 'on-first-retry',
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],
-  webServer: {
-    command: 'npm run preview',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
 });
