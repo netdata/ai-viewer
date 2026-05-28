@@ -6218,6 +6218,27 @@ SOW-0017 (own PR) plus a scan gate to prevent reappearance.
 on hard reload → JSON 404) — pre-existing Chunk-11 behavior, scoped out per this
 gate, filed as SOW-0016.
 
+**Post-merge hotfix (2026-05-29) — gosec G705 + a false-green merge.** PR #18
+merged with a RED `lint` job. CI's standalone `gosec@latest` "Go — Security"
+step flagged **G705 (XSS via taint)** at `servePublicFile`'s `w.Write(data)` —
+a verified FALSE POSITIVE: `servePublicFile` is registered ONLY on the
+exact-match `/favicon.svg` route, so `name` is never request-varied and the body
+is trusted embedded build output baked into the binary; gosec's taint analyzer
+cannot see the exact-match mux routing (its sibling `serveAsset` streams via
+`io.Copy` and is not flagged). **Suppression (justified per project-quality-gates
+Operating Rule):** `// #nosec G705 -- trusted embedded build output, not
+request-controlled` on the write. Two root causes, both now in the
+project-quality-gates skill: (1) I ran `golangci-lint` locally but NOT the
+SEPARATE standalone `gosec@latest` — golangci's *bundled* gosec is older and
+lacks the G705 analyzer, so golangci=0 hid it; the local gate set must include
+standalone `gosec`, `goimports`, and `govulncheck`. (2) `gh pr checks --watch`
+exited 0 despite the failing `lint` because branch protection has
+`required_status_checks: null`, so `--watch` treats all checks as
+informational; merges must parse per-check `pass` states, never the `--watch`
+exit code. Fixed in PR #19; local `gosec@latest` → Issues: 0 after the
+suppression, full lint set (gofmt/goimports/vet/golangci/gosec/govulncheck)
+green.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

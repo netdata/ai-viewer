@@ -49,6 +49,14 @@ govulncheck ./...
 
 Threshold: zero high/critical findings from gosec; zero known vulnerabilities from govulncheck. Govulncheck runs in CI on a schedule plus every push so newly-disclosed CVEs surface fast.
 
+**GOTCHA — standalone `gosec@latest` ≠ golangci's bundled gosec.** CI's "Go — Security" step installs and runs `gosec@latest` STANDALONE; that version ships newer analyzers (e.g. **G705** XSS-taint) that golangci-lint's older *bundled* gosec does not have. So `golangci-lint run` returning 0 does NOT mean `gosec` passes — they are different gates. Always run the standalone `gosec -severity medium -confidence medium ./...` locally (install with `go install github.com/securego/gosec/v2/cmd/gosec@latest`) AND `goimports -l` AND `govulncheck ./...` before pushing — not just `gofmt`/`vet`/`golangci-lint`/`test`/`build`. (govulncheck exits 0 when a required-but-uncalled module has a CVE — "your code doesn't appear to call" — that is a pass.)
+
+**Suppressions:** gosec honors the **hash** form `// #nosec G705 -- justification` (NOT `//nosec`). Per the Operating Rule, any `#nosec`/`//nolint` MUST be a verified false positive AND justified in the active SOW. Prefer restructuring to the gosec-clean pattern of a sibling handler over suppressing; suppress only when the finding is provably impossible (e.g. body is trusted embedded build output served on an exact-match route).
+
+## Verifying CI Before Merge (do not trust `--watch` exit code)
+
+Branch protection on this repo has `required_status_checks: null` (no *required* checks — see AGENTS.md). Consequence: **`gh pr checks <pr> --watch` can exit 0 even when a check FAILED**, because it only fails on *required* checks. Never gate a merge on the `--watch` exit code alone. Before `gh pr merge`, run `gh pr checks <pr>` and confirm EVERY row reads `pass` (no `fail`/`pending`). A green-looking `--watch` exit with a red `lint`/`gosec` is exactly how a failing build reaches master here.
+
 ### Go — Tests
 
 ```bash
