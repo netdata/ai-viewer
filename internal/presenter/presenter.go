@@ -12,8 +12,9 @@ import (
 // SchemaVersion is the canonical schema version the binary was built
 // against. Bumped together with internal/store/migrations/NNNN_*.sql.
 // Servers refuse to start when the on-disk schema_meta.version is
-// different — see CheckSchema below.
-const SchemaVersion = 1
+// different — see CheckSchema below. SOW-0015 migration 0003 sets
+// schema_meta.version='3'; this constant moves in lockstep.
+const SchemaVersion = 3
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema
 // version disagrees with the binary's expected version. The main()

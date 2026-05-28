@@ -19,7 +19,8 @@ const Format = "aiagent_v3"
 // produce the canonical events' SourceID (e.g.
 // "aiagent_v3:/home/op/.ai-agent/sessions"). The ingester later
 // composes its own sources.id; the SourceID we emit is used only for
-// log attribution and dedup keyed on (SourceID, SourceSeq).
+// log attribution; idempotency is a SQL-layer guarantee keyed on each
+// table's natural identity (not SourceSeq).
 const sourceIDPrefix = Format + ":"
 
 // Adapter is the ai-agent v3 source adapter. Construction is via New

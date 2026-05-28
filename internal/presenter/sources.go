@@ -18,11 +18,11 @@ type sourcesResponse struct {
 // sourceItem is one row from the joined sources + source_progress
 // view. JSON tags use snake_case to match the rest of the REST API.
 //
-// LastSeq is the adapter's opaque per-source high-water mark, NOT a
-// portable event count. See healthSource in health.go for the
-// per-adapter semantics. Comparing last_seq across formats is
-// meaningless; comparing it across two snapshots of the same source
-// tells you whether the writer has advanced.
+// LastSeq is the adapter's opaque per-source observability counter (max
+// SourceSeq seen); NOT a dedup gate and NOT a portable event count. See
+// healthSource in health.go for the per-adapter semantics. Comparing
+// last_seq across formats is meaningless; comparing it across two
+// snapshots of the same source tells you whether the writer has advanced.
 type sourceItem struct {
 	ID          string `json:"id"`
 	Format      string `json:"format"`
@@ -38,9 +38,10 @@ type sourceItem struct {
 }
 
 // handleSources answers GET /api/sources. Returns every configured
-// source with the matching source_progress cursor + HWM. The Sources
-// admin panel (lands in Chunk 15) uses this endpoint to render its
-// per-source diagnostics.
+// source with the matching source_progress cursor + last_seq
+// observability counter (max SourceSeq seen; NOT a dedup gate). The
+// Sources admin panel (lands in Chunk 15) uses this endpoint to render
+// its per-source diagnostics.
 func (p *Presenter) handleSources(w http.ResponseWriter, r *http.Request) {
 	// HEAD parity: same headers as GET, empty body. writeJSON skips
 	// the body when r.Method == HEAD.

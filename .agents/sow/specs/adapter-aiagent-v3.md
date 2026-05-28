@@ -501,7 +501,7 @@ Cache-token counters (`tokensCacheRead`, `tokensCacheWrite`) carry useful signal
 
 ### 5.4 SourceSeq Assignment
 
-Every emitted canonical event needs a stable `SourceSeq` for dedup. The adapter constructs it from the ledger's `(sessionId, seq)` pair using a deterministic packing — for example `SourceSeq = ledger_seq * 1000 + sub_event_index` where `sub_event_index` orders sub-events from one ledger record (turn_start → op[0]_start → op[0]_finalize → payload_ref[0] → ... → turn_end). Exact packing decided at implementation time; the contract is: **monotonic per (source, session) across all ledger lines, stable across rescans**.
+Every emitted canonical event carries a stable `SourceSeq` — a deterministic per-(session, ledger-line) identifier (monotonic per file/session, stable across rescans). It is an observability counter and log-attribution aid, NOT a dedup gate or cross-source ordering key (dedup is a SQL-layer guarantee; see `ingester.md` §Dedup and Idempotency). The adapter constructs it from the ledger's `(sessionId, seq)` pair using a deterministic packing — for example `SourceSeq = ledger_seq * 1000 + sub_event_index` where `sub_event_index` orders sub-events from one ledger record (turn_start → op[0]_start → op[0]_finalize → payload_ref[0] → ... → turn_end). Exact packing decided at implementation time.
 
 ## 6. Watch Strategy
 
@@ -572,8 +572,8 @@ On startup:
 ### 7.3 Durability
 
 Cursor is durable because:
-- The ingester writes it as part of the same SQLite transaction that writes the canonical rows from the corresponding records. If the ingester crashes mid-transaction, the cursor reverts atomically with the row writes; on restart the re-read is idempotent (`SourceSeq` dedup).
-- `cursor.lastSeq` is the high-water mark per session: events with `SourceSeq <= hwm` are discarded by the ingester (`canonical-events.md` §Idempotency).
+- The ingester writes it as part of the same SQLite transaction that writes the canonical rows from the corresponding records. If the ingester crashes mid-transaction, the cursor reverts atomically with the row writes; on restart the re-read is idempotent (every writer table upserts on a natural identity — SQL-layer idempotency, see `ingester.md` §Dedup and Idempotency).
+- The cursor's per-file byte `Offset` is the resume mechanism: on restart `Scan(since=cursor)` seeks past already-read bytes so completed records are not re-emitted. Resume is cursor-driven, not gated by a per-source `SourceSeq` high-water-mark (removed in SOW-0015; a scalar HWM cannot work when one `sourceID` aggregates many files whose `ledgerSeq` each restart at 1).
 
 ### 7.4 Cursor Size Bound
 

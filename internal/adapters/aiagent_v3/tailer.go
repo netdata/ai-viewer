@@ -145,8 +145,8 @@ func resetDebounce(t *time.Timer) {
 
 // flushDirty re-reads every dirty file from its cursor offset and
 // updates the shared cursor. Emits a SourceProgress checkpoint at the
-// end so the ingester observes the new high-water-mark even if no
-// downstream consumer is ticking.
+// end so the ingester observes the new max SourceSeq (observability
+// counter) even if no downstream consumer is ticking.
 func flushDirty(ctx context.Context, root, sourceID string, dirty map[string]struct{}, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
 	if len(dirty) == 0 {
 		return nil

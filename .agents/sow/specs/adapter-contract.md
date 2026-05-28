@@ -36,7 +36,7 @@ type Adapter interface {
 type Cursor interface {
     // String returns an opaque JSON encoding for persistence in sources.cursor.
     String() string
-    // After reports whether c is strictly after other (used by ingester for HWM checks).
+    // After reports whether c is strictly after other (used by the ingester for resume-ordering comparison).
     After(other Cursor) bool
 }
 
@@ -72,7 +72,7 @@ type AdapterOptions struct {
               └──────────────────────────────┘
 ```
 
-The ingester calls `Scan` first, then `Tail`. The adapter MUST handle the case where new data arrives *during* `Scan`: those events should be picked up by `Tail` and deduped by the ingester via `SourceSeq`.
+The ingester calls `Scan` first, then `Tail`. The adapter MUST handle the case where new data arrives *during* `Scan`: those events should be picked up by `Tail`; any resulting re-emission is absorbed by the ingester's SQL-layer idempotent upserts (natural-identity keys), NOT by a `SourceSeq` gate. See `ingester.md` §Dedup and Idempotency.
 
 ## Concurrency Rules
 

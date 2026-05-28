@@ -5,9 +5,12 @@
 // Adapters in internal/adapters/<name> read one specific session-snapshot
 // format (ai-agent v2/v3, claude-code, codex, opencode, ...) and emit a
 // stream of typed Event values onto a channel. The ingester is the only
-// writer to SQLite; it consumes that stream, enforces dedup and ordering
-// by (SourceID, SourceSeq), and persists canonical rows according to the
-// schema in .agents/sow/specs/data-model.md.
+// writer to SQLite; it consumes that stream and persists canonical rows
+// according to the schema in .agents/sow/specs/data-model.md.
+// Event-level idempotency is a SQL-layer guarantee — every table upserts
+// on its natural identity (NOT a SourceSeq dedup gate; see ingester.md
+// §Dedup and Idempotency). SourceSeq is an observability counter / stable
+// replay identifier, not a dedup key.
 //
 // The event model is deliberately wider than any single source format so
 // that the same downstream schema covers every adapter. Per-format quirks

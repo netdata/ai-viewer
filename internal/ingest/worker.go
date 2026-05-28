@@ -93,9 +93,6 @@ func (w *worker) run(ctx context.Context) {
 				if !ok {
 					break
 				}
-				if !w.hwm.IsAfter(ev.EventSourceID(), ev.EventSourceSeq()) && ev.EventSourceSeq() != 0 {
-					continue
-				}
 				batch = append(batch, ev)
 				if len(batch) >= w.batchSize {
 					flush("size on shutdown", drainCtx)
@@ -107,12 +104,6 @@ func (w *worker) run(ctx context.Context) {
 			select {
 			case ev, ok := <-w.events:
 				if ok {
-					// Mirror the main-loop dedup: drop events at or
-					// below HWM; the seq==0 carve-out is for SourceProgress
-					// which the main loop also lets through.
-					if !w.hwm.IsAfter(ev.EventSourceID(), ev.EventSourceSeq()) && ev.EventSourceSeq() != 0 {
-						break
-					}
 					batch = append(batch, ev)
 				}
 			default:
@@ -130,11 +121,12 @@ func (w *worker) run(ctx context.Context) {
 				drainCancel()
 				return
 			}
-			if !w.hwm.IsAfter(ev.EventSourceID(), ev.EventSourceSeq()) && ev.EventSourceSeq() != 0 {
-				// Dropped by dedup. SourceProgressEvent uses SourceSeq=0
-				// by convention; let it through so the cursor advances.
-				continue
-			}
+			// No event-drop dedup: a per-source scalar high-water-mark is
+			// structurally wrong here (one sourceID aggregates many
+			// independently-sequenced files). Resume-skipping is the
+			// adapter cursor's job; event-level idempotency is a SQL-layer
+			// guarantee (idempotent upserts). See ingester.md §Dedup and
+			// Idempotency. Every event flows to the writer.
 			batch = append(batch, ev)
 			if !timerArmed {
 				flushTimer.Reset(w.batchEvery)

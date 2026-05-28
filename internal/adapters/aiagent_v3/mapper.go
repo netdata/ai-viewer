@@ -9,9 +9,10 @@ import (
 
 // subEventBits is the maximum number of sub-events the mapper allocates
 // per ledger record. Used to pack (ledgerSeq, subIdx) into a single
-// monotonic SourceSeq. Per spec §5.4 the contract is just "monotonic per
-// (source, session), stable across rescans"; a fixed 12-bit stride lets
-// the ingester compute global ordering without an extra column.
+// uint64 that is monotonic per file. This is a stable per-event identifier
+// (observability counter + log attribution); the ingester does NOT use it
+// for ordering or dedup — see ingester.md §Dedup and Idempotency. A fixed
+// 12-bit stride bounds the sub-event index per ledger record.
 const subEventBits = 12
 
 // maxSubEventsPerRecord is the cap that subEventBits implies. A

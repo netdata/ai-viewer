@@ -11,7 +11,9 @@ import (
 //
 // The ingester calls Scan once (historical backfill), then Tail (realtime
 // follow). New data that arrives during Scan must be picked up by Tail
-// and deduped by the ingester via SourceSeq.
+// and made idempotent by the ingester via SQL-layer natural-identity
+// upserts (NOT a SourceSeq dedup gate; see ingester.md §Dedup and
+// Idempotency).
 type Adapter interface {
 	// Name returns the stable identifier for this adapter, e.g.
 	// "aiagent_v3". Used in sources.id and logs.
@@ -46,7 +48,7 @@ type Cursor interface {
 	// String returns an opaque JSON encoding for persistence.
 	String() string
 	// After reports whether c is strictly after other. The ingester
-	// uses this for high-water-mark checks on resume.
+	// uses this for resume-ordering comparison.
 	After(other Cursor) bool
 }
 

@@ -405,6 +405,9 @@ func expectedSchema() []tableContract {
 				{Name: "sha256", Type: "TEXT"},
 			},
 			indexes: []index{
+				// Migration 0003 natural-identity UNIQUE index for
+				// idempotent re-scans (SOW-0015).
+				{Name: "idx_payload_refs_identity", Cols: []string{"op_id", "kind", "location_uri"}, Unique: true},
 				{Name: "idx_payload_refs_op", Cols: []string{"op_id"}},
 			},
 			fks: []fkRef{
@@ -426,6 +429,14 @@ func expectedSchema() []tableContract {
 				{Name: "extras_json", Type: "TEXT"},
 			},
 			indexes: []index{
+				// Migration 0003 natural-identity UNIQUE expression index
+				// for idempotent re-scans (SOW-0015). The four leading
+				// COALESCE(...) expressions (session_id, source_id, op_id,
+				// turn_id) and the trailing COALESCE(extras_json, '')
+				// report NULL column names from PRAGMA index_info, surfaced
+				// here as empty strings. The key covers every persisted
+				// content column so a duplicate is a byte-identical row.
+				{Name: "idx_log_entries_identity", Cols: []string{"", "", "", "", "ts", "severity", "source", "message", ""}, Unique: true},
 				{Name: "idx_log_session_ts", Cols: []string{"session_id", "ts"}},
 				{Name: "idx_log_severity", Cols: []string{"severity", "ts"}, Partial: true},
 				{Name: "idx_log_source_ts", Cols: []string{"source_id", "ts"}, Partial: true},

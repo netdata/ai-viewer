@@ -58,8 +58,10 @@ func readFile(ctx context.Context, path, sourceID, sessionRoot string, start Fil
 	cur := start
 
 	// Truncation defense (spec §7.2): if size < cursor.size, the file
-	// was shortened. Reset to full-scan and let the ingester dedup via
-	// SourceSeq.
+	// was shortened. Reset to full-scan; the ingester's SQL-layer
+	// idempotent upserts (natural-identity keys) absorb any re-emitted
+	// rows — there is no SourceSeq dedup gate. See ingester.md
+	// §Dedup and Idempotency.
 	if cur.Size > 0 && size < cur.Size {
 		onError(fmt.Errorf("ledger %s shrank (size=%d, cursor.size=%d); rescanning from 0", path, size, cur.Size))
 		cur = FileCursor{}

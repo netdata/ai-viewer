@@ -71,7 +71,7 @@ func (c Cursor) String() string {
 // After implements canonical.Cursor. Reports whether c is strictly after
 // other on at least one file's progress, with no file regressing on
 // either Offset or LastSeq. Per the contract, the ingester uses this
-// only for high-water-mark checks on resume.
+// only for resume-ordering comparison.
 //
 // Equal byte offsets are tie-broken by LastSeq so a re-emit (e.g. a
 // snapshot rewrite that produced the same offset but a higher record

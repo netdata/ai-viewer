@@ -504,7 +504,7 @@ The canonical model (`canonical-events.md`) is session/turn/op shaped. Claude Co
 | `SessionStartedEvent.ParentNativeID` (subagent) | `<parent sessionId>` |
 | `TurnStartedEvent.SessionNativeID` | as above |
 | `OpStartedEvent.Seq`, `TurnStartedEvent.Seq` | adapter-synthesized 1-based monotonic counter |
-| `SourceSeq` | adapter's monotonic per-source counter (separate from any uuid) |
+| `SourceSeq` | adapter's deterministic per-event identifier (stable across rescans); observability counter, not a dedup gate |
 | `OpStartedEvent.Ts` | parsed `timestamp` (ISO-8601) → microseconds UTC |
 
 The subagent's NativeID is NOT the parent's `sessionId` (they would collide); the synthetic `:agent:<agentId>` suffix uniquifies. The `agentId` is durable across resumes (same subagent dir is appended on resume).

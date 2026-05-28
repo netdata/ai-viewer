@@ -53,8 +53,9 @@ func TestSources_EmptyReturns200WithEmptyItems(t *testing.T) {
 }
 
 // TestSources_ListsConfiguredSources asserts the join between sources
-// and source_progress surfaces every configured source with the
-// cursor + HWM the ingester persisted.
+// and source_progress surfaces every configured source with the cursor
+// + last_seq observability counter (max SourceSeq seen; NOT a dedup
+// gate) the ingester persisted.
 func TestSources_ListsConfiguredSources(t *testing.T) {
 	t.Parallel()
 	p, db, cleanup := newTestPresenter(t)

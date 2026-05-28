@@ -38,7 +38,7 @@ The two binaries communicate **only via the SQLite file plus a small notify chan
 │              ▼                                                   │
 │  ┌───────────────────────────────────────────────────────────┐   │
 │  │ ingest/                                                   │   │
-│  │   - dedup by (source_id, source_seq)                      │   │
+│  │   - idempotent upserts (natural-identity dedup at SQL layer)│  │
 │  │   - resolve parent/child links                            │   │
 │  │   - write to SQLite in batched txns                       │   │
 │  │   - emit notify-channel ping                              │   │
@@ -120,7 +120,7 @@ Backfill of the 294K existing local snapshots is a separate concern with its own
 
 - Every parse error is logged with file path, byte offset, format version, and reason. Counted per-adapter. Surfaced in `/health` and in the UI's adapter status panel.
 - A persistently-failing source does NOT block other sources: each adapter runs in its own goroutine pool with its own cursor.
-- The ingester is **at-least-once**; dedup is by `(source_id, source_seq)` in SQLite. Idempotent writes are mandatory.
+- The ingester is **at-least-once**; dedup is by natural-identity idempotent upserts in SQLite (every table has an ON CONFLICT key); `(source_id, source_seq)` is NOT the dedup key. Idempotent writes are mandatory.
 - If the canonical schema migrates, the ingester resets its cursor for affected sources and re-reads. Cursors are stored in SQLite alongside the rows.
 
 ## Code organization rules

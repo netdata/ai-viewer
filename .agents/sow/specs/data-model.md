@@ -197,7 +197,25 @@ CREATE TABLE payload_refs (
 );
 
 CREATE INDEX idx_payload_refs_op ON payload_refs(op_id);
+
+-- Migration 0003: natural-identity uniqueness for idempotent re-scans.
+-- An op has at most one payload per (kind, location). The ingester
+-- inserts with ON CONFLICT DO NOTHING so re-emitting the same payload
+-- (Tail re-read, file re-scan) never duplicates the row.
+CREATE UNIQUE INDEX idx_payload_refs_identity
+    ON payload_refs(op_id, kind, location_uri);
 ```
+
+`payload_refs` uses `DO NOTHING` (not `DO UPDATE`) intentionally:
+payload artifacts are immutable once written. If a re-emit carries the
+same `(op_id, kind, location_uri)` but different `format`,
+`compression`, `original_bytes`, `stored_bytes`, or `sha256`, the
+original row's metadata is kept. This is safe because a changed payload
+never mutates an existing artifact in place — it lands at a new
+`location_uri` / a new on-disk ledger record, so it inserts as a
+distinct row rather than colliding. If a future adapter ever rewrites a
+payload at the same `location_uri` with different content, switch this
+INSERT to `ON CONFLICT ... DO UPDATE`.
 
 ### log_entries
 
@@ -221,6 +239,36 @@ CREATE TABLE log_entries (
 CREATE INDEX idx_log_session_ts ON log_entries(session_id, ts);
 CREATE INDEX idx_log_source_ts  ON log_entries(source_id, ts) WHERE source_id IS NOT NULL;
 CREATE INDEX idx_log_severity   ON log_entries(severity, ts) WHERE severity IN ('WRN','ERR');
+
+-- Migration 0003: natural-identity uniqueness for idempotent re-scans.
+-- COALESCE maps NULL owner columns to a '' sentinel so re-emitted
+-- rows collide (raw SQL NULLs are distinct in a UNIQUE index, which
+-- would otherwise let duplicates through). turn_id is part of the key:
+-- v3 emits turn-scoped warnings/errors with turn_id set but op_id NULL,
+-- so two genuinely distinct logs in the same session under different
+-- turns (same ts/severity/source/message, op_id NULL) must NOT collide.
+-- INVARIANT: the key lists every persisted content column (everything
+-- except the autoincrement id), so extras_json is the last keyed column
+-- (v2 stores the source `path` in extras — two logs identical except for
+-- extras must stay distinct). A log row is a duplicate iff it is
+-- byte-identical; omitting any persisted column reintroduces false-dedup
+-- data loss. The ingester's logEntryOnConflict ON CONFLICT target must
+-- match this expression list character-for-character, and any new
+-- log_entries column must be added to both in the same commit.
+-- The ingester inserts with ON CONFLICT DO NOTHING. message and
+-- extras_json are indexed directly (not hashed): log rows here are short
+-- structured lines (parse errors, pricing-miss warnings) — payload
+-- bodies live in payload_refs, never log_entries — so the b-tree stays
+-- small and a hash column would add schema/write complexity for no
+-- measurable benefit.
+CREATE UNIQUE INDEX idx_log_entries_identity ON log_entries(
+    COALESCE(session_id, ''),
+    COALESCE(source_id, ''),
+    COALESCE(op_id, ''),
+    COALESCE(turn_id, ''),
+    ts, severity, source, message,
+    COALESCE(extras_json, '')
+);
 ```
 
 ### Catalog tables (denormalized rollups)
@@ -302,7 +350,7 @@ CREATE TABLE catalog_cwds (
 
 ### source_progress
 
-Per-source ingest bookkeeping introduced in migration `0002`. Holds the high-water-mark sequence and most recent adapter cursor JSON so the ingester can dedup re-emitted events on resume and resume scanning from the right offset.
+Per-source ingest bookkeeping introduced in migration `0002`. Holds an observability sequence counter and the most recent adapter cursor JSON so the ingester can resume scanning from the right offset. Re-emitted events are deduped at the SQL layer (idempotent upserts), not by a sequence watermark — see `ingester.md` §Dedup and Idempotency.
 
 ```sql
 CREATE TABLE source_progress (
@@ -316,9 +364,9 @@ CREATE TABLE source_progress (
 
 Notes:
 
-- `last_seq` is the per-source monotonic high-water-mark advanced atomically with the batch that wrote the matching events.
+- `last_seq` records the maximum `SourceSeq` observed per source, advanced atomically with the batch that wrote the matching events. It is an **observability counter** surfaced via `/api/health`; the ingester does NOT read it as a dedup gate. A per-source scalar watermark is structurally wrong here because one `sourceID` aggregates many independently-sequenced files (`SourceSeq` is per-file, not per-source) — see `ingester.md` §Dedup and Idempotency.
 - `last_ts_us` records the Ts of the most recent observed event for diagnostics; the ingester does not use it for dedup.
-- `cursor` mirrors the adapter's opaque JSON cursor; updated from `SourceProgressEvent` so a restart re-enters the source at the right offset.
+- `cursor` mirrors the adapter's opaque JSON cursor; updated from `SourceProgressEvent` so a restart re-enters the source at the right offset. This is the durable resume point.
 - The table is separate from `sources` (which holds operator-facing configuration) so per-batch updates do not contend with operator metadata. Spec'd in `ingester.md` §Dedup.
 
 ### Schema versioning
@@ -328,10 +376,29 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='1', key='created_at' value=...
+-- key='version' value='3', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
+
+Migration history:
+
+- `0001_initial.sql` — full v1 schema; sets `schema_meta.version = '1'`.
+- `0002_source_progress.sql` — adds the `source_progress` table.
+- `0003_idempotent_children.sql` — adds the natural-identity UNIQUE
+  indexes `idx_payload_refs_identity` and `idx_log_entries_identity`,
+  and bumps `schema_meta.version` to `'3'`. The matching binary version
+  is `presenter.SchemaVersion` (servers refuse to start on mismatch), so
+  the two bump in lockstep.
+
+The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
+the migration runs once, tracked in `_schema_migrations`). The ingest DB
+is **derived/disposable** (deleting `index.db` triggers a full re-ingest,
+see `deployment.md`). If an operator's existing `index.db` already
+contains duplicate `payload_refs`/`log_entries` rows from a pre-`0003`
+binary, the `CREATE UNIQUE INDEX` will fail on apply; the one-time fix is
+to delete `index.db` and re-ingest. A dedup-existing-rows migration is
+deliberately not written because the data is disposable.
 
 ## Cross-Format Compatibility Matrix
 

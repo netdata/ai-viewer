@@ -237,7 +237,10 @@ func (i *Ingester) Stop() error {
 	return nil
 }
 
-// HWM returns the current high-water-mark for sourceID. Mainly for tests.
+// HWM returns the current per-source observability counter (max
+// SourceSeq seen) for sourceID — surfaced via /api/health and used by
+// tests to assert the counter advanced. It is NOT a dedup gate; the name
+// is retained to avoid out-of-scope churn (SOW-0015). See hwmCache.
 func (i *Ingester) HWM(sourceID string) uint64 {
 	return i.hwm.Get(sourceID)
 }

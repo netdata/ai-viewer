@@ -22,8 +22,9 @@
 // The cursor records `(content_hash, mtime_ns, size)` per file. Because
 // v2 rewrites the whole file on every snapshot a byte-offset cursor is
 // meaningless; content hashing lets the adapter skip re-emission when a
-// filesystem touch changes mtime but not bytes. The ingester's SourceSeq
-// HWM absorbs duplicates whenever a re-scan re-emits unchanged content.
+// filesystem touch changes mtime but not bytes. The ingester's SQL-layer
+// idempotent upserts absorb duplicates whenever a re-scan re-emits
+// unchanged content.
 //
 // See `.agents/sow/specs/adapter-aiagent-v2.md` for the format
 // reference (snapshot shape, edge cases, sub-agent embedding semantics)
