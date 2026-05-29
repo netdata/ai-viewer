@@ -2,6 +2,7 @@ package claude_code
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -168,6 +169,77 @@ func TestTail_NewProjectDirWatched(t *testing.T) {
 			cancel()
 			wg.Wait()
 			t.Fatalf("timeout: new-project-dir transcript not picked up; got %d events", len(got))
+		}
+	}
+}
+
+// TestTail_SymlinkTranscriptEscapeRefused pins P1.3 for the TAIL read path: a
+// `*.jsonl` symlink created in a watched directory AFTER Tail starts, resolving
+// OUTSIDE the projects root, must be refused before it is opened — its content
+// must never be emitted. A legitimate transcript created the same way IS
+// ingested, proving the guard rejects only the escape.
+func TestTail_SymlinkTranscriptEscapeRefused(t *testing.T) {
+	t.Parallel()
+	// A secret transcript OUTSIDE the root, shaped to emit a session if read.
+	// (The canonical session native id derives from the FILENAME stem, so the
+	// symlink's name — not the record's sessionId — is what would surface.)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.jsonl")
+	writeFileBytes(t, secret,
+		[]byte(`{"type":"user","uuid":"x1","sessionId":"ignored","message":{"role":"user","content":"leak"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	// Seed a benign transcript so the project dir exists and is watched.
+	writeFileBytes(t, filepath.Join(proj, "seed.jsonl"),
+		[]byte(`{"type":"user","uuid":"s1","sessionId":"seed","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan canonical.Event, 256)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = a.Tail(ctx, out) }()
+
+	time.Sleep(150 * time.Millisecond)
+	// After the watch is live: a legitimate new transcript AND a *.jsonl symlink
+	// escaping the root, both in the watched project dir. The legit file's stem
+	// "legit-tail" is its session native id; the symlink "escape.jsonl" would
+	// surface as session "escape" if the guard failed.
+	writeFileBytes(t, filepath.Join(proj, "legit-tail.jsonl"),
+		[]byte(`{"type":"user","uuid":"u9","sessionId":"ok","message":{"role":"user","content":"ok"},"timestamp":"2026-05-26T10:00:09.000Z"}`+"\n"))
+	if err := os.Symlink(secret, filepath.Join(proj, "escape.jsonl")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	// Collect until the legitimate session arrives, then assert the escape did not.
+	deadline := time.After(6 * time.Second)
+	var got []canonical.Event
+	for {
+		select {
+		case ev := <-out:
+			got = append(got, ev)
+			if _, ok := sessionStartedByNative(got, "legit-tail"); ok {
+				// Give a brief grace for any (erroneous) escape emission to flow.
+				time.Sleep(200 * time.Millisecond)
+				got = append(got, drainBuffered(out)...)
+				cancel()
+				wg.Wait()
+				for _, e := range got {
+					if ss, ok := e.(canonical.SessionStartedEvent); ok && ss.NativeID == "escape" {
+						t.Fatal("symlinked transcript escaping the root was read by Tail (P1.3 breach)")
+					}
+				}
+				return
+			}
+		case <-deadline:
+			cancel()
+			wg.Wait()
+			t.Fatalf("timeout: legitimate tail transcript not picked up; got %d events", len(got))
 		}
 	}
 }

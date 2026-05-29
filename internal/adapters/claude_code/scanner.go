@@ -245,8 +245,12 @@ type metaMap struct {
 // readSessionMetas reads every agent-*.meta.json under a session dir's
 // subagents/ and returns the toolUseId→agentId map plus per-agent agentType.
 // Missing dir / unreadable files yield an empty map (best-effort; the
-// structural linkage via path still works without the sidecar).
-func readSessionMetas(sessionDir string) metaMap {
+// structural linkage via path still works without the sidecar). Every meta
+// path is containment-checked against the projects root before it is read
+// (spec §6.1, P1.3): a symlinked .meta.json resolving outside the root is
+// refused with a SourceError and skipped, so its (potentially sensitive)
+// content is never absorbed into a session's extras.
+func readSessionMetas(root, sessionDir string, onError func(error)) metaMap {
 	mm := metaMap{toolUseToAgent: map[string]string{}, agentType: map[string]string{}}
 	if sessionDir == "" {
 		return mm
@@ -258,8 +262,11 @@ func readSessionMetas(sessionDir string) metaMap {
 	// phases keeps the read off the callback path.
 	paths := collectMetaPaths(subDir)
 	for _, path := range paths {
+		if !withinSourceRoot(root, path, onError) {
+			continue
+		}
 		agentID := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(path), metaExt), "agent-")
-		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path collected from a filtered walk strictly under the configured read-only projects root
+		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path containment-checked (withinSourceRoot) and collected from a filtered walk under the configured read-only projects root
 		if rerr != nil {
 			continue
 		}
@@ -305,12 +312,17 @@ func collectMetaPaths(dir string) []string {
 // metaHashes returns a map of meta-file relative path → sha256 of content
 // for every .meta.json under the projects root. Used by the tail/scan loop
 // to detect sidecar rewrites (spec §7 step 4). Two-phase like
-// readSessionMetas: collect paths, then read off the walk callback.
-func metaHashes(root string) (map[string]string, error) {
+// readSessionMetas: collect paths, then read off the walk callback. Each meta
+// path is containment-checked before it is read (spec §6.1, P1.3): a symlinked
+// .meta.json resolving outside the root is refused (SourceError) and skipped.
+func metaHashes(root string, onError func(error)) (map[string]string, error) {
 	out := map[string]string{}
 	paths := collectMetaPaths(root)
 	for _, path := range paths {
-		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path collected from a filtered walk strictly under the configured read-only projects root
+		if !withinSourceRoot(root, path, onError) {
+			continue
+		}
+		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path containment-checked (withinSourceRoot) and collected from a filtered walk under the configured read-only projects root
 		if rerr != nil {
 			continue
 		}
@@ -336,7 +348,19 @@ func hashBytes(b []byte) string {
 // ChildSessionNativeID on Agent ops. Partial trailing lines are held back
 // (offset advances only past complete lines) per spec §6.3.
 func readTranscript(ctx context.Context, root string, t transcript, sourceID string, mm metaMap, start FileCursor, out chan<- canonical.Event, onError func(error)) (FileCursor, int, *fileMapper, error) {
-	f, err := os.Open(t.abs) // #nosec G304 -- path from filtered directory scan under configured root
+	// Containment guard on EVERY transcript open (spec §6.1, P1.3): Scan's
+	// discovery already checks discovered paths, but the Tail flush path
+	// reconstructs a transcript from a relative path (transcriptForRel) WITHOUT
+	// a check, so a *.jsonl symlink planted in a watched dir after Tail starts
+	// would otherwise be opened. Resolving here makes the guard uniform across
+	// Scan and Tail. A refused path surfaces a SourceError (the caller logs the
+	// returned error) and the file is skipped — never opened.
+	if _, ok, cerr := resolveWithinRoot(root, t.abs); cerr != nil {
+		return start, 0, nil, fmt.Errorf("claude_code: cannot resolve %s for containment; skipping: %w", t.abs, cerr)
+	} else if !ok {
+		return start, 0, nil, fmt.Errorf("claude_code: %s resolves outside the projects root; skipping (symlink escape)", t.rel)
+	}
+	f, err := os.Open(t.abs) // #nosec G304 -- path containment-checked above (resolveWithinRoot) and from a filtered scan under the configured root
 	if err != nil {
 		return start, 0, nil, fmt.Errorf("open %s: %w", t.abs, err)
 	}
@@ -369,15 +393,17 @@ func readTranscript(ctx context.Context, root string, t transcript, sourceID str
 		sessionDir:     t.sessionDir,
 	})
 
-	if cur.Offset >= size {
-		// Nothing new to read, but the file is fully consumed: a Scan that
-		// already read this child to EOF still needs the mapper returned so
-		// the caller can finalize a parent Agent op whose child this is
-		// (spec §8.1, P1b). The mapper has no records replayed, but
-		// fullyRead reflects the cursor state.
-		cur.Size = size
-		mapper.fullyRead = true
-		return cur, 0, mapper, nil
+	// Even when the file is fully consumed (offset >= size) we must replay the
+	// chain from offset 0 with the emit-gate set to the current size (emit
+	// NOTHING) so the per-file Agent-op map AND the child's last-record
+	// timestamp are reconstructed (spec §8.1, P1.2). A naive early-return with an
+	// empty mapper would make a parent's Agent op invisible to Tail's deferral
+	// after the Scan→Tail boundary — the child completing later would then never
+	// finalize the parent — and would stamp a fully-read child's finalize at
+	// ts=0. emitFrom is clamped to >= size below, so already-consumed bytes
+	// (all of them, in this case) rebuild state without re-emitting any event.
+	if emitFrom > size {
+		emitFrom = size
 	}
 
 	// Always parse from offset 0 so the per-file turn/op inference counters
@@ -388,7 +414,7 @@ func readTranscript(ctx context.Context, root string, t transcript, sourceID str
 	// or after the resume offset (emitFrom), so a resume yields ZERO duplicate
 	// and ZERO gap (acceptance #6). The byte offset is the durable resume key;
 	// the cheap re-parse of already-consumed bytes is discarded, not emitted.
-	emitted, advanced, perr := streamLines(ctx, f, size, emitFrom, t, sourceID, mapper, out, onError)
+	emitted, advanced, perr := streamLines(ctx, f, emitFrom, t, sourceID, mapper, out, onError)
 	if perr != nil {
 		return cur, emitted, mapper, perr
 	}
@@ -429,7 +455,7 @@ func agentIDFromNative(nativeID string) string {
 // emitted-event count and the absolute offset just past the last complete
 // line consumed. Parse errors before emitFrom are not re-surfaced (they were
 // reported on the first pass).
-func streamLines(ctx context.Context, r io.Reader, fileSize, emitFrom int64, t transcript, sourceID string, mapper *fileMapper, out chan<- canonical.Event, onError func(error)) (int, int64, error) {
+func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript, sourceID string, mapper *fileMapper, out chan<- canonical.Event, onError func(error)) (int, int64, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	emitted := 0
 	off := int64(0)
@@ -437,19 +463,24 @@ func streamLines(ctx context.Context, r io.Reader, fileSize, emitFrom int64, t t
 		if err := ctx.Err(); err != nil {
 			return emitted, off, err
 		}
-		line, err := readOneLine(br)
+		line, consumed, err := readOneLine(br)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return emitted, off, nil
 			}
 			if errors.Is(err, errLineTooLong) {
+				// Surface exactly one SourceError for the oversized line, advance
+				// past the bytes drained up to and including its terminating
+				// newline, and CONTINUE reading subsequent records (spec §6.3,
+				// P2.5). Jumping to EOF here would silently discard every later
+				// valid record in the file. If the oversized line had no trailing
+				// newline (drained to EOF), consumed covers the rest of the file
+				// and the next read returns io.EOF.
 				if off >= emitFrom {
 					onError(fmt.Errorf("transcript %s @%d: line exceeds %d bytes; skipping", t.rel, off, scanBufferMax))
 				}
-				if fileSize > off {
-					off = fileSize
-				}
-				return emitted, off, nil
+				off += consumed
+				continue
 			}
 			return emitted, off, fmt.Errorf("read %s @%d: %w", t.rel, off, err)
 		}
@@ -514,47 +545,62 @@ var errLineTooLong = errors.New("claude_code: line exceeds scan buffer")
 
 // readOneLine reads one '\n'-terminated record from br, returning the line
 // WITH the trailing '\n' so callers can advance offset by len(). Returns
-// io.EOF when no complete line is available — it never returns a partial
-// trailing line, implementing the spec §6.3 hold-back invariant.
-func readOneLine(br *bufio.Reader) ([]byte, error) {
+// io.EOF (with consumed=0) when no complete line is available — it never
+// returns a partial trailing line, implementing the spec §6.3 hold-back
+// invariant. On errLineTooLong it returns the number of bytes drained up to
+// AND including the next '\n' (or to EOF when the oversized line is the file's
+// trailing bytes) so the caller can advance past the skipped line and continue
+// (spec §6.3, P2.5). consumed is meaningful only for the errLineTooLong and
+// nil-error cases; it is 0 for io.EOF and other errors.
+func readOneLine(br *bufio.Reader) ([]byte, int64, error) {
 	buf := make([]byte, 0, 256)
 	for {
 		chunk, err := br.ReadSlice('\n')
 		if err == nil {
 			buf = append(buf, chunk...)
 			if len(buf) > scanBufferMax {
-				return nil, errLineTooLong
+				return nil, int64(len(buf)), errLineTooLong
 			}
-			return buf, nil
+			return buf, int64(len(buf)), nil
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			buf = append(buf, chunk...)
 			if len(buf) > scanBufferMax {
-				if drainErr := drainToNewline(br); drainErr != nil {
-					return nil, drainErr
+				// Drain the rest of the oversized line and report the total
+				// bytes consumed so the caller advances past it and continues.
+				drained, drainErr := drainToNewline(br)
+				if drainErr != nil && !errors.Is(drainErr, io.EOF) {
+					return nil, 0, drainErr
 				}
-				return nil, errLineTooLong
+				return nil, int64(len(buf)) + drained, errLineTooLong
 			}
 			continue
 		}
 		if errors.Is(err, io.EOF) {
 			// Partial line at EOF: do not return it (hold-back).
-			return nil, io.EOF
+			return nil, 0, io.EOF
 		}
-		return nil, err
+		return nil, 0, err
 	}
 }
 
-func drainToNewline(br *bufio.Reader) error {
+// drainToNewline reads and discards bytes from br up to and including the next
+// '\n', returning the number of bytes consumed. On io.EOF (the oversized line
+// runs to the end of the file with no trailing newline) it returns the bytes
+// consumed so far together with io.EOF so the caller can advance the offset to
+// EOF; the next read then reports io.EOF cleanly.
+func drainToNewline(br *bufio.Reader) (int64, error) {
+	var consumed int64
 	for {
-		_, err := br.ReadSlice('\n')
+		chunk, err := br.ReadSlice('\n')
+		consumed += int64(len(chunk))
 		if err == nil {
-			return nil
+			return consumed, nil
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
-		return err
+		return consumed, err
 	}
 }
 
@@ -599,7 +645,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		if t.sessionDir != "" {
 			cached, ok := metaCache[t.sessionDir]
 			if !ok {
-				cached = readSessionMetas(t.sessionDir)
+				cached = readSessionMetas(root, t.sessionDir, onError)
 				metaCache[t.sessionDir] = cached
 			}
 			mm = cached
@@ -633,7 +679,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	}
 
 	// Refresh meta hashes so the cursor records the sidecar state observed.
-	if hashes, herr := metaHashes(root); herr == nil {
+	if hashes, herr := metaHashes(root, onError); herr == nil {
 		for rel, h := range hashes {
 			cur = cur.withMetaSeen(rel, h)
 		}

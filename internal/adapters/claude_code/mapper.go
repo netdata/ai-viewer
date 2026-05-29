@@ -109,6 +109,20 @@ type fileMapper struct {
 	// one; the child's end time used to stamp the deferred Agent-op finalize
 	// (spec §8.1). Stays 0 for a file whose records all lack timestamps.
 	lastTsUs int64
+	// lastCompactionTurnSeq / lastCompactionOpSeq remember the (turn,op) of the
+	// most recent compaction op so the post-compaction summary user message
+	// (processed AFTER the boundary, spec §9.2) scopes its PayloadRef to that
+	// op. payload_refs.op_id is NOT NULL REFERENCES ops(id), so the summary
+	// payload MUST reference an op that exists — the compaction op is its owner
+	// (P1.1a). 0/0 until a compaction has been seen on the file.
+	lastCompactionTurnSeq int
+	lastCompactionOpSeq   int
+	// prLinks accumulates every pr-link record seen on the file so the mapper
+	// emits the FULL prLinks array each time (spec §3.9, §397, P2.7). The
+	// ingester overwrites the prLinks extras key wholesale (json_patch), so a
+	// singular per-PR object would lose all but the last; the complete array
+	// (re-emitted on resume via replay-from-0) is authoritative.
+	prLinks []map[string]any
 }
 
 // agentOpRef locates a parent `Agent` op so it can be finalized when its child
@@ -229,19 +243,13 @@ func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 		}
 		out = append(out, evs...)
 	case recAttachment:
-		ts := m.recordTs(rec)
-		out = append(out, m.logEntry(advance(ts), "DBG", "attachment", rec))
-		// A `file` attachment carrying inline content also emits a PayloadRef
-		// so the UI can surface the attached file (spec §5.4, P2b). Other
-		// subtypes (incl. compact_file_reference, whose target lives outside
-		// the served root) emit no ref — see §3.4.
-		ref, ok, perr := m.emitFileAttachmentPayload(rec, advance(ts))
-		if perr != nil {
-			return nil, perr
-		}
-		if ok {
-			out = append(out, ref)
-		}
+		// An attachment is turn-context the harness injected, not a tool op, so
+		// it has NO owning op. The adapter emits ONLY a DBG LogEntry — never a
+		// PayloadRef (payload_refs.op_id is NOT NULL REFERENCES ops(id), so an
+		// orphan ref FK-rolls-back the batch). For a `file` attachment the
+		// LogEntry's extras additionally carry filename/displayPath/type so the
+		// reference stays visible in the UI (spec §333, §338, P1.1b + P2.6).
+		out = append(out, m.attachmentLog(advance(m.recordTs(rec)), rec))
 	case recQueueOperation:
 		out = append(out, m.logEntry(advance(m.recordTs(rec)), "INF", "queue-operation", rec))
 	case recPRLink:
@@ -333,6 +341,28 @@ func (m *fileMapper) logEntry(base canonical.EventBase, severity, kind string, r
 		Message:         kind,
 		Extras:          extras,
 	}
+}
+
+// attachmentLog builds the DBG LogEntry for an `attachment` record. For a
+// `file` attachment it enriches the extras with filename, displayPath, and the
+// attachment type so the reference is visible in the UI without a backing
+// payload row (spec §333, §338, P2.6). No PayloadRef is ever emitted for an
+// attachment — it has no owning op (P1.1b).
+func (m *fileMapper) attachmentLog(base canonical.EventBase, rec record) canonical.LogEntryEvent {
+	le := m.logEntry(base, "DBG", "attachment", rec)
+	att := decodeAttachment(rec.Raw)
+	if att.Type != "" {
+		le.Extras["attachmentType"] = att.Type
+	}
+	if att.Type == "file" {
+		if att.Filename != "" {
+			le.Extras["filename"] = att.Filename
+		}
+		if att.DisplayPath != "" {
+			le.Extras["displayPath"] = att.DisplayPath
+		}
+	}
+	return le
 }
 
 // packSeq packs (recordIdx, subIdx) into a single uint64 that is monotone

@@ -186,21 +186,14 @@ type record struct {
 }
 
 // attachmentBody carries the fields of an `attachment` record the mapper's
-// payload path consumes (spec §3.4, §5.4). Only `file` attachments WITH inline
-// content emit a servable PayloadRef; other subtypes (incl.
-// compact_file_reference, whose target lives outside the served root) do not.
+// log path consumes (spec §3.4, §338). A `file` attachment's filename and
+// displayPath are surfaced in the attachment LogEntry's extras; no PayloadRef
+// is emitted for any attachment (it has no owning op — P1.1b).
 type attachmentBody struct {
 	Type        string `json:"type"`
 	Filename    string `json:"filename"`
 	DisplayPath string `json:"displayPath"`
-	// Content is the inline file body for a `file` attachment:
-	// {type:"text", file:{filePath, content}} (spec §3.4). Decoded opaquely;
-	// presence (non-empty) is the signal that backing content exists.
-	Content json.RawMessage `json:"content"`
 }
-
-// hasFileContent reports whether a `file` attachment carries inline content.
-func (a attachmentBody) hasFileContent() bool { return len(a.Content) > 0 }
 
 // decodeAttachment extracts the `attachment` sub-object from a record's raw
 // bytes. Returns the zero attachmentBody on any decode failure (defensive).

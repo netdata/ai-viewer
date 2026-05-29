@@ -319,6 +319,98 @@ were landed by the prior agent. Golden `expected.jsonl` for a/b/c/d/e regenerate
 11.0M execs / 0 crashes (`FuzzParseCursor` 15s / 0 crashes); `scan-secrets.sh` exit 0
 (478 files); `scan-ai-attribution.sh` exit 0. Coverage: claude_code 81.6%, ingest 88.9%.
 
+### Round 2 (2026-05-29) — codex + glm + minimax (full scope + Round-1 fix notes)
+
+minimax + glm → "safe to merge" again (0 blockers). **codex → NOT safe: 3 P1 + 4 P2**,
+ALL verified real against ground truth (zero false positives; the others missed every
+one). Critically, codex's full-scope re-review showed three Round-1 "fixes" were
+INCOMPLETE and one introduced a crash — this is why the review scope was NOT narrowed
+to "review the fixes". Adjudication + authoritative fix design (CTO decisions):
+
+- **[P1.1] PayloadRefs reference a non-existent op → FK rollback of the whole ingest
+  batch.** `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)`
+  (`migrations/0001_initial.sql:147`); `writer.go:714` derives `op_id` from
+  `(TurnSeq,OpSeq)` with NO existence guard (unlike `applyLogEntry:743`, whose column
+  is nullable). The Round-1 P2b payloads emit op seq 0: `payloads.go:119`
+  (compaction summary, no turn/op) + `:149` (file attachment, no OpSeq) — golden
+  `c_compaction/expected.jsonl:10` shows `TurnSeq:0,OpSeq:0`. The adapter-only golden
+  never runs the writer, so the seam was invisible. **A real claude-code compaction or
+  file attachment breaks ingestion of that batch.**
+  **Fix (design):** (a) compaction-summary payload attaches to the **compaction op**
+  (mapper remembers the last compaction op `(turnSeq,opSeq)`; `emitSummaryPayload`
+  uses them). (b) `file` attachments have no owning op in our model → do NOT emit an
+  orphan payload; record `filename`/`displayPath`/`type` in the attachment LogEntry
+  extras instead (also satisfies P2.6). (c) Defense-in-depth in the ingester:
+  `applyPayloadRef` verifies the op exists; if absent, surface a SourceError + SKIP the
+  ref (no silent drop, no batch crash). **NEW test (the missing seam):** run claude_code
+  compaction+attachment events through the real writer → no FK error, summary attached
+  to the compaction op; orphan-ref → SourceError + batch survives.
+- **[P1.2] Agent-op finalize lost across the Scan→Tail boundary.** A parent fully read
+  in Scan returns an empty-`agentOps` mapper on the EOF early-return (`scanner.go:372`);
+  Tail starts a fresh deferral (`tailer.go:67`) and only learns pending parents from
+  re-read files → child completing in Tail never finalizes the parent. The Round-1 P1b
+  child-EOF deferral does not survive the boundary.
+- **[P2.4] Child byte-EOF ≠ semantic completion** for a live subagent (`scanner.go:400`):
+  a long-running subagent is marked completed after its first flushed record in Tail.
+  **Fix for P1.2+P2.4 (design grounded in VERIFIED format facts):** an earlier draft of
+  this fix proposed finalizing on a *parent* Task `tool_result` — that is FALSE for
+  claude-code. Per §485 (verified against a real transcript): the parent's `Agent`
+  `tool_use` has NO matching `tool_result`; the subagent result is implicit (the last
+  `assistant` text record in `agent-<agentId>.jsonl`). So the completion signal is
+  inherently **child-side**, and sessions are modeled "always running" (no end marker).
+  Therefore keep child-side finalization but fix both gaps:
+  - **P1.2 (durability):** make the parent-Agent-op deferral durable across Scan→Tail.
+    Tail's `catchUpFromCursor` must rebuild the deferral by replaying parent transcripts
+    (emit-nothing, like the counter rebuild) so a parent `Agent` op emitted during Scan
+    is finalizable when its child completes during Tail. Today the EOF early-return
+    (`scanner.go:372`) returns an empty-`agentOps` mapper, so the parent is invisible to
+    Tail.
+  - **P2.4 (not premature):** finalize an `Agent` op only on a **quiescent** child EOF —
+    child fully read AND the child file is NOT in the current flush's just-appended dirty
+    set. A static Scan has no dirty set ⇒ historical children finalize (correct). In live
+    Tail, a child appended in this flush stays `running`; it is finalized on a later
+    flush/tick when it sits at EOF with no new appends. A subagent that never goes
+    quiescent stays `running` (correct).
+  **Tests:** parent `Agent` op in Scan + child completes in Tail → finalized (durability);
+  child actively appended this flush → stays `running` (not premature); quiescent child
+  at EOF → finalized at child's last-record ts.
+- **[P1.3] Symlink containment is incomplete.** Only Scan transcript discovery is
+  guarded. Meta reads bypass it (`scanner.go:262`,`:313` — `os.ReadFile` on walk paths,
+  no `resolveWithinRoot`; `tailer.go:155-158` self-documents the gap as a TODO), and the
+  Tail transcript read path (`transcriptForRel`→`readTranscript`) joins `root+rel`
+  without `EvalSymlinks`. A symlinked `.jsonl`/`.meta.json` created after Tail starts
+  reads outside the source root. **Fix:** apply `resolveWithinRoot` uniformly to meta
+  collection/read (`collectMetaPaths`/`metaHashes`/`readSessionMetas`), Tail transcript
+  read (`transcriptForRel`/`readTranscript`), and Tail meta hash (`hashFile`). **Tests:**
+  symlinked `.meta.json` escape refused (scan + tail); symlinked `.jsonl` in a watched
+  dir during tail refused.
+- **[P2.5] Oversized line skips the REST of the file.** `errLineTooLong` sets
+  `off = fileSize` and returns (`scanner.go:445-452`) → all later valid records lost
+  permanently. **Fix:** discard bytes to the next `\n` and continue; one SourceError for
+  the skipped line. **Test:** `[valid, >8MB line, valid]` → both valid records ingested,
+  one SourceError.
+- **[P2.6] Attachment `displayPath` dropped.** Spec §333 says the adapter records
+  `displayPath` in the attachment LogEntry extras; the generic `logEntry` records only
+  recordType/subtype. **Fix:** attachment LogEntry carries `filename`/`displayPath`/
+  `type` (honors §333/§338; bundled with P1.1(b)). **Test:** extras contain the fields.
+- **[P2.7] PR links overwrite instead of appending.** Spec §397 says
+  `sessions.extras_json.prLinks[]` (array — a session may make several PRs); `ops.go:396`
+  emits a singular `prLink` object, and json_patch overwrites → only the last PR
+  survives. **Fix:** accumulate all pr-links in file state; emit `{"prLinks":[…]}` (full
+  array; replay-from-0 ⇒ last-wins on the complete array). **Test:** two pr-links →
+  `prLinks` length 2.
+
+Spec deltas to land same-change: §5.4 (payload op-scoping), §338 (attachment → LogEntry
+extras, not orphan payload), §8.1 (Agent-op finalize is CHILD-SIDE — explicitly NO parent
+Task tool_result, which does not exist per §485 — made durable across Scan→Tail and
+fired only on a quiescent child EOF), §333 + §397 (code must now honor the promised shapes), §6.x
+(oversized-line skip-not-truncate), §6.1/§7 (containment on meta + Tail reads), plus
+`ingester.md` (applyPayloadRef defensive op-existence skip). Migration 0001 unchanged
+(no schema change — payloads stay op-scoped).
+
+Not merged. Fix round delegated (spec + failing tests incl. the ingester seam test +
+code); re-review same scope + these notes before merge.
+
 ## Outcome
 
 Pending.

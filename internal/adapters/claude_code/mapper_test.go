@@ -129,6 +129,8 @@ func TestMapper_CompactionOp(t *testing.T) {
 	var compactionOps, turns int
 	var compactStarted canonical.OpStartedEvent
 	var compactFinal canonical.OpFinalizedEvent
+	var summaryPayload canonical.PayloadRefEvent
+	var sawSummaryPayload bool
 	var sawBoundaryLog bool
 	for _, ev := range events {
 		switch e := ev.(type) {
@@ -143,6 +145,11 @@ func TestMapper_CompactionOp(t *testing.T) {
 			}
 		case canonical.TurnStartedEvent:
 			turns++
+		case canonical.PayloadRefEvent:
+			if e.PayloadKind == "log" {
+				summaryPayload = e
+				sawSummaryPayload = true
+			}
 		case canonical.LogEntryEvent:
 			if e.Message == "compact_boundary" && e.Severity == "INF" {
 				sawBoundaryLog = true
@@ -155,6 +162,17 @@ func TestMapper_CompactionOp(t *testing.T) {
 	}
 	if compactionOps != 1 {
 		t.Fatalf("compaction ops = %d, want 1", compactionOps)
+	}
+	// P1.1a: the post-compaction summary PayloadRef must be scoped to the
+	// compaction op (the op that exists), NOT (TurnSeq=0,OpSeq=0). A payload
+	// referencing a non-existent op FK-rolls-back the whole ingest batch
+	// because payload_refs.op_id is NOT NULL REFERENCES ops(id).
+	if !sawSummaryPayload {
+		t.Fatal("isCompactSummary user must emit a PayloadRef (PayloadKind=log)")
+	}
+	if summaryPayload.TurnSeq != compactStarted.TurnSeq || summaryPayload.OpSeq != compactStarted.Seq {
+		t.Fatalf("summary payload scoped to (turn=%d,op=%d), want the compaction op (turn=%d,op=%d) so it references an existing op (P1.1a)",
+			summaryPayload.TurnSeq, summaryPayload.OpSeq, compactStarted.TurnSeq, compactStarted.Seq)
 	}
 	if !sawBoundaryLog {
 		t.Fatal("compact_boundary must emit a LogEntry INF in addition to the op (spec §5.4 / §9.2, P2a)")
@@ -262,7 +280,7 @@ func TestMapper_RecordTypeCoverage(t *testing.T) {
 				sawAPIErr = true
 			}
 		case canonical.SessionUpdatedEvent:
-			if e.Extras["prLink"] != nil {
+			if e.Extras["prLinks"] != nil {
 				sawPRLinkUpdate = true
 			}
 			if e.Extras["bridge.bridgeSessionId"] != nil {
@@ -274,7 +292,7 @@ func TestMapper_RecordTypeCoverage(t *testing.T) {
 		t.Error("api_error should emit an ERR LogEntry")
 	}
 	if !sawPRLinkUpdate {
-		t.Error("pr-link should emit a SessionUpdated with prLink extras")
+		t.Error("pr-link should emit a SessionUpdated with prLinks extras")
 	}
 	if !sawBridgeUpdate {
 		t.Error("bridge-session should emit a SessionUpdated with bridge extras")
@@ -361,6 +379,107 @@ func TestMapper_FileHistorySnapshotEmptyBackupsNoUpdate(t *testing.T) {
 				t.Fatalf("empty trackedFileBackups should not produce a fileHistory update: %+v", su.Extras)
 			}
 		}
+	}
+}
+
+// TestMapper_FileAttachmentNoPayloadRefExtrasCarryFields pins P1.1b + P2.6: a
+// bare `file` attachment has no owning op, so the adapter must NOT emit a
+// PayloadRefEvent (an orphan ref FK-rolls-back the ingest batch). Instead the
+// attachment LogEntry's extras must carry filename, displayPath, and type
+// (spec §333, §338).
+func TestMapper_FileAttachmentNoPayloadRefExtrasCarryFields(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"attachment","uuid":"at1","sessionId":"s","attachment":{"type":"file","filename":"<HOME>/src/demo/main.go","displayPath":"main.go","content":{"type":"text","file":{"filePath":"<HOME>/src/demo/main.go","content":"package main"}}},"timestamp":"2026-05-26T10:00:01.000Z"}`,
+	)
+	// No PayloadRefEvent may be emitted for a file attachment.
+	for _, ev := range events {
+		if _, ok := ev.(canonical.PayloadRefEvent); ok {
+			t.Fatalf("file attachment must NOT emit a PayloadRefEvent (orphan op_id FK rollback, P1.1b); got %+v", ev)
+		}
+	}
+	// The attachment LogEntry's extras must carry filename, displayPath, type.
+	var sawLog bool
+	for _, ev := range events {
+		le, ok := ev.(canonical.LogEntryEvent)
+		if !ok || le.Message != "attachment" {
+			continue
+		}
+		sawLog = true
+		if le.Extras["filename"] != "<HOME>/src/demo/main.go" {
+			t.Errorf("attachment LogEntry extras.filename = %v, want the filename (P2.6)", le.Extras["filename"])
+		}
+		if le.Extras["displayPath"] != "main.go" {
+			t.Errorf("attachment LogEntry extras.displayPath = %v, want 'main.go' (spec §333)", le.Extras["displayPath"])
+		}
+		if le.Extras["attachmentType"] != "file" {
+			t.Errorf("attachment LogEntry extras.attachmentType = %v, want 'file' (spec §338)", le.Extras["attachmentType"])
+		}
+	}
+	if !sawLog {
+		t.Fatal("file attachment must emit a LogEntry (with the field extras)")
+	}
+}
+
+// TestMapper_NonFileAttachmentNoFieldExtras verifies a non-`file` attachment
+// (e.g. a reminder the harness injected) emits a LogEntry without the
+// file-specific extras and no PayloadRef.
+func TestMapper_NonFileAttachmentNoFieldExtras(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"attachment","uuid":"at1","sessionId":"s","attachment":{"type":"todo_reminder","content":"do x"},"timestamp":"2026-05-26T10:00:01.000Z"}`,
+	)
+	for _, ev := range events {
+		if _, ok := ev.(canonical.PayloadRefEvent); ok {
+			t.Fatalf("non-file attachment must not emit a PayloadRef; got %+v", ev)
+		}
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "attachment" {
+			if le.Extras["filename"] != nil || le.Extras["displayPath"] != nil {
+				t.Errorf("non-file attachment must not carry file extras: %+v", le.Extras)
+			}
+		}
+	}
+}
+
+// TestMapper_PRLinksAccumulateAsArray pins P2.7: multiple pr-link records must
+// accumulate into a single prLinks ARRAY (not a singular prLink object that
+// json_patch overwrites). Two pr-links → the final SessionUpdated carries a
+// prLinks array of length 2.
+func TestMapper_PRLinksAccumulateAsArray(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"pr-link","sessionId":"s","prNumber":11,"prUrl":"https://example.invalid/pr/11","prRepository":"owner/repo","timestamp":"2026-05-26T10:00:06.000Z"}`,
+		`{"type":"pr-link","sessionId":"s","prNumber":22,"prUrl":"https://example.invalid/pr/22","prRepository":"owner/repo","timestamp":"2026-05-26T10:00:07.000Z"}`,
+	)
+	// The adapter must NOT emit a singular prLink key (that loses all but the last).
+	var lastLen int
+	var sawArray bool
+	for _, ev := range events {
+		su, ok := ev.(canonical.SessionUpdatedEvent)
+		if !ok {
+			continue
+		}
+		if su.Extras["prLink"] != nil {
+			t.Fatalf("singular prLink key emitted (loses prior PRs on json_patch overwrite, P2.7): %+v", su.Extras)
+		}
+		// In-memory the array is []map[string]any (the writer JSON-encodes it
+		// to a JSON array via json_patch); accept either shape defensively.
+		switch arr := su.Extras["prLinks"].(type) {
+		case []map[string]any:
+			lastLen = len(arr)
+			sawArray = true
+		case []any:
+			lastLen = len(arr)
+			sawArray = true
+		}
+	}
+	if !sawArray {
+		t.Fatal("pr-link must emit a SessionUpdated with a prLinks array")
+	}
+	if lastLen != 2 {
+		t.Fatalf("final prLinks array length = %d, want 2 (both PRs accumulated, P2.7)", lastLen)
 	}
 }
 

@@ -168,6 +168,26 @@ of event ordering or batch boundaries. The natural-identity canonical
 IDs (`canonicalOpID`, etc.) are deterministic across runs, so a replayed
 event resolves to the same row.
 
+### Layer 3 — payload_ref orphan guard (defense-in-depth)
+
+`payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` (migration `0001`),
+so a `PayloadRefEvent` whose `(TurnSeq, OpSeq)` resolves to an op that was
+never written would raise a foreign-key error and roll back the **entire
+batch** — one malformed ref from any adapter could stall a source. Unlike
+`log_entries.op_id` (nullable, so `applyLogEntry` simply omits the link),
+a payload ref must point at a real op or not exist at all.
+
+`applyPayloadRef` therefore verifies the parent op exists (`SELECT 1 FROM
+ops WHERE id = ?`, same tx) before inserting. On a miss it does **not**
+insert; instead it surfaces the orphan the same way a parse error is
+surfaced — `sources.parse_errors` is bumped (visible via `/api/health`
+and the Sources panel) and a source-scoped `ERR` `log_entries` row is
+written — then returns nil so the rest of the batch still commits. This
+is a no-silent-failure safety net: adapters are expected to emit only
+op-scoped payload refs (e.g. the claude-code compaction summary attaches
+to its compaction op; bare file attachments emit a `LogEntry` instead of
+an orphan ref), but a future adapter bug can never roll back ingestion.
+
 ### `source_progress.last_seq` is an observability counter only
 
 `source_progress.last_seq` still records the maximum `SourceSeq` seen per

@@ -120,6 +120,14 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			// Re-walk to Add() any directory created since startup
 			// (new project dir, new session dir, new subagents/ dir).
 			addWatchTree(watcher, resolvedRoot, root, watched, onError)
+			// Advance the deferral cycle and finalize any child that has sat at
+			// EOF since an earlier cycle with no new append (quiescent, spec
+			// §8.1, P2.4): a child appended in a prior flush but not since now
+			// goes quiescent here and finalizes its parent Agent op.
+			deferral.cycle++
+			if perr := sweepQuiescentFinalizations(ctx, sourceID, deferral, out); perr != nil {
+				return perr
+			}
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return perr
 			}
@@ -157,7 +165,7 @@ func catchUpFromCursor(ctx context.Context, resolvedRoot, root, sourceID string,
 	// meta-specific containment check has it.
 	_ = resolvedRoot
 	metaDirty := make(map[string]struct{})
-	if hashes, herr := metaHashes(root); herr == nil {
+	if hashes, herr := metaHashes(root, onError); herr == nil {
 		for rel := range hashes {
 			metaDirty[rel] = struct{}{}
 		}
@@ -275,21 +283,48 @@ func resetDebounce(t *time.Timer) {
 }
 
 // tailDeferral carries Agent-op deferral state across Tail flush cycles (spec
-// §8.1, P1b). The Tail loop owns one instance for its lifetime so a parent
-// Agent op recorded in one flush is finalized when its child sidechain reaches
-// EOF in a later flush (or the same flush), regardless of arrival order. A
+// §8.1, P1.2 + P2.4). The Tail loop owns one instance for its lifetime so a
+// parent Agent op recorded in one flush is finalized when its child sidechain
+// reaches a QUIESCENT EOF in a later cycle, regardless of arrival order. A
 // child finalized once is removed so a subsequent append that re-opens the
 // file does not re-finalize.
+//
+// Quiescence (P2.4): reaching byte-EOF on a child appended in the CURRENT flush
+// is not semantic completion. A fully-read child is parked in childAtEOF with
+// the cycle it was last dirtied; it is finalized only on a later sweep whose
+// cycle is strictly greater (i.e. at least one flush/tick cycle elapsed with no
+// new append). A continuously-appended child keeps bumping its cycle and never
+// finalizes — consistent with the "always running" session model (§11.11).
 type tailDeferral struct {
-	// pending maps child native id → parent Agent op location.
+	// pending maps child native id → parent Agent op location (durable across
+	// flushes so a parent recorded before its child completes is reachable).
 	pending map[string]agentOpFinalize
+	// childAtEOF maps a fully-read child native id → (end state, the cycle in
+	// which it was last seen dirty). It is finalized on a sweep cycle strictly
+	// later than lastDirtyCycle (quiescent).
+	childAtEOF map[string]childAtEOFState
 	// done records child native ids already finalized so a re-read does not
 	// re-emit the finalize.
 	done map[string]struct{}
+	// cycle is a monotonic counter incremented once per flush and once per tick
+	// sweep, used to judge quiescence.
+	cycle int
+}
+
+// childAtEOFState pairs a fully-read child's end state with the deferral cycle
+// in which it was last observed dirty (appended), so the sweep can tell a
+// just-appended child (defer) from a quiescent one (finalize).
+type childAtEOFState struct {
+	end            childEndState
+	lastDirtyCycle int
 }
 
 func newTailDeferral() *tailDeferral {
-	return &tailDeferral{pending: map[string]agentOpFinalize{}, done: map[string]struct{}{}}
+	return &tailDeferral{
+		pending:    map[string]agentOpFinalize{},
+		childAtEOF: map[string]childAtEOFState{},
+		done:       map[string]struct{}{},
+	}
 }
 
 // flushDirty re-reads every dirty transcript from its cursor offset and
@@ -305,6 +340,12 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map
 	// bump does not warrant re-reading (spec §7 step 4).
 	for rel := range metaDirty {
 		abs := filepath.Join(root, filepath.FromSlash(rel))
+		// Containment guard on the Tail meta-hash read (spec §6.1, P1.3): a
+		// .meta.json symlink planted in a watched dir after Tail starts must be
+		// refused before its content is hashed/read.
+		if !withinSourceRoot(root, abs, onError) {
+			continue
+		}
 		h, ok := hashFile(abs)
 		if !ok {
 			continue
@@ -342,7 +383,7 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map
 		if t.sessionDir != "" {
 			cached, seen := metaCache[t.sessionDir]
 			if !seen {
-				cached = readSessionMetas(t.sessionDir)
+				cached = readSessionMetas(root, t.sessionDir, onError)
 				metaCache[t.sessionDir] = cached
 			}
 			mm = cached
@@ -358,54 +399,78 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map
 		}
 		*cur = cur.withFile(rel, updated)
 		// Fold this file's Agent ops / child end-state into the loop-lifetime
-		// deferral so a parent Agent op is finalized when its child reaches
-		// EOF, in any flush order (spec §8.1, P1b).
+		// deferral so a parent Agent op is finalized when its child reaches a
+		// QUIESCENT EOF, in any flush order (spec §8.1, P1.2 + P2.4).
 		if def != nil {
 			collectAgentDeferral(mapper, t, def.pending, childEnd)
 		}
 	}
 	if def != nil {
-		if perr := emitTailAgentFinalizations(ctx, sourceID, def, childEnd, out); perr != nil {
+		// A child read in THIS flush was just appended (its WRITE made it
+		// dirty), so it is parked at the current cycle, not finalized now; a
+		// later sweep (this flush's tail, or a tick) finalizes it once it is
+		// quiescent (spec §8.1, P2.4). The sweep also finalizes children parked
+		// in an EARLIER cycle whose parent op is now known.
+		def.cycle++
+		parkChildEnds(def, childEnd)
+		if perr := sweepQuiescentFinalizations(ctx, sourceID, def, out); perr != nil {
 			return perr
 		}
 	}
 	return emitProgress(ctx, sourceID, *cur, out)
 }
 
-// emitTailAgentFinalizations finalizes parent Agent ops whose child sidechain
-// reached EOF in this flush (spec §8.1, P1b). It consults the loop-lifetime
-// pending map (which may hold a parent recorded in an earlier flush) and the
-// per-flush childEnd. Each finalized child is marked done so a later append
-// that re-reads it does not re-finalize. Ordered for deterministic replay.
-func emitTailAgentFinalizations(ctx context.Context, sourceID string, def *tailDeferral, childEnd map[string]childEndState, out chan<- canonical.Event) error {
-	childIDs := make([]string, 0, len(childEnd))
-	for childID := range childEnd {
+// parkChildEnds records the fully-read children read in this flush as
+// at-EOF-but-not-yet-quiescent, stamped with the current deferral cycle (spec
+// §8.1, P2.4). Because these children were just read in THIS flush (their WRITE
+// is what made them dirty), they are not finalized now; a later sweep whose
+// cycle is strictly greater finalizes them, unless a new append re-stamps the
+// cycle first. A child that is no longer fully read (parked partial line — the
+// producer appended an in-flight record) is removed from childAtEOF so it
+// reverts to running.
+func parkChildEnds(def *tailDeferral, childEnd map[string]childEndState) {
+	for childID, end := range childEnd {
+		if !end.fullyRead {
+			delete(def.childAtEOF, childID)
+			continue
+		}
+		def.childAtEOF[childID] = childAtEOFState{end: end, lastDirtyCycle: def.cycle}
+	}
+}
+
+// sweepQuiescentFinalizations finalizes parent Agent ops whose child sidechain
+// has been at EOF since a STRICTLY EARLIER deferral cycle (quiescent — no new
+// append in the current cycle, spec §8.1, P2.4) and whose parent Agent op has
+// been observed (P1.2 durability). A child whose parent op is not yet known is
+// left parked; the ingester resolver still repairs the structural child→parent
+// op link (P1a), and the status finalize waits until the parent op is seen.
+// Each finalized child is marked done and removed so a re-read does not
+// re-finalize. Ordered for deterministic replay.
+func sweepQuiescentFinalizations(ctx context.Context, sourceID string, def *tailDeferral, out chan<- canonical.Event) error {
+	childIDs := make([]string, 0, len(def.childAtEOF))
+	for childID := range def.childAtEOF {
 		childIDs = append(childIDs, childID)
 	}
 	sort.Strings(childIDs)
 	for _, childID := range childIDs {
-		end := childEnd[childID]
-		if !end.fullyRead {
-			continue
-		}
-		if _, already := def.done[childID]; already {
+		st := def.childAtEOF[childID]
+		if st.lastDirtyCycle >= def.cycle {
+			// Dirtied in the current cycle (just appended): not quiescent yet.
 			continue
 		}
 		parent, ok := def.pending[childID]
 		if !ok {
-			// Parent Agent op not seen yet (the parent transcript has not been
-			// flushed in this Tail session). The child→parent op link is still
-			// repaired by the ingester resolver (P1a); the status finalize
-			// waits until the parent op is observed.
+			// Parent Agent op not observed yet; keep parked until it is.
 			continue
 		}
-		fin := agentFinalizeEvent(sourceID, parent.parentNativeID, parent.ref, end.lastTsUs, "completed")
+		fin := agentFinalizeEvent(sourceID, parent.parentNativeID, parent.ref, st.end.lastTsUs, "completed")
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case out <- fin:
 		}
 		def.done[childID] = struct{}{}
+		delete(def.childAtEOF, childID)
 	}
 	return nil
 }

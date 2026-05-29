@@ -21,13 +21,17 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 	if boolValue(rec.Env.IsCompactSummary) {
 		// Post-compaction summary: does NOT open a new turn (spec §9.2).
 		// Surface as INF so the UI can show it in a compaction lane, plus a
-		// PayloadRef pointing at the inline summary text (spec §5.4, P2b).
+		// PayloadRef pointing at the inline summary text (spec §5.4). The ref is
+		// scoped to the preceding compaction op so it references an op that
+		// EXISTS (P1.1a) — payload_refs.op_id is NOT NULL REFERENCES ops(id).
 		out = append(out, m.logEntry(advance(tsUs), "INF", "compaction-summary", rec))
-		ref, perr := m.emitSummaryPayload(advance(tsUs))
+		ref, ok, perr := m.emitSummaryPayload(advance(tsUs), m.lastCompactionTurnSeq, m.lastCompactionOpSeq)
 		if perr != nil {
 			return nil, perr
 		}
-		out = append(out, ref)
+		if ok {
+			out = append(out, ref)
+		}
 		return out, nil
 	}
 
@@ -322,6 +326,12 @@ func (m *fileMapper) mapCompaction(rec record, advance func(int64) canonical.Eve
 	// Seq stays unique, but do not reset opSeqInTurn.
 	m.opSeqInTurn++
 	opSeq := m.opSeqInTurn
+	// Remember the compaction op's (turn,op) so the post-compaction summary
+	// user message can scope its PayloadRef to an op that EXISTS (P1.1a):
+	// payload_refs.op_id is NOT NULL REFERENCES ops(id), so a summary payload
+	// at (0,0) would FK-roll-back the whole ingest batch.
+	m.lastCompactionTurnSeq = m.turnSeq
+	m.lastCompactionOpSeq = opSeq
 	started := canonical.OpStartedEvent{
 		EventBase:       advance(tsUs),
 		SessionNativeID: m.nativeID,
@@ -379,7 +389,11 @@ func compactionExtras(cm *compactMetadata) map[string]any {
 }
 
 // mapPRLink surfaces a pr-link record as a session-extras update plus an INF
-// log (it carries a timestamp). The prLink is appended to extras_json.prLinks.
+// log (it carries a timestamp). It accumulates every PR seen on the file and
+// emits the FULL prLinks ARRAY each time (spec §3.9, §397, P2.7): the ingester
+// overwrites the prLinks extras key wholesale (json_patch), so a singular
+// per-PR object would lose all but the last. Replay-from-0 on resume re-emits
+// the complete array, so it is last-wins on the whole array.
 func (m *fileMapper) mapPRLink(rec record, advance func(int64) canonical.EventBase) []canonical.Event {
 	tsUs := m.recordTs(rec)
 	fields := decodeRawFields(rec.Raw)
@@ -393,10 +407,15 @@ func (m *fileMapper) mapPRLink(rec record, advance func(int64) canonical.EventBa
 		m.logEntry(advance(tsUs), "INF", "pr-link", rec),
 	}
 	if len(prLink) > 0 {
+		m.prLinks = append(m.prLinks, prLink)
+		// Emit a copy of the accumulated array so a later mutation of m.prLinks
+		// cannot alias an already-emitted event's slice.
+		snapshot := make([]map[string]any, len(m.prLinks))
+		copy(snapshot, m.prLinks)
 		out = append(out, canonical.SessionUpdatedEvent{
 			EventBase: advance(tsUs),
 			NativeID:  m.nativeID,
-			Extras:    map[string]any{"prLink": prLink},
+			Extras:    map[string]any{"prLinks": snapshot},
 		})
 	}
 	return out

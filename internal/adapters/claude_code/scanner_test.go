@@ -160,6 +160,62 @@ func TestScan_SymlinkEscapeRefused(t *testing.T) {
 	}
 }
 
+// TestScan_SymlinkMetaEscapeRefused pins P1.3 for the META read path: a
+// subagent `.meta.json` that is a symlink resolving OUTSIDE the projects root
+// must be refused with a SourceError and never read, so its (potentially
+// sensitive) agentType/toolUseId is not absorbed into a session's extras. The
+// in-root transcript and a legitimate sibling meta are still ingested.
+func TestScan_SymlinkMetaEscapeRefused(t *testing.T) {
+	t.Parallel()
+	// A secret meta OUTSIDE the root, shaped like a real sidecar.
+	outside := t.TempDir()
+	secretMeta := filepath.Join(outside, "secret.meta.json")
+	writeFileBytes(t, secretMeta, []byte(`{"agentType":"LEAKED-AGENT-TYPE","toolUseId":"toolu_leak"}`))
+
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	// A legitimate subagent sidechain + a legitimate sibling meta.
+	subDir := filepath.Join(proj, "sess-1", "subagents")
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.jsonl"),
+		[]byte(`{"type":"user","uuid":"su1","isSidechain":true,"agentId":"aaa111bbb222ccc","sessionId":"sess-1","message":{"role":"user","content":"task"},"timestamp":"2026-05-26T10:00:05.000Z"}`+"\n"))
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.meta.json"),
+		[]byte(`{"agentType":"general-purpose","toolUseId":"toolu_ok"}`))
+	// A meta sidecar that is a SYMLINK escaping the root.
+	escapeMeta := filepath.Join(subDir, "agent-evil000evil111e.meta.json")
+	if err := os.Symlink(secretMeta, escapeMeta); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	events, errs := collectErrors(t, root)
+
+	// No session's AgentName may carry the leaked agentType.
+	for _, ev := range events {
+		if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.AgentName == "LEAKED-AGENT-TYPE" {
+			t.Fatal("symlinked .meta.json escaping the root was read (P1.3 breach)")
+		}
+	}
+	// The legitimate subagent (general-purpose) must still be ingested.
+	child := "sess-1:agent:aaa111bbb222ccc"
+	cs, ok := sessionStartedByNative(events, child)
+	if !ok {
+		t.Fatalf("legitimate subagent %q not started; guard too aggressive", child)
+	}
+	if cs.AgentName != "general-purpose" {
+		t.Fatalf("legitimate subagent AgentName = %q, want general-purpose", cs.AgentName)
+	}
+	// A containment SourceError must surface for the escaping meta.
+	var sawEscapeErr bool
+	for _, e := range errs {
+		if strings.Contains(e, "evil000evil111e.meta.json") &&
+			(strings.Contains(e, "outside the projects root") || strings.Contains(e, "symlink escape")) {
+			sawEscapeErr = true
+		}
+	}
+	if !sawEscapeErr {
+		t.Fatalf("no symlink-escape SourceError surfaced for the meta; errors=%v", errs)
+	}
+}
+
 // TestScan_DiscoversMainAndSubagent verifies discovery walks both the main
 // transcript and the subagent sidechain, emitting two sessions.
 func TestScan_DiscoversMainAndSubagent(t *testing.T) {
@@ -213,33 +269,47 @@ func TestScan_OrphanRootSynthesized(t *testing.T) {
 	}
 }
 
-// TestScan_OversizedLineSkipped verifies a single line exceeding the scan
-// buffer is surfaced as a SourceError and skipped to EOF (exercises
-// errLineTooLong + drainToNewline), without aborting the scan.
-func TestScan_OversizedLineSkipped(t *testing.T) {
+// TestScan_OversizedLineSkippedContinues pins P2.5: a single line exceeding the
+// scan buffer is surfaced as exactly one SourceError, skipped (bytes discarded
+// up to and including the next newline), and reading CONTINUES — the valid
+// record AFTER the oversized line must still be ingested. The pre-fix behavior
+// jumped to EOF, silently discarding every later record in the file.
+func TestScan_OversizedLineSkippedContinues(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	proj := filepath.Join(tmp, "-home-user-x")
-	// A valid record, then an oversized garbage line (> scanBufferMax),
-	// then another valid record after a newline.
+	// [valid string-content user, > scanBufferMax line, valid string-content
+	// user]: both valid records open a turn, so two TurnStarted events must
+	// survive. (The canonical session native id derives from the FILENAME, so
+	// both records map to one session; turn count is the observable that proves
+	// the record AFTER the oversized line was still read.)
 	big := strings.Repeat("x", scanBufferMax+1024)
 	body := `{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"a"},"timestamp":"2026-05-26T10:00:00.000Z"}` + "\n" +
-		big + "\n"
+		big + "\n" +
+		`{"type":"user","uuid":"u2","sessionId":"s","message":{"role":"user","content":"b"},"timestamp":"2026-05-26T10:00:02.000Z"}` + "\n"
 	writeFileBytes(t, filepath.Join(proj, "s.jsonl"), []byte(body))
 
 	events, errs := collectErrors(t, tmp)
-	var sawTooLong bool
+
+	// Exactly one 'exceeds' SourceError for the single oversized line.
+	tooLong := 0
 	for _, e := range errs {
 		if strings.Contains(e, "exceeds") {
-			sawTooLong = true
+			tooLong++
 		}
 	}
-	if !sawTooLong {
-		t.Fatalf("expected an 'exceeds' SourceError for the oversized line; got %v", errs)
+	if tooLong != 1 {
+		t.Fatalf("oversized line surfaced %d 'exceeds' errors, want exactly 1; errs=%v", tooLong, errs)
 	}
-	// The first valid record's session must still have been emitted.
+	// The session must be started (the record before the oversized line).
 	if _, ok := sessionStartedByNative(events, "s"); !ok {
-		t.Fatal("oversized line aborted the scan; the prior valid record was lost")
+		t.Fatal("record before the oversized line was lost")
+	}
+	// BOTH valid records must open a turn — turn 2 proves the record AFTER the
+	// oversized line was still read (P2.5: oversized line must not jump to EOF
+	// and discard the rest of the file).
+	if n := countKind(events, canonical.EvTurnStarted); n != 2 {
+		t.Fatalf("turn_started = %d, want 2 (both valid records; oversized-line skip must continue, not jump to EOF, P2.5)", n)
 	}
 }
 

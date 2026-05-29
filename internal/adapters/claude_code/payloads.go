@@ -114,32 +114,15 @@ func (m *fileMapper) emitToolResultPayload(base canonical.EventBase, turnSeq, op
 
 // emitSummaryPayload returns a PayloadRefEvent for the post-compaction summary
 // user message (spec §5.4, §9.2). The summary text lives inline in the
-// transcript; the ref lets the UI render it in a compaction lane. Not op- or
-// turn-scoped (OpSeq/TurnSeq 0).
-func (m *fileMapper) emitSummaryPayload(base canonical.EventBase) (canonical.PayloadRefEvent, error) {
-	uri, err := payloadLocationURI(m.root, m.absPath)
-	if err != nil {
-		return canonical.PayloadRefEvent{}, err
-	}
-	return canonical.PayloadRefEvent{
-		EventBase:       base,
-		SessionNativeID: m.nativeID,
-		PayloadKind:     "log",
-		Format:          "text",
-		LocationURI:     uri,
-		OriginalBytes:   -1,
-	}, nil
-}
-
-// emitFileAttachmentPayload returns a PayloadRefEvent for a `file` attachment
-// that carries inline content (spec §5.4). The content lives inline in the
-// transcript, so the ref points at the transcript file. Returns (zero, false,
-// nil) when the attachment is not a `file` with content (every other subtype,
-// including compact_file_reference whose target lives outside the served root
-// — see §3.4). A containment failure returns a non-nil error.
-func (m *fileMapper) emitFileAttachmentPayload(rec record, base canonical.EventBase) (canonical.PayloadRefEvent, bool, error) {
-	att := decodeAttachment(rec.Raw)
-	if att.Type != "file" || !att.hasFileContent() {
+// transcript; the ref lets the UI render it in a compaction lane. It is scoped
+// to the compaction op (turnSeq/opSeq) so it references an op that EXISTS
+// (P1.1a): payload_refs.op_id is NOT NULL REFERENCES ops(id), and the summary
+// belongs to its compaction. Returns (zero, false, nil) when no compaction op
+// has been seen on the file — without an owning op the ref would FK-roll-back
+// the batch, so it is dropped (a summary without a preceding boundary is
+// malformed input, not a normal case).
+func (m *fileMapper) emitSummaryPayload(base canonical.EventBase, turnSeq, opSeq int) (canonical.PayloadRefEvent, bool, error) {
+	if turnSeq == 0 || opSeq == 0 {
 		return canonical.PayloadRefEvent{}, false, nil
 	}
 	uri, err := payloadLocationURI(m.root, m.absPath)
@@ -149,8 +132,9 @@ func (m *fileMapper) emitFileAttachmentPayload(rec record, base canonical.EventB
 	return canonical.PayloadRefEvent{
 		EventBase:       base,
 		SessionNativeID: m.nativeID,
-		TurnSeq:         m.turnSeq,
-		PayloadKind:     "tool_request",
+		TurnSeq:         turnSeq,
+		OpSeq:           opSeq,
+		PayloadKind:     "log",
 		Format:          "text",
 		LocationURI:     uri,
 		OriginalBytes:   -1,

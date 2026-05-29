@@ -712,6 +712,23 @@ func (w *writer) applyPayloadRef(ctx context.Context, tx *sql.Tx, ev canonical.P
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	opID := canonicalOpID(turnID, ev.OpSeq)
+	// Defense-in-depth: payload_refs.op_id is NOT NULL REFERENCES ops(id)
+	// (migration 0001), so an INSERT naming an op that has no row raises a
+	// foreign-key error that rolls back the ENTIRE batch — one stray
+	// PayloadRefEvent would kill ingestion for the whole source. Adapters
+	// are expected to emit op-scoped refs only (and to order OpStarted
+	// before its children), but a future adapter bug must never be able to
+	// abort a batch here. So verify the parent op exists first; if it does
+	// not, surface the condition through the same Sources-panel error
+	// mechanism applySourceError uses and skip the insert — never a silent
+	// drop (project "no silent failures" contract). See ingester.md
+	// §Layer 3 — payload_ref orphan guard.
+	if err := w.requireOpExists(ctx, tx, opID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return w.reportOrphanPayloadRef(ctx, tx, ev, opID)
+		}
+		return err
+	}
 	// ON CONFLICT DO NOTHING on the natural identity
 	// (op_id, kind, location_uri) makes the write idempotent: re-emitting
 	// the same payload (Tail re-read, file re-scan) never duplicates the
@@ -728,6 +745,54 @@ ON CONFLICT (op_id, kind, location_uri) DO NOTHING
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
+	return nil
+}
+
+// requireOpExists returns nil when an ops row with id exists, sql.ErrNoRows
+// when it does not, and a wrapped error on any other query failure. Used by
+// applyPayloadRef to guard the NOT NULL FK on payload_refs.op_id before the
+// insert, so a missing parent op is handled gracefully instead of aborting
+// the batch.
+func (w *writer) requireOpExists(ctx context.Context, tx *sql.Tx, opID string) error {
+	var one int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM ops WHERE id = ?`, opID).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return fmt.Errorf("writer: lookup payload_ref op: %w", err)
+	}
+	return nil
+}
+
+// reportOrphanPayloadRef surfaces a PayloadRefEvent whose parent op row does
+// not exist. It mirrors applySourceError exactly — bump the shared
+// Sources-panel error counter (so /api/health and the source-status panel
+// reflect the problem) and write a source-scoped ERR log_entries row — then
+// returns nil so the rest of the batch still commits. The orphaned ref is
+// NOT inserted (its FK target is missing) and the turn/session are NOT marked
+// dirty, since nothing was persisted for them here.
+func (w *writer) reportOrphanPayloadRef(ctx context.Context, tx *sql.Tx, ev canonical.PayloadRefEvent, opID string) error {
+	if err := w.bumpSourceErrorCounter(ctx, tx, ev.Ts); err != nil {
+		return err
+	}
+	extras, err := json.Marshal(map[string]any{
+		"op_id":        opID,
+		"turn_seq":     ev.TurnSeq,
+		"op_seq":       ev.OpSeq,
+		"payload_kind": ev.PayloadKind,
+		"location_uri": ev.LocationURI,
+	})
+	if err != nil {
+		return fmt.Errorf("writer: marshal orphan payload_ref extras: %w", err)
+	}
+	msg := fmt.Sprintf("payload_ref references unknown op %s; dropped to protect the batch", opID)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
+VALUES (NULL, ?, NULL, NULL, ?, 'ERR', ?, ?, ?)
+`+logEntryOnConflict, w.sourceID, ev.Ts, w.sourceFormat, msg, string(extras)); err != nil {
+		return fmt.Errorf("writer: insert orphan payload_ref log: %w", err)
+	}
 	return nil
 }
 
