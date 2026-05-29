@@ -175,8 +175,8 @@ func TestSources_NullableSourceProgressFields(t *testing.T) {
 // TestSources_DBErrorLogCarriesRequestID pins observability.md §"Trace
 // IDs" for the DB-error code path: when the sources query fails, the
 // structured error log line MUST carry the same `request_id` as the
-// X-Request-ID response header. Codex iter-6 P2 flagged that the seven
-// DB-error log sites in health.go + sources.go were emitted with `err`
+// X-Request-ID response header. The seven DB-error log sites in
+// health.go + sources.go were emitted with `err`
 // only — no request_id — so a failed query could not be grepped back to
 // its access log line.
 //

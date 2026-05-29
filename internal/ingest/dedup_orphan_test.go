@@ -95,7 +95,7 @@ func submitEvents(t *testing.T, i *Ingester, sourceID string, events []canonical
 //
 // The asymmetry (parent below, child above) is mandatory: if both fell
 // below the HWM the old code would drop both and the test would pass by
-// accident, proving nothing (codex iter-3 P2#4).
+// accident, proving nothing.
 func TestWorker_OrphanFK_V2ParentBelowChildAbove(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)

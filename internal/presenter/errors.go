@@ -72,8 +72,7 @@ func writeJSONError(w http.ResponseWriter, r *http.Request, logger *slog.Logger,
 		// request_id mirrors the X-Request-ID header so a 4xx/5xx warning
 		// can be grepped together with the deferred access log line for
 		// the same request. Per observability.md §"Trace IDs" every
-		// request-scoped log line MUST carry the field; codex iter-5 P2
-		// flagged this surface as the last gap.
+		// request-scoped log line MUST carry the field.
 		attrs := []any{
 			"status", status,
 			"code", code,

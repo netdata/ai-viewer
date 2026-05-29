@@ -67,8 +67,8 @@ func TestWriteJSONErrorWithDetails(t *testing.T) {
 
 // TestWriteJSONErrorHEADHasEmptyBody asserts the helper honours the
 // HEAD contract: status and Content-Type are written but no JSON body.
-// Pins presenter.md §"Routing" (HEAD returns empty body) and codex
-// iter-4 P3 — without this guard, HEAD requests to error paths
+// Pins presenter.md §"Routing" (HEAD returns empty body) — without
+// this guard, HEAD requests to error paths
 // (missing assets, deferred API routes) leak the JSON envelope.
 func TestWriteJSONErrorHEADHasEmptyBody(t *testing.T) {
 	t.Parallel()
@@ -144,9 +144,8 @@ func TestLoggingResponseWriterFlushPassthrough(t *testing.T) {
 // IDs" on the error log surface: when writeJSONError emits its warning
 // line, the line MUST carry the same `request_id` value that
 // loggingMiddleware seeded into r.Context() (and that surfaces as the
-// X-Request-ID response header). Codex iter-5 P2 flagged that
-// error/panic logs were silently dropping the field and breaking
-// per-request grep.
+// X-Request-ID response header). Error/panic logs were silently
+// dropping the field and breaking per-request grep.
 func TestWriteJSONError_IncludesRequestID(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

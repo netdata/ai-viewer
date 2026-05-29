@@ -48,8 +48,6 @@ type DetailedPricer interface {
 // Pricers that do not implement MetadataPricer (e.g. NopPricer)
 // cause the catalog seed to skip silently — matching the pre-iter-8
 // behaviour and keeping the test surface stable.
-//
-// Iter-8 fix iter8-4 (codex iter-7 P2#4).
 type MetadataPricer interface {
 	Pricer
 	// CtxMax returns the seeded context-window size for a (provider,

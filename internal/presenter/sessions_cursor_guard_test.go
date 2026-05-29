@@ -6,7 +6,7 @@ import (
 )
 
 // TestSessions_CursorTamperedOrderRejected pins the explicit sort/order
-// guard (codex iter-7): a cursor carrying the CORRECT live fingerprint but a
+// guard: a cursor carrying the CORRECT live fingerprint but a
 // tampered `Order` (asc when the live query is desc) must be rejected with 400
 // rather than silently accepted. Before the guard only FP was checked, so the
 // junk Order slipped through (200); after it the explicit
@@ -73,7 +73,7 @@ func TestSessions_CursorTamperedOrderRejected(t *testing.T) {
 }
 
 // TestSessions_CursorToRawMismatchRejected pins the supplied-`to` (toRaw)
-// fingerprint binding end-to-end (glm iter-7): the fingerprint encodes the
+// fingerprint binding end-to-end: the fingerprint encodes the
 // operator-SUPPLIED `to` (toRaw), NOT the now-defaulted `to`. A cursor minted
 // WITH an explicit ?to and replayed WITHOUT it is a different query and must be
 // rejected with 400. The explicit ?to is pinned to the harness clock

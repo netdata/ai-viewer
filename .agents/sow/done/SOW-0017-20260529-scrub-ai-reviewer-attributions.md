@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: completed
 
-Sub-state: awaits the operator moving it to current/ for execution. Operator-directed ("remove these comments") during SOW-0001 Chunk 17. Filed as its own SOW/PR so the Chunk-17 build-pipeline PR stays focused; the two Chunk-17-touched files (`cmd/ai-viewer-serve/main.go`, `cmd/ai-viewer-serve/main_test.go`) are already cleaned in the Chunk-17 commit.
+Sub-state: operator-approved ("remove these comments", 2026-05-29), executed, and moved to done/ in the same commit. The two Chunk-17-touched files (`cmd/ai-viewer-serve/main.go`, `cmd/ai-viewer-serve/main_test.go`) are already cleaned (merged in PR #18/#19); this scrubs the remaining ~63 attribution sites repo-wide and adds the scan gate.
 
 ## Requirements
 
@@ -45,4 +45,37 @@ The distinction is attribution-vs-domain: `// ... (codex iter-6 P2#2)` is an att
 
 ## Execution Log
 
-(Filled during execution.)
+**2026-05-29 — done.** Reworded **64 attribution sites** across 38 files in
+`cmd/`, `internal/`, `scripts/` (drop the reviewer name + issue id, keep the
+technical "why"; remove the line entirely when it was a pure attribution
+marker). Added `scripts/scan-ai-attribution.sh` (narrow pattern: a reviewer name
+adjacent to an iter/priority tag or attribution verb — never bare domain terms;
+self-excluded; scoped to the three shipped trees, tests included) and wired it
+into the CI `gates` job (mirrors the existing scan-secrets/spec-drift
+detect+run pattern). Registered the gate in the project-quality-gates skill's
+runtime gate catalog (the operative gate list).
+
+Keep-list confirmed untouched: `pricing.json` model names (gemini/deepseek),
+`codex`/`opencode` session-format domain terms (`canonical/`, `adapters/`,
+`registry_test.go`), the `sanitize-fixture.sh` deepseek redaction rule, all 24
+`#nosec` directives, and `.agents/**` prose. Internal `Iter-N fix iterN-M`
+changelog labels (no reviewer name) were left as-is (out of scope — not AI
+attributions).
+
+Verification (master-run, FULL CI gate set per the gosec lesson): zero
+attribution hits (`grep` + the new scan gate exits 0); `gofmt`/`goimports`/`go
+vet`/`golangci-lint` clean; standalone `gosec@latest` Issues: 0 (Nosec: 24);
+`govulncheck` 0 called; `go test -race ./internal/... ./cmd/...` 11 packages
+pass. CI verified per-check `pass` before merge (not the `--watch` exit code).
+
+**Review decision (judgment, recorded):** no external second-opinion round was
+run for this SOW. Rationale: the change is mechanical and non-logical (comment +
+test-message text edits that cannot alter behavior — proven by build/vet/lint/
+gosec/`-race` all green) plus one ~40-line grep gate script that the master read
+in full and exercised (PASS on a clean tree; FAIL on an injected attribution).
+There is no logic for a reviewer to find a bug in; a 3-reviewer round would be
+disproportionate spend. The full local gate set + CI per-check parse are the
+gate here. (Contrast: code-producing SOWs with real logic still get the
+mandatory orchestrator review round.)
+
+Status → completed; moved to done/ in the merge commit.

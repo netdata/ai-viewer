@@ -69,8 +69,8 @@ func TestStreamLines_LastSeqNotUpdatedWhenStale(t *testing.T) {
 }
 
 // TestTail_DoesNotCreateMissingSessionDir asserts the read-only-on-
-// sources invariant (security.md §"Hard Rules" #1, codex iter-3 P1
-// addressed in iter-4): when session/ does not exist, Tail surfaces a
+// sources invariant (security.md §"Hard Rules" #1): when session/
+// does not exist, Tail surfaces a
 // SourceError via OnError and returns cleanly — it MUST NOT create
 // the directory. The dedicated regression test in tailer_test.go
 // pins the OnError + early-return behavior; this case stays here so

@@ -27,7 +27,7 @@ SCRIPT="${REPO_ROOT}/scripts/refresh-pricing.sh"
 
 # Iter-9 fix iter9-2: tests run OFFLINE via $LITELLM_URL /
 # $OPENROUTER_URL pointing at file:// fixtures (pre-iter9 tests
-# silently used network defaults — codex iter-8 P2#2).
+# silently used network defaults).
 FIXTURES_DIR="${SCRIPT_DIR}/fixtures/refresh-pricing"
 export LITELLM_URL="file://${FIXTURES_DIR}/litellm.json"
 export OPENROUTER_URL="file://${FIXTURES_DIR}/openrouter.json"
@@ -239,7 +239,7 @@ fi
 
 # --- iter10-3 : show_review_diff falls back when git is missing -----
 #
-# codex iter-9 P2#3: prompt_apply called `git diff --no-index ... || :`
+# prompt_apply called `git diff --no-index ... || :`
 # but require_tools only checks for `diff` (not `git`). On a minimal
 # environment WITHOUT git the operator was prompted to overwrite with
 # NO diff shown — the `|| :` swallowed the missing-git failure.
@@ -332,7 +332,7 @@ fi
 
 # --- iter11-3 : require_tools rejects PATH without git AND without diff -
 #
-# codex iter-10 P3: require_tools demanded `diff` unconditionally, which
+# require_tools demanded `diff` unconditionally, which
 # contradicted show_review_diff's git-first fallback. Iter-11 split the
 # gate: curl/jq/sqlite3 always required, plus AT LEAST ONE of git/diff.
 # Mutation: reverting either branch changes the die message or lets the

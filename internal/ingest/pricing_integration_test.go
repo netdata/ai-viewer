@@ -71,8 +71,6 @@ func TestPricingPackageSatisfiesIngestInterface(t *testing.T) {
 // `ctx_max` field is the catalog seed; without this end-to-end test
 // a future change that drops MetadataPricer or the COALESCE clause
 // in catalog.go would silently regress the seeding contract.
-//
-// Iter-8 fix iter8-4 (codex iter-7 P2#4).
 func TestCatalogModelsCtxMaxSeededFromPricer(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
@@ -151,8 +149,8 @@ func TestCatalogModelsCtxMaxAbsentWhenPricerUnknown(t *testing.T) {
 // observed values, with the pricing seed acting as a FLOOR (not a
 // ceiling). Without the MAX/CASE update in onOpFinalized, the seed
 // pins the column forever even when an adapter observes a larger
-// context window — exactly the regression codex iter-8 P2#1 called
-// out. claude-3-5-sonnet seeds at 200000; the test ingests an op
+// context window — exactly the regression this test guards against.
+// claude-3-5-sonnet seeds at 200000; the test ingests an op
 // observing 300000 and asserts the catalog row carries the larger
 // value.
 func TestCatalogModelsCtxMaxObservedExceedsSeed(t *testing.T) {

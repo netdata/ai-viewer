@@ -33,9 +33,9 @@ const gzipMinBytes = 1024
 // bytes_out, client_ip, and a freshly-minted UUID-v4 request_id that
 // also surfaces on the X-Request-ID response header. The field list is
 // the contract documented in observability.md §"Structured Logging" +
-// §"Trace IDs"; codex iter-5 P2 flagged that the pre-defer
-// implementation skipped the access log on the panic path AND that
-// error/panic logs were missing request_id — both gaps are closed
+// §"Trace IDs"; the pre-defer implementation skipped the access log
+// on the panic path AND error/panic logs were missing request_id —
+// both gaps are closed
 // here.
 //
 // loggingMiddleware is registered as the OUTERMOST middleware so the

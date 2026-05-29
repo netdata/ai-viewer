@@ -140,8 +140,8 @@ func TestHealth_DegradedOnParseErrors(t *testing.T) {
 // TestHealth_SessionScopedErrorsDoNotDegrade asserts session-scoped
 // log_entries rows (those with a non-NULL session_id — agent / tool
 // errors emitted via canonical.LogEntryEvent) do NOT count toward the
-// "degraded" trigger. Only source-scoped parse errors count (codex
-// iter-3 P2#4). The fixture also includes ONE source-scoped parse
+// "degraded" trigger. Only source-scoped parse errors count. The
+// fixture also includes ONE source-scoped parse
 // error so we verify both rows coexist in the table while only the
 // source-scoped one flips the verdict — pinning the filter exactly,
 // not just rejecting session-scoped rows by accident.

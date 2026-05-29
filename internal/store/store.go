@@ -142,7 +142,7 @@ func OpenWriter(ctx context.Context, dsn string, logger *slog.Logger) (*Store, e
 	// what lets ":memory:" tests see the same DB across pooled handles
 	// (otherwise every opened conn is a separate in-memory database).
 	// Readers use OpenReader (mode=ro) which keeps the default pool
-	// size of 8; concurrent reads remain unbounded. Codex iter-3 P2#5.
+	// size of 8; concurrent reads remain unbounded.
 	db.SetMaxOpenConns(1)
 
 	// sql.Open does not contact the database. Ping forces a real open
@@ -211,7 +211,6 @@ func OpenReader(ctx context.Context, dsn string, logger *slog.Logger) (*Store, e
 	// unbounded burst pressure under a busy SSE fan-out. Pin to the
 	// spec'd value so the presenter has a predictable read concurrency
 	// envelope. SQLite WAL keeps reads non-blocking across this pool.
-	// Codex iter-3 P2#5.
 	db.SetMaxOpenConns(8)
 
 	// sql.Open is lazy: it returns a *sql.DB without contacting the

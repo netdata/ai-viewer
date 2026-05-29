@@ -457,7 +457,7 @@ jobs:
         id: detect
         shell: bash
         run: |
-          for s in gates scan-secrets spec-drift; do
+          for s in gates scan-secrets spec-drift scan-ai-attribution; do
             f="scripts/${s}.sh"
             if [[ -f "$f" ]]; then
               echo "${s//-/_}=true" >> "$GITHUB_OUTPUT"
@@ -467,8 +467,8 @@ jobs:
           done
 
       - name: Skip notice (no aggregate scripts yet)
-        if: steps.detect.outputs.gates != 'true' && steps.detect.outputs.scan_secrets != 'true' && steps.detect.outputs.spec_drift != 'true'
-        run: echo "No scripts/gates.sh, scripts/scan-secrets.sh, or scripts/spec-drift.sh present; gates job is a no-op on this commit."
+        if: steps.detect.outputs.gates != 'true' && steps.detect.outputs.scan_secrets != 'true' && steps.detect.outputs.spec_drift != 'true' && steps.detect.outputs.scan_ai_attribution != 'true'
+        run: echo "No scripts/gates.sh, scripts/scan-secrets.sh, scripts/spec-drift.sh, or scripts/scan-ai-attribution.sh present; gates job is a no-op on this commit."
 
       - name: Set up Go (for gates that shell out to go tools)
         if: hashFiles('go.mod') != ''
@@ -497,6 +497,12 @@ jobs:
         run: |
           chmod +x scripts/spec-drift.sh
           ./scripts/spec-drift.sh
+
+      - name: Scan AI attribution
+        if: steps.detect.outputs.scan_ai_attribution == 'true'
+        run: |
+          chmod +x scripts/scan-ai-attribution.sh
+          ./scripts/scan-ai-attribution.sh
 
       - name: Aggregate gates
         if: steps.detect.outputs.gates == 'true'

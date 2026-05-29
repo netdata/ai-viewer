@@ -1182,7 +1182,7 @@ func TestWriter_PricerSkippedWhenOpRowSelectFails(t *testing.T) {
 	}
 }
 
-// TestWriter_PricerComputedCostFlowsToCatalog pins codex iter-6 P2#1:
+// TestWriter_PricerComputedCostFlowsToCatalog pins that
 // when the pricer computes cost (because ev.CostUSD arrives as 0),
 // the catalog rollups (catalog_providers.total_cost_usd /
 // catalog_models.total_cost_usd) must include the computed value, not
@@ -1244,7 +1244,7 @@ func TestWriter_PricerComputedCostFlowsToCatalog(t *testing.T) {
 		t.Fatalf("query catalog_models: %v", err)
 	}
 	if modelCost != 2.50 {
-		t.Errorf("catalog_models.total_cost_usd = %f, want 2.50 (codex iter-6 P2#1)", modelCost)
+		t.Errorf("catalog_models.total_cost_usd = %f, want 2.50", modelCost)
 	}
 
 	// catalog_providers.total_cost_usd must also match.
@@ -1255,11 +1255,11 @@ func TestWriter_PricerComputedCostFlowsToCatalog(t *testing.T) {
 		t.Fatalf("query catalog_providers: %v", err)
 	}
 	if providerCost != 2.50 {
-		t.Errorf("catalog_providers.total_cost_usd = %f, want 2.50 (codex iter-6 P2#1)", providerCost)
+		t.Errorf("catalog_providers.total_cost_usd = %f, want 2.50", providerCost)
 	}
 }
 
-// TestWriter_PricingMissDedupedAcrossBatches pins codex iter-6 P2#2:
+// TestWriter_PricingMissDedupedAcrossBatches pins that
 // the pricing-miss dedup must survive resetBatch() so the same
 // (provider, model, missKind) tuple emits exactly one WRN row and one
 // parse_errors increment per source — not one per batch. Before iter-7
@@ -1297,8 +1297,7 @@ func TestWriter_PricingMissDedupedAcrossBatches(t *testing.T) {
 	// Mimic worker.flush's post-commit sequence: promote pending dedup
 	// keys into the lifetime map, then reset per-batch state. Without
 	// the promotion the next batch's emitPricingMiss would see neither
-	// the pending nor the lifetime map carrying the key and re-emit
-	// (codex iter-9 P2#1).
+	// the pending nor the lifetime map carrying the key and re-emit.
 	w.promotePendingMissDedup()
 	w.resetBatch()
 
@@ -1323,16 +1322,16 @@ func TestWriter_PricingMissDedupedAcrossBatches(t *testing.T) {
 	// Exactly ONE WRN row across both batches (spec: "deduped per
 	// (sourceID, provider, model, missKind)").
 	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
-		t.Errorf("WRN log_entries count across 2 batches = %d, want 1 (codex iter-6 P2#2)", v)
+		t.Errorf("WRN log_entries count across 2 batches = %d, want 1", v)
 	}
 	// Exactly ONE parse_errors increment.
 	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
-		t.Errorf("parse_errors across 2 batches = %d, want 1 (codex iter-6 P2#2)", v)
+		t.Errorf("parse_errors across 2 batches = %d, want 1", v)
 	}
 }
 
-// TestWriter_PricingMissDedup_RollbackDoesNotSuppress pins codex iter-9
-// P2#1: marking pricingMissDedup at emit time (BEFORE commit) silently
+// TestWriter_PricingMissDedup_RollbackDoesNotSuppress pins that
+// marking pricingMissDedup at emit time (BEFORE commit) silently
 // suppressed every future identical warning even when the surrounding
 // tx rolled back and the warning row never landed. Fix: the writer
 // marks per-batch pendingMissDedup on INSERT success, and worker.flush
@@ -1428,10 +1427,10 @@ func TestWriter_PricingMissDedup_RollbackDoesNotSuppress(t *testing.T) {
 	// also tried to emit one. Without the fix the count is 0 because
 	// emitPricingMiss in batch 2 would have short-circuited.
 	if v := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN' AND source_id IS NOT NULL`); v != 1 {
-		t.Errorf("WRN log_entries count after rollback+commit = %d, want 1 (codex iter-9 P2#1: rolled-back warning must NOT suppress next batch)", v)
+		t.Errorf("WRN log_entries count after rollback+commit = %d, want 1 (rolled-back warning must NOT suppress next batch)", v)
 	}
 	if v := scanInt(t, db, `SELECT parse_errors FROM sources WHERE id='aiagent_v3:/tmp'`); v != 1 {
-		t.Errorf("parse_errors after rollback+commit = %d, want 1 (codex iter-9 P2#1)", v)
+		t.Errorf("parse_errors after rollback+commit = %d, want 1", v)
 	}
 
 	// --- Batch 3: NOW the lifetime map carries the key. A third

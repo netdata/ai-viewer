@@ -161,7 +161,7 @@ require_tools() {
   if [ -n "$missing" ]; then
     die "missing required tools:${missing}"
   fi
-  # codex iter-10 P3: show_review_diff prefers git, falls back to diff;
+  # show_review_diff prefers git, falls back to diff;
   # require at least one (both missing was previously rejected at this
   # gate before the fallback could run).
   if ! command -v git >/dev/null 2>&1 && ! command -v diff >/dev/null 2>&1; then
@@ -325,8 +325,8 @@ validate_proposed() {
 
 # --- diff + apply prompt ------------------------------------------------
 
-# show_review_diff renders the cur→proposed diff. codex iter-9 P2#3:
-# never reach prompt_apply without showing a diff. Prefer git (colored),
+# show_review_diff renders the cur→proposed diff: never reach
+# prompt_apply without showing a diff. Prefer git (colored),
 # fall back to diff -u, die if neither is available.
 show_review_diff() {
   local cur="$1" proposed="$2"

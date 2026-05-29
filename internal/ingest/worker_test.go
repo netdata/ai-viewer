@@ -290,8 +290,8 @@ func TestWorker_OnErrCallbackFires(t *testing.T) {
 	}
 }
 
-// TestWorker_FlushPromotesPendingMissDedupAfterCommit pins codex iter-10
-// P2: the rollback/dedup writer-level tests call promotePendingMissDedup
+// TestWorker_FlushPromotesPendingMissDedupAfterCommit pins that
+// the rollback/dedup writer-level tests call promotePendingMissDedup
 // manually, so a developer who removed wr.promotePendingMissDedup from
 // worker.flush (worker.go:204) would still see them pass. This test
 // drives the *worker* end-to-end for two batches that each carry the

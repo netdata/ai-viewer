@@ -169,7 +169,7 @@ prices_have_required() {
 }
 
 # enforce_missing_seed_gate is the iter-8 missing-seed gate, extracted
-# in iter-9 (codex iter-8 P3 + glm iter-8 P2 line budget) so the
+# in iter-9 (line budget) so the
 # refresh-pricing.sh entry script stays under its 400-line file budget
 # AND its main() under the 60-line function budget. Reads the globals
 # MISSING_COUNT / MISSING_PAIRS that build_records_from_seeds sets and

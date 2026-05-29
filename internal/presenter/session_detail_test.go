@@ -198,7 +198,7 @@ func TestSessionDetail_HeadParity(t *testing.T) {
 	}
 }
 
-// TestSessionDetail_PathControlCharRejected pins glm iter-6 P2-1: a control
+// TestSessionDetail_PathControlCharRejected pins that a control
 // byte in the path :id (e.g. a%09b => "a\tb") must be a loud 400 (BAD_REQUEST)
 // checked on the RAW PathValue before TrimSpace, not a silent doomed lookup
 // that returns 404. Mirrors the query-value control-char rule so the path id

@@ -103,7 +103,7 @@ func mapSessionStart(rec record, base canonical.EventBase) []canonical.Event {
 	}
 	// originId is the root session's id; surface it in extras so
 	// consumers reading sessions.extras_json can see it without joining
-	// to root_native_id (per qwen P2-4 / spec §3.1).
+	// to root_native_id (spec §3.1).
 	if rec.Common.OriginID != "" {
 		extras["originId"] = rec.Common.OriginID
 	}

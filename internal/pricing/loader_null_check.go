@@ -16,8 +16,6 @@ import (
 // `0` — none of which match the schema. This function is the Go-side
 // equivalent of the jq validator's `has(X) ⇒ type == "array"` /
 // `nn_number` shape (scripts/lib/pricing-validate.jq:114-115).
-//
-// Iter-8 fix iter8-3 (codex iter-7 P2#3).
 func rejectNullsInOptionals(jsonBytes []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(jsonBytes, &raw); err != nil {

@@ -136,9 +136,8 @@ func parseDoc(jsonBytes []byte) (map[modelKey]*modelEntry, *rawDoc, error) {
 	if err := dec.Decode(&doc); err != nil {
 		return nil, nil, fmt.Errorf("pricing: parse json: %w", err)
 	}
-	// Iter-9 fix iter9-3 (codex iter-8 P2#3): json.Decoder.Decode
-	// consumes exactly one top-level JSON value and silently leaves
-	// any trailing content unread. The schema declares a single
+	// json.Decoder.Decode consumes exactly one top-level JSON value and
+	// silently leaves any trailing content unread. The schema declares a single
 	// document; concatenated JSON values (e.g. `{...}\n{}`) are a
 	// corrupted seed and must be rejected by the runtime safety net,
 	// not just by the jq validator. A second Decode call should
