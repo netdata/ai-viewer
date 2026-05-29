@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate; the assistant runs the same gates locally via `./scripts/gates.sh` before any commit. A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
+The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate as a dedicated job; the assistant runs the same gates locally before any commit (today via the individual gate commands — a single `./scripts/gates.sh` aggregator is planned, see §Aggregate Scripts). A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
 
 The runtime companion to this spec is `.agents/skills/project-quality-gates/SKILL.md` (commands and ergonomics). This spec is the durable truth about *what* is enforced and *at what threshold*.
 
@@ -112,11 +112,49 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - Thresholds: main chunk ≤ 500 KB gzipped; per-route lazy chunks ≤ 200 KB gzipped.
 - Exceeding requires a SOW with justification.
 
-### Secrets Scan
+### Secrets + Operator-PII Scan
 
-- `scripts/scan-secrets.sh` greps `testdata/` and committed source.
-- Patterns: long entropy strings near keywords `key|token|secret|password|bearer`; `sk-…` (OpenAI); `xox[bpas]-…` (Slack); `AKIA[0-9A-Z]{16}` (AWS); plus the project's allow-list for placeholders like `[REDACTED_SECRET]`.
-- Threshold: zero hits.
+`scripts/scan-secrets.sh` scans **every tracked file in the repository** (not just
+`testdata/`) and exits non-zero on any hit. It enforces two rule classes:
+
+1. **Operator identity (banned everywhere, zero tolerance).** The operator's real
+   email addresses, real home path, and given/sur-name. These must never appear in
+   any tracked file — including the sanitizer's `INPUT/` fixtures. The ban-list is
+   **derived at runtime from the repository's own git author metadata** — `git log`
+   author emails + names, unioned with `git config user.email`/`user.name`; home
+   stems from each email local-part, each name, and `$HOME` — so **no operator
+   literal is committed in the scanner**. The scan is **fail-closed**: if no
+   identity can be derived (and, when the repo has commits, if `git log` fails
+   unexpectedly) it exits non-zero rather than running with Rule 1 disabled or on a
+   partial ban-list. Name matching is word-bounded so unrelated tokens (e.g.
+   `cost_usd`) never match.
+2. **Generic secret shapes.** `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys),
+   `xox[bpas]-…` (Slack), `AKIA[0-9A-Z]{16}` (AWS), `Bearer <high-entropy>`
+   tokens, and VCS PATs (`ghp_…`, `github_pat_…`, `glpat-…`). (Public provider
+   *hostnames* like `api.anthropic.com` are NOT secrets and are not scanned —
+   they are a sanitizer concern; fixtures rewrite them to `*.example.invalid`.) A
+   secret-shape token is flagged **everywhere**, with a single exemption: a token
+   carrying the synthetic marker `EXAMPLE` (e.g. `sk-ant-EXAMPLE…`) — the
+   convention for the dirty inputs that exercise `sanitize-fixture.sh`'s
+   redaction. A secret-shape token WITHOUT `EXAMPLE` is flagged even under
+   `scripts/test/fixtures/*/INPUT/**`, so "synthetic only" for fixtures is
+   enforced by the gate, not merely policy.
+
+The `EXAMPLE` exemption is matched **per token, never per line** — a real secret
+on the same line as a placeholder is still flagged — and applies **only to rule
+class 2**; rule class 1 (operator identity) is never exempted under any
+circumstances. `.gz` archives are decompressed and scanned; a malformed archive
+is scanned raw and its decompression failure reported (never silently skipped).
+Tracked symlinks are scanned by their target-path string, not the dereferenced
+target.
+
+- **Threshold:** zero hits.
+- **Fail-closed in CI.** The `gates` job runs the scanner and **fails when the
+  script is absent** — a missing scanner is a missing gate, not a pass. (Only the
+  genuinely-optional aggregate `scripts/gates.sh` may be skipped when absent.)
+- **Negative self-test.** The scanner ships with a test that plants an
+  operator-identity string in a temp file and asserts the scan flags it, so the
+  enforcement itself cannot silently rot.
 
 ### Spec Drift
 
@@ -140,15 +178,28 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ## Aggregate Scripts
 
-- `./scripts/lint.sh` — all formatting + lint + static + security.
-- `./scripts/test.sh` — all tests + coverage + race.
-- `./scripts/gates.sh` — every gate above, in order, fail-fast. The canonical pre-commit gate.
+CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
+`embed-smoke`, `gates`) that invokes the tools directly — see
+`.github/workflows/ci.yml`. The implemented helper scripts today are
+`scripts/build.sh` (frontend + embed + both binaries), `scripts/dev.sh`,
+`scripts/embed-smoke.sh`, `scripts/e2e-serve.sh`, `scripts/sanitize-fixture.sh`,
+`scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
+`scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
 
-CI uses the same scripts so local and CI behavior cannot diverge.
+Single-command aggregators — `scripts/lint.sh`, `scripts/test.sh`, and
+`scripts/gates.sh` (run every gate, fail-fast) — are a planned convenience and
+are **not yet present**. Until they land, run the individual gates (or rely on
+the per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
+gracefully when absent. The one exception is the security scanner: it is
+**fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if
+`scripts/scan-secrets.sh` or its self-test is missing, never skips it.
 
 ## Performance Target
 
-Full local `./scripts/gates.sh` completes in under 5 minutes on the operator's workstation. If it exceeds, profile and parallelize before adding more gates.
+When the `scripts/gates.sh` aggregator lands, a full local run should complete in
+under 5 minutes on the operator's workstation; if it exceeds, profile and
+parallelize before adding more gates. Today the equivalent is the set of CI jobs,
+which run in parallel.
 
 ## When a Gate Fails
 
@@ -161,7 +212,7 @@ Full local `./scripts/gates.sh` completes in under 5 minutes on the operator's w
 
 ## Adding or Removing Gates
 
-- **Add**: when a class of bug or risk would not have been caught by existing gates, design a new gate. Update this spec + the runtime skill + CI + `scripts/gates.sh` in the same commit. Update `AGENTS.md` if it adds a top-level commitment.
+- **Add**: when a class of bug or risk would not have been caught by existing gates, design a new gate. Update this spec + the runtime skill + CI (and `scripts/gates.sh` once that aggregator exists) in the same commit. Update `AGENTS.md` if it adds a top-level commitment.
 - **Remove**: requires an operator-approved SOW with: evidence the gate is wrong or obsolete, what replaces it, what risk class is now unprotected.
 
 ## Why These Specific Gates

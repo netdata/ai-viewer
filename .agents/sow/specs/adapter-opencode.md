@@ -47,7 +47,7 @@ Per `anomalyco/opencode @ 2b3ddf9 :: packages/opencode/src/session/session.sql.t
 | `workspace_id` TEXT NULL | FK to `workspace.id`; NULL for all 6785 operator sessions (workspace is a Console/cloud feature) |
 | `parent_id` TEXT NULL | child session pointer; NULL = root session |
 | `slug` TEXT NOT NULL | human-readable handle (e.g. `glowing-panda`) |
-| `directory` TEXT NOT NULL | working directory at session start (e.g. `/home/costa/src/PRs/topology-containers`) — sensitive |
+| `directory` TEXT NOT NULL | working directory at session start (e.g. `/home/operator/src/PRs/example-project`) — sensitive |
 | `path` TEXT NULL | added by `20260428004200_add_session_path` |
 | `title` TEXT NOT NULL | session title (operator-facing, may contain PR titles, SOW labels) |
 | `version` TEXT NOT NULL | opencode CLI version that wrote this row (e.g. `1.15.10`) |
@@ -259,7 +259,7 @@ The defining constraint: opencode's writer holds the database open and may commi
 3. Open a **fresh connection per poll cycle** or keep a pool with `SetMaxOpenConns(1)` for the read path. Opening read-only against a WAL-mode database is non-blocking for the writer — multiple readers and a single writer can proceed concurrently (SQLite WAL guarantee). Concrete DSN:
 
 ```
-file:%2Fhome%2Fcosta%2F.local%2Fshare%2Fopencode%2Fopencode.db?mode=ro&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=query_only(true)&_pragma=foreign_keys(off)&_txlock=deferred
+file:%2Fhome%2Foperator%2F.local%2Fshare%2Fopencode%2Fopencode.db?mode=ro&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=query_only(true)&_pragma=foreign_keys(off)&_txlock=deferred
 ```
 
 Key choices:

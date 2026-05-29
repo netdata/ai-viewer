@@ -45,8 +45,12 @@
 #                  enforcement (replaces benchtime=1x smoke run below)
 #     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
 #                  enforcement (replaces bundle-size report below)
-#     - SOW-0013 — scripts/{gates,scan-secrets,spec-drift}.sh +
-#                  CodeQL workflow + Dependabot config
+#     - SOW-0013 — scripts/{gates,spec-drift}.sh + CodeQL workflow +
+#                  Dependabot config
+#   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its
+#   negative self-test (scripts/test/scan-secrets-test.sh) are already
+#   implemented and run as REQUIRED, fail-closed steps in the gates job
+#   below; they are not deferred.
 #   Each of those SOWs adds steps to existing jobs OR adds new jobs.
 #   They do not require renaming the four current jobs.
 #
@@ -475,7 +479,11 @@ jobs:
         id: detect
         shell: bash
         run: |
-          for s in gates scan-secrets spec-drift scan-ai-attribution; do
+          # scan-secrets is intentionally NOT in this list: it is fail-closed
+          # (a dedicated required step below errors if it is absent), so it
+          # must never participate in the "all optional scripts absent -> skip"
+          # decision. Only the genuinely-optional helpers are detected here.
+          for s in gates spec-drift scan-ai-attribution; do
             f="scripts/${s}.sh"
             if [[ -f "$f" ]]; then
               echo "${s//-/_}=true" >> "$GITHUB_OUTPUT"
@@ -484,9 +492,9 @@ jobs:
             fi
           done
 
-      - name: Skip notice (no aggregate scripts yet)
-        if: steps.detect.outputs.gates != 'true' && steps.detect.outputs.scan_secrets != 'true' && steps.detect.outputs.spec_drift != 'true' && steps.detect.outputs.scan_ai_attribution != 'true'
-        run: echo "No scripts/gates.sh, scripts/scan-secrets.sh, scripts/spec-drift.sh, or scripts/scan-ai-attribution.sh present; gates job is a no-op on this commit."
+      - name: Skip notice (no optional aggregate scripts yet)
+        if: steps.detect.outputs.gates != 'true' && steps.detect.outputs.spec_drift != 'true' && steps.detect.outputs.scan_ai_attribution != 'true'
+        run: echo "No optional scripts/gates.sh, scripts/spec-drift.sh, or scripts/scan-ai-attribution.sh present; only the required secrets scan runs on this commit."
 
       - name: Set up Go (for gates that shell out to go tools)
         if: hashFiles('go.mod') != ''
@@ -504,8 +512,34 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      # Fail-closed: the secrets + operator-PII scanner is a mandatory gate.
+      # A missing scanner is a MISSING GATE, not a pass, so this step errors
+      # when either the scanner or its negative self-test is absent. (Contrast
+      # with the optional aggregate scripts above, which may be skipped.)
+      - name: Require secrets scanner present (fail-closed)
+        shell: bash
+        run: |
+          missing=0
+          for f in scripts/scan-secrets.sh scripts/test/scan-secrets-test.sh; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::required secrets gate file is absent: $f"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "The secrets + operator-PII scanner is fail-closed: a missing scanner or self-test fails the gates job." >&2
+            exit 1
+          fi
+          echo "secrets scanner and self-test present."
+
+      # Self-test first: prove the scanner still detects (a gate that cannot
+      # detect has silently rotted) before trusting its all-clear on the tree.
+      - name: Secrets scanner self-test
+        run: |
+          chmod +x scripts/test/scan-secrets-test.sh
+          ./scripts/test/scan-secrets-test.sh
+
       - name: Secrets scan
-        if: steps.detect.outputs.scan_secrets == 'true'
         run: |
           chmod +x scripts/scan-secrets.sh
           ./scripts/scan-secrets.sh

@@ -317,9 +317,9 @@ CLI flags (also accepts env vars and a YAML config file):
 --db <path>                SQLite path (default ~/.local/share/ai-viewer/index.db)
 --state-dir <path>         state directory (default ~/.local/share/ai-viewer/). The notify channel is the SQLite `notify` table, so no IPC channel file lives here. Flag retained for other state.
 --source <format>:<path>   add a source. May be repeated.
-  e.g. --source aiagent_v3:/home/costa/.ai-agent/sessions
-       --source aiagent_v2:/home/costa/.ai-agent/sessions
-       --source claude_code:/home/costa/.claude/projects
+  e.g. --source aiagent_v3:~/.ai-agent/sessions
+       --source aiagent_v2:~/.ai-agent/sessions
+       --source claude_code:~/.claude/projects
 --workers <n>              workers per adapter (default 4)
 --log-level <level>        debug|info|warn|error (default info)
 --metrics-addr <addr>      optional metrics endpoint bind (default disabled)
