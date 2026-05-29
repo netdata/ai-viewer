@@ -73,21 +73,115 @@ func TestServeAsset_MissingReturns404(t *testing.T) {
 	}
 }
 
-// TestRoot_NonRootPathReturns404 asserts the root handler refuses any
-// path other than exactly "/" — non-asset, non-API paths get a
-// structured 404 instead of accidentally serving index.html for any
-// URL. The SPA's client-side router takes ownership only after the
-// browser loads "/" once.
-func TestRoot_NonRootPathReturns404(t *testing.T) {
+// TestRoot_ClientRouteServesSPA asserts the SPA-fallback contract
+// (presenter.md §"SPA fallback"): a hard navigation / reload / bookmark of
+// a client-side route that the mux does not route to a more-specific
+// handler (not /api/*, not /assets/*, not an exact root public file) serves
+// the SPA shell — the same built index.html with 200 + text/html +
+// no-cache as GET /. Several distinct paths are exercised to prove the
+// fallback is a catch-all, NOT special-cased to one route. (Inverts the
+// former TestRoot_NonRootPathReturns404, which pinned the old behaviour of
+// 404-ing any path other than "/".)
+func TestRoot_ClientRouteServesSPA(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
+	for _, p2 := range []string{"/sessions/abc123", "/sources"} {
+		t.Run(p2, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, p2, nil)
+			rr := httptest.NewRecorder()
+			p.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want 200 (body=%q)", p2, rr.Code, rr.Body.String())
+			}
+			if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+				t.Fatalf("GET %s Content-Type = %q, want text/html", p2, ct)
+			}
+			if cc := rr.Header().Get("Cache-Control"); cc != "no-cache" {
+				t.Fatalf("GET %s Cache-Control = %q, want no-cache", p2, cc)
+			}
+			// Same built index.html bytes the newTestPresenter synthetic FS
+			// installs (marker also asserted by TestServeIndex_PlaceholderReturned).
+			if !strings.Contains(rr.Body.String(), "test") {
+				t.Fatalf("GET %s body = %q, want the built index.html shell", p2, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestRoot_ClientRouteHeadEmptyBody asserts a HEAD on a client-side route
+// honours the shell's HEAD parity: 200 + text/html + no-cache + a
+// Content-Length header, empty body (RFC 9110 §9.3.2). Mirrors
+// TestServeIndex_NoIndexHeadEmptyBody for the built-shell path.
+func TestRoot_ClientRouteHeadEmptyBody(t *testing.T) {
+	t.Parallel()
+	p, _, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodHead, "/sessions/abc123", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("HEAD status = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", cc)
+	}
+	if cl := rr.Header().Get("Content-Length"); cl == "" {
+		t.Fatalf("HEAD /sessions/abc123: Content-Length not set")
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("HEAD body = %q, want empty", rr.Body.String())
+	}
+}
+
+// TestRoot_ClientRouteMethodNotAllowed asserts a non-GET/HEAD method on a
+// client-side route is rejected with the METHOD_NOT_ALLOWED envelope — the
+// SPA fallback serves the shell only for GET/HEAD (presenter.md §"SPA
+// fallback").
+func TestRoot_ClientRouteMethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	p, _, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions/abc123", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "METHOD_NOT_ALLOWED") {
+		t.Fatalf("body = %q, want METHOD_NOT_ALLOWED envelope", rr.Body.String())
+	}
+}
+
+// TestRoot_ApiUnknownStillJSON404 asserts the SPA fallback did NOT swallow
+// unknown /api/* paths: they must still return the structured JSON
+// NOT_FOUND envelope (Content-Type application/json), never the HTML shell
+// (presenter.md §"SPA fallback": /api/* is exempt and surfaces real
+// errors). TestHandlerRegistersRoutes already pins the 404 status for
+// /api/does-not-exist; this adds the body + content-type assertions that
+// prove the response is JSON, not the fallback shell.
+func TestRoot_ApiUnknownStillJSON404(t *testing.T) {
+	t.Parallel()
+	p, _, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/does-not-exist", nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json (JSON envelope, not the HTML shell)", ct)
+	}
+	if !strings.Contains(rr.Body.String(), "NOT_FOUND") {
+		t.Fatalf("body = %q, want NOT_FOUND envelope", rr.Body.String())
 	}
 }
 

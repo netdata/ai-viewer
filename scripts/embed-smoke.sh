@@ -143,4 +143,44 @@ echo "GET $asset -> 200 with long-cache header"
 curl -fsS -o /dev/null -w 'GET /favicon.svg -> HTTP %{http_code}\n' \
   "$base/favicon.svg"
 
+# SPA deep-link fallback (presenter.md §"SPA fallback"): a hard navigation to a
+# client-side route must serve the REAL built shell (referencing a hashed
+# /assets/index-*.js bundle), NOT the not-built notice and NOT a JSON 404. This
+# is what makes reload/bookmark of /sessions/<id> load the app.
+route_body="$(curl -fsS "$base/sessions/smoke-test-id")"
+if ! printf '%s' "$route_body" | grep -qE '/assets/index-[A-Za-z0-9_-]+\.js'; then
+  echo -e "${RED}[ERROR]${NC} GET /sessions/smoke-test-id did not serve the real shell (no hashed /assets/index-*.js):" >&2
+  printf '%s\n' "$route_body" >&2
+  exit 1
+fi
+if printf '%s' "$route_body" | grep -q 'scripts/build.sh'; then
+  echo -e "${RED}[ERROR]${NC} GET /sessions/smoke-test-id served the not-built notice instead of the real UI" >&2
+  exit 1
+fi
+echo "GET /sessions/smoke-test-id -> real index.html shell (SPA deep-link fallback)"
+
+# The fallback must NOT swallow unknown /api/* paths: they stay structured JSON
+# 404 (NOT_FOUND envelope, Content-Type application/json), never the HTML shell
+# (presenter.md §"SPA fallback": /api/* is exempt). Assert status AND content-type
+# AND body so a shell leaking into /api/* (200 html, or 404 html) is caught — a
+# bare status check would pass even if the shell were served. No -f: a 404 is the
+# expected, healthy outcome here.
+api_resp="$(curl -s -i "$base/api/this-route-does-not-exist")"
+if ! printf '%s' "$api_resp" | grep -qE '^HTTP/[0-9.]+ 404'; then
+  echo -e "${RED}[ERROR]${NC} GET /api/this-route-does-not-exist did not return 404:" >&2
+  printf '%s\n' "$api_resp" >&2
+  exit 1
+fi
+if ! printf '%s' "$api_resp" | grep -qiE '^content-type: *application/json'; then
+  echo -e "${RED}[ERROR]${NC} unknown /api/* 404 was not application/json (SPA shell may be leaking into /api/*):" >&2
+  printf '%s\n' "$api_resp" >&2
+  exit 1
+fi
+if ! printf '%s' "$api_resp" | grep -q 'NOT_FOUND'; then
+  echo -e "${RED}[ERROR]${NC} unknown /api/* 404 body missing the NOT_FOUND envelope:" >&2
+  printf '%s\n' "$api_resp" >&2
+  exit 1
+fi
+echo "GET /api/this-route-does-not-exist -> 404 application/json NOT_FOUND (not swallowed by SPA fallback)"
+
 echo -e "${GREEN}embed-smoke passed${NC} (single binary serves the real built UI same-origin with /api)" >&2

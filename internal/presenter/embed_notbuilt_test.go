@@ -108,6 +108,47 @@ func TestServeIndex_NoIndexHeadEmptyBody(t *testing.T) {
 	}
 }
 
+// TestRoot_NotBuiltNoticeOnClientRoute asserts the not-built degrade is
+// consistent on client-side routes too: with a frontend FS that has no
+// index.html (the .gitkeep-only embed of a clean checkout), the SPA
+// fallback for a client route serves the same "UI not built" notice at 200
+// — not a 404 and not a 500 (presenter.md §"SPA fallback" + §"serveIndex
+// contract"). Mirrors TestServeIndex_NoIndexServesNotice for the fallback
+// path.
+func TestRoot_NotBuiltNoticeOnClientRoute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := store.OpenWriter(ctx, ":memory:", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// .gitkeep-only embed: wired FS, no frontend_dist/index.html.
+	p, err := New(Options{
+		DB:         s.DB(),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FrontendFS: fstest.MapFS{"frontend_dist/.gitkeep": {Data: []byte("")}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions/abc123", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (not-built notice, not 404/500)", rr.Code)
+	}
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", cc)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "scripts/build.sh") {
+		t.Fatalf("notice body must tell operator to run scripts/build.sh; body = %q", body)
+	}
+}
+
 // syncBuffer is a goroutine-safe bytes.Buffer so a slog handler can be
 // driven from the test without data races flagged by -race.
 type syncBuffer struct {
