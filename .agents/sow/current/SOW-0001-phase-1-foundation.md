@@ -46,7 +46,7 @@ Unknowns:
 4. The Sessions list page shows the ingested sessions correctly filtered by the global time range, agent, model, and status filters. **Verification**: manual UI walkthrough; backend unit tests for filter query SQL.
 5. The Session Detail page shows: Overview tab with summary stats (tokens, cost, turns, ops, failures) and Logs tab with severity-filtered log entries. **Verification**: manual walkthrough; component tests; one E2E test asserting the page renders against a fixture session.
 6. The Sources panel shows ingest status, lag, and parse error counts per source. **Verification**: manual; unit test on the `/api/sources` handler.
-7. Real-time updates: writing a new v3 ledger record into the test fixture directory causes the UI to fade-in the new session within 2 seconds. **Verification**: Playwright E2E test that does exactly this.
+7. Real-time updates: writing a new v3 ledger record into the test fixture directory causes the UI to fade-in the new session within 2 seconds. **Verification**: Playwright E2E test that does exactly this. **Superseded (Chunk 18 / D4, 2026-05-29):** Phase-1 ships live data refresh (SSE invalidates queries) but NO visible live indicator or fade-in animation; Chunk-18 E2E therefore verifies SSE liveness at the PROTOCOL level (subscription `POST` + `EventSource` stream open), and the live-append-triggers-fade-in test + the visible indicator are deferred to SOW-0018. See `ui-pages.md` §"Realtime UX Rules" (each rule marked Phase-2/Implemented) and Chunk-18 gate D4.
 8. CI: GitHub Actions workflow runs lint + tests on every push; zero warnings, zero failures. **Verification**: workflow green on the bootstrap commit and on every Phase 1 PR.
 9. Specs under `.agents/sow/specs/` are updated to reflect every divergence discovered during implementation (especially the v2 field names). **Verification**: diff of specs alongside code in each commit.
 
@@ -6238,6 +6238,189 @@ informational; merges must parse per-check `pass` states, never the `--watch`
 exit code. Fixed in PR #19; local `gosec@latest` → Issues: 0 after the
 suppression, full lint set (gofmt/goimports/vet/golangci/gosec/govulncheck)
 green.
+
+### Chunk 18 — Playwright E2E (Pre-Implementation Gate, 2026-05-29)
+
+**Goal / fit-for-purpose.** Real browser end-to-end coverage of the shipped UI:
+prove the single binary serves a working app — routes render real seeded data,
+theme (dark/light/auto + OS-preference) works, deep-links load, and every route
+is axe-clean — against the EMBEDDED SPA served by `ai-viewer-serve` (the true
+artifact), not `vite preview`. This is the last test layer before the SOW-0001
+close-out chunks.
+
+**Problem / current state (evidence).** Playwright is a tested-deferred skeleton:
+- `frontend/playwright.config.ts:10-23` — config exists (chromium, `baseURL
+  http://127.0.0.1:7710`, retries 2-in-CI), **no `webServer` block**;
+  `frontend/tests/` is empty; `@playwright/test@1.60.0` is pinned
+  (`frontend/package.json:34`).
+- **No `e2e` script** in `frontend/package.json` (removed in Chunk 14). CI
+  `.github/workflows/ci.yml:321-330` "Detect Playwright" keys on that script
+  existing, then runs `npm run e2e` at `:336-338` — so re-adding the script
+  AUTO-enables CI E2E.
+- **CI landmine (the Chunk-14 incident, still latent):** in the `frontend` job
+  the E2E step (`ci.yml:336-338`) runs BEFORE `npm run build` (`:340`), and the
+  job sets up **Node only — no Go** (`:280-286`). So today re-adding `e2e` would
+  fail: nothing builds/boots the binary on :7710. Go is available only in the
+  `embed-smoke`/`test`/`lint` jobs (`:402-408`).
+- Real fixtures exist for SEEDED data: `testdata/aiagent_v3/{happy_single_turn,
+  multi_turn,sub_agent,session_error,in_progress_turn,with_payloads}/INPUT/session/*.jsonl`
+  — ingestible via `ai-viewer-ingest --source "aiagent_v3:<dir>"`. So E2E asserts
+  REAL rendered data, not empty-state.
+- Seed+boot+readiness pattern is already proven in `scripts/embed-smoke.sh:52-106`
+  (ingest → poll `0004_notify.sql` → boot serve → poll `/api/health`).
+- Routes (`frontend/src/App.tsx:19-29`): `/`, `/sessions/:id`, `/sources` (live),
+  `/topology`,`/tools`,`/models`,`/agents` (Phase-2 `ComingSoon`), `*` NotFound.
+  Theme (`state/theme.ts` + `ThemeToggle`): `data-theme` on `<html>`, localStorage
+  `aiViewerTheme`, 3-button Auto/Dark/Light with aria + `role=status` live region.
+- `@axe-core/playwright` is **NOT** a dep yet (`package.json:24-45`) — must add.
+  Bundle-size gate stays deferred (its own SOW; not Chunk 18).
+
+**Decisions (CTO — technical, documented; not operator questions).**
+- **D1 — E2E runs in the `frontend` CI job, with Go added; build precedes E2E.**
+  Add `actions/setup-go` to the `frontend` job and run `scripts/build.sh` (builds
+  SPA → embeds → builds both binaries) BEFORE the Playwright step; reorder so the
+  late `npm run build` no longer trails E2E. Rationale: keeps all frontend tests
+  in one job; `build.sh` is the real artifact path; avoids duplicating browser
+  setup into `embed-smoke`. Rejected: running E2E inside `embed-smoke` (no browser
+  there; conflates the single-binary smoke with UI E2E).
+- **D2 — Playwright `webServer` boots the PRE-BUILT binary via a new
+  `scripts/e2e-serve.sh`; it does NOT build.** The script (reusing the
+  embed-smoke seed/boot logic) creates a temp DB, ingests a FIXED set of
+  committed fixtures for deterministic data, then `exec`s `bin/ai-viewer-serve
+  --bind 127.0.0.1:7710` in the foreground so Playwright manages its lifecycle
+  (`webServer.url: …/api/health`, `reuseExistingServer: false` always — see the
+  iter-4 review note below: the E2E target is the seeded binary, never a stray
+  :7710 server, so reuse is disabled even locally). Building stays in
+  `scripts/build.sh` (run first by CI / by the dev). Rationale: separation of
+  concerns; fast; deterministic seed.
+- **D3 — deterministic seed set:** `happy_single_turn` + `multi_turn` +
+  `sub_agent` (gives a multi-row sessions list, a detail with turns/ops, and a
+  parent+children session that also exercises the SOW-0016 deep-link + the
+  Overview child-sessions table). Seeded read-only; no live mutation needed for
+  Phase-1 assertions.
+- **D4 — SSE/"realtime" scope = connection-liveness at the PROTOCOL level, not a
+  live mutation and not a visible indicator.** The ingester is read-only over
+  static fixtures, so E2E asserts the SSE subscription is created (`POST
+  /api/subscriptions` → 200) and the event stream opens (`GET /api/events?sub=`
+  → 200 `text/event-stream`), with no page errors and re-subscription on
+  navigation — NOT a visible "connected" indicator (Phase-1 has none;
+  `useLiveUpdates` surfaces no connection state to the DOM — see `ui-pages.md`
+  §"Realtime UX Rules" and the deferred SOW-0018), and NOT that a new session
+  appears mid-test (would need a writer the product does not expose). A true
+  append-triggers-fade-in test is
+  noted as a Phase-2 follow-up if wanted.
+
+**Affected contracts / surfaces.** `frontend/playwright.config.ts` (+webServer),
+`frontend/package.json` (`e2e` script + `@axe-core/playwright` dep + lockfile),
+new `frontend/tests/*.spec.ts`, new `scripts/e2e-serve.sh`,
+`.github/workflows/ci.yml` (`frontend` job: +Go, build-before-e2e order). No Go
+source, no schema, no `/api`, no React app-source change (E2E observes the app;
+it does not modify it). Specs: `ui-pages.md` (note E2E coverage of the Realtime
+UX + theme rules), `deployment.md`/`quality-gates.md`-adjacent (the e2e-serve
+script + the CI order) — master updates these.
+
+**Existing patterns to reuse.** `scripts/embed-smoke.sh` seed/boot/readiness +
+PID-only cleanup; the `run()` wrapper; the CI `frontend` job's Node setup + the
+`embed-smoke` job's Go setup (copy its `setup-go` step); the fixture ingest form
+from embed-smoke.
+
+**Risk / blast radius.** Moderate, CI-localized. (1) Re-adding `e2e` + wrong
+order = red CI — D1 fixes the order and adds Go. (2) E2E flake (timing, port
+7710 on the runner) — mitigate with health-poll readiness + Playwright retries
+(already 2 in CI); `reuseExistingServer:false` means an occupied :7710 fails
+loudly rather than testing an unknown server (determinism over convenience).
+(3) axe false-positives on
+Phase-2 `ComingSoon` stubs — scope axe to serious/critical, fix real hits. No
+production-code risk (test-only + CI). Localhost bind unchanged.
+
+**Sensitive data plan.** Fixtures under `testdata/` are already sanitized
+(committed). The temp E2E DB is built from them at test time, never the
+operator's real `~/.local/share/ai-viewer`. Scripts carry no secrets/home-paths.
+
+**Implementation plan (spec→tests→code, subagent-produced, [FORBIDDEN] no
+reviewers).** (1) master lands the spec notes. (2) add `@axe-core/playwright` +
+`e2e` script; write `scripts/e2e-serve.sh`; add `webServer` to the config. (3)
+specs under `frontend/tests/`: `routes.spec.ts` (each live route + every
+ComingSoon route `/topology`/`/tools`/`/models`/`/agents` + an unknown path →
+NotFound), `deep-link.spec.ts` (hard-load `/sessions/<seeded-id>` → detail
+renders, SOW-0016, incl. a root WITH children asserting the Overview
+child-sessions table), `theme.spec.ts` (dark/light via toggle + `data-theme`;
+auto follows emulated `prefers-color-scheme`; localStorage persistence across
+reload), `a11y.spec.ts` (axe per live route under dark AND light, zero
+serious/critical), `realtime.spec.ts` (protocol-level SSE liveness — subscription
+POST + EventSource stream open; NO visible indicator, see D4). (4) CI: +Go, build→e2e
+order. (5) gates incl. running `npm run e2e` LOCALLY (the Chunk-14 lesson) + the
+full Go/standalone-gosec set; master review round; commit; PR; per-check `pass`;
+merge.
+
+**Validation plan (named).** Local: `scripts/build.sh && (cd frontend && npm run
+e2e)` all green; the named specs above pass; `npm run lint`/`typecheck`/`test`
+unchanged. CI: the `frontend` job runs build→playwright(+axe) green; other jobs
+unaffected.
+
+**Artifact impact.** No new published runtime artifact; E2E + a seed script are
+test tooling. `bin/` + temp DBs stay gitignored/ephemeral.
+
+**Open decisions.** None blocking — D1-D4 settled. (Deferred follow-ups: a true
+live-append realtime test; the bundle-size gate; Chunks 19 systemd / 20 runbook /
+21 final review / 22 close.)
+
+### Chunk 18 — implementation + review (2026-05-29)
+
+Delivered all four decisions. `scripts/e2e-serve.sh` (NEW) boots the pre-built
+binary with a deterministically seeded temp DB (ingests the 3 fixtures, waits
+for 3 "adapter scan complete" log lines, SIGTERM+wait to flush, then an EXACT
+read-only `sqlite3` guard: 4 sessions / 1 child / 3 sources). `playwright.config.ts`
+gained a `webServer` (boots that script; `reuseExistingServer: false`).
+`@axe-core/playwright` added; `e2e` script added. Specs under `frontend/tests/`:
+`routes.spec.ts` (`/` seeded rows, `/sources` health badge scoped to the Sources
+region, all 4 ComingSoon routes, unknown-path → server-200-shell + client
+NotFound), `deep-link.spec.ts` (hard-load detail + the SOW-0016 child-sessions
+drill-down, ids runtime-derived), `theme.spec.ts` (dark/light toggle + auto/OS +
+persistence), `a11y.spec.ts` (axe per live route × dark+light, zero
+serious/critical), `realtime.spec.ts` (protocol-level: subscription POST +
+EventSource stream open 200/text-event-stream + nav re-subscribe). CI `frontend`
+job: +`setup-go`, `scripts/build.sh` BEFORE the e2e step, trailing `npm run
+build` removed. `tsconfig`/`vitest` includes adjusted so specs type-check but
+vitest does not sweep them. `.gitignore` += `.playwright-mcp/`.
+
+Master verification (each iteration, not just subagent report): full Go gate set
+(gofmt/vet/golangci 0, standalone gosec Issues:0, govulncheck 0), fe lint/typecheck
+0, 235 unit pass, and **`CI=1 npm run e2e` run by master → 19 passed** against the
+real built binary with the 4/1/3 seed.
+
+**Review (codex + glm + minimax, 4 iterations → CONVERGENCE).** codex carried the
+signal every round; glm + minimax converged early each round and missed the real
+items — multi-reviewer adjudication on verified ground truth mattered throughout.
+- iter-1: codex **P1** (racy seed — gating on the migration line only proved
+  schema, so a SIGTERM under load could commit a partial seed; the guard was a
+  too-weak `>=1`) + 3×P2 (realtime asserted request-issued not stream-open; nav
+  test could catch the initial subscription; SOW/spec parity). Fixed: 3-scan-complete
+  gate + flush-on-Stop; stream-open assertion; nav-waiter drain; spec deltas.
+- iter-2: codex **P2** (the child-session UI the `sub_agent` seed exists for was
+  never exercised) + 2×P3 (route coverage gaps; stale SOW line). Fixed: child-sessions
+  drill-down test; ComingSoon×4 + NotFound coverage; SOW line.
+- iter-3: codex 3×P2 + 2×P3 — `reuseExistingServer:!CI` could test a stray :7710
+  server (determinism hole); `/sources` matched the ThemeToggle `role=status`
+  live region not the health badge (false pass); guard was `>=` while documented
+  "exact"; unknown-route didn't prove server-200; stale SOW criterion. Fixed:
+  reuse=false; region-scoped health assertion; exact `==4/1/3` guard; `resp.status
+  ===200 + text/html`; SOW item-7 superseded note.
+- iter-4: **all three converged on the code** — codex found ZERO code/determinism
+  defects, only P3 spec-drift (SOW reuse wording, deployment.md "≥1 row" vs the
+  exact guard, an unqualified `ui-pages.md` fade-in line); glm flagged the same
+  deployment.md drift; minimax clean. All drift corrected in this commit. The
+  subagent ran NO external reviewers in any iteration (the delegation `[FORBIDDEN]`
+  carve-out held — no duplicate rounds).
+
+Final gates (master-run, post iter-4): Go gofmt/vet/golangci 0, gosec Issues:0,
+govulncheck 0; fe lint/typecheck 0; 235 unit; **19 E2E passed** (`CI=1`); seed
+"4 sessions incl. 1 child, 3 sources"; scan-ai-attribution PASS; clean tree
+(no built `dist`/`bin`/temp DBs staged).
+
+Deferred (filed): visible SSE live indicator + fade-in animations + true
+live-append E2E → SOW-0018. Logs-tab / filter-bar E2E + bundle-size gate
+enforcement → noted as Phase-2 (not in the Chunk-18 validation plan).
 
 ## Validation
 

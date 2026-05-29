@@ -285,6 +285,18 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      # Go is needed because the E2E step boots the built ai-viewer-serve binary
+      # (scripts/build.sh -> scripts/e2e-serve.sh). go-version-file resolves
+      # relative to the repo root, so the frontend job's working-directory
+      # default does not affect it; this mirrors the embed-smoke job's setup.
+      - name: Set up Go
+        if: steps.detect.outputs.fe == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
       - name: Install dependencies
         if: steps.detect.outputs.fe == 'true'
         run: npm ci
@@ -333,13 +345,19 @@ jobs:
         if: steps.detect.outputs.fe == 'true' && steps.pw.outputs.present == 'true'
         run: npx playwright install --with-deps
 
+      # Build the SPA + embed + both Go binaries BEFORE E2E: the Playwright
+      # webServer (scripts/e2e-serve.sh) seeds a temp DB and boots the PRE-BUILT
+      # bin/ai-viewer-serve, so bin/ must exist first. build.sh also leaves
+      # frontend/dist/ in place for the bundle-size report below, so this is the
+      # job's single build (the old trailing `npm run build` is gone).
+      - name: Build single binary (frontend + embed + go build)
+        if: steps.detect.outputs.fe == 'true'
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/build.sh
+
       - name: E2E (Playwright + axe)
         if: steps.detect.outputs.fe == 'true' && steps.pw.outputs.present == 'true'
         run: npm run e2e
-
-      - name: Build
-        if: steps.detect.outputs.fe == 'true'
-        run: npm run build
 
       - name: Bundle size report
         if: steps.detect.outputs.fe == 'true'

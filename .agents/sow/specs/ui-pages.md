@@ -29,7 +29,7 @@ The global filter bar is always visible and applies to every page; routes interp
 - Hierarchical list: root sessions at the top level, expandable to show child (sub-agent) sessions.
 - Columns: agent, model, start time, duration, status (with color), turns, ops, tokens in/out, cost, failures.
 - Click a row → session detail page.
-- Live updates: as new sessions appear within the timeframe + filters, they fade-in at the top of the list.
+- Live updates: as new sessions appear within the timeframe + filters, they fade-in at the top of the list. *(Phase-1: the list refreshes live via SSE query-invalidation; the fade-in animation itself is Phase-2 — see §"Realtime UX Rules" and SOW-0018.)*
 
 ### `/sessions/:id` — Session detail
 
@@ -84,11 +84,19 @@ Table of `catalog_agents`. Same shape, scoped to agents.
 
 ## Realtime UX Rules
 
-- Items entering view fade in over 200ms (no abrupt jumps).
-- Counters and stats animate from old value to new (200ms ease).
-- Live indicator (small pulsing dot) in the header when an active SSE subscription is connected.
-- If SSE disconnects: indicator goes amber, with a tooltip "reconnecting…". Auto-reconnect handled by EventSource.
-- If `resync` event arrives: silently re-fetch current view.
+These describe the eventual target. The Phase-1 status of each is noted; the
+forward-looking visual rules (fade-in, value animation, the visible live
+indicator) are NOT yet implemented — `useLiveUpdates` connects the SSE stream
+and invalidates queries (data refreshes live), but the connection state is not
+surfaced to any DOM element. The visible live indicator + entrance/value
+animations are tracked in `.agents/sow/pending/SOW-0018-…live-indicator…` (the
+deferred half of SOW-0001 Chunk-18 D4).
+
+- Items entering view fade in over 200ms (no abrupt jumps). *(Phase-2: not yet implemented.)*
+- Counters and stats animate from old value to new (200ms ease). *(Phase-2: not yet implemented.)*
+- Live indicator (small pulsing dot) in the header when an active SSE subscription is connected. *(Phase-2: not yet implemented — Phase-1 has no visible connection indicator; Chunk-18 E2E asserts SSE liveness at the subscription/EventSource protocol level instead.)*
+- If SSE disconnects: indicator goes amber, with a tooltip "reconnecting…". Auto-reconnect handled by EventSource. *(Phase-2: not yet implemented; EventSource auto-reconnect itself is active.)*
+- If `resync` event arrives: silently re-fetch current view. *(Implemented — `sse.ts` invalidates all queries on `resync`.)*
 
 ## Keyboard Shortcuts
 
