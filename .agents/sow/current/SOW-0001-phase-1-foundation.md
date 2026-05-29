@@ -6442,6 +6442,140 @@ verification environment; merge gated on the `frontend` job going green there
 axe/visual-dependent checks must be confirmed green in CI before merge, never on
 the local run alone.
 
+### Chunk 19 — systemd user units + install script (Pre-Implementation Gate, 2026-05-29)
+
+**Goal / fit-for-purpose.** Let the operator run ai-viewer persistently on their
+own workstation (run-on-login, auto-restart) via systemd USER units — localhost
+only, no privilege escalation, no remote/production exposure. Realises the units
+`deployment.md` §"systemd User Units" already specs but that do not exist yet.
+
+**Problem / current state (evidence).** `deployment.md` specs
+`ai-viewer-ingest.service` + `ai-viewer-serve.service` (the latter `After=` the
+former) and references `scripts/install-systemd-user.sh` (deployment.md:30), but
+`find` shows NO `.service` files and NO install script exist. Binary flags
+(verified): `ai-viewer-serve` `--db/--state-dir/--bind/--log-level/--log-format`
+(bind default `127.0.0.1:7710`); `ai-viewer-ingest` same minus `--bind`, plus
+repeatable `--source`. Both default `--db`/`--state-dir` to
+`~/.local/share/ai-viewer/…`, so units need NO flags for the default install.
+`ai-viewer-serve` does `CheckSchema` at startup and exits non-zero on a missing/
+mismatched schema (the ingester creates+migrates the DB on first run).
+
+**Decisions (CTO — technical).**
+- **D1 — ship unit files as repo templates under `deploy/systemd/`** (`ai-viewer-ingest.service`,
+  `ai-viewer-serve.service`), matching the deployment.md spec verbatim
+  (`ExecStart=%h/.local/bin/ai-viewer-…`, `Restart=on-failure`, `RestartSec=3s`,
+  `WantedBy=default.target`, serve `After=ai-viewer-ingest.service`). Repo
+  templates are reviewable + version-controlled; the install script copies them.
+- **D2 — `scripts/install-systemd-user.sh`** with subcommands `install`
+  (default) / `uninstall` / `status`. install: ALWAYS run `scripts/build.sh`
+  first (so `git pull && install` never reinstalls stale binaries — codex
+  Chunk-19 iter-2 P2), copy `bin/ai-viewer-{ingest,serve}` →
+  `~/.local/bin/`, copy the two units → `~/.config/systemd/user/`, `systemctl
+  --user daemon-reload`, then PRINT the `systemctl --user enable --now` commands
+  for the operator to run — do NOT auto-enable/start (see D4). uninstall: stop/
+  disable if present, remove units + daemon-reload (leave binaries + data).
+  status: `systemctl --user status` for both. Transparent `run()` wrapper
+  (global CLAUDE.md). Localhost-only; no `sudo`; no secrets/home-path literals
+  (use `$HOME`/`%h`/XDG vars).
+- **D3 — start-order race is handled by `Restart=on-failure`, not a code change.**
+  systemd `After=` orders START only, not readiness; on a fresh machine
+  `ai-viewer-serve` may start before the ingester finishes migrations →
+  `CheckSchema` fails → exit → systemd restarts it (RestartSec=3s) until the DB
+  is migrated. This is the spec'd, acceptable behaviour; documented in the unit
+  comment + deployment.md. (A serve-side "wait for schema" is a Phase-2 nicety,
+  not Chunk-19 scope.)
+- **D4 — verification is STATIC; do NOT enable/start services on the operator's
+  workstation.** Enabling a run-on-login service is a persistent action on the
+  operator's machine — out of bounds without explicit consent. Verify with:
+  `bash -n` + `shellcheck` the install script; `systemd-analyze verify
+  deploy/systemd/*.service` (offline parse/validation, touches no session bus —
+  guard on availability); and a small unit-file lint (required `[Unit]/[Service]/
+  [Install]` directives, `ExecStart`, `Restart`, the `After=` ordering). The
+  operator runs the actual `enable --now` themselves.
+
+**Affected contracts / surfaces.** New: `deploy/systemd/ai-viewer-ingest.service`,
+`deploy/systemd/ai-viewer-serve.service`, `scripts/install-systemd-user.sh`,
+optional `scripts/test/systemd-units-test.sh`. Modified: `deployment.md` (point
+the §systemd + install refs at the real files; document install/uninstall/status
++ the start-order/Restart note). No Go/app/CI-runtime change (CI may add a static
+lint of the units/script, optional). No schema/API/frontend change.
+
+**Existing patterns to reuse.** The `run()` wrapper + `set -euo pipefail` +
+repo-root-from-script-dir idiom from `scripts/build.sh`/`embed-smoke.sh`; the
+deployment.md unit text as the canonical content; the `gates` job's
+detect-script CI pattern if wiring a lint.
+
+**Risk / blast radius.** Low. Pure ops tooling; nothing in the runtime binaries
+changes. The only "action" risk (enabling services on the workstation) is
+explicitly excluded by D4. shellcheck + systemd-analyze verify catch script/unit
+errors statically.
+
+**Sensitive data plan.** None. Units + script use `%h`/`$HOME`/XDG vars, no
+operator home-path literals, no secrets.
+
+**Implementation plan (spec→tests→code, subagent-produced, [FORBIDDEN] no
+reviewers).** (1) master lands the deployment.md deltas. (2) a unit-file lint
+test (`scripts/test/systemd-units-test.sh`: asserts required directives +
+ExecStart + ordering) written before the units. (3) the two unit files + the
+install script. (4) verify: `bash -n`+shellcheck the script, `systemd-analyze
+verify` the units, run the lint, `scripts/build.sh` still green; master review
+round (codex+glm+minimax); commit; PR; per-check `pass`; merge. Do NOT enable/
+start on this machine.
+
+**Validation plan (named).** `scripts/test/systemd-units-test.sh` passes;
+`shellcheck scripts/install-systemd-user.sh` clean; `systemd-analyze verify
+deploy/systemd/*.service` clean (where available); `install-systemd-user.sh`
+`--help`/dry path prints the expected steps without mutating the session.
+
+**Artifact impact.** Unit files + install script are operator tooling (not
+runtime artifacts); no generated/published surface. `bin/` stays gitignored.
+
+**Open decisions.** None blocking — D1-D4 settled.
+
+### Chunk 19 — implementation + review (2026-05-29)
+
+Delivered the two `deploy/systemd/*.service` USER unit templates (localhost,
+`%h`, `Restart=on-failure`/`RestartSec=3s`, serve `After=ai-viewer-ingest.service`
+with the start-order-race comment), `scripts/install-systemd-user.sh`
+(install/uninstall/status; `install` always rebuilds then copies binaries→
+`~/.local/bin` + units→user systemd dir + `daemon-reload`, then PRINTS the
+`enable --now` command — never runs it, D4), and `scripts/test/systemd-units-test.sh`
+(directive lint + `systemd-analyze verify`). deployment.md §Install/§Updates/
+§systemd updated. Verified by master: `bash -n` + `shellcheck` clean,
+`systemd-analyze verify` clean, lint PASS, `--help` mutates nothing, and
+`systemctl --user is-enabled` confirms NOTHING was installed/started on this
+machine (D4 honored throughout).
+
+**Review (codex + glm + minimax, 3 iterations → CONVERGENCE).** codex carried the
+signal every round (glm + minimax converged earlier and missed the real items).
+- iter-1: codex 2×P2 + 1×P3 — §Updates installed to `/usr/local/bin` while the
+  units run `~/.local/bin` (restart would run stale binaries); the lint asserted
+  only the `ai-viewer-` ExecStart PREFIX while the verify-filter suppressed ALL
+  "not executable" lines (a typo'd binary could pass); `status` lacked
+  `--no-pager`. Fixed: §Updates uses the install script; exact per-unit ExecStart
+  asserts + narrow two-path verify filter (typo now fails — verified by
+  injection); `--no-pager`.
+- iter-2: codex 1×P2 + 2×P3 — `install` only built when a binary was MISSING, so
+  `git pull && install` reinstalled STALE binaries; `uninstall` `|| true` on
+  `disable --now` could report success while leaving a service running; the lint
+  didn't assert `RestartSec=3s`. Fixed: `install` ALWAYS runs `scripts/build.sh`;
+  `disable` failure now propagates (probes still tolerate a missing user
+  manager); `RestartSec=3s` asserted (verified: removing it fails the lint).
+- iter-3: **all three converged on correctness (no P1/P2).** The sole remaining
+  item was the same stale "build if bin/ missing" wording lingering in three doc
+  surfaces (deployment.md §Install, the install-script `usage()` text, SOW D2) —
+  spec/code drift per the spec-sync rule. All three synced to "always rebuilds".
+  No 4th review round: correctness was clean and the fix was a doc-wording sync
+  with zero behavior change (proportionate, per the operator's finish-the-job
+  directive). The implementation subagent ran NO reviewers (delegation
+  `[FORBIDDEN]` carve-out held).
+
+Final gates (master-run): `bash -n`/`shellcheck` clean; `systemd-analyze verify`
++ directive lint PASS (typo + missing-RestartSec both fail it); `--help` synced;
+no stale wording remains (the one grep hit is the rationale comment explaining
+why "if missing" was rejected); `scripts/build.sh` green; nothing installed on
+this machine.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
