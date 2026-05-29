@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: completed
 
-Sub-state: awaits operator approval before moving to current/. Surfaced by an external reviewer during SOW-0001 Chunk 17 (single-binary serve) review; filed as tracked follow-up rather than expanding Chunk 17's agreed scope (the Chunk 17 gate explicitly scoped "SPA fallback unchanged").
+Sub-state: operator-approved 2026-05-29 ("proceed as you recommend" — the operator's SOW sign-off; the assistant had recommended doing this next). Open decision #1 (fallback policy) is a TECHNICAL choice decided by the assistant as CTO = catch-all (a); see below. Implemented, reviewed (codex+glm+minimax → converged), merged; moved to done/ in the merge commit. Surfaced by an external reviewer during SOW-0001 Chunk 17, whose gate scoped "SPA fallback unchanged".
 
 ## Requirements
 
@@ -59,7 +59,7 @@ Risks:
 
 ## Pre-Implementation Gate
 
-Status: needs-user-decision
+Status: ready (open decision #1 resolved as a CTO call — catch-all)
 
 Problem / root-cause model:
 
@@ -111,7 +111,7 @@ Open-source reference evidence:
 
 Open decisions:
 
-1. **SPA-fallback policy** — (a) Catch-all: any path that is not `/api/*` and not `/assets/*` serves the SPA shell (standard SPA behavior, zero maintenance, but a typo'd non-API path shows the app's in-router NotFound rather than a server 404); (b) Allowlist: only known route prefixes from `App.tsx` serve the shell, everything else 404s (stricter, but the server must be updated whenever a client route is added). Recommendation: (a) — it is the conventional SPA contract, keeps the server ignorant of client routes, and the app already renders its own `NotFound` for unknown client paths. Decision pending operator/CTO sign-off at SOW activation.
+1. **SPA-fallback policy** — (a) Catch-all: any path that is not `/api/*` and not `/assets/*` (and not an exact root public file like `/favicon.svg`) serves the SPA shell (standard SPA behavior, zero maintenance, but a typo'd non-API path shows the app's in-router NotFound rather than a server 404); (b) Allowlist: only known route prefixes from `App.tsx` serve the shell, everything else 404s (stricter, but the server must be updated whenever a client route is added). **DECIDED (CTO, 2026-05-29): (a) catch-all.** Reasoning: it is the conventional SPA contract; it keeps the server ignorant of the client route table (Phase-2/3 add topology/tools/models/agents routes — an allowlist would force a server change for each); and the app already renders its own `NotFound` for unknown client paths. The mux already routes `/api/*`, `/assets/*`, and the exact `/favicon.svg` to more-specific handlers, so the only behavioral change is in `rootHandler`: drop its `path != "/"` → 404 branch and serve the shell for any GET/HEAD (non-GET/HEAD → 405). Trade-off accepted: `/favicon.ico`-style unknown paths now receive the HTML shell (200) instead of 404 — harmless for a localhost read-only viewer; the app declares `/favicon.svg`. `/api/*` and `/assets/*` stay exempt so real API/asset errors still surface (no silent-failure regression).
 
 ## Implications And Decisions
 
@@ -123,15 +123,61 @@ Pending operator approval (see Open decisions #1).
 
 ## Execution Log
 
-None yet.
+**2026-05-29 — done.** Spec-first: master updated `presenter.md` §"SPA fallback" +
+Routing table (and fixed the now-contradictory "unexpected root path 404s"
+language). Tests + code delegated to a subagent (with the `[FORBIDDEN]`
+no-reviewers block — the orchestrator owns review). Change is a single localized
+edit to `internal/presenter/presenter.go` `rootHandler`: drop the `path != "/"`
+→ 404 branch so any GET/HEAD falls through to `p.serveIndex`; keep the
+non-GET/HEAD → 405 gate. `/api/*`, `/assets/*`, exact `/favicon.svg` are routed
+by more-specific mux patterns (verified against Go ServeMux precedence) and are
+unaffected. Tests: rewrote `TestRoot_NonRootPathReturns404` → `…ClientRouteServesSPA`
+(two paths); added HEAD-empty-body, POST→405, `…ApiUnknownStillJSON404`
+(asserts application/json + NOT_FOUND, not the shell), and a not-built-notice
+variant. `scripts/embed-smoke.sh` gained a `GET /sessions/<id>` real-shell
+assertion and a `GET /api/<unknown>` → 404 + application/json + NOT_FOUND
+assertion.
+
+**Review — orchestrator round (codex + glm + minimax), converged.** All three:
+no P1/P2; exemptions correct (codex verified ServeMux trailing-slash precedence
+in the stdlib source); security/serveIndex-reuse/HEAD-parity/tests/spec all
+sound. 3× P3 — all real, all fixed in the same change: (1) two stale code
+comments at `presenter.go` + `embed.go` still said unexpected paths "404 rather
+than leaking the shell" (drift the spec fixed but the comments missed) → reworded
+to "exact route gives correct content-type/cache; without it the fallback would
+serve the shell"; (2) a spec routing-table typo `non-/asset` → `non-/assets`;
+(3) the smoke's `/api/unknown` check asserted only HTTP 404, not JSON+envelope →
+now asserts status + Content-Type + NOT_FOUND body. The implementation subagent
+ran NO reviewers (the delegation `[FORBIDDEN]` carve-out held — no double round).
+
+**Review decision (judgment, recorded):** no re-review round after the 3 P3
+fixes. They are doc-comment rewordings, a spec typo, and a test-script assertion
+— ZERO runtime-logic change (the substance had already converged across all
+three reviewers). Re-verified instead by re-running the full local gate set
+(gofmt/goimports/vet/golangci/`gosec@latest` Issues:0/govulncheck/`go test
+-race`) + the real-binary `embed-smoke.sh` (the new JSON-envelope assertion
+passes). Same proportionality call as SOW-0017; a fresh 3-reviewer round on
+no-logic polish would be disproportionate spend.
 
 ## Validation
 
-Pending.
+- Unit (package `presenter`): `TestRoot_ClientRouteServesSPA`,
+  `…ClientRouteHeadEmptyBody`, `…ClientRouteMethodNotAllowed`,
+  `…ApiUnknownStillJSON404`, `…NotBuiltNoticeOnClientRoute`; existing
+  `TestServeAsset_MissingReturns404` / `TestServePublicFile_MissingReturns404`
+  unchanged and green. `go test -race ./...` all pass.
+- Gates (master-run): gofmt/goimports/vet 0; `golangci-lint` 0; standalone
+  `gosec` Issues:0; `govulncheck` 0 called; attribution scan PASS.
+- Real-binary smoke: `GET /sessions/<id>` → real hashed-asset shell;
+  `GET /api/<unknown>` → 404 application/json NOT_FOUND; `/`, `/assets/<hash>`,
+  `/favicon.svg`, `/api/health` all still correct.
 
 ## Outcome
 
-Pending.
+Hard reload / deep-link / bookmark of a client route (`/sessions/:id`,
+`/sources`, …) now loads the app instead of a JSON 404, while `/api/*` and
+`/assets/*` still surface real errors. Single localized handler change; no
+schema/API/frontend-source change. Merged to master.
 
 ## Lessons Extracted
 

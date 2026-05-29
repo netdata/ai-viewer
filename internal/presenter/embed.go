@@ -136,11 +136,12 @@ func (p *Presenter) serveNotBuiltNotice(w http.ResponseWriter, r *http.Request) 
 
 // publicRootFiles is the set of root-level files Vite copies from
 // frontend/public/ into dist/ that the built index.html references at the
-// site root. They are served by servePublicFile via an explicit mux route
-// each (NOT a catch-all), so an unexpected root path still 404s rather than
-// leaking the SPA shell. Phase 1 ships only favicon.svg; add a string here
-// AND a build-output copy when a new root public file is introduced
-// (presenter.md §"Root public assets"). A fixed-size array (not a slice)
+// site root. They are served by servePublicFile via an explicit exact mux
+// route each so the file is returned with its correct content-type + cache;
+// without the exact route the SPA fallback in rootHandler would serve the
+// HTML shell in place of e.g. /favicon.svg. Phase 1 ships only favicon.svg;
+// add a string here AND a build-output copy when a new root public file is
+// introduced (presenter.md §"Root public assets"). A fixed-size array (not a slice)
 // signals this registry is compile-time fixed and never appended to at
 // runtime; the mux is built from it once in Handler().
 var publicRootFiles = [...]string{"favicon.svg"}

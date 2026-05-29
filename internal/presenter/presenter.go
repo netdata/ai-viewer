@@ -243,9 +243,10 @@ func (p *Presenter) Handler() http.Handler {
 	// Frontend routes.
 	mux.HandleFunc("/assets/", p.serveAsset)
 	// Root public files Vite copies from frontend/public/ to dist/ root
-	// (e.g. /favicon.svg). Each gets an explicit exact route so unexpected
-	// root paths still fall through to rootHandler's NOT_FOUND rather than a
-	// catch-all (presenter.md §"Root public assets").
+	// (e.g. /favicon.svg). Each gets an explicit exact route so the file is
+	// served with its correct content-type + cache; without it the SPA
+	// fallback in rootHandler would serve the HTML shell in its place
+	// (presenter.md §"Root public assets").
 	for _, name := range publicRootFiles {
 		mux.HandleFunc("/"+name, p.servePublicFile)
 	}
@@ -271,18 +272,23 @@ func chainMiddleware(base http.Handler, mws ...func(http.Handler) http.Handler) 
 	return h
 }
 
-// rootHandler dispatches GET / and HEAD / to the embedded SPA shell
-// and rejects any other path with NOT_FOUND. The default ServeMux
-// routes every unmatched request to "/" so we filter explicitly. HEAD
-// support is mandatory per RFC 9110 §9.3.2 — every resource that
-// supports GET MUST also support HEAD with identical headers and an
-// empty body.
+// rootHandler is the SPA-fallback catch-all: it serves the embedded SPA
+// shell for any GET/HEAD request the mux did not route to a more-specific
+// pattern. The mux already sends /api/* (structured JSON, incl. NOT_FOUND
+// for unknown sub-routes), /assets/* (hashed bundle, 404 on miss), and each
+// exact root public file (/favicon.svg) to dedicated handlers; everything
+// else falls through here. Serving the shell — built index.html, the
+// not-built notice, or 500 when the FS is unwired, all via serveIndex with
+// 200 + no-cache + Content-Length + HEAD parity — is what lets a hard
+// navigation / reload / bookmark of a client-side route (/sessions/:id,
+// /sources, /topology, /tools, /models, /agents) load the app instead of a
+// JSON 404; BrowserRouter then renders its own NotFound for genuinely
+// unknown client paths (presenter.md §"SPA fallback"). Only /api/* and
+// /assets/* are exempt so real API/asset errors still surface. A
+// non-GET/HEAD method is 405 METHOD_NOT_ALLOWED; HEAD support is mandatory
+// per RFC 9110 §9.3.2 — every resource that supports GET MUST also support
+// HEAD with identical headers and an empty body.
 func (p *Presenter) rootHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		writeJSONError(w, r, p.logger, http.StatusNotFound,
-			CodeNotFound, "not found", map[string]any{"path": r.URL.Path})
-		return
-	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
 			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})

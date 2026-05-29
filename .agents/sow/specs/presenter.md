@@ -235,11 +235,27 @@ Build pipeline: `scripts/build.sh` runs `npm run build` in `frontend/`, copies t
   the production binary cannot reach, since it always embeds the FS): respond
   `500` with the structured `INTERNAL_ERROR` envelope.
 
-`serveAsset` and the SPA-fallback behavior are unchanged: `/assets/*` serves the
-hashed bundle with a long immutable cache and returns `404` on a miss (no SPA
-fallback for asset paths). Only `/` falls back to the SPA shell / notice. Both
-the built `index.html` and the not-built notice set an explicit `Content-Length`
-so `HEAD /` advertises the same body length a `GET /` would return.
+`serveAsset` is unchanged: `/assets/*` serves the hashed bundle with a long
+immutable cache and returns `404` on a miss — assets never fall back to the SPA
+shell, so a missing bundle surfaces as a real failure rather than masquerading
+as the app.
+
+**SPA fallback.** Every `GET`/`HEAD` request that the mux does not route to a
+more-specific handler — i.e. not `/api/*`, not `/assets/*`, and not an exact
+root public file (`/favicon.svg`) — serves the SPA shell via `serveIndex`: the
+built `index.html`, or the not-built notice, with the same `200` + `no-cache` +
+explicit `Content-Length` (and HEAD parity) as `GET /`. This is what makes a
+hard navigation / reload / bookmark of a client-side route (`/sessions/:id`,
+`/sources`, `/topology`, `/tools`, `/models`, `/agents`) load the app instead of
+a JSON `404`: `BrowserRouter` owns client-side routing and the app renders its
+own in-router `NotFound` for genuinely unknown client paths. A non-`GET`/`HEAD`
+method on such a path is `405 METHOD_NOT_ALLOWED`. Only `/api/*` (structured JSON
+`404` for unknown sub-routes) and `/assets/*` (`404` on miss) are exempt — they
+must surface real errors, never the shell. The fallback is a catch-all, not an
+allowlist of known routes: the server stays ignorant of the client route table
+(so Phase-2/3 routes need no server change), at the cost that a typo'd non-API
+path loads the app (which then shows its own `NotFound`) rather than a server
+`404` — the conventional SPA contract.
 
 ### Root public assets
 
@@ -251,15 +267,19 @@ each referenced root file from an explicit route (`GET /favicon.svg`) via
 `servePublicFile`. That handler reads a single, traversal-safe basename from the
 embed root, returns the file with a content-typed `200` and a short
 revalidating cache (`no-cache`, since these names are not content-hashed), and
-returns `404` on a miss (no SPA fallback). Adding a new root public file (e.g.
-`robots.txt`) is one new mux registration plus a build-output copy — it is NOT
-served by a catch-all, so an unexpected root path still 404s rather than leaking
-the SPA shell.
+returns `404` on a miss. Each root public file gets an EXPLICIT exact mux route
+so it is served with its correct content-type and short revalidating cache;
+without that route the SPA fallback (above) would serve the HTML shell in place
+of `/favicon.svg`. Adding a new root public file (e.g. `robots.txt`) is one new
+mux registration plus a build-output copy. (An unexpected non-API, non-asset
+path is NOT a `404` — it serves the SPA shell so client-side routes load on
+reload; see the SPA-fallback contract above.)
 
 ## Routing
 
 ```
 GET  /                          → frontend index.html (or not-built notice)                 (live)
+GET  /<any non-/api non-/assets> → SPA shell (client-route fallback: /sessions/:id, …)       (live)
 GET  /favicon.svg               → embedded root public asset                                (live)
 GET  /assets/*                  → embedded frontend assets                                  (live)
 GET  /api/health                → JSON health status                                        (live)
