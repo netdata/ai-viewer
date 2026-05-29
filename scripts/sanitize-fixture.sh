@@ -238,6 +238,8 @@ sanitize_text() {
     -e 's|xox[bpas]-[A-Za-z0-9_-]{10,}|[REDACTED_SECRET]|g' \
     -e 's|AKIA[0-9A-Z]{16}|[REDACTED_SECRET]|g' \
     -e 's|ghp_[A-Za-z0-9]{30,}|[REDACTED_SECRET]|g' \
+    -e 's|github_pat_[A-Za-z0-9_]{20,}|[REDACTED_SECRET]|g' \
+    -e 's|glpat-[A-Za-z0-9_-]{16,}|[REDACTED_SECRET]|g' \
     -e 's@"([Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Tt][Oo][Kk][Ee][Nn])" *: *"[^"]*"@"\1": "[REDACTED_SECRET]"@g' \
     -e 's|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|user@example.invalid|g' \
     -e "s|${home_path_re}|<HOME>|g" \

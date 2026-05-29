@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate; the assistant runs the same gates locally via `./scripts/gates.sh` before any commit. A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
+The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate as a dedicated job; the assistant runs the same gates locally before any commit (today via the individual gate commands — a single `./scripts/gates.sh` aggregator is planned, see §Aggregate Scripts). A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
 
 The runtime companion to this spec is `.agents/skills/project-quality-gates/SKILL.md` (commands and ergonomics). This spec is the durable truth about *what* is enforced and *at what threshold*.
 
@@ -207,7 +207,7 @@ which run in parallel.
 
 ## Adding or Removing Gates
 
-- **Add**: when a class of bug or risk would not have been caught by existing gates, design a new gate. Update this spec + the runtime skill + CI + `scripts/gates.sh` in the same commit. Update `AGENTS.md` if it adds a top-level commitment.
+- **Add**: when a class of bug or risk would not have been caught by existing gates, design a new gate. Update this spec + the runtime skill + CI (and `scripts/gates.sh` once that aggregator exists) in the same commit. Update `AGENTS.md` if it adds a top-level commitment.
 - **Remove**: requires an operator-approved SOW with: evidence the gate is wrong or obsolete, what replaces it, what risk class is now unprotected.
 
 ## Why These Specific Gates

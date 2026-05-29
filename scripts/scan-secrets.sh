@@ -72,35 +72,138 @@ SELF_REL="scripts/scan-secrets.sh"
 # hit reports which rule fired.
 
 # Rule 1 — operator identity. Banned everywhere (no INPUT exemption).
-#   - explicit emails and their private domains
+#   - the operator's email addresses
 #   - home path (literal and URL-encoded)
-#   - given/sur-name, word-bounded + case-insensitive (-w on the whole line is
-#     too coarse for JSON, so the name rule is matched case-insensitively with
-#     explicit \b boundaries here, and -i is applied to ALL three Rule-1
+#   - the operator's name, word-bounded + case-insensitive (-w on the whole
+#     line is too coarse for JSON, so the name rule is matched case-insensitively
+#     with explicit \b boundaries here, and -i is applied to ALL three Rule-1
 #     patterns below so mixed-/upper-case forms of the email, home path, and
 #     name cannot bypass them).
 #
-# CRITICAL — the patterns are assembled from NON-CONTIGUOUS fragments at
-# runtime so this PUBLIC script file never contains the operator's real
-# identity as a literal string. Self-exclusion (SELF_REL skip below) stops a
-# self-hit, but it does NOT stop publication: a contiguous literal here would
-# leak the identity into the repo regardless. Splitting each token across a
-# string concatenation means `grep` over this file's bytes finds no contiguous
-# operator literal, while the assembled regexes still match correctly at run
-# time. The self-test (scripts/test/scan-secrets-test.sh) uses the same
-# fragment-assembly technique to probe detection.
-_op_name="co""sta"                          # operator given-name
-_op_surname="tsa""ousis"                    # operator sur-name
-_op_domain1="net""data"'\.cloud'            # operator email domain 1 (ERE)
-_op_domain2="tsa""ousis"'\.gr'              # operator email domain 2 (ERE)
-R1_EMAIL="@${_op_domain1}|@${_op_domain2}"
-R1_HOME="/home/${_op_name}|%2[Ff]home%2[Ff]${_op_name}"
-R1_NAME="\\b${_op_name}\\b|\\b${_op_surname}\\b"
-# The fragments served their purpose; drop them so they do not linger in the
-# environment of any child process this script spawns.
-unset _op_name _op_surname _op_domain1 _op_domain2
+# CRITICAL — this PUBLIC file contains NO operator identity literal, contiguous
+# OR fragmented. The ban-list is DERIVED AT RUNTIME from the repository's own
+# git author metadata, so the identity to ban is never written here. Two
+# sources are unioned and de-duped:
+#   - `git log --format='%ae%n%an'` — every author email + name that has ever
+#     committed (the durable, content-backed source of truth).
+#   - `git config user.email` / `git config user.name` — covers a repo with no
+#     commits yet (e.g. the self-test's throwaway repos), where `git log` is
+#     empty.
+# From those values the three ERE patterns are built (every derived value
+# ERE-escaped so dots etc. are literal):
+#   - EMAIL: each derived email, alternated.
+#   - HOME:  /home/<X> and /Users/<X> plus their URL-encoded forms, where <X>
+#            is the local-part of each derived email, the space-stripped
+#            lowercase of each derived name, and the basename of $HOME (covers
+#            the local runner's home dir).
+#   - NAME:  each whitespace-separated word of each derived name, word-bounded.
+# Self-exclusion (SELF_REL skip below) stops a self-hit on the scanner, but the
+# real protection is that nothing identity-bearing is committed here at all.
+#
+# derive_rule1 — populate R1_EMAIL / R1_HOME / R1_NAME from git metadata.
+# FAIL-CLOSED: if no email AND no name can be derived, Rule 1 has no ban-list
+# and must NOT run silently — print an error and exit non-zero.
+ere_escape() { printf '%s' "$1" | sed -E 's/[][(){}.^$*+?|\\]/\\&/g'; }
 
-# Rule 2 — generic secret shapes. Banned everywhere EXCEPT */INPUT/** fixtures.
+derive_rule1() {
+  local emails=() names=()
+  local v
+  # Union of git-log authors and the configured identity, partitioned into
+  # emails (contain '@') and names, de-duping each. `git log` on a repo with no
+  # commits prints a fatal to stderr and nothing to stdout; stderr is suppressed
+  # so the empty result simply falls through to the config fallback. Fed via
+  # process substitution (not a pipe) so the arrays populate in THIS shell.
+  local email_seen="" name_seen=""
+  while IFS= read -r v; do
+    [[ -z "$v" ]] && continue
+    if [[ "$v" == *@* ]]; then
+      case "$email_seen" in *$'\n'"$v"$'\n'*) continue ;; esac
+      email_seen="${email_seen}"$'\n'"$v"$'\n'
+      emails+=("$v")
+    else
+      case "$name_seen" in *$'\n'"$v"$'\n'*) continue ;; esac
+      name_seen="${name_seen}"$'\n'"$v"$'\n'
+      names+=("$v")
+    fi
+  done < <(
+    # `|| true` on EVERY command: the process-substitution subshell inherits
+    # `set -e`, and `git log` exits non-zero on a repo with no commits (and
+    # `git config` exits non-zero when a key is unset). Without the guard the
+    # subshell would abort after the first failing command, dropping the
+    # fallback values and tripping the fail-closed guard even when a config
+    # identity exists.
+    git log --format='%ae%n%an' 2>/dev/null || true
+    git config user.email 2>/dev/null || true
+    git config user.name 2>/dev/null || true
+  )
+
+  # Fail-closed: an empty ban-list means Rule 1 would silently pass everything.
+  if [[ "${#emails[@]}" -eq 0 && "${#names[@]}" -eq 0 ]]; then
+    printf >&2 '%s[FAIL]%s Rule 1 ban-list is empty: no git author (git log) and no git config user.email/user.name could be derived. Rule 1 (operator identity) must always run with a real ban-list; refusing to scan with Rule 1 disabled.\n' "$RED" "$NC"
+    exit 2
+  fi
+
+  # Collect the home-path stems <X>: email local-parts, space-stripped lowercase
+  # names, and the basename of $HOME (for the local runner).
+  local stems=() s stem_seen=""
+  add_stem() {
+    local x="$1"
+    [[ -z "$x" ]] && return 0
+    case "$stem_seen" in *$'\n'"$x"$'\n'*) return 0 ;; esac
+    stem_seen="${stem_seen}"$'\n'"$x"$'\n'
+    stems+=("$x")
+  }
+  for v in "${emails[@]}"; do add_stem "${v%%@*}"; done
+  for v in "${names[@]}"; do
+    add_stem "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  done
+  add_stem "$(basename "$HOME")"
+
+  # Collect name words (each whitespace-separated token of each derived name).
+  local words=() w word_seen=""
+  for v in "${names[@]}"; do
+    # Intentional word-splitting: a derived name like "First Last" must yield
+    # the words "First" and "Last", each banned word-bounded below.
+    # shellcheck disable=SC2086
+    for w in $v; do
+      [[ -z "$w" ]] && continue
+      case "$word_seen" in *$'\n'"$w"$'\n'*) continue ;; esac
+      word_seen="${word_seen}"$'\n'"$w"$'\n'
+      words+=("$w")
+    done
+  done
+
+  # Build EMAIL pattern: each derived email, ERE-escaped, alternated.
+  R1_EMAIL=""
+  for v in "${emails[@]}"; do
+    R1_EMAIL="${R1_EMAIL}${R1_EMAIL:+|}$(ere_escape "$v")"
+  done
+
+  # Build HOME pattern: literal and URL-encoded /home/<X> and /Users/<X> for
+  # each stem (escaped). %2F is the URL-encoded slash (case-insensitive hex).
+  local stem
+  R1_HOME=""
+  for s in "${stems[@]}"; do
+    stem="$(ere_escape "$s")"
+    R1_HOME="${R1_HOME}${R1_HOME:+|}/home/${stem}|/Users/${stem}"
+    R1_HOME="${R1_HOME}|%2[Ff]home%2[Ff]${stem}|%2[Ff]Users%2[Ff]${stem}"
+  done
+
+  # Build NAME pattern: each derived name word, ERE-escaped, word-bounded.
+  R1_NAME=""
+  for w in "${words[@]}"; do
+    R1_NAME="${R1_NAME}${R1_NAME:+|}\\b$(ere_escape "$w")\\b"
+  done
+  # If no names were derived (email-only identity), the name pattern is empty;
+  # emit_raw treats an empty regex as "nothing to match" (skipped below).
+}
+
+derive_rule1
+
+# Rule 2 — generic secret shapes. Banned EVERYWHERE, including under
+# scripts/test/fixtures/*/INPUT/**. There is no directory carve-out: a
+# secret-shape token is exempt ONLY when the matched token itself carries the
+# literal "EXAMPLE" marker (the per-token SECRET_MARKER below).
 #
 # Each shape requires a LEFT TOKEN BOUNDARY ((^|[^A-Za-z0-9])) so the prefix is
 # the start of a real token, not the tail of an English word: this stops
@@ -112,7 +215,10 @@ BOUNDARY='(^|[^A-Za-z0-9])'
 R2_OPENAI="${BOUNDARY}sk-[A-Za-z0-9_-]{8,}"
 R2_SLACK="${BOUNDARY}xox[bpas]-[A-Za-z0-9-]{8,}"
 R2_AWS="${BOUNDARY}AKIA[0-9A-Z]{16}"
-R2_BEARER='Bearer [A-Za-z0-9._-]{16,}'
+# Same LEFT TOKEN BOUNDARY convention as the shapes above, for consistency:
+# "Bearer" must start a real token (line/quote/space start), not be the tail of
+# a longer word. Real Authorization headers always begin at one of those.
+R2_BEARER="${BOUNDARY}Bearer [A-Za-z0-9._-]{16,}"
 # Version-control provider tokens. The sanitizer already redacts ghp_…; the
 # scanner must hunt the same shapes (plus GitHub fine-grained PATs and GitLab
 # PATs) so a committed VCS credential outside INPUT/ is caught. Same left
@@ -164,8 +270,15 @@ scan_text() {
   # emit_raw — Rule 1 reporter. Matches <regex> against the RAW text (no
   # allow-list filtering, ever) and reports the whole offending line.
   # Args: <regex> <rule-label> <grep-iflag>.
+  #
+  # An EMPTY regex is skipped: `grep -E ''` matches EVERY line, which would
+  # turn an empty Rule-1 sub-pattern (e.g. R1_NAME when the derived identity is
+  # email-only, with no name) into a flag on every line. derive_rule1
+  # guarantees at least one of EMAIL/NAME is non-empty (fail-closed otherwise),
+  # so skipping an individual empty sub-pattern cannot disable Rule 1 wholesale.
   emit_raw() {
     local re="$1" rule="$2" iflag="$3" out
+    [[ -z "$re" ]] && return 0
     out="$(printf '%s' "$text" | grep -nE ${iflag:+-i} "$re" || true)"
     if [[ -n "$out" ]]; then
       while IFS= read -r line; do

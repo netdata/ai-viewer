@@ -19,11 +19,15 @@
 #   - sanctioned placeholders ([REDACTED_*], *.example.invalid, example.com,
 #     EXAMPLE-marked secret shapes) never trip a hit
 #
-# No operator-identity string is ever written to a TRACKED file in THIS repo:
-# every fixture lives under a mktemp dir that is removed on exit. The literal
-# identity tokens used to probe detection are assembled at runtime from parts
-# so this test file itself stays clean of the patterns it exercises (and so the
-# real scan-secrets.sh gate never flags this test).
+# The scanner derives its Rule-1 (operator-identity) ban-list at runtime from
+# the repository's OWN git author metadata (git log + git config). So this test
+# does NOT need — and deliberately does NOT contain — any operator-identity
+# literal, contiguous or fragmented. Each throwaway repo is given a clearly
+# SYNTHETIC author identity (sentinel@scan-test.example / "Scan Sentinel"); the
+# Rule-1 detection cases plant THAT synthetic identity in tracked content and
+# assert the scanner (whose ban-list is now derived from that throwaway repo's
+# own author) flags it. The non-Rule-1 cases (secret shapes, gz, symlink,
+# EXAMPLE-exempt) are independent of identity.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -53,31 +57,40 @@ fail_case() {
   fail=$((fail + 1)); failed_names="${failed_names} ${1}"
 }
 
-# Probe tokens assembled at runtime from fragments so THIS source file never
-# contains a contiguous operator-identity literal — otherwise the real
-# scan-secrets.sh gate would (correctly) flag this very test. Each value below
-# reconstructs exactly what scan-secrets.sh Rule 1 / Rule 2 hunts for.
-OP_NAME="co""sta"                       # operator given-name (Rule 1: name)
-OP_DOMAIN="netdata"".cloud"             # operator email domain (Rule 1: email)
-OP_EMAIL="${OP_NAME}@${OP_DOMAIN}"
-OP_HOME="/home/""${OP_NAME}"            # operator home path (Rule 1: home)
-# Mixed-/upper-case operator email (Rule 1, FIX 6): the scanner now matches all
-# three Rule-1 patterns case-insensitively, so an upper-cased form must still be
-# flagged. Assembled from fragments and upper-cased at runtime so THIS source
-# file never carries a contiguous operator-identity literal.
-OP_NAME_UC="$(printf '%s' "$OP_NAME" | tr '[:lower:]' '[:upper:]')"
-OP_DOMAIN_UC="$(printf '%s' "$OP_DOMAIN" | tr '[:lower:]' '[:upper:]')"
-OP_EMAIL_MIXED="${OP_NAME_UC}@${OP_DOMAIN_UC}"
+# SYNTHETIC author identity planted into each throwaway repo (see new_repo).
+# The scanner derives its Rule-1 ban-list from the repo's own git author
+# metadata, so these are exactly the values the scanner will ban inside that
+# repo — and the Rule-1 detection cases plant THESE values in tracked content.
+# They are obviously synthetic (the .example TLD is RFC-2606 reserved and the
+# name is a sentinel), so committing them in THIS test file leaks nothing, and
+# the real scan-secrets.sh gate — whose ban-list derives from the REAL repo's
+# authors — does not flag them.
+SYNTH_NAME="Scan Sentinel"                 # synthetic git user.name (Rule 1: name)
+SYNTH_EMAIL="sentinel@scan-test.example"   # synthetic git user.email (Rule 1: email)
+# Local-part of the synthetic email -> the home-path stem the scanner derives.
+SYNTH_LOCALPART="${SYNTH_EMAIL%%@*}"
+SYNTH_HOME="/home/${SYNTH_LOCALPART}"      # synthetic operator home path (Rule 1: home)
+# A single name word the scanner bans word-bounded (first token of SYNTH_NAME).
+SYNTH_NAME_WORD="${SYNTH_NAME%% *}"
+# A near-miss token sharing the name-word's prefix but NOT word-bounded-equal,
+# proving the \b boundary (the scanner must NOT flag this).
+SYNTH_NAME_NEARMISS="${SYNTH_NAME_WORD}ner"   # e.g. "Scanner" vs banned "Scan"
+# Mixed-/upper-case synthetic email (Rule 1, case-insensitive): an upper-cased
+# form must still be flagged because the scanner matches Rule 1 case-insensitively.
+SYNTH_EMAIL_MIXED="$(printf '%s' "$SYNTH_EMAIL" | tr '[:lower:]' '[:upper:]')"
 # A real-looking Anthropic key shape (Rule 2). NOT EXAMPLE-marked, so it must be
-# flagged EVERYWHERE now — including under INPUT/ (FIX 2).
+# flagged EVERYWHERE — including under INPUT/.
 SECRET_KEY="sk-""ant-api03-DeadBeefDeadBeefDeadBeef1234567890"
 # The sanctioned SYNTHETIC placeholder key (Rule 2 per-token exemption). Carries
-# the literal EXAMPLE marker, so it is exempt anywhere. Assembled from parts only
-# for symmetry; it is already safe to write literally.
+# the literal EXAMPLE marker, so it is exempt anywhere.
 PLACEHOLDER_KEY="sk-""ant-EXAMPLEdeadbeefdeadbeef"
-# A GitHub personal-access-token shape (Rule 2, FIX 5). NOT EXAMPLE-marked, so
+# A GitHub classic personal-access-token shape (Rule 2). NOT EXAMPLE-marked, so
 # it must be flagged. The ghp_ prefix needs >=30 trailing chars to match.
 GH_PAT="ghp_""AbCdEf0123456789AbCdEf0123456789xyz"
+# A GitHub fine-grained PAT shape (Rule 2, FIX C). github_pat_ + >=20 chars.
+GH_FINE_PAT="github_pat_""11ABCDEFG0aBcDeFgHiJkL_mNoPqRsTuVwXyZ0123456789AbCd"
+# A GitLab PAT shape (Rule 2, FIX C). glpat- + >=16 chars.
+GITLAB_PAT="glpat-""AbCdEf0123456789xyz"
 
 # --- helpers ----------------------------------------------------------------
 
@@ -93,12 +106,24 @@ new_repo() {
   (
     cd "$dir"
     git init -q
-    # Local identity so `git` commands work; never the operator's.
-    git config user.email "test@example.invalid"
-    git config user.name "fixture"
+    # SYNTHETIC identity. The scanner derives its Rule-1 ban-list from THIS
+    # repo's git metadata, so these values become exactly what it bans here.
+    # They are obviously synthetic (RFC-2606 .example TLD + sentinel name) and
+    # never the real operator's, so the Rule-1 detection cases can plant them
+    # in tracked content and assert they are flagged.
+    git config user.email "$SYNTH_EMAIL"
+    git config user.name "$SYNTH_NAME"
     git config commit.gpgsign false
   )
   printf '%s' "$dir"
+}
+
+# commit_all <repo> <message> — stage everything already added and make a real
+# commit, so the scanner's `git log` derivation path (not just `git config`) is
+# exercised. Uses the repo's configured synthetic identity.
+commit_all() {
+  local repo="$1" msg="$2"
+  ( cd "$repo" && git commit -q -m "$msg" )
 }
 
 # track <repo> <relpath> — create a tracked file via git add (content on stdin).
@@ -145,14 +170,15 @@ run_scanner() {
 
 # --- cases ------------------------------------------------------------------
 
-# 1. Operator email anywhere -> flagged.
+# 1. Operator (synthetic) email anywhere -> flagged. Derived from git config
+#    (this repo has no commits yet), exercising the config-fallback path.
 case_detect_operator_email() {
   local name="detect::operator_email"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf 'contact: %s\n' "$OP_EMAIL" | track "$repo" "docs/notes.md"
+  printf 'contact: %s\n' "$SYNTH_EMAIL" | track "$repo" "docs/notes.md"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
-    fail_case "$name" "scanner passed but should have flagged an operator email"; return
+    fail_case "$name" "scanner passed but should have flagged the synthetic operator email"; return
   fi
   if ! printf '%s' "$OUT" | grep -q 'docs/notes.md'; then
     fail_case "$name" "non-zero exit but report did not name the offending file:
@@ -161,49 +187,82 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 2. Operator home path anywhere -> flagged.
-case_detect_operator_home() {
-  local name="detect::operator_home"
+# 1b. Operator (synthetic) email in COMMITTED content -> flagged via the
+#     `git log` derivation path (a real commit is made, then a clean-named file
+#     carrying the synthetic email is committed too). This exercises the author
+#     metadata source `git log --format=%ae%n%an`, not just `git config`.
+case_detect_operator_email_from_git_log() {
+  local name="detect::operator_email_from_git_log"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf '{"workdir":"%s/src/x"}\n' "$OP_HOME" | track "$repo" "data/session.json"
+  printf 'first tracked file\n' | track "$repo" "README.md"
+  commit_all "$repo" "initial commit by synthetic author"
+  # Now the synthetic identity exists in `git log`. Plant the email and commit.
+  printf 'maintainer: %s\n' "$SYNTH_EMAIL" | track "$repo" "MAINTAINERS"
+  commit_all "$repo" "add maintainer"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
-    fail_case "$name" "scanner passed but should have flagged the operator home path"; return
+    fail_case "$name" "synthetic email derived from git log was NOT flagged:
+$OUT"; return
   fi
-  pass_case "$name"
-}
-
-# 3. Operator name (word-bounded) -> flagged; an unrelated token sharing the
-#    substring (cost_usd) must NOT, proving the boundary.
-case_detect_operator_name_word_bounded() {
-  local name="detect::operator_name_word_bounded"
-  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf 'author: %s\n' "$OP_NAME" | track "$repo" "AUTHORS.txt"
-  run_scanner "$repo"
-  if [ "$RC" -eq 0 ]; then
-    fail_case "$name" "scanner passed but should have flagged the operator name"; return
-  fi
-  # Now a clean repo whose only token is cost_usd (substring of the name).
-  local clean; clean="$(new_repo "${name//[^A-Za-z0-9]/_}_clean")"
-  printf '{"cost_usd":0.04,"costing":true}\n' | track "$clean" "metrics.json"
-  run_scanner "$clean"
-  if [ "$RC" -ne 0 ]; then
-    fail_case "$name" "scanner falsely flagged cost_usd / costing (boundary broken):
+  if ! printf '%s' "$OUT" | grep -q 'MAINTAINERS'; then
+    fail_case "$name" "non-zero exit but report did not name the offending file:
 $OUT"; return
   fi
   pass_case "$name"
 }
 
-# 4. Operator identity INSIDE an INPUT/ fixture -> still flagged (Rule 1 has no
-#    INPUT exemption).
+# 2. Operator (synthetic) home path anywhere -> flagged. The scanner derives
+#    /home/<localpart> from the synthetic email; SYNTH_HOME plants exactly that.
+case_detect_operator_home() {
+  local name="detect::operator_home"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf '{"workdir":"%s/src/x"}\n' "$SYNTH_HOME" | track "$repo" "data/session.json"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "scanner passed but should have flagged the synthetic operator home path"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'data/session.json'; then
+    fail_case "$name" "non-zero exit but report did not name the offending file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 3. Operator (synthetic) name word (word-bounded) -> flagged; an unrelated
+#    token sharing the prefix (SYNTH_NAME_WORD + "ner", e.g. "Scanner") must
+#    NOT, proving the \b boundary.
+case_detect_operator_name_word_bounded() {
+  local name="detect::operator_name_word_bounded"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf 'author: %s\n' "$SYNTH_NAME_WORD" | track "$repo" "AUTHORS.txt"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "scanner passed but should have flagged the synthetic operator name word"; return
+  fi
+  # Now a clean repo whose only token shares the banned word's prefix but is a
+  # different word (e.g. "Scanner" vs banned "Scan") plus a snake_case near-miss.
+  local clean; clean="$(new_repo "${name//[^A-Za-z0-9]/_}_clean")"
+  printf '{"tool":"%s","%s_count":3}\n' \
+    "$SYNTH_NAME_NEARMISS" "$(printf '%s' "$SYNTH_NAME_WORD" | tr '[:upper:]' '[:lower:]')" \
+    | track "$clean" "metrics.json"
+  run_scanner "$clean"
+  if [ "$RC" -ne 0 ]; then
+    fail_case "$name" "scanner falsely flagged a prefix near-miss (boundary broken):
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 4. Operator (synthetic) identity INSIDE an INPUT/ fixture -> still flagged
+#    (Rule 1 has no INPUT exemption).
 case_detect_operator_identity_in_input() {
   local name="detect::operator_identity_in_input_fixture"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf '{"operatorEmail":"%s"}\n' "$OP_EMAIL" \
+  printf '{"operatorEmail":"%s"}\n' "$SYNTH_EMAIL" \
     | track "$repo" "scripts/test/fixtures/aiagent_v3/x/INPUT/s.jsonl"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
-    fail_case "$name" "operator identity under INPUT/ was NOT flagged (Rule 1 must apply everywhere)"; return
+    fail_case "$name" "synthetic operator identity under INPUT/ was NOT flagged (Rule 1 must apply everywhere)"; return
   fi
   pass_case "$name"
 }
@@ -260,11 +319,12 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 7. Dirt inside a *.gz -> detected (decompression path).
+# 7. Dirt inside a *.gz -> detected (decompression path). Uses the synthetic
+#    operator email so Rule 1 fires after decompression.
 case_detect_secret_in_gz() {
   local name="detect::operator_identity_in_gz"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf '{"operatorEmail":"%s"}\n' "$OP_EMAIL" \
+  printf '{"operatorEmail":"%s"}\n' "$SYNTH_EMAIL" \
     | track_gz "$repo" "data/snap.json.gz"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
@@ -318,13 +378,13 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 10. Rule 1 is NEVER allow-listed: the operator email sharing a line with an
-#     allow-listed token (example.com) must still be flagged. This is the
-#     whole-line-drop bypass the per-rule semantics close.
+# 10. Rule 1 is NEVER allow-listed: the (synthetic) operator email sharing a
+#     line with an allow-listed token (example.com) must still be flagged. This
+#     is the whole-line-drop bypass the per-rule semantics close.
 case_rule1_not_allowlisted_on_shared_line() {
   local name="detect::operator_email_on_allowlisted_line"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf '{"operatorEmail":"%s"} see example.com\n' "$OP_EMAIL" \
+  printf '{"operatorEmail":"%s"} see example.com\n' "$SYNTH_EMAIL" \
     | track "$repo" "docs/leak.md"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
@@ -373,15 +433,15 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 13. Mixed-/upper-case operator email outside INPUT/ -> flagged (FIX 6: Rule 1
-#     is now case-insensitive on all three patterns).
+# 13. Mixed-/upper-case (synthetic) operator email outside INPUT/ -> flagged:
+#     Rule 1 is case-insensitive on all three patterns.
 case_detect_operator_email_mixed_case() {
   local name="detect::operator_email_mixed_case"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  printf 'contact: %s\n' "$OP_EMAIL_MIXED" | track "$repo" "docs/contact.md"
+  printf 'contact: %s\n' "$SYNTH_EMAIL_MIXED" | track "$repo" "docs/contact.md"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
-    fail_case "$name" "mixed-case operator email was NOT flagged (Rule 1 must be case-insensitive):
+    fail_case "$name" "mixed-case synthetic operator email was NOT flagged (Rule 1 must be case-insensitive):
 $OUT"; return
   fi
   if ! printf '%s' "$OUT" | grep -q 'docs/contact.md'; then
@@ -391,18 +451,54 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 14. A GitHub PAT shape outside INPUT/ -> flagged (FIX 5: scanner now covers
-#     the same VCS-token shapes the sanitizer redacts).
+# 14. A GitHub classic PAT shape (ghp_) outside INPUT/ -> flagged (scanner
+#     covers the same VCS-token shapes the sanitizer redacts).
 case_detect_github_pat() {
   local name="detect::github_pat_shape"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
   printf '{"gh_token":"%s"}\n' "$GH_PAT" | track "$repo" "config/ci.json"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
-    fail_case "$name" "GitHub PAT shape was NOT flagged (FIX 5):
+    fail_case "$name" "GitHub classic PAT shape was NOT flagged:
 $OUT"; return
   fi
   if ! printf '%s' "$OUT" | grep -q 'config/ci.json'; then
+    fail_case "$name" "non-zero exit but report did not name the offending file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 14b. A GitHub fine-grained PAT shape (github_pat_) outside INPUT/ -> flagged
+#      (FIX C: completes VCS-PAT self-test coverage; scanner has R2_GH_FINE).
+case_detect_github_fine_pat() {
+  local name="detect::github_fine_pat_shape"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf '{"gh_token":"%s"}\n' "$GH_FINE_PAT" | track "$repo" "config/fine.json"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "GitHub fine-grained PAT shape was NOT flagged (FIX C):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'config/fine.json'; then
+    fail_case "$name" "non-zero exit but report did not name the offending file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 14c. A GitLab PAT shape (glpat-) outside INPUT/ -> flagged (FIX C: completes
+#      VCS-PAT self-test coverage; scanner has R2_GITLAB).
+case_detect_gitlab_pat() {
+  local name="detect::gitlab_pat_shape"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf '{"gl_token":"%s"}\n' "$GITLAB_PAT" | track "$repo" "config/gitlab.json"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "GitLab PAT shape was NOT flagged (FIX C):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'config/gitlab.json'; then
     fail_case "$name" "non-zero exit but report did not name the offending file:
 $OUT"; return
   fi
@@ -431,15 +527,15 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 16. A tracked symlink whose TARGET PATH STRING contains the operator home ->
-#     flagged (FIX 4: the scanner scans the link target string, not the
-#     dereferenced target file content).
+# 16. A tracked symlink whose TARGET PATH STRING contains the (synthetic)
+#     operator home -> flagged (the scanner scans the link target string, not
+#     the dereferenced target file content).
 case_detect_operator_home_in_symlink_target() {
   local name="detect::operator_home_in_symlink_target"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
-  # Symlink target is an absolute path under the operator home. readlink returns
-  # exactly this string; the scanner must flag it.
-  track_symlink "$repo" "link-to-secret" "${OP_HOME}/private/notes.txt"
+  # Symlink target is an absolute path under the synthetic operator home.
+  # readlink returns exactly this string; the scanner must flag it.
+  track_symlink "$repo" "link-to-secret" "${SYNTH_HOME}/private/notes.txt"
   run_scanner "$repo"
   if [ "$RC" -eq 0 ]; then
     fail_case "$name" "operator home in a symlink target path was NOT flagged (FIX 4):
@@ -467,6 +563,7 @@ main() {
   printf '%s==> scan-secrets-test%s\n' "$C_YELLOW" "$C_RESET"
 
   case_detect_operator_email
+  case_detect_operator_email_from_git_log
   case_detect_operator_home
   case_detect_operator_name_word_bounded
   case_detect_operator_identity_in_input
@@ -481,6 +578,8 @@ main() {
   case_rule2_placeholder_token_still_exempt
   case_detect_operator_email_mixed_case
   case_detect_github_pat
+  case_detect_github_fine_pat
+  case_detect_gitlab_pat
   case_detect_secret_in_corrupt_gz
   case_detect_operator_home_in_symlink_target
 

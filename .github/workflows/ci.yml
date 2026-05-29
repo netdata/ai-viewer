@@ -45,8 +45,12 @@
 #                  enforcement (replaces benchtime=1x smoke run below)
 #     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
 #                  enforcement (replaces bundle-size report below)
-#     - SOW-0013 — scripts/{gates,scan-secrets,spec-drift}.sh +
-#                  CodeQL workflow + Dependabot config
+#     - SOW-0013 — scripts/{gates,spec-drift}.sh + CodeQL workflow +
+#                  Dependabot config
+#   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its
+#   negative self-test (scripts/test/scan-secrets-test.sh) are already
+#   implemented and run as REQUIRED, fail-closed steps in the gates job
+#   below; they are not deferred.
 #   Each of those SOWs adds steps to existing jobs OR adds new jobs.
 #   They do not require renaming the four current jobs.
 #

@@ -6766,6 +6766,52 @@ real (verified against the code). Not merged — one comprehensive fix round:
    phantom-gate class. Fix: correct the spec (gates.sh is an optional aggregator;
    CI runs each gate inline).
 
+Round-1 fixes landed in commit `093ff8e`; CI green on it (lint/test/frontend/
+embed-smoke/gates all pass).
+
+##### PR-A review round 2 (2026-05-29) — codex + glm + minimax
+
+On the round-1 fixes: **minimax** + **glm** → safe to merge (P3s only); **codex**
+→ one **P1 remained** + P3s. Adjudicated on ground truth (codex correct):
+
+- **[P1] Operator identity still committed, just fragment-split.** Round-1 fix 1
+  removed contiguous literals but the scanner + self-test still reconstructed the
+  email/home/name from adjacent string fragments — a public repo must not commit
+  reconstructable operator identity, and the scanner self-excludes so it is not
+  self-enforced. (Privacy impact is nil — the identity is already the contiguous
+  git author of every commit — but the contract bars operator literals in
+  artifacts, and overriding a security reviewer would be a risk-acceptance the
+  operator owns, so the right move is to *remove* the literals, not accept them.)
+- **[P3]** stale comments (`scan-secrets.sh` "except INPUT", `ci.yml` SOW-0013
+  list, `quality-gates.md` `gates.sh`-is-canonical at :5/:210); VCS-PAT self-test
+  only covered `ghp_` (codex); sanitizer lacked `github_pat_`/`glpat-` (glm);
+  Bearer rule-2 lacked the left token boundary the other shapes use (glm).
+
+#### Round-3 resolution (commit pending)
+
+- **[P1] fixed by derivation, not hardcoding.** `scan-secrets.sh` now builds its
+  Rule-1 ban-list at runtime from the repo's own git author metadata
+  (`git log --format='%ae%n%an'` ∪ `git config user.email`/`user.name`), with
+  home stems from email local-parts + names + `$HOME` basename. **Fail-closed**:
+  an empty ban-list exits 2 (never scans with Rule 1 disabled). No operator
+  literal — contiguous or fragmented — remains in the scanner or its self-test
+  (grep proof: zero). The self-test drives Rule-1 detection off a synthetic
+  throwaway-repo author (`sentinel@scan-test.example`), incl. a `git log`-path
+  case. Two latent bugs found + fixed while implementing: a `set -e`
+  process-substitution abort on a no-commit repo (`|| true` per command) and an
+  empty-`R1_NAME` regex that matched every line for an email-only identity
+  (guarded in `emit_raw`).
+- **[P3] all fixed.** Comments synced; PAT self-test cases added (`github_pat_`,
+  `glpat-`); sanitizer gained `github_pat_`/`glpat-` redaction (scanner↔sanitizer
+  symmetry); Bearer rule-2 gained the left boundary; `quality-gates.md` `gates.sh`
+  claims corrected.
+- **Verified (master):** `grep` for operator identity in scanner+self-test → zero;
+  `scan-secrets.sh` exit 0 (441 files); self-test **20/20**;
+  `sanitize-fixture-test.sh` 13/13 (+ `HOME=/tmp/fakehome`); shellcheck clean; the
+  derivation in this repo yields exactly the operator-family identity → would flag
+  it in content. **Lesson:** a scanner that bans operator identity must derive that
+  identity (from git authorship), never hardcode it — captured for AGENTS/memory.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
