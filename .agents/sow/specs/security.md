@@ -52,16 +52,19 @@ rule classes:
 - **Operator identity** (real emails, real home path, name) — banned in every
   tracked file with zero tolerance, including the sanitizer's `INPUT/` fixtures.
 - **Generic secret shapes** (`AKIA…`, `sk-…`, `sk-ant-…`, `xox[bpas]-…`,
-  high-entropy bearer tokens) — banned in all real artifacts, allowed **only**
-  under `scripts/test/fixtures/*/INPUT/**`, whose job is to carry *synthetic*
-  dirty data so `sanitize-fixture.sh`'s redaction can be tested. (Public provider
-  hostnames are not secrets; the sanitizer rewrites them to `*.example.invalid`.)
+  high-entropy bearer tokens, and VCS PATs `ghp_…`/`github_pat_…`/`glpat-…`) —
+  flagged in **every** tracked file; the only exemption is a token carrying the
+  synthetic marker `EXAMPLE` (e.g. `sk-ant-EXAMPLE…`), the convention for the
+  sanitizer's dirty-input fixtures. A real secret-shape (no `EXAMPLE`) is flagged
+  even under `scripts/test/fixtures/*/INPUT/**`, so the synthetic-only rule is
+  enforced by the gate. (Public provider hostnames are not secrets; the sanitizer
+  rewrites them to `*.example.invalid`.)
 
-Those sanitizer inputs must be synthetic: they may contain secret-*shaped*
-strings but never the operator's real identity. The scanner is **fail-closed in
-CI** — an absent scanner fails the `gates` job rather than passing silently — and
-ships with a negative self-test that plants an operator-identity string and
-asserts detection.
+Sanitizer dirty inputs must therefore be synthetic: they may contain
+secret-*shaped* strings (marked `EXAMPLE`) but never the operator's real
+identity. The scanner is **fail-closed in CI** — an absent scanner fails the
+`gates` job rather than passing silently — and ships with a negative self-test
+that plants an operator-identity string and asserts detection.
 
 ## Dependency Hygiene
 

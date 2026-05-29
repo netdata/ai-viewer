@@ -123,23 +123,25 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
    patterns are defined inside the script itself, which **excludes its own path**
    from the scan (a scanner necessarily contains the patterns it hunts for). Name
    matching is word-bounded so unrelated tokens (e.g. `cost_usd`) never match.
-2. **Generic secret shapes (banned everywhere except sanitizer test inputs).**
-   `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys), `xox[bpas]-…` (Slack),
-   `AKIA[0-9A-Z]{16}` (AWS), and `Bearer <high-entropy>` tokens. (Public provider
-   *hostnames* like `api.anthropic.com` are NOT secrets and are not scanned — they
-   are a sanitizer concern; fixtures replace them with `*.example.invalid`.) Secret
-   shapes are banned in all real artifacts but **allowed only** under
-   `scripts/test/fixtures/*/INPUT/**` — the dirty inputs
-   whose entire purpose is to exercise `sanitize-fixture.sh`'s redaction. Those
-   inputs must be **synthetic** (rule class 1 still applies to them, so they may
-   never carry the operator's real identity). Known placeholders are allow-listed:
-   `[REDACTED_*]`, `*.example.invalid`, RFC-2606 reserved `example.com`, and the
-   synthetic `sk-ant-EXAMPLE…` key shape.
+2. **Generic secret shapes.** `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys),
+   `xox[bpas]-…` (Slack), `AKIA[0-9A-Z]{16}` (AWS), `Bearer <high-entropy>`
+   tokens, and VCS PATs (`ghp_…`, `github_pat_…`, `glpat-…`). (Public provider
+   *hostnames* like `api.anthropic.com` are NOT secrets and are not scanned —
+   they are a sanitizer concern; fixtures rewrite them to `*.example.invalid`.) A
+   secret-shape token is flagged **everywhere**, with a single exemption: a token
+   carrying the synthetic marker `EXAMPLE` (e.g. `sk-ant-EXAMPLE…`) — the
+   convention for the dirty inputs that exercise `sanitize-fixture.sh`'s
+   redaction. A secret-shape token WITHOUT `EXAMPLE` is flagged even under
+   `scripts/test/fixtures/*/INPUT/**`, so "synthetic only" for fixtures is
+   enforced by the gate, not merely policy.
 
-The allow-list is applied **per matched token, never per line** — a real secret on
-the same line as a placeholder is still flagged. The allow-list applies **only to
-rule class 2**; rule class 1 (operator identity) is never exempted under any
-circumstances.
+The `EXAMPLE` exemption is matched **per token, never per line** — a real secret
+on the same line as a placeholder is still flagged — and applies **only to rule
+class 2**; rule class 1 (operator identity) is never exempted under any
+circumstances. `.gz` archives are decompressed and scanned; a malformed archive
+is scanned raw and its decompression failure reported (never silently skipped).
+Tracked symlinks are scanned by their target-path string, not the dereferenced
+target.
 
 - **Threshold:** zero hits.
 - **Fail-closed in CI.** The `gates` job runs the scanner and **fails when the
@@ -171,15 +173,28 @@ circumstances.
 
 ## Aggregate Scripts
 
-- `./scripts/lint.sh` — all formatting + lint + static + security.
-- `./scripts/test.sh` — all tests + coverage + race.
-- `./scripts/gates.sh` — every gate above, in order, fail-fast. The canonical pre-commit gate.
+CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
+`embed-smoke`, `gates`) that invokes the tools directly — see
+`.github/workflows/ci.yml`. The implemented helper scripts today are
+`scripts/build.sh` (frontend + embed + both binaries), `scripts/dev.sh`,
+`scripts/embed-smoke.sh`, `scripts/e2e-serve.sh`, `scripts/sanitize-fixture.sh`,
+`scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
+`scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
 
-CI uses the same scripts so local and CI behavior cannot diverge.
+Single-command aggregators — `scripts/lint.sh`, `scripts/test.sh`, and
+`scripts/gates.sh` (run every gate, fail-fast) — are a planned convenience and
+are **not yet present**. Until they land, run the individual gates (or rely on
+the per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
+gracefully when absent. The one exception is the security scanner: it is
+**fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if
+`scripts/scan-secrets.sh` or its self-test is missing, never skips it.
 
 ## Performance Target
 
-Full local `./scripts/gates.sh` completes in under 5 minutes on the operator's workstation. If it exceeds, profile and parallelize before adding more gates.
+When the `scripts/gates.sh` aggregator lands, a full local run should complete in
+under 5 minutes on the operator's workstation; if it exceeds, profile and
+parallelize before adding more gates. Today the equivalent is the set of CI jobs,
+which run in parallel.
 
 ## When a Gate Fails
 

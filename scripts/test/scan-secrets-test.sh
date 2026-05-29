@@ -9,13 +9,15 @@
 # set we control) and asserts:
 #
 #   - operator-identity strings (Rule 1) are flagged ANYWHERE, including under
-#     scripts/test/fixtures/*/INPUT/** (zero tolerance)
-#   - generic secret shapes (Rule 2) are flagged outside INPUT/ ...
-#   - ... but ALLOWED under scripts/test/fixtures/*/INPUT/** (synthetic dirt)
-#   - dirt inside a *.gz file is detected (decompression path works)
-#   - a fully clean tree (only allow-listed placeholders) passes (exit 0)
-#   - sanctioned placeholders ([REDACTED_*], *.example.invalid, example.com)
-#     never trip a hit
+#     scripts/test/fixtures/*/INPUT/** (zero tolerance), case-insensitively
+#   - generic secret shapes (Rule 2) are flagged EVERYWHERE, including under
+#     scripts/test/fixtures/*/INPUT/** — only a per-token EXAMPLE marker exempts
+#   - dirt inside a *.gz file is detected (decompression path works), and a
+#     corrupt *.gz is scanned raw rather than failing open
+#   - a tracked symlink is scanned by its target PATH STRING, not dereferenced
+#   - a fully clean tree (only sanctioned placeholders) passes (exit 0)
+#   - sanctioned placeholders ([REDACTED_*], *.example.invalid, example.com,
+#     EXAMPLE-marked secret shapes) never trip a hit
 #
 # No operator-identity string is ever written to a TRACKED file in THIS repo:
 # every fixture lives under a mktemp dir that is removed on exit. The literal
@@ -59,12 +61,23 @@ OP_NAME="co""sta"                       # operator given-name (Rule 1: name)
 OP_DOMAIN="netdata"".cloud"             # operator email domain (Rule 1: email)
 OP_EMAIL="${OP_NAME}@${OP_DOMAIN}"
 OP_HOME="/home/""${OP_NAME}"            # operator home path (Rule 1: home)
-# A real-looking Anthropic key shape (Rule 2). NOT the sanctioned
-# sk-ant-EXAMPLE placeholder, so it must be flagged outside INPUT/.
+# Mixed-/upper-case operator email (Rule 1, FIX 6): the scanner now matches all
+# three Rule-1 patterns case-insensitively, so an upper-cased form must still be
+# flagged. Assembled from fragments and upper-cased at runtime so THIS source
+# file never carries a contiguous operator-identity literal.
+OP_NAME_UC="$(printf '%s' "$OP_NAME" | tr '[:lower:]' '[:upper:]')"
+OP_DOMAIN_UC="$(printf '%s' "$OP_DOMAIN" | tr '[:lower:]' '[:upper:]')"
+OP_EMAIL_MIXED="${OP_NAME_UC}@${OP_DOMAIN_UC}"
+# A real-looking Anthropic key shape (Rule 2). NOT EXAMPLE-marked, so it must be
+# flagged EVERYWHERE now — including under INPUT/ (FIX 2).
 SECRET_KEY="sk-""ant-api03-DeadBeefDeadBeefDeadBeef1234567890"
-# The sanctioned SYNTHETIC placeholder key (Rule 2 allow-list). Assembled from
-# parts only for symmetry; it is already safe to write literally.
+# The sanctioned SYNTHETIC placeholder key (Rule 2 per-token exemption). Carries
+# the literal EXAMPLE marker, so it is exempt anywhere. Assembled from parts only
+# for symmetry; it is already safe to write literally.
 PLACEHOLDER_KEY="sk-""ant-EXAMPLEdeadbeefdeadbeef"
+# A GitHub personal-access-token shape (Rule 2, FIX 5). NOT EXAMPLE-marked, so
+# it must be flagged. The ghp_ prefix needs >=30 trailing chars to match.
+GH_PAT="ghp_""AbCdEf0123456789AbCdEf0123456789xyz"
 
 # --- helpers ----------------------------------------------------------------
 
@@ -101,6 +114,25 @@ track_gz() {
   local repo="$1" rel="$2"
   mkdir -p "$repo/$(dirname "$rel")"
   gzip -n -c > "$repo/$rel"
+  ( cd "$repo" && git add -- "$rel" )
+}
+
+# track_raw <repo> <relpath> — write the stdin bytes VERBATIM (no gzip) to a
+# *.gz-named path so we can simulate a corrupt/truncated archive, then track it.
+track_raw() {
+  local repo="$1" rel="$2"
+  mkdir -p "$repo/$(dirname "$rel")"
+  cat > "$repo/$rel"
+  ( cd "$repo" && git add -- "$rel" )
+}
+
+# track_symlink <repo> <relpath> <target> — create a tracked symlink at <relpath>
+# whose target PATH STRING is <target>. The scanner must scan the target string
+# (the git blob of a mode-120000 entry), not dereference it.
+track_symlink() {
+  local repo="$1" rel="$2" target="$3"
+  mkdir -p "$repo/$(dirname "$rel")"
+  ln -s "$target" "$repo/$rel"
   ( cd "$repo" && git add -- "$rel" )
 }
 
@@ -188,15 +220,41 @@ case_detect_secret_shape_outside_input() {
   pass_case "$name"
 }
 
-# 6. Same secret shape INSIDE INPUT/ -> allowed (Rule 2 exempt there).
-case_secret_shape_allowed_in_input() {
-  local name="exempt::secret_shape_allowed_in_input_fixture"
+# 6. A REAL (non-EXAMPLE) secret shape INSIDE INPUT/ -> now FLAGGED (FIX 2).
+#    The old blanket-INPUT Rule-2 exemption is gone; only the per-token EXAMPLE
+#    marker exempts. This closes the original leak class where any secret shape
+#    passed unreviewed under INPUT/.
+case_real_secret_shape_flagged_in_input() {
+  local name="detect::real_secret_shape_flagged_in_input_fixture"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
   printf '{"api_key":"%s"}\n' "$SECRET_KEY" \
     | track "$repo" "scripts/test/fixtures/aiagent_v2/y/INPUT/s.json"
   run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "a real (non-EXAMPLE) secret shape under INPUT/ was NOT flagged (FIX 2: no blanket INPUT exemption):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'INPUT/s.json'; then
+    fail_case "$name" "non-zero exit but report did not name the offending INPUT file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 6b. An EXAMPLE-marked secret shape passes WHETHER under INPUT/ or not (FIX 2):
+#     the per-token marker is the only thing that exempts, and it applies
+#     everywhere.
+case_example_marked_shape_exempt_everywhere() {
+  local name="exempt::example_marked_shape_exempt_everywhere"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  # Same token in two places: a normal source path AND an INPUT/ fixture.
+  printf '{"api_key":"%s"}\n' "$PLACEHOLDER_KEY" \
+    | track "$repo" "config/app.json"
+  printf '{"api_key":"%s"}\n' "$PLACEHOLDER_KEY" \
+    | track "$repo" "scripts/test/fixtures/aiagent_v3/y/INPUT/s.jsonl"
+  run_scanner "$repo"
   if [ "$RC" -ne 0 ]; then
-    fail_case "$name" "secret shape under INPUT/ was flagged but Rule 2 must be exempt there:
+    fail_case "$name" "EXAMPLE-marked secret shape was flagged but must be exempt per token everywhere:
 $OUT"; return
   fi
   pass_case "$name"
@@ -315,6 +373,85 @@ $OUT"; return
   pass_case "$name"
 }
 
+# 13. Mixed-/upper-case operator email outside INPUT/ -> flagged (FIX 6: Rule 1
+#     is now case-insensitive on all three patterns).
+case_detect_operator_email_mixed_case() {
+  local name="detect::operator_email_mixed_case"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf 'contact: %s\n' "$OP_EMAIL_MIXED" | track "$repo" "docs/contact.md"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "mixed-case operator email was NOT flagged (Rule 1 must be case-insensitive):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'docs/contact.md'; then
+    fail_case "$name" "non-zero exit but report did not name the offending file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 14. A GitHub PAT shape outside INPUT/ -> flagged (FIX 5: scanner now covers
+#     the same VCS-token shapes the sanitizer redacts).
+case_detect_github_pat() {
+  local name="detect::github_pat_shape"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf '{"gh_token":"%s"}\n' "$GH_PAT" | track "$repo" "config/ci.json"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "GitHub PAT shape was NOT flagged (FIX 5):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'config/ci.json'; then
+    fail_case "$name" "non-zero exit but report did not name the offending file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 15. A corrupt/truncated *.gz (raw bytes, never gzipped) carrying a secret
+#     shape -> flagged (FIX 3: gz decompression no longer fails open). The raw
+#     bytes are scanned as a fallback AND a decompress-failure violation is
+#     recorded, so a corrupt archive hiding secret bytes cannot pass silently.
+case_detect_secret_in_corrupt_gz() {
+  local name="detect::secret_in_corrupt_gz"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  # Not gzip: plain text in a .gz-named, tracked file containing a real key.
+  printf 'garbage-not-gzip {"api_key":"%s"}\n' "$SECRET_KEY" \
+    | track_raw "$repo" "data/corrupt.json.gz"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "secret shape inside a corrupt .gz was NOT flagged (decompression failed open):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'corrupt.json.gz'; then
+    fail_case "$name" "non-zero exit but report did not name the corrupt .gz file:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 16. A tracked symlink whose TARGET PATH STRING contains the operator home ->
+#     flagged (FIX 4: the scanner scans the link target string, not the
+#     dereferenced target file content).
+case_detect_operator_home_in_symlink_target() {
+  local name="detect::operator_home_in_symlink_target"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  # Symlink target is an absolute path under the operator home. readlink returns
+  # exactly this string; the scanner must flag it.
+  track_symlink "$repo" "link-to-secret" "${OP_HOME}/private/notes.txt"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "operator home in a symlink target path was NOT flagged (FIX 4):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'link-to-secret'; then
+    fail_case "$name" "non-zero exit but report did not name the offending symlink:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
 # --- main -------------------------------------------------------------------
 
 main() {
@@ -334,13 +471,18 @@ main() {
   case_detect_operator_name_word_bounded
   case_detect_operator_identity_in_input
   case_detect_secret_shape_outside_input
-  case_secret_shape_allowed_in_input
+  case_real_secret_shape_flagged_in_input
+  case_example_marked_shape_exempt_everywhere
   case_detect_secret_in_gz
   case_clean_tree_passes
   case_scanner_self_excludes
   case_rule1_not_allowlisted_on_shared_line
   case_rule2_per_match_on_shared_line
   case_rule2_placeholder_token_still_exempt
+  case_detect_operator_email_mixed_case
+  case_detect_github_pat
+  case_detect_secret_in_corrupt_gz
+  case_detect_operator_home_in_symlink_target
 
   echo
   printf '%s%d passed%s, %s%d failed%s\n' \

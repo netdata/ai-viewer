@@ -6728,6 +6728,44 @@ convergence. PR-A (security/P1) lands first because it is a live exposure.
 technical decisions within the signed-off Phase-1 scope; the history-rewrite
 non-action is recorded as a risk decision (do-not-rewrite, with rationale).
 
+##### PR-A review round 1 (2026-05-29) — codex + glm + minimax
+
+PR [#25](https://github.com/netdata/ai-viewer/pull/25). Adjudicated on ground
+truth (not convergence): **minimax** said "safe to merge" and missed every issue;
+**glm** found 2 (case-sensitivity + gz fail-open); **codex** found 7. All 8 are
+real (verified against the code). Not merged — one comprehensive fix round:
+
+1. **[P1] Scanner publishes operator literals.** `scan-secrets.sh` defined R1
+   patterns as contiguous literals (the operator's real email domain, home path,
+   and name) in a public tracked file — self-exclusion stops a self-hit but not
+   publication.
+   Fix: assemble R1 patterns from non-contiguous fragments at runtime (the
+   self-test already does this), so no contiguous operator identity is committed.
+2. **[P1] INPUT dirs blanket-exempt Rule 2.** Any secret-shape (not just synthetic
+   placeholders) passes under `*/INPUT/**` — the exact class of the original leak.
+   Fix: drop the blanket exemption; a secret-shape token is exempt only if it is a
+   synthetic placeholder (contains `EXAMPLE`), enforced everywhere. Re-synthesize
+   `02_sub_agent` + `03_with_payloads` INPUT secret-shapes to `EXAMPLE`-marked,
+   regenerate EXPECTED; flip the self-test "real key passes under INPUT" case to
+   expect a flag.
+3. **[P2] `.gz` fails open.** `gunzip -c … 2>/dev/null || true` scans a malformed
+   archive as empty. Fix: on gunzip failure of a non-empty `.gz`, scan the raw
+   bytes and report the decompression failure as a violation; 0-byte files are ok.
+4. **[P2] Tracked symlinks scan target content, not the blob.** `[[ -f ]]` + `cat`
+   dereferences `CLAUDE.md`/`GEMINI.md`/`.claude/skills` (mode 120000). Fix: for a
+   symlink, scan the link target path string (`readlink`/git blob).
+5. **[P2] Scanner narrower than sanitizer.** Sanitizer redacts `ghp_…` but the
+   scanner doesn't. Fix: add `ghp_`, `github_pat_`, `glpat-` to Rule 2.
+6. **[P2] R1 case-sensitive.** Only the name rule used `-i`, so mixed-case
+   variants of the operator email/home bypassed Rule 1. Fix: apply `-i` to all
+   three Rule-1 patterns.
+7. **[P3] `$HOME` unescaped in sed** (`sanitize-fixture.sh`). Fix: escape it (or
+   drop the literal rule now that generic `/home`,`/Users`,`/root` roots cover it).
+8. **[P3] gates.sh spec drift.** `quality-gates.md` calls `scripts/gates.sh` the
+   canonical local gate, but it does not exist and CI treats it optional — the same
+   phantom-gate class. Fix: correct the spec (gates.sh is an optional aggregator;
+   CI runs each gate inline).
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

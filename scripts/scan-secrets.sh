@@ -4,31 +4,37 @@
 # This is the enforced safety net behind .agents/sow/specs/quality-gates.md
 # §"Secrets + Operator-PII Scan" and .agents/sow/specs/security.md
 # §"Sensitive Data In Fixtures and Durable Artifacts". It scans EVERY tracked
-# file (git ls-files), decompressing *.gz to scan their contents too, and exits
-# non-zero on any hit so a leak can never reach master.
+# file (git ls-files), decompressing *.gz to scan their contents too, reading
+# tracked symlinks as their target PATH STRING (not the dereferenced target),
+# and exits non-zero on any hit so a leak can never reach master.
 #
 # Two rule classes are enforced:
 #
-#   Rule 1 — operator identity. Banned EVERYWHERE, including the sanitizer's
-#            */INPUT/** fixtures, with zero tolerance. Real emails, the real
-#            home path, and the given/sur-name (word-bounded so unrelated
-#            tokens like cost_usd or costing never match).
+#   Rule 1 — operator identity. Banned EVERYWHERE with zero tolerance,
+#            case-insensitively. Real email domains, the real home path
+#            (literal + URL-encoded), and the given/sur-name (word-bounded so
+#            unrelated tokens like cost_usd or costing never match). The
+#            patterns are assembled from non-contiguous fragments at runtime so
+#            this PUBLIC file never contains the operator identity as a literal.
 #
 #   Rule 2 — generic secret shapes (sk-/sk-ant-, xox[bpas]-, AKIA…, high-entropy
-#            Bearer tokens). Banned everywhere EXCEPT
-#            scripts/test/fixtures/*/INPUT/** — those dirty inputs legitimately
-#            carry SYNTHETIC secret-shaped strings whose entire purpose is to
-#            exercise sanitize-fixture.sh's redaction. Rule 1 still applies to
-#            them, so they may never carry the operator's real identity.
+#            Bearer tokens, ghp_/github_pat_ GitHub PATs, glpat- GitLab PATs).
+#            Banned EVERYWHERE, including scripts/test/fixtures/*/INPUT/**. A
+#            secret-shape token is exempt ONLY when the matched token itself
+#            carries the literal marker "EXAMPLE" (case-sensitive) — that is how
+#            sanitize-fixture.sh's synthetic dirty inputs (sk-ant-EXAMPLE…,
+#            sk-EXAMPLEcustomer…) declare themselves non-real. A real key (no
+#            EXAMPLE) is flagged anywhere; there is NO directory carve-out.
 #
-# Allow-listed (never a hit): [REDACTED_…] placeholders, *.example.invalid,
-# RFC-2606 reserved example.com / example.org, and this script's own path.
-# Public provider hostnames (api.anthropic.com, api.openai.com) are NOT secrets
-# and are not scanned — they are a sanitizer concern, not a leak.
+# Never a hit: [REDACTED_…] placeholders, EXAMPLE-marked secret shapes, and this
+# script's own path. Public provider hostnames (api.anthropic.com,
+# api.openai.com) are NOT secrets and are not scanned — they are a sanitizer
+# concern, not a leak.
 #
 # This script MUST exclude its own path from the scan: a scanner necessarily
 # contains the very patterns it hunts for. It takes no arguments and contains
-# no real secrets — only pattern definitions.
+# no real secrets and no operator identity — only pattern definitions assembled
+# from fragments.
 set -euo pipefail
 
 # Colors for transparent command tracing (mirrors scan-ai-attribution.sh).
@@ -70,10 +76,29 @@ SELF_REL="scripts/scan-secrets.sh"
 #   - home path (literal and URL-encoded)
 #   - given/sur-name, word-bounded + case-insensitive (-w on the whole line is
 #     too coarse for JSON, so the name rule is matched case-insensitively with
-#     explicit \b boundaries here and -i is applied only to that rule below)
-R1_EMAIL='@netdata\.cloud|@tsaousis\.gr'
-R1_HOME='/home/costa|%2[Ff]home%2[Ff]costa'
-R1_NAME='\bcosta\b|\btsaousis\b'
+#     explicit \b boundaries here, and -i is applied to ALL three Rule-1
+#     patterns below so mixed-/upper-case forms of the email, home path, and
+#     name cannot bypass them).
+#
+# CRITICAL — the patterns are assembled from NON-CONTIGUOUS fragments at
+# runtime so this PUBLIC script file never contains the operator's real
+# identity as a literal string. Self-exclusion (SELF_REL skip below) stops a
+# self-hit, but it does NOT stop publication: a contiguous literal here would
+# leak the identity into the repo regardless. Splitting each token across a
+# string concatenation means `grep` over this file's bytes finds no contiguous
+# operator literal, while the assembled regexes still match correctly at run
+# time. The self-test (scripts/test/scan-secrets-test.sh) uses the same
+# fragment-assembly technique to probe detection.
+_op_name="co""sta"                          # operator given-name
+_op_surname="tsa""ousis"                    # operator sur-name
+_op_domain1="net""data"'\.cloud'            # operator email domain 1 (ERE)
+_op_domain2="tsa""ousis"'\.gr'              # operator email domain 2 (ERE)
+R1_EMAIL="@${_op_domain1}|@${_op_domain2}"
+R1_HOME="/home/${_op_name}|%2[Ff]home%2[Ff]${_op_name}"
+R1_NAME="\\b${_op_name}\\b|\\b${_op_surname}\\b"
+# The fragments served their purpose; drop them so they do not linger in the
+# environment of any child process this script spawns.
+unset _op_name _op_surname _op_domain1 _op_domain2
 
 # Rule 2 — generic secret shapes. Banned everywhere EXCEPT */INPUT/** fixtures.
 #
@@ -88,24 +113,31 @@ R2_OPENAI="${BOUNDARY}sk-[A-Za-z0-9_-]{8,}"
 R2_SLACK="${BOUNDARY}xox[bpas]-[A-Za-z0-9-]{8,}"
 R2_AWS="${BOUNDARY}AKIA[0-9A-Z]{16}"
 R2_BEARER='Bearer [A-Za-z0-9._-]{16,}'
+# Version-control provider tokens. The sanitizer already redacts ghp_…; the
+# scanner must hunt the same shapes (plus GitHub fine-grained PATs and GitLab
+# PATs) so a committed VCS credential outside INPUT/ is caught. Same left
+# token-boundary convention as the shapes above.
+R2_GH_PAT="${BOUNDARY}ghp_[A-Za-z0-9]{30,}"
+R2_GH_FINE="${BOUNDARY}github_pat_[A-Za-z0-9_]{20,}"
+R2_GITLAB="${BOUNDARY}glpat-[A-Za-z0-9_-]{16,}"
 
-# Allow-list: lines containing any of these tokens are never a hit. These are
-# the sanctioned placeholders/examples the project uses in clean artifacts.
-#   [REDACTED_…]            sanitizer output
-#   *.example.invalid       sanitizer-rewritten provider hosts
-#   example.com/example.org RFC-2606 reserved domains used in docs/fixtures
-#   sk-ant-EXAMPLE…         the canonical SYNTHETIC key placeholder used by the
-#                           sanitizer INPUT fixtures and documented in the specs
-#                           /SOW that describe this scanner; never a real key
-#                           (real Anthropic keys are sk-ant-api03-…).
-ALLOW='\[REDACTED_|example\.invalid|example\.com|example\.org|sk-ant-EXAMPLE'
+# Rule-2 per-token synthetic marker. A secret-SHAPE token is exempt — anywhere
+# in the tree, INPUT/ or not — IFF the matched token itself contains the
+# literal "EXAMPLE" (case-sensitive). This is the ONLY thing that distinguishes
+# a sanctioned synthetic fixture secret (e.g. sk-ant-EXAMPLE…,
+# sk-EXAMPLEcustomer…) from a real leaked key. There is no directory exemption:
+# a real-shaped token WITHOUT "EXAMPLE" is flagged everywhere, including under
+# scripts/test/fixtures/*/INPUT/** — closing the original blanket-INPUT hole
+# where any secret shape passed unreviewed. Case-sensitivity is deliberate so a
+# real key cannot smuggle itself in as the lowercase word "example".
+SECRET_MARKER='EXAMPLE'
 
 # --- scanning helpers --------------------------------------------------------
 
-# scan_text <file-label> <is_input_dir:0|1> < text-on-stdin
+# scan_text <file-label> < text-on-stdin
 #
-# Greps the stdin text against every rule appropriate for the file. Prints
-# one line per hit and returns 1 if any hit was found, 0 otherwise.
+# Greps the stdin text against every rule. Prints one line per hit and returns
+# 1 if any hit was found, 0 otherwise.
 #
 # Allow-listing is deliberately NOT applied as an up-front whole-line filter:
 # that would silently drop a line — and any real secret or real operator
@@ -116,15 +148,15 @@ ALLOW='\[REDACTED_|example\.invalid|example\.com|example\.org|sk-ant-EXAMPLE'
 #   allow-listed: there is no legitimate placeholder form of the operator's
 #   real email/home/name, so an "exemption" could only ever hide a leak.
 #
-#   Rule 2 (generic secret shapes) is allow-listed PER MATCHED TOKEN, not per
-#   line. Each secret-shape token found on a line is reported only if the token
-#   itself is not a sanctioned placeholder (e.g. sk-ant-EXAMPLE…). A real
-#   secret therefore still fires even when it shares a line with a placeholder.
+#   Rule 2 (generic secret shapes) is exempted PER MATCHED TOKEN, not per line
+#   and not per directory. Each secret-shape token is reported unless the token
+#   itself carries the synthetic marker "EXAMPLE" (case-sensitive). A real
+#   secret therefore still fires even when it shares a line with a placeholder,
+#   and even when it lives under an INPUT/ fixture dir.
 #
-# Rule 1 runs for every file. Rule 2 runs only when is_input_dir == 0 (the
-# sanitizer's dirty inputs are the sole place synthetic secret shapes live).
+# Both rules run for EVERY file: there is no INPUT/ carve-out anymore.
 scan_text() {
-  local label="$1" is_input="$2"
+  local label="$1"
   local text hits=0
   text="$(cat)"
   [[ -z "$text" ]] && return 0
@@ -144,9 +176,9 @@ scan_text() {
   }
 
   # emit_tokens — Rule 2 reporter. Extracts each matched secret-shape TOKEN with
-  # its line number (grep -noE), then reports only tokens that are NOT
-  # themselves allow-listed. Allow-listing is per token, so a real secret on a
-  # line that also carries a placeholder is still flagged.
+  # its line number (grep -noE), then reports only tokens that are NOT marked
+  # synthetic. The exemption is per token, so a real secret on a line that also
+  # carries a synthetic placeholder is still flagged.
   # Args: <regex> <rule-label>.
   emit_tokens() {
     local re="$1" rule="$2" out lineno token
@@ -156,12 +188,13 @@ scan_text() {
       lineno="${line%%:*}"
       # The matched token is everything after the first "<lineno>:". The left
       # token boundary in the Rule-2 regexes can capture one leading delimiter
-      # byte (quote/space/=/:) — harmless for reporting and for the allow-list
-      # check, which uses a substring match.
+      # byte (quote/space/=/:) — harmless for reporting and for the marker
+      # check, which uses a fixed-string substring match.
       token="${line#*:}"
-      # Per-token allow-list: skip only tokens that are themselves sanctioned
-      # placeholders (e.g. sk-ant-EXAMPLE…). Everything else is a real hit.
-      if printf '%s' "$token" | grep -qE "$ALLOW"; then
+      # Per-token synthetic exemption: skip only tokens that carry the literal
+      # "EXAMPLE" marker (case-sensitive — grep -F, no -i). Everything else is a
+      # real hit, INPUT/ fixture or not.
+      if printf '%s' "$token" | grep -qF "$SECRET_MARKER"; then
         continue
       fi
       printf '%s:%s [%s] %s\n' "$label" "$lineno" "$rule" "$token"
@@ -169,28 +202,24 @@ scan_text() {
     done <<< "$out"
   }
 
-  # Rule 1 — always, raw, never allow-listed.
-  emit_raw "$R1_EMAIL" "operator-email" ""
-  emit_raw "$R1_HOME"  "operator-home"  ""
+  # Rule 1 — always, raw, never allow-listed, case-insensitive on all three so
+  # mixed-/upper-case forms of the email, home path, and name cannot bypass.
+  emit_raw "$R1_EMAIL" "operator-email" "-i"
+  emit_raw "$R1_HOME"  "operator-home"  "-i"
   emit_raw "$R1_NAME"  "operator-name"  "-i"
 
-  # Rule 2 — only outside sanitizer INPUT fixtures; allow-listed per token.
-  if [[ "$is_input" -eq 0 ]]; then
-    emit_tokens "$R2_OPENAI" "secret-sk"
-    emit_tokens "$R2_SLACK"  "secret-slack"
-    emit_tokens "$R2_AWS"    "secret-aws"
-    emit_tokens "$R2_BEARER" "secret-bearer"
-  fi
+  # Rule 2 — every file; exempted per token via the EXAMPLE marker. Secret
+  # shapes are case-specific (AKIA upper, xox lower, ghp_/glpat- exact prefix),
+  # so these are matched case-SENSITIVELY (no -i in emit_tokens).
+  emit_tokens "$R2_OPENAI"  "secret-sk"
+  emit_tokens "$R2_SLACK"   "secret-slack"
+  emit_tokens "$R2_AWS"     "secret-aws"
+  emit_tokens "$R2_BEARER"  "secret-bearer"
+  emit_tokens "$R2_GH_PAT"  "secret-github-pat"
+  emit_tokens "$R2_GH_FINE" "secret-github-fine"
+  emit_tokens "$R2_GITLAB"  "secret-gitlab"
 
   return "$hits"
-}
-
-# is_input_fixture <repo-relative-path> -> 0 if under scripts/test/fixtures/*/INPUT/**
-is_input_fixture() {
-  case "$1" in
-    scripts/test/fixtures/*/INPUT/*) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 # --- main --------------------------------------------------------------------
@@ -209,17 +238,47 @@ while IFS= read -r -d '' f; do
   # Never scan this script (it lists the patterns) — would be a guaranteed
   # self-hit.
   [[ "$f" == "$SELF_REL" ]] && continue
+
+  if [[ -L "$f" ]]; then
+    # Tracked symlinks (CLAUDE.md, GEMINI.md, .claude/skills are mode 120000).
+    # `-f`/`cat` would DEREFERENCE them and scan the TARGET's content; the git
+    # blob is the target PATH STRING. Scan that string so operator PII or a
+    # secret embedded in a symlink target is caught, and so we never re-scan
+    # the (already-scanned) target file's bytes through the link.
+    scanned=$((scanned + 1))
+    link_target="$(readlink "$f")"
+    if out="$(printf '%s' "$link_target" | scan_text "$f:(symlink)")"; then
+      :
+    else
+      violations="${violations}${out}"$'\n'
+    fi
+    continue
+  fi
+
   [[ -f "$f" ]] || continue
 
-  input_flag=1
-  is_input_fixture "$f" || input_flag=0
-
   if [[ "$f" == *.gz ]]; then
-    # Decompress and scan the contents. A *.gz under an INPUT/ dir keeps its
-    # Rule-2 exemption; Rule 1 still applies.
+    # Decompress and scan the contents. Rules apply identically to text files;
+    # there is no INPUT/ carve-out.
     gz_scanned=$((gz_scanned + 1))
-    gz_text="$(gunzip -c "$f" 2>/dev/null || true)"
-    if out="$(printf '%s' "$gz_text" | scan_text "$f:(gz)" "$input_flag")"; then
+    # Capture gunzip's exit status SEPARATELY from its output: `|| true` alone
+    # would mask a corrupt archive as empty text and let secret bytes hidden in
+    # a malformed .gz pass silently (fail-open). On decompression FAILURE for a
+    # non-empty file, fall back to scanning the RAW bytes AND record an explicit
+    # violation so the corrupt archive can never slip through. A genuinely
+    # 0-byte .gz (a tracked empty payload fixture) is fine — skip it.
+    gz_rc=0
+    gz_text="$(gunzip -c "$f" 2>/dev/null)" || gz_rc=$?
+    if [[ "$gz_rc" -ne 0 ]]; then
+      if [[ -s "$f" ]]; then
+        violations="${violations}${f}:(gz) [gz-decompress-failed] gunzip exit ${gz_rc}; scanning raw bytes as fallback"$'\n'
+        gz_text="$(cat "$f")"
+      else
+        # Empty .gz: nothing to scan, no violation.
+        continue
+      fi
+    fi
+    if out="$(printf '%s' "$gz_text" | scan_text "$f:(gz)")"; then
       :
     else
       violations="${violations}${out}"$'\n'
@@ -230,7 +289,7 @@ while IFS= read -r -d '' f; do
     # (rather than a redirect that shares the same name as the outer
     # assignment) keeps the read/write paths unambiguous.
     plain_text="$(cat "$f")"
-    if out="$(printf '%s' "$plain_text" | scan_text "$f" "$input_flag")"; then
+    if out="$(printf '%s' "$plain_text" | scan_text "$f")"; then
       :
     else
       violations="${violations}${out}"$'\n'
@@ -241,7 +300,7 @@ done < <(git ls-files -z)
 if [[ -n "${violations//[$'\n\t ']/}" ]]; then
   printf >&2 '%s[FAIL]%s secret / operator-PII scan found hits:\n' "$RED" "$NC"
   printf '%s' "$violations" | grep -v '^$' >&2
-  printf >&2 '%sRemove the operator real identity entirely; replace generic secret shapes outside INPUT/ fixtures with [REDACTED_...] or an example value. Do NOT weaken the scanner.%s\n' "$RED" "$NC"
+  printf >&2 '%sRemove the operator real identity entirely; replace generic secret shapes with [REDACTED_...] or a synthetic EXAMPLE-marked value (fixtures only). Do NOT weaken the scanner.%s\n' "$RED" "$NC"
   exit 1
 fi
 

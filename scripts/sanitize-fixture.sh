@@ -211,6 +211,18 @@ sanitize_text() {
   # Forward-slash is universal in $HOME, so use a vertical bar.
   local home_path="${HOME}"
 
+  # $HOME is interpolated as the PATTERN of an ERE sed rule below. Interpolating
+  # it raw would let a home path containing ERE metacharacters ([ ] . ( ) { } *
+  # + ? ^ $) or the `|` delimiter over/under-redact or break sed entirely. Escape
+  # every ERE-special byte and the `|` delimiter with a leading backslash so the
+  # path is matched literally. (The replacement side is the constant "<HOME>",
+  # which contains no sed-special bytes, so only the pattern needs escaping.)
+  local home_path_re
+  # Character class lists every ERE-special byte plus the `|` delimiter and a
+  # literal backslash; `$` is placed last (not adjacent to `(`) so shellcheck
+  # does not misread it as a command substitution inside the single quotes.
+  home_path_re="$(printf '%s' "$home_path" | sed 's/[][\.|(){}?+*^$]/\\&/g')"
+
   sed -E \
     -e 's|Bearer +[A-Za-z0-9._-]+|Bearer [REDACTED_SECRET]|g' \
     -e 's|https?://api\.openai\.com(/[^" '"'"']*)?|https://api.example.invalid/openai\1|g' \
@@ -228,7 +240,7 @@ sanitize_text() {
     -e 's|ghp_[A-Za-z0-9]{30,}|[REDACTED_SECRET]|g' \
     -e 's@"([Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Tt][Oo][Kk][Ee][Nn])" *: *"[^"]*"@"\1": "[REDACTED_SECRET]"@g' \
     -e 's|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|user@example.invalid|g' \
-    -e "s|${home_path}|<HOME>|g" \
+    -e "s|${home_path_re}|<HOME>|g" \
     -e 's|/home/[^/"'"'"' \t]+|<HOME>|g' \
     -e 's|/Users/[^/"'"'"' \t]+|<HOME>|g' \
     -e 's@/root([/"'"'"' \t]|$)@<HOME>\1@g'
