@@ -2,9 +2,14 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: moved to current/ on 2026-05-26 after operator approval. SOW-0002 (cross-format data model analysis) is a prerequisite and lands in done/ in the same commit. Implementation begins at Chunk 1 (spec deltas for UI/pricing/adapter behavior); Chunk 2 (CI scaffolding) lands second so the spec deltas are not gated on workflow setup.
+Sub-state: Phase 1 delivered across chunks 1–20, hardened by the Chunk 21
+cross-cutting review (PR #25 security + PR #26 honest-surface, both merged), and
+closed in Chunk 22 on 2026-05-29 (moved to `done/` in this commit). Follow-ups
+filed in `pending/` (SOW-0018, SOW-0019); Phase 2 scope in the M2–M5 milestone
+SOWs. Original sub-state: moved to current/ on 2026-05-26 after operator
+approval; SOW-0002 (cross-format data model analysis) was a prerequisite.
 
 ## Requirements
 
@@ -6900,16 +6905,67 @@ codex confirmation of the P2 fix pending before merge.
 
 ## Validation
 
-(Filled at end. Test summary, perf numbers, review summary.)
+- **Go:** `go test -race ./...` green across all packages; `gofmt`/`go vet`/
+  `golangci-lint` 0; standalone `gosec` 0 high/critical; `govulncheck` 0 called.
+  Chunk-21 additions: resolver→notify integration tests (2-level + 3-level
+  separate-root), subscription scalar-trim test, payload-no-`url` test, and the
+  21-case `scan-secrets-test.sh`.
+- **Frontend:** `tsc --noEmit` (strict) 0; vitest 238 tests; `vite build` main
+  chunk 92.82 KB gzipped (≤ 500 budget); Playwright E2E + `@axe-core` a11y in CI.
+- **Integration:** `scripts/embed-smoke.sh` (single binary serves the real built
+  UI same-origin + JSON 404 not swallowed) and the deterministic E2E seed pass.
+- **Security gate:** `scripts/scan-secrets.sh` PASS on 442 tracked files,
+  fail-closed in CI (missing scanner fails the `gates` job).
+- **Perf (real corpus, `bench/v2-backfill-2026-05-27.txt`):** v2 backfill of
+  294,316 files in ~2m12s — ~2,235 files/s, ~198 MB/s compressed, ~165k events/s,
+  peak RSS ~6 GB, 0 parse errors.
 
 ## Reviews
 
-(Filled as external reviewers run. One sub-section per round.)
+Every code-producing chunk ran an external round (codex + glm + minimax in
+parallel) recorded inline in its chunk entry. The **Chunk 21 cross-cutting
+review** is the capstone: PR-A (security, [#25](https://github.com/netdata/ai-viewer/pull/25))
+converged after 4 rounds; PR-B (honest surface, [#26](https://github.com/netdata/ai-viewer/pull/26))
+after 2. Standing finding across the project: **codex** is the decisive reviewer
+(it surfaced real defects minimax — and sometimes glm — missed); adjudicate on
+ground truth, never on reviewer convergence.
 
 ## Outcome
 
-(Filled at SOW close.)
+**Phase 1 delivered and merged.** `ai-viewer-ingest` + `ai-viewer-serve` (single
+embedded binary), ai-agent v2 + v3 adapters, canonical SQLite store with WAL,
+SSE live updates via an in-DB notify table, a React/TS SPA (sessions list +
+session detail Overview/Logs + sources/health), localhost-only + read-only,
+deep-linking, dark/light theme, E2E + a11y + embed-smoke in CI, systemd USER
+units, operator runbook/README/SECURITY docs, and a fail-closed secret/PII
+scanner. The final cross-cutting review closed a P1 security gap (committed
+operator PII behind a phantom scanner gate) plus B/C/D correctness + drift
+defects. Trace/Topology/Timeline tabs, payload streaming, catalog endpoints, and
+the claude-code/codex/opencode adapters are explicitly Phase 2.
 
 ## Lessons / Follow-Ups
 
-(Filled at SOW close. Items that should become new SOWs in `pending/`.)
+**Lessons (durable):**
+1. **Phantom gate.** A spec that promised `scripts/scan-secrets.sh` while the
+   script did not exist, plus CI that *skipped* (passed) when it was absent, let
+   real operator PII into committed fixtures on a public repo. A gate that is only
+   described is not a gate — it must be implemented and **fail-closed**, and a spec
+   claiming a gate must point to enforcement that actually runs.
+2. **A scanner that bans operator identity must derive it, never hardcode it.**
+   Even fragment-split literals are a leak on a public repo; deriving the ban-list
+   from the repo's own git author metadata at runtime keeps the scanner
+   self-contained, self-maintaining, and literal-free (fail-closed if none).
+3. **Cross-chunk defects live in the seams.** The phantom gate, an emitted-but-
+   unserved payload URL, and a resolver mutating rows without emitting notify all
+   sat *between* chunks where per-chunk reviews structurally could not see them. A
+   holistic end-of-phase review is mandatory, not optional.
+4. **Adjudicate reviews on ground truth.** codex repeatedly found real P1/P2s that
+   minimax rated "safe to merge"; convergence is not correctness.
+
+**Follow-ups (in `pending/`):**
+- `SOW-0018` — visible SSE live indicator + true-append E2E (pre-existing).
+- `SOW-0019` — SSE subscription cap (defense-in-depth; localhost-only, low
+   urgency) — filed this chunk from glm's PR-A observation.
+- Phase 2 scope (Trace/Topology/Timeline, `/api/payloads` streaming, catalog
+   endpoints, claude-code/codex/opencode adapters) tracked in the M2–M5 milestone
+   SOWs.
