@@ -112,11 +112,42 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - Thresholds: main chunk ≤ 500 KB gzipped; per-route lazy chunks ≤ 200 KB gzipped.
 - Exceeding requires a SOW with justification.
 
-### Secrets Scan
+### Secrets + Operator-PII Scan
 
-- `scripts/scan-secrets.sh` greps `testdata/` and committed source.
-- Patterns: long entropy strings near keywords `key|token|secret|password|bearer`; `sk-…` (OpenAI); `xox[bpas]-…` (Slack); `AKIA[0-9A-Z]{16}` (AWS); plus the project's allow-list for placeholders like `[REDACTED_SECRET]`.
-- Threshold: zero hits.
+`scripts/scan-secrets.sh` scans **every tracked file in the repository** (not just
+`testdata/`) and exits non-zero on any hit. It enforces two rule classes:
+
+1. **Operator identity (banned everywhere, zero tolerance).** The operator's real
+   email addresses, real home path, and given/sur-name. These must never appear in
+   any tracked file — including the sanitizer's `INPUT/` fixtures. The literal
+   patterns are defined inside the script itself, which **excludes its own path**
+   from the scan (a scanner necessarily contains the patterns it hunts for). Name
+   matching is word-bounded so unrelated tokens (e.g. `cost_usd`) never match.
+2. **Generic secret shapes (banned everywhere except sanitizer test inputs).**
+   `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys), `xox[bpas]-…` (Slack),
+   `AKIA[0-9A-Z]{16}` (AWS), and `Bearer <high-entropy>` tokens. (Public provider
+   *hostnames* like `api.anthropic.com` are NOT secrets and are not scanned — they
+   are a sanitizer concern; fixtures replace them with `*.example.invalid`.) Secret
+   shapes are banned in all real artifacts but **allowed only** under
+   `scripts/test/fixtures/*/INPUT/**` — the dirty inputs
+   whose entire purpose is to exercise `sanitize-fixture.sh`'s redaction. Those
+   inputs must be **synthetic** (rule class 1 still applies to them, so they may
+   never carry the operator's real identity). Known placeholders are allow-listed:
+   `[REDACTED_*]`, `*.example.invalid`, RFC-2606 reserved `example.com`, and the
+   synthetic `sk-ant-EXAMPLE…` key shape.
+
+The allow-list is applied **per matched token, never per line** — a real secret on
+the same line as a placeholder is still flagged. The allow-list applies **only to
+rule class 2**; rule class 1 (operator identity) is never exempted under any
+circumstances.
+
+- **Threshold:** zero hits.
+- **Fail-closed in CI.** The `gates` job runs the scanner and **fails when the
+  script is absent** — a missing scanner is a missing gate, not a pass. (Only the
+  genuinely-optional aggregate `scripts/gates.sh` may be skipped when absent.)
+- **Negative self-test.** The scanner ships with a test that plants an
+  operator-identity string in a temp file and asserts the scan flags it, so the
+  enforcement itself cannot silently rot.
 
 ### Spec Drift
 

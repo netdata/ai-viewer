@@ -1,4 +1,4 @@
-backfillbench: reading from /home/costa/.ai-agent/sessions (read-only). Cold page cache will skew the first run; consider `cat /home/costa/.ai-agent/sessions/*.json.gz > /dev/null` (read-only) to warm before benching.
+backfillbench: reading from ~/.ai-agent/sessions (read-only). Cold page cache will skew the first run; consider `cat ~/.ai-agent/sessions/*.json.gz > /dev/null` (read-only) to warm before benching.
 [00:00:10] files=23485/294316 (8.0%) 2348 files/s  175.6 MB/s compressed  143169 events/s  rss=4444 MB  errs=0  zero=2
 [00:00:20] files=48038/294316 (16.3%) 2402 files/s  196.2 MB/s compressed  158589 events/s  rss=5042 MB  errs=0  zero=4
 [00:00:30] files=73302/294316 (24.9%) 2443 files/s  197.8 MB/s compressed  162544 events/s  rss=5042 MB  errs=0  zero=4
@@ -15,7 +15,7 @@ backfillbench: reading from /home/costa/.ai-agent/sessions (read-only). Cold pag
 
 BackfillV2_RealCorpus summary
 =============================
-root              : /home/costa/.ai-agent/sessions
+root              : ~/.ai-agent/sessions
 workers           : 16 (NumCPU=16)
 wall_time         : 2m11.665s
 files_scanned     : 294316

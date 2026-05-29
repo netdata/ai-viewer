@@ -41,9 +41,27 @@ Out of scope:
 - The server looks up the `location_uri` from SQLite and validates it starts with `file://` and resolves inside one of the configured source roots before opening.
 - The Content-Disposition header is set to `attachment` for any non-text payload; the browser will not execute it as a script.
 
-## Sensitive Data In Fixtures
+## Sensitive Data In Fixtures and Durable Artifacts
 
-Test fixtures committed to the repo go through sanitization (see `testing-strategy.md`). CI grep-scans for common secret patterns (`AKIA`, `sk-`, `xoxb-`, bearer tokens, private IPs) and fails the build if any are found in `testdata/`.
+Test fixtures committed to the repo go through sanitization (see
+`testing-strategy.md`). The enforced gate is `scripts/scan-secrets.sh`
+(`quality-gates.md` §Secrets + Operator-PII Scan), which scans **every tracked
+file** — not just `testdata/` — and fails the build on any hit. It enforces two
+rule classes:
+
+- **Operator identity** (real emails, real home path, name) — banned in every
+  tracked file with zero tolerance, including the sanitizer's `INPUT/` fixtures.
+- **Generic secret shapes** (`AKIA…`, `sk-…`, `sk-ant-…`, `xox[bpas]-…`,
+  high-entropy bearer tokens) — banned in all real artifacts, allowed **only**
+  under `scripts/test/fixtures/*/INPUT/**`, whose job is to carry *synthetic*
+  dirty data so `sanitize-fixture.sh`'s redaction can be tested. (Public provider
+  hostnames are not secrets; the sanitizer rewrites them to `*.example.invalid`.)
+
+Those sanitizer inputs must be synthetic: they may contain secret-*shaped*
+strings but never the operator's real identity. The scanner is **fail-closed in
+CI** — an absent scanner fails the `gates` job rather than passing silently — and
+ships with a negative self-test that plants an operator-identity string and
+asserts detection.
 
 ## Dependency Hygiene
 

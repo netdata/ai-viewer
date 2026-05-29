@@ -39,7 +39,7 @@ stream, consume the channel, or touch the connect/disconnect lifecycle
 ```json
 {
   "time_range": { "from": <ts_us>, "to": <ts_us> },
-  "sources": ["aiagent_v3:/home/costa/.ai-agent/sessions"],
+  "sources": ["aiagent_v3:~/.ai-agent/sessions"],
   "agents": ["nedi", "neda"],
   "models": ["claude-opus-4-7"],
   "tools": ["mcp__slack__send_message"],

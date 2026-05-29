@@ -55,11 +55,11 @@ The algorithm is **lossy**:
 
 | cwd from inside the jsonl | encoded dir name |
 |---|---|
-| `/home/costa` | `-home-costa` |
-| `/home/costa/.agents/skills/manjaro-updates` | `-home-costa--agents-skills-manjaro-updates` |
-| `/home/costa/src/ai-agent.git` | `-home-costa-src-ai-agent-git` |
-| `/home/costa/src/llama.cpp.git` | `-home-costa-src-llama-cpp-git` |
-| `/home/costa/src/dashboard/netdata-cloud-frontend.git` | `-home-costa-src-dashboard-netdata-cloud-frontend-git` |
+| `/home/operator` | `-home-operator` |
+| `/home/operator/.agents/skills/manjaro-updates` | `-home-operator--agents-skills-manjaro-updates` |
+| `/home/operator/src/ai-agent.git` | `-home-operator-src-ai-agent-git` |
+| `/home/operator/src/llama.cpp.git` | `-home-operator-src-llama-cpp-git` |
+| `/home/operator/src/dashboard/netdata-cloud-frontend.git` | `-home-operator-src-dashboard-netdata-cloud-frontend-git` |
 | `/tmp/nefeli` | `-tmp-nefeli` |
 | `/opt/baddisk/monitoring` | `-opt-baddisk-monitoring` |
 
@@ -67,7 +67,7 @@ Note the double-hyphen `--agents` arising from the leading `.` of `.agents`: eve
 
 #### Lossiness implications
 
-The encoded name **does not uniquely round-trip to a cwd**. For example, `/home/costa/ai-agent.git` and `/home/costa/ai-agent/git` and `/home/costa/ai_agent_git` all sanitize to `-home-costa-ai-agent-git`. The viewer **must read the authoritative cwd from inside the jsonl records** (see §3) and treat the directory name as a presentation/index aid only.
+The encoded name **does not uniquely round-trip to a cwd**. For example, `/home/operator/ai-agent.git` and `/home/operator/ai-agent/git` and `/home/operator/ai_agent_git` all sanitize to `-home-operator-ai-agent-git`. The viewer **must read the authoritative cwd from inside the jsonl records** (see §3) and treat the directory name as a presentation/index aid only.
 
 ### 2.3 Session File Layout
 
@@ -687,7 +687,7 @@ Observed `compactMetadata.trigger` value: `"manual"` (operator ran `/compact`). 
 
 ### 10.1 Older session layouts
 
-Sessions older than ~Mar 2026 may live as a `<sessionId>/` directory containing ONLY `subagents/` — no parent `.jsonl` at root. Verified observation: `~/.claude/projects/-home-costa-src-alerts/<sessionId>/subagents/agent-*.jsonl` exists; no `<sessionId>.jsonl` next to it. Even older (Feb 2026) sessions have just `subagents/` with two orphan files and nothing else.
+Sessions older than ~Mar 2026 may live as a `<sessionId>/` directory containing ONLY `subagents/` — no parent `.jsonl` at root. Verified observation: `~/.claude/projects/-home-operator-src-alerts/<sessionId>/subagents/agent-*.jsonl` exists; no `<sessionId>.jsonl` next to it. Even older (Feb 2026) sessions have just `subagents/` with two orphan files and nothing else.
 
 Adapter behavior: emit a `SessionStartedEvent` with `Kind='root'`, `AgentName=''`, `Model=''`, `Ts = earliest record across all subagent files`, and treat each subagent file as a `sub_agent` child. The parent session has zero turns/ops directly — the entire activity lives in the children. Mark `sessions.extras_json.orphanRoot = true` so the UI can hint at this.
 

@@ -10,7 +10,7 @@ This spec is an evidence-based replacement of the bootstrap sketch. It corrects 
 
 ### Producer behavior
 
-The producer is `ai-agent` (`/home/costa/src/ai-agent.git`). Snapshots are written exclusively by `createPersistenceHandlers().handleSnapshot` in `ai-agent.git/src/persistence.ts:50-67`. The write sequence is:
+The producer is `ai-agent` (`~/src/ai-agent.git`). Snapshots are written exclusively by `createPersistenceHandlers().handleSnapshot` in `ai-agent.git/src/persistence.ts:50-67`. The write sequence is:
 
 1. `fs.mkdirSync(dir, { recursive: true })` — directory created on demand.
 2. Serialize `{ version, reason, opTree }` via `JSON.stringify`, then `gzipSync`.

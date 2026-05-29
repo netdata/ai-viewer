@@ -350,7 +350,7 @@ Files created (line counts include doc comments):
   — print-and-exit stubs so `go build ./...` succeeds. Real
   implementations land in Chunks 4+.
 
-Local gates (run from `/home/costa/src/ai-viewer.git`, all clean):
+Local gates (run from `~/src/ai-viewer.git`, all clean):
 
 ```
 go mod tidy           # no changes
@@ -1131,7 +1131,7 @@ Implementation decisions worth recording:
   primary key (turn_id, seq) is indexed and the row is hot in
   the transaction's working set.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                            # no changes
@@ -1275,7 +1275,7 @@ Notable design decisions:
   surfaces via a `SessionUpdatedEvent` with extras
   `step.<index>.kind`.
 
-Pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                            # no changes
@@ -1632,7 +1632,7 @@ The seed is correct enough to compute non-zero, plausible cost
 numbers for every fixture-referenced (provider, model) pair on day
 one; it is NOT a price oracle.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                            # no changes
@@ -1834,7 +1834,7 @@ Spec changes:
   reason (canonical event has no matching token fields). Schema
   retains the per-million fields.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                                  # no diff
@@ -2067,7 +2067,7 @@ Items punted with reason (recorded for the next reviewer):
   with the correct post-promotion rate; embedding the promotional
   rate now would lead to under-billing once the promo ends.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                                            # no diff
@@ -2319,7 +2319,7 @@ Findings addressed:
   follow-up; those aliases do not appear in the current
   fixture set or the discoverable DB at chunk-10 time.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                                            # no diff
@@ -2491,7 +2491,7 @@ above. iter-5 reviewers will run on the same scope (specs + all
 touched files + matching tests) plus the iter-5 fix notes; their job
 is to confirm convergence rather than open a new round.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 go mod tidy                                            # no diff
@@ -2628,7 +2628,7 @@ each addressed by iter6-1 / iter6-2 / iter6-3 respectively. The
 assistant intends to run ONE more reviewer round (iter-6 reviewers)
 to confirm zero new findings before committing.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 gofmt -l .                                             # zero output
@@ -2811,7 +2811,7 @@ into the new wording.
   the test harness cannot drive without networking. The change is
   small (eight lines including the gitignore) and shellcheck-clean.
 
-Local pre-PR gates (run from `/home/costa/src/ai-viewer.git`):
+Local pre-PR gates (run from `~/src/ai-viewer.git`):
 
 ```
 gofmt -l .                                             # zero output
@@ -6607,6 +6607,126 @@ verified against the code/specs.
 no runtime logic, grounded in the maintained specs and accuracy-verified against
 the code. The CI `gates` job's secret + AI-attribution scans run on the PR.
 Consistent with the doc-only proportionality calls earlier this SOW.
+
+### Chunk 21 — final cross-cutting review of the Phase-1 surface (2026-05-29)
+
+Purpose: one holistic review across ALL chunks, looking for defects that live in
+the *seams between* chunks — exactly what per-chunk reviews cannot see. Ran
+`codex` + `glm` + `minimax` in parallel over the whole integrated tree.
+
+**Reviewer verdicts (raw):**
+- **minimax:** converged; 1×P3 (`observability.md:42` schema_version 3→4). Fixed.
+- **glm:** declared "Phase 1 production-ready, no P1 defects" — but its headline
+  is a **false negative**: glm:200 says "no PII in `testdata/`" having scanned
+  ONLY `testdata/`, never `scripts/test/fixtures/`, where the real leak lives.
+  glm:136 saw `scan-secrets.sh` missing but rated it P3 ("CI already runs the
+  gates") — false: no CI step greps for secrets. glm's *detail* findings are
+  still valuable (two real spec drifts + two silent-error gaps codex missed).
+- **codex:** "not production-ready until P1 + P2 fixed." Correct on the headline.
+
+**Adjudication on ground truth (not convergence — codex's P1 verified by direct
+`git grep` / file reads; glm's spec-drifts verified against code):**
+
+| # | Finding | Verified | Severity | Decision |
+|---|---|---|---|---|
+| A | Secret scanner is a **phantom gate**: `scripts/scan-secrets.sh` does not exist (only `quality-gates.md` describes it); CI `gates` job **fails open** (skips, exit 0, when absent). Real operator PII committed: `01_happy_path/INPUT:1` (`operatorEmail` = operator real email; `workdir` = operator real `/home/<user>/…` path); `04_deep_optree/INPUT` gz (operator real email + an `sk-ant-`-shaped key); the operator home path across 6 specs + SOW-0001 (×10 gate-run lines) + `bench/v2-backfill-2026-05-27.txt`. (Literal values withheld from this artifact — exact patterns live only in the scanner, self-excluded.) | yes | **P1** | Build the scanner (fail-closed, whole-tree, two rule-classes); scrub all real operator identity from HEAD; make CI fail when the scanner is absent. |
+| B1 | `payload_refs[].url` emits `/api/payloads/<id>` (`session_detail_ops.go:190`) to a route that is **not registered** (`presenter.go:232-241` → `notImplemented`). `url` is a *required* field in the Go DTO (`session_detail.go:81`) and TS type (`types.ts:130`); a Go test pins it; `frontend/src/api/payloads.ts` builds it. No Phase-1 view renders it. | yes | **P2** | **Drop the dead seam** (no half-built features). Remove `url` from DTO+TS+helpers+test; mark `GET /api/payloads/:ref` Phase 2 in `rest-api.md`/`security.md`/`presenter.md`. Implementing the streaming route is out of Phase-1 scope. |
+| B2 | Resolver (`resolver.go:86-138`) links orphan child→parent/root with two blind `UPDATE`s and emits **zero** notify rows; `emitNotify` only runs for writer batches (`notify_producer.go:44`). Session-detail children are computed live from `parent_session_id` (`session_detail.go:181`). SSE spec promises `session_changed` on matching row updates (`sse-protocol.md:77`). | yes | **P2** | Resolver must emit `session_changed` for changed child+parent+root ids and `stats_invalidated`, atomically with the linkage UPDATE. Add a child-first integration test. |
+| C1 | `rest-api.md` health shows `schema_version: 3` (code is 4), omits `notify`/`sse`; documents topology/timeline/catalog/payloads as current though `presenter.md:290` marks them deferred. | yes | **P3** | Spec fix: schema 4, add notify/sse, mark deferred routes Phase 2 / structured `NOT_FOUND`. |
+| C2 | `frontend-architecture.md:50-69` lists nonexistent dirs (`SpanBar/`, `viz/`, `TopologyTab/TraceTab/TimelineTab/`); omits existing `api/queryClient.ts`, `api/sources.ts`, `theme/global.css`. | yes | **P3** | Spec fix: layout matches reality; Phase-N annotations on future items. |
+| C3 | `architecture.md:125-131` shows the Adapter interface with 3 methods; `canonical/adapter.go` has 5 (`Format`, `ParseCursor` missing from the snippet). | yes | **P3** | Spec fix: add the two methods. |
+| D1 | `subscription_filter.go:188-189` comment claims "empty after **trimming**"; `:198-201` does **not** trim — whitespace-only `session_id`/`root_session_id` slips the empty check, inconsistent with array + other ID paths that trim. | yes | **P3** | Trim before the empty check; return normalized; test whitespace-only → 400. |
+| D2 | Silent error swallows: SSE write (`events_sse.go:154`) + gzip copy (`middleware.go:262`) return without logging — violates "no silent failures" (debug-level is fine for dead-connection noise). | yes | **P3** | Add `DebugContext` logging before the early return. |
+| E | Phase-2/3 by-design deferrals (catalog tables populated-not-served; cache-token/extras columns stored-not-surfaced; no SSE subscription cap; payload streaming). | yes | n/a | Not defects. SSE subscription cap → tracked as a Phase-2 hardening note; rest already documented as deferred. |
+
+**Why the per-chunk reviews missed these (lesson):** every item is a *seam*. The
+scanner gap is a spec that promised behavior never implemented in the place that
+enforces it (CI). The payload URL is emitted in Chunk 12 but the route belongs
+to Chunk 11. The resolver (Chunk 7) mutates rows that the notify producer
+(Chunk 13) never learns about. Cross-chunk defects need a cross-chunk review —
+this chunk earned its place.
+
+#### Pre-Implementation Gate (Chunk 21 fixes)
+
+Delivered as **two focused PRs**, each spec→test→code + external re-review to
+convergence. PR-A (security/P1) lands first because it is a live exposure.
+
+**PR-A — Security hardening (Finding A):**
+- *Root-cause model:* a quality gate existed only in prose; CI's "detect
+  aggregate scripts" step treats an absent scanner as a pass (fail-open). With no
+  enforcement, fixtures authored with the operator's real identity as "realistic
+  dirt" were committed.
+- *Spec deltas (land first):* `quality-gates.md` — replace the `scan-secrets.sh`
+  description with the implemented two-rule-class contract + whole-tree coverage
+  + CI-fail-when-absent; `security.md` §Sensitive data — state the scanner is the
+  enforced gate and that sanitizer `INPUT/` fixtures must be synthetic-only.
+- *Decision — scanner design (two rule classes):*
+  1. **Real-operator-identity** (the operator's two real email addresses, the
+     real home path, and the operator's given/surname — exact literals defined
+     only inside `scripts/scan-secrets.sh`, which self-excludes from its own
+     scan): banned in **every** tracked file, including sanitizer `INPUT/` dirs.
+     Zero tolerance. Word-bounded so unrelated tokens (e.g. `cost_usd`) never
+     match.
+  2. **Generic secret-shapes** (`sk-…`, `sk-ant-…`, `xox[bpas]-…`,
+     `AKIA[0-9A-Z]{16}`, bearer+entropy, real API hostnames
+     `api.(anthropic|openai).com`): banned everywhere **except** the narrowly
+     scoped sanitizer `scripts/test/fixtures/*/INPUT/**` (whose job is to carry
+     synthetic secret-shaped dirt for the redaction test). Allow-list known
+     placeholders (`[REDACTED_*]`, `*.example.invalid`, RFC-2606 `example.com`).
+- *Decision — fixtures:* keep the golden-file model (no harness rewrite). Make
+  `INPUT/` **synthetic**: operator real email → a synthetic dev email
+  (`dev@example.com`), operator real home path → `/home/devuser/…`, the
+  real-looking `sk-ant-` API key → an `sk-ant-EXAMPLE…` synthetic shape; regenerate
+  the affected `EXPECTED/` goldens by re-running the sanitizer; `02_sub_agent`
+  already uses synthetic `*.example.com` + customer shapes (verify, likely no
+  change). Confirm `sanitize-fixture.sh` actually redacts email + home path; if
+  it does not, that is an in-scope sanitizer redaction-gap fix (its EXPECTED
+  would otherwise leak).
+- *Decision — history:* **no rewrite.** The operator's name+email are the
+  pervasive git-author identity on all 59 commits by their own config; rewriting
+  one fixture out of history is meaningless while authorship stands, and a
+  force-push is a destructive op the contract reserves for the operator. Scrub
+  HEAD + prevent regressions forward.
+- *Scrub targets (HEAD):* the 2 fixture INPUTs (+ regenerated EXPECTED); specs
+  `adapter-claude-code.md` (path-encoding table + `:690` real project name),
+  `adapter-aiagent-v2.md:13`, `adapter-opencode.md:50,262`, `ingester.md:320-322`,
+  `sse-protocol.md:42`; `SOW-0001` (×10 gate-run lines);
+  `bench/v2-backfill-2026-05-27.txt`. Replace the operator home path → `~` /
+  `/home/operator` / `<repo>` as reads best, preserving each example's
+  illustrative value.
+- *CI:* `gates` job must **fail** when `scripts/scan-secrets.sh` is absent, and
+  must run it; keep the graceful-skip only for the genuinely-optional aggregate
+  scripts (`gates.sh`).
+- *Validation:* `scripts/scan-secrets.sh` green on the scrubbed tree; a negative
+  test (a planted operator-identity string is detected → non-zero); the existing
+  `sanitize-fixture-test.sh` still passes byte-for-byte against regenerated
+  EXPECTED; full lint/test suite green.
+
+**PR-B — Honest Phase-1 surface + spec sync (Findings B1, B2, C1-3, D1-2):**
+- *Spec deltas (land first):* `presenter.md` + `rest-api.md` + `security.md`
+  (payloads route Phase 2; drop `url` from the payloadRef shape); `sse-protocol.md`
+  + `ingester.md` (resolver emits notify on linkage); `rest-api.md` (schema 4,
+  notify/sse, deferred routes); `frontend-architecture.md` + `architecture.md`
+  drift; `presenter.md` (subscription scalar trim contract).
+- *Patterns to reuse:* notify emission mirrors `notify_producer.go emitNotify`
+  (one `session_changed` per affected id + one `stats_invalidated`); resolver
+  capture-then-notify uses `UPDATE … RETURNING` (verify modernc/sqlite supports
+  RETURNING; else SELECT-affected-then-UPDATE) inside one tx; scalar trim mirrors
+  `session_detail.go:123` / `subscriptions.go:317`.
+- *Risk/blast radius:* B1 removes a JSON field — verified no Phase-1 component
+  consumes it (only a Phase-2 stub). B2 adds writes to the resolver's tx; keep it
+  read-only-safe for serve (serve never writes notify). D-items are additive
+  logging + a stricter validation that only rejects whitespace-only input.
+- *Validation:* Go: resolver child-first integration test (linkage → notify rows
+  present with correct kinds/ids → poller delivers); subscription whitespace-only
+  → 400 test; payload DTO no-`url` test; `go test -race ./...`. Frontend: type +
+  `payloads.ts` updates, `tsc`, vitest, build/embed-smoke/e2e green.
+- *Artifact impact:* no migration; no new public route; the payload route stays
+  unregistered and is now documented as Phase 2 rather than silently advertised.
+
+**Open decisions:** none requiring the operator. All choices above are CTO
+technical decisions within the signed-off Phase-1 scope; the history-rewrite
+non-action is recorded as a risk decision (do-not-rewrite, with rationale).
 
 ## Validation
 
