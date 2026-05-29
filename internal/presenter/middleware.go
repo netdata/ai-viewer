@@ -273,7 +273,15 @@ func gzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				}
 				return
 			}
-			_ = gz.Close()
+			// Close writes the gzip footer; a failure here means the
+			// trailer never reached the client, so record it (the headers
+			// are already flushed, so there is no way to surface it
+			// otherwise — no-silent-failure rule).
+			if err := gz.Close(); err != nil && logger != nil {
+				logger.DebugContext(r.Context(), "gzip close failed",
+					"error", err, "path", r.URL.Path,
+					"request_id", requestIDFromContext(r.Context()))
+			}
 		})
 	}
 }

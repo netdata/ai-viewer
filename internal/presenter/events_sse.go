@@ -84,17 +84,20 @@ func (p *Presenter) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	writeSSEHeaders(w)
 	if err := rc.Flush(); err != nil {
+		p.logger.DebugContext(r.Context(), "sse header flush failed", "error", err, "sub", sub)
 		return
 	}
 	clearWriteDeadline(rc)
 
 	if !covered {
 		if err := writeResync(w, rc); err != nil {
+			p.logger.DebugContext(r.Context(), "sse resync write failed", "error", err, "sub", sub)
 			return
 		}
 	}
 	for _, ev := range replay {
 		if err := p.writeEvent(w, rc, sub, ev); err != nil {
+			p.logger.DebugContext(r.Context(), "sse replay write failed", "error", err, "sub", sub)
 			return
 		}
 	}
@@ -157,6 +160,7 @@ func (p *Presenter) streamLoop(ctx context.Context, w http.ResponseWriter, rc *h
 			}
 		case <-keepalive.C:
 			if err := writeKeepalive(w, rc); err != nil {
+				p.logger.DebugContext(ctx, "sse keepalive write failed", "error", err, "sub", sub)
 				return
 			}
 		}

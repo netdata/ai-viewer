@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-JSON over HTTP. All endpoints return `application/json` except `/api/payloads/:ref` (variable content type) and `/api/events` (text/event-stream). Pagination, time-range filtering, and structured errors are consistent across endpoints.
+JSON over HTTP. All implemented endpoints return `application/json` except `/api/events` (text/event-stream); the Phase-2 `/api/payloads/:ref` would carry a variable content type once implemented, but in Phase 1 it is unregistered and returns the JSON `NOT_FOUND` envelope. Pagination, time-range filtering, and structured errors are consistent across endpoints.
 
 ## Conventions
 

@@ -123,9 +123,14 @@ func (r *resolver) linkOrphans(ctx context.Context) error {
 }
 
 // linkParents runs the parent-link UPDATE and records, for every child it
-// links, both the child id and its newly-set parent id into affected. A
-// changed child means its parent now has a visible new child, so an open
-// parent-detail view must refetch too (sse-protocol.md §session_changed).
+// links, the child id, its newly-set parent id, AND its current root id into
+// affected. A changed child means its parent now has a visible new child, so an
+// open parent-detail view must refetch; and because a detail-page subscriber
+// filters by EXACT session_id, the root must be signalled too even when the
+// child was already correctly rooted (root present, parent absent — the root
+// re-resolution UPDATE never fires for that child). Returning the root column
+// here is what guarantees the root gets a session_changed on a parent-only
+// link (sse-protocol.md §session_changed; ingester.md §resolver pass).
 func (r *resolver) linkParents(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
 	before := len(affected)
 	rows, err := tx.QueryContext(ctx, `
@@ -142,12 +147,12 @@ WHERE sessions.parent_session_id IS NULL
        WHERE p.source_id = sessions.source_id
          AND p.native_id = json_extract(sessions.extras_json, '$.aiViewer.parentNativeId')
   )
-RETURNING id, parent_session_id
+RETURNING id, parent_session_id, root_session_id
 `)
 	if err != nil {
 		return fmt.Errorf("resolver UPDATE parent: %w", err)
 	}
-	if err := scanLinkedPairs(rows, affected); err != nil {
+	if err := scanLinkedRows(rows, affected); err != nil {
 		return fmt.Errorf("resolver UPDATE parent: %w", err)
 	}
 	if r.logger != nil && len(affected) > before {
@@ -180,7 +185,7 @@ RETURNING id, root_session_id
 	if err != nil {
 		return fmt.Errorf("resolver UPDATE root: %w", err)
 	}
-	if err := scanLinkedPairs(rows, affected); err != nil {
+	if err := scanLinkedRows(rows, affected); err != nil {
 		return fmt.Errorf("resolver UPDATE root: %w", err)
 	}
 	if r.logger != nil && len(affected) > before {
@@ -189,22 +194,37 @@ RETURNING id, root_session_id
 	return nil
 }
 
-// scanLinkedPairs reads (changedID, linkedID) pairs from an UPDATE …
-// RETURNING result and adds BOTH ids of every pair to affected. The linked id
-// (parent or root) is non-NULL on every returned row because the WHERE clause
-// only matches rows whose correlated subquery has a hit, but it is scanned as
-// nullable defensively. Closes rows before returning.
-func scanLinkedPairs(rows *sql.Rows, affected map[string]struct{}) error {
+// scanLinkedRows reads an UPDATE … RETURNING result and adds every id it
+// carries to affected. The FIRST column is the changed child id (always added);
+// every REMAINING column is a related id (newly-linked parent and/or current
+// root) added when non-empty. It adapts to the column count so both shapes work
+// unchanged: the parent-link UPDATE returns (id, parent_session_id,
+// root_session_id) and the root-link UPDATE returns (id, root_session_id). The
+// related ids are non-NULL on every matched row (the WHERE clause requires the
+// correlated subquery to hit) but are scanned as nullable defensively. Closes
+// rows before returning.
+func scanLinkedRows(rows *sql.Rows, affected map[string]struct{}) error {
 	defer func() { _ = rows.Close() }()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
 	for rows.Next() {
 		var changed string
-		var linked sql.NullString
-		if err := rows.Scan(&changed, &linked); err != nil {
+		related := make([]sql.NullString, len(cols)-1)
+		dest := make([]any, len(cols))
+		dest[0] = &changed
+		for i := range related {
+			dest[i+1] = &related[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return err
 		}
 		affected[changed] = struct{}{}
-		if linked.Valid && linked.String != "" {
-			affected[linked.String] = struct{}{}
+		for _, rel := range related {
+			if rel.Valid && rel.String != "" {
+				affected[rel.String] = struct{}{}
+			}
 		}
 	}
 	return rows.Err()
