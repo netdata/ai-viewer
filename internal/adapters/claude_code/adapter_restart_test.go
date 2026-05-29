@@ -677,6 +677,109 @@ func TestScan_AgentOpNotFinalizedToolUseTerminated(t *testing.T) {
 	}
 }
 
+// TestScanThenTail_ParkedCompletionDurableAcrossRestart pins P2.4d: a child that
+// completes (terminal assistant-text) BEFORE its parent Agent op is known parks
+// its completion; that park must survive a daemon restart via the cursor. After
+// restart (new adapter instance, same cursor) the parent Agent op finally appears
+// and the parent must finalize EXACTLY ONCE. Without cursor-durable parking the
+// restart loses the in-memory park and the parent never finalizes.
+func TestScanThenTail_ParkedCompletionDurableAcrossRestart(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// The child sidechain + its meta exist; the PARENT transcript does NOT yet.
+	// So the child completes with no known parent Agent op → it parks.
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+	}, "\n")+"\n"))
+	writeFileBytes(t, metaPath(root),
+		[]byte(`{"agentType":"Explore","description":"explore","toolUseId":"`+parentAgentToolUseID+`"}`))
+
+	// Run #1: Scan reads the child (completes, parks — parent unknown). No
+	// finalize is possible yet. Capture the persisted cursor.
+	a1, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New #1: %v", err)
+	}
+	out1 := make(chan canonical.Event, 256)
+	if err := a1.Scan(context.Background(), nil, out1); err != nil {
+		t.Fatalf("Scan #1: %v", err)
+	}
+	events1 := drainBuffered(out1)
+	if of, ok := childOpFinalized(events1); ok {
+		t.Fatalf("parent Agent op finalized in run #1 though its transcript does not exist yet: EndTs=%d", of.EndTs)
+	}
+	cursor := lastCursor(t, events1)
+
+	// The persisted cursor must carry the parked completion so a restart can
+	// restore it (the durability the fix adds).
+	parsed1, err := ParseCursor(cursor)
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	wantChild := childNativeID(durParentSession, durAgentID)
+	if _, ok := parsed1.Parked[wantChild]; !ok {
+		t.Fatalf("persisted cursor did not record the parked completion for %q (P2.4d); parked=%v", wantChild, parsed1.Parked)
+	}
+
+	// Run #2 (simulated restart): a FRESH adapter instance resuming from the
+	// persisted cursor. Now the parent transcript appears (its Agent tool_use
+	// spawns the child). Scan reads it → the parent op becomes known → the
+	// restored park must finalize the parent exactly once.
+	writeParentWithAgentOp(t, root)
+
+	a2, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New #2: %v", err)
+	}
+	parsed2, err := a2.ParseCursor(cursor)
+	if err != nil {
+		t.Fatalf("ParseCursor #2: %v", err)
+	}
+	// Drive Scan then Tail on the restarted instance (mirrors runAdapter). The
+	// finalize may land in Scan (parent read there) — assert it appears exactly
+	// once across Scan + a brief Tail.
+	out2 := make(chan canonical.Event, 256)
+	if err := a2.Scan(context.Background(), parsed2, out2); err != nil {
+		t.Fatalf("Scan #2: %v", err)
+	}
+	scan2 := drainBuffered(out2)
+
+	finalizes := 0
+	for _, ev := range scan2 {
+		if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
+			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+			finalizes++
+		}
+	}
+
+	// Tail briefly to confirm no SECOND finalize is emitted (the finalized set +
+	// the dropped park entry guard against it).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailOut := make(chan canonical.Event, 256)
+	done := make(chan struct{})
+	go func() { _ = a2.Tail(ctx, tailOut); close(done) }()
+	deadline := time.After(tailTickInterval + 600*time.Millisecond)
+	for done2 := false; !done2; {
+		select {
+		case ev := <-tailOut:
+			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				finalizes++
+			}
+		case <-deadline:
+			done2 = true
+		}
+	}
+	cancel()
+	<-done
+
+	if finalizes != 1 {
+		t.Fatalf("parent Agent op finalized %d times across the restart, want exactly 1 (P2.4d parked-completion durability)", finalizes)
+	}
+}
+
 // TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay pins P2.3a: once a child
 // finalizes its parent Agent op, a subsequent catch-up / replay (re-reading the
 // same already-consumed child from EOF) must emit NO second OpFinalized for it.

@@ -598,6 +598,10 @@ Containment is **uniform across every read path**, not only Scan-time transcript
 
 A symlink planted after the watch is established is therefore refused on the read path, not merely at startup discovery.
 
+**The read opens the symlink-resolved path, not the original (no TOCTOU).** The containment guard resolves a path with `filepath.EvalSymlinks` and then the adapter `os.Open`/`os.ReadFile`s the **resolved** path the guard returned — never the original unresolved path. Opening the original after checking the resolved one would leave a time-of-check/time-of-use window: a symlink swapped between the check and the open would redirect the read outside the root even though the check passed. Because the resolved path is fully symlink-evaluated, no further swap can redirect it. This applies to transcript opens (Scan + Tail) and to subagent `.meta.json` reads.
+
+**Meta read/parse failures surface a `SourceError` (no silent failure).** A subagent `.meta.json` that is PRESENT but cannot be read (`os.ReadFile` error) or cannot be parsed (`json.Unmarshal` error) carries the `toolUseId → agentId` linkage and the subagent's `agentType`; silently dropping it would silently fail the parent-`Agent`-op→child link repair and lose the child's `AgentName`. The adapter therefore surfaces a `SourceError` (via the `OnError` callback → `sources.parse_errors` + a `log_entries` ERR row, visible in `/api/health` and the Sources panel) on a present meta file's read or parse failure. A genuinely-absent meta dir or file is NOT an error — the structural path-based linkage still works without the sidecar; only a present-but-broken sidecar is surfaced.
+
 On `CREATE` of a new directory at depth 1 (a new project dir), the watcher `Add()`s the new dir.
 
 On `CREATE` of a new directory at depth 2 (a new session subdir under a project), the watcher `Add()`s the `subagents/` subdir as soon as it appears, AND the `tool-results/` subdir.
@@ -735,6 +739,19 @@ land independently:
      `running` — no timing heuristic, no quiescence window. This holds identically
      in a static Scan and in live Tail.
 
+   - **The flag reflects the PHYSICAL last record, not the last MAPPED record.**
+     The completion marker is the genuine last line of the file, regardless of
+     whether the adapter mapped, skipped, or failed to parse it. The line reader
+     therefore sets `lastRecordAssistantText` (and `lastRecordEmitted`) for EVERY
+     physical line it consumes: a parse-error line and a skipped known-no-op line
+     (e.g. a trailing `summary` / `task-summary` record, or a malformed JSON line)
+     both set `lastRecordAssistantText = false`. So a child whose physical last
+     record is `[assistant{text}, <skipped no-op>]` or `[assistant{text},
+     <malformed line>]` is NOT complete — its parent `Agent` op stays `running` —
+     because the assistant-text record is not the physical last line. Without this,
+     a trailing no-op/malformed line would leave the flag stale-true from the
+     preceding assistant-text record and wrongly finalize the parent.
+
    - **Emit-gated by `emitFrom` (replay emits nothing).** A child is marked
      `completed` only when its terminal assistant-text record was **newly read**
      this pass — i.e. that record's `lineStart >= emitFrom`. A catch-up / resume
@@ -769,6 +786,20 @@ land independently:
      finalizes in a later flush once the parent op is observed). There is no
      `cycle` counter, no quiescence window, and no tick-driven sweep.
 
+   - **Parked completions survive a daemon restart (cursor-durable).** The
+     `completed` set is also persisted in the cursor (a `parked` map of child
+     native id → completion-ts-micros, JSON `omitempty` so older cursors without
+     it still parse). It is checkpointed on every `SourceProgress` and restored
+     into the loop's `completed` set on Tail startup, and an entry is removed from
+     the cursor when its finalize is emitted. Without this, a child that completes
+     BEFORE its parent `Agent` op is known would lose its parked completion on a
+     restart: if the daemon restarts before the parent op appears, the parent later
+     appears but is never finalized (the in-memory park is gone). Persisting the
+     park closes that gap. This is isolated to the cursor and the park set; it does
+     NOT change the finalize-emit gating (the `finalized` set and the
+     `lastRecordEmitted` gate are unchanged), so a replay over an already-finalized
+     child still emits nothing.
+
    The finalize's `EndTs` is the child's terminal assistant-text record's
    timestamp (its implicit completion time).
 
@@ -793,6 +824,19 @@ land independently:
    nothing" property of the finalize machinery above (the finalize stays
    emit-gated; only the parent's `OpStarted` re-emits, and it is an idempotent
    UPDATE).
+
+   The meta also carries the subagent's `agentType`, which seeds the CHILD
+   session's `AgentName` (§5.2). A child sidechain read BEFORE its `.meta.json`
+   landed therefore emitted its `SessionStarted` with an empty `AgentName`.
+   Re-reading only the parent (above) repairs the op→child link but leaves the
+   child session's `AgentName` empty. So a meta change ALSO forces a re-read of
+   the affected session's CHILD subagent transcript(s) from offset 0 with emission
+   ENABLED, re-emitting the child `SessionStarted` now carrying the `agentType`
+   `AgentName`. The ingester upserts session `AgentName` via
+   `COALESCE(NULLIF(excluded.agent_name, ''), agent_name)`, so the re-emit with the
+   now-known name updates the previously-empty value. Like the parent re-read, this
+   is an idempotent UPDATE that fires only on a (rare) meta change and does not
+   affect the finalize gating.
 
 ## 9. Compaction Handling
 

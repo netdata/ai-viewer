@@ -313,6 +313,127 @@ func TestScan_OversizedLineSkippedContinues(t *testing.T) {
 	}
 }
 
+// TestScan_AgentOpNotFinalizedTrailingNoOp pins P1.4: a child whose PHYSICAL
+// last record is a skipped known-no-op (e.g. a trailing `summary` record) after
+// an assistant-text record must NOT finalize its parent Agent op. The
+// assistant-text record is not the physical last line, so the completion flag
+// must reflect that and the parent op stays running. Before the fix, streamLines
+// `continue`d past the skipped record without clearing lastRecordAssistantText,
+// leaving it stale-true from the preceding assistant-text record.
+func TestScan_AgentOpNotFinalizedTrailingNoOp(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeParentWithAgentOp(t, root)
+	// Child: a task, then an assistant-text record, then a trailing `summary`
+	// no-op record (parseLine skips it). The physical last record is the no-op.
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+		`{"type":"summary","leafUuid":"cu1","summary":"trailing no-op"}`,
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, out); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	events := drainBuffered(out)
+	if of, ok := childOpFinalized(events); ok {
+		t.Fatalf("Agent op finalized though the child's PHYSICAL last record is a skipped no-op, not assistant-text (P1.4): EndTs=%d", of.EndTs)
+	}
+}
+
+// TestScan_AgentOpNotFinalizedTrailingMalformed pins P1.4 for the parse-error
+// path: a child whose PHYSICAL last record is a malformed JSON line after an
+// assistant-text record must NOT finalize its parent Agent op. streamLines must
+// clear lastRecordAssistantText on the parse-error `continue` too.
+func TestScan_AgentOpNotFinalizedTrailingMalformed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeParentWithAgentOp(t, root)
+	// Child: a task, an assistant-text record, then a malformed JSON line as the
+	// physical last record.
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+		`{"type":"assistant","this is not valid json`,
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, out); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	events := drainBuffered(out)
+	if of, ok := childOpFinalized(events); ok {
+		t.Fatalf("Agent op finalized though the child's PHYSICAL last record is a malformed line, not assistant-text (P1.4): EndTs=%d", of.EndTs)
+	}
+}
+
+// TestReadTranscript_OpensResolvedPath pins P2.4a: readTranscript opens the
+// symlink-RESOLVED path, so the bytes read are the resolved target's, not the
+// original link's. A symlinked transcript that resolves INSIDE the root is read
+// correctly via its resolved path (the resolved path is what the containment
+// guard returns and what is opened — no second, unresolved open).
+func TestReadTranscript_OpensResolvedPath(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	// A real transcript, and a symlink to it WITHIN the same project dir. Both
+	// resolve inside the root; the symlink must be read via its resolved target.
+	realPath := filepath.Join(proj, "real.jsonl")
+	writeFileBytes(t, realPath,
+		[]byte(`{"type":"user","uuid":"u1","sessionId":"real","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+	linkPath := filepath.Join(proj, "link.jsonl")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	events, errs := collectErrors(t, root)
+	// Both the real and the (in-root) symlinked transcript are ingested; the
+	// symlink's filename stem is its session native id.
+	if _, ok := sessionStartedByNative(events, "real"); !ok {
+		t.Fatal("real transcript not ingested")
+	}
+	if _, ok := sessionStartedByNative(events, "link"); !ok {
+		t.Fatalf("in-root symlinked transcript not ingested via its resolved path; errs=%v", errs)
+	}
+}
+
+// TestScan_MalformedMetaSurfacesError pins P2.4b: a PRESENT but malformed
+// subagent `.meta.json` (invalid JSON) must surface a SourceError (no silent
+// failure), so the failed toolUseId→agentId linkage repair is visible in
+// /api/health. The legitimate transcript is still ingested.
+func TestScan_MalformedMetaSurfacesError(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	subDir := filepath.Join(proj, "sess-1", "subagents")
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.jsonl"),
+		[]byte(`{"type":"user","uuid":"su1","isSidechain":true,"agentId":"aaa111bbb222ccc","sessionId":"sess-1","message":{"role":"user","content":"task"},"timestamp":"2026-05-26T10:00:05.000Z"}`+"\n"))
+	// A present-but-malformed meta sidecar (invalid JSON).
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.meta.json"),
+		[]byte(`{"agentType":"general-purpose", THIS IS NOT JSON`))
+
+	_, errs := collectErrors(t, root)
+	var sawMetaErr bool
+	for _, e := range errs {
+		if strings.Contains(e, "agent-aaa111bbb222ccc.meta.json") &&
+			(strings.Contains(e, "parse") || strings.Contains(e, "meta")) {
+			sawMetaErr = true
+		}
+	}
+	if !sawMetaErr {
+		t.Fatalf("malformed .meta.json did not surface a SourceError (P2.4b no silent failure); errs=%v", errs)
+	}
+}
+
 // TestScan_EmptyRootNoEvents verifies a missing projects root is tolerated.
 func TestScan_EmptyRootNoEvents(t *testing.T) {
 	t.Parallel()

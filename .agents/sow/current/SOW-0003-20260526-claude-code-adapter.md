@@ -479,6 +479,91 @@ assistant-text, emitFrom-gated; remove quiescence wording), §5.4/§9.2 (turn-0 
 
 Not merged. Redesign delegated; re-review same scope + these notes (Round 4) before merge.
 
+### Round 4 (2026-05-29) — codex + glm + minimax (full scope + Round-3 redesign notes)
+
+glm + minimax → "safe to merge" (nits only). **codex → NOT safe: 1 P1 + 4 P2**, all
+verified real. The finalize REDESIGN is sound in shape (turn-0 guard, removed quiescence,
+no-double-finalize all confirmed OK) — the P1 is a flag-tracking bug in it, and the P2s are
+edge cases + pre-existing weaknesses codex surfaced under the new scope. Finding severity
+is decreasing each round (R2 FK crashes → R3 logic gaps → R4 a flag bug + rare edges):
+converging. Fixes:
+
+- **[P1.4] Stale completion flag → wrong finalize.** `mapper.lastRecordAssistantText` is
+  set ONLY in `mapRecord` (`mapper.go:230`); `streamLines` `continue`s past parse errors
+  (`scanner.go:504-508`) and skipped known-no-op records (`scanner.go:510-512`) WITHOUT
+  clearing it, and `collectAgentDeferral` (`scanner.go:743-745`) reads the flag. So a child
+  ending in `[assistant{text}, <summary/task-summary no-op OR malformed JSON>]` leaves the
+  flag stale-true and the parent Agent op finalizes even though the PHYSICAL terminal record
+  is not assistant-text. **Fix:** `streamLines` sets `lastRecordAssistantText` (and
+  `lastRecordEmitted`) for EVERY physical line — false on skip/parse-error — so the flag
+  reflects the true last record. Tests: child ending in `assistant{text}`+no-op, and
+  `assistant{text}`+malformed → parent stays `running`.
+- **[P2.4a] TOCTOU symlink open.** `readTranscript` checks the resolved path
+  (`scanner.go:366`) but opens the ORIGINAL unresolved `t.abs` (`scanner.go:371`); same for
+  metas (`scanner.go:269`/`:273`). A symlink swap between check and open reads outside the
+  root. **Fix:** open the RESOLVED path returned by `resolveWithinRoot` (transcripts + metas).
+- **[P2.4b] Silent meta read/parse failures.** `readSessionMetas` (`scanner.go:273`,`:281`)
+  and `metaHashes` (`scanner.go:333`) ignore `ReadFile`/JSON errors → a malformed late
+  `.meta.json` silently fails the `toolUseId→agentId` linkage repair. Violates no-silent-
+  failures. **Fix:** surface a `SourceError` on meta read/parse failure.
+- **[P2.4c] Late meta repairs op link but not child `AgentName`.** The late-meta
+  `forceFromZero` re-read (`tailer.go:357`) re-reads only the PARENT transcript, so a child
+  read before its meta gets its op link repaired but its session `AgentName` (=agentType,
+  `scanner.go:441`) stays empty. **Fix:** the meta-dirty flush also re-reads the affected
+  CHILD transcript(s) so the child `AgentName` is repaired.
+- **[P2.4d] Parked completions not durable across restart.** The `completed` set is
+  in-memory only (`tailer.go:292`); the cursor persists only `Files`+`MetaSeen`
+  (`cursor.go:20`). If a child completes before its parent op is known and the daemon
+  restarts before the parent appears, the parent later appears but is never finalized.
+  **Fix:** persist the parked `completed` set (childID→ts) in the cursor; restore on resume;
+  drop entries on finalize. (Isolated to cursor.go + tailer.go; does NOT touch the
+  finalize-emit gating, so the no-double-finalize property is preserved. JSON cursor →
+  `omitempty` keeps old cursors parseable.)
+
+Spec: §8.1 (completion flag reflects the PHYSICAL last record; parked completions survive
+restart via the cursor), §6.1 (open the resolved path; meta read/parse errors surface).
+
+Not merged. Fixes delegated; re-review same scope + these notes (Round 5) before merge.
+
+#### Fixes applied (2026-05-29) — all 5 findings landed + pinned by tests
+
+- **P1.4 (stale completion flag) — DONE.** `scanner.go` `streamLines` now sets
+  `mapper.lastRecordAssistantText = false` AND `mapper.lastRecordEmitted = emit` on
+  BOTH the parse-error `continue` and the skipped-no-op `continue` paths, so the flag
+  reflects the TRUE physical last line. A child ending in `[assistant{text}, <skipped
+  no-op>]` or `[assistant{text}, <malformed JSON>]` no longer leaves the flag stale-true.
+  Pinned by `scanner_test.go::TestScan_AgentOpNotFinalizedTrailingNoOp` and
+  `::TestScan_AgentOpNotFinalizedTrailingMalformed`; the genuine-completion case still
+  finalizes (`TestScan_AgentOpFinalizeTerminalAssistantText`, unchanged, stays green).
+- **P2.4a (TOCTOU symlink open) — DONE.** `readTranscript` opens the RESOLVED path that
+  `resolveWithinRoot` returns (not the original `t.abs`); `readSessionMetas` reads the
+  resolved path that `withinResolvedRoot` returns. A symlink swap between check and open
+  can no longer redirect the read outside the root. Existing symlink-escape tests stay
+  green; pinned additionally by `scanner_test.go::TestReadTranscript_OpensResolvedPath`.
+- **P2.4b (silent meta failures) — DONE.** `readSessionMetas` and `metaHashes` now call
+  `onError(...)` (→ SourceError → /api/health) on `os.ReadFile` AND `json.Unmarshal`
+  failures of a PRESENT meta file (an absent meta dir is still not an error). Pinned by
+  `scanner_test.go::TestScan_MalformedMetaSurfacesError`.
+- **P2.4c (late meta does not repair child AgentName) — DONE.** `flushDirty`'s late-meta
+  path now also force-re-reads the affected CHILD subagent transcript(s) (not only the
+  parent), so a child read before its meta re-emits its SessionStarted with the now-known
+  `AgentName` (ingester upserts via `COALESCE(NULLIF(...))`, writer.go:280). New helper
+  `metaChildRels` mirrors `metaParentRels`. Pinned by
+  `tailer_test.go::TestScanThenTail_LateMetaRepairsChildAgentName`.
+- **P2.4d (parked completions not durable) — DONE.** `cursor.go` gains a `Parked
+  map[string]int64` field (JSON `parked,omitempty` → old cursors still parse). The
+  loop-lifetime `def.completed` is checkpointed into the cursor on every flush
+  (`emitProgress` path) and restored into `def.completed` on Tail startup; an entry is
+  dropped from the cursor when its finalize is emitted. The finalize-EMIT gating
+  (`finalized` set + `lastRecordEmitted`) is UNCHANGED, so
+  `TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay` stays green. Pinned by
+  `adapter_restart_test.go::TestScanThenTail_ParkedCompletionDurableAcrossRestart`.
+
+Spec deltas landed same-change: §8.1 (completion flag = PHYSICAL last record incl.
+skipped/malformed trailing; parked completions persisted in the cursor and restored on
+resume; late meta repairs the child AgentName too), §6.1 (reads open the symlink-resolved
+path; meta read/parse failures surface a SourceError).
+
 ## Outcome
 
 Pending.

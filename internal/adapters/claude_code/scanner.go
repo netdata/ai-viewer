@@ -266,19 +266,33 @@ func readSessionMetas(resolvedRoot, sessionDir string, onError func(error)) meta
 	// phases keeps the read off the callback path.
 	paths := collectMetaPaths(subDir)
 	for _, path := range paths {
-		if !withinSourceRoot(resolvedRoot, path, onError) {
+		// Containment guard returning the RESOLVED path so the read opens it, not
+		// the original (P2.4a, no TOCTOU). A path that escapes the root surfaces a
+		// SourceError via withinSourceRoot's onError and is skipped.
+		resolvedPath, ok, rerr := withinResolvedRoot(resolvedRoot, path)
+		if rerr != nil {
+			onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", path, rerr))
+			continue
+		}
+		if !ok {
+			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", path))
 			continue
 		}
 		agentID := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(path), metaExt), "agent-")
-		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path containment-checked (withinSourceRoot) and collected from a filtered walk under the configured read-only projects root
-		if rerr != nil {
+		raw, readErr := os.ReadFile(resolvedPath) // #nosec G304 G122 -- reading the containment-checked RESOLVED path collected from a filtered walk under the configured read-only projects root
+		if readErr != nil {
+			// A present-but-unreadable meta silently fails the toolUseId→agentId
+			// linkage repair and the child's AgentName; surface it (P2.4b, no
+			// silent failure) so /api/health shows it.
+			onError(fmt.Errorf("claude_code: read meta %s: %w", path, readErr))
 			continue
 		}
 		var meta struct {
 			AgentType string `json:"agentType"`
 			ToolUseID string `json:"toolUseId"`
 		}
-		if json.Unmarshal(raw, &meta) != nil {
+		if jerr := json.Unmarshal(raw, &meta); jerr != nil {
+			onError(fmt.Errorf("claude_code: parse meta %s: %w", path, jerr))
 			continue
 		}
 		if meta.AgentType != "" {
@@ -327,15 +341,27 @@ func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]stri
 	out := map[string]string{}
 	paths := collectMetaPaths(root)
 	for _, path := range paths {
-		if !withinSourceRoot(resolvedRoot, path, onError) {
+		// Containment guard returning the RESOLVED path so the hash reads it, not
+		// the original (P2.4a, no TOCTOU).
+		resolvedPath, ok, cerr := withinResolvedRoot(resolvedRoot, path)
+		if cerr != nil {
+			onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", path, cerr))
 			continue
 		}
-		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path containment-checked (withinSourceRoot) and collected from a filtered walk under the configured read-only projects root
-		if rerr != nil {
+		if !ok {
+			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", path))
 			continue
 		}
 		rel, rerr := relPath(root, path)
 		if rerr != nil {
+			onError(fmt.Errorf("claude_code: relpath meta %s: %w", path, rerr))
+			continue
+		}
+		raw, readErr := os.ReadFile(resolvedPath) // #nosec G304 G122 -- reading the containment-checked RESOLVED path collected from a filtered walk under the configured read-only projects root
+		if readErr != nil {
+			// A present-but-unreadable meta silently fails the rewrite-detection
+			// that drives the late-meta linkage repair; surface it (P2.4b).
+			onError(fmt.Errorf("claude_code: read meta %s: %w", path, readErr))
 			continue
 		}
 		out[rel] = hashBytes(raw)
@@ -363,12 +389,19 @@ func readTranscript(ctx context.Context, root string, t transcript, sourceID str
 	// would otherwise be opened. Resolving here makes the guard uniform across
 	// Scan and Tail. A refused path surfaces a SourceError (the caller logs the
 	// returned error) and the file is skipped — never opened.
-	if _, ok, cerr := resolveWithinRoot(root, t.abs); cerr != nil {
+	//
+	// Open the RESOLVED path, not the original t.abs (P2.4a, no TOCTOU): checking
+	// the resolved path then opening the unresolved one leaves a time-of-check/
+	// time-of-use window where a symlink swapped between the two reads outside the
+	// root. The resolved path is fully symlink-evaluated, so no further swap can
+	// redirect it.
+	resolvedAbs, ok, cerr := resolveWithinRoot(root, t.abs)
+	if cerr != nil {
 		return start, 0, nil, fmt.Errorf("claude_code: cannot resolve %s for containment; skipping: %w", t.abs, cerr)
 	} else if !ok {
 		return start, 0, nil, fmt.Errorf("claude_code: %s resolves outside the projects root; skipping (symlink escape)", t.rel)
 	}
-	f, err := os.Open(t.abs) // #nosec G304 -- path containment-checked above (resolveWithinRoot) and from a filtered scan under the configured root
+	f, err := os.Open(resolvedAbs) // #nosec G304 -- opening the containment-checked RESOLVED path (resolveWithinRoot) from a filtered scan under the configured root
 	if err != nil {
 		return start, 0, nil, fmt.Errorf("open %s: %w", t.abs, err)
 	}
@@ -505,9 +538,24 @@ func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript,
 			if emit && shouldSurfaceParseError(mapper, perr) {
 				onError(fmt.Errorf("transcript %s @%d: %w", t.rel, lineStart, perr))
 			}
+			// A malformed line is the PHYSICAL last record if it is the file's
+			// trailing line, so the §485 completion marker must reflect it: clear
+			// the assistant-text flag (a parse error is never an assistant-text
+			// record) so a child ending in [assistant{text}, <malformed>] does NOT
+			// finalize its parent Agent op (P1.4). lastRecordEmitted tracks whether
+			// this physical line was newly read, mirroring the mapped-record path.
+			mapper.lastRecordAssistantText = false
+			mapper.lastRecordEmitted = emit
 			continue
 		}
 		if skip {
+			// A skipped known-no-op record (e.g. a trailing summary/task-summary)
+			// is also a PHYSICAL record: clear the completion flag so a child whose
+			// last physical line is [assistant{text}, <skipped no-op>] is NOT
+			// complete (P1.4). Without this the flag would stay stale-true from the
+			// preceding assistant-text record and wrongly finalize the parent.
+			mapper.lastRecordAssistantText = false
+			mapper.lastRecordEmitted = emit
 			continue
 		}
 		// mapRecord always runs so the turn/op inference counters advance
@@ -659,8 +707,13 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	// state once its sidechain is fully read AND terminates in a newly-read
 	// assistant-text marker (§485). After the walk, every completed child whose
 	// parent op is known is finalized exactly once (finalized set guards
-	// re-emit).
+	// re-emit). Seed completed from the persisted cursor's parked set so a child
+	// that completed before its parent op was known survives a restart in which
+	// the parent appears during THIS Scan (P2.4d). Restore from `start` (the
+	// caller's persisted cursor) so the park is not lost if `cur` was reset to a
+	// fresh cursor above (start.Files == nil).
 	def := newTailDeferral()
+	def.restoreParked(start.Parked)
 
 	for _, t := range transcripts {
 		if err := ctx.Err(); err != nil {
@@ -688,6 +741,9 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		collectAgentDeferral(mapper, t, def.pending, def.completed)
 		emittedSinceProgress += n
 		if emittedSinceProgress >= progressEveryEvents || time.Since(lastProgress) >= progressEveryDuration {
+			// Checkpoint parked completions so a Scan interrupted mid-walk still
+			// persists children awaiting their parent op (P2.4d).
+			cur = cur.withParked(def.parkedSnapshot())
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return cur, perr
 			}
@@ -709,6 +765,12 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			cur = cur.withMetaSeen(rel, h)
 		}
 	}
+
+	// Persist the parked completions that survived pairing (children still
+	// awaiting their parent op) so a restart can restore them (P2.4d). Finalized
+	// children were dropped from def.completed by pairCompletedFinalizations, so
+	// they are excluded from this snapshot.
+	cur = cur.withParked(def.parkedSnapshot())
 
 	if err := emitProgress(ctx, sourceID, cur, out); err != nil {
 		return cur, err

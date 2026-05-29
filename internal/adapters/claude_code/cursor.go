@@ -24,6 +24,14 @@ type Cursor struct {
 	// its last-seen content, so a sidecar rewrite (description change on
 	// resume) is re-read exactly once.
 	MetaSeen map[string]string `json:"metaSeen,omitempty"`
+	// Parked maps a child session native id → its completion timestamp (micros)
+	// for a subagent that completed (terminal assistant-text) BEFORE its parent
+	// `Agent` op was known. It persists the in-memory deferral park so a daemon
+	// restart before the parent op appears does not lose the completion and can
+	// still finalize the parent once it lands (spec §8.1, P2.4d). `omitempty`
+	// keeps cursors that predate this field parseable. Observability/durability
+	// only — not part of After() ordering.
+	Parked map[string]int64 `json:"parked,omitempty"`
 	// Version is the on-disk format version. Defaults to cursorVersion on
 	// construction; ParseCursor refuses anything else.
 	Version int `json:"version"`
@@ -47,6 +55,7 @@ func newCursor() Cursor {
 	return Cursor{
 		Files:    map[string]FileCursor{},
 		MetaSeen: map[string]string{},
+		Parked:   map[string]int64{},
 		Version:  cursorVersion,
 	}
 }
@@ -173,15 +182,30 @@ func (c Cursor) metaSeen(rel string) string {
 	return c.MetaSeen[rel]
 }
 
+// withParked returns a new Cursor whose Parked map is REPLACED by a snapshot of
+// the given parked set (child native id → completion ts). It is a full replace,
+// not a merge, so an entry dropped from the live deferral (because its parent op
+// was finalized) is naturally removed from the persisted cursor on the next
+// checkpoint — mirroring how the deferral's `completed` set drops finalized
+// children (spec §8.1, P2.4d). The receiver is not mutated.
+func (c Cursor) withParked(parked map[string]int64) Cursor {
+	out := c.clone()
+	out.Parked = make(map[string]int64, len(parked))
+	maps.Copy(out.Parked, parked)
+	return out
+}
+
 // clone deep-copies the cursor's maps so callers can mutate the result
 // without affecting the receiver.
 func (c Cursor) clone() Cursor {
 	out := Cursor{
 		Files:    make(map[string]FileCursor, len(c.Files)+1),
 		MetaSeen: make(map[string]string, len(c.MetaSeen)+1),
+		Parked:   make(map[string]int64, len(c.Parked)+1),
 		Version:  cursorVersion,
 	}
 	maps.Copy(out.Files, c.Files)
 	maps.Copy(out.MetaSeen, c.MetaSeen)
+	maps.Copy(out.Parked, c.Parked)
 	return out
 }

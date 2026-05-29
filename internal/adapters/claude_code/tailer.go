@@ -64,7 +64,11 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	metaDirty := make(map[string]struct{}, 16)
 	// Loop-lifetime Agent-op deferral so a parent Agent op observed in one
 	// flush is finalized when its child sidechain ends in another (spec §8.1).
+	// Seed its parked completions from the persisted cursor so a child that
+	// completed before its parent op was known — and was checkpointed before a
+	// restart — is still finalizable when the parent op appears (P2.4d).
 	deferral := newTailDeferral()
+	deferral.restoreParked(cur.Parked)
 
 	// Initial catch-up (spec §6.3, P2c): the watch is now established, but any
 	// bytes appended to a known file BETWEEN Scan finishing and this point
@@ -319,6 +323,42 @@ func newTailDeferral() *tailDeferral {
 	}
 }
 
+// parkedSnapshot projects the deferral's `completed` set into the cursor's
+// `parked` shape (child native id → completion ts micros) for checkpointing
+// (spec §8.1, P2.4d). It is a pure read of the live set.
+func (d *tailDeferral) parkedSnapshot() map[string]int64 {
+	if d == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(d.completed))
+	for childID, st := range d.completed {
+		out[childID] = st.tsUs
+	}
+	return out
+}
+
+// restoreParked seeds the deferral's `completed` set from a cursor's persisted
+// `parked` map (spec §8.1, P2.4d), so a child that completed before its parent
+// op was known — and was checkpointed before a daemon restart — is still
+// finalizable when the parent op appears after the restart. An already-finalized
+// child is not restored (it is not in `parked`, which is a snapshot of the live
+// `completed` set that drops finalized children). Existing in-memory entries are
+// preserved (restore only adds).
+func (d *tailDeferral) restoreParked(parked map[string]int64) {
+	if d == nil {
+		return
+	}
+	for childID, tsUs := range parked {
+		if _, done := d.finalized[childID]; done {
+			continue
+		}
+		if _, present := d.completed[childID]; present {
+			continue
+		}
+		d.completed[childID] = completionState{tsUs: tsUs}
+	}
+}
+
 // flushDirty re-reads every dirty transcript from its cursor offset and
 // re-reads every changed meta file, updating the shared cursor. Emits a
 // SourceProgress checkpoint at the end. A meta change additionally forces a
@@ -354,11 +394,18 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 		changedMetas[rel] = struct{}{}
 	}
 
-	// A changed meta repairs the linkage of its session's parent transcript:
-	// force that parent re-read from offset 0 with emission (spec §8.1, late
-	// meta). The forced parents join the dirty set (so they are read this flush)
-	// and forceFromZero (so they are read with emitFrom=0, not the cursor).
+	// A changed meta repairs the linkage of its session's parent transcript AND
+	// the child subagent's AgentName: force BOTH re-read from offset 0 with
+	// emission (spec §8.1, late meta). The parent re-emit carries the resolved
+	// ChildSessionNativeID; the child re-emit carries the agentType AgentName
+	// (P2.4c) — a child read before its meta would otherwise keep an empty
+	// AgentName forever. The forced files join the dirty set (so they are read
+	// this flush) and forceFromZero (so they are read with emitFrom=0, not the
+	// cursor).
 	forceFromZero := metaParentRels(root, changedMetas)
+	for rel := range metaChildRels(root, changedMetas) {
+		forceFromZero[rel] = struct{}{}
+	}
 	dirtyAll := dirty
 	if len(forceFromZero) > 0 {
 		dirtyAll = make(map[string]struct{}, len(dirty)+len(forceFromZero))
@@ -433,6 +480,11 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 		if perr := pairCompletedFinalizations(ctx, sourceID, def, out); perr != nil {
 			return perr
 		}
+		// Checkpoint the surviving parked completions into the cursor so a restart
+		// restores them (P2.4d). pairCompletedFinalizations already dropped the
+		// finalized children from def.completed, so this snapshot is exactly the
+		// children still awaiting their parent op.
+		*cur = cur.withParked(def.parkedSnapshot())
 	}
 	return emitProgress(ctx, sourceID, *cur, out)
 }
@@ -461,6 +513,46 @@ func metaParentRels(root string, changedMetas map[string]struct{}) map[string]st
 		out[parentRel] = struct{}{}
 	}
 	return out
+}
+
+// metaChildRels maps each changed `.meta.json` relative path to its OWN child
+// subagent-transcript relative path (the sibling `agent-<id>.jsonl`), the file
+// whose `SessionStarted` must be re-emitted so the child's `AgentName` picks up
+// the now-known `agentType` (spec §8.1, P2.4c). The child path is the meta path
+// with the `.meta.json` suffix replaced by `.jsonl`. The child must exist on
+// disk (the re-read itself re-checks containment). A rel that is not a subagent
+// meta path, or whose sibling transcript is absent, is skipped.
+func metaChildRels(root string, changedMetas map[string]struct{}) map[string]struct{} {
+	out := map[string]struct{}{}
+	for rel := range changedMetas {
+		childRel, ok := metaChildRel(rel)
+		if !ok {
+			continue
+		}
+		abs := filepath.Join(root, filepath.FromSlash(childRel))
+		if info, err := os.Stat(abs); err != nil || info.IsDir() {
+			// The child sidechain is not present yet: nothing to re-read. It will
+			// be read normally (with the now-known meta) when it appears.
+			continue
+		}
+		out[childRel] = struct{}{}
+	}
+	return out
+}
+
+// metaChildRel derives the sibling child-transcript rel from a subagent meta
+// rel: "<...>/agent-<id>.meta.json" → "<...>/agent-<id>.jsonl". Returns
+// ("", false) when rel is not a subagent meta path.
+func metaChildRel(metaRel string) (string, bool) {
+	if !strings.HasSuffix(metaRel, metaExt) {
+		return "", false
+	}
+	// Confirm it is a subagent meta (has a "subagents" segment with a session-id
+	// parent), reusing metaParentRel's structural check.
+	if _, ok := metaParentRel(metaRel); !ok {
+		return "", false
+	}
+	return strings.TrimSuffix(metaRel, metaExt) + transcriptExt, true
 }
 
 // metaParentRel derives the parent root-transcript rel from a subagent meta

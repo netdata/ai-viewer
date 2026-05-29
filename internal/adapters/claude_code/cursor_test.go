@@ -36,6 +36,41 @@ func TestParseCursor_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestParseCursor_ParkedRoundTrip verifies the P2.4d parked-completion map
+// survives a String → ParseCursor round-trip.
+func TestParseCursor_ParkedRoundTrip(t *testing.T) {
+	t.Parallel()
+	orig := newCursor().withParked(map[string]int64{
+		"sess:agent:abc": 1779789609000000,
+	})
+	got, err := ParseCursor(orig.String())
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	if got.Parked["sess:agent:abc"] != 1779789609000000 {
+		t.Fatalf("parked lost across round-trip: %+v", got.Parked)
+	}
+}
+
+// TestParseCursor_OldCursorWithoutParked verifies a cursor persisted BEFORE the
+// `parked` field existed still parses (the field is additive with omitempty and
+// the version is unchanged), yielding an empty/nil parked map — not an error.
+func TestParseCursor_OldCursorWithoutParked(t *testing.T) {
+	t.Parallel()
+	// A version-1 cursor with no "parked" key (the pre-P2.4d shape).
+	old := `{"version":1,"files":{"p/s.jsonl":{"offset":10,"size":10}},"metaSeen":{}}`
+	got, err := ParseCursor(old)
+	if err != nil {
+		t.Fatalf("ParseCursor(old cursor): %v", err)
+	}
+	if got.Files["p/s.jsonl"].Offset != 10 {
+		t.Fatalf("old cursor offset lost: %+v", got)
+	}
+	if len(got.Parked) != 0 {
+		t.Fatalf("old cursor must yield empty parked, got %+v", got.Parked)
+	}
+}
+
 func TestParseCursor_RejectsUnknownVersion(t *testing.T) {
 	t.Parallel()
 	_, err := ParseCursor(`{"version":99}`)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -383,6 +384,161 @@ func TestMetaParentRel(t *testing.T) {
 		if ok != c.wantOK || got != c.wantParent {
 			t.Errorf("metaParentRel(%q) = (%q, %v), want (%q, %v)", c.metaRel, got, ok, c.wantParent, c.wantOK)
 		}
+	}
+}
+
+// TestScanThenTail_LateMetaRepairsChildAgentName pins P2.4c: a child subagent
+// transcript read BEFORE its `.meta.json` exists emits its SessionStarted with an
+// empty AgentName. When the meta arrives in a later Tail flush, the adapter must
+// re-read the CHILD transcript (not only the parent) so the child SessionStarted
+// re-emits carrying the agentType AgentName. Without the child re-read the
+// AgentName would stay permanently empty.
+func TestScanThenTail_LateMetaRepairsChildAgentName(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	child := childNativeID(durParentSession, durAgentID)
+	// The child sidechain exists at Scan time; its meta does NOT.
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Scan reads the child. No meta → its AgentName is empty.
+	scanOut := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	cs, ok := sessionStartedByNative(drainBuffered(scanOut), child)
+	if !ok {
+		t.Fatalf("child session %q not started during Scan", child)
+	}
+	if cs.AgentName != "" {
+		t.Fatalf("child AgentName = %q before meta exists; test premise broken", cs.AgentName)
+	}
+
+	// Tail on the SAME instance; after the watch is live, create the .meta.json.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailOut := make(chan canonical.Event, 256)
+	done := make(chan struct{})
+	go func() { _ = a.Tail(ctx, tailOut); close(done) }()
+
+	time.Sleep(150 * time.Millisecond)
+	writeFileBytes(t, metaPath(root),
+		[]byte(`{"agentType":"Explore","description":"explore","toolUseId":"`+parentAgentToolUseID+`"}`))
+
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev := <-tailOut:
+			if ss, ok := ev.(canonical.SessionStartedEvent); ok &&
+				ss.NativeID == child && ss.AgentName == "Explore" {
+				cancel()
+				<-done
+				return
+			}
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("child session %q never re-emitted with AgentName=Explore after the late .meta.json (P2.4c)", child)
+		}
+	}
+}
+
+// TestMetaChildRel verifies the subagent-meta → sibling child-transcript rel
+// derivation used by the late-meta child re-read (P2.4c): a subagent meta maps
+// to its sibling agent-<id>.jsonl; a non-meta or non-subagent path is rejected.
+func TestMetaChildRel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		metaRel   string
+		wantChild string
+		wantOK    bool
+	}{
+		{"-home-x/sess-1/subagents/agent-abc.meta.json", "-home-x/sess-1/subagents/agent-abc.jsonl", true},
+		{"-home-x/sess-1/subagents/wf/agent-def.meta.json", "-home-x/sess-1/subagents/wf/agent-def.jsonl", true},
+		{"-home-x/sess-1.jsonl", "", false},        // not a meta
+		{"-home-x/loose.meta.json", "", false},     // meta without a subagents/ segment
+		{"subagents/agent-x.meta.json", "", false}, // no session-id parent before subagents
+	}
+	for _, c := range cases {
+		got, ok := metaChildRel(c.metaRel)
+		if ok != c.wantOK || got != c.wantChild {
+			t.Errorf("metaChildRel(%q) = (%q, %v), want (%q, %v)", c.metaRel, got, ok, c.wantChild, c.wantOK)
+		}
+	}
+}
+
+// TestMetaChildRels_SkipsAbsentChild verifies metaChildRels only returns child
+// rels whose sibling transcript exists on disk (an absent sidechain is skipped;
+// it is read normally when it appears).
+func TestMetaChildRels_SkipsAbsentChild(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	// A meta whose sibling child transcript EXISTS.
+	present := "-home-user-x/sess-1/subagents/agent-present.meta.json"
+	writeFileBytes(t, filepath.Join(proj, "sess-1", "subagents", "agent-present.jsonl"), []byte("{}\n"))
+	// A meta whose sibling child transcript is ABSENT.
+	absent := "-home-user-x/sess-1/subagents/agent-absent.meta.json"
+
+	out := metaChildRels(root, map[string]struct{}{present: {}, absent: {}})
+	if _, ok := out["-home-user-x/sess-1/subagents/agent-present.jsonl"]; !ok {
+		t.Errorf("metaChildRels dropped a child whose transcript exists: %v", out)
+	}
+	if _, ok := out["-home-user-x/sess-1/subagents/agent-absent.jsonl"]; ok {
+		t.Errorf("metaChildRels returned a child whose transcript is absent: %v", out)
+	}
+}
+
+// TestRestoreParked verifies the cursor-park restore logic (P2.4d): a nil
+// deferral is a no-op; an already-finalized child is not re-restored; an entry
+// already present in completed is left untouched; a fresh entry is added.
+func TestRestoreParked(t *testing.T) {
+	t.Parallel()
+	// nil receiver must not panic.
+	var nilDef *tailDeferral
+	nilDef.restoreParked(map[string]int64{"x": 1})
+
+	d := newTailDeferral()
+	d.finalized["already-done"] = struct{}{}
+	d.completed["already-parked"] = completionState{tsUs: 111}
+
+	d.restoreParked(map[string]int64{
+		"already-done":   999, // finalized → must NOT be restored
+		"already-parked": 222, // present → must keep its existing ts (111)
+		"fresh":          333, // new → added
+	})
+
+	if _, ok := d.completed["already-done"]; ok {
+		t.Error("restoreParked re-restored an already-finalized child")
+	}
+	if st := d.completed["already-parked"]; st.tsUs != 111 {
+		t.Errorf("restoreParked overwrote an existing parked entry: ts=%d, want 111", st.tsUs)
+	}
+	if st, ok := d.completed["fresh"]; !ok || st.tsUs != 333 {
+		t.Errorf("restoreParked did not add the fresh entry: %+v ok=%v", st, ok)
+	}
+}
+
+// TestParkedSnapshot verifies parkedSnapshot projects completed → child→ts and
+// that a nil deferral returns nil.
+func TestParkedSnapshot(t *testing.T) {
+	t.Parallel()
+	var nilDef *tailDeferral
+	if nilDef.parkedSnapshot() != nil {
+		t.Error("parkedSnapshot on nil deferral should be nil")
+	}
+	d := newTailDeferral()
+	d.completed["c1"] = completionState{tsUs: 42}
+	d.completed["c2"] = completionState{tsUs: 7}
+	snap := d.parkedSnapshot()
+	if snap["c1"] != 42 || snap["c2"] != 7 || len(snap) != 2 {
+		t.Errorf("parkedSnapshot = %v, want {c1:42, c2:7}", snap)
 	}
 }
 
