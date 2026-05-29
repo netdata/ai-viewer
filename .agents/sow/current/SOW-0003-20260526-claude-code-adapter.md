@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: awaits operator approval before moving to current/. Prerequisite: SOW-0001 Phase 1 Foundation completed (canonical event types + ingest pipeline + store) — this SOW reuses that infrastructure.
+Sub-state: blanket Phase-2 sign-off (2026-05-29); moved to current/. SOW-0001 prerequisite is completed. Pre-Implementation Gate filled; spec delta D1 landed; adapter built (C2-C7) + gate-verified by the orchestrator; external review pending before merge + close.
 
 ## Requirements
 
@@ -79,11 +79,136 @@ Risks:
 
 ## Pre-Implementation Gate
 
-(To be filled by the assistant picking this SOW up. Required before moving to `current/`.)
+Picked up 2026-05-29 (blanket Phase-2 sign-off). This is a greenfield adapter that
+plugs into the SOW-0001 infrastructure and mirrors `aiagent_v3` — no behavior
+change to existing code, only additions.
+
+**Evidence reviewed (this session):**
+- Reference pattern (Explore): `internal/adapters/aiagent_v3/` = adapter.go
+  (Name/Format/Scan/Tail/ParseCursor + `adapters.Register` in `init`), cursor.go
+  (per-file offset map + Version; String/After), parser.go (line JSONL decoder),
+  mapper.go / ops.go (record→canonical Events; SourceSeq packing), scanner.go
+  (list + walk from cursor), tailer.go (fsnotify on the root), payloads.go;
+  `*_test.go` + `fuzz_test.go`; golden fixtures under the adapter's `testdata/`.
+- Auto-discovery: `cmd/ai-viewer-ingest/sources.go` probes `~/.ai-agent/sessions`
+  and surfaces counts in `/api/health`; the claude-code probe slots into the same
+  array (format `claude-code`, location `~/.claude/projects`, `$CLAUDE_CONFIG_DIR`
+  honored).
+- Canonical targets: `internal/canonical/events.go` already defines
+  `OpCompaction = "compaction"` and `SessionKind` `sub_agent` — no canonical
+  schema change needed.
+- **Workstation recon (live `~/.claude/projects`, read-only):** 56 project dirs,
+  397 root transcripts, 622 sub-agent sidechains + 622 `.meta.json`. Longest
+  encoded dir name = 72 chars (far below the 200-char truncation point) → **no
+  Bun/Node hash-divergence pairs on this workstation** (R1 cannot be exercised
+  against a live pair; the adapter still handles it generically per spec via
+  read-dir-as-is + prefix tolerance). `compactMetadata.trigger` observed values:
+  `manual` (24) and `auto` (8) → fixtures must cover both; adapter tolerates any
+  string. Real `compact_boundary` records exist → a real compaction fixture is
+  curatable. Backfill of 397 transcripts is well under the 5-min target
+  single-threaded (R-perf resolved; no parallelization).
+
+**Decisions (CTO):**
+1. **Compaction → `OpCompaction`** (first-class), per acceptance #4 and
+   `events.go`. `adapter-claude-code.md §9.1` currently says `Kind='internal'` —
+   that is stale drift against the canonical model + the SOW; it is corrected as a
+   spec delta below.
+2. No SourceSeq cardinality cleverness beyond what `aiagent_v3` does; claude-code
+   has no native seq, so SourceSeq = a stable per-file monotonic derived from
+   record order (byte offset is the durable cursor; SourceSeq is observability
+   only, per the SourceSeq-semantics convention).
+3. Sessions are always emitted `running` (no terminal signal); never emit
+   `SessionFinalizedEvent` for claude-code.
+4. Sub-agent NativeID = `<parentSessionId>:agent:<agentId>`,
+   ParentNativeID = `<parentSessionId>`; rely on the ingester resolver (SOW-0001)
+   for child-before-parent ordering (R3) — and the resolver now emits notify on
+   linkage (PR #26), so an open UI refreshes.
+
+**Spec deltas to land BEFORE tests/code** (both in
+`.agents/sow/specs/adapter-claude-code.md`):
+- **D1:** §9 — change the compaction synthetic-op mapping from `Kind='internal',
+  Name='compact'` to `OpKind='compaction'` (`Ts=boundary.timestamp`,
+  `EndTs=Ts+durationMs*1000`, `BytesIn=preTokens`, `BytesOut=postTokens`,
+  `Extras=compactMetadata`), matching acceptance #4 + `canonical-events.md`.
+- **D2:** ~~add a consolidated mapping table~~ — **already satisfied**: §5.4
+  "Per-record mapping" is exactly that table (verified on pickup). No delta needed;
+  D1 brought its compaction row into line with the canonical model.
+
+**Affected surfaces:** new `internal/adapters/claude_code/` package; one line in
+`internal/adapters/registry.go` (blank import) + `init` `Register`; one probe in
+`cmd/ai-viewer-ingest/sources.go`; `/api/health` source list gains a `claude-code`
+entry when the dir exists; new `testdata/claude_code/<scenario>/` fixtures;
+the spec deltas above. No migration, no canonical-schema change, no API shape
+change (sessions/ops already carry the needed fields).
+
+**Risk / blast radius:** additive. The only cross-cutting touch is the
+auto-discovery probe (guard: only registers when the dir exists; a workstation
+without Claude Code is unaffected — unit-tested with a tmpdir). R1-R5 per the
+Analysis; R1 has no live instance here (handle generically), R3 covered by the
+resolver.
+
+**Sensitive-data plan:** every fixture is produced via `scripts/sanitize-fixture.sh`
+(real cwd → `<HOME>`, emails/secrets redacted); the `scripts/scan-secrets.sh` gate
+runs in CI; no real path, prompt, or tool I/O reaches a committed artifact. Curate
+fixtures from the operator's real transcripts then sanitize — never commit raw.
+
+**Implementation plan (chunks, mirroring the aiagent_v3 build order):**
+- C1: spec deltas D1 + D2 (this gate's prerequisite).
+- C2: `parser.go` (pure JSONL line decoder, every observed `type` + unknown
+  tolerance) + `parser_fuzz_test.go` + unit tests.
+- C3: `mapper.go`/`ops.go` (record → canonical Events incl. compaction op,
+  sub-agent session synthesis, metadata-snapshot → session-property updates,
+  no-new-turn-on-compact-summary) + unit tests.
+- C4: `cursor.go` (per-relative-path byte offset map; String/After) + restart
+  integration test (acceptance #6).
+- C5: `scanner.go` + `tailer.go` (walk project dirs + sidechains; fsnotify tail
+  with partial-line parking, R2) + `adapter.go` + registry registration.
+- C6: auto-discovery probe in `sources.go` + probe unit test (acceptance #8).
+- C7: curate + sanitize the 7 golden fixtures (acceptance #5 a-g) + golden tests.
+- Each chunk: full gates + the SOW-0001 cycle.
+
+**Validation plan (named):** `parser_test.go` + `parser_fuzz_test.go` (#2, #7);
+`mapper_test.go` (#3 sub-agent, #4 compaction); `cursor_test.go` +
+`adapter_restart_test.go` (#6); `scanner_test.go`/`tailer_test.go`;
+`registry_test.go` (#1, enumerable as `claude-code`); `sources_test.go` (#8 probe);
+golden tests reading `testdata/claude_code/<scenario>/` diffed against committed
+`.golden.json` for scenarios a-g (#5). `go build`/`golangci-lint`/`gosec`/
+`go test -race`/`scan-secrets`/fuzz all green.
+
+**Open decisions requiring operator:** none — all within the signed-off Phase-2
+scope.
 
 ## Implementation
 
-(Empty placeholder. Filled as chunks complete.)
+Delivered 2026-05-29 (one build, mirroring `aiagent_v3`; orchestrator-verified
+before review). `internal/adapters/claude_code/` — `adapter.go` (Name/Format
+`claude-code` + Scan/Tail/ParseCursor + `init` Register), `parser.go` (pure JSONL
+decoder, unknown-`type` tolerance via `errUnknownRecordType`; wired at
+`scanner.go:398` Scan + `:614` Tail), `mapper.go`/`ops.go` (record→canonical per
+§5.4: turns, llm/tool/reasoning ops, **compaction → `OpKind='compaction'`**,
+sub-agent session synthesis, metadata-snapshot → property/log, no-new-turn on
+`isCompactSummary`), `cursor.go` (per-relative-path byte offset + `metaSeen`),
+`scanner.go`/`tailer.go` (tree walk + sidechains + orphan-root; fsnotify with
+partial-line parking + new-dir catch-up). Sessions always `running` (no terminal
+signal). Sub-agent NativeID = `<parent>:agent:<agentId>` (structural, always) +
+op-level `ChildSessionNativeID` when the `.meta.json` carries `toolUseId`
+(present in 226/623 real metas — best-effort, no error when absent).
+
+Registered in `registry_init_test.go`; auto-discovery probe added to
+`cmd/ai-viewer-ingest/sources.go` (`~/.claude/projects` + `$CLAUDE_CONFIG_DIR`).
+`scripts/sanitize-fixture.sh` + `scripts/lib/sanitize-rules.jq` gained a
+`--format=claude_code` mode. 7 golden fixtures (`testdata/claude_code/{a..g}_*`)
+are synthetic-but-shape-verified (real compaction transcripts are multi-MB; goldens
+stay small + deterministic), each diffed by `TestGolden`.
+
+**Orchestrator verification (all green, re-run on master):** `go build`/`vet`/
+`golangci-lint`/`gosec` 0; `govulncheck` 0 called; `go test -race -count=1`
+claude_code + cmd pass at **83.5%** coverage; fuzz 30s = 11.3M execs, 0 crashes;
+`scan-secrets.sh` PASS (442 files — fixtures clean); confirmed `parseLine`/
+`classifyUserContent` are production-wired (the IDE unused-func hints were
+false positives golangci agrees with). **Real-data backfill** of the operator's
+`~/.claude/projects`: 1,020 sessions, 5,268 turns, 190,102 op-starts, **0 source
+errors**. External review pending.
 
 ## Validation
 

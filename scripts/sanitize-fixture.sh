@@ -43,17 +43,23 @@ usage() {
 sanitize-fixture.sh - strip sensitive content from session fixtures.
 
 Usage:
-  scripts/sanitize-fixture.sh --format=<aiagent_v3|aiagent_v2> \
+  scripts/sanitize-fixture.sh --format=<aiagent_v3|aiagent_v2|claude_code> \
                               --input=<path> --output=<dir> \
                               [--id-seed=<int>] [--dry-run] [--diff] [--force]
 
 Required:
-  --format=<NAME>   one of: aiagent_v3, aiagent_v2
+  --format=<NAME>   one of: aiagent_v3, aiagent_v2, claude_code
   --input=<PATH>    source file or directory:
                     - aiagent_v3: a <sessionId>.jsonl file, OR a directory
                       containing session/<sessionId>.jsonl plus optional
                       payloads/<sessionId>/turn-NNNN/*.gz
                     - aiagent_v2: a <originId>.json.gz file
+                    - claude_code: a <sessionId>.jsonl transcript, an
+                      agent-<agentId>.jsonl sidechain, an agent-<agentId>.meta.json
+                      sidecar, OR a directory mirrored verbatim (every *.jsonl
+                      sanitized per-line, every *.meta.json redacted, dir
+                      structure preserved so <sessionId>/subagents/ linkage
+                      survives)
   --output=<DIR>    output directory (created if missing). The script mirrors
                     the input structure under this directory.
 
@@ -120,8 +126,8 @@ parse_args() {
   [ -n "$OUTPUT" ] || { usage >&2; die "--output is required"; }
 
   case "$FORMAT" in
-    aiagent_v3|aiagent_v2) ;;
-    *) die "--format must be one of: aiagent_v3, aiagent_v2 (got: $FORMAT)" ;;
+    aiagent_v3|aiagent_v2|claude_code) ;;
+    *) die "--format must be one of: aiagent_v3, aiagent_v2, claude_code (got: $FORMAT)" ;;
   esac
 
   if ! [[ "$ID_SEED" =~ ^[0-9]+$ ]]; then
@@ -265,6 +271,15 @@ sanitize_v2_json() {
     --argjson id_map "$id_map_json" \
     -L "$(dirname "$RULES_LIB")" \
     'include "sanitize-rules"; sanitize_v2_snapshot'
+}
+
+# Sanitize one claude-code JSONL record against the claude_code rules.
+sanitize_claude_code_json_line() {
+  local id_map_json="$1"
+  jq -c \
+    --argjson id_map "$id_map_json" \
+    -L "$(dirname "$RULES_LIB")" \
+    'include "sanitize-rules"; sanitize_claude_code_record'
 }
 
 # --- output helpers ---------------------------------------------------------
@@ -506,6 +521,137 @@ process_v3_input() {
   die "unsupported input type for aiagent_v3: $INPUT"
 }
 
+# --- claude_code processing --------------------------------------------------
+
+# Process a single claude-code .jsonl transcript (main or sidechain) line by
+# line. Mirrors process_v3_ledger but uses the claude_code jq ruleset (which
+# redacts message bodies, tool I/O, titles, and the bypassPermissions flag).
+# Args: <input_jsonl> <output_jsonl>
+process_claude_code_jsonl() {
+  local in_path="$1"
+  local out_path="$2"
+
+  if [ ! -s "$in_path" ]; then
+    warn "skipping zero-byte transcript: $in_path"
+    return 0
+  fi
+
+  local raw
+  raw="$(cat "$in_path")"
+  check_placeholder_leak "$raw" "transcript $in_path"
+
+  # Validate JSON structure line-by-line before mutating anything.
+  local lineno=0
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    [ -z "$line" ] && continue
+    if ! printf '%s' "$line" | jq -e . >/dev/null 2>&1; then
+      die "malformed JSON in $in_path at line $lineno"
+    fi
+  done <<< "$raw"
+
+  # Build the id map across the WHOLE file so parentUuid->uuid linkage is
+  # preserved with consistent pseudonymous UUIDs.
+  local id_map
+  id_map="$(build_id_map "$raw")"
+
+  # First pass: structural jq rewrite per line.
+  local sanitized_lines=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local jq_out
+    jq_out="$(printf '%s' "$line" | sanitize_claude_code_json_line "$id_map")"
+    sanitized_lines+="${jq_out}"$'\n'
+  done <<< "$raw"
+
+  # Second pass: string-level rewrite (HOME paths, emails, URLs, secrets).
+  local sanitized
+  sanitized="$(printf '%s' "$sanitized_lines" | sanitize_text)"
+
+  show_diff "$raw" "$sanitized" "$in_path"
+  write_file "$out_path" "$sanitized"
+}
+
+# Process a single claude-code agent-<agentId>.meta.json sidecar. The sidecar
+# carries agentType, description (free text), and optional toolUseId. We keep
+# agentType + toolUseId (structural join keys) and redact description.
+# Args: <input_meta> <output_meta>
+process_claude_code_meta() {
+  local in_path="$1"
+  local out_path="$2"
+
+  if [ ! -s "$in_path" ]; then
+    warn "skipping zero-byte meta: $in_path"
+    return 0
+  fi
+  local raw
+  raw="$(cat "$in_path")"
+  if ! printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
+    die "malformed JSON in meta sidecar: $in_path"
+  fi
+  local id_map
+  id_map="$(build_id_map "$raw")"
+  local sanitized
+  sanitized="$(printf '%s' "$raw" \
+    | jq -c --argjson id_map "$id_map" -L "$(dirname "$RULES_LIB")" \
+        'include "sanitize-rules"; remap_uuids_deep
+         | (if has("description") then .description = "[REDACTED_DESCRIPTION]" else . end)' \
+    | sanitize_text)"
+  show_diff "$raw" "$sanitized" "$in_path"
+  write_file "$out_path" "$sanitized"
+}
+
+# Dispatch one claude-code input file (by extension) to the right processor,
+# remapping UUIDs in the output path so on-disk linkage survives.
+# Args: <input_path> <output_path>
+process_claude_code_file() {
+  local in_path="$1"
+  local out_path="$2"
+  case "$in_path" in
+    *.meta.json) process_claude_code_meta  "$in_path" "$out_path" ;;
+    *.jsonl)     process_claude_code_jsonl "$in_path" "$out_path" ;;
+    *) warn "skipping non-transcript file: $in_path" ;;
+  esac
+}
+
+process_claude_code_input() {
+  if [ -f "$INPUT" ]; then
+    local base new_base
+    base="$(basename "$INPUT")"
+    case "$base" in
+      *.jsonl|*.meta.json) ;;
+      *) die "claude_code single-file input must be *.jsonl or *.meta.json (got: $base)" ;;
+    esac
+    new_base="$(remap_path_uuids "$base")"
+    process_claude_code_file "$INPUT" "${OUTPUT%/}/${new_base}"
+    return 0
+  fi
+
+  if [ -d "$INPUT" ]; then
+    # Directory mode: mirror the tree verbatim, sanitizing every *.jsonl and
+    # *.meta.json and remapping UUIDs in path components so the
+    # <sessionId>/subagents/agent-<agentId>.jsonl layout still cross-refs.
+    local found=0
+    while IFS= read -r -d '' f; do
+      case "$f" in
+        *.jsonl|*.meta.json) ;;
+        *) continue ;;
+      esac
+      found=$((found + 1))
+      local rel new_rel
+      rel="${f#"${INPUT%/}/"}"
+      new_rel="$(remap_path_uuids "$rel")"
+      process_claude_code_file "$f" "${OUTPUT%/}/${new_rel}"
+    done < <(find "$INPUT" -type f \( -name '*.jsonl' -o -name '*.meta.json' \) -print0 | sort -z)
+    if [ "$found" = "0" ]; then
+      warn "no *.jsonl / *.meta.json files under $INPUT"
+    fi
+    return 0
+  fi
+
+  die "unsupported input type for claude_code: $INPUT"
+}
+
 # --- v2 processing ----------------------------------------------------------
 
 process_v2_input() {
@@ -570,8 +716,9 @@ main() {
   fi
 
   case "$FORMAT" in
-    aiagent_v3) process_v3_input ;;
-    aiagent_v2) process_v2_input ;;
+    aiagent_v3)  process_v3_input ;;
+    aiagent_v2)  process_v2_input ;;
+    claude_code) process_claude_code_input ;;
   esac
 }
 

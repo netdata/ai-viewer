@@ -544,7 +544,7 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 | Each subagent jsonl file | a separate canonical Session (`Kind='sub_agent'`, parent linkage via `ParentNativeID`); turn/op inference identical to main session |
 | `system.subtype=="turn_duration"` | `TurnFinalizedEvent` for the just-completed turn |
 | `system.subtype=="api_error"` | `LogEntry` severity `ERR`; if the next record is a synthetic assistant or absence-of-assistant, mark the in-flight LLM op `status='failed', error_class=api_error_<status>` |
-| `system.subtype=="compact_boundary"` | `LogEntry` `INF` with body=compactMetadata; emit a synthetic op `Kind='internal', Name='compact'` carrying `Ts=record.timestamp`, `Duration=durationMs`, `BytesIn=preTokens`, `BytesOut=postTokens`. Subsequent records' `parentUuid` may be `null` (post-compaction chain restart); the adapter must accept that without error. See §9. |
+| `system.subtype=="compact_boundary"` | `LogEntry` `INF` with body=compactMetadata; emit a synthetic op `OpKind='compaction'` carrying `Ts=record.timestamp`, `EndTs=Ts+durationMs*1000`, `BytesIn=preTokens`, `BytesOut=postTokens`, `Extras=compactMetadata`. Subsequent records' `parentUuid` may be `null` (post-compaction chain restart); the adapter must accept that without error. See §9. |
 | `system.subtype=="stop_hook_summary"` | `LogEntry` `DBG` (one per hook) plus aggregate `LogEntry` `INF`; no canonical op |
 | `system.subtype=="local_command"` | `LogEntry` `INF` |
 | `system.subtype=="informational"` | `LogEntry` `INF` |
@@ -670,9 +670,9 @@ Compaction is Claude Code's mechanism for summarizing a long conversation to sta
 
 ### 9.2 Canonical-model treatment
 
-The decision: **keep both pre- and post-compaction history in the canonical model**, separated by a synthetic internal op.
+The decision: **keep both pre- and post-compaction history in the canonical model**, separated by a synthetic `OpKind='compaction'` op (the canonical model's first-class compaction kind, not an `internal` op).
 
-1. The `compact_boundary` record emits one synthetic `OpStartedEvent`/`OpFinalizedEvent` pair with `Kind='internal'`, `Name='compact'`, `Ts=boundary.timestamp`, `EndTs = boundary.timestamp + compactMetadata.durationMs * 1000`. `BytesIn = compactMetadata.preTokens`, `BytesOut = compactMetadata.postTokens`, `Extras = compactMetadata`.
+1. The `compact_boundary` record emits one synthetic `OpStartedEvent`/`OpFinalizedEvent` pair with `OpKind='compaction'` (the canonical model defines `OpCompaction` as a first-class op kind), `Ts=boundary.timestamp`, `EndTs = boundary.timestamp + compactMetadata.durationMs * 1000`. `BytesIn = compactMetadata.preTokens`, `BytesOut = compactMetadata.postTokens`, `Extras = compactMetadata`.
 2. The `isCompactSummary:true` user message after the boundary does NOT start a new turn. It is emitted as a `LogEntry` `INF` and as a `PayloadRef` for the summary text (so the UI can show it in a "compaction" lane).
 3. The next regular user-prompt record opens a new turn as usual.
 4. The pre-compaction turn count is preserved; the post-compaction continues numbering monotonically.
@@ -745,7 +745,7 @@ The canonical events model is span-shaped and assumes adapters can produce expli
 
 1. **No native turn or op boundaries.** Inferred from message-chain heuristics (§5.3, §5.5). Risk: an exotic flow (mid-turn user interrupt with a `text` block instead of a tool_result; multi-prompt operator runs without explicit completion) could break inference. Mitigation: extensive fixtures from real data; if inference is ambiguous, the adapter emits `SourceError` `INF` and continues with best-effort.
 2. **No native cost.** Compute from `pricing.go`. Risk: pricing model changes silently. Mitigation: pricing is a versioned spec; tested against known totals where Anthropic's web console can be cross-checked.
-3. **Compaction is structural, not an op.** Modeled as a synthetic `Kind='internal'` op (§9). The canonical model already supports `Kind='internal'`, so no schema change is needed — but the UI must learn to render `compact_boundary` distinctively (a different lane / icon).
+3. **Compaction is a first-class op.** Modeled as a synthetic `OpKind='compaction'` op (§9). The canonical model already defines `OpCompaction`, so no schema change is needed — but the UI must learn to render `compact_boundary` distinctively (a different lane / icon).
 4. **Subagents share `sessionId` with parent.** Resolved via synthetic NativeID (`<sessionId>:agent:<agentId>`). The canonical model needs no extension; the adapter owns the NativeID synthesis.
 5. **Last-wins metadata snapshots have no Ts.** Records like `last-prompt`, `permission-mode`, `custom-title`, `ai-title`, `bridge-session`, `file-history-snapshot` have no `timestamp`. They are emitted as **session updates** (`SessionUpdatedEvent` for AgentName/Model; otherwise as in-memory state flushed to `sessions.extras_json` on the next `SourceProgress`). They do NOT appear on the timeline.
 6. **Synthetic `<synthetic>` model.** Handled as `LogEntry`, not as a model op (§3.2). No schema change.

@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/adapters"
-	// Side-effect import to populate the registry for the cursor-load tests.
+	// Side-effect imports to populate the registry for the cursor-load and
+	// probe tests.
 	_ "github.com/netdata/ai-viewer/internal/adapters/aiagent_v3"
+	_ "github.com/netdata/ai-viewer/internal/adapters/claude_code"
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
@@ -158,6 +160,7 @@ func TestResolveSources_ExplicitReplacesAutoDiscovery(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("CLAUDE_CONFIG_DIR", "") // hermetic: ignore any real claude config
 	if err := os.MkdirAll(filepath.Join(tmp, ".ai-agent", "sessions", "session"), 0o755); err != nil {
 		t.Fatalf("plant home: %v", err)
 	}
@@ -199,6 +202,7 @@ func TestResolveSources_AutoDiscoveryWhenNoFlags(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("CLAUDE_CONFIG_DIR", "") // hermetic: no claude-code source here
 	if err := os.MkdirAll(filepath.Join(tmp, ".ai-agent", "sessions", "session"), 0o755); err != nil {
 		t.Fatalf("plant home: %v", err)
 	}
@@ -208,7 +212,8 @@ func TestResolveSources_AutoDiscoveryWhenNoFlags(t *testing.T) {
 		t.Fatalf("resolveSources: %v", err)
 	}
 	// Both v3 and v2 should be discovered — v3's probe is the
-	// `session` subdir, v2's probe is the parent dir (deployment.md).
+	// `session` subdir, v2's probe is the parent dir (deployment.md). No
+	// .claude/projects here, so claude-code is not discovered.
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2 (v3 + v2 share location); got=%+v", len(got), got)
 	}
@@ -225,6 +230,7 @@ func TestResolveSources_AutoDiscoveryEmptyOnMissingTree(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("CLAUDE_CONFIG_DIR", "") // hermetic
 	got, err := resolveSources(nil, silentLogger())
 	if err != nil {
 		t.Fatalf("resolveSources: %v", err)
@@ -239,6 +245,112 @@ func TestResolveSources_MalformedSourceBubblesError(t *testing.T) {
 	_, err := resolveSources([]string{"not-a-format-location-pair"}, silentLogger())
 	if err == nil {
 		t.Fatal("resolveSources accepted malformed --source; want error")
+	}
+}
+
+// TestAutoDiscover_ClaudeCodeProbe verifies acceptance #8: a tmpdir layout
+// containing ~/.claude/projects/<one project dir> is auto-discovered as a
+// claude-code source pointing at the projects root.
+func TestAutoDiscover_ClaudeCodeProbe(t *testing.T) {
+	// Not parallel: t.Setenv mutates process-wide HOME / CLAUDE_CONFIG_DIR.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	projects := filepath.Join(tmp, ".claude", "projects", "-home-user-x")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatalf("plant claude projects: %v", err)
+	}
+
+	got, err := resolveSources(nil, silentLogger())
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	var cc *configuredSource
+	for i := range got {
+		if got[i].format == "claude-code" {
+			cc = &got[i]
+		}
+	}
+	if cc == nil {
+		t.Fatalf("claude-code source not auto-discovered; got %+v", got)
+	}
+	wantLoc := filepath.Join(tmp, ".claude", "projects")
+	if cc.location != wantLoc {
+		t.Fatalf("claude-code location = %q, want %q", cc.location, wantLoc)
+	}
+	// The registered format must construct via the registry.
+	if _, ok := adapters.Get("claude-code"); !ok {
+		t.Fatal("claude-code factory not registered")
+	}
+}
+
+// TestAutoDiscover_ClaudeConfigDirOverride verifies the probe honors
+// $CLAUDE_CONFIG_DIR (spec adapter-claude-code.md §2.1).
+func TestAutoDiscover_ClaudeConfigDirOverride(t *testing.T) {
+	// Not parallel: mutates process-wide env.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp) // no ~/.claude here
+	cfg := filepath.Join(tmp, "custom-claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	projects := filepath.Join(cfg, "projects", "-home-user-y")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatalf("plant custom claude projects: %v", err)
+	}
+
+	got, err := resolveSources(nil, silentLogger())
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	var loc string
+	for _, s := range got {
+		if s.format == "claude-code" {
+			loc = s.location
+		}
+	}
+	want := filepath.Join(cfg, "projects")
+	if loc != want {
+		t.Fatalf("claude-code location = %q, want %q (CLAUDE_CONFIG_DIR honored)", loc, want)
+	}
+}
+
+// TestAutoDiscover_NoClaudeCodeWhenAbsent verifies a workstation without
+// ~/.claude/projects does not register a claude-code source.
+func TestAutoDiscover_NoClaudeCodeWhenAbsent(t *testing.T) {
+	// Not parallel: mutates process-wide env.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	got, err := resolveSources(nil, silentLogger())
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	for _, s := range got {
+		if s.format == "claude-code" {
+			t.Fatalf("claude-code registered with no projects dir present: %+v", got)
+		}
+	}
+}
+
+// TestCountProjectDirs verifies the project-dir counter used for the
+// /api/health observability surface (acceptance #8).
+func TestCountProjectDirs(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	for _, d := range []string{"-home-user-a", "-home-user-b", "-home-user-c"} {
+		if err := os.MkdirAll(filepath.Join(tmp, d), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	// A stray file must not be counted.
+	if err := os.WriteFile(filepath.Join(tmp, "stray.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write stray: %v", err)
+	}
+	if n := countProjectDirs(tmp); n != 3 {
+		t.Fatalf("countProjectDirs = %d, want 3", n)
+	}
+	if n := countProjectDirs(filepath.Join(tmp, "missing")); n != 0 {
+		t.Fatalf("countProjectDirs(missing) = %d, want 0", n)
 	}
 }
 
