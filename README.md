@@ -6,7 +6,11 @@ Watches your local session storage for `ai-agent`, `claude-code`, `codex`, and `
 
 ## Status
 
-**Pre-alpha.** Phase 1 (ingester foundation + minimal UI) is in active scoping. See `.agents/sow/pending/` for the current SOW.
+**v0.1 — Phase 1 complete.** The single binary serves a live web UI (sessions
+list, session detail with Overview + Logs, sources/health) for the ai-agent
+v2/v3 adapters, with deep-linking, light/dark theme, and end-to-end +
+accessibility tests in CI. Phase 2 (Trace/Topology/Timeline views, more
+adapters, cross-session analytics) is next. See `.agents/sow/` for the SOWs.
 
 ## Why
 
@@ -22,11 +26,31 @@ When you run AI coding agents, every session leaves a trail on disk — turn bou
 | codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.json` | date-sharded rollout JSON |
 | opencode | `~/.local/share/opencode/opencode.db` | SQLite |
 
-New formats are added as Go adapters implementing one interface. See `.agents/sow/specs/adapter-contract.md`.
+New formats are added as Go adapters implementing one interface. See `.agents/sow/specs/adapter-contract.md`. **Phase 1 wires the ai-agent v2 + v3 adapters** (auto-discovered under `~/.ai-agent/sessions`); the claude-code, codex, and opencode adapters are planned for a later phase.
 
 ## Install
 
-(Available after Phase 1. Will be a single static binary `ai-viewer` with embedded frontend.)
+`ai-viewer-serve` is a single binary with the web UI embedded; `ai-viewer-ingest`
+populates its database. Both are localhost-only and read-only on your source
+files.
+
+```bash
+git clone https://github.com/netdata/ai-viewer ~/src/ai-viewer.git
+cd ~/src/ai-viewer.git
+./scripts/build.sh            # builds the UI + both binaries into bin/
+bin/ai-viewer-ingest &        # ingest your sessions (auto-discovers sources)
+bin/ai-viewer-serve           # serve the UI + API at http://127.0.0.1:7710
+```
+
+To run it persistently on login (systemd USER units, no root):
+
+```bash
+scripts/install-systemd-user.sh
+systemctl --user enable --now ai-viewer-ingest.service ai-viewer-serve.service
+```
+
+See [docs/runbook.md](docs/runbook.md) for full operating instructions and
+[SECURITY.md](SECURITY.md) for the security posture.
 
 ## Architecture
 

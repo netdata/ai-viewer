@@ -6576,6 +6576,38 @@ no stale wording remains (the one grep hit is the rationale comment explaining
 why "if missing" was rejected); `scripts/build.sh` green; nothing installed on
 this machine.
 
+### Chunk 20 — operator runbook + docs (2026-05-29)
+
+Doc-only chunk (SOW-0001 acceptance items: runbook stub + README status + the
+operator-facing doc set). Delivered:
+- **`README.md`** — Status flipped "Pre-alpha" → "v0.1 — Phase 1 complete";
+  Install section rewritten to the real flow (`scripts/build.sh` → run the two
+  binaries, or `scripts/install-systemd-user.sh` + `enable --now`); the
+  Supported-Formats table now notes Phase 1 wires only the ai-agent v2/v3
+  adapters.
+- **`docs/runbook.md`** — build / run (manual + systemd) / Phase-1 UI surfaces /
+  update / data locations / troubleshooting / boundaries.
+- **`docs/architecture-overview.md`** — operator-facing summary of
+  `architecture.md` (two binaries, SQLite, adapters, SSE, go:embed, notify).
+- **`SECURITY.md`** — localhost-only, no auth, read-only, zero outbound network,
+  USER-level systemd (no root), reporting guidance — distilled from
+  `security.md`.
+
+**Accuracy verification (master, grounded in code — the doc-claim discipline):**
+every operator-facing claim was checked against the shipped behavior. Caught +
+corrected two would-be overclaims before commit: the runbook + README initially
+implied auto-discovery of `~/.claude`/`~/.codex`/opencode, but
+`cmd/ai-viewer-ingest/sources.go:80` only probes `~/.ai-agent/sessions` (the
+registered adapters are aiagent_v2 + aiagent_v3 only — main.go:40-41); both docs
+now say so and point claude/codex/opencode to a later phase. Default bind,
+data paths, systemd flow, the not-built notice, and the Phase-1 route set all
+verified against the code/specs.
+
+**Review decision (judgment, recorded):** no external review round — doc-only,
+no runtime logic, grounded in the maintained specs and accuracy-verified against
+the code. The CI `gates` job's secret + AI-attribution scans run on the PR.
+Consistent with the doc-only proportionality calls earlier this SOW.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
