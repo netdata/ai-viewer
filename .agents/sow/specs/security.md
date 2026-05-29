@@ -35,6 +35,10 @@ Out of scope:
 
 ## Payload Serving Safety
 
+**Phase 2 — the payload route is not implemented in Phase 1** (it is not
+registered, and `payload_refs` deliberately carries no `url`). The defenses below
+are the design for when the streaming route lands; they are not yet active code.
+
 `GET /api/payloads/:ref` could be a vector if the `ref` is attacker-controlled. Defense:
 
 - Refs are integer IDs from the `payload_refs` table, not arbitrary paths from the URL.

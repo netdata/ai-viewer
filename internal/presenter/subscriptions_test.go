@@ -104,6 +104,41 @@ func TestSubscriptionsCreate_BadFilter(t *testing.T) {
 	}
 }
 
+// TestSubscriptionsCreate_ScalarWhitespace asserts the POST path trims the
+// session_id/root_session_id scalars before the empty check: a
+// whitespace-only scalar is a 400 BAD_REQUEST (a client bug surfaces rather
+// than a filter that silently matches everything), and a padded scalar is
+// accepted with the trimmed value echoed in filter_normalized.
+func TestSubscriptionsCreate_ScalarWhitespace(t *testing.T) {
+	t.Parallel()
+	p, _, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	for _, body := range []string{
+		`{"filter":{"session_id":"   "}}`,
+		`{"filter":{"root_session_id":"  "}}`,
+	} {
+		code, out := doPostSub(t, p, body)
+		if code != http.StatusBadRequest {
+			t.Fatalf("POST %s: status = %d, want 400", body, code)
+		}
+		if out.rawError.Error.Code != CodeBadRequest {
+			t.Fatalf("POST %s: code = %q, want BAD_REQUEST", body, out.rawError.Error.Code)
+		}
+	}
+
+	code, out := doPostSub(t, p, `{"filter":{"session_id":"  s1  ","root_session_id":" rootA "}}`)
+	if code != http.StatusOK {
+		t.Fatalf("padded scalars: status = %d, want 200", code)
+	}
+	if out.Filter.SessionID == nil || *out.Filter.SessionID != "s1" {
+		t.Fatalf("filter_normalized.session_id = %v, want trimmed \"s1\"", out.Filter.SessionID)
+	}
+	if out.Filter.RootSessionID == nil || *out.Filter.RootSessionID != "rootA" {
+		t.Fatalf("filter_normalized.root_session_id = %v, want trimmed \"rootA\"", out.Filter.RootSessionID)
+	}
+}
+
 // TestSubscriptionsCreate_MethodGate asserts non-POST methods are 405.
 func TestSubscriptionsCreate_MethodGate(t *testing.T) {
 	t.Parallel()

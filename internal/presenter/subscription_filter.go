@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/netdata/ai-viewer/internal/notify"
 )
@@ -185,9 +186,13 @@ func normalizeFilterArray(key string, in *[]string) ([]string, error) {
 }
 
 // normalizeScalar validates an optional scalar string (session_id,
-// root_session_id): rejects control chars; an empty string after trimming
-// is treated as a present-but-empty BAD_REQUEST so a client bug surfaces
-// rather than silently matching everything.
+// root_session_id): rejects control chars on the RAW value first, then trims
+// surrounding whitespace; an empty string after trimming is a
+// present-but-empty BAD_REQUEST so a client bug surfaces rather than silently
+// matching everything. The trimmed value is returned so the stored predicate
+// and the filter_normalized echo carry the canonical form — matching the
+// array dimensions (parseArrayParam) and the REST surface
+// (session_detail.go, subscriptions.go), which all trim.
 func normalizeScalar(key string, in *string) (*string, error) {
 	if in == nil {
 		return nil, nil
@@ -195,7 +200,7 @@ func normalizeScalar(key string, in *string) (*string, error) {
 	if err := rejectControlChars(key, *in); err != nil {
 		return nil, err
 	}
-	v := *in
+	v := strings.TrimSpace(*in)
 	if v == "" {
 		return nil, wrapBadFilter("filter " + quoteKey(key) + " is present but empty")
 	}

@@ -103,6 +103,43 @@ func TestParseSubscriptionFilter_Rejects(t *testing.T) {
 	}
 }
 
+// TestParseSubscriptionFilter_ScalarWhitespace asserts the scalar
+// session_id/root_session_id predicates are trimmed before the empty check
+// (matching the array dimensions and session_detail.go / subscriptions.go):
+// a whitespace-only value is a present-but-empty BAD_REQUEST, and a value
+// with surrounding spaces is accepted and normalized (trimmed) in the
+// filter_normalized echo. Without the trim, a whitespace-only scalar would
+// slip through and silently match everything.
+func TestParseSubscriptionFilter_ScalarWhitespace(t *testing.T) {
+	t.Parallel()
+
+	// Space-only scalars pass the control-char check (space is 0x20, not a
+	// control byte) and then trim to empty → present-but-empty BAD_REQUEST.
+	// This is the path the D1 fix adds: without TrimSpace the value would
+	// slip through and silently match everything.
+	for _, body := range []string{
+		`{"filter":{"session_id":"   "}}`,
+		`{"filter":{"root_session_id":"  "}}`,
+	} {
+		if _, err := parseSubscriptionFilter([]byte(body)); err == nil {
+			t.Fatalf("parseSubscriptionFilter(%s): want BAD_REQUEST error, got nil", body)
+		}
+	}
+
+	// Surrounding spaces are accepted and the stored value is trimmed.
+	f, err := parseSubscriptionFilter([]byte(`{"filter":{"session_id":"  s1  ","root_session_id":" rootA "}}`))
+	if err != nil {
+		t.Fatalf("parseSubscriptionFilter (padded scalars): %v", err)
+	}
+	norm := f.normalized()
+	if norm.SessionID == nil || *norm.SessionID != "s1" {
+		t.Fatalf("session_id = %v, want trimmed \"s1\"", norm.SessionID)
+	}
+	if norm.RootSessionID == nil || *norm.RootSessionID != "rootA" {
+		t.Fatalf("root_session_id = %v, want trimmed \"rootA\"", norm.RootSessionID)
+	}
+}
+
 // TestSubscriptionFilter_MatchesSessionChanged exercises matches() for
 // session_changed events against a seeded DB: a row that satisfies the
 // SQL dimensions matches; one that does not match on status, source, or

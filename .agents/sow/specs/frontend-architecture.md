@@ -31,47 +31,52 @@ frontend/
 │   ├── main.tsx                 # app entry
 │   ├── App.tsx                  # router + layout
 │   ├── theme/
-│   │   └── tokens.css           # color/spacing/font tokens, dark+light
-│   ├── api/
-│   │   ├── client.ts            # fetch wrapper
-│   │   ├── sessions.ts          # session endpoints
-│   │   ├── stats.ts
-│   │   ├── catalog.ts
-│   │   ├── payloads.ts
+│   │   ├── tokens.css           # color/spacing/font tokens, dark+light
+│   │   └── global.css           # base/reset styles
+│   ├── api/                     # one module per endpoint + shared client
+│   │   ├── client.ts            # fetch wrapper (API_BASE, error envelope)
+│   │   ├── queryClient.ts       # React Query client
+│   │   ├── sessions.ts          # /api/sessions + /api/sessions/:id
+│   │   ├── logs.ts              # /api/sessions/:id/logs
+│   │   ├── sources.ts           # /api/sources
+│   │   ├── stats.ts             # /api/stats
+│   │   ├── catalog.ts           # catalog client stub (Phase-2 routes)
+│   │   ├── payloads.ts          # payload helpers (Phase-2 route)
 │   │   ├── sse.ts               # SSE subscription + EventSource wrapper
-│   │   └── types.ts             # response types (mirror Go types)
+│   │   └── types.ts             # response types (mirror Go DTOs)
 │   ├── state/
 │   │   ├── filters.ts           # URL-synced filter store
-│   │   └── theme.ts             # theme provider
+│   │   ├── theme.ts             # theme provider (auto/dark/light)
+│   │   └── useLiveUpdates.ts    # SSE-driven query invalidation
 │   ├── components/              # reusable UI primitives
 │   │   ├── Layout/
 │   │   ├── FilterBar/
 │   │   ├── SessionRow/
-│   │   ├── SpanBar/
 │   │   ├── StatCard/
-│   │   └── ...
+│   │   ├── StatusViews/         # loading / empty / error states
+│   │   ├── Tabs/
+│   │   ├── LogRow/
+│   │   ├── LoadMore/
+│   │   ├── ComingSoon/          # Phase-2 placeholder panel
+│   │   └── ThemeToggle/
 │   ├── pages/
 │   │   ├── SessionsList/
-│   │   ├── SessionDetail/
-│   │   │   ├── OverviewTab/
-│   │   │   ├── TopologyTab/    # D3 force-directed
-│   │   │   ├── TraceTab/       # span tree
-│   │   │   ├── TimelineTab/    # D3 time-axis
-│   │   │   └── LogsTab/
-│   │   ├── Topology/           # cross-session
-│   │   ├── Tools/
-│   │   ├── Models/
-│   │   ├── Agents/
-│   │   └── Sources/
-│   ├── viz/
-│   │   ├── topology.ts          # D3 force-directed renderer
-│   │   ├── timeline.ts          # D3 timeline renderer
-│   │   └── color.ts             # status/severity color mapping
-│   └── lib/
-│       ├── format.ts            # ts/duration/bytes/cost formatters
-│       └── tree.ts              # session tree helpers
-├── public/                      # static assets (logos, favicons)
-└── tests/                       # Playwright E2E
+│   │   ├── SessionDetail/       # OverviewTab/ + LogsTab/ (Trace/Topology/
+│   │   │   ├── OverviewTab/     #   Timeline tabs are Phase 2, rendered inline
+│   │   │   └── LogsTab/         #   as ComingSoon placeholders)
+│   │   ├── Sources/
+│   │   ├── NotFound.tsx
+│   │   ├── Topology/            # cross-session — Phase 2 (ComingSoon)
+│   │   ├── Tools/               # Phase 2 (ComingSoon)
+│   │   ├── Models/              # Phase 2 (ComingSoon)
+│   │   └── Agents/              # Phase 2 (ComingSoon)
+│   ├── lib/
+│   │   ├── format.ts            # ts/duration/bytes/cost formatters
+│   │   └── tree.ts              # session tree helpers
+│   ├── test/                    # vitest setup (setup.ts, matchMedia.ts)
+│   └── viz/                     # D3 renderers — Phase 2 (empty in Phase 1)
+├── public/                      # static assets (favicon)
+└── tests/                       # Playwright E2E specs
 ```
 
 ## State Management

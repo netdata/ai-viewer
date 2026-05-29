@@ -256,7 +256,7 @@ func (p *Presenter) Handler() http.Handler {
 		loggingMiddleware(p.logger),
 		recoverMiddleware(p.logger),
 		bodyLimitMiddleware,
-		gzipMiddleware,
+		gzipMiddleware(p.logger),
 	)
 	return chain
 }

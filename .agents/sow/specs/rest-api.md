@@ -23,14 +23,16 @@ JSON over HTTP. All endpoints return `application/json` except `/api/payloads/:r
 {
   "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
-  "schema_version": 3,
+  "schema_version": 4,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,
   "sources": [
     { "id":"...", "format":"aiagent_v3", "location":"...", "enabled":true,
       "last_seen_at":<us>, "lag_us":<int>, "parse_errors":0, "last_seq":12345 }
-  ]
+  ],
+  "notify": { "last_seq":67890, "lag_us":<int> },
+  "sse": { "subscriptions":3 }
 }
 ```
 
@@ -115,7 +117,7 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
           "child_session_id":null,
           "payload_refs":[
             { "id":1,"kind":"llm_request","format":"http","compression":"gzip",
-              "url":"/api/payloads/1","original_bytes":1234,"stored_bytes":456 }
+              "original_bytes":1234,"stored_bytes":456 }
           ]
         }
       ]
@@ -144,6 +146,10 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
 
 ### GET /api/sessions/:id/topology
 
+**Phase 2 — not implemented in Phase 1.** Not registered; a request falls through
+to the `/api/` catch-all and returns a structured `NOT_FOUND`. The shape below is
+the planned contract.
+
 Returns nodes and edges for the D3 force-directed view.
 
 ```json
@@ -161,6 +167,9 @@ Returns nodes and edges for the D3 force-directed view.
 Size metric selection: `?metric=cost|tokens|duration|calls|ctx_pct` (default `duration`).
 
 ### GET /api/sessions/:id/timeline
+
+**Phase 2 — not implemented in Phase 1.** Not registered; returns a structured
+`NOT_FOUND` today. The shape below is the planned contract.
 
 Returns ordered spans for the timeline view.
 
@@ -202,9 +211,19 @@ Cross-session aggregates over the filtered set.
 
 ### GET /api/catalog/{tools,models,agents}
 
+**Phase 2 — not implemented in Phase 1.** The catalog tables are populated by the
+ingester but no handler serves them yet; returns a structured `NOT_FOUND` today.
+
 Catalog table contents with filters and sorting.
 
 ### GET /api/payloads/:ref
+
+**Phase 2 — not implemented in Phase 1.** The route is not registered (returns a
+structured `NOT_FOUND`), and Phase 1 deliberately does **not** emit a `url` on
+`payload_refs` (a viewer must not advertise a route it does not serve). The
+`payload_refs` entries still carry `id`/`kind`/`format`/`compression`/bytes so a
+later phase can add the streaming route + link. The shape below is the planned
+contract.
 
 Streams the payload bytes. Headers:
 
@@ -226,7 +245,10 @@ The `filter` is validated and normalized with the **same rules as the list
 endpoints** (`time_range`, `sources`, `agents`, `models`, `tools`, `status`,
 `session_id`, `root_session_id`; unknown fields rejected; present-but-empty
 array → `BAD_REQUEST`; ASCII control char `< 0x20` in any value →
-`BAD_REQUEST`). A bad filter returns `400`. Response `200`:
+`BAD_REQUEST`). The scalar `session_id` / `root_session_id` are **trimmed** and
+normalized; a present-but-whitespace-only value → `BAD_REQUEST` (consistent with
+the array dimensions and the other ID paths, which all trim). A bad filter
+returns `400`. Response `200`:
 
 ```json
 { "id": "sub-<32 hex>", "filter_normalized": { ... } }

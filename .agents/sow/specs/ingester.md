@@ -200,6 +200,15 @@ UPDATE sessions
 
 The `parent_native_id` is persisted into `extras_json.aiViewer.parentNativeId` at insert time so the resolver can re-run against the durable state. This is implementation detail of the ingester (the field is not part of the public schema or API contract).
 
+Because the resolver mutates `parent_session_id` / `root_session_id` **outside**
+the normal batch-writer path, it must emit its own `notify` rows in the **same
+transaction** as the linkage UPDATEs: a `session_changed` for each affected child,
+its newly-linked parent, and its root, plus one `stats_invalidated` (child-count /
+topology aggregates changed). Without this, an already-open UI would never refetch
+parent/child detail after a child-first ingestion is repaired — the SSE contract
+(`sse-protocol.md` §`session_changed`) promises an event whenever a matching
+session row changes, and resolver linkage is such a change.
+
 ## Sequencing and Aggregation Updates
 
 After each batch's per-event UPSERTs, the ingester runs a **two-stage aggregate refresh** for the dirty session and turn IDs touched in this batch:

@@ -152,6 +152,7 @@ func (p *Presenter) streamLoop(ctx context.Context, w http.ResponseWriter, rc *h
 				return
 			}
 			if err := p.writeEvent(w, rc, sub, ev); err != nil {
+				p.logger.DebugContext(ctx, "sse write failed", "error", err, "sub", sub)
 				return
 			}
 		case <-keepalive.C:

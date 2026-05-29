@@ -45,7 +45,6 @@ type sessionDetailBody struct {
 				Kind          string  `json:"kind"`
 				Format        string  `json:"format"`
 				Compression   *string `json:"compression"`
-				URL           string  `json:"url"`
 				OriginalBytes *int64  `json:"original_bytes"`
 				StoredBytes   *int64  `json:"stored_bytes"`
 			} `json:"payload_refs"`
@@ -113,14 +112,15 @@ func TestSessionDetail_HappyPath(t *testing.T) {
 	if t1.Ops[0].CtxUsed == nil || *t1.Ops[0].CtxUsed != 12000 {
 		t.Fatalf("op0 ctx_used = %v", t1.Ops[0].CtxUsed)
 	}
-	// o1 carries two payload_refs with URL /api/payloads/<id>.
+	// o1 carries two payload_refs. The streaming URL is Phase 2 (no `url`
+	// field is emitted yet — the /api/payloads route is unregistered), so the
+	// detail view only surfaces the ref metadata.
 	if len(t1.Ops[0].PayloadRefs) != 2 {
 		t.Fatalf("op0 payload_refs = %d, want 2", len(t1.Ops[0].PayloadRefs))
 	}
 	pr := t1.Ops[0].PayloadRefs[0]
-	wantURL := "/api/payloads/" + itoa64(pr.ID)
-	if pr.URL != wantURL {
-		t.Fatalf("payload url = %q, want %q", pr.URL, wantURL)
+	if pr.ID == 0 {
+		t.Fatalf("payload ref id = 0, want a real row id (%+v)", pr)
 	}
 	// o3 is a session op linking childA1.
 	if t1.Ops[2].ChildSessionID == nil || *t1.Ops[2].ChildSessionID != "childA1" {

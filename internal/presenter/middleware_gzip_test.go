@@ -4,17 +4,25 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+// gzipTestLogger is a discarding logger for the gzip middleware tests: the
+// middleware now takes a logger (to record a mid-stream copy failure at debug
+// level), and these tests do not exercise that failure path.
+func gzipTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // TestGzipMiddlewareCompressesLargeBodies asserts a response above
 // gzipMinBytes is compressed when the client advertises gzip support.
 func TestGzipMiddlewareCompressesLargeBodies(t *testing.T) {
 	t.Parallel()
 	payload := bytes.Repeat([]byte("abcd"), gzipMinBytes) // ~ 4 KB
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := gzipMiddleware(gzipTestLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(payload)
 	}))
@@ -43,7 +51,7 @@ func TestGzipMiddlewareCompressesLargeBodies(t *testing.T) {
 // CPU cost is not wasted on a few hundred bytes.
 func TestGzipMiddlewareSkipsSmallBodies(t *testing.T) {
 	t.Parallel()
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := gzipMiddleware(gzipTestLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
@@ -65,7 +73,7 @@ func TestGzipMiddlewareSkipsSmallBodies(t *testing.T) {
 func TestGzipMiddlewareSkipsEventStream(t *testing.T) {
 	t.Parallel()
 	payload := bytes.Repeat([]byte("x"), gzipMinBytes*2)
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := gzipMiddleware(gzipTestLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(payload)
 	}))
@@ -84,7 +92,7 @@ func TestGzipMiddlewareSkipsEventStream(t *testing.T) {
 func TestGzipMiddlewareSkipsWithoutAcceptEncoding(t *testing.T) {
 	t.Parallel()
 	payload := bytes.Repeat([]byte("y"), gzipMinBytes*2)
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := gzipMiddleware(gzipTestLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(payload)
 	}))

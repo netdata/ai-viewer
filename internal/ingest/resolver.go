@@ -72,22 +72,63 @@ func (r *resolver) Stop() {
 	}
 }
 
-// linkOrphans walks every session with parent_session_id IS NULL and a
-// non-empty extras_json.aiViewer.parentNativeId, and links it to the
-// parent if one with the matching (source_id, native_id) now exists.
-// It also re-resolves root_session_id when the orphan recorded a
-// rootNativeId in extras_json that initially fell back to self (because
-// the root row was not yet in the store).
+// linkOrphans links every orphan child whose parent (and/or root) has since
+// landed, and — crucially — emits the notify rows that tell an already-open
+// UI to refetch. The linkage mutates parent_session_id / root_session_id
+// OUTSIDE the batch-writer path, so the notify rows the writer would normally
+// emit are absent; without them the SSE contract (sse-protocol.md
+// §session_changed) is silently broken for child-first ingestions.
 //
-// Two statements run per pass: one for parent_session_id, one for
-// root_session_id. Each is a single UPDATE with a correlated subquery;
-// the bounded WHERE clauses keep the work proportional to the orphan
-// count rather than the full session table.
+// Everything runs in ONE transaction so the two UPDATEs and the notify rows
+// commit atomically: the serve poller can never observe a linkage without its
+// notification, nor a notification before the linked rows are visible. Each
+// UPDATE uses RETURNING to capture exactly the rows it changed (modernc.org/
+// sqlite supports UPDATE … RETURNING); the affected set is the union of every
+// changed child, its newly-linked parent, and its root. When nothing links,
+// the transaction makes no notify rows — an open poller is not spammed for a
+// no-op pass.
 func (r *resolver) linkOrphans(ctx context.Context) error {
 	if r.db == nil {
 		return errors.New("resolver: nil db")
 	}
-	res, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("resolver: begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// affected accumulates the distinct session ids whose row is now part of
+	// a newly-resolved parent/child/root relationship and therefore needs a
+	// session_changed notification.
+	affected := map[string]struct{}{}
+	if err := r.linkParents(ctx, tx, affected); err != nil {
+		return err
+	}
+	if err := r.linkRoots(ctx, tx, affected); err != nil {
+		return err
+	}
+	if err := r.emitResolverNotify(ctx, tx, affected); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("resolver: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// linkParents runs the parent-link UPDATE and records, for every child it
+// links, both the child id and its newly-set parent id into affected. A
+// changed child means its parent now has a visible new child, so an open
+// parent-detail view must refetch too (sse-protocol.md §session_changed).
+func (r *resolver) linkParents(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	before := len(affected)
+	rows, err := tx.QueryContext(ctx, `
 UPDATE sessions SET parent_session_id = (
     SELECT p.id FROM sessions p
      WHERE p.source_id = sessions.source_id
@@ -101,16 +142,25 @@ WHERE sessions.parent_session_id IS NULL
        WHERE p.source_id = sessions.source_id
          AND p.native_id = json_extract(sessions.extras_json, '$.aiViewer.parentNativeId')
   )
+RETURNING id, parent_session_id
 `)
 	if err != nil {
 		return fmt.Errorf("resolver UPDATE parent: %w", err)
 	}
-	if r.logger != nil {
-		if n, errAff := res.RowsAffected(); errAff == nil && n > 0 {
-			r.logger.Debug("resolver: linked orphan parents", "count", n)
-		}
+	if err := scanLinkedPairs(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE parent: %w", err)
 	}
-	res, err = r.db.ExecContext(ctx, `
+	if r.logger != nil && len(affected) > before {
+		r.logger.Debug("resolver: linked orphan parents", "affected", len(affected)-before)
+	}
+	return nil
+}
+
+// linkRoots runs the root-re-resolution UPDATE and records, for every child
+// it re-roots, both the child id and its newly-set root id into affected.
+func (r *resolver) linkRoots(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	before := len(affected)
+	rows, err := tx.QueryContext(ctx, `
 UPDATE sessions SET root_session_id = (
     SELECT r.id FROM sessions r
      WHERE r.source_id = sessions.source_id
@@ -125,14 +175,90 @@ WHERE sessions.root_session_id = sessions.id
        WHERE r.source_id = sessions.source_id
          AND r.native_id = json_extract(sessions.extras_json, '$.aiViewer.rootNativeId')
   )
+RETURNING id, root_session_id
 `)
 	if err != nil {
 		return fmt.Errorf("resolver UPDATE root: %w", err)
 	}
-	if r.logger != nil {
-		if n, errAff := res.RowsAffected(); errAff == nil && n > 0 {
-			r.logger.Debug("resolver: linked orphan roots", "count", n)
-		}
+	if err := scanLinkedPairs(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE root: %w", err)
+	}
+	if r.logger != nil && len(affected) > before {
+		r.logger.Debug("resolver: linked orphan roots", "affected", len(affected)-before)
 	}
 	return nil
+}
+
+// scanLinkedPairs reads (changedID, linkedID) pairs from an UPDATE …
+// RETURNING result and adds BOTH ids of every pair to affected. The linked id
+// (parent or root) is non-NULL on every returned row because the WHERE clause
+// only matches rows whose correlated subquery has a hit, but it is scanned as
+// nullable defensively. Closes rows before returning.
+func scanLinkedPairs(rows *sql.Rows, affected map[string]struct{}) error {
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var changed string
+		var linked sql.NullString
+		if err := rows.Scan(&changed, &linked); err != nil {
+			return err
+		}
+		affected[changed] = struct{}{}
+		if linked.Valid && linked.String != "" {
+			affected[linked.String] = struct{}{}
+		}
+	}
+	return rows.Err()
+}
+
+// emitResolverNotify writes the change-log rows for a resolver pass INSIDE the
+// pass's transaction: one session_changed per affected session (carrying that
+// session's current root_session_id, read back from the row just updated in
+// this tx), plus exactly one stats_invalidated when any session was affected
+// (child-count / topology aggregates changed). It mirrors the producer rules
+// and INSERT shape of the batch writer's emitNotify (notify_producer.go).
+// Emits nothing when affected is empty so a no-op pass is silent.
+func (r *resolver) emitResolverNotify(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	if len(affected) == 0 {
+		return nil
+	}
+	tsUS := time.Now().UTC().UnixMicro()
+	for id := range affected {
+		rootID, err := resolverLookupRoot(ctx, tx, id)
+		if err != nil {
+			// The row is guaranteed present (it is either the child the
+			// resolver just updated or its now-landed parent/root). A miss
+			// means the database is unhealthy; surfacing the error rolls back
+			// the whole pass rather than dropping a notification (no silent
+			// failures).
+			return fmt.Errorf("resolver notify: lookup root for session %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO notify (ts_us, kind, session_id, root_session_id)
+VALUES (?, 'session_changed', ?, ?)
+`, tsUS, id, rootID); err != nil {
+			return fmt.Errorf("resolver notify: insert session_changed: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO notify (ts_us, kind) VALUES (?, 'stats_invalidated')
+`, tsUS); err != nil {
+		return fmt.Errorf("resolver notify: insert stats_invalidated: %w", err)
+	}
+	return nil
+}
+
+// resolverLookupRoot returns the current root_session_id of the sessions row
+// identified by canonical id, read inside the caller's tx so it reflects the
+// linkage just applied. sql.ErrNoRows is an integrity failure (the row is
+// guaranteed present) and is returned to the caller.
+func resolverLookupRoot(ctx context.Context, tx *sql.Tx, id string) (string, error) {
+	var root string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT root_session_id FROM sessions WHERE id = ?`, id).Scan(&root); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("sessions row %s absent in resolver tx: %w", id, err)
+		}
+		return "", err
+	}
+	return root, nil
 }

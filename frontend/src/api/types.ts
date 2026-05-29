@@ -121,13 +121,16 @@ export interface SessionDetail {
   child_session_count: number;
 }
 
-/** One payload_refs row (presenter payloadRef). */
+/**
+ * One payload_refs row (presenter payloadRef). The byte-streaming route
+ * (GET /api/payloads/<id>) is Phase 2 and not yet registered, so no `url`
+ * field is present — only the ref metadata is surfaced today.
+ */
 export interface PayloadRef {
   id: number;
   kind: string;
   format: string;
   compression: string | null;
-  url: string;
   original_bytes: number | null;
   stored_bytes: number | null;
 }

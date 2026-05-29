@@ -147,9 +147,10 @@ func fillOpNullables(op *opDetail, endTS, duration sql.NullInt64, errClass sql.N
 
 // attachPayloadRefs reads every payload_ref for the session's ops in one
 // query (joined on ops.session_id) and appends each to its op via the
-// opIndex map, indexing back into the shared turns slice. The url field
-// is the /api/payloads/<id> streaming route (lands in a later chunk;
-// emitted now so clients can build links).
+// opIndex map, indexing back into the shared turns slice. Only the ref
+// metadata is surfaced; the byte-streaming route (GET /api/payloads/<id>) is
+// Phase 2 and unregistered, so no url is built here (rest-api.md §GET
+// /api/payloads).
 func (p *Presenter) attachPayloadRefs(ctx context.Context, sessionID string, turns []turnDetail, opIndex map[string]opLoc) error {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
@@ -187,7 +188,6 @@ ORDER BY pr.op_id ASC, pr.id ASC`, sessionID)
 			v := storedBytes.Int64
 			pr.StoredBytes = &v
 		}
-		pr.URL = payloadURL(pr.ID)
 		loc, ok := opIndex[opID]
 		if !ok {
 			continue
