@@ -6422,6 +6422,26 @@ Deferred (filed): visible SSE live indicator + fade-in animations + true
 live-append E2E → SOW-0018. Logs-tab / filter-bar E2E + bundle-size gate
 enforcement → noted as Phase-2 (not in the Chunk-18 validation plan).
 
+**CI caught a real a11y defect the local e2e + 4 review rounds missed
+(2026-05-29).** PR #22's first CI run: the `frontend` job's axe gate FAILED on
+`/sources` (both themes) with `scrollable-region-focusable` (serious) — yet
+`CI=1 npm run e2e` passed 19/19 locally. Root cause: the `.tableWrap`
+`overflow-x:auto` containers (sources/sessions/logs tables) become
+keyboard-inaccessible scrollable regions ONCE the table overflows the viewport;
+CI's viewport overflowed the 7-column sources table, the local viewport did not
+(viewport/data-dependent). This is a genuine Chunk-15 keyboard-a11y bug the unit
+tests + manual review + my local e2e all missed — exactly the value the E2E
+axe gate was built to provide. Fix (NOT a test weakening — the gate is correct):
+all three `.tableWrap` divs get `tabIndex={0}` + `role="region"` + `aria-label`
+(focusable named scroll region — the standard `scrollable-region-focusable`
+remedy), pinned by a new unit test per page (238 unit tests, +3).
+`frontend-architecture.md` §Accessibility gained the rule. CI is the empirical
+verification environment; merge gated on the `frontend` job going green there
+(per-check parse, not `--watch` exit — the gosec lesson). Lesson: `reuseExistingServer:false`
++ a fixed local viewport mean local e2e cannot reproduce every CI viewport;
+axe/visual-dependent checks must be confirmed green in CI before merge, never on
+the local run alone.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

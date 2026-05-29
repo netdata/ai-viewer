@@ -64,7 +64,7 @@ export function SessionsList() {
         <EmptyState>No sessions match the current filters.</EmptyState>
       ) : (
         <>
-          <div className={styles.tableWrap}>
+          <div className={styles.tableWrap} tabIndex={0} role="region" aria-label="Sessions table">
             <table className={styles.table}>
               <thead>
                 <tr>

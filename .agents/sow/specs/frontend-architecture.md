@@ -254,6 +254,14 @@ This inline script is the **only** JS that runs synchronously before React; ever
 - ARIA labels on icon-only buttons.
 - Focus rings visible in both themes.
 - Color is never the only signal (status text + color, not just color).
+- **Scrollable table wrappers are focusable named regions.** Every horizontally
+  scrollable container (the `.tableWrap` `overflow-x:auto` wrappers on the
+  sessions list, sources table, and logs table) carries `tabIndex={0}` +
+  `role="region"` + an `aria-label`, so a keyboard-only user can scroll it and a
+  screen reader announces it. Without `tabIndex`, axe's `scrollable-region-focusable`
+  rule (serious) fails the moment the content overflows the viewport — which is
+  viewport- and data-dependent, so it must be fixed structurally, not avoided by
+  a wide test viewport. (Surfaced by the Chunk-18 E2E axe gate on `/sources`.)
 
 ## Build & Embed
 

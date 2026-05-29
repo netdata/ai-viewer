@@ -94,6 +94,19 @@ describe('LogsTab', () => {
     expect(within(table).getByText('WRN')).toBeInTheDocument();
   });
 
+  it('wraps the log table in a keyboard-focusable named region (scrollable-region-focusable)', () => {
+    logsSpy.mockReturnValue(
+      result({
+        data: { pages: [page([logItem({ message: 'first line' })])], pageParams: [''] },
+      }),
+    );
+    render(<LogsTab sessionId="s1" />);
+    // The overflow-x:auto wrapper must be focusable so keyboard-only users can
+    // scroll it; without tabindex axe's scrollable-region-focusable rule fails.
+    const region = screen.getByRole('region', { name: /session logs/i });
+    expect(region).toHaveAttribute('tabindex', '0');
+  });
+
   it('starts with all severities (empty set) and shows the hint', () => {
     logsSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
     render(<LogsTab sessionId="s1" />);
