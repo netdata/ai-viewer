@@ -53,9 +53,19 @@ type fileMapper struct {
 	// agentName seeds SessionStartedEvent.AgentName (subagent: agentType
 	// from .meta.json; main: filled later from custom/ai title).
 	agentName string
-	// relPath is the file's path relative to the projects root, used as the
-	// PayloadRef LocationURI base and for log attribution.
+	// absPath is the transcript's absolute path on disk, used as the
+	// PayloadRef LocationURI for inline bodies (toolUseResult, file
+	// attachments, compaction summaries live inline in the jsonl) and for
+	// log attribution.
 	absPath string
+	// root is the configured projects root (absolute), used to enforce
+	// symlink/path containment on any PayloadRef LocationURI (spec §6.1,
+	// security.md §6). Empty disables the check (mapper-only unit tests).
+	root string
+	// sessionDir is the absolute <projDir>/<sessionId>/ dir, used to locate
+	// spill files referenced by compact_file_reference attachments
+	// (<sessionDir>/tool-results/<id>.txt). Empty for mapper-only tests.
+	sessionDir string
 
 	// recordIdx is the 0-based ordinal of the record being mapped, used to
 	// derive a stable per-file SourceSeq. Monotone within a streaming pass.
@@ -77,6 +87,49 @@ type fileMapper struct {
 	// modelSeen is the first non-synthetic model observed, used to emit a
 	// single SessionUpdatedEvent carrying the model.
 	modelSeen bool
+	// customTitleSeen records that a custom-title snapshot has set the
+	// AgentName, so a later ai-title does NOT clobber the operator's chosen
+	// title (spec §3.7 precedence: custom wins regardless of arrival order).
+	customTitleSeen bool
+	// seenUnknownType dedups unknown-`type` SourceErrors to one per distinct
+	// variant per file (spec §3.12, acceptance #2): a transcript with many
+	// records of one unrecognized type must surface exactly one error, not
+	// one per occurrence.
+	seenUnknownType map[string]struct{}
+	// agentOps records every parent `Agent` tool_use op the mapper emitted,
+	// keyed by the child session's native id. The caller finalizes these on
+	// the child sidechain's EOF (spec §8.1, P1b): the parent transcript has no
+	// tool_result for the Agent tool, so the op is otherwise stuck running.
+	agentOps map[string]agentOpRef
+	// fullyRead reports whether this file was streamed to EOF with no parked
+	// partial trailing line. Set by readTranscript. A fully-read subagent
+	// sidechain in Scan finalizes its parent's Agent op (§8.1).
+	fullyRead bool
+	// lastTsUs is the timestamp (micros) of the most recent record carrying
+	// one; the child's end time used to stamp the deferred Agent-op finalize
+	// (spec §8.1). Stays 0 for a file whose records all lack timestamps.
+	lastTsUs int64
+}
+
+// agentOpRef locates a parent `Agent` op so it can be finalized when its child
+// sidechain ends (spec §8.1).
+type agentOpRef struct {
+	turnSeq int
+	opSeq   int
+}
+
+// firstUnknownType reports whether typ is the first occurrence of this
+// unknown record type on this file, recording it so subsequent occurrences
+// are suppressed (spec §3.12). Lazily allocates the set.
+func (m *fileMapper) firstUnknownType(typ string) bool {
+	if m.seenUnknownType == nil {
+		m.seenUnknownType = map[string]struct{}{}
+	}
+	if _, seen := m.seenUnknownType[typ]; seen {
+		return false
+	}
+	m.seenUnknownType[typ] = struct{}{}
+	return true
 }
 
 // openToolOp records where an in-flight tool op was emitted so its
@@ -87,18 +140,40 @@ type openToolOp struct {
 	name    string
 }
 
+// mapperConfig bundles the per-file inputs newFileMapper needs. Grouping them
+// keeps the constructor readable as the field count grew (PayloadRef support
+// added root + sessionDir).
+type mapperConfig struct {
+	sourceID       string
+	absPath        string
+	nativeID       string
+	parentNativeID string
+	kind           canonical.SessionKind
+	agentName      string
+	toolUseToAgent map[string]string
+	// root is the configured projects root (absolute) for PayloadRef
+	// containment; sessionDir locates spill files. Both may be empty in
+	// mapper-only unit tests (PayloadRef LocationURI containment then relies
+	// solely on the absPath being absolute).
+	root       string
+	sessionDir string
+}
+
 // newFileMapper constructs a mapper for one transcript file.
-func newFileMapper(sourceID, absPath, nativeID, parentNativeID string, kind canonical.SessionKind, agentName string, toolUseToAgent map[string]string) *fileMapper {
+func newFileMapper(cfg mapperConfig) *fileMapper {
+	toolUseToAgent := cfg.toolUseToAgent
 	if toolUseToAgent == nil {
 		toolUseToAgent = map[string]string{}
 	}
 	return &fileMapper{
-		sourceID:       sourceID,
-		nativeID:       nativeID,
-		parentNativeID: parentNativeID,
-		kind:           kind,
-		agentName:      agentName,
-		absPath:        absPath,
+		sourceID:       cfg.sourceID,
+		nativeID:       cfg.nativeID,
+		parentNativeID: cfg.parentNativeID,
+		kind:           cfg.kind,
+		agentName:      cfg.agentName,
+		absPath:        cfg.absPath,
+		root:           cfg.root,
+		sessionDir:     cfg.sessionDir,
 		toolOps:        map[string]openToolOp{},
 		toolUseToAgent: toolUseToAgent,
 	}
@@ -111,6 +186,9 @@ func newFileMapper(sourceID, absPath, nativeID, parentNativeID string, kind cano
 func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 	idx := m.recordIdx
 	m.recordIdx++
+	if ts := m.recordTs(rec); ts > m.lastTsUs {
+		m.lastTsUs = ts
+	}
 
 	out := make([]canonical.Event, 0, 4)
 	sub := uint64(0)
@@ -151,7 +229,19 @@ func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 		}
 		out = append(out, evs...)
 	case recAttachment:
-		out = append(out, m.logEntry(advance(m.recordTs(rec)), "DBG", "attachment", rec))
+		ts := m.recordTs(rec)
+		out = append(out, m.logEntry(advance(ts), "DBG", "attachment", rec))
+		// A `file` attachment carrying inline content also emits a PayloadRef
+		// so the UI can surface the attached file (spec §5.4, P2b). Other
+		// subtypes (incl. compact_file_reference, whose target lives outside
+		// the served root) emit no ref — see §3.4.
+		ref, ok, perr := m.emitFileAttachmentPayload(rec, advance(ts))
+		if perr != nil {
+			return nil, perr
+		}
+		if ok {
+			out = append(out, ref)
+		}
 	case recQueueOperation:
 		out = append(out, m.logEntry(advance(m.recordTs(rec)), "INF", "queue-operation", rec))
 	case recPRLink:

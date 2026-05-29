@@ -77,6 +77,89 @@ func TestScan_UnknownTypeTolerance(t *testing.T) {
 	}
 }
 
+// TestScan_UnknownTypePerVariantDedup verifies acceptance #2's stricter
+// requirement (P2d): many occurrences of ONE unknown `type` surface exactly
+// one SourceError, not one per occurrence. The prior implementation emitted
+// per-occurrence, flooding /health for a transcript full of one new type.
+func TestScan_UnknownTypePerVariantDedup(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	projDir := filepath.Join(tmp, "-home-user-x")
+	var b strings.Builder
+	b.WriteString(`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}` + "\n")
+	// 50 occurrences of the SAME unknown type.
+	const occurrences = 50
+	for i := 0; i < occurrences; i++ {
+		b.WriteString(`{"type":"brand-new-future-type","sessionId":"s"}` + "\n")
+	}
+	writeFileBytes(t, filepath.Join(projDir, "s.jsonl"), []byte(b.String()))
+
+	_, errs := collectErrors(t, tmp)
+	unknownErrs := 0
+	for _, e := range errs {
+		if strings.Contains(e, "unknown record type") && strings.Contains(e, "brand-new-future-type") {
+			unknownErrs++
+		}
+	}
+	if unknownErrs != 1 {
+		t.Fatalf("one unknown type repeated %d times surfaced %d SourceErrors, want exactly 1", occurrences, unknownErrs)
+	}
+}
+
+// TestScan_SymlinkEscapeRefused pins P2e (spec §6.1, security.md §6): a
+// transcript that is a symlink resolving OUTSIDE the projects root is refused
+// with a SourceError and never read. A legitimate transcript in the same
+// project dir is still ingested, proving the guard rejects only the escape.
+func TestScan_SymlinkEscapeRefused(t *testing.T) {
+	t.Parallel()
+	// A secret file OUTSIDE the projects root, shaped like a real transcript
+	// so it WOULD parse and emit a session if the guard failed to stop it.
+	outside := t.TempDir()
+	secretPath := filepath.Join(outside, "secret.jsonl")
+	writeFileBytes(t, secretPath,
+		[]byte(`{"type":"user","uuid":"x1","sessionId":"escaped","message":{"role":"user","content":"leak"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	// A legitimate in-root transcript.
+	writeFileBytes(t, filepath.Join(proj, "ok.jsonl"),
+		[]byte(`{"type":"user","uuid":"u1","sessionId":"ok","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+	// A *.jsonl symlink inside the project dir pointing at the outside secret.
+	escapeLink := filepath.Join(proj, "escape.jsonl")
+	if err := os.Symlink(secretPath, escapeLink); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	events, errs := collectErrors(t, root)
+
+	// The escaping session must NOT be ingested.
+	for _, ev := range events {
+		if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.NativeID == "escaped" {
+			t.Fatalf("symlink escaping the root was read and emitted session %q (P2e breach)", ss.NativeID)
+		}
+	}
+	// The legitimate session must still be ingested.
+	var sawOK bool
+	for _, ev := range events {
+		if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.NativeID == "ok" {
+			sawOK = true
+		}
+	}
+	if !sawOK {
+		t.Fatal("legitimate in-root transcript was not ingested; guard too aggressive")
+	}
+	// A containment SourceError must surface for the escape.
+	var sawEscapeErr bool
+	for _, e := range errs {
+		if strings.Contains(e, "escape.jsonl") && (strings.Contains(e, "outside the projects root") || strings.Contains(e, "symlink escape")) {
+			sawEscapeErr = true
+		}
+	}
+	if !sawEscapeErr {
+		t.Fatalf("no symlink-escape SourceError surfaced; errors=%v", errs)
+	}
+}
+
 // TestScan_DiscoversMainAndSubagent verifies discovery walks both the main
 // transcript and the subagent sidechain, emitting two sessions.
 func TestScan_DiscoversMainAndSubagent(t *testing.T) {

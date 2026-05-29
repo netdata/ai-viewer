@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -247,4 +248,79 @@ func splitNonEmptyLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// TestScanThenTail_NoLossInWindow pins P2c (spec §6.3): records appended to a
+// transcript BETWEEN Scan finishing and Tail starting must NOT be lost. Tail
+// resumes from the per-file offsets Scan recorded on the instance (and does an
+// initial catch-up read to current EOF), so the during-window append surfaces.
+// With the pre-fix behavior (Tail snapshots current EOF), turn 2 below would be
+// silently skipped.
+func TestScanThenTail_NoLossInWindow(t *testing.T) {
+	t.Parallel()
+	turn1 := []string{
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"first"},"timestamp":"2026-05-26T10:00:00.000Z","cwd":"<HOME>/x"}`,
+		`{"type":"system","subtype":"turn_duration","uuid":"sy1","sessionId":"s","durationMs":1000,"timestamp":"2026-05-26T10:00:01.000Z"}`,
+	}
+	// Appended AFTER Scan, BEFORE Tail reads — the data-loss window.
+	turn2 := []string{
+		`{"type":"user","uuid":"u2","sessionId":"s","message":{"role":"user","content":"second"},"timestamp":"2026-05-26T10:01:00.000Z","cwd":"<HOME>/x"}`,
+	}
+
+	tmp := t.TempDir()
+	proj := filepath.Join(tmp, "-home-user-x")
+	path := filepath.Join(proj, "s.jsonl")
+	writeFileBytes(t, path, []byte(strings.Join(turn1, "\n")+"\n"))
+
+	a, err := New(tmp, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Scan turn 1; the adapter records its final offsets for the Tail handoff.
+	scanOut := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	_ = drainBuffered(scanOut)
+	if a.scanCursor == nil {
+		t.Fatal("Scan must record scanCursor for the Tail handoff (P2c)")
+	}
+
+	// The window: append turn 2 before Tail starts watching.
+	appendFileBytes(t, path, []byte(strings.Join(turn2, "\n")+"\n"))
+
+	// Tail on the SAME instance. Its startup catch-up reads from the recorded
+	// offset to EOF, so turn 2 must appear. Run in a goroutine and wait for
+	// turn 2's TurnStarted, then cancel.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailOut := make(chan canonical.Event, 256)
+	done := make(chan struct{})
+	go func() { _ = a.Tail(ctx, tailOut); close(done) }()
+
+	if !waitForTurn2(t, tailOut) {
+		cancel()
+		<-done
+		t.Fatal("turn 2 (appended in the Scan→Tail window) was not emitted by Tail (P2c data loss)")
+	}
+	cancel()
+	<-done
+}
+
+// waitForTurn2 drains tailOut until a TurnStartedEvent with Seq==2 arrives or
+// the timeout elapses. Returns true on success.
+func waitForTurn2(t *testing.T, tailOut <-chan canonical.Event) bool {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-tailOut:
+			if ts, ok := ev.(canonical.TurnStartedEvent); ok && ts.Seq == 2 {
+				return true
+			}
+		case <-timeout:
+			return false
+		}
+	}
 }

@@ -105,10 +105,17 @@ func runGoldenScenario(t *testing.T, scenarioDir string) {
 	}
 }
 
-// encodeEvents serialises events one goldenEvent per line, with the
-// absolute test-machine root replaced by rootPlaceholder so golden files
-// are portable. SourceID (which embeds the root) is rewritten.
+// encodeEvents serialises events one goldenEvent per line, with the absolute
+// test-machine root replaced by rootPlaceholder so golden files are portable
+// AND carry no operator filesystem path (sensitive-data hygiene). Two fields
+// embed the root: SourceID ("claude-code:<root>") and PayloadRef.LocationURI
+// ("file://<resolved-root>/..."). The latter is symlink-resolved by the
+// adapter, so the resolved form of the root is also rewritten.
 func encodeEvents(events []canonical.Event, absRoot string) ([]byte, error) {
+	resolvedRoot := absRoot
+	if r, err := filepath.EvalSymlinks(absRoot); err == nil {
+		resolvedRoot = r
+	}
 	var b strings.Builder
 	for _, ev := range events {
 		payload, err := json.Marshal(ev)
@@ -116,7 +123,12 @@ func encodeEvents(events []canonical.Event, absRoot string) ([]byte, error) {
 			return nil, fmt.Errorf("marshal %T: %w", ev, err)
 		}
 		s := string(payload)
+		// Rewrite every embedding of the absolute root to the portable
+		// placeholder: SourceID's "claude-code:<root>" prefix and any
+		// LocationURI "file://<root>" (raw or symlink-resolved).
 		s = strings.ReplaceAll(s, sourceIDPrefix+absRoot, sourceIDPrefix+rootPlaceholder)
+		s = strings.ReplaceAll(s, "file://"+filepath.ToSlash(resolvedRoot), "file://"+rootPlaceholder)
+		s = strings.ReplaceAll(s, "file://"+filepath.ToSlash(absRoot), "file://"+rootPlaceholder)
 
 		ge := goldenEvent{Kind: string(ev.EventKind()), Payload: json.RawMessage(s)}
 		enc, err := json.Marshal(ge)

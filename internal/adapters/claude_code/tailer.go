@@ -48,11 +48,35 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 		onError(fmt.Errorf("claude_code: projects root %s not present (read-only on sources, no mkdir): %w", root, statErr))
 		return nil
 	}
+	// Resolve the root through symlinks ONCE so every watched dir can be
+	// checked for containment against it (spec §6.1, P2e): a symlinked
+	// directory inside the tree that points outside the resolved root is
+	// never Add()ed to the watcher.
+	resolvedRoot, rrErr := filepath.EvalSymlinks(filepath.Clean(root))
+	if rrErr != nil {
+		onError(fmt.Errorf("claude_code: cannot resolve projects root %s; tail disabled for this source: %w", root, rrErr))
+		return nil
+	}
 	watched := map[string]struct{}{}
-	addWatchTree(watcher, root, watched, onError)
+	addWatchTree(watcher, resolvedRoot, root, watched, onError)
 
 	dirty := make(map[string]struct{}, 16)
 	metaDirty := make(map[string]struct{}, 16)
+	// Loop-lifetime Agent-op deferral so a parent Agent op observed in one
+	// flush is finalized when its child sidechain ends in another (spec §8.1).
+	deferral := newTailDeferral()
+
+	// Initial catch-up (spec §6.3, P2c): the watch is now established, but any
+	// bytes appended to a known file BETWEEN Scan finishing and this point
+	// arrived before the watch and would otherwise only be read on the next
+	// WRITE event (which may never come for an idle session). Read every known
+	// file from its cursor offset to current EOF once, up front, so the
+	// Scan→Tail window loses nothing. Re-emission of an already-consumed line
+	// is absorbed by the ingester's idempotent upserts.
+	if perr := catchUpFromCursor(ctx, resolvedRoot, root, sourceID, &cur, deferral, out, onError); perr != nil {
+		return perr
+	}
+
 	debounce := time.NewTimer(debounceWindow)
 	defer debounce.Stop()
 	if !debounce.Stop() {
@@ -69,9 +93,9 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			if !ok {
 				return nil
 			}
-			handleEvent(watcher, root, ev, watched, dirty, metaDirty, onError)
+			handleEvent(watcher, resolvedRoot, root, ev, watched, dirty, metaDirty, onError)
 			if len(dirty)+len(metaDirty) >= debounceMaxEntries {
-				if perr := flushDirty(ctx, root, sourceID, dirty, metaDirty, &cur, out, onError); perr != nil {
+				if perr := flushDirty(ctx, root, sourceID, dirty, metaDirty, &cur, deferral, out, onError); perr != nil {
 					return perr
 				}
 				dirty = make(map[string]struct{}, 16)
@@ -87,7 +111,7 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			}
 			onError(fmt.Errorf("claude_code: watcher: %w", werr))
 		case <-debounce.C:
-			if perr := flushDirty(ctx, root, sourceID, dirty, metaDirty, &cur, out, onError); perr != nil {
+			if perr := flushDirty(ctx, root, sourceID, dirty, metaDirty, &cur, deferral, out, onError); perr != nil {
 				return perr
 			}
 			dirty = make(map[string]struct{}, 16)
@@ -95,7 +119,7 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 		case <-tick.C:
 			// Re-walk to Add() any directory created since startup
 			// (new project dir, new session dir, new subagents/ dir).
-			addWatchTree(watcher, root, watched, onError)
+			addWatchTree(watcher, resolvedRoot, root, watched, onError)
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return perr
 			}
@@ -103,18 +127,56 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	}
 }
 
+// catchUpFromCursor reads every currently-discovered transcript (and refreshes
+// every changed meta) from its cursor offset to current EOF, once, at Tail
+// startup (spec §6.3, P2c). It closes the Scan→Tail window: bytes appended
+// before the watch was established are read here rather than waiting for a
+// future WRITE event. It reuses flushDirty so the offset advance, partial-line
+// hold-back, Agent-op deferral, and SourceProgress checkpoint are identical to
+// the steady-state path. A file already fully consumed by Scan re-reads zero
+// new bytes (offset == size) and emits nothing.
+func catchUpFromCursor(ctx context.Context, resolvedRoot, root, sourceID string, cur *Cursor, def *tailDeferral, out chan<- canonical.Event, onError func(error)) error {
+	transcripts, derr := discoverTranscripts(root, onError)
+	if derr != nil {
+		// A discovery failure is non-fatal for Tail: surface it and continue
+		// into the watch loop (steady-state WRITE events still drive reads).
+		onError(fmt.Errorf("claude_code: tail catch-up discovery: %w", derr))
+		return nil
+	}
+	if len(transcripts) == 0 {
+		return nil
+	}
+	dirty := make(map[string]struct{}, len(transcripts))
+	for _, t := range transcripts {
+		dirty[t.rel] = struct{}{}
+	}
+	// Refresh any meta whose content changed since the cursor's metaSeen so a
+	// sidecar rewritten during the window is picked up (flushDirty skips
+	// unchanged hashes). resolvedRoot is unused here (containment already
+	// applied by discoverTranscripts) but kept in the signature so a future
+	// meta-specific containment check has it.
+	_ = resolvedRoot
+	metaDirty := make(map[string]struct{})
+	if hashes, herr := metaHashes(root); herr == nil {
+		for rel := range hashes {
+			metaDirty[rel] = struct{}{}
+		}
+	}
+	return flushDirty(ctx, root, sourceID, dirty, metaDirty, cur, def, out, onError)
+}
+
 // handleEvent classifies one fsnotify event. New directories are added to
 // the watch set. Transcript writes mark the relative path dirty; meta-file
 // writes mark the meta path dirty. Removes/renames are logged, not acted on
 // (spec §6.2).
-func handleEvent(watcher *fsnotify.Watcher, root string, ev fsnotify.Event, watched, dirty, metaDirty map[string]struct{}, onError func(error)) {
+func handleEvent(watcher *fsnotify.Watcher, resolvedRoot, root string, ev fsnotify.Event, watched, dirty, metaDirty map[string]struct{}, onError func(error)) {
 	// A newly created directory must be watched (fsnotify is non-recursive).
 	// Files written into it BEFORE we Add() the watch would be missed, so we
 	// also walk the new dir and mark any transcripts/metas already present as
 	// dirty (race-window catch-up). Subsequent writes arrive via the watch.
 	if ev.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-			addWatchTree(watcher, ev.Name, watched, onError)
+			addWatchTree(watcher, resolvedRoot, ev.Name, watched, onError)
 			markExistingDirty(root, ev.Name, dirty, metaDirty)
 			return
 		}
@@ -174,14 +236,20 @@ func relOrBase(root, abs string) string {
 // addWatchTree walks dir and Add()s every subdirectory not already watched.
 // Errors adding a single dir are surfaced via onError but do not abort the
 // walk. fsnotify de-duplicates Add() of an already-watched path, but the
-// watched set avoids the syscall churn on every tick.
-func addWatchTree(watcher *fsnotify.Watcher, dir string, watched map[string]struct{}, onError func(error)) {
+// watched set avoids the syscall churn on every tick. resolvedRoot is the
+// symlink-resolved projects root: a directory that resolves outside it (a
+// planted symlink escaping the source) is refused with a SourceError and not
+// watched (spec §6.1, P2e). SkipDir prunes the escaping subtree from the walk.
+func addWatchTree(watcher *fsnotify.Watcher, resolvedRoot, dir string, watched map[string]struct{}, onError func(error)) {
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if !d.IsDir() {
 			return nil
+		}
+		if !withinSourceRoot(resolvedRoot, path, onError) {
+			return filepath.SkipDir
 		}
 		if _, ok := watched[path]; ok {
 			return nil
@@ -206,13 +274,31 @@ func resetDebounce(t *time.Timer) {
 	t.Reset(debounceWindow)
 }
 
+// tailDeferral carries Agent-op deferral state across Tail flush cycles (spec
+// §8.1, P1b). The Tail loop owns one instance for its lifetime so a parent
+// Agent op recorded in one flush is finalized when its child sidechain reaches
+// EOF in a later flush (or the same flush), regardless of arrival order. A
+// child finalized once is removed so a subsequent append that re-opens the
+// file does not re-finalize.
+type tailDeferral struct {
+	// pending maps child native id → parent Agent op location.
+	pending map[string]agentOpFinalize
+	// done records child native ids already finalized so a re-read does not
+	// re-emit the finalize.
+	done map[string]struct{}
+}
+
+func newTailDeferral() *tailDeferral {
+	return &tailDeferral{pending: map[string]agentOpFinalize{}, done: map[string]struct{}{}}
+}
+
 // flushDirty re-reads every dirty transcript from its cursor offset and
 // re-reads every changed meta file, updating the shared cursor. Emits a
 // SourceProgress checkpoint at the end. Meta changes that introduce a new
 // toolUseId→agentId mapping update only future Agent ops; already-emitted
 // ops are not retro-patched (the resolver handles parent/child linkage via
 // the structural path independently of toolUseId).
-func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map[string]struct{}, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
+func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map[string]struct{}, cur *Cursor, def *tailDeferral, out chan<- canonical.Event, onError func(error)) error {
 	// Record meta-file hashes first so a transcript flushed in the same
 	// cycle picks up the freshest metaMap. A meta whose content hash is
 	// unchanged from the cursor's metaSeen is skipped — a bare touch/mtime
@@ -243,6 +329,7 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map
 	sort.Strings(names)
 
 	metaCache := map[string]metaMap{}
+	childEnd := map[string]childEndState{}
 	for _, rel := range names {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -261,7 +348,7 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map
 			mm = cached
 		}
 		fc := cur.fileCursor(rel)
-		updated, _, rerr := readTranscript(ctx, t, sourceID, mm, fc, out, onError)
+		updated, _, mapper, rerr := readTranscript(ctx, root, t, sourceID, mm, fc, out, onError)
 		if rerr != nil {
 			if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 				return rerr
@@ -270,8 +357,57 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty, metaDirty map
 			continue
 		}
 		*cur = cur.withFile(rel, updated)
+		// Fold this file's Agent ops / child end-state into the loop-lifetime
+		// deferral so a parent Agent op is finalized when its child reaches
+		// EOF, in any flush order (spec §8.1, P1b).
+		if def != nil {
+			collectAgentDeferral(mapper, t, def.pending, childEnd)
+		}
+	}
+	if def != nil {
+		if perr := emitTailAgentFinalizations(ctx, sourceID, def, childEnd, out); perr != nil {
+			return perr
+		}
 	}
 	return emitProgress(ctx, sourceID, *cur, out)
+}
+
+// emitTailAgentFinalizations finalizes parent Agent ops whose child sidechain
+// reached EOF in this flush (spec §8.1, P1b). It consults the loop-lifetime
+// pending map (which may hold a parent recorded in an earlier flush) and the
+// per-flush childEnd. Each finalized child is marked done so a later append
+// that re-reads it does not re-finalize. Ordered for deterministic replay.
+func emitTailAgentFinalizations(ctx context.Context, sourceID string, def *tailDeferral, childEnd map[string]childEndState, out chan<- canonical.Event) error {
+	childIDs := make([]string, 0, len(childEnd))
+	for childID := range childEnd {
+		childIDs = append(childIDs, childID)
+	}
+	sort.Strings(childIDs)
+	for _, childID := range childIDs {
+		end := childEnd[childID]
+		if !end.fullyRead {
+			continue
+		}
+		if _, already := def.done[childID]; already {
+			continue
+		}
+		parent, ok := def.pending[childID]
+		if !ok {
+			// Parent Agent op not seen yet (the parent transcript has not been
+			// flushed in this Tail session). The child→parent op link is still
+			// repaired by the ingester resolver (P1a); the status finalize
+			// waits until the parent op is observed.
+			continue
+		}
+		fin := agentFinalizeEvent(sourceID, parent.parentNativeID, parent.ref, end.lastTsUs, "completed")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case out <- fin:
+		}
+		def.done[childID] = struct{}{}
+	}
+	return nil
 }
 
 // transcriptForRel reconstructs a transcript descriptor from a root-relative

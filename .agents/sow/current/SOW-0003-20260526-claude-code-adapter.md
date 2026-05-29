@@ -216,7 +216,108 @@ errors**. External review pending.
 
 ## Reviews
 
-(Empty placeholder. Filled as external reviewers run.)
+### Round 1 (2026-05-29) — codex + glm + minimax
+
+minimax + glm → "safe to merge" (P3 only). **codex → not safe: 2 P1 + 5 P2**, all
+verified real against the code (the recurring pattern: codex finds contract gaps
+the others miss). Adjudication + fix plan:
+
+- **[P1a] Sub-agent op→child link lost in SQLite.** Parent `Agent` op is emitted
+  before the child session exists; `internal/ingest/writer.go:425` stores
+  `ops.child_session_id` only if the child row already exists and the resolver
+  re-links only *sessions*, not ops → the parent op can permanently show no child.
+  **Fix (ingester):** the resolver must also re-link `ops.child_session_id` when a
+  child session with the matching native id lands later; persist the pending child
+  native id. Add an integration test (child-after-parent op linkage). Verify
+  aiagent adapters are unaffected/benefit.
+- **[P1b] Parent `Agent` ops never finalized.** Spec §543 wants deferred finalize
+  on subagent EOF; code finalizes only on `user.tool_result`, which claude-code
+  parents lack → ops stuck `running`. **Fix (adapter):** finalize the `Agent` op
+  when the subagent sidechain ends (EOF), not on a tool_result that never comes.
+- **[P2a] Compaction incomplete.** §547 wants `LogEntry INF` + the op; code emits
+  only the op and drops `preservedSegment`/`preservedMessages` from Extras.
+  **Fix:** emit the log + carry full `compactMetadata` in Extras.
+- **[P2b] No PayloadRef emission.** §5.4 wants PayloadRefs for `toolUseResult`,
+  `compact_file_reference`, file attachments, compaction summaries; the adapter
+  has no `payloads.go`. **Fix:** implement payload-ref emission per §5.4 (refs/
+  metadata only; serving stays Phase 2).
+- **[P2c] Scan→Tail skips during-Scan appends.** Tail snapshots current EOF
+  instead of resuming from the persisted cursor offset (`adapter.go:96,140`) →
+  data loss. **Fix:** Tail resumes from the cursor; restart/append integration
+  test.
+- **[P2d] Unknown-type tolerance is per-occurrence, not per-variant** (acceptance
+  #2). **Fix:** dedupe — one SourceError per distinct unknown type; test with
+  repeated occurrences of one variant.
+- **[P2e] No symlink containment** (`security.md` §"No symlink traversal escape").
+  **Fix:** `EvalSymlinks` + verify resolved path stays inside the source root, in
+  Scan + Tail; mirror the aiagent adapters. Test with a symlink escaping root.
+- **[P3]** metadata-snapshot fidelity (`file-history-snapshot` → store fileHistory;
+  `custom-title` last-wins vs `ai-title`). Address opportunistically.
+
+Not merged. Fixes delegated; re-review (same scope + fix notes) before merge.
+
+#### Fixes applied (2026-05-29) — all 7 findings landed + pinned by tests
+
+A prior fix subagent crashed mid-edit (transient API error), leaving the tree
+non-compiling (undefined `payloadEmitted`, `resolveWithinRoot`; `flushDirty`
+signature drift). Completed to a green state:
+
+- **P1a (ingester) — DONE.** `internal/ingest/writer.go:431-443` stashes the
+  child native id in `ops.extras_json.aiViewer.childNativeId` when the child
+  session is absent at parent-op write time; `internal/ingest/resolver.go:200-243`
+  adds `linkOpChildren` — an `UPDATE ops … RETURNING session_id` that re-links
+  `ops.child_session_id` once the child lands and adds the **parent** session to
+  the resolver notify set (`session_changed`). Pinned by
+  `internal/ingest/resolver_op_child_test.go` (`TestResolver_LinksOpChildWhenChildArrives`,
+  `TestResolver_OpChildNoOpWhenChildAbsent`). aiagent_v2/v3 (which also emit
+  op `ChildSessionNativeID`) strictly benefit; their suites stay green.
+  *(This was the one finding the crashed agent never started — no `internal/ingest/`
+  edit existed in the partial tree.)*
+- **P1b (adapter) — DONE (prior agent, completed/verified).** Deferred Agent-op
+  finalize on subagent EOF: `internal/adapters/claude_code/ops.go` `agentOps` map
+  + `agentFinalizeEvent`; `scanner.go` `collectAgentDeferral`/`emitAgentFinalizations`;
+  `tailer.go` loop-lifetime `tailDeferral` + `emitTailAgentFinalizations`. Pinned by
+  the regenerated `b_subagent_sidechain` golden (trailing parent `op_finalized Seq=2`).
+- **P2a — DONE.** `ops.go` `compactionExtras` carries the FULL `compactMetadata`
+  (preservedSegment + preservedMessages) on BOTH the compaction op and a new
+  `compact_boundary` `LogEntry INF`. Pinned by `mapper_test.go::TestMapper_CompactionOp`
+  + the `c_compaction` golden.
+- **P2b — DONE.** New `internal/adapters/claude_code/payloads.go` emits PayloadRefs
+  for `toolUseResult` (tool_response), compaction summary (log), and `file`
+  attachments with inline content (tool_request). `compact_file_reference` targets
+  live outside the served root → no ref (spec §3.4). Wired in `ops.go` (mapUser,
+  `payloadEmitted` guard) + `mapper.go` (attachment dispatch). Pinned by the
+  a/c/d goldens carrying `payload_ref` rows.
+- **P2c — DONE.** `adapter.go` records Scan's final cursor on the instance
+  (`scanCursor`); `Tail` resumes from it (cold Tail still snapshots EOF). `tailer.go`
+  `catchUpFromCursor` reads each known file from its offset to EOF at Tail startup
+  (fsnotify does not fire for pre-watch appends). Pinned by
+  `adapter_restart_test.go::TestScanThenTail_NoLossInWindow` (+ cold-Tail-skips-history
+  still green).
+- **P2d — DONE (prior agent).** `parser.go` `unknownTypeError` + `scanner.go`
+  `shouldSurfaceParseError` dedup one SourceError per distinct unknown type per
+  file. Pinned by `scanner_test.go::TestScan_UnknownTypePerVariantDedup`.
+- **P2e — DONE.** `payloads.go` `resolveWithinRoot` (EvalSymlinks + within-resolved-root
+  via `filepath.Rel`); `scanner.go` `withinSourceRoot` guards every discovered
+  transcript; `tailer.go` resolves the root once and guards every watched dir.
+  Pinned by `scanner_test.go::TestScan_SymlinkEscapeRefused`.
+- **P3 — DONE (prior agent).** `ops.go` `customTitleSeen` (custom-title wins over a
+  later ai-title) + `fileHistoryBackups` (stores `trackedFileBackups`, not a bool).
+  Pinned by `TestMapper_CustomTitleWinsOverLaterAITitle`,
+  `TestMapper_FileHistorySnapshotStoresBackups`.
+
+Spec deltas landed same-change: `adapter-claude-code.md` §6.3 (P2c offset handoff +
+catch-up read mechanism). All other spec deltas (§3.4/§3.7/§3.11/§3.12/§5.4/§6.1/§8.1/§9.2)
+were landed by the prior agent. Golden `expected.jsonl` for a/b/c/d/e regenerated;
+`golden_test.go::encodeEvents` now rewrites the absolute root in `LocationURI` too
+(portability + no operator path in fixtures — secret scan PASS). No migration needed
+(the `ops.child_session_id` column + `extras_json` already exist).
+
+**Gates (this completion):** `go build ./...` 0; `gofmt -l` clean; `go vet ./...` 0;
+`golangci-lint run` 0 issues; `go test -race -count=1 ./internal/adapters/...
+./internal/ingest/... ./cmd/...` all pass (incl. aiagent_v2/v3); `FuzzParseLine` 30s =
+11.0M execs / 0 crashes (`FuzzParseCursor` 15s / 0 crashes); `scan-secrets.sh` exit 0
+(478 files); `scan-ai-attribution.sh` exit 0. Coverage: claude_code 81.6%, ingest 88.9%.
 
 ## Outcome
 

@@ -20,8 +20,14 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 	}
 	if boolValue(rec.Env.IsCompactSummary) {
 		// Post-compaction summary: does NOT open a new turn (spec §9.2).
-		// Surface as INF so the UI can show it in a compaction lane.
+		// Surface as INF so the UI can show it in a compaction lane, plus a
+		// PayloadRef pointing at the inline summary text (spec §5.4, P2b).
 		out = append(out, m.logEntry(advance(tsUs), "INF", "compaction-summary", rec))
+		ref, perr := m.emitSummaryPayload(advance(tsUs))
+		if perr != nil {
+			return nil, perr
+		}
+		out = append(out, ref)
 		return out, nil
 	}
 
@@ -39,7 +45,11 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 		return out, nil
 	}
 
-	// Array content: finalize tool ops by tool_use_id.
+	// Array content: finalize tool ops by tool_use_id. A top-level
+	// toolUseResult body becomes ONE PayloadRef for the record, attached to
+	// the first matched tool op (the common case is a single tool_result per
+	// record); payloadEmitted guards against emitting it more than once.
+	payloadEmitted := false
 	for i := range blocks {
 		blk := blocks[i]
 		if blk.Type != "tool_result" || blk.ToolUseID == "" {
@@ -67,6 +77,18 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 			ErrorClass:      errClass,
 			EndTs:           tsUs,
 		})
+		// A top-level toolUseResult body (the structured tool-result echo,
+		// inline in the transcript) becomes a PayloadRef on the finalized tool
+		// op (spec §5.4, P2b). One ref for the record, attached to the first
+		// matched tool op (the common case is a single tool_result per record).
+		if rec.HasToolUseResult && !payloadEmitted {
+			ref, perr := m.emitToolResultPayload(advance(tsUs), open.turnSeq, open.opSeq)
+			if perr != nil {
+				return nil, perr
+			}
+			out = append(out, ref)
+			payloadEmitted = true
+		}
 		delete(m.toolOps, blk.ToolUseID)
 	}
 	return out, nil
@@ -174,7 +196,15 @@ func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.Even
 		if blk.Name == "Agent" {
 			started.Kind = canonical.OpSession
 			if agentID, ok := m.toolUseToAgent[blk.ID]; ok && agentID != "" {
-				started.ChildSessionNativeID = childNativeID(m.nativeID, agentID)
+				childID := childNativeID(m.nativeID, agentID)
+				started.ChildSessionNativeID = childID
+				// Record the Agent op so it can be finalized when the child
+				// sidechain reaches EOF (spec §8.1, P1b): the parent has no
+				// tool_result for Agent, so without this the op stays running.
+				if m.agentOps == nil {
+					m.agentOps = map[string]agentOpRef{}
+				}
+				m.agentOps[childID] = agentOpRef{turnSeq: m.turnSeq, opSeq: opSeq}
 			}
 			if desc := agentDescription(blk.Input); desc != "" {
 				started.Name = desc
@@ -282,15 +312,9 @@ func (m *fileMapper) mapSystem(rec record, advance func(int64) canonical.EventBa
 func (m *fileMapper) mapCompaction(rec record, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
 	cm := rec.System.Compact
 	endUs := tsUs
-	var extras map[string]any
+	extras := compactionExtras(cm)
 	if cm != nil {
 		endUs = tsUs + cm.DurationMs*1000
-		extras = map[string]any{
-			"trigger":    cm.Trigger,
-			"preTokens":  cm.PreTokens,
-			"postTokens": cm.PostTokens,
-			"durationMs": cm.DurationMs,
-		}
 	}
 	// The compaction op is top-level within whatever turn is currently open
 	// (or turn 0 if compaction precedes any turn). It does not consume an
@@ -320,7 +344,38 @@ func (m *fileMapper) mapCompaction(rec record, advance func(int64) canonical.Eve
 		finalized.BytesIn = cm.PreTokens
 		finalized.BytesOut = cm.PostTokens
 	}
-	return []canonical.Event{started, finalized}
+	// Spec §5.4 / §9.2: emit BOTH the compaction op AND a LogEntry INF so the
+	// UI can render the boundary on the timeline and in a compaction lane. The
+	// log carries the full compactMetadata (the op already does too).
+	logEv := m.logEntry(advance(tsUs), "INF", "compact_boundary", rec)
+	for k, v := range extras {
+		logEv.Extras[k] = v
+	}
+	return []canonical.Event{started, finalized, logEv}
+}
+
+// compactionExtras builds the op/log Extras carrying the FULL compactMetadata
+// (spec §9.2, P2a): the scalar trigger/token/duration fields PLUS the
+// preservedSegment and preservedMessages sub-objects, so a consumer can see
+// exactly what context the compaction kept. Returns nil when the metadata is
+// absent (a malformed boundary record).
+func compactionExtras(cm *compactMetadata) map[string]any {
+	if cm == nil {
+		return nil
+	}
+	extras := map[string]any{
+		"trigger":    cm.Trigger,
+		"preTokens":  cm.PreTokens,
+		"postTokens": cm.PostTokens,
+		"durationMs": cm.DurationMs,
+	}
+	if len(cm.PreservedSegment) > 0 {
+		extras["preservedSegment"] = json.RawMessage(cm.PreservedSegment)
+	}
+	if len(cm.PreservedMessage) > 0 {
+		extras["preservedMessages"] = json.RawMessage(cm.PreservedMessage)
+	}
+	return extras
 }
 
 // mapPRLink surfaces a pr-link record as a session-extras update plus an INF
@@ -365,13 +420,19 @@ func (m *fileMapper) mapSnapshot(rec record, base canonical.EventBase) canonical
 	case recAITitle:
 		if v, ok := stringField(fields, "aiTitle"); ok {
 			ev.Extras["aiTitle"] = v
-			// AgentName falls back to aiTitle when no custom title set yet.
-			ev.AgentName = v
+			// AgentName falls back to aiTitle ONLY when no custom title has
+			// been seen on this file. A custom-title (operator-chosen) wins
+			// regardless of arrival order (spec §3.7, P3): a trailing ai-title
+			// must not clobber it.
+			if !m.customTitleSeen {
+				ev.AgentName = v
+			}
 		}
 	case recCustomTitle:
 		if v, ok := stringField(fields, "customTitle"); ok {
 			ev.Extras["customTitle"] = v
 			ev.AgentName = v // custom title wins (spec §3.7).
+			m.customTitleSeen = true
 		}
 	case recPermissionMode:
 		if v, ok := stringField(fields, "permissionMode"); ok {
@@ -384,9 +445,12 @@ func (m *fileMapper) mapSnapshot(rec record, base canonical.EventBase) canonical
 			}
 		}
 	case recFileHistorySnapshot:
-		// Record only that a snapshot exists; the per-file backup map can
-		// be large and is not needed on the timeline (spec §3.11).
-		ev.Extras["fileHistorySnapshot"] = true
+		// Store the actual tracked-file backup map (last non-empty wins),
+		// not merely a boolean, so the UI can show which files the session
+		// backed up (spec §3.11, P3). The map lives under snapshot.trackedFileBackups.
+		if backups := fileHistoryBackups(fields); backups != nil {
+			ev.Extras["fileHistory"] = backups
+		}
 	}
 	if len(ev.Extras) == 0 && ev.AgentName == "" {
 		return nil
@@ -398,6 +462,27 @@ func (m *fileMapper) mapSnapshot(rec record, base canonical.EventBase) canonical
 // "<parentSessionId>:agent:<agentId>".
 func childNativeID(parentSessionID, agentID string) string {
 	return parentSessionID + ":agent:" + agentID
+}
+
+// agentFinalizeEvent builds the deferred OpFinalizedEvent for a parent Agent
+// op whose child sidechain has ended (spec §8.1, P1b). parentNativeID is the
+// parent session, ref locates the op, endUs is the child's end timestamp, and
+// status is "completed" for a fully-read child. SourceSeq is 0 (observability
+// only; this finalize is synthesized post-stream, outside the per-record
+// packing).
+func agentFinalizeEvent(sourceID, parentNativeID string, ref agentOpRef, endUs int64, status string) canonical.OpFinalizedEvent {
+	return canonical.OpFinalizedEvent{
+		EventBase: canonical.EventBase{
+			SourceID:  sourceID,
+			SourceSeq: 0,
+			Ts:        endUs,
+		},
+		SessionNativeID: parentNativeID,
+		TurnSeq:         ref.turnSeq,
+		Seq:             ref.opSeq,
+		Status:          status,
+		EndTs:           endUs,
+	}
 }
 
 // agentDescription extracts the Agent tool_use input's "description" field
@@ -437,4 +522,20 @@ func stringField(fields map[string]any, key string) (string, bool) {
 	}
 	s, ok := v.(string)
 	return s, ok
+}
+
+// fileHistoryBackups extracts the snapshot.trackedFileBackups object from a
+// file-history-snapshot record's decoded fields (spec §3.11, P3). Returns nil
+// when absent or empty, so the caller stores only non-empty backup maps
+// (last-non-empty wins) rather than a meaningless boolean.
+func fileHistoryBackups(fields map[string]any) map[string]any {
+	snap, ok := fields["snapshot"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	backups, ok := snap["trackedFileBackups"].(map[string]any)
+	if !ok || len(backups) == 0 {
+		return nil
+	}
+	return backups
 }

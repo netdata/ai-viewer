@@ -112,6 +112,9 @@ func (r *resolver) linkOrphans(ctx context.Context) error {
 	if err := r.linkRoots(ctx, tx, affected); err != nil {
 		return err
 	}
+	if err := r.linkOpChildren(ctx, tx, affected); err != nil {
+		return err
+	}
 	if err := r.emitResolverNotify(ctx, tx, affected); err != nil {
 		return err
 	}
@@ -190,6 +193,50 @@ RETURNING id, root_session_id
 	}
 	if r.logger != nil && len(affected) > before {
 		r.logger.Debug("resolver: linked orphan roots", "affected", len(affected)-before)
+	}
+	return nil
+}
+
+// linkOpChildren re-links ops.child_session_id from the child native id stashed
+// in ops.extras_json.aiViewer.childNativeId once the referenced child session
+// lands (P1a). The parent Agent op is written before its child sidechain
+// session exists, so child_session_id starts NULL and the native id is stashed;
+// without this pass the parent op would permanently show no child (the
+// session-only linkParents/linkRoots passes never touch ops). It records the
+// op's OWNING session id — the PARENT session — into affected so an open
+// parent-detail view refetches and renders the now-linked child op
+// (sse-protocol.md §session_changed). The child session is matched on
+// (source_id, native_id); source_id is resolved by joining through the op's
+// session row since ops carry no source_id column. modernc.org/sqlite supports
+// UPDATE … FROM and UPDATE … RETURNING.
+func (r *resolver) linkOpChildren(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	before := len(affected)
+	rows, err := tx.QueryContext(ctx, `
+UPDATE ops SET child_session_id = (
+    SELECT c.id FROM sessions c
+     JOIN sessions parent ON parent.id = ops.session_id
+     WHERE c.source_id = parent.source_id
+       AND c.native_id = json_extract(ops.extras_json, '$.aiViewer.childNativeId')
+)
+WHERE ops.child_session_id IS NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.childNativeId') IS NOT NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.childNativeId') <> ''
+  AND EXISTS (
+      SELECT 1 FROM sessions c
+       JOIN sessions parent ON parent.id = ops.session_id
+       WHERE c.source_id = parent.source_id
+         AND c.native_id = json_extract(ops.extras_json, '$.aiViewer.childNativeId')
+  )
+RETURNING session_id
+`)
+	if err != nil {
+		return fmt.Errorf("resolver UPDATE op child: %w", err)
+	}
+	if err := scanLinkedRows(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE op child: %w", err)
+	}
+	if r.logger != nil && len(affected) > before {
+		r.logger.Debug("resolver: linked orphan op children", "affected", len(affected)-before)
 	}
 	return nil
 }

@@ -37,6 +37,14 @@ type Adapter struct {
 	// construction; New and Factory substitute a no-op when nil so adapter
 	// code can call it unconditionally.
 	onError func(error)
+	// scanCursor holds the final per-file offsets recorded by the most
+	// recent Scan, so a following Tail on the SAME instance resumes from
+	// where Scan left off rather than snapshotting current EOF (spec §6.3,
+	// P2c). Nil until Scan runs (a cold Tail then falls back to
+	// snapshotCursor). The ingester drives Scan→Tail on one instance
+	// (cmd/ai-viewer-ingest/sources.go runAdapter), single-threaded, so a
+	// plain field needs no synchronisation.
+	scanCursor *Cursor
 }
 
 // Compile-time conformance to the canonical.Adapter interface.
@@ -78,7 +86,13 @@ func (a *Adapter) Format() string { return Format }
 // caller owns `out`; Scan never closes it.
 func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error {
 	start := a.coerceCursor(since)
-	_, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	final, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	// Record the final offsets even on cancellation so a Tail that follows a
+	// context-cancelled Scan still resumes from the work that was completed
+	// (the cursor reflects only fully-consumed lines). On a hard error the
+	// cursor is still the best resume point we have.
+	cursorCopy := final
+	a.scanCursor = &cursorCopy
 	if sErr != nil {
 		if errors.Is(sErr, context.Canceled) || errors.Is(sErr, context.DeadlineExceeded) {
 			return nil
@@ -89,14 +103,24 @@ func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- c
 }
 
 // Tail implements canonical.Adapter. Subscribes to fsnotify events on the
-// projects tree and emits canonical events as transcripts grow. Returns
-// when ctx is cancelled. Tail initializes its cursor from current file
-// sizes so a cold Tail (without a preceding Scan) does not re-emit history;
-// the ingester normally runs Scan first and persists the cursor.
+// projects tree and emits canonical events as transcripts grow. Returns when
+// ctx is cancelled. Tail resumes from the per-file offsets the preceding Scan
+// recorded on this instance (spec §6.3, P2c), closing the data-loss window
+// where records appended BETWEEN Scan finishing and Tail starting would be
+// skipped if Tail snapshotted current EOF. Any re-emission of an already-seen
+// line is absorbed by the ingester's SQL-layer idempotent upserts. A cold Tail
+// with no preceding Scan falls back to current file sizes so it does not
+// replay full history.
 func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
-	cur, err := a.snapshotCursor()
-	if err != nil {
-		return fmt.Errorf("claude_code: tail snapshot: %w", err)
+	var cur Cursor
+	if a.scanCursor != nil {
+		cur = a.coerceCursor(*a.scanCursor)
+	} else {
+		snap, err := a.snapshotCursor()
+		if err != nil {
+			return fmt.Errorf("claude_code: tail snapshot: %w", err)
+		}
+		cur = snap
 	}
 	return tailLoop(ctx, a.root, a.sourceID, cur, out, a.onError)
 }
@@ -138,7 +162,7 @@ func (a *Adapter) coerceCursor(c canonical.Cursor) Cursor {
 // cold Tail does not re-emit historical events (spec §6.1: Tail follows
 // changes from now on; existing content is Scan's job).
 func (a *Adapter) snapshotCursor() (Cursor, error) {
-	transcripts, err := discoverTranscripts(a.root)
+	transcripts, err := discoverTranscripts(a.root, a.onError)
 	if err != nil {
 		return Cursor{}, err
 	}

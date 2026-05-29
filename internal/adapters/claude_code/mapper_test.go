@@ -10,7 +10,15 @@ import (
 // the concatenated events. agentMap seeds the toolUseId→agentId map.
 func mapAll(t *testing.T, nativeID, parentNativeID string, kind canonical.SessionKind, agentName string, agentMap map[string]string, lines ...string) []canonical.Event {
 	t.Helper()
-	m := newFileMapper("src", "/abs/x.jsonl", nativeID, parentNativeID, kind, agentName, agentMap)
+	m := newFileMapper(mapperConfig{
+		sourceID:       "src",
+		absPath:        "/abs/x.jsonl",
+		nativeID:       nativeID,
+		parentNativeID: parentNativeID,
+		kind:           kind,
+		agentName:      agentName,
+		toolUseToAgent: agentMap,
+	})
 	var out []canonical.Event
 	for _, line := range lines {
 		rec, skip, err := parseLine([]byte(line))
@@ -113,7 +121,7 @@ func TestMapper_CompactionOp(t *testing.T) {
 	t.Parallel()
 	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
 		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"first"},"timestamp":"2026-05-26T12:00:00.000Z"}`,
-		`{"type":"system","subtype":"compact_boundary","uuid":"sy1","sessionId":"s","compactMetadata":{"trigger":"manual","preTokens":700000,"postTokens":8000,"durationMs":110000},"timestamp":"2026-05-26T12:02:00.000Z"}`,
+		`{"type":"system","subtype":"compact_boundary","uuid":"sy1","sessionId":"s","compactMetadata":{"trigger":"manual","preTokens":700000,"postTokens":8000,"durationMs":110000,"preservedSegment":{"headUuid":"u1","anchorUuid":"u1","tailUuid":"u1"},"preservedMessages":{"anchorUuid":"u1","uuids":["u1"]}},"timestamp":"2026-05-26T12:02:00.000Z"}`,
 		`{"type":"user","uuid":"u2","isCompactSummary":true,"sessionId":"s","message":{"role":"user","content":"summary"},"timestamp":"2026-05-26T12:02:00.500Z"}`,
 		`{"type":"user","uuid":"u3","sessionId":"s","message":{"role":"user","content":"second"},"timestamp":"2026-05-26T12:03:00.000Z"}`,
 	)
@@ -121,6 +129,7 @@ func TestMapper_CompactionOp(t *testing.T) {
 	var compactionOps, turns int
 	var compactStarted canonical.OpStartedEvent
 	var compactFinal canonical.OpFinalizedEvent
+	var sawBoundaryLog bool
 	for _, ev := range events {
 		switch e := ev.(type) {
 		case canonical.OpStartedEvent:
@@ -134,10 +143,21 @@ func TestMapper_CompactionOp(t *testing.T) {
 			}
 		case canonical.TurnStartedEvent:
 			turns++
+		case canonical.LogEntryEvent:
+			if e.Message == "compact_boundary" && e.Severity == "INF" {
+				sawBoundaryLog = true
+				// The boundary log must carry the full metadata too (P2a).
+				if e.Extras["preservedSegment"] == nil {
+					t.Errorf("compact_boundary log missing preservedSegment in extras: %+v", e.Extras)
+				}
+			}
 		}
 	}
 	if compactionOps != 1 {
 		t.Fatalf("compaction ops = %d, want 1", compactionOps)
+	}
+	if !sawBoundaryLog {
+		t.Fatal("compact_boundary must emit a LogEntry INF in addition to the op (spec §5.4 / §9.2, P2a)")
 	}
 	if turns != 2 {
 		t.Fatalf("turns = %d, want 2 (first + second; the compact summary must NOT open a turn)", turns)
@@ -155,6 +175,13 @@ func TestMapper_CompactionOp(t *testing.T) {
 	}
 	if compactStarted.Extras["trigger"] != "manual" {
 		t.Fatalf("compaction extras.trigger = %v, want manual", compactStarted.Extras["trigger"])
+	}
+	// Full compactMetadata must be carried (P2a): preservedSegment + preservedMessages.
+	if compactStarted.Extras["preservedSegment"] == nil {
+		t.Errorf("compaction op extras missing preservedSegment: %+v", compactStarted.Extras)
+	}
+	if compactStarted.Extras["preservedMessages"] == nil {
+		t.Errorf("compaction op extras missing preservedMessages: %+v", compactStarted.Extras)
 	}
 }
 
@@ -257,6 +284,83 @@ func TestMapper_RecordTypeCoverage(t *testing.T) {
 	}
 	if severities["INF"] == 0 {
 		t.Error("queue-operation / local_command should emit INF logs")
+	}
+}
+
+// TestMapper_CustomTitleWinsOverLaterAITitle verifies P3: a custom-title sets
+// AgentName, and a LATER ai-title does NOT overwrite it (spec §3.7 precedence:
+// the operator's chosen title wins regardless of arrival order).
+func TestMapper_CustomTitleWinsOverLaterAITitle(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"custom-title","customTitle":"My Title","sessionId":"s"}`,
+		`{"type":"ai-title","aiTitle":"Robot Title","sessionId":"s"}`,
+	)
+	// The custom-title update must set AgentName; the ai-title update must NOT.
+	var customSet, aiClobbered bool
+	for _, ev := range events {
+		su, ok := ev.(canonical.SessionUpdatedEvent)
+		if !ok {
+			continue
+		}
+		if su.Extras["customTitle"] == "My Title" && su.AgentName == "My Title" {
+			customSet = true
+		}
+		if su.Extras["aiTitle"] == "Robot Title" && su.AgentName != "" {
+			aiClobbered = true
+		}
+	}
+	if !customSet {
+		t.Fatal("custom-title must set AgentName")
+	}
+	if aiClobbered {
+		t.Fatal("ai-title after a custom-title must NOT set AgentName (custom wins, P3)")
+	}
+}
+
+// TestMapper_FileHistorySnapshotStoresBackups verifies P3: a
+// file-history-snapshot stores the actual trackedFileBackups map under
+// extras.fileHistory, not merely a boolean.
+func TestMapper_FileHistorySnapshotStoresBackups(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"file-history-snapshot","messageId":"u1","snapshot":{"messageId":"u1","trackedFileBackups":{"<HOME>/x.go":{"backupFileName":"<HOME>/.bak/x.go","version":2,"backupTime":"2026-05-26T10:00:01.000Z"}},"timestamp":"2026-05-26T10:00:01.000Z"},"isSnapshotUpdate":false}`,
+	)
+	var found bool
+	for _, ev := range events {
+		su, ok := ev.(canonical.SessionUpdatedEvent)
+		if !ok {
+			continue
+		}
+		fh, ok := su.Extras["fileHistory"].(map[string]any)
+		if !ok {
+			continue
+		}
+		found = true
+		if _, ok := fh["<HOME>/x.go"]; !ok {
+			t.Fatalf("fileHistory missing the tracked file: %+v", fh)
+		}
+	}
+	if !found {
+		t.Fatal("file-history-snapshot must store the trackedFileBackups map under extras.fileHistory (P3)")
+	}
+}
+
+// TestMapper_FileHistorySnapshotEmptyBackupsNoUpdate verifies an empty
+// trackedFileBackups map produces no session update (nothing useful to store).
+func TestMapper_FileHistorySnapshotEmptyBackupsNoUpdate(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"file-history-snapshot","messageId":"u1","snapshot":{"messageId":"u1","trackedFileBackups":{},"timestamp":"2026-05-26T10:00:01.000Z"},"isSnapshotUpdate":false}`,
+	)
+	for _, ev := range events {
+		if su, ok := ev.(canonical.SessionUpdatedEvent); ok {
+			if su.Extras["fileHistory"] != nil {
+				t.Fatalf("empty trackedFileBackups should not produce a fileHistory update: %+v", su.Extras)
+			}
+		}
 	}
 }
 

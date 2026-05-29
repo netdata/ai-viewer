@@ -275,7 +275,7 @@ func TestFlushDirty_MetaSeenSkipsUnchanged(t *testing.T) {
 	sourceID := "claude-code:" + tmp
 	out := make(chan canonical.Event, 16)
 	metaDirty := map[string]struct{}{metaRel: {}}
-	if err := flushDirty(context.Background(), tmp, sourceID, map[string]struct{}{}, metaDirty, &cur, out, func(error) {}); err != nil {
+	if err := flushDirty(context.Background(), tmp, sourceID, map[string]struct{}{}, metaDirty, &cur, newTailDeferral(), out, func(error) {}); err != nil {
 		t.Fatalf("flushDirty: %v", err)
 	}
 	// The hash is unchanged, so metaSeen must still hold the same hash.

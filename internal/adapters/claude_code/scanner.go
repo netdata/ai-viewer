@@ -65,7 +65,25 @@ type transcript struct {
 // dir with only subagents/ and no parent .jsonl) are detected here and a
 // synthetic root transcript is NOT added — the orphan root session is
 // synthesized in scanAll from the union of its children (spec §10.1).
-func discoverTranscripts(root string) ([]transcript, error) {
+//
+// Every discovered transcript path is resolved with filepath.EvalSymlinks and
+// verified to stay inside the resolved projects root before it is returned
+// (spec §6.1, P2e, security.md §6 "No symlink traversal escape"). A path that
+// escapes the root — a planted symlink pointing at /etc/passwd or any location
+// outside the source — is refused with a SourceError via onError and skipped;
+// it is never opened or read. onError may be nil for callers that do not need
+// the diagnostic (it is then treated as a no-op).
+func discoverTranscripts(root string, onError func(error)) ([]transcript, error) {
+	if onError == nil {
+		onError = func(error) {}
+	}
+	resolvedRoot, rerr := filepath.EvalSymlinks(filepath.Clean(root))
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("resolve projects root %s: %w", root, rerr)
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -79,7 +97,7 @@ func discoverTranscripts(root string) ([]transcript, error) {
 			continue
 		}
 		projDir := filepath.Join(root, projEntry.Name())
-		ts, derr := discoverProject(root, projDir)
+		ts, derr := discoverProject(root, resolvedRoot, projDir, onError)
 		if derr != nil {
 			return nil, derr
 		}
@@ -89,9 +107,29 @@ func discoverTranscripts(root string) ([]transcript, error) {
 	return out, nil
 }
 
+// withinSourceRoot reports whether abs resolves (through symlinks) to a path
+// inside resolvedRoot (spec §6.1, P2e). On escape it surfaces a SourceError
+// via onError and returns false; on a resolve error it likewise surfaces and
+// returns false, so a transcript whose path cannot be safely resolved is
+// skipped rather than read.
+func withinSourceRoot(resolvedRoot, abs string, onError func(error)) bool {
+	resolved, ok, err := resolveWithinRoot(resolvedRoot, abs)
+	if err != nil {
+		onError(fmt.Errorf("claude_code: cannot resolve %s for containment; skipping: %w", abs, err))
+		return false
+	}
+	if !ok {
+		onError(fmt.Errorf("claude_code: %s resolves to %s outside the projects root; skipping (symlink escape)", abs, resolved))
+		return false
+	}
+	return true
+}
+
 // discoverProject enumerates transcripts under a single
-// <root>/<sanitized-cwd>/ project directory.
-func discoverProject(root, projDir string) ([]transcript, error) {
+// <root>/<sanitized-cwd>/ project directory. resolvedRoot is the
+// symlink-resolved projects root used for the per-path containment guard
+// (P2e); root is the unresolved root used for cursor-key relativisation.
+func discoverProject(root, resolvedRoot, projDir string, onError func(error)) ([]transcript, error) {
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -104,7 +142,7 @@ func discoverProject(root, projDir string) ([]transcript, error) {
 		name := e.Name()
 		if e.IsDir() {
 			// A <sessionId>/ session dir: scan its subagents/.
-			sub, serr := discoverSessionSubagents(root, projDir, name)
+			sub, serr := discoverSessionSubagents(root, resolvedRoot, projDir, name, onError)
 			if serr != nil {
 				return nil, serr
 			}
@@ -114,8 +152,11 @@ func discoverProject(root, projDir string) ([]transcript, error) {
 		if !strings.HasSuffix(name, transcriptExt) {
 			continue
 		}
-		sessionID := strings.TrimSuffix(name, transcriptExt)
 		abs := filepath.Join(projDir, name)
+		if !withinSourceRoot(resolvedRoot, abs, onError) {
+			continue
+		}
+		sessionID := strings.TrimSuffix(name, transcriptExt)
 		rel, rerr := relPath(root, abs)
 		if rerr != nil {
 			return nil, rerr
@@ -137,8 +178,9 @@ func discoverProject(root, projDir string) ([]transcript, error) {
 
 // discoverSessionSubagents enumerates the subagent transcripts under
 // <projDir>/<sessionId>/subagents/ (recursively, to cover workflow
-// subdirs). parentSessionID is the enclosing <sessionId> dir name.
-func discoverSessionSubagents(root, projDir, sessionID string) ([]transcript, error) {
+// subdirs). parentSessionID is the enclosing <sessionId> dir name. Each
+// discovered sidechain path is containment-checked (P2e) before it is added.
+func discoverSessionSubagents(root, resolvedRoot, projDir, sessionID string, onError func(error)) ([]transcript, error) {
 	subDir := filepath.Join(projDir, sessionID, subagentsDir)
 	var out []transcript
 	walkErr := filepath.WalkDir(subDir, func(path string, d os.DirEntry, err error) error {
@@ -156,6 +198,9 @@ func discoverSessionSubagents(root, projDir, sessionID string) ([]transcript, er
 			return nil
 		}
 		if !strings.HasPrefix(name, "agent-") {
+			return nil
+		}
+		if !withinSourceRoot(resolvedRoot, path, onError) {
 			return nil
 		}
 		agentID := strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), transcriptExt)
@@ -290,16 +335,16 @@ func hashBytes(b []byte) string {
 // caller supplies the per-session metaMap so the file's mapper can set
 // ChildSessionNativeID on Agent ops. Partial trailing lines are held back
 // (offset advances only past complete lines) per spec §6.3.
-func readTranscript(ctx context.Context, t transcript, sourceID string, mm metaMap, start FileCursor, out chan<- canonical.Event, onError func(error)) (FileCursor, int, error) {
+func readTranscript(ctx context.Context, root string, t transcript, sourceID string, mm metaMap, start FileCursor, out chan<- canonical.Event, onError func(error)) (FileCursor, int, *fileMapper, error) {
 	f, err := os.Open(t.abs) // #nosec G304 -- path from filtered directory scan under configured root
 	if err != nil {
-		return start, 0, fmt.Errorf("open %s: %w", t.abs, err)
+		return start, 0, nil, fmt.Errorf("open %s: %w", t.abs, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return start, 0, fmt.Errorf("stat %s: %w", t.abs, err)
+		return start, 0, nil, fmt.Errorf("stat %s: %w", t.abs, err)
 	}
 	size := info.Size()
 	cur := start
@@ -310,9 +355,29 @@ func readTranscript(ctx context.Context, t transcript, sourceID string, mm metaM
 		onError(fmt.Errorf("transcript %s shrank (size=%d, cursor.size=%d); rescanning from 0", t.rel, size, cur.Size))
 		cur = FileCursor{}
 	}
+
+	emitFrom := cur.Offset
+	mapper := newFileMapper(mapperConfig{
+		sourceID:       sourceID,
+		absPath:        t.abs,
+		nativeID:       t.nativeID,
+		parentNativeID: t.parentNativeID,
+		kind:           t.kind,
+		agentName:      agentNameFor(t, mm),
+		toolUseToAgent: mm.toolUseToAgent,
+		root:           root,
+		sessionDir:     t.sessionDir,
+	})
+
 	if cur.Offset >= size {
+		// Nothing new to read, but the file is fully consumed: a Scan that
+		// already read this child to EOF still needs the mapper returned so
+		// the caller can finalize a parent Agent op whose child this is
+		// (spec §8.1, P1b). The mapper has no records replayed, but
+		// fullyRead reflects the cursor state.
 		cur.Size = size
-		return cur, 0, nil
+		mapper.fullyRead = true
+		return cur, 0, mapper, nil
 	}
 
 	// Always parse from offset 0 so the per-file turn/op inference counters
@@ -323,16 +388,17 @@ func readTranscript(ctx context.Context, t transcript, sourceID string, mm metaM
 	// or after the resume offset (emitFrom), so a resume yields ZERO duplicate
 	// and ZERO gap (acceptance #6). The byte offset is the durable resume key;
 	// the cheap re-parse of already-consumed bytes is discarded, not emitted.
-	emitFrom := cur.Offset
-	mapper := newFileMapper(sourceID, t.abs, t.nativeID, t.parentNativeID, t.kind, agentNameFor(t, mm), mm.toolUseToAgent)
-
 	emitted, advanced, perr := streamLines(ctx, f, size, emitFrom, t, sourceID, mapper, out, onError)
 	if perr != nil {
-		return cur, emitted, perr
+		return cur, emitted, mapper, perr
 	}
 	cur.Offset = advanced
 	cur.Size = size
-	return cur, emitted, nil
+	// The file is fully read when the offset reached EOF (no parked partial
+	// line). A parked partial line leaves advanced < size, meaning the child
+	// is still being written and its parent Agent op stays running (§8.1).
+	mapper.fullyRead = advanced >= size
+	return cur, emitted, mapper, nil
 }
 
 // agentNameFor returns the AgentName a transcript's session should start
@@ -397,7 +463,7 @@ func streamLines(ctx context.Context, r io.Reader, fileSize, emitFrom int64, t t
 
 		rec, skip, perr := parseLine(recBytes)
 		if perr != nil {
-			if emit {
+			if emit && shouldSurfaceParseError(mapper, perr) {
 				onError(fmt.Errorf("transcript %s @%d: %w", t.rel, lineStart, perr))
 			}
 			continue
@@ -426,6 +492,20 @@ func streamLines(ctx context.Context, r io.Reader, fileSize, emitFrom int64, t t
 			}
 		}
 	}
+}
+
+// shouldSurfaceParseError reports whether a per-line parse error should be
+// forwarded to onError. Unknown-`type` errors are deduped to one per distinct
+// variant per file (spec §3.12, acceptance #2) via the mapper's seen-set; all
+// other parse errors (malformed JSON, missing type, decode failures) surface
+// every time because they describe a distinct broken line, not a repeated
+// known-unknown variant.
+func shouldSurfaceParseError(mapper *fileMapper, perr error) bool {
+	var ute *unknownTypeError
+	if errors.As(perr, &ute) {
+		return mapper.firstUnknownType(ute.Type)
+	}
+	return true
 }
 
 // errLineTooLong signals that a single transcript line exceeded
@@ -484,7 +564,7 @@ func drainToNewline(br *bufio.Reader) error {
 // parent .jsonl) get a synthetic root SessionStartedEvent so the children
 // have a parent to attach to (spec §10.1). Returns the final cursor.
 func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<- canonical.Event, onError func(error)) (Cursor, error) {
-	transcripts, err := discoverTranscripts(root)
+	transcripts, err := discoverTranscripts(root, onError)
 	if err != nil {
 		return start, err
 	}
@@ -503,6 +583,14 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	emittedSinceProgress := 0
 	lastProgress := time.Now()
 
+	// Agent-op deferral state (spec §8.1, P1b). pendingAgentOps maps a child
+	// session native id to its parent's Agent op (parent session + op
+	// location). childEnd maps a child native id to (fullyRead, lastTsUs) once
+	// the child sidechain has been read. After the walk, every Agent op whose
+	// child was fully read is finalized.
+	pendingAgentOps := map[string]agentOpFinalize{}
+	childEnd := map[string]childEndState{}
+
 	for _, t := range transcripts {
 		if err := ctx.Err(); err != nil {
 			return cur, err
@@ -517,7 +605,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			mm = cached
 		}
 		fc := cur.fileCursor(t.rel)
-		updated, n, rerr := readTranscript(ctx, t, sourceID, mm, fc, out, onError)
+		updated, n, mapper, rerr := readTranscript(ctx, root, t, sourceID, mm, fc, out, onError)
 		if rerr != nil {
 			if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 				return cur, rerr
@@ -526,6 +614,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			continue
 		}
 		cur = cur.withFile(t.rel, updated)
+		collectAgentDeferral(mapper, t, pendingAgentOps, childEnd)
 		emittedSinceProgress += n
 		if emittedSinceProgress >= progressEveryEvents || time.Since(lastProgress) >= progressEveryDuration {
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
@@ -534,6 +623,13 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			emittedSinceProgress = 0
 			lastProgress = time.Now()
 		}
+	}
+
+	// Finalize parent Agent ops whose child sidechain has been fully read
+	// (spec §8.1, P1b). A child still being appended (fullyRead=false) leaves
+	// its parent op running. Deterministic order for stable replay.
+	if perr := emitAgentFinalizations(ctx, sourceID, pendingAgentOps, childEnd, out); perr != nil {
+		return cur, perr
 	}
 
 	// Refresh meta hashes so the cursor records the sidecar state observed.
@@ -547,6 +643,63 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		return cur, err
 	}
 	return cur, nil
+}
+
+// agentOpFinalize captures the parent session and op location of a deferred
+// Agent op (spec §8.1, P1b).
+type agentOpFinalize struct {
+	parentNativeID string
+	ref            agentOpRef
+}
+
+// childEndState records whether a subagent sidechain was fully read and the
+// timestamp of its last record (the Agent op's EndTs).
+type childEndState struct {
+	fullyRead bool
+	lastTsUs  int64
+}
+
+// collectAgentDeferral folds one transcript's mapper state into the
+// cross-file Agent-op deferral maps (spec §8.1). A parent transcript
+// contributes its Agent ops (keyed by child native id); a subagent transcript
+// contributes its own end state (keyed by its native id).
+func collectAgentDeferral(mapper *fileMapper, t transcript, pending map[string]agentOpFinalize, childEnd map[string]childEndState) {
+	if mapper == nil {
+		return
+	}
+	for childID, ref := range mapper.agentOps {
+		pending[childID] = agentOpFinalize{parentNativeID: mapper.nativeID, ref: ref}
+	}
+	if t.kind == canonical.KindSubAgent {
+		childEnd[t.nativeID] = childEndState{fullyRead: mapper.fullyRead, lastTsUs: mapper.lastTsUs}
+	}
+}
+
+// emitAgentFinalizations emits the deferred OpFinalizedEvent for every parent
+// Agent op whose child sidechain was fully read (spec §8.1, P1b). A child not
+// yet seen, or seen but still being appended (fullyRead=false), leaves its
+// parent op running. Ordered by child native id for deterministic replay.
+func emitAgentFinalizations(ctx context.Context, sourceID string, pending map[string]agentOpFinalize, childEnd map[string]childEndState, out chan<- canonical.Event) error {
+	childIDs := make([]string, 0, len(pending))
+	for childID := range pending {
+		childIDs = append(childIDs, childID)
+	}
+	sort.Strings(childIDs)
+	for _, childID := range childIDs {
+		end, seen := childEnd[childID]
+		if !seen || !end.fullyRead {
+			// Child not present yet, or still in-flight: the Agent op stays
+			// running until a later Scan/Tail pass reads the child to EOF.
+			continue
+		}
+		fin := agentFinalizeEvent(sourceID, pending[childID].parentNativeID, pending[childID].ref, end.lastTsUs, "completed")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case out <- fin:
+		}
+	}
+	return nil
 }
 
 // emitOrphanRoots emits a synthetic root SessionStartedEvent for every

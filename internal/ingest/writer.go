@@ -422,19 +422,27 @@ ON CONFLICT (session_id, seq) DO NOTHING
 		parentOpID = sql.NullString{String: canonicalOpID(turnID, ev.ParentOpSeq), Valid: true}
 	}
 	var childSessionID sql.NullString
+	opExtras := ev.Extras
 	if ev.ChildSessionNativeID != "" {
 		// Only point child_session_id at another session when that row
-		// is already in the store; otherwise the FK fires. The child
-		// session will eventually arrive; for now leave the link NULL
-		// and stash the child native id in extras for a future
-		// resolver pass (extension beyond Chunk 7 scope).
+		// is already in the store; otherwise the FK fires. When the child
+		// has not landed yet (the parent transcript is read before, or in a
+		// different batch than, the child sidechain), leave the link NULL and
+		// stash the child native id in ops.extras_json.aiViewer.childNativeId.
+		// The resolver re-links child_session_id from that stash once the
+		// child session lands (P1a) — mirroring the session
+		// extras_json.aiViewer.parentNativeId stash + resolver pass.
 		if cid, err := w.lookupSessionID(ctx, tx, ev.ChildSessionNativeID); err == nil {
 			childSessionID = sql.NullString{String: cid, Valid: true}
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		} else if errors.Is(err, sql.ErrNoRows) {
+			opExtras = mergeExtras(ev.Extras, map[string]any{
+				"aiViewer": map[string]any{"childNativeId": ev.ChildSessionNativeID},
+			})
+		} else {
 			return err
 		}
 	}
-	extras, err := marshalExtras(ev.Extras)
+	extras, err := marshalExtras(opExtras)
 	if err != nil {
 		return fmt.Errorf("writer: marshal op extras: %w", err)
 	}

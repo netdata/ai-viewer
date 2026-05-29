@@ -330,7 +330,7 @@ Observed `subtype` values:
 - `mcp_instructions_delta` — diff to the MCP-server instructions context.
 - `diagnostics` — IDE diagnostics (linter errors, etc.).
 - `date_change` — the calendar day changed mid-session.
-- `compact_file_reference` — reference to a spilled large tool-result stored under `<sessionDir>/tool-results/<id>.txt`. The viewer can resolve this to a file:// URI for payload-on-demand.
+- `compact_file_reference` — **reality (verified `jarmuine/claude-code @ <commit> :: src/utils/attachments.ts:307-312, 3136`)**: the record carries `{type, filename, displayPath}` where `filename` is the **original project file** the model read (a CWD-relative or absolute path under the operator's project, e.g. `/home/user/src/x.go`), NOT a spill file under `<sessionDir>/tool-results/`. `displayPath` is the CWD-relative form for display. The earlier draft of this spec assumed a `tool-results/<id>.txt` spill path; that is the layout for Bash/PowerShell oversized-output spills (`BashTool.tsx:292`, `toolResultStorage.ts:27`), referenced by `persistedOutputPath`, not by `compact_file_reference`. Because the referenced file lives **outside the configured projects root**, the adapter does NOT emit a servable `PayloadRefEvent` for it (a read-only viewer serves only files under its source root; pointing a payload at an arbitrary project path would fail the §6.1 containment guard). The adapter records the `displayPath` in the attachment `LogEntry`'s extras so the reference is still visible in the UI, and leaves payload-on-demand for these to a future SOW if the operator wants project-file serving.
 - `nested_memory` — memory directive injected from a nested `CLAUDE.md`.
 - `command_permissions` — permission-prompt history.
 - `ultrathink_effort` — extended-thinking effort indicator.
@@ -371,7 +371,7 @@ Re-appended near EOF for tail readers. **No timestamp**. The adapter treats the 
 { "type": "ai-title",    "aiTitle":    "<string>", "sessionId": "<uuid>" }
 ```
 
-No timestamp. Last-wins. `custom-title` is user-set and wins over `ai-title` for display (`logs.ts:67-74`). The adapter promotes the surviving title to `sessions.extras_json.title` (preferring custom over AI).
+No timestamp. Last-wins. `custom-title` is user-set and wins over `ai-title` for display (`logs.ts:67-74`). The adapter promotes the surviving title to the session's `AgentName`. Precedence is **custom-title over ai-title regardless of arrival order**: once a `custom-title` has set the AgentName, a later `ai-title` does NOT overwrite it (the writer's `COALESCE(NULLIF(excluded.agent_name,''), agent_name)` would otherwise let a trailing `ai-title` clobber the user's chosen title). The adapter enforces this by not emitting an `ai-title` AgentName update once a `custom-title` has been seen on the file.
 
 ### 3.8 `permission-mode` records
 
@@ -424,7 +424,7 @@ No timestamp, no uuid. Records the link between the local Claude Code session an
 }
 ```
 
-No top-level `timestamp` (the inner `snapshot.timestamp` is the write time). Records the producer's tracked-file backup state for Edit/Write undo. The adapter emits a single `LogEntry` `DBG` with the snapshot summary and stores per-file backups under `sessions.extras_json.fileHistory[]` only if non-empty.
+No top-level `timestamp` (the inner `snapshot.timestamp` is the write time). Records the producer's tracked-file backup state for Edit/Write undo. The adapter stores the actual `snapshot.trackedFileBackups` map under `sessions.extras_json.fileHistory` when non-empty (last-non-empty wins, mirroring the other last-wins snapshots), so the UI can show which files the session backed up — not merely a boolean that a snapshot existed.
 
 ### 3.12 Records observed only in source, not in real data
 
@@ -432,7 +432,7 @@ No top-level `timestamp` (the inner `snapshot.timestamp` is the write time). Rec
 - `task-summary` — produced by `claude ps` instrumentation; off by default in observed installs.
 - `tag`, `agent-name`, `agent-color`, `agent-setting`, `mode`, `worktree-state`, `content-replacement`, `attribution-snapshot`, `speculation-accept`, `marble-origami-commit`, `marble-origami-snapshot`.
 
-Defensive policy: any unknown `type` value triggers a `SourceError` event with severity `INF` (informational; not blocking) plus a per-file counter so a future upgrade is visible in `/health`.
+Defensive policy: any unknown `type` value triggers a `SourceError` event with severity `INF` (informational; not blocking). The adapter surfaces **exactly one `SourceError` per distinct unknown `type` value per scan** (deduped on the `type` string), not one per occurrence — a transcript with thousands of records of one unrecognized type must not flood `/health` with thousands of identical errors. The dedup set lives on the per-file mapper; a Tail resume that re-reads the same file re-arms the set (the warning re-fires once on the resumed pass, absorbed downstream).
 
 ## 4. Subagent (Sidechain) Records
 
@@ -534,21 +534,21 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 |---|---|
 | First record in file | `SessionStartedEvent` (once per file) |
 | `user` with string content (non-meta, non-compact) | `TurnStartedEvent(Seq=N+1)` |
-| `user` with array content (`tool_result` blocks) | one `OpFinalizedEvent` per `tool_result` block, matched by `tool_use_id`; plus `PayloadRefEvent` for the `toolUseResult` body or for `compact_file_reference` spillovers |
+| `user` with array content (`tool_result` blocks) | one `OpFinalizedEvent` per `tool_result` block, matched by `tool_use_id`; plus one `PayloadRefEvent` (`PayloadKind='tool_response'`, `Format='text'`, `LocationURI=file://<transcript>`) for the `toolUseResult` body when present, matched to the finalized tool op's `Seq` |
 | `user` with `isMeta==true` (`<local-command-caveat>` etc.) | `LogEntry` `DBG`; no turn/op events |
-| `user` with `isCompactSummary==true` | `LogEntry` `INF` carrying the post-compaction summary, plus updates the previous turn's `extras_json.compactionSummary` |
+| `user` with `isCompactSummary==true` | `LogEntry` `INF` carrying the post-compaction summary, plus a `PayloadRefEvent` (`PayloadKind='log'`, `Format='text'`, `LocationURI=file://<transcript>`) pointing at the summary text so the UI can render it in a compaction lane |
 | `assistant` (model != `<synthetic>`) | `OpStartedEvent(Kind='llm', Model, Provider='anthropic', Name=Model)` covering the LLM call; for each `tool_use` block in `content[]`, an additional `OpStartedEvent(Kind='tool', Name=name, ToolNamespace=mcp_server or '')`; `OpFinalizedEvent` for the LLM op with tokens from `message.usage` |
 | `assistant` (model == `<synthetic>`) | `LogEntry` `INF`; no LLM op emitted |
 | `assistant.content[].type=="thinking"` | nested `OpStartedEvent`/`OpFinalizedEvent` with `Kind='reasoning'`, `ParentOpSeq=<the LLM op>`, `BytesOut=len(thinking)` |
-| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, ChildSessionNativeID=<parent sessionId>:agent:<agentId>)`; deferred `OpFinalizedEvent` resolved when subagent EOF |
+| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, ChildSessionNativeID=<parent sessionId>:agent:<agentId>)`; the `OpFinalizedEvent` is deferred until the spawned subagent sidechain reaches EOF (see §8.1). The parent transcript has NO `tool_result` for the Agent tool, so the op is finalized from the child's end state, not from a `tool_result` block. |
 | Each subagent jsonl file | a separate canonical Session (`Kind='sub_agent'`, parent linkage via `ParentNativeID`); turn/op inference identical to main session |
 | `system.subtype=="turn_duration"` | `TurnFinalizedEvent` for the just-completed turn |
 | `system.subtype=="api_error"` | `LogEntry` severity `ERR`; if the next record is a synthetic assistant or absence-of-assistant, mark the in-flight LLM op `status='failed', error_class=api_error_<status>` |
-| `system.subtype=="compact_boundary"` | `LogEntry` `INF` with body=compactMetadata; emit a synthetic op `OpKind='compaction'` carrying `Ts=record.timestamp`, `EndTs=Ts+durationMs*1000`, `BytesIn=preTokens`, `BytesOut=postTokens`, `Extras=compactMetadata`. Subsequent records' `parentUuid` may be `null` (post-compaction chain restart); the adapter must accept that without error. See §9. |
+| `system.subtype=="compact_boundary"` | BOTH a `LogEntry` `INF` (Message `compact_boundary`, Extras carry the full `compactMetadata`) AND a synthetic op `OpKind='compaction'` carrying `Ts=record.timestamp`, `EndTs=Ts+durationMs*1000`, `BytesIn=preTokens`, `BytesOut=postTokens`, and `Extras=` the FULL `compactMetadata` (`trigger`, `preTokens`, `postTokens`, `durationMs`, AND `preservedSegment` + `preservedMessages`). Subsequent records' `parentUuid` may be `null` (post-compaction chain restart); the adapter must accept that without error. See §9. |
 | `system.subtype=="stop_hook_summary"` | `LogEntry` `DBG` (one per hook) plus aggregate `LogEntry` `INF`; no canonical op |
 | `system.subtype=="local_command"` | `LogEntry` `INF` |
 | `system.subtype=="informational"` | `LogEntry` `INF` |
-| `attachment` (any subtype) | `LogEntry` `DBG`; for `file` and `compact_file_reference` subtypes, also a `PayloadRefEvent` for the backing content |
+| `attachment` (any subtype) | `LogEntry` `DBG`; for `file` subtype WITH inline content, a `PayloadRefEvent` (`PayloadKind='tool_request'`, `Format='text'`, `LocationURI=file://<transcript>` — the content is inline in the jsonl). See the `compact_file_reference` note below. |
 | `queue-operation` | `LogEntry` `INF` |
 | `last-prompt` | UPDATE `sessions.extras_json.lastPrompt`; no event (no `Ts`) — implemented as last-wins in the adapter's in-memory state, flushed on `SourceProgress` |
 | `custom-title` / `ai-title` | UPDATE `sessions.extras_json.title` (custom wins) |
@@ -587,6 +587,8 @@ Recursive watch is the natural model, but `fsnotify` is **not recursive on Linux
 - Each `~/.claude/projects/<sanitized-cwd>/` — to detect new session files (`<sessionId>.jsonl`) and new session subdirs (`<sessionId>/`).
 - Each `~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/` — to detect new subagent jsonls and meta sidecars.
 
+Every discovered path (project dir, session file, subagent file, spill/meta sidecar) is resolved with `filepath.EvalSymlinks` and verified to stay inside the configured projects root before it is opened or watched (`security.md` §6 "No symlink traversal escape"). A path that resolves outside the root — a symlink planted to point at `/etc/passwd`, a session dir, or any other location — is refused with a `SourceError` and skipped; the adapter never reads or watches it. The root itself is resolved once at startup so a legitimately symlinked projects root (e.g. `~/.claude` → an external volume) still works: containment is judged against the resolved root.
+
 On `CREATE` of a new directory at depth 1 (a new project dir), the watcher `Add()`s the new dir.
 
 On `CREATE` of a new directory at depth 2 (a new session subdir under a project), the watcher `Add()`s the `subagents/` subdir as soon as it appears, AND the `tool-results/` subdir.
@@ -600,6 +602,25 @@ On `CREATE` of a new directory at depth 2 (a new session subdir under a project)
 - `DELETE` — operator deleted a project directory or jsonl. The adapter logs and stops watching the missing file. Existing rows in SQLite remain (read-only viewer; data is never deleted).
 
 ### 6.3 Tail semantics
+
+Tail resumes each file from the **persisted cursor offset** where Scan left off —
+NOT from the file's current EOF. The ingester drives one adapter instance through
+`Scan` then `Tail` (`runAdapter`); Scan records its final per-file offsets on the
+adapter, and Tail continues from those. This closes the data-loss window where
+records appended to a file *between* Scan finishing and Tail starting would be
+skipped if Tail snapshotted current EOF (any re-emission of an already-seen line is
+absorbed by the ingester's SQL-layer idempotent upserts). A cold Tail with no
+preceding Scan (no recorded offsets) falls back to current file sizes so it does
+not replay full history.
+
+Because fsnotify does not fire for bytes written before the watch was
+established, Tail performs an **initial catch-up read** once at startup, after
+the watches are added: it reads every currently-discovered transcript from its
+cursor offset to current EOF (reusing the steady-state flush path, so the
+offset advance, partial-line hold-back, and Agent-op deferral are identical).
+A file already fully consumed by Scan re-reads zero new bytes (offset == size)
+and emits nothing; a file that grew during the window emits exactly the new
+records. After the catch-up, the fsnotify loop drives all further reads.
 
 Stream-parse line-by-line from the cursor offset. A line without a trailing `\n` is an in-flight write; the adapter parks the partial bytes and resumes on the next event. A line that parses but has unknown `type` produces a `SourceError`. A line that fails to parse as JSON: same. The adapter does not skip bytes blindly; it always advances `offset` past completed lines only.
 
@@ -656,6 +677,33 @@ Canonical-model expression:
 - The parent's `Agent` tool_use becomes an `op` with `Kind='session'`, `ChildSessionNativeID = <parent sessionId>:agent:<agentId>`. The ingester resolves this to a foreign key.
 
 Resume case: an interrupted subagent (Claude Code can `/resume` an agent) appends to the same `agent-<agentId>.jsonl`. The adapter does not start a new canonical session; it continues the existing one (which is achieved by stable `NativeID`).
+
+### 8.1 Op→child linkage and Agent-op finalization
+
+Two ordering hazards arise because the parent `Agent` op and the child session
+land independently:
+
+1. **Op→child link survives child-after-parent ordering (ingester).** The parent's
+   `OpStartedEvent(Kind='session')` carries `ChildSessionNativeID`, but the child
+   `sessions` row may not exist yet when the parent op is written (the parent
+   transcript is read before, or in a different batch than, the child sidechain).
+   The writer therefore sets `ops.child_session_id` only when the child row is
+   already present; otherwise it **stashes the child native id in
+   `ops.extras_json.aiViewer.childNativeId`** (mirroring the
+   `sessions.extras_json.aiViewer.parentNativeId` stash). The background resolver
+   pass re-links `ops.child_session_id` from that stash once a session with the
+   matching `(source_id, native_id)` lands, and emits a `session_changed` notify
+   for the affected **parent** session so an open UI refetches. This mirrors the
+   session parent/root re-link the resolver already performs.
+
+2. **Agent op finalize on subagent EOF (adapter).** The parent transcript has no
+   `tool_result` block for the `Agent` tool (§4.4), so the op cannot be finalized
+   the usual way. The adapter defers the `OpFinalizedEvent` until the spawned
+   subagent sidechain reaches end-of-stream: in Scan, after the child file has
+   been fully read; in Tail, the same Scan-completed child triggers it. A fully
+   read child in Scan MUST finalize its parent Agent op (status `completed`); a
+   child still being appended leaves the op `running`. The link is the op's
+   `ChildSessionNativeID` (equal to the child file's synthetic `NativeID`).
 
 ## 9. Compaction Handling
 

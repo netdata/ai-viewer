@@ -7,11 +7,26 @@ import (
 	"fmt"
 )
 
-// errUnknownRecordType is returned by parseLine when the record's `type`
-// discriminator is not one of the documented claude-code types. The
-// caller treats this as a non-fatal parse error (forwarded via
-// opts.OnError per spec §3.12 "any unknown type triggers a SourceError").
+// errUnknownRecordType is the sentinel wrapped by unknownTypeError so callers
+// can detect the "skip and surface as parse error" case via errors.Is. The
+// concrete unknownTypeError additionally carries the offending `type` string
+// so the caller can dedup one SourceError per distinct variant (spec §3.12).
 var errUnknownRecordType = errors.New("claude_code: unknown record type")
+
+// unknownTypeError reports a record whose `type` discriminator is not a
+// documented claude-code type. It wraps errUnknownRecordType (for errors.Is)
+// and exposes the raw Type so streamLines can emit exactly one SourceError per
+// distinct unknown variant per scan (acceptance #2).
+type unknownTypeError struct {
+	Type string
+}
+
+func (e *unknownTypeError) Error() string {
+	return fmt.Sprintf("%s: %q", errUnknownRecordType.Error(), e.Type)
+}
+
+// Unwrap lets errors.Is(err, errUnknownRecordType) match.
+func (e *unknownTypeError) Unwrap() error { return errUnknownRecordType }
 
 // recordType discriminates the parsed claude-code JSONL record variants.
 // Values are verbatim from the producer's `type` discriminator
@@ -159,11 +174,47 @@ type record struct {
 	User      *userMessage
 	Assistant *assistantMessage
 	System    *systemBody
+	// HasToolUseResult reports whether a `user` record carried a top-level
+	// toolUseResult body (the structured tool-result echo, spec §3.1). The
+	// mapper emits a PayloadRefEvent for it on the finalized tool op (§5.4).
+	HasToolUseResult bool
 	// Raw is the verbatim line bytes (sans trailing newline). Used to
-	// surface metadata-snapshot field values (lastPrompt, title, etc.)
-	// without re-typing every snapshot variant; decoded on demand by the
-	// mapper's snapshot path.
+	// surface metadata-snapshot field values (lastPrompt, title, etc.) and
+	// attachment bodies without re-typing every variant; decoded on demand by
+	// the mapper's snapshot/payload paths.
 	Raw []byte
+}
+
+// attachmentBody carries the fields of an `attachment` record the mapper's
+// payload path consumes (spec §3.4, §5.4). Only `file` attachments WITH inline
+// content emit a servable PayloadRef; other subtypes (incl.
+// compact_file_reference, whose target lives outside the served root) do not.
+type attachmentBody struct {
+	Type        string `json:"type"`
+	Filename    string `json:"filename"`
+	DisplayPath string `json:"displayPath"`
+	// Content is the inline file body for a `file` attachment:
+	// {type:"text", file:{filePath, content}} (spec §3.4). Decoded opaquely;
+	// presence (non-empty) is the signal that backing content exists.
+	Content json.RawMessage `json:"content"`
+}
+
+// hasFileContent reports whether a `file` attachment carries inline content.
+func (a attachmentBody) hasFileContent() bool { return len(a.Content) > 0 }
+
+// decodeAttachment extracts the `attachment` sub-object from a record's raw
+// bytes. Returns the zero attachmentBody on any decode failure (defensive).
+func decodeAttachment(raw []byte) attachmentBody {
+	if len(raw) == 0 {
+		return attachmentBody{}
+	}
+	var wrapper struct {
+		Attachment attachmentBody `json:"attachment"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return attachmentBody{}
+	}
+	return wrapper.Attachment
 }
 
 // parseLine decodes one JSONL line into a record. Whitespace-only / empty
@@ -196,6 +247,15 @@ func parseLine(line []byte) (record, bool, error) {
 			}
 		}
 		rec.User = &msg
+		// Detect a top-level toolUseResult body (spec §3.1) so the mapper can
+		// emit a PayloadRef for it (§5.4). A bare `null` value does not count.
+		var probe struct {
+			ToolUseResult json.RawMessage `json:"toolUseResult"`
+		}
+		if json.Unmarshal(trimmed, &probe) == nil {
+			tur := bytes.TrimSpace(probe.ToolUseResult)
+			rec.HasToolUseResult = len(tur) > 0 && !bytes.Equal(tur, []byte("null"))
+		}
 	case recAssistant:
 		var msg assistantMessage
 		if len(env.Message) > 0 {
@@ -220,7 +280,7 @@ func parseLine(line []byte) (record, bool, error) {
 			// Declared-but-ignored producer type: skip without surfacing.
 			return rec, true, nil
 		}
-		return record{}, false, fmt.Errorf("%w: %q", errUnknownRecordType, env.Type)
+		return record{}, false, &unknownTypeError{Type: string(env.Type)}
 	}
 	return rec, false, nil
 }
