@@ -46,3 +46,6 @@ CRUSH.local.md
 
 # Local fixture caches (real session data; never commit)
 /testdata-local/
+
+# Playwright MCP local cache (regenerated per run; never commit)
+/.playwright-mcp/

@@ -67,7 +67,7 @@ export function Sources() {
       ) : items.length === 0 ? (
         <EmptyState>No sources configured.</EmptyState>
       ) : (
-        <div className={styles.tableWrap}>
+        <div className={styles.tableWrap} tabIndex={0} role="region" aria-label="Sources table">
           <table className={styles.table}>
             <thead>
               <tr>

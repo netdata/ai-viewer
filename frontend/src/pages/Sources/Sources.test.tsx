@@ -118,6 +118,15 @@ describe('Sources', () => {
     expect(within(table).getByText('99')).toBeInTheDocument();
   });
 
+  it('wraps the table in a keyboard-focusable named region (scrollable-region-focusable)', () => {
+    sourcesSpy.mockReturnValue(qr({ data: sourcesResp([makeSource({})]) }));
+    renderPage();
+    // The overflow-x:auto wrapper must be focusable so keyboard-only users can
+    // scroll it; without tabindex axe's scrollable-region-focusable rule fails.
+    const region = screen.getByRole('region', { name: /sources table/i });
+    expect(region).toHaveAttribute('tabindex', '0');
+  });
+
   it('renders the overall health badge', () => {
     sourcesSpy.mockReturnValue(qr({ data: sourcesResp([makeSource({})]) }));
     healthSpy.mockReturnValue(qr({ data: healthResp({ status: 'degraded' }) }));

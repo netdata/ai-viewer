@@ -131,6 +131,19 @@ describe('SessionsList', () => {
     expect(screen.getByText('completed')).toBeInTheDocument();
   });
 
+  it('wraps the table in a keyboard-focusable named region (scrollable-region-focusable)', () => {
+    infiniteSpy.mockReturnValue(
+      result({
+        data: { pages: [page([makeSession({ id: 'a', agent_name: 'nedi' })])], pageParams: [''] },
+      }),
+    );
+    renderPage();
+    // The overflow-x:auto wrapper must be focusable so keyboard-only users can
+    // scroll it; without tabindex axe's scrollable-region-focusable rule fails.
+    const region = screen.getByRole('region', { name: /sessions table/i });
+    expect(region).toHaveAttribute('tabindex', '0');
+  });
+
   it('links the child-session count to the session detail page (not a dead ?root=)', () => {
     infiniteSpy.mockReturnValue(
       result({

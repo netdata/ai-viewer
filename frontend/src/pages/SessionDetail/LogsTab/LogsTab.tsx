@@ -64,7 +64,7 @@ export function LogsTab({ sessionId }: { sessionId: string }) {
         <EmptyState>No log entries for this session.</EmptyState>
       ) : (
         <>
-          <div className={styles.tableWrap}>
+          <div className={styles.tableWrap} tabIndex={0} role="region" aria-label="Session logs">
             <table className={styles.table}>
               <thead>
                 <tr>
