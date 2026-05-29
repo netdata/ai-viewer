@@ -119,10 +119,15 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 1. **Operator identity (banned everywhere, zero tolerance).** The operator's real
    email addresses, real home path, and given/sur-name. These must never appear in
-   any tracked file — including the sanitizer's `INPUT/` fixtures. The literal
-   patterns are defined inside the script itself, which **excludes its own path**
-   from the scan (a scanner necessarily contains the patterns it hunts for). Name
-   matching is word-bounded so unrelated tokens (e.g. `cost_usd`) never match.
+   any tracked file — including the sanitizer's `INPUT/` fixtures. The ban-list is
+   **derived at runtime from the repository's own git author metadata** — `git log`
+   author emails + names, unioned with `git config user.email`/`user.name`; home
+   stems from each email local-part, each name, and `$HOME` — so **no operator
+   literal is committed in the scanner**. The scan is **fail-closed**: if no
+   identity can be derived (and, when the repo has commits, if `git log` fails
+   unexpectedly) it exits non-zero rather than running with Rule 1 disabled or on a
+   partial ban-list. Name matching is word-bounded so unrelated tokens (e.g.
+   `cost_usd`) never match.
 2. **Generic secret shapes.** `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys),
    `xox[bpas]-…` (Slack), `AKIA[0-9A-Z]{16}` (AWS), `Bearer <high-entropy>`
    tokens, and VCS PATs (`ghp_…`, `github_pat_…`, `glpat-…`). (Public provider

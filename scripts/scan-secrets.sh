@@ -85,10 +85,22 @@ SELF_REL="scripts/scan-secrets.sh"
 # git author metadata, so the identity to ban is never written here. Two
 # sources are unioned and de-duped:
 #   - `git log --format='%ae%n%an'` — every author email + name that has ever
-#     committed (the durable, content-backed source of truth).
+#     committed (the durable, content-backed source of truth; typically a
+#     SUPERSET of the configured identity, e.g. historical co-authors).
 #   - `git config user.email` / `git config user.name` — covers a repo with no
 #     commits yet (e.g. the self-test's throwaway repos), where `git log` is
 #     empty.
+# FAIL-CLOSED on the `git log` source: a repo that HAS commits MUST yield its
+# author list, otherwise the ban-list silently shrinks to the (possibly
+# smaller) config-only identity and historical authors go un-banned — a
+# fail-OPEN hole for a security gate. So the two outcomes are distinguished by
+# `git rev-parse --verify HEAD`:
+#   - HEAD resolves (repo has commits) -> `git log` MUST succeed; if it exits
+#     non-zero (corrupt repo, git error) we ABORT non-zero rather than scan
+#     with a partial Rule-1 ban-list.
+#   - HEAD does NOT resolve (no commits yet — the legitimate empty-repo case)
+#     -> skip `git log` entirely and fall back to `git config` (each key may be
+#     unset, which is expected, so `|| true` is fine there).
 # From those values the three ERE patterns are built (every derived value
 # ERE-escaped so dots etc. are literal):
 #   - EMAIL: each derived email, alternated.
@@ -108,11 +120,32 @@ ere_escape() { printf '%s' "$1" | sed -E 's/[][(){}.^$*+?|\\]/\\&/g'; }
 derive_rule1() {
   local emails=() names=()
   local v
-  # Union of git-log authors and the configured identity, partitioned into
-  # emails (contain '@') and names, de-duping each. `git log` on a repo with no
-  # commits prints a fatal to stderr and nothing to stdout; stderr is suppressed
-  # so the empty result simply falls through to the config fallback. Fed via
-  # process substitution (not a pipe) so the arrays populate in THIS shell.
+
+  # Gather the raw git-metadata lines (author emails+names from history, plus
+  # the configured identity) into one buffer FIRST, so `git log`'s exit code is
+  # inspectable here. A process substitution would run in a subshell and hide
+  # that exit code, which is exactly the fail-OPEN this guards against.
+  local meta=""
+  if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    # Repo HAS commits: `git log` MUST succeed. Capture its output and exit
+    # code separately; on ANY failure (corrupt repo, git error) abort non-zero
+    # rather than silently shrinking Rule 1 to the config-only identity and
+    # leaving historical authors un-banned.
+    local log_out log_rc=0
+    log_out="$(git log --format='%ae%n%an' 2>/dev/null)" || log_rc=$?
+    if [[ "$log_rc" -ne 0 ]]; then
+      printf >&2 '%s[FAIL]%s Rule 1 ban-list derivation failed: HEAD resolves (repo has commits) but git log exited %s. Refusing to scan with a partial operator-identity ban-list (historical authors would go un-banned).\n' "$RED" "$NC" "$log_rc"
+      exit 2
+    fi
+    meta="${log_out}"$'\n'
+  fi
+  # `git config` is the no-commit fallback (and a supplement otherwise). A key
+  # that is unset exits non-zero — expected — so `|| true` is correct HERE only.
+  meta="${meta}$(git config user.email 2>/dev/null || true)"$'\n'
+  meta="${meta}$(git config user.name 2>/dev/null || true)"$'\n'
+
+  # Partition the gathered lines into emails (contain '@') and names, de-duping
+  # each. Fed via a here-string so the arrays populate in THIS shell.
   local email_seen="" name_seen=""
   while IFS= read -r v; do
     [[ -z "$v" ]] && continue
@@ -125,17 +158,7 @@ derive_rule1() {
       name_seen="${name_seen}"$'\n'"$v"$'\n'
       names+=("$v")
     fi
-  done < <(
-    # `|| true` on EVERY command: the process-substitution subshell inherits
-    # `set -e`, and `git log` exits non-zero on a repo with no commits (and
-    # `git config` exits non-zero when a key is unset). Without the guard the
-    # subshell would abort after the first failing command, dropping the
-    # fallback values and tripping the fail-closed guard even when a config
-    # identity exists.
-    git log --format='%ae%n%an' 2>/dev/null || true
-    git config user.email 2>/dev/null || true
-    git config user.name 2>/dev/null || true
-  )
+  done <<< "$meta"
 
   # Fail-closed: an empty ban-list means Rule 1 would silently pass everything.
   if [[ "${#emails[@]}" -eq 0 && "${#names[@]}" -eq 0 ]]; then

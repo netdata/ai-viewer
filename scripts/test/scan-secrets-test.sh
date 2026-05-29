@@ -15,6 +15,8 @@
 #   - dirt inside a *.gz file is detected (decompression path works), and a
 #     corrupt *.gz is scanned raw rather than failing open
 #   - a tracked symlink is scanned by its target PATH STRING, not dereferenced
+#   - an UNEXPECTED git-log failure on a repo WITH commits aborts the scan
+#     (fail-closed) instead of silently scanning with a partial Rule-1 ban-list
 #   - a fully clean tree (only sanctioned placeholders) passes (exit 0)
 #   - sanctioned placeholders ([REDACTED_*], *.example.invalid, example.com,
 #     EXAMPLE-marked secret shapes) never trip a hit
@@ -548,6 +550,52 @@ $OUT"; return
   pass_case "$name"
 }
 
+# 17. FAIL-CLOSED on an UNEXPECTED git-log failure (P2). A repo that HAS commits
+#     must yield its author ban-list; if `git log` fails, the scanner must abort
+#     (exit non-zero) rather than silently scan with the smaller config-only
+#     identity, leaving historical authors un-banned. We reproduce "HEAD
+#     resolves but git log fails" by removing the loose object store after a
+#     commit: `git rev-parse --verify HEAD` still resolves the ref to its SHA
+#     (no object body needed), but `git log` walks the now-missing commit
+#     object and exits 128. The scanner must exit non-zero with its fail-closed
+#     message — NOT exit 0 on a partial list.
+case_git_log_failure_fails_closed() {
+  local name="failclosed::git_log_failure_aborts"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf 'first tracked file\n' | track "$repo" "README.md"
+  commit_all "$repo" "initial commit by synthetic author"
+  # Sanity: with commits + intact objects the scanner passes (HEAD resolves,
+  # git log works), proving the failure below is the corruption, not the setup.
+  run_scanner "$repo"
+  if [ "$RC" -ne 0 ]; then
+    fail_case "$name" "precondition: clean committed repo should pass before corruption:
+$OUT"; return
+  fi
+  # Corrupt the object store: fan-out dirs are two lowercase-hex chars. A fresh
+  # `git init` + single commit has only loose objects (no packs), so removing
+  # these makes the commit object unreadable while the HEAD ref still resolves.
+  rm -rf "$repo"/.git/objects/[0-9a-f][0-9a-f]
+  # Guard the simulation: assert the git state we depend on actually holds
+  # (rev-parse succeeds, git log fails). If a future git changes this, the test
+  # fails loudly here instead of silently passing on the wrong code path.
+  if ! ( cd "$repo" && git rev-parse --verify -q HEAD >/dev/null 2>&1 ); then
+    fail_case "$name" "simulation precondition broke: rev-parse HEAD no longer resolves after object removal (cannot exercise the HEAD-resolves-but-git-log-fails path)"; return
+  fi
+  if ( cd "$repo" && git log --format='%ae%n%an' >/dev/null 2>&1 ); then
+    fail_case "$name" "simulation precondition broke: git log still succeeds after object removal (cannot exercise the git-log-failure path)"; return
+  fi
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "git log failed on a repo WITH commits but the scanner still exited 0 (fail-OPEN: scanned with a partial Rule-1 ban-list):
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'partial operator-identity ban-list'; then
+    fail_case "$name" "scanner exited non-zero but without the fail-closed git-log message:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
 # --- main -------------------------------------------------------------------
 
 main() {
@@ -582,6 +630,7 @@ main() {
   case_detect_gitlab_pat
   case_detect_secret_in_corrupt_gz
   case_detect_operator_home_in_symlink_target
+  case_git_log_failure_fails_closed
 
   echo
   printf '%s%d passed%s, %s%d failed%s\n' \

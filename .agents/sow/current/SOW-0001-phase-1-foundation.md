@@ -6812,6 +6812,40 @@ On the round-1 fixes: **minimax** + **glm** → safe to merge (P3s only); **code
   it in content. **Lesson:** a scanner that bans operator identity must derive that
   identity (from git authorship), never hardcode it — captured for AGENTS/memory.
 
+Round-2 fixes landed in commit `316b55c`; CI green on it.
+
+##### PR-A review round 3 (2026-05-29) — codex + glm
+
+On the derivation rewrite: **glm** → safe to merge, 1 P3 (spec still said the
+patterns were literals-in-script). **codex** → one **P2** + 2 P3s:
+
+- **[P2] `git log` failure masked → partial ban-list (fail-open).** The round-2
+  `git log … 2>/dev/null || true` survived a no-commit repo but also swallowed an
+  *unexpected* `git log` failure, silently shrinking Rule 1 to the config-only
+  identity (missing historical authors). Real fail-open in the gate.
+- **[P3]** `quality-gates.md:123` still described literal-in-script patterns
+  (stale after the derivation rewrite) — flagged by both codex and glm.
+- **[P3]** sanitizer `github_pat_`/`glpat-` redaction rules had no fixture
+  exercising them.
+
+#### Round-4 resolution (commit pending)
+
+- **[P2] fixed.** `derive_rule1` now guards with `git rev-parse --verify -q HEAD`:
+  if the repo HAS commits, `git log` MUST succeed — its exit code is captured (via
+  a `meta` buffer + here-string, not a process substitution that hid it) and any
+  non-zero aborts with `exit 2` rather than falling back to a partial config-only
+  ban-list; only a genuine no-commit repo (HEAD unresolved) uses the config
+  fallback. New self-test `failclosed::git_log_failure_aborts` (commit, remove
+  loose objects, assert non-zero) — pins it. Independently demo'd: healthy→0,
+  git-log-forced-fail→2, no-commit→0.
+- **[P3]** `quality-gates.md` Rule-1 description rewritten to the derivation model
+  (done by orchestrator). Sanitizer fixture: `01_happy_path` INPUT gained
+  `EXAMPLE`-marked `github_pat_`/`glpat-` tokens; EXPECTED regenerated → both
+  `[REDACTED_SECRET]`, exercising the sanitizer's PAT rules.
+- **Verified (master):** grep operator-identity → zero; `scan-secrets.sh` exit 0
+  (441 files); self-test **21/21**; `sanitize-fixture-test.sh` 13/13 (+ alt HOME);
+  shellcheck clean.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)
