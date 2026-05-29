@@ -1,0 +1,15 @@
+# ai-viewer ingester — systemd USER unit (no privilege, localhost-only).
+# Installed by scripts/install-systemd-user.sh to
+# ~/.config/systemd/user/ai-viewer-ingest.service.
+# %h is the systemd home specifier; no hardcoded home paths.
+[Unit]
+Description=ai-viewer ingester
+After=default.target
+
+[Service]
+ExecStart=%h/.local/bin/ai-viewer-ingest
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

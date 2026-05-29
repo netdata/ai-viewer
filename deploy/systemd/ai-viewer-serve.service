@@ -1,0 +1,22 @@
+# ai-viewer server — systemd USER unit (no privilege, localhost-only).
+# Installed by scripts/install-systemd-user.sh to
+# ~/.config/systemd/user/ai-viewer-serve.service.
+# %h is the systemd home specifier; no hardcoded home paths.
+#
+# After=ai-viewer-ingest.service orders START only, not readiness. On a fresh
+# machine the server may start before the ingester has created+migrated the
+# SQLite schema; the server's CheckSchema then fails and it exits non-zero.
+# Restart=on-failure (RestartSec=3s) retries until the schema exists. This
+# start-order race is intentional and acceptable — see deployment.md
+# §"systemd User Units" / SOW-0001 Chunk 19 D3.
+[Unit]
+Description=ai-viewer server
+After=ai-viewer-ingest.service
+
+[Service]
+ExecStart=%h/.local/bin/ai-viewer-serve
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

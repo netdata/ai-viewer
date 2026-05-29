@@ -27,12 +27,20 @@ ai-viewer-serve &                              # start server
 xdg-open http://127.0.0.1:7710                # open UI
 ```
 
-Manjaro-friendly install script (matches the user's environment) provided at `scripts/install-systemd-user.sh`:
+Manjaro-friendly install script (matches the user's environment) provided at `scripts/install-systemd-user.sh` (no root needed; localhost-only):
 
-- Installs binaries to `~/.local/bin/`.
-- Drops user systemd units at `~/.config/systemd/user/ai-viewer-{ingest,serve}.service`.
-- `systemctl --user enable --now ai-viewer-{ingest,serve}.service`.
-- No root needed.
+```bash
+scripts/install-systemd-user.sh            # (default: install)
+scripts/install-systemd-user.sh uninstall  # remove units (keeps binaries + data)
+scripts/install-systemd-user.sh status     # systemctl --user status for both
+```
+
+- `install`: ALWAYS rebuilds from current source via `scripts/build.sh` (so `git pull && install` never reinstalls stale binaries), copies the binaries to `~/.local/bin/` and the unit templates from `deploy/systemd/` to `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`, runs `systemctl --user daemon-reload`, then **prints** (does not run) the enable command — enabling a run-on-login service is the operator's explicit step:
+  ```bash
+  systemctl --user enable --now ai-viewer-ingest.service ai-viewer-serve.service
+  ```
+- `uninstall`: disables+stops the units if present (idempotent), removes them, reloads; leaves the binaries and the data dir (`~/.local/share/ai-viewer`) intact.
+- The two units are version-controlled templates under `deploy/systemd/`; `scripts/test/systemd-units-test.sh` statically lints them (`systemd-analyze verify` + required-directive checks).
 
 ## Build Pipeline
 
@@ -151,7 +159,11 @@ sources:
 
 ## systemd User Units
 
-`ai-viewer-ingest.service`:
+The two USER units are shipped as version-controlled templates under
+`deploy/systemd/` and installed by `scripts/install-systemd-user.sh` (above).
+They are USER units (no `User=`, no privilege) and the server binds localhost.
+
+`deploy/systemd/ai-viewer-ingest.service`:
 
 ```ini
 [Unit]
@@ -167,17 +179,28 @@ RestartSec=3s
 WantedBy=default.target
 ```
 
-`ai-viewer-serve.service`: analogous; `After=ai-viewer-ingest.service`.
+`deploy/systemd/ai-viewer-serve.service`: analogous (`Description=ai-viewer
+server`), with `After=ai-viewer-ingest.service`.
+
+**Start-order note.** `After=` orders START only, not readiness. On a fresh
+machine the server may start before the ingester has created+migrated the SQLite
+schema; the server's `CheckSchema` then exits non-zero and `Restart=on-failure`
+(`RestartSec=3s`) retries until the schema exists. This is intentional — no
+serve-side "wait for schema" is needed in v1.
 
 ## Updates
 
 ```bash
 cd ~/src/ai-viewer.git
 git pull
-./scripts/build.sh
-sudo install -m 0755 bin/ai-viewer-* /usr/local/bin/
-systemctl --user restart ai-viewer-{ingest,serve}.service
+scripts/install-systemd-user.sh install     # rebuilds + reinstalls bin -> ~/.local/bin and units
+systemctl --user restart ai-viewer-ingest.service ai-viewer-serve.service
 ```
+
+`install` copies the freshly-built binaries to `~/.local/bin/` — the SAME path
+the user units' `ExecStart=%h/.local/bin/ai-viewer-*` runs — so the restart
+picks up the new binaries. (Do NOT `sudo install` to `/usr/local/bin`: the user
+units would keep running the stale `~/.local/bin` copies.)
 
 The SQLite schema migrates automatically on ingester startup. If migration fails: ingester exits non-zero with a loud log; user must intervene (rollback binary or run `ai-viewer-ingest migrate --dry-run` to inspect).
 
