@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
+	"sort"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -32,6 +34,16 @@ type Cursor struct {
 	// keeps cursors that predate this field parseable. Observability/durability
 	// only — not part of After() ordering.
 	Parked map[string]int64 `json:"parked,omitempty"`
+	// Finalized is the set of child session native ids whose parent `Agent` op
+	// has already been finalized. It persists the in-memory `finalized` guard so a
+	// finalize emitted during Scan (or a previous process lifetime) is not
+	// re-emitted by a Tail catch-up or — critically — by the late-`.meta.json`
+	// child re-read, which re-reads the child sidechain from offset 0 with
+	// emission enabled and so would otherwise re-mark the terminal assistant-text
+	// record as newly read (spec §8.1, P2.5c). Stored as a sorted slice (set
+	// semantics). `omitempty` keeps cursors that predate this field parseable.
+	// Observability/durability only — not part of After() ordering.
+	Finalized []string `json:"finalized,omitempty"`
 	// Version is the on-disk format version. Defaults to cursorVersion on
 	// construction; ParseCursor refuses anything else.
 	Version int `json:"version"`
@@ -195,14 +207,46 @@ func (c Cursor) withParked(parked map[string]int64) Cursor {
 	return out
 }
 
-// clone deep-copies the cursor's maps so callers can mutate the result
-// without affecting the receiver.
+// withFinalized returns a new Cursor whose Finalized slice is REPLACED by a
+// sorted snapshot of the given child-native-id set (spec §8.1, P2.5c). A full
+// replace (not a merge) keeps the persisted set in lockstep with the live
+// `finalized` set. The slice is sorted so the persisted cursor JSON is stable
+// (deterministic across runs). The receiver is not mutated.
+func (c Cursor) withFinalized(finalized map[string]struct{}) Cursor {
+	out := c.clone()
+	if len(finalized) == 0 {
+		out.Finalized = nil
+		return out
+	}
+	ids := make([]string, 0, len(finalized))
+	for id := range finalized {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out.Finalized = ids
+	return out
+}
+
+// finalizedSet returns the Finalized slice as a set for membership tests and
+// restoring into the deferral (spec §8.1, P2.5c). Returns an empty (non-nil) set
+// when none are recorded.
+func (c Cursor) finalizedSet() map[string]struct{} {
+	out := make(map[string]struct{}, len(c.Finalized))
+	for _, id := range c.Finalized {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+// clone deep-copies the cursor's maps and slices so callers can mutate the
+// result without affecting the receiver.
 func (c Cursor) clone() Cursor {
 	out := Cursor{
-		Files:    make(map[string]FileCursor, len(c.Files)+1),
-		MetaSeen: make(map[string]string, len(c.MetaSeen)+1),
-		Parked:   make(map[string]int64, len(c.Parked)+1),
-		Version:  cursorVersion,
+		Files:     make(map[string]FileCursor, len(c.Files)+1),
+		MetaSeen:  make(map[string]string, len(c.MetaSeen)+1),
+		Parked:    make(map[string]int64, len(c.Parked)+1),
+		Finalized: slices.Clone(c.Finalized),
+		Version:   cursorVersion,
 	}
 	maps.Copy(out.Files, c.Files)
 	maps.Copy(out.MetaSeen, c.MetaSeen)

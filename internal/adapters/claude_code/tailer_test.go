@@ -319,15 +319,17 @@ func TestHashFile(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "x.json")
 	writeFileBytes(t, path, []byte(`{"a":1}`))
-	h, ok := hashFile(path)
-	if !ok || h == "" {
-		t.Fatalf("hashFile = (%q,%v), want a hash", h, ok)
+	h, err := hashFile(path)
+	if err != nil || h == "" {
+		t.Fatalf("hashFile = (%q,%v), want a hash", h, err)
 	}
 	if h != hashBytes([]byte(`{"a":1}`)) {
 		t.Fatalf("hashFile hash mismatch")
 	}
-	if _, ok := hashFile(filepath.Join(tmp, "missing")); ok {
-		t.Fatal("hashFile(missing) should report ok=false")
+	// A read error is RETURNED, not swallowed (P2.5a): the caller surfaces it as a
+	// SourceError rather than silently skipping a present-but-broken meta.
+	if _, err := hashFile(filepath.Join(tmp, "missing")); err == nil {
+		t.Fatal("hashFile(missing) should return a read error, not nil")
 	}
 }
 
@@ -539,6 +541,97 @@ func TestParkedSnapshot(t *testing.T) {
 	snap := d.parkedSnapshot()
 	if snap["c1"] != 42 || snap["c2"] != 7 || len(snap) != 2 {
 		t.Errorf("parkedSnapshot = %v, want {c1:42, c2:7}", snap)
+	}
+}
+
+// TestRestoreFinalized verifies restoreFinalized seeds the deferral's finalized
+// set additively and tolerates a nil receiver (P2.5c).
+func TestRestoreFinalized(t *testing.T) {
+	t.Parallel()
+	var nilDef *tailDeferral
+	nilDef.restoreFinalized(map[string]struct{}{"x": {}})
+
+	d := newTailDeferral()
+	d.finalized["existing"] = struct{}{}
+	d.restoreFinalized(map[string]struct{}{"existing": {}, "fresh": {}})
+	if _, ok := d.finalized["existing"]; !ok {
+		t.Error("restoreFinalized dropped an existing entry")
+	}
+	if _, ok := d.finalized["fresh"]; !ok {
+		t.Error("restoreFinalized did not add the fresh entry")
+	}
+}
+
+// TestFinalizedSnapshot verifies finalizedSnapshot copies the finalized set and
+// that a nil deferral returns nil (P2.5c).
+func TestFinalizedSnapshot(t *testing.T) {
+	t.Parallel()
+	var nilDef *tailDeferral
+	if nilDef.finalizedSnapshot() != nil {
+		t.Error("finalizedSnapshot on nil deferral should be nil")
+	}
+	d := newTailDeferral()
+	d.finalized["c1"] = struct{}{}
+	d.finalized["c2"] = struct{}{}
+	snap := d.finalizedSnapshot()
+	if _, ok := snap["c1"]; !ok {
+		t.Error("finalizedSnapshot missing c1")
+	}
+	if _, ok := snap["c2"]; !ok {
+		t.Error("finalizedSnapshot missing c2")
+	}
+	if len(snap) != 2 {
+		t.Errorf("finalizedSnapshot len = %d, want 2", len(snap))
+	}
+	// Mutating the snapshot must not affect the live set.
+	delete(snap, "c1")
+	if _, ok := d.finalized["c1"]; !ok {
+		t.Error("finalizedSnapshot returned an aliased map (mutation leaked)")
+	}
+}
+
+// TestFlushDirty_UnreadableMetaSurfacesError pins P2.5a: a PRESENT but unreadable
+// subagent .meta.json on the Tail meta-hash checkpoint path surfaces a
+// SourceError (no silent failure). A meta path that exists in-root but cannot be
+// read (here: a directory at the meta path, so os.ReadFile fails) must drive an
+// onError, not be silently skipped. Before the fix hashFile swallowed the read
+// error and returned ok=false, masking the broken sidecar.
+func TestFlushDirty_UnreadableMetaSurfacesError(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	proj := filepath.Join(tmp, "-home-user-x")
+	metaRel := "-home-user-x/sess-1/subagents/agent-abc.meta.json"
+	// Create a DIRECTORY at the meta path: it exists (containment passes) but
+	// os.ReadFile on it returns an error → the hash read fails.
+	if err := os.MkdirAll(filepath.Join(proj, "sess-1", "subagents", "agent-abc.meta.json"), 0o755); err != nil {
+		t.Fatalf("mkdir meta-as-dir: %v", err)
+	}
+
+	resolvedRoot, rrErr := filepath.EvalSymlinks(filepath.Clean(tmp))
+	if rrErr != nil {
+		t.Fatalf("resolve root: %v", rrErr)
+	}
+	var mu sync.Mutex
+	var errs []string
+	onError := func(e error) {
+		mu.Lock()
+		errs = append(errs, e.Error())
+		mu.Unlock()
+	}
+	cur := newCursor()
+	out := make(chan canonical.Event, 16)
+	metaDirty := map[string]struct{}{metaRel: {}}
+	if err := flushDirty(context.Background(), resolvedRoot, tmp, "claude-code:"+tmp, map[string]struct{}{}, metaDirty, &cur, newTailDeferral(), out, onError); err != nil {
+		t.Fatalf("flushDirty: %v", err)
+	}
+	var sawHashErr bool
+	for _, e := range errs {
+		if strings.Contains(e, "agent-abc.meta.json") && strings.Contains(e, "hash meta") {
+			sawHashErr = true
+		}
+	}
+	if !sawHashErr {
+		t.Fatalf("unreadable meta on the Tail hash path did not surface a SourceError (P2.5a); errs=%v", errs)
 	}
 }
 

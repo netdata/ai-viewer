@@ -489,7 +489,7 @@ This is the most important structural difference from ai-agent v3 and must be en
 1. While streaming the parent's jsonl, on each `assistant.tool_use` with `name == "Agent"`, emit `OpStartedEvent` with `kind='session'`, capture the `toolu_id`.
 2. The corresponding `OpFinalizedEvent` is deferred until the subagent's jsonl reports completion (its last assistant record or end-of-file with no more activity).
 3. Read the sidecar `.meta.json` to recover `agentType` (the subagent's effective "agent name") and the `toolUseId` join key.
-4. Emit a separate canonical Session for the subagent: `SessionStartedEvent` with `Kind='sub_agent'`, `ParentNativeID=<parent sessionId>+<toolUseId>` synthetic native id (see §5.2), `AgentName=<agentType>`.
+4. Emit a separate canonical Session for the subagent: `SessionStartedEvent` with `Kind='sub_agent'`, `ParentNativeID=<parent sessionId>` and the synthetic `NativeID=<parent sessionId>:agent:<agentId>` (see §5.1, §5.2), `AgentName=<agentType>`.
 
 ## 5. Mapping to Canonical Events
 
@@ -594,13 +594,14 @@ Containment is **uniform across every read path**, not only Scan-time transcript
 - Scan transcript discovery (the directory walk) — guarded.
 - Subagent `.meta.json` collection and read (the `agentType` / `toolUseId` sidecar reads in both Scan and Tail) — guarded; a symlinked `.meta.json` resolving outside the root is refused and surfaces a `SourceError`.
 - Tail transcript reads (a file marked dirty by an fsnotify WRITE, resolved from `root + relpath`) — guarded; a `*.jsonl` symlink created in a watched directory after Tail starts is refused before it is opened.
-- Tail meta-hash checkpointing — guarded; the same containment gate applies before hashing a sidecar's content.
+- Tail meta-hash checkpointing — guarded; the same containment gate applies before hashing a sidecar's content, and the hash reads the resolved path the guard returns (no TOCTOU).
+- Orphan-root earliest-timestamp probe (the single-line read of an orphan parent's child sidechain that seeds the synthetic root's `Ts`, §10.1) — guarded; it opens the symlink-resolved path, not the discovery-time unresolved path.
 
 A symlink planted after the watch is established is therefore refused on the read path, not merely at startup discovery.
 
-**The read opens the symlink-resolved path, not the original (no TOCTOU).** The containment guard resolves a path with `filepath.EvalSymlinks` and then the adapter `os.Open`/`os.ReadFile`s the **resolved** path the guard returned — never the original unresolved path. Opening the original after checking the resolved one would leave a time-of-check/time-of-use window: a symlink swapped between the check and the open would redirect the read outside the root even though the check passed. Because the resolved path is fully symlink-evaluated, no further swap can redirect it. This applies to transcript opens (Scan + Tail) and to subagent `.meta.json` reads.
+**The read opens the symlink-resolved path, not the original (no TOCTOU).** The containment guard resolves a path with `filepath.EvalSymlinks` and then the adapter `os.Open`/`os.ReadFile`s the **resolved** path the guard returned — never the original unresolved path. Opening the original after checking the resolved one would leave a time-of-check/time-of-use window: a symlink swapped between the check and the open would redirect the read outside the root even though the check passed. Because the resolved path is fully symlink-evaluated, no further swap can redirect it. This applies UNIFORMLY to every file open in the adapter: transcript opens (Scan + Tail), subagent `.meta.json` reads (Scan + Tail), the Tail meta-hash checkpoint read, and the orphan-root earliest-timestamp probe. No code path opens an unresolved discovery-time path.
 
-**Meta read/parse failures surface a `SourceError` (no silent failure).** A subagent `.meta.json` that is PRESENT but cannot be read (`os.ReadFile` error) or cannot be parsed (`json.Unmarshal` error) carries the `toolUseId → agentId` linkage and the subagent's `agentType`; silently dropping it would silently fail the parent-`Agent`-op→child link repair and lose the child's `AgentName`. The adapter therefore surfaces a `SourceError` (via the `OnError` callback → `sources.parse_errors` + a `log_entries` ERR row, visible in `/api/health` and the Sources panel) on a present meta file's read or parse failure. A genuinely-absent meta dir or file is NOT an error — the structural path-based linkage still works without the sidecar; only a present-but-broken sidecar is surfaced.
+**Meta read/parse failures surface a `SourceError` (no silent failure).** A subagent `.meta.json` that is PRESENT but cannot be read (`os.ReadFile` error) or cannot be parsed (`json.Unmarshal` error) carries the `toolUseId → agentId` linkage and the subagent's `agentType`; silently dropping it would silently fail the parent-`Agent`-op→child link repair and lose the child's `AgentName`. The adapter therefore surfaces a `SourceError` (via the `OnError` callback → `sources.parse_errors` + a `log_entries` ERR row, visible in `/api/health` and the Sources panel) on a present meta file's read or parse failure. This holds on EVERY meta read path, including the Tail meta-hash checkpoint: a meta whose content cannot be read when the checkpoint hashes it surfaces a `SourceError` rather than being silently skipped (the silent skip would mask a broken sidecar whose rewrite should have driven the late-meta linkage repair). A genuinely-absent meta dir or file is NOT an error — the structural path-based linkage still works without the sidecar; only a present-but-broken sidecar is surfaced.
 
 On `CREATE` of a new directory at depth 1 (a new project dir), the watcher `Add()`s the new dir.
 
@@ -662,11 +663,19 @@ The cursor is the adapter's resume contract. Shape (JSON, stored in `sources.cur
   },
   "metaSeen": {
     "<sanitized-cwd>/<sessionId>/subagents/agent-<agentId>.meta.json": "<sha256-of-content>"
-  }
+  },
+  "parked": {
+    "<parent sessionId>:agent:<agentId>": <completion_ts_microseconds>
+  },
+  "finalized": [
+    "<parent sessionId>:agent:<agentId>"
+  ]
 }
 ```
 
 Keys are paths **relative to the configured root** (`~/.claude/projects/`). The adapter never stores absolute paths in the cursor — moving the projects dir or running under a different `CLAUDE_CONFIG_DIR` shifts the root, not every cursor key.
+
+`parked` and `finalized` are the durable Agent-op-finalization state described in §8.1: `parked` carries the completion timestamps of subagent children that completed before their parent `Agent` op was known (so a restart can still finalize the parent when the op appears), and `finalized` carries the child ids already finalized (so a restart or a late-`.meta.json` child re-read does not re-emit a finalize). Both are JSON `omitempty` so cursors that predate them still parse, and both are observability/durability state only — they do NOT participate in `After()` ordering, which is keyed solely on per-file byte offsets.
 
 On startup:
 
@@ -741,16 +750,21 @@ land independently:
 
    - **The flag reflects the PHYSICAL last record, not the last MAPPED record.**
      The completion marker is the genuine last line of the file, regardless of
-     whether the adapter mapped, skipped, or failed to parse it. The line reader
-     therefore sets `lastRecordAssistantText` (and `lastRecordEmitted`) for EVERY
-     physical line it consumes: a parse-error line and a skipped known-no-op line
-     (e.g. a trailing `summary` / `task-summary` record, or a malformed JSON line)
-     both set `lastRecordAssistantText = false`. So a child whose physical last
-     record is `[assistant{text}, <skipped no-op>]` or `[assistant{text},
-     <malformed line>]` is NOT complete — its parent `Agent` op stays `running` —
-     because the assistant-text record is not the physical last line. Without this,
-     a trailing no-op/malformed line would leave the flag stale-true from the
-     preceding assistant-text record and wrongly finalize the parent.
+     whether the adapter mapped, skipped, failed to parse, or could not even buffer
+     it. The line reader therefore sets `lastRecordAssistantText` (and
+     `lastRecordEmitted`) for EVERY physical line it consumes — on EVERY path that
+     advances the offset past a line: the normal mapped path, the parse-error skip,
+     the known-no-op skip, AND the oversized-line skip. A parse-error line, a
+     skipped known-no-op line (e.g. a trailing `summary` / `task-summary` record),
+     a malformed JSON line, and a line that exceeds `scanBufferMax` all set
+     `lastRecordAssistantText = false`. So a child whose physical last record is
+     `[assistant{text}, <skipped no-op>]`, `[assistant{text}, <malformed line>]`,
+     or `[assistant{text}, <oversized line>]` is NOT complete — its parent `Agent`
+     op stays `running` — because the assistant-text record is not the physical
+     last line. Without this, a trailing no-op / malformed / oversized line would
+     leave the flag stale-true from the preceding assistant-text record and wrongly
+     finalize the parent. The ONLY non-line-consuming loop exit is the clean
+     end-of-file return, which leaves the flag set by the genuine last line.
 
    - **Emit-gated by `emitFrom` (replay emits nothing).** A child is marked
      `completed` only when its terminal assistant-text record was **newly read**
@@ -786,6 +800,25 @@ land independently:
      finalizes in a later flush once the parent op is observed). There is no
      `cycle` counter, no quiescence window, and no tick-driven sweep.
 
+   - **A parked completion is RETRACTED when a re-read child is no longer
+     complete.** Folding one transcript's mapper state into the deferral is
+     bidirectional, not add-only: when a subagent transcript is read and it IS
+     currently complete (fully read, terminal assistant-text, newly read this
+     pass) its child id is added to `completed`; when a subagent transcript is
+     read and it is NOT currently complete (`!(fullyRead &&
+     lastRecordAssistantText)` — e.g. it grew a trailing `tool_use` / `user`
+     record after a prior pass had observed it complete, or a parked-but-not-yet-
+     finalized child re-read after appending), its child id is **deleted** from
+     `completed`. Without retraction, a child that completed and parked (because
+     its parent op was not yet known) but then grew a non-text terminal record
+     BEFORE the parent op appeared would keep its stale parked completion and
+     wrongly finalize the parent once the op landed. The `lastRecordEmitted` gate
+     stays on the ADD branch only: a pure replay of an already-complete child
+     (fully read, terminal assistant-text, but read below the resume offset so
+     `lastRecordEmitted == false`) is neither re-added (the emit gate) nor
+     retracted (it IS still complete) — its existing park / `finalized` state is
+     left untouched, so the no-double-finalize property holds.
+
    - **Parked completions survive a daemon restart (cursor-durable).** The
      `completed` set is also persisted in the cursor (a `parked` map of child
      native id → completion-ts-micros, JSON `omitempty` so older cursors without
@@ -799,6 +832,24 @@ land independently:
      NOT change the finalize-emit gating (the `finalized` set and the
      `lastRecordEmitted` gate are unchanged), so a replay over an already-finalized
      child still emits nothing.
+
+   - **The `finalized` set is also cursor-durable (no re-finalize after a
+     restart or a late-meta child re-read).** The `finalized` set is persisted in
+     the cursor too (a `finalized` list of child native ids, JSON `omitempty` so
+     older cursors still parse), checkpointed alongside `parked` on every
+     `SourceProgress` and restored on Tail startup. The loop-lifetime `finalized`
+     set guards against a re-finalize WITHIN one process lifetime, but two paths
+     cross the lifetime boundary: (a) a child finalized during Scan, then a Tail in
+     the same or a restarted process; and (b) the late-`.meta.json` child re-read,
+     which re-reads the child sidechain from offset 0 with emission enabled — that
+     re-read makes the terminal assistant-text record "newly read" again
+     (`lastRecordEmitted == true`), so the in-memory gate alone would re-mark the
+     child complete and re-emit the finalize. Consulting the persisted `finalized`
+     set in the pairing step suppresses that second emit: a child whose id is in the
+     restored `finalized` set is never finalized again. Like `parked`, this is
+     observability/durability state only — it does not participate in cursor
+     `After()` ordering — and it does NOT change the normal finalize behavior (a
+     child finalized for the first time still emits exactly once).
 
    The finalize's `EndTs` is the child's terminal assistant-text record's
    timestamp (its implicit completion time).

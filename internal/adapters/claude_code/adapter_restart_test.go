@@ -864,3 +864,93 @@ func TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay(t *testing.T) {
 		}
 	}
 }
+
+// TestScanThenTail_LateMetaChildReReadNoDoubleFinalize pins P2.5c: a child
+// finalized during Scan must NOT be re-finalized when a LATE `.meta.json` rewrite
+// during Tail forces the child sidechain to be re-read from offset 0 (the P2.4c
+// child re-read). That re-read makes the terminal assistant-text record "newly
+// read" again (lastRecordEmitted=true), so the in-memory finalize gate alone
+// would re-emit. The durable `finalized` set — persisted in the Scan cursor and
+// restored on Tail startup — suppresses the second emit. Exactly one finalize
+// must be observed across Scan + Tail.
+func TestScanThenTail_LateMetaChildReReadNoDoubleFinalize(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Parent + child + meta ALL present at Scan time → the child completes and the
+	// parent Agent op finalizes ONCE during Scan.
+	writeParentWithAgentOp(t, root)
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	scanOut := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	scanEvents := drainBuffered(scanOut)
+	finalizes := 0
+	for _, ev := range scanEvents {
+		if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
+			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+			finalizes++
+		}
+	}
+	if finalizes != 1 {
+		t.Fatalf("Scan finalized the parent Agent op %d times, want exactly 1 (test premise)", finalizes)
+	}
+	// The Scan cursor must carry the finalized child id so Tail can suppress a
+	// re-finalize (the durability the P2.5c fix adds).
+	wantChild := childNativeID(durParentSession, durAgentID)
+	parsed, err := ParseCursor(lastCursor(t, scanEvents))
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	foundFinalized := false
+	for _, id := range parsed.Finalized {
+		if id == wantChild {
+			foundFinalized = true
+		}
+	}
+	if !foundFinalized {
+		t.Fatalf("Scan cursor did not record the finalized child %q (P2.5c); finalized=%v", wantChild, parsed.Finalized)
+	}
+
+	// Tail on the SAME instance (resumes from the Scan cursor, restoring the
+	// finalized set). After the watch is live, REWRITE the .meta.json with changed
+	// content so the late-meta path fires and re-reads the child from offset 0.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailOut := make(chan canonical.Event, 256)
+	done := make(chan struct{})
+	go func() { _ = a.Tail(ctx, tailOut); close(done) }()
+
+	time.Sleep(150 * time.Millisecond)
+	// Changed content (different description) → hash differs from the cursor's
+	// metaSeen → the meta is "changed" → the child is force-re-read from 0.
+	writeFileBytes(t, metaPath(root),
+		[]byte(`{"agentType":"Explore","description":"explore-rewritten","toolUseId":"`+parentAgentToolUseID+`"}`))
+
+	deadline := time.After(tailTickInterval + 1500*time.Millisecond)
+	extra := 0
+	for done2 := false; !done2; {
+		select {
+		case ev := <-tailOut:
+			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				extra++
+			}
+		case <-deadline:
+			done2 = true
+		}
+	}
+	cancel()
+	<-done
+	if extra != 0 {
+		t.Fatalf("late-meta child re-read in Tail emitted %d additional OpFinalized for the parent Agent op, want 0 (P2.5c durable finalized set)", extra)
+	}
+}

@@ -517,9 +517,20 @@ func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript,
 				// valid record in the file. If the oversized line had no trailing
 				// newline (drained to EOF), consumed covers the rest of the file
 				// and the next read returns io.EOF.
-				if off >= emitFrom {
+				emit := off >= emitFrom
+				if emit {
 					onError(fmt.Errorf("transcript %s @%d: line exceeds %d bytes; skipping", t.rel, off, scanBufferMax))
 				}
+				// An oversized line is the PHYSICAL last record if it is the file's
+				// trailing line, so the §485 completion marker must reflect it: clear
+				// the assistant-text flag (an unbuffered line is never an
+				// assistant-text record) so a child ending in [assistant{text},
+				// <oversized line>] does NOT finalize its parent Agent op (P1.5a).
+				// This mirrors the parse-error and skipped-no-op continues — every
+				// physical-line-consuming path leaves the flag reflecting THAT line;
+				// the only non-consuming exit is the io.EOF return above.
+				mapper.lastRecordAssistantText = false
+				mapper.lastRecordEmitted = emit
 				off += consumed
 				continue
 			}
@@ -559,12 +570,19 @@ func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript,
 			continue
 		}
 		// mapRecord always runs so the turn/op inference counters advance
-		// during a resume replay; only the events past emitFrom are sent.
+		// during a resume replay; only the events past emitFrom are sent. It also
+		// sets lastRecordAssistantText for THIS record before any error return
+		// (mapper.go), so the completion flag already reflects this physical line.
 		events, mErr := mapper.mapRecord(rec)
 		if mErr != nil {
 			if emit {
 				onError(fmt.Errorf("transcript %s @%d: map: %w", t.rel, lineStart, mErr))
 			}
+			// Keep lastRecordEmitted in lockstep with every other physical-line
+			// path (the map-error record is still the physical last line if it is
+			// the file's trailing record); lastRecordAssistantText was already set
+			// by mapRecord above.
+			mapper.lastRecordEmitted = emit
 			continue
 		}
 		// Record whether this (now the most recent) record was newly read this
@@ -692,7 +710,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		resolvedRoot = rr
 	}
 
-	if perr := emitOrphanRoots(ctx, root, sourceID, transcripts, out); perr != nil {
+	if perr := emitOrphanRoots(ctx, resolvedRoot, sourceID, transcripts, out); perr != nil {
 		return cur, perr
 	}
 
@@ -709,10 +727,14 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	// parent op is known is finalized exactly once (finalized set guards
 	// re-emit). Seed completed from the persisted cursor's parked set so a child
 	// that completed before its parent op was known survives a restart in which
-	// the parent appears during THIS Scan (P2.4d). Restore from `start` (the
-	// caller's persisted cursor) so the park is not lost if `cur` was reset to a
-	// fresh cursor above (start.Files == nil).
+	// the parent appears during THIS Scan (P2.4d), and seed finalized from the
+	// cursor so a child already finalized in a prior lifetime is not re-finalized
+	// when re-read here (P2.5c). Restore from `start` (the caller's persisted
+	// cursor) so the state is not lost if `cur` was reset to a fresh cursor above
+	// (start.Files == nil). Restore finalized FIRST so the parked restore's guard
+	// sees it.
 	def := newTailDeferral()
+	def.restoreFinalized(start.finalizedSet())
 	def.restoreParked(start.Parked)
 
 	for _, t := range transcripts {
@@ -741,9 +763,11 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		collectAgentDeferral(mapper, t, def.pending, def.completed)
 		emittedSinceProgress += n
 		if emittedSinceProgress >= progressEveryEvents || time.Since(lastProgress) >= progressEveryDuration {
-			// Checkpoint parked completions so a Scan interrupted mid-walk still
-			// persists children awaiting their parent op (P2.4d).
+			// Checkpoint parked completions AND the finalized set so a Scan
+			// interrupted mid-walk still persists children awaiting their parent op
+			// (P2.4d) and any restored already-finalized guard (P2.5c).
 			cur = cur.withParked(def.parkedSnapshot())
+			cur = cur.withFinalized(def.finalizedSnapshot())
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return cur, perr
 			}
@@ -767,10 +791,14 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	}
 
 	// Persist the parked completions that survived pairing (children still
-	// awaiting their parent op) so a restart can restore them (P2.4d). Finalized
-	// children were dropped from def.completed by pairCompletedFinalizations, so
-	// they are excluded from this snapshot.
+	// awaiting their parent op) so a restart can restore them (P2.4d), and the
+	// finalized set so a child finalized during THIS Scan is not re-finalized by
+	// the subsequent Tail catch-up or a late-meta re-read (P2.5c). Finalized
+	// children were dropped from def.completed and added to def.finalized by
+	// pairCompletedFinalizations, so the parked snapshot excludes them and the
+	// finalized snapshot includes them.
 	cur = cur.withParked(def.parkedSnapshot())
+	cur = cur.withFinalized(def.finalizedSnapshot())
 
 	if err := emitProgress(ctx, sourceID, cur, out); err != nil {
 		return cur, err
@@ -789,12 +817,24 @@ type agentOpFinalize struct {
 // Agent-op deferral maps (spec §8.1). A parent transcript contributes its Agent
 // ops (keyed by child native id) into `pending` — rebuilt on every read,
 // including the emit-suppressed replay, so a parent observed during Scan is
-// reachable in Tail. A subagent transcript contributes a `completed` entry ONLY
-// when it is fully read AND its terminal record is an assistant-text completion
-// marker (§485) that was NEWLY read this pass (lastRecordEmitted) — so a
-// catch-up/replay over an already-consumed child does not re-mark it (no double
-// finalize). A child terminated by a user/tool record (lastRecordAssistantText
-// false) is never marked completed and stays running.
+// reachable in Tail.
+//
+// The subagent → `completed` fold is BIDIRECTIONAL (P1.5b):
+//   - ADD: a subagent fully read AND ending in an assistant-text completion
+//     marker (§485) that was NEWLY read this pass (lastRecordEmitted) is added to
+//     `completed`. The emit gate means a catch-up/replay over an already-consumed
+//     child does not re-mark it (no double finalize).
+//   - RETRACT: a subagent re-read that is NOT currently complete
+//     (!(fullyRead && lastRecordAssistantText) — e.g. it grew a trailing
+//     tool_use/user record after a prior pass parked it complete) is DELETED from
+//     `completed`. Without this, a child that completed and parked (parent op not
+//     yet known) but then grew a non-text terminal record before the parent op
+//     appeared would keep its stale park and wrongly finalize the parent.
+//
+// The emit gate is on the ADD branch ONLY: a pure replay of an already-complete
+// child (fully read, terminal assistant-text, but read below the resume offset so
+// lastRecordEmitted is false) is neither re-added nor retracted (it IS still
+// complete), preserving the no-double-finalize property.
 func collectAgentDeferral(mapper *fileMapper, t transcript, pending map[string]agentOpFinalize, completed map[string]completionState) {
 	if mapper == nil {
 		return
@@ -802,17 +842,27 @@ func collectAgentDeferral(mapper *fileMapper, t transcript, pending map[string]a
 	for childID, ref := range mapper.agentOps {
 		pending[childID] = agentOpFinalize{parentNativeID: mapper.nativeID, ref: ref}
 	}
-	if t.kind == canonical.KindSubAgent &&
-		mapper.fullyRead && mapper.lastRecordAssistantText && mapper.lastRecordEmitted {
+	if t.kind != canonical.KindSubAgent {
+		return
+	}
+	currentlyComplete := mapper.fullyRead && mapper.lastRecordAssistantText
+	switch {
+	case currentlyComplete && mapper.lastRecordEmitted:
 		completed[t.nativeID] = completionState{tsUs: mapper.lastAssistantTextTsUs}
+	case !currentlyComplete:
+		// Re-read child that is no longer complete: retract any stale park so it
+		// cannot finalize the parent. A no-op when the child was never parked.
+		delete(completed, t.nativeID)
 	}
 }
 
 // emitOrphanRoots emits a synthetic root SessionStartedEvent for every
 // parent sessionId that has subagent transcripts but no own root transcript
 // (spec §10.1). The synthetic root carries orphanRoot=true in extras so the
-// UI can hint at it. Idempotent: the ingester upserts on NativeID.
-func emitOrphanRoots(ctx context.Context, root, sourceID string, transcripts []transcript, out chan<- canonical.Event) error {
+// UI can hint at it. Idempotent: the ingester upserts on NativeID. resolvedRoot
+// is the symlink-resolved projects root, threaded into the earliest-timestamp
+// probe's containment open (P2.5b).
+func emitOrphanRoots(ctx context.Context, resolvedRoot, sourceID string, transcripts []transcript, out chan<- canonical.Event) error {
 	haveRoot := map[string]struct{}{}
 	for _, t := range transcripts {
 		if t.kind == canonical.KindRoot {
@@ -829,7 +879,7 @@ func emitOrphanRoots(ctx context.Context, root, sourceID string, transcripts []t
 		if _, ok := haveRoot[t.parentNativeID]; ok {
 			continue
 		}
-		ts := earliestTs(t.abs)
+		ts := earliestTs(resolvedRoot, t.abs)
 		if existing, seen := orphans[t.parentNativeID]; !seen || ts < existing {
 			if !seen {
 				order = append(order, t.parentNativeID)
@@ -860,9 +910,17 @@ func emitOrphanRoots(ctx context.Context, root, sourceID string, transcripts []t
 }
 
 // earliestTs returns the first parseable record timestamp in a transcript,
-// or 0 when none is found. Cheap single-line read for the orphan-root Ts.
-func earliestTs(abs string) int64 {
-	f, err := os.Open(abs) // #nosec G304 -- path from filtered directory scan under configured root
+// or 0 when none is found. Cheap single-line read for the orphan-root Ts. It
+// opens the symlink-RESOLVED path within resolvedRoot (P2.5b, no TOCTOU): a path
+// that resolves outside the root, or cannot be resolved, yields 0 (the synthetic
+// orphan root then gets Ts=0 rather than reading an out-of-root file). Mirrors
+// readTranscript's containment open.
+func earliestTs(resolvedRoot, abs string) int64 {
+	resolvedAbs, ok, rerr := withinResolvedRoot(resolvedRoot, abs)
+	if rerr != nil || !ok {
+		return 0
+	}
+	f, err := os.Open(resolvedAbs) // #nosec G304 -- opening the containment-checked RESOLVED path (withinResolvedRoot) from a filtered scan under the configured root
 	if err != nil {
 		return 0
 	}

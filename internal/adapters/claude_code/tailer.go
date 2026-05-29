@@ -64,10 +64,15 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	metaDirty := make(map[string]struct{}, 16)
 	// Loop-lifetime Agent-op deferral so a parent Agent op observed in one
 	// flush is finalized when its child sidechain ends in another (spec §8.1).
-	// Seed its parked completions from the persisted cursor so a child that
-	// completed before its parent op was known — and was checkpointed before a
-	// restart — is still finalizable when the parent op appears (P2.4d).
+	// Seed its parked completions AND its already-finalized set from the persisted
+	// cursor: a child that completed before its parent op was known — and was
+	// checkpointed before a restart — is still finalizable when the parent op
+	// appears (P2.4d), and a child already finalized in a previous lifetime (or
+	// during Scan) is not re-finalized by the catch-up or the late-meta re-read
+	// (P2.5c). Restore `finalized` FIRST so restoreParked's already-finalized guard
+	// sees it.
 	deferral := newTailDeferral()
+	deferral.restoreFinalized(cur.finalizedSet())
 	deferral.restoreParked(cur.Parked)
 
 	// Initial catch-up (spec §6.3, P2c): the watch is now established, but any
@@ -343,7 +348,8 @@ func (d *tailDeferral) parkedSnapshot() map[string]int64 {
 // finalizable when the parent op appears after the restart. An already-finalized
 // child is not restored (it is not in `parked`, which is a snapshot of the live
 // `completed` set that drops finalized children). Existing in-memory entries are
-// preserved (restore only adds).
+// preserved (restore only adds). Callers that also restore `finalized` should do
+// so FIRST so the already-finalized guard here sees the restored set.
 func (d *tailDeferral) restoreParked(parked map[string]int64) {
 	if d == nil {
 		return
@@ -357,6 +363,32 @@ func (d *tailDeferral) restoreParked(parked map[string]int64) {
 		}
 		d.completed[childID] = completionState{tsUs: tsUs}
 	}
+}
+
+// restoreFinalized seeds the deferral's `finalized` set from a cursor's persisted
+// `finalized` slice (spec §8.1, P2.5c), so a finalize emitted in a previous
+// process lifetime (or during Scan) is not re-emitted by a Tail catch-up or the
+// late-meta child re-read. Restore only adds; existing entries are preserved.
+func (d *tailDeferral) restoreFinalized(finalized map[string]struct{}) {
+	if d == nil {
+		return
+	}
+	for childID := range finalized {
+		d.finalized[childID] = struct{}{}
+	}
+}
+
+// finalizedSnapshot returns a copy of the deferral's `finalized` set for
+// checkpointing into the cursor (spec §8.1, P2.5c). A pure read of the live set.
+func (d *tailDeferral) finalizedSnapshot() map[string]struct{} {
+	if d == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(d.finalized))
+	for childID := range d.finalized {
+		out[childID] = struct{}{}
+	}
+	return out
 }
 
 // flushDirty re-reads every dirty transcript from its cursor offset and
@@ -376,15 +408,26 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 	changedMetas := make(map[string]struct{}, len(metaDirty))
 	for rel := range metaDirty {
 		abs := filepath.Join(root, filepath.FromSlash(rel))
-		// Containment guard on the Tail meta-hash read (spec §6.1, P1.3): a
+		// Containment guard on the Tail meta-hash read (spec §6.1, P1.3, P2.5a): a
 		// .meta.json symlink planted in a watched dir after Tail starts must be
-		// refused before its content is hashed/read. resolvedRoot is pre-resolved
-		// so this does not re-run EvalSymlinks on the root per meta.
-		if !withinSourceRoot(resolvedRoot, abs, onError) {
+		// refused before its content is hashed/read, and the hash must open the
+		// RESOLVED path the guard returns (no TOCTOU), not the original. resolvedRoot
+		// is pre-resolved so this does not re-run EvalSymlinks on the root per meta.
+		resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, abs)
+		if cerr != nil {
+			onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", rel, cerr))
 			continue
 		}
-		h, ok := hashFile(abs)
 		if !ok {
+			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", rel))
+			continue
+		}
+		h, herr := hashFile(resolvedAbs)
+		if herr != nil {
+			// A present-but-unreadable meta silently failing the rewrite-detection
+			// would mask a broken sidecar whose rewrite should drive the late-meta
+			// linkage repair; surface it (P2.5a, no silent failure).
+			onError(fmt.Errorf("claude_code: hash meta %s: %w", rel, herr))
 			continue
 		}
 		if cur.metaSeen(rel) == h {
@@ -480,11 +523,14 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 		if perr := pairCompletedFinalizations(ctx, sourceID, def, out); perr != nil {
 			return perr
 		}
-		// Checkpoint the surviving parked completions into the cursor so a restart
-		// restores them (P2.4d). pairCompletedFinalizations already dropped the
-		// finalized children from def.completed, so this snapshot is exactly the
-		// children still awaiting their parent op.
+		// Checkpoint the surviving parked completions AND the finalized set into the
+		// cursor so a restart restores them (P2.4d, P2.5c).
+		// pairCompletedFinalizations already dropped the finalized children from
+		// def.completed (so the parked snapshot is exactly the children still
+		// awaiting their parent op) and added them to def.finalized (so the
+		// finalized snapshot persists the no-re-finalize guard).
 		*cur = cur.withParked(def.parkedSnapshot())
+		*cur = cur.withFinalized(def.finalizedSnapshot())
 	}
 	return emitProgress(ctx, sourceID, *cur, out)
 }
@@ -655,12 +701,16 @@ func transcriptForRel(root, rel string) (transcript, bool) {
 	}, true
 }
 
-// hashFile returns the sha256 hex of a file's content, or ("", false) on
-// error. Used by flushDirty to checkpoint meta-file state.
-func hashFile(abs string) (string, bool) {
-	raw, err := os.ReadFile(abs) // #nosec G304 -- path from watched tree under configured root
+// hashFile returns the sha256 hex of a file's content. It MUST be given a
+// containment-checked, symlink-RESOLVED path (the caller resolves via
+// withinResolvedRoot and passes the resolved path, P2.5a — no TOCTOU). A read
+// error is RETURNED (not swallowed) so the caller can surface a SourceError
+// rather than silently skipping a present-but-broken meta (spec §6.1). Used by
+// flushDirty to checkpoint meta-file state.
+func hashFile(resolvedAbs string) (string, error) {
+	raw, err := os.ReadFile(resolvedAbs) // #nosec G304 -- reading the containment-checked RESOLVED path (withinResolvedRoot) from the watched tree under the configured root
 	if err != nil {
-		return "", false
+		return "", err
 	}
-	return hashBytes(raw), true
+	return hashBytes(raw), nil
 }

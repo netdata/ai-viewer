@@ -71,6 +71,50 @@ func TestParseCursor_OldCursorWithoutParked(t *testing.T) {
 	}
 }
 
+// TestParseCursor_FinalizedRoundTrip verifies the P2.5c finalized-child set
+// survives a String → ParseCursor round-trip and is readable back as a set.
+func TestParseCursor_FinalizedRoundTrip(t *testing.T) {
+	t.Parallel()
+	orig := newCursor().withFinalized(map[string]struct{}{
+		"sess:agent:abc": {},
+		"sess:agent:def": {},
+	})
+	got, err := ParseCursor(orig.String())
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	set := got.finalizedSet()
+	if _, ok := set["sess:agent:abc"]; !ok {
+		t.Fatalf("finalized lost across round-trip: %+v", got.Finalized)
+	}
+	if _, ok := set["sess:agent:def"]; !ok {
+		t.Fatalf("finalized lost across round-trip: %+v", got.Finalized)
+	}
+	// withFinalized sorts for a stable serialization.
+	if len(got.Finalized) != 2 || got.Finalized[0] != "sess:agent:abc" {
+		t.Fatalf("finalized not stably sorted: %+v", got.Finalized)
+	}
+}
+
+// TestParseCursor_OldCursorWithoutFinalized verifies a cursor persisted BEFORE
+// the `finalized` field existed still parses (additive omitempty, unchanged
+// version), yielding an empty finalized set — not an error.
+func TestParseCursor_OldCursorWithoutFinalized(t *testing.T) {
+	t.Parallel()
+	// A version-1 cursor with parked but no "finalized" key (the pre-P2.5c shape).
+	old := `{"version":1,"files":{"p/s.jsonl":{"offset":10,"size":10}},"metaSeen":{},"parked":{"sess:agent:abc":42}}`
+	got, err := ParseCursor(old)
+	if err != nil {
+		t.Fatalf("ParseCursor(old cursor): %v", err)
+	}
+	if got.Parked["sess:agent:abc"] != 42 {
+		t.Fatalf("old cursor parked lost: %+v", got.Parked)
+	}
+	if len(got.Finalized) != 0 {
+		t.Fatalf("old cursor must yield empty finalized, got %+v", got.Finalized)
+	}
+}
+
 func TestParseCursor_RejectsUnknownVersion(t *testing.T) {
 	t.Parallel()
 	_, err := ParseCursor(`{"version":99}`)

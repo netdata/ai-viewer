@@ -564,6 +564,114 @@ skipped/malformed trailing; parked completions persisted in the cursor and resto
 resume; late meta repairs the child AgentName too), §6.1 (reads open the symlink-resolved
 path; meta read/parse failures surface a SourceError).
 
+### Round 5 (2026-05-29) — codex + glm + minimax (full scope + Round-4 fix notes)
+
+glm + minimax → "safe to merge" (nits). **codex → NOT safe: 2 P1 + 3 P2 + 1 P3**, all
+verified real BY MY OWN AUDIT (I enumerated every instance of each pattern — codex's list
+is complete). Root theme: the Round-4 fixes were INCOMPLETE PATTERN-SWEEPS — the cited
+lines were fixed but SIBLING paths of the same class were missed. This round sweeps EVERY
+instance. Audit (ground truth):
+
+- **[P1.5a] Oversized-line skip leaves the completion flag stale.** Round-4 cleared
+  `lastRecordAssistantText` on the `perr` and `skip` continues but NOT on the
+  `errLineTooLong` continue (`scanner.go` ~524). Audited every continue/return in
+  `streamLines`: io.EOF returns; perr+skip already clear; **errLineTooLong is the ONLY
+  remaining un-cleared continue.** Fix: clear the flag (+ set `lastRecordEmitted`) there.
+- **[P1.5b] Stale parked completion never retracted.** `collectAgentDeferral`
+  (`scanner.go:798-806`) only ADDS to `completed`; it never deletes when a child is re-read
+  and is NO LONGER complete (grew a non-text terminal). The stale park later finalizes the
+  parent. Fix: when a subagent is re-read and `!(fullyRead && lastRecordAssistantText)`,
+  RETRACT (`delete(completed, nativeID)`). Keep the `lastRecordEmitted` gate on the ADD so a
+  pure replay of an already-complete child neither re-adds nor wrongly retracts.
+- **[P2.5a] Tail meta-hash TOCTOU + silent failure.** `flushDirty` checks containment then
+  `hashFile(abs)` opens the UNRESOLVED path (`tailer.go:661`) and silently returns false on
+  read error. Audited ALL 5 file opens: scanner.go:282/360/404 already resolved; the two NOT
+  fixed are `tailer.go:661` and `scanner.go:865` (below). Fix: `hashFile` opens the resolved
+  path + surfaces a SourceError; `flushDirty` passes the resolved path.
+- **[P2.5b] earliestTs opens the unresolved path** (`scanner.go:865`, orphan-root timestamp).
+  Fix: open the resolved path.
+- **[P2.5c] Late-meta child re-read re-emits an already-emitted Agent finalize.** The P2.4c
+  from-0 child re-read makes the terminal assistant-text "newly read"; Tail's `finalized` set
+  is per-lifetime and unaware of a Scan-time finalize, so it re-emits. Fix: persist the
+  `finalized` child-id set in the cursor (alongside `Parked`, json omitempty), restore on
+  Tail start, consult it in pairing. Also hardens restart double-finalize. Keep the
+  no-double-finalize test green.
+- **[P3.5] Spec wording drift.** `adapter-claude-code.md:492` says
+  `ParentNativeID=<sessionId>+<toolUseId>` but §5.1 + code use `<sessionId>`. Fix the text.
+
+Every finding is a completeness gap or a small state-machine refinement (retract, durable
+`finalized`) — not a fresh design flaw. The complete instance list above makes the fix
+total, not partial. If a finalize bug recurs after a COMPLETE sweep, escalate the design
+tradeoff (drop live-tail finalize → Scan-only) to the operator.
+
+Not merged. Fixes delegated; re-review same scope + these notes (Round 6) before merge.
+
+#### Fixes applied (2026-05-29) — all 6 findings landed + pinned by tests
+
+Each fix was applied AND the entire package was re-audited for sibling instances of
+the same bug class (the Round-4 incompleteness lesson). Audit results inline.
+
+- **P1.5a (oversized-line stale flag) — DONE.** `scanner.go` `streamLines` now clears
+  `mapper.lastRecordAssistantText = false` and sets `lastRecordEmitted = emit` on the
+  `errLineTooLong` continue, mirroring the `perr` and `skip` paths. **AUDIT:** enumerated
+  every consuming path in `streamLines` — `errLineTooLong`, parse-error, skipped-no-op,
+  AND the mapRecord-error continue all now set the flags (the latter for symmetry; its
+  `lastRecordAssistantText` was already set inside `mapRecord`); the only non-consuming
+  exit is the clean io.EOF return. 1 cited + 1 sibling (mapRecord-error) = total. Pinned by
+  `scanner_test.go::TestScan_AgentOpNotFinalizedTrailingOversized`.
+- **P1.5b (stale parked completion never retracted) — DONE.** `scanner.go`
+  `collectAgentDeferral` is now bidirectional: a subagent re-read that is NOT currently
+  complete (`!(fullyRead && lastRecordAssistantText)`) RETRACTS its `completed` entry
+  (`delete`); the `lastRecordEmitted` gate stays on the ADD branch only, so a pure replay
+  of an already-complete child neither re-adds nor wrongly retracts. **AUDIT:**
+  `collectAgentDeferral` is the sole writer of the `completed` set across both Scan and
+  Tail; one fix covers both call sites. Pinned by
+  `scanner_test.go::TestScan_StaleParkedCompletionRetracted` (and the retraction also
+  clears the persisted park).
+- **P2.5a (Tail meta-hash TOCTOU + silent failure) — DONE.** `tailer.go` `flushDirty`
+  resolves the meta via `withinResolvedRoot` and passes the RESOLVED path to `hashFile`;
+  `hashFile` now returns `(string, error)` and the caller surfaces a `SourceError`
+  ("hash meta …") on a read failure. **AUDIT:** all 5 file opens in the package now read
+  containment-checked RESOLVED paths (scanner.go:282/360/404/916, tailer.go:711); zero
+  unresolved opens remain. Pinned by `tailer_test.go::TestFlushDirty_UnreadableMetaSurfacesError`
+  + updated `TestHashFile`.
+- **P2.5b (earliestTs unresolved open) — DONE.** `scanner.go` `earliestTs` takes
+  `resolvedRoot`, resolves the path via `withinResolvedRoot`, and opens the resolved path
+  (0 on escape/resolve failure). Threaded `resolvedRoot` through `emitOrphanRoots`. Pinned
+  by `scanner_test.go::TestEarliestTs_OpensResolvedPathAndRefusesEscape`.
+- **P2.5c (late-meta child re-read re-emits an already-emitted finalize) — DONE.**
+  `cursor.go` gains a `Finalized []string` field (JSON `finalized,omitempty`) with
+  `withFinalized`/`finalizedSet`; `tailer.go` `tailDeferral` gains `restoreFinalized`/
+  `finalizedSnapshot`; the finalized set is checkpointed alongside `parked` in `flushDirty`
+  and `scanAll`, and restored on Tail startup AND in `scanAll` (restored FIRST so the
+  parked-restore guard sees it). `pairCompletedFinalizations` already consults `finalized`,
+  so a child finalized during Scan (or a prior lifetime) is not re-emitted by the P2.4c
+  child re-read. **AUDIT:** the `finalized` set has exactly one read-before-emit
+  (`pairCompletedFinalizations`) and is now durable across every lifetime boundary. Pinned
+  by `adapter_restart_test.go::TestScanThenTail_LateMetaChildReReadNoDoubleFinalize`;
+  `TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay` and
+  `TestScanThenTail_ParkedCompletionDurableAcrossRestart` stay green.
+- **P3.5 (spec wording) — DONE.** `adapter-claude-code.md:492` corrected from
+  `ParentNativeID=<parent sessionId>+<toolUseId>` to `ParentNativeID=<parent sessionId>` +
+  `NativeID=<parent sessionId>:agent:<agentId>`, matching §5.1 + the code.
+
+Spec deltas landed same-change: §8.1 (completion flag reflects the PHYSICAL last record
+incl. the oversized-line skip; parked completions RETRACTED when a re-read child is no
+longer complete; the `finalized` set is cursor-durable), §6.1 (the Tail meta-hash read and
+the orphan-root timestamp probe open the resolved path; the Tail meta-hash read failure
+surfaces a SourceError), §7 (cursor JSON shows `parked` + `finalized`), §492 wording. No
+migration (cursor JSON only gained an `omitempty` field; old cursors still parse).
+
+**Gates (this completion):** `gofmt -l`/`goimports -l` clean; `go vet
+./internal/adapters/claude_code/...` 0; `golangci-lint run
+./internal/adapters/claude_code/...` 0 issues; `go build ./...` 0; `go test -race -count=1
+./internal/adapters/...` all pass (claude_code + aiagent_v2 + aiagent_v3); `FuzzParseLine`
+30s = 9.5M execs / 0 crashes; `go test -race -count=1 ./internal/ingest/...` pass (seam
+unchanged, internal/ingest not modified); `scan-secrets.sh` exit 0 (482 files). Coverage:
+claude_code **84.8%** (new functions `withFinalized`/`finalizedSet`/`restoreFinalized`/
+`finalizedSnapshot`/`hashFile` all 100%). Each P1/P2 test confirmed to FAIL without its fix
+(genuine regression guards).
+
 ## Outcome
 
 Pending.

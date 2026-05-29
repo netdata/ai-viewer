@@ -510,3 +510,143 @@ func TestScan_TruncationRescans(t *testing.T) {
 		t.Fatalf("expected a 'shrank' SourceError; got %v", errs)
 	}
 }
+
+// TestScan_AgentOpNotFinalizedTrailingOversized pins P1.5a: a child whose
+// PHYSICAL last record is an oversized (> scanBufferMax) line after an
+// assistant-text record must NOT finalize its parent Agent op. The
+// errLineTooLong skip path must clear lastRecordAssistantText (like the
+// parse-error and skipped-no-op paths) so the stale-true flag from the preceding
+// assistant-text record does not wrongly complete the child.
+func TestScan_AgentOpNotFinalizedTrailingOversized(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeParentWithAgentOp(t, root)
+	// Child: a task, an assistant-text record (the §485 marker), then an oversized
+	// line as the physical last record (with a trailing newline so the offset
+	// advances cleanly past it).
+	big := strings.Repeat("x", scanBufferMax+1024)
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+		big,
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, out); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	events := drainBuffered(out)
+	if of, ok := childOpFinalized(events); ok {
+		t.Fatalf("Agent op finalized though the child's PHYSICAL last record is an oversized line, not assistant-text (P1.5a): EndTs=%d", of.EndTs)
+	}
+}
+
+// TestScan_StaleParkedCompletionRetracted pins P1.5b: a child that completes
+// (terminal assistant-text) BEFORE its parent Agent op is known parks its
+// completion; if the child then GROWS a non-text terminal record (a trailing
+// tool_use) BEFORE the parent op appears, the park must be RETRACTED so the
+// parent op is NOT finalized when it finally lands. Without the delete-on-
+// not-complete in collectAgentDeferral the stale park would wrongly finalize.
+func TestScan_StaleParkedCompletionRetracted(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Step 1: child complete, parent transcript + meta absent → the child parks.
+	// (The meta carries the toolUseId join; without the parent transcript there is
+	// no Agent op yet, so the completed child has nowhere to pair → it parks.)
+	writeFileBytes(t, metaPath(root),
+		[]byte(`{"agentType":"Explore","description":"explore","toolUseId":"`+parentAgentToolUseID+`"}`))
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+	}, "\n")+"\n"))
+
+	a1, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New #1: %v", err)
+	}
+	out1 := make(chan canonical.Event, 256)
+	if err := a1.Scan(context.Background(), nil, out1); err != nil {
+		t.Fatalf("Scan #1: %v", err)
+	}
+	events1 := drainBuffered(out1)
+	cursor := lastCursor(t, events1)
+	parsed1, err := ParseCursor(cursor)
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	wantChild := childNativeID(durParentSession, durAgentID)
+	if _, ok := parsed1.Parked[wantChild]; !ok {
+		t.Fatalf("child did not park after completing with no known parent op; parked=%v", parsed1.Parked)
+	}
+
+	// Step 2: the child GROWS a trailing tool_use record → it is no longer
+	// complete (its physical last record is now a tool_use, not assistant-text).
+	appendFileBytes(t, childPath(root),
+		[]byte(childToolUseLine("ct1", "toolu_child_grow", "Read", "2026-05-26T10:00:11.000Z")+"\n"))
+	// And NOW the parent transcript appears (its Agent tool_use op).
+	writeParentWithAgentOp(t, root)
+
+	// Step 3: resume Scan from the persisted cursor. The child is re-read (now NOT
+	// complete) → its stale park must be RETRACTED; the parent op is read → known.
+	// The parent op must NOT finalize (the child is no longer complete).
+	a2, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New #2: %v", err)
+	}
+	out2 := make(chan canonical.Event, 256)
+	if err := a2.Scan(context.Background(), parsed1, out2); err != nil {
+		t.Fatalf("Scan #2: %v", err)
+	}
+	events2 := drainBuffered(out2)
+	if of, ok := childOpFinalized(events2); ok {
+		t.Fatalf("parent Agent op finalized from a STALE parked completion though the child grew a non-text terminal record (P1.5b): EndTs=%d", of.EndTs)
+	}
+	// The retraction must also clear the persisted park so a later restart cannot
+	// resurrect it.
+	cursor2 := lastCursor(t, events2)
+	parsed2, err := ParseCursor(cursor2)
+	if err != nil {
+		t.Fatalf("ParseCursor #2: %v", err)
+	}
+	if _, ok := parsed2.Parked[wantChild]; ok {
+		t.Fatalf("stale park survived in the cursor after retraction (P1.5b); parked=%v", parsed2.Parked)
+	}
+}
+
+// TestEarliestTs_OpensResolvedPathAndRefusesEscape pins P2.5b: earliestTs opens
+// the symlink-RESOLVED path within the resolved root, and refuses (returns 0) a
+// path that resolves OUTSIDE the root. An in-root real file yields its first
+// record's ts; an out-of-root symlink target is not read.
+func TestEarliestTs_OpensResolvedPathAndRefusesEscape(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	// In-root real transcript: earliestTs returns its first record's ts.
+	proj := filepath.Join(root, "-home-user-x")
+	inRoot := filepath.Join(proj, "real.jsonl")
+	writeFileBytes(t, inRoot,
+		[]byte(`{"type":"user","uuid":"u1","sessionId":"real","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+	wantTs, _ := parseTsToMicros("2026-05-26T10:00:00.000Z")
+	if got := earliestTs(resolvedRoot, inRoot); got != wantTs {
+		t.Fatalf("earliestTs(in-root) = %d, want %d", got, wantTs)
+	}
+
+	// Out-of-root file, reached via an in-tree symlink: must be refused (0).
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	writeFileBytes(t, outside,
+		[]byte(`{"type":"user","uuid":"u2","sessionId":"evil","message":{"role":"user","content":"x"},"timestamp":"2026-05-26T11:00:00.000Z"}`+"\n"))
+	link := filepath.Join(proj, "escape.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	if got := earliestTs(resolvedRoot, link); got != 0 {
+		t.Fatalf("earliestTs(out-of-root symlink) = %d, want 0 (P2.5b containment)", got)
+	}
+}
