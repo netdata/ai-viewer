@@ -108,12 +108,15 @@ func discoverTranscripts(root string, onError func(error)) ([]transcript, error)
 }
 
 // withinSourceRoot reports whether abs resolves (through symlinks) to a path
-// inside resolvedRoot (spec §6.1, P2e). On escape it surfaces a SourceError
-// via onError and returns false; on a resolve error it likewise surfaces and
-// returns false, so a transcript whose path cannot be safely resolved is
+// inside resolvedRoot (spec §6.1, P2e). The first argument MUST be the
+// ALREADY-symlink-resolved projects root: callers resolve the root ONCE (e.g.
+// discoverTranscripts / scanAll) and thread it here, so a directory walk does
+// not re-resolve the root once per file (P2-perf). On escape it surfaces a
+// SourceError via onError and returns false; on a resolve error it likewise
+// surfaces and returns false, so a path that cannot be safely resolved is
 // skipped rather than read.
 func withinSourceRoot(resolvedRoot, abs string, onError func(error)) bool {
-	resolved, ok, err := resolveWithinRoot(resolvedRoot, abs)
+	resolved, ok, err := withinResolvedRoot(resolvedRoot, abs)
 	if err != nil {
 		onError(fmt.Errorf("claude_code: cannot resolve %s for containment; skipping: %w", abs, err))
 		return false
@@ -245,12 +248,13 @@ type metaMap struct {
 // readSessionMetas reads every agent-*.meta.json under a session dir's
 // subagents/ and returns the toolUseId→agentId map plus per-agent agentType.
 // Missing dir / unreadable files yield an empty map (best-effort; the
-// structural linkage via path still works without the sidecar). Every meta
-// path is containment-checked against the projects root before it is read
-// (spec §6.1, P1.3): a symlinked .meta.json resolving outside the root is
-// refused with a SourceError and skipped, so its (potentially sensitive)
-// content is never absorbed into a session's extras.
-func readSessionMetas(root, sessionDir string, onError func(error)) metaMap {
+// structural linkage via path still works without the sidecar). resolvedRoot is
+// the ALREADY-symlink-resolved projects root: every meta path is
+// containment-checked against it before it is read (spec §6.1, P1.3) without
+// re-resolving the root per file. A symlinked .meta.json resolving outside the
+// root is refused with a SourceError and skipped, so its (potentially
+// sensitive) content is never absorbed into a session's extras.
+func readSessionMetas(resolvedRoot, sessionDir string, onError func(error)) metaMap {
 	mm := metaMap{toolUseToAgent: map[string]string{}, agentType: map[string]string{}}
 	if sessionDir == "" {
 		return mm
@@ -262,7 +266,7 @@ func readSessionMetas(root, sessionDir string, onError func(error)) metaMap {
 	// phases keeps the read off the callback path.
 	paths := collectMetaPaths(subDir)
 	for _, path := range paths {
-		if !withinSourceRoot(root, path, onError) {
+		if !withinSourceRoot(resolvedRoot, path, onError) {
 			continue
 		}
 		agentID := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(path), metaExt), "agent-")
@@ -312,14 +316,18 @@ func collectMetaPaths(dir string) []string {
 // metaHashes returns a map of meta-file relative path → sha256 of content
 // for every .meta.json under the projects root. Used by the tail/scan loop
 // to detect sidecar rewrites (spec §7 step 4). Two-phase like
-// readSessionMetas: collect paths, then read off the walk callback. Each meta
-// path is containment-checked before it is read (spec §6.1, P1.3): a symlinked
-// .meta.json resolving outside the root is refused (SourceError) and skipped.
-func metaHashes(root string, onError func(error)) (map[string]string, error) {
+// readSessionMetas: collect paths, then read off the walk callback. root is the
+// UNRESOLVED configured root (the walk source and the cursor-key relativisation
+// base, per spec §7); resolvedRoot is the symlink-resolved root used for the
+// per-path containment check WITHOUT re-resolving it per file (P2-perf).
+// Each meta path is containment-checked before it is read (spec §6.1, P1.3): a
+// symlinked .meta.json resolving outside the root is refused (SourceError) and
+// skipped.
+func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]string, error) {
 	out := map[string]string{}
 	paths := collectMetaPaths(root)
 	for _, path := range paths {
-		if !withinSourceRoot(root, path, onError) {
+		if !withinSourceRoot(resolvedRoot, path, onError) {
 			continue
 		}
 		raw, rerr := os.ReadFile(path) // #nosec G304 G122 -- path containment-checked (withinSourceRoot) and collected from a filtered walk under the configured read-only projects root
@@ -511,6 +519,12 @@ func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript,
 			}
 			continue
 		}
+		// Record whether this (now the most recent) record was newly read this
+		// pass, so the Agent-op finalize can be gated on the terminal
+		// assistant-text record being NEWLY read (§8.1): a replay re-reads the
+		// terminal record below emitFrom (emit=false) and so does not re-mark the
+		// child completed.
+		mapper.lastRecordEmitted = emit
 		if !emit {
 			continue
 		}
@@ -619,6 +633,17 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		cur = newCursor()
 	}
 
+	// Pre-resolve the projects root ONCE so the per-file meta containment checks
+	// (readSessionMetas, metaHashes) do not re-run EvalSymlinks on the root for
+	// every file (P2-perf), mirroring discoverTranscripts. A resolve failure
+	// here is non-fatal: fall back to the unresolved root for containment (the
+	// transcripts were already discovered, so the root exists; a degenerate
+	// resolve only loses the perf optimisation, not correctness).
+	resolvedRoot := root
+	if rr, rrErr := filepath.EvalSymlinks(filepath.Clean(root)); rrErr == nil {
+		resolvedRoot = rr
+	}
+
 	if perr := emitOrphanRoots(ctx, root, sourceID, transcripts, out); perr != nil {
 		return cur, perr
 	}
@@ -629,13 +654,13 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	emittedSinceProgress := 0
 	lastProgress := time.Now()
 
-	// Agent-op deferral state (spec §8.1, P1b). pendingAgentOps maps a child
-	// session native id to its parent's Agent op (parent session + op
-	// location). childEnd maps a child native id to (fullyRead, lastTsUs) once
-	// the child sidechain has been read. After the walk, every Agent op whose
-	// child was fully read is finalized.
-	pendingAgentOps := map[string]agentOpFinalize{}
-	childEnd := map[string]childEndState{}
+	// Agent-op deferral state (spec §8.1). pending maps a child session native
+	// id → its parent's Agent op. completed maps a child native id → completion
+	// state once its sidechain is fully read AND terminates in a newly-read
+	// assistant-text marker (§485). After the walk, every completed child whose
+	// parent op is known is finalized exactly once (finalized set guards
+	// re-emit).
+	def := newTailDeferral()
 
 	for _, t := range transcripts {
 		if err := ctx.Err(); err != nil {
@@ -645,7 +670,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		if t.sessionDir != "" {
 			cached, ok := metaCache[t.sessionDir]
 			if !ok {
-				cached = readSessionMetas(root, t.sessionDir, onError)
+				cached = readSessionMetas(resolvedRoot, t.sessionDir, onError)
 				metaCache[t.sessionDir] = cached
 			}
 			mm = cached
@@ -660,7 +685,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			continue
 		}
 		cur = cur.withFile(t.rel, updated)
-		collectAgentDeferral(mapper, t, pendingAgentOps, childEnd)
+		collectAgentDeferral(mapper, t, def.pending, def.completed)
 		emittedSinceProgress += n
 		if emittedSinceProgress >= progressEveryEvents || time.Since(lastProgress) >= progressEveryDuration {
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
@@ -671,15 +696,15 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		}
 	}
 
-	// Finalize parent Agent ops whose child sidechain has been fully read
-	// (spec §8.1, P1b). A child still being appended (fullyRead=false) leaves
-	// its parent op running. Deterministic order for stable replay.
-	if perr := emitAgentFinalizations(ctx, sourceID, pendingAgentOps, childEnd, out); perr != nil {
+	// Finalize parent Agent ops whose child sidechain completed (spec §8.1). A
+	// child terminated by a non-assistant-text record, or still in-flight, is
+	// not in `completed` and leaves its parent op running. Deterministic order.
+	if perr := pairCompletedFinalizations(ctx, sourceID, def, out); perr != nil {
 		return cur, perr
 	}
 
 	// Refresh meta hashes so the cursor records the sidecar state observed.
-	if hashes, herr := metaHashes(root, onError); herr == nil {
+	if hashes, herr := metaHashes(root, resolvedRoot, onError); herr == nil {
 		for rel, h := range hashes {
 			cur = cur.withMetaSeen(rel, h)
 		}
@@ -692,60 +717,33 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 }
 
 // agentOpFinalize captures the parent session and op location of a deferred
-// Agent op (spec §8.1, P1b).
+// Agent op (spec §8.1).
 type agentOpFinalize struct {
 	parentNativeID string
 	ref            agentOpRef
 }
 
-// childEndState records whether a subagent sidechain was fully read and the
-// timestamp of its last record (the Agent op's EndTs).
-type childEndState struct {
-	fullyRead bool
-	lastTsUs  int64
-}
-
-// collectAgentDeferral folds one transcript's mapper state into the
-// cross-file Agent-op deferral maps (spec §8.1). A parent transcript
-// contributes its Agent ops (keyed by child native id); a subagent transcript
-// contributes its own end state (keyed by its native id).
-func collectAgentDeferral(mapper *fileMapper, t transcript, pending map[string]agentOpFinalize, childEnd map[string]childEndState) {
+// collectAgentDeferral folds one transcript's mapper state into the cross-file
+// Agent-op deferral maps (spec §8.1). A parent transcript contributes its Agent
+// ops (keyed by child native id) into `pending` — rebuilt on every read,
+// including the emit-suppressed replay, so a parent observed during Scan is
+// reachable in Tail. A subagent transcript contributes a `completed` entry ONLY
+// when it is fully read AND its terminal record is an assistant-text completion
+// marker (§485) that was NEWLY read this pass (lastRecordEmitted) — so a
+// catch-up/replay over an already-consumed child does not re-mark it (no double
+// finalize). A child terminated by a user/tool record (lastRecordAssistantText
+// false) is never marked completed and stays running.
+func collectAgentDeferral(mapper *fileMapper, t transcript, pending map[string]agentOpFinalize, completed map[string]completionState) {
 	if mapper == nil {
 		return
 	}
 	for childID, ref := range mapper.agentOps {
 		pending[childID] = agentOpFinalize{parentNativeID: mapper.nativeID, ref: ref}
 	}
-	if t.kind == canonical.KindSubAgent {
-		childEnd[t.nativeID] = childEndState{fullyRead: mapper.fullyRead, lastTsUs: mapper.lastTsUs}
+	if t.kind == canonical.KindSubAgent &&
+		mapper.fullyRead && mapper.lastRecordAssistantText && mapper.lastRecordEmitted {
+		completed[t.nativeID] = completionState{tsUs: mapper.lastAssistantTextTsUs}
 	}
-}
-
-// emitAgentFinalizations emits the deferred OpFinalizedEvent for every parent
-// Agent op whose child sidechain was fully read (spec §8.1, P1b). A child not
-// yet seen, or seen but still being appended (fullyRead=false), leaves its
-// parent op running. Ordered by child native id for deterministic replay.
-func emitAgentFinalizations(ctx context.Context, sourceID string, pending map[string]agentOpFinalize, childEnd map[string]childEndState, out chan<- canonical.Event) error {
-	childIDs := make([]string, 0, len(pending))
-	for childID := range pending {
-		childIDs = append(childIDs, childID)
-	}
-	sort.Strings(childIDs)
-	for _, childID := range childIDs {
-		end, seen := childEnd[childID]
-		if !seen || !end.fullyRead {
-			// Child not present yet, or still in-flight: the Agent op stays
-			// running until a later Scan/Tail pass reads the child to EOF.
-			continue
-		}
-		fin := agentFinalizeEvent(sourceID, pending[childID].parentNativeID, pending[childID].ref, end.lastTsUs, "completed")
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case out <- fin:
-		}
-	}
-	return nil
 }
 
 // emitOrphanRoots emits a synthetic root SessionStartedEvent for every

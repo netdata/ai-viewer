@@ -203,6 +203,116 @@ func TestMapper_CompactionOp(t *testing.T) {
 	}
 }
 
+// TestMapper_TerminalAssistantTextTracking pins the §485 completion-marker
+// tracking the Agent-op finalize depends on (§8.1): after mapping a sequence,
+// lastRecordAssistantText is true with the right ts ONLY when the LAST record is
+// an assistant message whose content[0] is text; it is false when the last
+// record is a tool_use-led assistant, a user, or a system record.
+func TestMapper_TerminalAssistantTextTracking(t *testing.T) {
+	t.Parallel()
+	const (
+		userLine    = `{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"task"},"timestamp":"2026-05-26T10:00:00.000Z"}`
+		textLine    = `{"type":"assistant","uuid":"a1","sessionId":"s","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"done"}]},"timestamp":"2026-05-26T10:00:09.000Z"}`
+		toolUseLine = `{"type":"assistant","uuid":"a2","sessionId":"s","message":{"id":"m2","role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"timestamp":"2026-05-26T10:00:10.000Z"}`
+		sysLine     = `{"type":"system","subtype":"turn_duration","uuid":"sy1","sessionId":"s","durationMs":1000,"timestamp":"2026-05-26T10:00:11.000Z"}`
+	)
+	wantTextTs, _ := parseTsToMicros("2026-05-26T10:00:09.000Z")
+
+	cases := []struct {
+		name     string
+		lines    []string
+		wantText bool
+		wantTs   int64
+	}{
+		{"ends-text", []string{userLine, textLine}, true, wantTextTs},
+		{"ends-tool_use", []string{userLine, textLine, toolUseLine}, false, 0},
+		{"ends-user", []string{textLine, userLine}, false, 0},
+		{"ends-system", []string{textLine, sysLine}, false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			m := newFileMapper(mapperConfig{sourceID: "src", absPath: "/abs/x.jsonl", nativeID: "s", kind: canonical.KindRoot})
+			for _, line := range c.lines {
+				rec, skip, err := parseLine([]byte(line))
+				if err != nil {
+					t.Fatalf("parseLine: %v", err)
+				}
+				if skip {
+					continue
+				}
+				if _, err := m.mapRecord(rec); err != nil {
+					t.Fatalf("mapRecord: %v", err)
+				}
+			}
+			if m.lastRecordAssistantText != c.wantText {
+				t.Fatalf("lastRecordAssistantText = %v, want %v", m.lastRecordAssistantText, c.wantText)
+			}
+			if c.wantText && m.lastAssistantTextTsUs != c.wantTs {
+				t.Fatalf("lastAssistantTextTsUs = %d, want %d", m.lastAssistantTextTsUs, c.wantTs)
+			}
+		})
+	}
+}
+
+// TestMapper_Turn0CompactionSummaryEmitted pins P2.3b: a compact_boundary that
+// occurs BEFORE any operator prompt lives at turn 0 (turnSeq never advanced),
+// and its post-compaction summary PayloadRef must STILL be emitted — scoped to
+// the turn-0 compaction op — not dropped. The old guard keyed on
+// `turnSeq == 0 || opSeq == 0`, which wrongly dropped this legitimate turn-0
+// summary; the guard must key on `opSeq == 0` only.
+func TestMapper_Turn0CompactionSummaryEmitted(t *testing.T) {
+	t.Parallel()
+	// No operator string prompt precedes the boundary: turnSeq stays 0.
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"system","subtype":"compact_boundary","uuid":"sy1","sessionId":"s","compactMetadata":{"trigger":"auto","preTokens":500000,"postTokens":6000,"durationMs":90000},"timestamp":"2026-05-26T12:00:00.000Z"}`,
+		`{"type":"user","uuid":"u1","isCompactSummary":true,"sessionId":"s","message":{"role":"user","content":"summary"},"timestamp":"2026-05-26T12:00:00.500Z"}`,
+	)
+
+	var compactStarted canonical.OpStartedEvent
+	var sawCompaction bool
+	var summaryPayload canonical.PayloadRefEvent
+	var sawSummaryPayload bool
+	turns := 0
+	for _, ev := range events {
+		switch e := ev.(type) {
+		case canonical.OpStartedEvent:
+			if e.Kind == canonical.OpCompaction {
+				compactStarted = e
+				sawCompaction = true
+			}
+		case canonical.PayloadRefEvent:
+			if e.PayloadKind == "log" {
+				summaryPayload = e
+				sawSummaryPayload = true
+			}
+		case canonical.TurnStartedEvent:
+			turns++
+		}
+	}
+	if !sawCompaction {
+		t.Fatal("no compaction op emitted for a turn-0 compact_boundary")
+	}
+	if compactStarted.TurnSeq != 0 {
+		t.Fatalf("compaction op TurnSeq = %d, want 0 (compaction before any operator prompt)", compactStarted.TurnSeq)
+	}
+	if compactStarted.Seq == 0 {
+		t.Fatalf("compaction op Seq = %d, want >= 1 (a compaction always consumes an op slot)", compactStarted.Seq)
+	}
+	if turns != 0 {
+		t.Fatalf("turns = %d, want 0 (the compact summary must not open a turn, and no operator prompt arrived)", turns)
+	}
+	// The turn-0 summary payload MUST be emitted, scoped to the turn-0
+	// compaction op (P2.3b) — not dropped by a turnSeq==0 guard.
+	if !sawSummaryPayload {
+		t.Fatal("turn-0 compaction summary PayloadRef was dropped (P2.3b); it must be emitted scoped to the turn-0 compaction op")
+	}
+	if summaryPayload.TurnSeq != compactStarted.TurnSeq || summaryPayload.OpSeq != compactStarted.Seq {
+		t.Fatalf("summary payload scoped to (turn=%d,op=%d), want the turn-0 compaction op (turn=%d,op=%d)",
+			summaryPayload.TurnSeq, summaryPayload.OpSeq, compactStarted.TurnSeq, compactStarted.Seq)
+	}
+}
+
 // TestMapper_SyntheticAssistantNoLLMOp verifies a <synthetic> model emits a
 // LogEntry and NO LLM op (spec §3.2).
 func TestMapper_SyntheticAssistantNoLLMOp(t *testing.T) {

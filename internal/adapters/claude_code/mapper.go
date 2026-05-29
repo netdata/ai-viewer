@@ -103,12 +103,30 @@ type fileMapper struct {
 	agentOps map[string]agentOpRef
 	// fullyRead reports whether this file was streamed to EOF with no parked
 	// partial trailing line. Set by readTranscript. A fully-read subagent
-	// sidechain in Scan finalizes its parent's Agent op (§8.1).
+	// sidechain whose terminal record is an assistant-text marker finalizes its
+	// parent's Agent op (§8.1).
 	fullyRead bool
 	// lastTsUs is the timestamp (micros) of the most recent record carrying
-	// one; the child's end time used to stamp the deferred Agent-op finalize
-	// (spec §8.1). Stays 0 for a file whose records all lack timestamps.
+	// one. Observability only (cursor LastTsUs). Stays 0 for a file whose
+	// records all lack timestamps.
 	lastTsUs int64
+	// lastRecordAssistantText reports whether the LAST record mapped on this
+	// file was an `assistant` message whose content[0].type=="text" — the §485
+	// completion marker for a subagent sidechain. Set true (with
+	// lastAssistantTextTsUs) on such a record and false on ANY other record
+	// type, so a child terminated by a user/tool record is NOT complete (§8.1).
+	lastRecordAssistantText bool
+	// lastAssistantTextTsUs is the timestamp (micros) of the terminal
+	// assistant-text record, used as the Agent-op finalize EndTs (§8.1). Only
+	// meaningful when lastRecordAssistantText is true.
+	lastAssistantTextTsUs int64
+	// lastRecordEmitted reports whether the LAST record mapped was newly read
+	// this pass (its line began at or after emitFrom), set by streamLines after
+	// each mapRecord. Combined with lastRecordAssistantText + fullyRead it gates
+	// the Agent-op finalize so a catch-up/replay (whose terminal record sits
+	// below the resume offset) re-marks nothing and emits no second finalize
+	// (§8.1). Defaults false (mapper-only unit tests that do not stream).
+	lastRecordEmitted bool
 	// lastCompactionTurnSeq / lastCompactionOpSeq remember the (turn,op) of the
 	// most recent compaction op so the post-compaction summary user message
 	// (processed AFTER the boundary, spec §9.2) scopes its PayloadRef to that
@@ -202,6 +220,18 @@ func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 	m.recordIdx++
 	if ts := m.recordTs(rec); ts > m.lastTsUs {
 		m.lastTsUs = ts
+	}
+	// Track the terminal-record completion marker (§485, §8.1): the last record
+	// of a completed subagent sidechain is an assistant message whose first
+	// content block is text. Set on such a record (capturing its ts) and cleared
+	// on every other record type, so a child terminated by a user/tool record is
+	// NOT complete. Evaluated here on EVERY record so the value after the full
+	// read reflects the genuine last record.
+	if ts, isText := assistantTextTs(rec); isText {
+		m.lastRecordAssistantText = true
+		m.lastAssistantTextTsUs = ts
+	} else {
+		m.lastRecordAssistantText = false
 	}
 
 	out := make([]canonical.Event, 0, 4)
@@ -311,6 +341,29 @@ func (m *fileMapper) sessionStarted0(rec record, base canonical.EventBase) canon
 		Cwd:            rec.Env.Cwd,
 		Extras:         extras,
 	}
+}
+
+// assistantTextTs reports whether rec is the §485 subagent completion marker —
+// an `assistant` message whose first content block is `text` — and, when so,
+// the record's timestamp in micros. A synthetic-model assistant counts too: it
+// is still a terminal assistant-text record (the child ended on a status text),
+// and it is not an LLM call distinction that matters for completion. Returns
+// (0, false) for any other record (user, tool_use-led assistant, system, etc.).
+func assistantTextTs(rec record) (int64, bool) {
+	if rec.Env.Type != recAssistant || rec.Assistant == nil {
+		return 0, false
+	}
+	if len(rec.Assistant.Content) == 0 || rec.Assistant.Content[0].Type != "text" {
+		return 0, false
+	}
+	if rec.Env.Timestamp == "" {
+		return 0, true
+	}
+	us, err := parseTsToMicros(rec.Env.Timestamp)
+	if err != nil {
+		return 0, true
+	}
+	return us, true
 }
 
 // recordTs parses the record's timestamp to micros, or returns 0 when the

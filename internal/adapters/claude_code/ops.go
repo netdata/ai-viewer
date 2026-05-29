@@ -397,6 +397,9 @@ func compactionExtras(cm *compactMetadata) map[string]any {
 func (m *fileMapper) mapPRLink(rec record, advance func(int64) canonical.EventBase) []canonical.Event {
 	tsUs := m.recordTs(rec)
 	fields := decodeRawFields(rec.Raw)
+	// A FRESH map per pr-link: m.prLinks only ever appends these never-mutated
+	// maps, so the shallow copy(snapshot, m.prLinks) below cannot alias a map a
+	// previously-emitted SessionUpdatedEvent still references.
 	prLink := map[string]any{}
 	for _, k := range []string{"prNumber", "prUrl", "prRepository"} {
 		if v, ok := fields[k]; ok {

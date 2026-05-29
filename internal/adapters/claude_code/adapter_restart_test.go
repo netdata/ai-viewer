@@ -359,9 +359,17 @@ func childLine(uuid, content, ts string) string {
 	return `{"type":"user","uuid":"` + uuid + `","isSidechain":true,"agentId":"` + durAgentID + `","sessionId":"` + durParentSession + `","message":{"role":"user","content":"` + content + `"},"timestamp":"` + ts + `"}`
 }
 
-// childAssistantLine builds the subagent's final assistant text record.
+// childAssistantLine builds the subagent's final assistant text record — the
+// §485 completion marker (content[0].type=="text").
 func childAssistantLine(uuid, text, ts string) string {
 	return `{"type":"assistant","uuid":"` + uuid + `","isSidechain":true,"agentId":"` + durAgentID + `","sessionId":"` + durParentSession + `","message":{"id":"cm1","role":"assistant","model":"claude-opus-4-7","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3},"content":[{"type":"text","text":"` + text + `"}]},"timestamp":"` + ts + `"}`
+}
+
+// childToolUseLine builds a subagent assistant record whose content[0] is a
+// tool_use block (NOT a text completion marker). A child whose LAST record is
+// this represents an interrupted/paused subagent and is NOT complete (§8.1).
+func childToolUseLine(uuid, toolUseID, toolName, ts string) string {
+	return `{"type":"assistant","uuid":"` + uuid + `","isSidechain":true,"agentId":"` + durAgentID + `","sessionId":"` + durParentSession + `","message":{"id":"cm2","role":"assistant","model":"claude-opus-4-7","stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":3},"content":[{"type":"tool_use","id":"` + toolUseID + `","name":"` + toolName + `","input":{}}]},"timestamp":"` + ts + `"}`
 }
 
 // childOpFinalized reports the OpFinalizedEvent for the parent's Agent op (the
@@ -376,11 +384,101 @@ func childOpFinalized(events []canonical.Event) (canonical.OpFinalizedEvent, boo
 	return canonical.OpFinalizedEvent{}, false
 }
 
-// TestScanThenTail_AgentOpFinalizeDurable pins P1.2: a parent Agent op observed
-// during Scan must be finalizable when its child sidechain COMPLETES during a
-// later Tail flush. The child does not exist at Scan time; it is created
-// (complete) after Tail starts. With the pre-fix behavior (Scan→Tail boundary
-// drops the parent's Agent-op deferral), the parent op would never finalize.
+// agentOpStartedWithChild reports the most recent Agent OpStarted (kind=session)
+// for the parent at turn 1, op 2 and whether its ChildSessionNativeID is set.
+func agentOpStartedChild(events []canonical.Event) (string, bool) {
+	child := ""
+	found := false
+	for _, ev := range events {
+		if os, ok := ev.(canonical.OpStartedEvent); ok &&
+			os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
+			os.TurnSeq == 1 && os.Seq == 2 {
+			child = os.ChildSessionNativeID
+			found = true
+		}
+	}
+	return child, found
+}
+
+// writeParentAgentOpNoMeta writes the parent transcript with the Agent tool_use
+// but does NOT write the linking .meta.json (the late-meta scenario, P1.3b).
+func writeParentAgentOpNoMeta(t *testing.T, root string) {
+	t.Helper()
+	proj := filepath.Join(root, "-home-user-x")
+	writeFileBytes(t, filepath.Join(proj, durParentSession+".jsonl"), []byte(strings.Join([]string{
+		`{"type":"user","uuid":"pu1","sessionId":"` + durParentSession + `","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"assistant","uuid":"pa1","sessionId":"` + durParentSession + `","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","id":"` + parentAgentToolUseID + `","name":"Agent","input":{"description":"explore"}}]},"timestamp":"2026-05-26T10:00:02.000Z"}`,
+	}, "\n")+"\n"))
+}
+
+// metaPath returns the subagent meta sidecar path for the durability fixtures.
+func metaPath(root string) string {
+	return filepath.Join(root, "-home-user-x", durParentSession, "subagents", "agent-"+durAgentID+".meta.json")
+}
+
+// TestScanThenTail_LateMetaRepairsAgentChildLink pins P1.3b: when the parent's
+// Agent tool_use is tailed BEFORE its .meta.json exists, the Agent op is first
+// emitted with NO child link; when the .meta.json arrives in a later flush, the
+// adapter re-reads the parent and RE-EMITS the Agent OpStarted now carrying the
+// resolved ChildSessionNativeID (idempotent UPDATE at the ingester). Without the
+// late-meta re-read the linkage would be permanently lost.
+func TestScanThenTail_LateMetaRepairsAgentChildLink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeParentAgentOpNoMeta(t, root)
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Scan reads the parent. No meta yet → the Agent op has an empty child link.
+	scanOut := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if child, ok := agentOpStartedChild(drainBuffered(scanOut)); !ok {
+		t.Fatal("Agent op not emitted during Scan")
+	} else if child != "" {
+		t.Fatalf("Agent op already linked to %q before the meta exists; test premise broken", child)
+	}
+
+	// Tail on the SAME instance; after the watch is live, create the .meta.json.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailOut := make(chan canonical.Event, 256)
+	done := make(chan struct{})
+	go func() { _ = a.Tail(ctx, tailOut); close(done) }()
+
+	time.Sleep(150 * time.Millisecond)
+	writeFileBytes(t, metaPath(root),
+		[]byte(`{"agentType":"Explore","description":"explore","toolUseId":"`+parentAgentToolUseID+`"}`))
+
+	wantChild := childNativeID(durParentSession, durAgentID)
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev := <-tailOut:
+			if os, ok := ev.(canonical.OpStartedEvent); ok &&
+				os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
+				os.TurnSeq == 1 && os.Seq == 2 && os.ChildSessionNativeID == wantChild {
+				cancel()
+				<-done
+				return
+			}
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("Agent op never re-emitted with the resolved ChildSessionNativeID after the late .meta.json (P1.3b); want child %q", wantChild)
+		}
+	}
+}
+
+// TestScanThenTail_AgentOpFinalizeDurable pins the §8.1 durability property: a
+// parent Agent op observed during Scan must be finalizable when its child
+// sidechain COMPLETES (terminal assistant-text marker) during a later Tail
+// flush. The child does not exist at Scan time; it is created (complete) after
+// Tail starts. With a naive Scan→Tail boundary that drops the parent's Agent-op
+// deferral, the parent op would never finalize.
 func TestScanThenTail_AgentOpFinalizeDurable(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -402,7 +500,9 @@ func TestScanThenTail_AgentOpFinalizeDurable(t *testing.T) {
 	}
 
 	// Tail on the SAME instance; after the watch is live, create the COMPLETE
-	// child sidechain. Its quiescent EOF (next tick) finalizes the parent op.
+	// child sidechain (terminal assistant-text). The flush that reads it newly
+	// marks the child completed and pairs it with the parent op (event-driven,
+	// no tick needed).
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tailOut := make(chan canonical.Event, 256)
@@ -415,7 +515,8 @@ func TestScanThenTail_AgentOpFinalizeDurable(t *testing.T) {
 		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
 	}, "\n")+"\n"))
 
-	// The parent Agent op must finalize, stamped at the child's last-record ts.
+	// The parent Agent op must finalize, stamped at the child's terminal
+	// assistant-text ts.
 	wantEnd, _ := parseTsToMicros("2026-05-26T10:00:09.000Z")
 	deadline := time.After(8 * time.Second)
 	for {
@@ -424,7 +525,7 @@ func TestScanThenTail_AgentOpFinalizeDurable(t *testing.T) {
 			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
 				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
 				if of.EndTs != wantEnd {
-					t.Errorf("Agent op finalize EndTs = %d, want the child's last-record ts %d", of.EndTs, wantEnd)
+					t.Errorf("Agent op finalize EndTs = %d, want the child's terminal assistant-text ts %d", of.EndTs, wantEnd)
 				}
 				cancel()
 				<-done
@@ -433,17 +534,20 @@ func TestScanThenTail_AgentOpFinalizeDurable(t *testing.T) {
 		case <-deadline:
 			cancel()
 			<-done
-			t.Fatal("parent Agent op (from Scan) never finalized after the child completed in Tail (P1.2 durability)")
+			t.Fatal("parent Agent op (from Scan) never finalized after the child completed in Tail (§8.1 durability)")
 		}
 	}
 }
 
-// TestScanThenTail_AgentOpNotPrematureOnLiveChild pins P2.4: a child actively
-// appended in the current flush must NOT finalize its parent Agent op — byte-EOF
-// of a live subagent is not semantic completion. Here the child is created
-// (and thus dirty/just-appended) but the parent op must stay running through the
-// flush that first reads it; only a later quiescent tick may finalize it.
-func TestScanThenTail_AgentOpNotPrematureOnLiveChild(t *testing.T) {
+// TestScanThenTail_AgentOpNotPrematureToolUseTerminated pins the §8.1
+// "not premature" property with NO timing gap: a child whose LAST record is a
+// tool_use (an interrupted/paused subagent, never an assistant-text completion
+// marker) must NEVER finalize its parent Agent op — and the test drives PAST a
+// full tail tick to prove it is not merely "not finalized in the first flush"
+// (closing codex's test-gap note from Round 3). The old quiescent-EOF design
+// would have finalized this child after one quiet tick; the terminal-record-type
+// rule never does.
+func TestScanThenTail_AgentOpNotPrematureToolUseTerminated(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeParentWithAgentOp(t, root)
@@ -464,14 +568,7 @@ func TestScanThenTail_AgentOpNotPrematureOnLiveChild(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = a.Tail(ctx, tailOut); close(done) }()
 
-	time.Sleep(150 * time.Millisecond)
-	// Append the child in two bursts so it is "just appended" in consecutive
-	// flushes. We assert that within the first ~debounce window after the FIRST
-	// burst, the parent op is not finalized (the child is dirty that flush).
-	writeFileBytes(t, childPath(root), []byte(childLine("cu1", "task", "2026-05-26T10:00:05.000Z")+"\n"))
-
-	// Watch for a premature finalize during a short observation window. The
-	// flush that first reads this just-appended child must NOT finalize it.
+	// Watch for ANY finalize of the parent Agent op for the whole test lifetime.
 	premature := make(chan canonical.OpFinalizedEvent, 1)
 	go func() {
 		for {
@@ -493,33 +590,38 @@ func TestScanThenTail_AgentOpNotPrematureOnLiveChild(t *testing.T) {
 		}
 	}()
 
-	// Keep appending to the child across two debounce windows so it stays dirty
-	// (non-quiescent) — the parent op must remain running the whole time.
-	appendFileBytes(t, childPath(root), []byte(childLine("cu2", "more", "2026-05-26T10:00:06.000Z")+"\n"))
-	time.Sleep(debounceWindow + 80*time.Millisecond)
-	appendFileBytes(t, childPath(root), []byte(childLine("cu3", "more2", "2026-05-26T10:00:07.000Z")+"\n"))
-	time.Sleep(debounceWindow + 80*time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
+	// A COMPLETE-LOOKING-but-interrupted child: it is fully written (no partial
+	// line) and quiescent (no further appends), but its terminal record is a
+	// tool_use, NOT an assistant-text marker — so it must stay running forever.
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childToolUseLine("ct1", "toolu_child_1", "Read", "2026-05-26T10:00:06.000Z"),
+	}, "\n")+"\n"))
+
+	// Drive PAST at least one full tail tick (the old design's quiescence sweep
+	// fired here). The parent op must NOT finalize at any point.
+	time.Sleep(tailTickInterval + 600*time.Millisecond)
 
 	select {
 	case of := <-premature:
 		cancel()
 		<-done
-		t.Fatalf("parent Agent op finalized while the child was still being appended this flush (premature, P2.4): EndTs=%d", of.EndTs)
+		t.Fatalf("parent Agent op finalized for a child whose terminal record is a tool_use (not an assistant-text completion marker) — premature finalize (§8.1): EndTs=%d", of.EndTs)
 	default:
 	}
 	cancel()
 	<-done
 }
 
-// TestScan_AgentOpFinalizeQuiescentChildEOF verifies the happy path: in a static
-// Scan (no per-flush dirty set), a fully-read child finalizes its parent Agent
-// op at the child's last-record timestamp. This is the "quiescent EOF" case the
-// P2.4 fix must preserve for historical data.
-func TestScan_AgentOpFinalizeQuiescentChildEOF(t *testing.T) {
+// TestScan_AgentOpFinalizeTerminalAssistantText verifies the happy path: in a
+// static Scan, a fully-read child whose terminal record is an assistant-text
+// marker finalizes its parent Agent op at that record's timestamp (§8.1, §485).
+func TestScan_AgentOpFinalizeTerminalAssistantText(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeParentWithAgentOp(t, root)
-	// The child already exists, complete, at Scan time → quiescent.
+	// The child already exists, complete (ends on assistant-text), at Scan time.
 	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
 		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
 		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
@@ -536,13 +638,126 @@ func TestScan_AgentOpFinalizeQuiescentChildEOF(t *testing.T) {
 	events := drainBuffered(out)
 	of, ok := childOpFinalized(events)
 	if !ok {
-		t.Fatal("fully-read child in Scan did not finalize its parent Agent op (quiescent EOF)")
+		t.Fatal("fully-read child ending in assistant-text did not finalize its parent Agent op (§8.1)")
 	}
 	wantEnd, _ := parseTsToMicros("2026-05-26T10:00:09.000Z")
 	if of.EndTs != wantEnd {
-		t.Fatalf("Agent op finalize EndTs = %d, want the child's last-record ts %d", of.EndTs, wantEnd)
+		t.Fatalf("Agent op finalize EndTs = %d, want the child's terminal assistant-text ts %d", of.EndTs, wantEnd)
 	}
 	if of.Status != "completed" {
 		t.Fatalf("Agent op finalize Status = %q, want completed", of.Status)
+	}
+}
+
+// TestScan_AgentOpNotFinalizedToolUseTerminated pins the static-Scan "not
+// premature" property: a fully-read child whose terminal record is a tool_use
+// (interrupted subagent) must NOT finalize its parent Agent op. No timing window
+// is involved — the rule is purely the terminal record's type (§8.1).
+func TestScan_AgentOpNotFinalizedToolUseTerminated(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeParentWithAgentOp(t, root)
+	// Child fully written but ending in a tool_use (no assistant-text marker).
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childToolUseLine("ct1", "toolu_child_1", "Read", "2026-05-26T10:00:06.000Z"),
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, out); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	events := drainBuffered(out)
+	if of, ok := childOpFinalized(events); ok {
+		t.Fatalf("Agent op finalized for a tool_use-terminated child (not complete, §8.1): EndTs=%d", of.EndTs)
+	}
+}
+
+// TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay pins P2.3a: once a child
+// finalizes its parent Agent op, a subsequent catch-up / replay (re-reading the
+// same already-consumed child from EOF) must emit NO second OpFinalized for it.
+// The terminal assistant-text record then sits BELOW the resume offset, so it is
+// not newly read and the child is not re-marked completed; the `finalized` set
+// is a second guard. Exactly one finalize must be observed across the whole run.
+func TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeParentWithAgentOp(t, root)
+	// Child already complete at Scan time → Scan finalizes the parent op once.
+	writeFileBytes(t, childPath(root), []byte(strings.Join([]string{
+		childLine("cu1", "task", "2026-05-26T10:00:05.000Z"),
+		childAssistantLine("ca1", "result", "2026-05-26T10:00:09.000Z"),
+	}, "\n")+"\n"))
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	scanOut := make(chan canonical.Event, 256)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	scanEvents := drainBuffered(scanOut)
+	finalizes := 0
+	for _, ev := range scanEvents {
+		if _, ok := ev.(canonical.OpFinalizedEvent); ok {
+			if of := ev.(canonical.OpFinalizedEvent); of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				finalizes++
+			}
+		}
+	}
+	if finalizes != 1 {
+		t.Fatalf("Scan finalized the parent Agent op %d times, want exactly 1", finalizes)
+	}
+
+	// Tail on the SAME instance: its startup catch-up RE-READS the already-
+	// consumed, UNCHANGED, COMPLETE child from EOF (offset==size). The terminal
+	// assistant-text record is the genuine last record (so lastRecordAssistantText
+	// is true) BUT it sits below the resume offset, so lastRecordEmitted is false
+	// → the child is NOT re-marked completed (the emit-gate). The `finalized` set
+	// is the second guard. Neither the catch-up nor any later flush may
+	// re-finalize.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailOut := make(chan canonical.Event, 256)
+	done := make(chan struct{})
+	go func() { _ = a.Tail(ctx, tailOut); close(done) }()
+
+	// Touch the child's mtime without changing content so a WRITE event fires and
+	// the flush re-reads it from offset==size (a pure replay of the complete
+	// child). Combined with the startup catch-up this exercises the replay path
+	// twice; neither pass may re-finalize.
+	time.Sleep(150 * time.Millisecond)
+	now := time.Now()
+	if err := os.Chtimes(childPath(root), now, now); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	// Also append a benign non-completing record so a real byte-growth WRITE
+	// drives a flush too: the terminal record becomes a user record (not
+	// complete), so this growth cannot newly complete the child either.
+	appendFileBytes(t, childPath(root), []byte(childLine("cu2", "more", "2026-05-26T10:00:11.000Z")+"\n"))
+
+	// Observe for well over a tick; count any further finalizes of the parent op.
+	deadline := time.After(tailTickInterval + 800*time.Millisecond)
+	extra := 0
+	for {
+		select {
+		case ev := <-tailOut:
+			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				extra++
+			}
+		case <-deadline:
+			cancel()
+			<-done
+			if extra != 0 {
+				t.Fatalf("replay/catch-up emitted %d additional OpFinalized for the parent Agent op, want 0 (P2.3a no double-finalize)", extra)
+			}
+			return
+		}
 	}
 }

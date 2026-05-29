@@ -347,12 +347,42 @@ func TestFlushDirty_MetaSeenSkipsUnchanged(t *testing.T) {
 	sourceID := "claude-code:" + tmp
 	out := make(chan canonical.Event, 16)
 	metaDirty := map[string]struct{}{metaRel: {}}
-	if err := flushDirty(context.Background(), tmp, sourceID, map[string]struct{}{}, metaDirty, &cur, newTailDeferral(), out, func(error) {}); err != nil {
+	resolvedRoot, rrErr := filepath.EvalSymlinks(filepath.Clean(tmp))
+	if rrErr != nil {
+		t.Fatalf("resolve root: %v", rrErr)
+	}
+	if err := flushDirty(context.Background(), resolvedRoot, tmp, sourceID, map[string]struct{}{}, metaDirty, &cur, newTailDeferral(), out, func(error) {}); err != nil {
 		t.Fatalf("flushDirty: %v", err)
 	}
 	// The hash is unchanged, so metaSeen must still hold the same hash.
 	if cur.metaSeen(metaRel) != h {
 		t.Fatalf("metaSeen changed for an unchanged meta: %q", cur.metaSeen(metaRel))
+	}
+}
+
+// TestMetaParentRel verifies the subagent-meta → parent-transcript relative
+// path derivation used by the late-meta re-read (P1.3b): a meta under
+// "<proj>/<sessionId>/subagents/.../agent-<id>.meta.json" maps to
+// "<proj>/<sessionId>.jsonl"; a non-subagent path is rejected.
+func TestMetaParentRel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		metaRel    string
+		wantParent string
+		wantOK     bool
+	}{
+		{"-home-x/sess-1/subagents/agent-abc.meta.json", "-home-x/sess-1.jsonl", true},
+		{"-home-x/sess-1/subagents/wf/agent-def.meta.json", "-home-x/sess-1.jsonl", true},
+		{"deep/proj/sess-9/subagents/agent-z.meta.json", "deep/proj/sess-9.jsonl", true},
+		{"-home-x/sess-1.jsonl", "", false},        // not a meta
+		{"-home-x/loose.meta.json", "", false},     // meta without a subagents/ segment
+		{"subagents/agent-x.meta.json", "", false}, // no session-id parent before subagents
+	}
+	for _, c := range cases {
+		got, ok := metaParentRel(c.metaRel)
+		if ok != c.wantOK || got != c.wantParent {
+			t.Errorf("metaParentRel(%q) = (%q, %v), want (%q, %v)", c.metaRel, got, ok, c.wantParent, c.wantOK)
+		}
 	}
 }
 

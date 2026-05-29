@@ -31,13 +31,14 @@ func payloadLocationURI(root, abs string) (string, error) {
 	return "file://" + filepath.ToSlash(resolved), nil
 }
 
-// resolveWithinRoot resolves abs through filepath.EvalSymlinks and reports
-// whether the fully-resolved path stays inside the fully-resolved root
-// (security.md §6 "No symlink traversal escape", spec §6.1, P2e). Both root and
-// abs are symlink-resolved so a legitimately symlinked projects root (e.g.
-// ~/.claude → an external volume) still works: containment is judged against
-// the RESOLVED root. A symlink inside the tree that points outside the
-// resolved root is refused (ok=false). Returns:
+// resolveWithinRoot resolves both root AND abs through filepath.EvalSymlinks and
+// reports whether the fully-resolved path stays inside the fully-resolved root
+// (security.md §6 "No symlink traversal escape", spec §6.1, P2e). It resolves
+// the root every call, so per-file walk callers that share one root should
+// resolve it once and use withinResolvedRoot instead. A legitimately symlinked
+// projects root (e.g. ~/.claude → an external volume) still works: containment
+// is judged against the RESOLVED root. A symlink inside the tree that points
+// outside the resolved root is refused (ok=false). Returns:
 //   - (resolvedAbs, true, nil)  — abs resolves to a path under the root.
 //   - ("", false, nil)          — abs resolves outside the root (escape).
 //   - ("", false, err)          — the path or root could not be resolved.
@@ -51,6 +52,16 @@ func resolveWithinRoot(root, abs string) (string, bool, error) {
 	if err != nil {
 		return "", false, fmt.Errorf("resolve root %q: %w", root, err)
 	}
+	return withinResolvedRoot(resolvedRoot, abs)
+}
+
+// withinResolvedRoot is resolveWithinRoot's core for callers that have ALREADY
+// resolved the projects root once (the directory-walk hot path: every meta and
+// every discovered transcript shares one resolved root, so re-running
+// EvalSymlinks on the root per file is wasted work — P2-perf). resolvedRoot MUST
+// be the output of filepath.EvalSymlinks on the configured root; only abs is
+// resolved here. Containment semantics are identical to resolveWithinRoot.
+func withinResolvedRoot(resolvedRoot, abs string) (string, bool, error) {
 	resolvedAbs, err := evalSymlinksAllowingTail(filepath.Clean(abs))
 	if err != nil {
 		return "", false, fmt.Errorf("resolve path %q: %w", abs, err)
@@ -117,12 +128,15 @@ func (m *fileMapper) emitToolResultPayload(base canonical.EventBase, turnSeq, op
 // transcript; the ref lets the UI render it in a compaction lane. It is scoped
 // to the compaction op (turnSeq/opSeq) so it references an op that EXISTS
 // (P1.1a): payload_refs.op_id is NOT NULL REFERENCES ops(id), and the summary
-// belongs to its compaction. Returns (zero, false, nil) when no compaction op
-// has been seen on the file — without an owning op the ref would FK-roll-back
-// the batch, so it is dropped (a summary without a preceding boundary is
-// malformed input, not a normal case).
+// belongs to its compaction. The drop guard keys on opSeq == 0 ONLY — the real
+// "no owning compaction op" sentinel (a compaction always sets opSeq>=1). A
+// compaction can legitimately occur BEFORE any operator prompt (turn 0,
+// P2.3b): keying the guard on turnSeq==0 too would wrongly drop that valid
+// turn-0 summary. Returns (zero, false, nil) only when no compaction op has
+// been seen on the file (opSeq==0) — without an owning op the ref would
+// FK-roll-back the batch.
 func (m *fileMapper) emitSummaryPayload(base canonical.EventBase, turnSeq, opSeq int) (canonical.PayloadRefEvent, bool, error) {
-	if turnSeq == 0 || opSeq == 0 {
+	if opSeq == 0 {
 		return canonical.PayloadRefEvent{}, false, nil
 	}
 	uri, err := payloadLocationURI(m.root, m.absPath)

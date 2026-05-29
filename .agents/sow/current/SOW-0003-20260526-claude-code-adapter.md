@@ -411,6 +411,74 @@ fired only on a quiescent child EOF), §333 + §397 (code must now honor the pro
 Not merged. Fix round delegated (spec + failing tests incl. the ingester seam test +
 code); re-review same scope + these notes before merge.
 
+### Round 3 (2026-05-29) — codex + glm + minimax (full scope + Round-2 fix notes)
+
+glm + minimax → "ready to merge" again. **codex → NOT safe: 2 P1 + 2 P2**, all verified
+real against ground truth. The P1.1 payload-ref FK fix, the containment fix, the
+oversized-line fix, P2.6, P2.7 are all confirmed correct. The blockers are concentrated
+in the **Agent-op finalize machinery** — which codex has now broken in TWO consecutive
+rounds (R2: durability + premature; R3: quiescence-insufficient + double-finalize). That
+is the signal: the quiescent-EOF design (cycle counter + childAtEOF + parkChildEnds +
+sweep + write-only `done`) is the wrong abstraction. **CTO decision: replace it**, do not
+patch it again.
+
+Findings (verified):
+- **[P1.3a] Quiescence ≠ completion.** `sweepQuiescentFinalizations` (`tailer.go:449`)
+  finalizes on `fullyRead` (byte EOF) + one quiet cycle, with NO check of the terminal
+  record type. A child paused mid-tool (last record a user/tool_use) for one
+  `tailTickInterval` is wrongly finalized. The "not premature" test cancels before the
+  tick that finalizes, so it never exercised the gap.
+- **[P1.3b] Late `.meta.json` permanently loses child linkage.** The Agent op records
+  `agentOps`+`ChildSessionNativeID` only if `toolUseToAgent[blk.ID]` is already populated
+  from the sidecar (`ops.go:200-212`). If Tail reads the parent `Agent` tool_use before
+  the `.meta.json`, the op is written with no child link and no deferral, and a later
+  meta-only flush does not re-replay the parent (`tailer.go` meta-only path), so the
+  resolver (which needs the stashed `childNativeId`) can never repair it.
+- **[P2.3a] Double-finalize on catch-up replay.** `readTranscript` suppresses record
+  events but rebuilds deferral state; `parkChildEnds` re-parks an already-finalized child
+  and `def.done` is written (`tailer.go:472`) but NEVER read, so a re-read re-emits the
+  finalize. Idempotent at the DB layer, but violates "emits nothing on replay" + redundant
+  notifies + dead field.
+- **[P2.3b] Turn-0 compaction summary payload silently dropped.** `emitSummaryPayload`
+  (`payloads.go:125`) drops when `turnSeq == 0 || opSeq == 0`, but a compaction op
+  legitimately exists at turn 0 (compaction before any user turn). Guard must key on
+  `opSeq == 0` only (the real "no owning op" sentinel; compaction always sets opSeq≥1).
+- **[P2-perf, glm] Redundant `EvalSymlinks`.** `scanAll`/`catchUpFromCursor` pass the
+  UNRESOLVED root to `readSessionMetas`/`metaHashes`, so the root is symlink-resolved once
+  per file instead of once. Not a security gap (containment is correct) — pre-resolve once
+  and thread `resolvedRoot` (mirror `discoverTranscripts`); drop the `_ = resolvedRoot`.
+
+Redesign (authoritative — grounded in VERIFIED real-data completion semantics):
+- The ONLY reliable completion signal in this format is §485's "the child's last record is
+  an assistant message with text content". Confirmed on real workstation transcripts:
+  11/12 completed sidechains end with `{assistant, content[0]=text}`; the one outlier ends
+  with a `user` record (an interrupted child — correctly NOT complete).
+- **Finalize an Agent op iff the child sidechain is fully read AND its terminal record is
+  an assistant-text record**, emitting the finalize **gated by `emitFrom`** (so a replay /
+  catch-up whose terminal record is below the resume offset emits nothing — fixes P2.3a),
+  with the parent op resolved through the existing `agentOps` deferral (preserves R2's
+  P1.2 durability). A child terminated by a user/tool record stays `running` (fixes P1.3a's
+  premature finalize without any timing heuristic).
+- **Remove** `cycle`, `childAtEOF`, `parkChildEnds`, `sweepQuiescentFinalizations`, and the
+  write-only `done`. Replace with: a `childCompleted` set (terminal-assistant-text observed
+  this pass) + a `finalized` set that IS READ before emitting (no re-finalize). Pairing is
+  event-driven (when the parent op is observed via `collectAgentDeferral`), not tick-driven.
+- **[P1.3b]** A meta-dirty Tail flush re-replays the parent transcript(s) of the affected
+  session(s) so a late `.meta.json` repairs the Agent op's `toolUseToAgent`→`childNativeId`
+  linkage (then the resolver links the child).
+- **[P2.3b]** `emitSummaryPayload` guard → `opSeq == 0` only.
+- **[glm perf/P3]** Pre-resolve root once in `scanAll`; thread `resolvedRoot`; rename the
+  misleading `withinSourceRoot(resolvedRoot, …)` param; document the `prLinks` fresh-map
+  invariant.
+
+Tests: finalize on terminal-assistant-text (scan + tail); child terminated by tool_use/
+user stays `running` AND a test that drives PAST a tick to prove it (close codex's
+test-gap note); no double-finalize across a catch-up replay; late-meta linkage repair;
+turn-0 compaction summary payload emitted. Spec §8.1 rewritten (completion = terminal
+assistant-text, emitFrom-gated; remove quiescence wording), §5.4/§9.2 (turn-0 allowed).
+
+Not merged. Redesign delegated; re-review same scope + these notes (Round 4) before merge.
+
 ## Outcome
 
 Pending.

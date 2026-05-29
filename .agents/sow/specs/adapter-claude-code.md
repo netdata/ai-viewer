@@ -536,11 +536,11 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 | `user` with string content (non-meta, non-compact) | `TurnStartedEvent(Seq=N+1)` |
 | `user` with array content (`tool_result` blocks) | one `OpFinalizedEvent` per `tool_result` block, matched by `tool_use_id`; plus one `PayloadRefEvent` (`PayloadKind='tool_response'`, `Format='text'`, `LocationURI=file://<transcript>`) for the `toolUseResult` body when present, matched to the finalized tool op's `Seq` |
 | `user` with `isMeta==true` (`<local-command-caveat>` etc.) | `LogEntry` `DBG`; no turn/op events |
-| `user` with `isCompactSummary==true` | `LogEntry` `INF` carrying the post-compaction summary, plus a `PayloadRefEvent` (`PayloadKind='log'`, `Format='text'`, `LocationURI=file://<transcript>`) pointing at the summary text so the UI can render it in a compaction lane. The payload is scoped to the **compaction op** that immediately precedes the summary (the same `(TurnSeq, OpSeq)` the `compact_boundary` synthetic op was emitted under), because `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` — a payload must reference an op that exists, and the compaction op is the natural owner of its own summary. |
+| `user` with `isCompactSummary==true` | `LogEntry` `INF` carrying the post-compaction summary, plus a `PayloadRefEvent` (`PayloadKind='log'`, `Format='text'`, `LocationURI=file://<transcript>`) pointing at the summary text so the UI can render it in a compaction lane. The payload is scoped to the **compaction op** that immediately precedes the summary (the same `(TurnSeq, OpSeq)` the `compact_boundary` synthetic op was emitted under), because `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` — a payload must reference an op that exists, and the compaction op is the natural owner of its own summary. The drop guard keys on `OpSeq == 0` only (the real "no owning op" sentinel): a compaction op legitimately exists at turn 0 (a `/compact` before any operator prompt), so a turn-0 compaction summary is still emitted, scoped to that turn-0 compaction op (§9.2). |
 | `assistant` (model != `<synthetic>`) | `OpStartedEvent(Kind='llm', Model, Provider='anthropic', Name=Model)` covering the LLM call; for each `tool_use` block in `content[]`, an additional `OpStartedEvent(Kind='tool', Name=name, ToolNamespace=mcp_server or '')`; `OpFinalizedEvent` for the LLM op with tokens from `message.usage` |
 | `assistant` (model == `<synthetic>`) | `LogEntry` `INF`; no LLM op emitted |
 | `assistant.content[].type=="thinking"` | nested `OpStartedEvent`/`OpFinalizedEvent` with `Kind='reasoning'`, `ParentOpSeq=<the LLM op>`, `BytesOut=len(thinking)` |
-| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, ChildSessionNativeID=<parent sessionId>:agent:<agentId>)`; the `OpFinalizedEvent` is deferred until the spawned subagent sidechain reaches EOF (see §8.1). The parent transcript has NO `tool_result` for the Agent tool, so the op is finalized from the child's end state, not from a `tool_result` block. |
+| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, ChildSessionNativeID=<parent sessionId>:agent:<agentId>)`; the `OpFinalizedEvent` is deferred until the spawned subagent sidechain is fully read AND its terminal record is an assistant-text completion marker (see §8.1, §485). The parent transcript has NO `tool_result` for the Agent tool, so the op is finalized from the child's end state, not from a `tool_result` block. When the linking `.meta.json` lands after the parent's `Agent` block was already tailed, the parent's `OpStarted` is re-emitted (idempotent UPDATE) carrying the now-resolved `ChildSessionNativeID` (§8.1). |
 | Each subagent jsonl file | a separate canonical Session (`Kind='sub_agent'`, parent linkage via `ParentNativeID`); turn/op inference identical to main session |
 | `system.subtype=="turn_duration"` | `TurnFinalizedEvent` for the just-completed turn |
 | `system.subtype=="api_error"` | `LogEntry` severity `ERR`; if the next record is a synthetic assistant or absence-of-assistant, mark the in-flight LLM op `status='failed', error_class=api_error_<status>` |
@@ -626,9 +626,11 @@ Because fsnotify does not fire for bytes written before the watch was
 established, Tail performs an **initial catch-up read** once at startup, after
 the watches are added: it reads every currently-discovered transcript from its
 cursor offset to current EOF (reusing the steady-state flush path, so the
-offset advance, partial-line hold-back, and Agent-op deferral are identical).
-A file already fully consumed by Scan re-reads zero new bytes (offset == size)
-and emits nothing; a file that grew during the window emits exactly the new
+offset advance, partial-line hold-back, and Agent-op deferral rebuild are
+identical). A file already fully consumed by Scan re-reads zero new bytes
+(offset == size) and emits nothing — including emitting no Agent-op finalize,
+because the terminal assistant-text record is below the resume offset and so is
+not newly read (§8.1). A file that grew during the window emits exactly the new
 records. After the catch-up, the fsnotify loop drives all further reads.
 
 Stream-parse line-by-line from the cursor offset. A line without a trailing `\n` is an in-flight write; the adapter parks the partial bytes and resumes on the next event. A line that parses but has unknown `type` produces a `SourceError`. A line that fails to parse as JSON: same. The adapter does not skip bytes blindly; it always advances `offset` past completed lines only.
@@ -707,15 +709,41 @@ land independently:
    for the affected **parent** session so an open UI refetches. This mirrors the
    session parent/root re-link the resolver already performs.
 
-2. **Agent op finalize is inherently child-side (adapter).** The parent
-   transcript has NO `tool_result` block for the `Agent` tool (§4.4, verified
-   against a real transcript: the Agent's `tool_use` id appears once, not the
-   typical twice), so there is no parent-side completion record. The subagent's
-   result is implicit — the last `assistant` text record in
-   `agent-<agentId>.jsonl`. The adapter therefore finalizes the parent's
-   `OpStartedEvent(Kind='session')` from the **child sidechain's end state**, never
-   from a parent record, and the link is the op's `ChildSessionNativeID` (equal to
-   the child file's synthetic `NativeID`). Two properties this finalize must have:
+2. **Agent op finalize is inherently child-side, via the terminal
+   assistant-text completion marker (adapter).** The parent transcript has NO
+   `tool_result` block for the `Agent` tool (§4.4, verified against a real
+   transcript: the Agent's `tool_use` id appears once, not the typical twice),
+   so there is no parent-side completion record. The subagent's result is
+   implicit — the **last record** of `agent-<agentId>.jsonl` is an `assistant`
+   message whose `content[0].type == "text"` (§4.4, §485; verified on real
+   workstation transcripts: completed sidechains end with `{assistant, text}`,
+   while a child whose last record is a `user`/`tool` record was interrupted and
+   is NOT complete). The adapter therefore finalizes the parent's
+   `OpStartedEvent(Kind='session')` from the **child sidechain's end state**,
+   never from a parent record, and the link is the op's `ChildSessionNativeID`
+   (equal to the child file's synthetic `NativeID`).
+
+   The completion rule is exact:
+
+   - A child is **complete** iff it was streamed fully to EOF (no parked partial
+     trailing line) AND its terminal record is an assistant-text record
+     (`childComplete := mapper.fullyRead && mapper.lastRecordAssistantText`). The
+     mapper tracks `lastRecordAssistantText`: set true (with the record's
+     timestamp captured in `lastAssistantTextTsUs`) when a record is an assistant
+     message with `content[0].type == "text"`, and set false on ANY other record
+     type. A child terminated by a `user`/`tool_use` record therefore stays
+     `running` — no timing heuristic, no quiescence window. This holds identically
+     in a static Scan and in live Tail.
+
+   - **Emit-gated by `emitFrom` (replay emits nothing).** A child is marked
+     `completed` only when its terminal assistant-text record was **newly read**
+     this pass — i.e. that record's `lineStart >= emitFrom`. A catch-up / resume
+     read (`emitFrom == size`) re-reads the terminal record below the resume
+     offset to rebuild counters, so it is NOT newly read and the child is NOT
+     re-marked, so no second finalize is emitted (a replay over an
+     already-finalized child emits nothing). A child id already finalized in the
+     loop lifetime is additionally skipped (a `finalized` set that is READ before
+     emitting, not merely written).
 
    - **Durable across the Scan→Tail boundary.** A parent fully read during Scan
      leaves no unread bytes, so a naive Tail catch-up that early-returns on
@@ -724,24 +752,47 @@ land independently:
      the parent. To prevent this, whenever a transcript is already at EOF
      (`offset >= size`) the adapter still **replays the chain from offset 0 with
      the emit-gate set to the file size** (emit nothing, identical to the
-     counter-rebuild used for resume), reconstructing the per-file Agent-op map and
-     the child's last-record timestamp without re-emitting any event. The parent's
-     Agent op is thus visible to Tail's loop-lifetime deferral when its child
-     completes in a later flush.
+     counter-rebuild used for resume), reconstructing the per-file Agent-op map
+     without re-emitting any event. The parent's Agent op is thus visible to
+     Tail's loop-lifetime deferral when its child completes in a later flush.
 
-   - **Not premature on a live child's byte-EOF.** Reaching byte-EOF on a
-     subagent that is still running is NOT semantic completion (the next flush may
-     append more records). The adapter finalizes an Agent op only on a **quiescent
-     child EOF**: the child is fully read AND was NOT appended in the current flush
-     cycle. A static Scan has no per-flush dirty set, so historical children
-     finalize immediately (correct). In live Tail, a child appended in this flush
-     (its WRITE is what made it dirty) stays `running`; it is finalized on a later
-     tick once it sits at EOF with no new appends since the prior cycle. A subagent
-     that never goes quiescent (continuously appended) stays `running` — consistent
-     with the "always running, no end marker" session model (§11.11).
+   - **Event-driven pairing (no ticks).** Across the Tail loop lifetime the
+     deferral carries two sets: `completed` (child id → completion ts, for
+     children observed complete whose parent op is not yet finalized) and
+     `finalized` (child ids already finalized). The parent Agent op ref is
+     discovered via the existing `agentOps` deferral (`def.pending[childID] =
+     parentRef`, rebuilt on every read including the emit-suppressed replay so it
+     survives the Scan→Tail boundary). After each flush's reads, for every child
+     id in `completed` not in `finalized`: if its parent op ref is known, emit the
+     finalize, move the child id into `finalized`, and drop it from `completed`; if
+     the parent op is not yet known, leave the child parked in `completed` (it
+     finalizes in a later flush once the parent op is observed). There is no
+     `cycle` counter, no quiescence window, and no tick-driven sweep.
 
-   The finalize's `EndTs` is the child's last-record timestamp (its implicit
-   completion time).
+   The finalize's `EndTs` is the child's terminal assistant-text record's
+   timestamp (its implicit completion time).
+
+3. **Late `.meta.json` repairs the Agent-op child linkage (adapter).** The
+   parent's `Agent` op carries `ChildSessionNativeID` (and records an `agentOps`
+   deferral entry) only when the sidecar's `toolUseId → agentId` mapping is
+   already known when the parent's `Agent` `tool_use` block is read. The parent
+   transcript and the sidecar `.meta.json` land independently, so Tail may read
+   the parent's `Agent` block in flush N before the `.meta.json` arrives in flush
+   N+1; the op would then be written with no child link and no deferral, and a
+   meta-only flush does not otherwise re-read the parent, so the resolver (which
+   needs the stashed `childNativeId`) could never repair it. To close this, a Tail
+   flush that observes a meta change **re-reads the affected session's parent
+   transcript(s) from offset 0 with emission ENABLED** (emitFrom = 0, not the
+   cursor) for that flush, so the `Agent` `OpStarted` is RE-EMITTED now carrying
+   the resolved `ChildSessionNativeID`. The ingester op write is idempotent
+   (`ON CONFLICT (turn_id, seq) DO UPDATE`, with `child_session_id =
+   COALESCE(...)` plus the writer's `childNativeId` stash), so the re-emit UPDATES
+   the existing op's child link rather than duplicating; the resolver then links
+   the child once it lands. This re-read fires only on a meta change (rare), so
+   the churn is acceptable, and it does NOT regress the "a normal replay emits
+   nothing" property of the finalize machinery above (the finalize stays
+   emit-gated; only the parent's `OpStarted` re-emits, and it is an idempotent
+   UPDATE).
 
 ## 9. Compaction Handling
 
@@ -759,7 +810,7 @@ Compaction is Claude Code's mechanism for summarizing a long conversation to sta
 The decision: **keep both pre- and post-compaction history in the canonical model**, separated by a synthetic `OpKind='compaction'` op (the canonical model's first-class compaction kind, not an `internal` op).
 
 1. The `compact_boundary` record emits one synthetic `OpStartedEvent`/`OpFinalizedEvent` pair with `OpKind='compaction'` (the canonical model defines `OpCompaction` as a first-class op kind), `Ts=boundary.timestamp`, `EndTs = boundary.timestamp + compactMetadata.durationMs * 1000`. `BytesIn = compactMetadata.preTokens`, `BytesOut = compactMetadata.postTokens`, `Extras = compactMetadata`.
-2. The `isCompactSummary:true` user message after the boundary does NOT start a new turn. It is emitted as a `LogEntry` `INF` and as a `PayloadRef` for the summary text (so the UI can show it in a "compaction" lane).
+2. The `isCompactSummary:true` user message after the boundary does NOT start a new turn. It is emitted as a `LogEntry` `INF` and as a `PayloadRef` for the summary text (so the UI can show it in a "compaction" lane). The summary `PayloadRef` is scoped to the preceding compaction op so it references an op that exists (`payload_refs.op_id` is `NOT NULL`). The drop guard is `OpSeq == 0` only — NOT `TurnSeq == 0 || OpSeq == 0`. A compaction can occur before any operator prompt (turn 0), in which case the compaction op lives at `(TurnSeq=0, OpSeq>=1)` and its summary payload is correctly emitted and op-scoped; keying the guard on `TurnSeq == 0` would wrongly drop that legitimate turn-0 summary.
 3. The next regular user-prompt record opens a new turn as usual.
 4. The pre-compaction turn count is preserved; the post-compaction continues numbering monotonically.
 
