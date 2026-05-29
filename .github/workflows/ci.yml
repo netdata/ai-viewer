@@ -522,6 +522,12 @@ jobs:
           chmod +x scripts/scan-ai-attribution.sh
           ./scripts/scan-ai-attribution.sh
 
+      - name: Lint systemd units
+        if: hashFiles('scripts/test/systemd-units-test.sh') != ''
+        run: |
+          chmod +x scripts/test/systemd-units-test.sh
+          ./scripts/test/systemd-units-test.sh
+
       - name: Aggregate gates
         if: steps.detect.outputs.gates == 'true'
         run: |
