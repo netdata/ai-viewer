@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -15,13 +14,6 @@ import (
 // 503.
 func isNoRows(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
-}
-
-// payloadURL builds the client-facing streaming URL for a payload_refs
-// row id. The /api/payloads/<id> route lands in a later chunk; the
-// detail endpoint emits the URL now so clients can build links eagerly.
-func payloadURL(id int64) string {
-	return "/api/payloads/" + strconv.FormatInt(id, 10)
 }
 
 // queryTimeout bounds every read query the Chunk 12 endpoints run. Per

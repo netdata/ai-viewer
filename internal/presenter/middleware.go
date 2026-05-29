@@ -222,48 +222,68 @@ func bodyLimitMiddleware(next http.Handler) http.Handler {
 // The middleware does NOT compress an explicit
 // Content-Encoding-already-set response, so SSE (which sets its own
 // Content-Type and never goes through this gate) is doubly safe.
-func gzipMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/events" || !clientAcceptsGzip(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		bw := &bufferingResponseWriter{ResponseWriter: w, header: http.Header{}}
-		next.ServeHTTP(bw, r)
-		// If the downstream handler hijacked the connection or already
-		// wrote a compressed/non-gzippable encoding, fall back to raw
-		// passthrough.
-		if bw.contentEncodingSet() {
-			bw.flushPassthrough()
-			return
-		}
-		if bw.buf.Len() < gzipMinBytes {
-			bw.flushPassthrough()
-			return
-		}
-		// Compress.
-		w.Header().Del("Content-Length")
-		for k, vs := range bw.header {
-			if strings.EqualFold(k, "Content-Length") {
-				continue
+//
+// It takes a logger (like loggingMiddleware / recoverMiddleware) so a
+// mid-stream gzip copy failure — the response headers are already flushed, so
+// there is no way to surface it to the client — is at least recorded at debug
+// level rather than swallowed silently (no-silent-failure rule).
+func gzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/events" || !clientAcceptsGzip(r) {
+				next.ServeHTTP(w, r)
+				return
 			}
-			for _, v := range vs {
-				w.Header().Add(k, v)
+			bw := &bufferingResponseWriter{ResponseWriter: w, header: http.Header{}}
+			next.ServeHTTP(bw, r)
+			// If the downstream handler hijacked the connection or already
+			// wrote a compressed/non-gzippable encoding, fall back to raw
+			// passthrough.
+			if bw.contentEncodingSet() {
+				bw.flushPassthrough()
+				return
 			}
-		}
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Add("Vary", "Accept-Encoding")
-		status := bw.status
-		if status == 0 {
-			status = http.StatusOK
-		}
-		w.WriteHeader(status)
-		gz := gzip.NewWriter(w)
-		if _, err := io.Copy(gz, &bw.buf); err != nil {
-			return
-		}
-		_ = gz.Close()
-	})
+			if bw.buf.Len() < gzipMinBytes {
+				bw.flushPassthrough()
+				return
+			}
+			// Compress.
+			w.Header().Del("Content-Length")
+			for k, vs := range bw.header {
+				if strings.EqualFold(k, "Content-Length") {
+					continue
+				}
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
+			}
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Add("Vary", "Accept-Encoding")
+			status := bw.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			gz := gzip.NewWriter(w)
+			if _, err := io.Copy(gz, &bw.buf); err != nil {
+				if logger != nil {
+					logger.DebugContext(r.Context(), "gzip copy failed",
+						"error", err, "path", r.URL.Path,
+						"request_id", requestIDFromContext(r.Context()))
+				}
+				return
+			}
+			// Close writes the gzip footer; a failure here means the
+			// trailer never reached the client, so record it (the headers
+			// are already flushed, so there is no way to surface it
+			// otherwise — no-silent-failure rule).
+			if err := gz.Close(); err != nil && logger != nil {
+				logger.DebugContext(r.Context(), "gzip close failed",
+					"error", err, "path", r.URL.Path,
+					"request_id", requestIDFromContext(r.Context()))
+			}
+		})
+	}
 }
 
 // clientAcceptsGzip reports whether the request advertises gzip

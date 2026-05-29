@@ -71,14 +71,15 @@ type opDetail struct {
 	PayloadRefs    []payloadRef `json:"payload_refs"`
 }
 
-// payloadRef is one payload_refs row. URL is the (later-chunk) streaming
-// route; the field is emitted now so clients can build links eagerly.
+// payloadRef is one payload_refs row. The byte-streaming route
+// (GET /api/payloads/<id>) is Phase 2 and not yet registered, so the row
+// carries only its metadata — no `url` field is emitted until the route and
+// a view that consumes it land together (rest-api.md §GET /api/payloads).
 type payloadRef struct {
 	ID            int64   `json:"id"`
 	Kind          string  `json:"kind"`
 	Format        string  `json:"format"`
 	Compression   *string `json:"compression"`
-	URL           string  `json:"url"`
 	OriginalBytes *int64  `json:"original_bytes"`
 	StoredBytes   *int64  `json:"stored_bytes"`
 }

@@ -105,7 +105,7 @@ func TestToAttrsSkipsNonStringKey(t *testing.T) {
 func TestGzipMiddlewareSkipsAlreadyCompressed(t *testing.T) {
 	t.Parallel()
 	payload := bytes.Repeat([]byte("z"), gzipMinBytes*2)
-	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := gzipMiddleware(gzipTestLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Encoding", "br")
 		_, _ = w.Write(payload)

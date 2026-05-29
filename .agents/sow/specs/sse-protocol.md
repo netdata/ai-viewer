@@ -76,7 +76,10 @@ The `id:` field is also set on each message to enable `Last-Event-ID` reconnect.
 
 ### `session_changed`
 
-Emitted when any row of a matching session is inserted or updated.
+Emitted when any row of a matching session is inserted or updated — including when
+the background parent-link resolver repairs a child-first ingestion: it emits a
+`session_changed` for the affected child, its newly-linked parent, and its root in
+the same transaction as the linkage UPDATE (`ingester.md` §resolver pass).
 
 ```json
 { "session_id": "<canonical_id>", "root_session_id": "<canonical_id>", "ts": <us>, "dropped": <n> }

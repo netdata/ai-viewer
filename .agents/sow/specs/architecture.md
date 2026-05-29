@@ -55,7 +55,7 @@ The two binaries communicate **only via the SQLite file**: the canonical rows pl
 │  │   GET  /api/stats?filter=...         (REST)               │   │
 │  │   POST /api/subscriptions            (REST)               │   │
 │  │   GET  /api/events?sub=...           (SSE)                │   │
-│  │   GET  /api/payloads/:ref            (REST, lazy)         │   │
+│  │   GET  /api/payloads/:ref            (REST, lazy — Phase 2)│   │
 │  │   GET  /                             (embedded frontend)  │   │
 │  └─────┬─────────────────────────────────────────────────────┘   │
 │        │ go:embed                                                │
@@ -125,10 +125,16 @@ Each source format is one Go package under `internal/adapters/`. Every adapter i
 ```go
 type Adapter interface {
     Name() string
+    Format() string
     Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error
     Tail(ctx context.Context, out chan<- canonical.Event) error
+    ParseCursor(stored string) (canonical.Cursor, error)
 }
 ```
+
+(`Format` returns the user-facing format string written to `sources.format`;
+`ParseCursor` decodes the persisted resume token. See `adapter-contract.md` for
+the authoritative method docs.)
 
 - `Scan` is the backfill path: walk what's on disk now, emit events from `since` forward.
 - `Tail` is the realtime path: subscribe to file/DB changes, emit events as they arrive.

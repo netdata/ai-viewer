@@ -6846,6 +6846,58 @@ patterns were literals-in-script). **codex** → one **P2** + 2 P3s:
   (441 files); self-test **21/21**; `sanitize-fixture-test.sh` 13/13 (+ alt HOME);
   shellcheck clean.
 
+### Chunk 21 PR-B — honest Phase-1 surface + spec drift (2026-05-29)
+
+Branch `sow-0001-chunk-21b-honest-surface`. Addresses codex's cross-cutting
+B1/B2 + the C/D spec-drift + silent-error findings (PR-A closed the security A).
+
+- **B1 — dead `payload_refs[].url` removed.** Phase 1 no longer advertises a
+  route it does not serve: dropped `URL` from the Go `payloadRef` DTO + the
+  `payloadURL` emitter/func (`session_detail*.go`, `query.go`) + the TS
+  `PayloadRef.url` + the `payloadUrl` helper (`types.ts`, `payloads.ts` → clean
+  Phase-2 stub); tests updated. Route stays unregistered, now documented Phase 2.
+- **B2 — resolver emits notify on linkage.** `resolver.go linkOrphans` now wraps
+  the parent/root linkage in one tx, captures affected ids via `UPDATE …
+  RETURNING` (modernc/sqlite v1.50.1 supports it), and emits `session_changed`
+  per affected child+parent+root + one `stats_invalidated` in that tx (mirrors
+  `notify_producer.go`); a no-op pass writes nothing. New integration test
+  `resolver_notify_test.go` (child-first ingest → one pass → linkage + notify
+  rows asserted; + no-link → zero notify).
+- **C1/C2/C3 spec drift fixed** (master-owned): `rest-api.md` schema 4 +
+  notify/sse + deferred routes (topology/timeline/catalog/payloads) marked Phase
+  2/`NOT_FOUND` + payload_refs `url` dropped; `frontend-architecture.md` tree
+  matches reality (Phase-N annotations); `architecture.md` Adapter interface 3→5
+  methods; `observability.md` schema 4 (from minimax round).
+- **D1 — subscription scalar trim.** `normalizeScalar` now trims before the empty
+  check and returns the normalized value (control-char check still first);
+  whitespace-only `session_id`/`root_session_id` → `BAD_REQUEST`. Tests added.
+- **D2 — no silent failures.** SSE write failure (`events_sse.go`) and gzip
+  `io.Copy` failure (`middleware.go`, now a logger-factory) log at Debug.
+
+**Verified (master, all green):** gofmt 0; `go vet` 0; `golangci-lint` 0 issues;
+`gosec` 0; `govulncheck` (0 called); `go test -race -count=1 ./internal/ingest/...
+./internal/presenter/...` ok; frontend `tsc` 0, vitest 238, build 92.82 KB gz;
+`scan-secrets.sh` PASS (441 files); `embed-smoke` pass.
+
+**PR-B review round 1 (codex + glm + minimax):** minimax + glm → safe to merge
+(P3s only); **codex → one P2** + P3s (adjudicated real):
+- **[P2] resolver missed the ROOT `session_changed` on a parent-only link.** A child
+  inserted with `root_session_id=R` (root present) + `parent_session_id=NULL` (parent
+  absent) never satisfied the root-link self-condition, so when the parent landed the
+  resolver emitted for child+parent but NOT R — and detail pages subscribe by EXACT
+  `session_id`, so an open R view would stay stale. Contradicts the documented
+  child+parent+root contract. **Fixed:** parent-link `UPDATE … RETURNING` now also
+  returns `root_session_id`; `scanLinkedRows` (generalized from `scanLinkedPairs`) adds
+  child+parent+root; new `TestResolver_EmitsNotifyForRootOnParentLink` (3-level
+  separate-root tree) pins it (also closes minimax's "3-level untested" note).
+- **[P3] D2 logging completed** — all SSE write-failure paths now log at Debug
+  (initial flush, resync, replay, keepalive — not just the live-event write).
+- **[P3] gzip `Close()`** error now logged (`middleware.go`).
+- **[P3] spec leftovers** — `rest-api.md` TL;DR + `architecture.md` serve-surface no
+  longer present `/api/payloads/:ref` as live (Phase 2).
+Re-verified green (gofmt/vet/golangci 0; `go test -race`; scan PASS 442 files).
+codex confirmation of the P2 fix pending before merge.
+
 ## Validation
 
 (Filled at end. Test summary, perf numbers, review summary.)

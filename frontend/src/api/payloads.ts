@@ -1,11 +1,7 @@
-import { API_BASE } from './client';
+// Payload byte-streaming (GET /api/payloads/:ref) is Phase 2. The route is
+// not registered on the server yet, and PayloadRef carries no `url` field, so
+// there is nothing to fetch or link today. The fetch helper and the URL
+// builder will be added here together with the route and the Trace tab that
+// renders payload bodies.
 
-// Payload streaming (GET /api/payloads/:ref) — Phase 2. The detail view links
-// to payload bytes via the `url` already present on each PayloadRef, so for now
-// we only expose a helper to build that URL. Inline fetching/rendering of
-// payload bodies lands with the Trace tab.
-
-/** payloadUrl returns the streaming URL for a payload ref id. */
-export function payloadUrl(ref: number): string {
-  return `${API_BASE}/payloads/${ref}`;
-}
+export {};
