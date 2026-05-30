@@ -62,15 +62,19 @@ func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Curso
 // row into its typed struct, records the owning session id into the affected
 // set, and (for message rows) populates the message→session map the part
 // fallback consults. The returned closure matches scanTableDelta's onRow type
-// and reports the row's watermark key. onError surfaces non-fatal per-row
-// anomalies (a session_message with an unknown type — adapter-opencode.md
-// §"Edge Cases" #1/§"session_message") without aborting the cycle.
+// and reports the row's watermark key. onError is threaded into the per-table
+// scanner (round-4 P2-1): a corrupt OPTIONAL numeric cell surfaces a WARN and
+// degrades to 0, while a corrupt REQUIRED watermark cell (id/time_updated)
+// returns an ERROR that aborts the page so the cursor never advances to a
+// poisoned watermark. onError ALSO surfaces non-fatal per-row anomalies (a
+// session_message with an unknown type — adapter-opencode.md §"Edge Cases"
+// #1/§"session_message") without aborting the cycle.
 func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchema, affected *affectedSet, msgSession map[string]string, onError func(error)) func(*sql.Rows) (rowKey, error) {
 	idx := newColumnIndex(s)
 	n := len(s.Present)
 	switch table {
 	case "session":
-		scan, row := scanSessionRow(idx, n)
+		scan, row := scanSessionRow(idx, n, onError)
 		return func(rows *sql.Rows) (rowKey, error) {
 			k, err := scan(rows)
 			if err != nil {
@@ -80,7 +84,7 @@ func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchem
 			return k, nil
 		}
 	case "message":
-		scan, row := scanMessageRow(idx, n)
+		scan, row := scanMessageRow(idx, n, onError)
 		return func(rows *sql.Rows) (rowKey, error) {
 			k, err := scan(rows)
 			if err != nil {
@@ -93,7 +97,7 @@ func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchem
 			return k, nil
 		}
 	case "part":
-		scan, row := scanPartRow(idx, n)
+		scan, row := scanPartRow(idx, n, onError)
 		hasSessionID := s.has("session_id")
 		return func(rows *sql.Rows) (rowKey, error) {
 			k, err := scan(rows)
@@ -108,7 +112,7 @@ func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchem
 			return k, nil
 		}
 	default: // session_message
-		scan, row := scanSessionMessageRow(idx, n)
+		scan, row := scanSessionMessageRow(idx, n, onError)
 		hasType := s.has("type")
 		return func(rows *sql.Rows) (rowKey, error) {
 			k, err := scan(rows)
@@ -271,12 +275,22 @@ type pollState struct {
 	lastWALEvent time.Time
 	lastProbe    time.Time
 	walFloorTill time.Time
+	// priorProbe records that at least one MAX(time_updated) probe has already
+	// completed in this tailer's life. It gates the safety-net boundary re-scan
+	// (SOW-0005 round-4 P1): the very FIRST probe of a cold Tail is a HEAD-snapshot
+	// reconciliation, and replaying its boundary bucket there would re-emit the
+	// snapshot's boundary session for no reason; once a real cycle has probed, a
+	// subsequent SAFETY-NET probe (no WAL hint) is allowed to run the boundary
+	// re-scan so a same-ms in-place update that arrived with a DROPPED/absent WAL
+	// event is still eventually surfaced. Set by markProbe.
+	priorProbe bool
 }
 
-// newPollState returns the initial state: idle, no WAL event yet, and a zero
+// newPollState returns the initial state: idle, no WAL event yet, a zero
 // lastProbe so the FIRST poll's gate is open (the safety net is immediately due,
 // guaranteeing the initial cycle reconciles in-place mutations that arrived
-// before tailing started).
+// before tailing started), and priorProbe=false so that first probe does NOT run
+// the safety-net boundary re-scan (cold-Tail replay guard, round-4 P1).
 func newPollState() pollState {
 	return pollState{}
 }
@@ -288,8 +302,14 @@ func (s *pollState) markWALEvent(t time.Time) {
 	s.walFloorTill = t.Add(walFloorWindow)
 }
 
-// markProbe records that a MAX(time_updated) probe ran at t.
-func (s *pollState) markProbe(t time.Time) { s.lastProbe = t }
+// markProbe records that a MAX(time_updated) probe ran at t and marks that a
+// probe has now completed (priorProbe) so a later safety-net probe may run the
+// boundary re-scan (round-4 P1; the very first probe still does not, by the
+// captured-before-markProbe read in pollOnce).
+func (s *pollState) markProbe(t time.Time) {
+	s.lastProbe = t
+	s.priorProbe = true
+}
 
 // markCycle records the outcome of a poll cycle at t: active when it produced a
 // change (switches to the 500 ms cadence), idle otherwise (2 s).

@@ -14,6 +14,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"log/slog"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/adapters"
+	"github.com/netdata/ai-viewer/internal/adapters/opencode"
 	"github.com/netdata/ai-viewer/internal/canonical"
 
 	// The opencode probe test builds a synthetic SQLite database with the
@@ -271,5 +273,44 @@ func TestAutoDiscover_OpencodeDirectoryNotRegistered(t *testing.T) {
 	}
 	if !bytes.Contains(buf.Bytes(), []byte("not a regular file")) {
 		t.Errorf("expected a WARN that the opencode path is not a regular file; got:\n%s", buf.String())
+	}
+}
+
+// TestOpencodeProbeRespectsCancelledContext pins SOW-0005 round-4 P3-1: the startup
+// ProbeStatus is now passed a bounded/cancellable context (autoDiscoverSources uses
+// context.WithTimeout(opencodeProbeTimeout)) instead of context.Background(), so a
+// cancelled context aborts the probe promptly with an error rather than running the
+// COUNT(*) queries to completion. A normal context still returns the counts. The
+// probe is best-effort: discovery surfaces the error and still registers the source
+// (covered by TestAutoDiscover_OpencodeProbeErrorStillRegisters), but the
+// cancellation must be HONORED rather than ignored.
+func TestOpencodeProbeRespectsCancelledContext(t *testing.T) {
+	// Not parallel: t.Setenv mutates process-wide HOME.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	dbPath := plantOpencodeDB(t, tmp, 2, 3, 4, "20260510033149_init")
+
+	// An already-cancelled context: ProbeStatus must return an error (it does not
+	// silently run to completion ignoring cancellation).
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, _, _, err := opencode.ProbeStatus(cancelled, dbPath); err == nil {
+		t.Error("ProbeStatus with a cancelled context returned nil error; the probe must honor cancellation (round-4 P3-1)")
+	}
+
+	// A normal (bounded) context still succeeds and returns the planted counts —
+	// proving the timeout/cancellable wiring did not break the happy path.
+	ctx, cancel2 := context.WithTimeout(context.Background(), opencodeProbeTimeout)
+	defer cancel2()
+	sessions, messages, parts, latest, err := opencode.ProbeStatus(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("ProbeStatus(valid ctx): %v", err)
+	}
+	if sessions != 2 || messages != 3 || parts != 4 {
+		t.Errorf("ProbeStatus counts = (%d,%d,%d), want (2,3,4)", sessions, messages, parts)
+	}
+	if latest != "20260510033149_init" {
+		t.Errorf("ProbeStatus latest migration = %q, want the planted one", latest)
 	}
 }

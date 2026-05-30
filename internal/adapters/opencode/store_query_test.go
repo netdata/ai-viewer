@@ -20,7 +20,7 @@ func scanMessagesFrom(t *testing.T, db *sql.DB, schema schemaSet, from TableWate
 	idx := newColumnIndex(s)
 	n := len(s.Present)
 	var got []messageRow
-	scan, row := scanMessageRow(idx, n)
+	scan, row := scanMessageRow(idx, n, nil)
 	delta, err := scanTableDelta(ctxBG(), db, s, from, func(rows *sql.Rows) (rowKey, error) {
 		k, err := scan(rows)
 		if err != nil {

@@ -153,7 +153,7 @@ func (m *sessionMapper) finalizeTurn(tc *turnContext, data *messageData, msg mes
 	m.havePrevTurn = true
 
 	status, errClass := turnStatus(data)
-	endUs := turnEndUs(data, msg)
+	endUs := m.turnEndUs(data, msg)
 	return canonical.TurnFinalizedEvent{
 		EventBase:        m.nextBase(endUs),
 		SessionNativeID:  m.nativeID(),
@@ -226,12 +226,15 @@ func turnIsTerminal(data *messageData, hasStepFinish bool) bool {
 
 // turnEndUs returns a turn's end timestamp (µs): the assistant message's
 // data.time.completed when set, else the message row's time_created (a turn with
-// no completed ts is still ordered by its creation).
-func turnEndUs(data *messageData, msg messageRow) int64 {
+// no completed ts is still ordered by its creation). It is a mapper METHOD so the
+// ms→µs conversion goes through the warning-capable msToMicrosWarn (SOW-0005
+// round-4 P2-2): the result becomes the TurnFinalized Ts and the session's
+// failed-terminal EndTs, so a crafted/corrupt timestamp clamps WITH a WARN.
+func (m *sessionMapper) turnEndUs(data *messageData, msg messageRow) int64 {
 	if data.Time.Completed != nil {
-		return msToMicros(*data.Time.Completed)
+		return m.msToMicrosWarn(*data.Time.Completed, "message.data.time.completed")
 	}
-	return msToMicros(msg.TimeCreatedMs)
+	return m.msToMicrosWarn(msg.TimeCreatedMs, "message.time_created (turn end)")
 }
 
 // --- provider canonicalization (AC#7) -----------------------------------------

@@ -16,6 +16,21 @@ import (
 
 const testSourceID = "opencode:/test/opencode.db"
 
+// canonicalPayloadKinds is the EXACT canonical PayloadRefEvent.PayloadKind set
+// (internal/canonical/events.go:323-326). The adapter must never emit a kind
+// outside this set (SOW-0005 round-4 P2-3 removed the non-canonical
+// "user_attachment"); tests assert every emitted PayloadRef's kind is a member.
+var canonicalPayloadKinds = map[string]bool{
+	"llm_request":      true,
+	"llm_response":     true,
+	"llm_sdk_request":  true,
+	"llm_sdk_response": true,
+	"llm_reasoning":    true,
+	"tool_request":     true,
+	"tool_response":    true,
+	"log":              true,
+}
+
 // --- synthetic-row builders ---------------------------------------------------
 
 // asgMsg builds an assistant messageRow with the given id/time and a data body
@@ -905,9 +920,14 @@ func TestMapSession_RetryWarnLog(t *testing.T) {
 	}
 }
 
-// --- file part → PayloadRef ---------------------------------------------------
+// --- file part → INF LogEntry (round-4 P2-3) ----------------------------------
 
-func TestMapSession_FilePartPayloadRef(t *testing.T) {
+// TestMapSession_FilePartLogEntry pins SOW-0005 round-4 P2-3: a file part emits an
+// INF LogEntry carrying filename/url/mime in its extras (an attachment record),
+// and NO PayloadRefEvent with a non-canonical PayloadKind. The old "user_attachment"
+// PayloadKind is not in the canonical PayloadRefEvent set (internal/canonical/
+// events.go), so the adapter must not emit it.
+func TestMapSession_FilePartLogEntry(t *testing.T) {
 	s := rootSession("ses_x", 0)
 	msgs := []messageWithParts{
 		mwp(asgMsg("msg_a", 1500, nil, "the-alias", "the-model", tokenCounts{}, 0, "", ""),
@@ -916,17 +936,45 @@ func TestMapSession_FilePartPayloadRef(t *testing.T) {
 		),
 	}
 	evs := run(t, s, msgs)
-	var found bool
+
+	// Every PayloadRef in the stream must carry a CANONICAL PayloadKind (the
+	// internal/canonical/events.go set); in particular the removed "user_attachment"
+	// kind must never appear.
 	for _, ev := range evs {
-		if p, ok := ev.(canonical.PayloadRefEvent); ok && p.PayloadKind == "user_attachment" {
-			found = true
-			if p.LocationURI != "https://cdn.example.invalid/x.png" {
-				t.Fatalf("file PayloadRef URI = %q want verbatim data.url", p.LocationURI)
+		if p, ok := ev.(canonical.PayloadRefEvent); ok {
+			if !canonicalPayloadKinds[p.PayloadKind] {
+				t.Fatalf("non-canonical PayloadRef kind=%q emitted (round-4 P2-3); canonical set only", p.PayloadKind)
 			}
 		}
 	}
-	if !found {
-		t.Fatal("no user_attachment PayloadRef for file part")
+
+	// Exactly one INF LogEntry "file attachment" with filename/url/mime in extras.
+	var found int
+	for _, ev := range evs {
+		l, ok := ev.(canonical.LogEntryEvent)
+		if !ok || l.Message != "file attachment" {
+			continue
+		}
+		found++
+		if l.Severity != "INF" {
+			t.Errorf("file-attachment LogEntry severity = %q, want INF", l.Severity)
+		}
+		if l.Extras["url"] != "https://cdn.example.invalid/x.png" {
+			t.Errorf("file-attachment extras.url = %v, want the verbatim data.url", l.Extras["url"])
+		}
+		if l.Extras["filename"] != "x.png" {
+			t.Errorf("file-attachment extras.filename = %v, want x.png", l.Extras["filename"])
+		}
+		if l.Extras["mime"] != "image/png" {
+			t.Errorf("file-attachment extras.mime = %v, want image/png", l.Extras["mime"])
+		}
+		// Scoped to the turn and the open LLM op (prt_1 opened one).
+		if l.TurnSeq != 1 {
+			t.Errorf("file-attachment LogEntry TurnSeq = %d, want 1", l.TurnSeq)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("file-attachment INF LogEntry count = %d, want 1", found)
 	}
 }
 

@@ -102,6 +102,15 @@ const connMaxLifetime = 30 * time.Minute
 // parsed only to be DISCARDED and rebuilt from the read-only set, so callers
 // may hand either a bare path or a pre-built URI without weakening the guard.
 //
+// Bare-path opacity (SOW-0005 round-4 P3-2): the `?`-split that strips the query
+// runs ONLY for the URI forms (file: / :memory:). A BARE filesystem path is
+// treated as OPAQUE — POSIX allows '?' in a filename, so a bare path containing
+// '?' opens the LITERAL file rather than misparsing everything after the '?' as a
+// DSN query. The whole bare path (including any '?') is percent-escaped into the
+// file: URI path. The default opencode database path contains no '?', so this is a
+// correctness guard for an unusual --source location, not a change to the common
+// case.
+//
 // CLI CONTRACT (SOW-0005 round-3 P2-4): the ingest CLI's opencode source
 // location is always a FILESYSTEM PATH — both auto-discovery and
 // `--source opencode:<path>` resolve to a real path, which
@@ -116,23 +125,30 @@ func buildReadOnlyDSN(dbPath string) (string, error) {
 		return "", fmt.Errorf("opencode: database path must be non-empty")
 	}
 
-	prefix, existingQuery := splitQuery(dbPath)
-
-	// Normalise the prefix into a "file:" URI with an absolute, escaped path.
-	var fileURI string
+	// Only the URI FORMS (file: / :memory:) carry a `?`-delimited query string;
+	// a BARE filesystem path is treated as OPAQUE (SOW-0005 round-4 P3-2). POSIX
+	// allows '?' in a filename, so splitting a bare path on '?' would misparse a
+	// real file whose name contains '?' — dropping part of the path into a bogus
+	// query. The default opencode path has no '?', but pointing --source
+	// opencode:<path> at such a file must open the LITERAL file. Query splitting is
+	// therefore scoped to the URI forms only; the bare-path branch escapes the
+	// whole dbPath (including any '?') as the file: path.
+	var fileURI, existingQuery string
 	switch {
-	case strings.HasPrefix(prefix, "file:"):
-		fileURI = prefix
-	case isMemoryDSN(prefix):
-		fileURI = prefix
+	case strings.HasPrefix(dbPath, "file:"):
+		fileURI, existingQuery = splitQuery(dbPath)
+	case isMemoryDSN(dbPath):
+		fileURI, existingQuery = splitQuery(dbPath)
 	default:
-		abs, err := filepath.Abs(prefix)
+		// Bare filesystem path: opaque. Do NOT split on '?'.
+		abs, err := filepath.Abs(dbPath)
 		if err != nil {
-			return "", fmt.Errorf("opencode: resolve db path %q: %w", prefix, err)
+			return "", fmt.Errorf("opencode: resolve db path %q: %w", dbPath, err)
 		}
 		// SQLite URIs require forward slashes and percent-escaping of the
 		// path. url.PathEscape leaves '/' intact (it escapes only segment
-		// reserved characters), giving a valid opaque file: path.
+		// reserved characters) and escapes '?'/'#'/spaces, giving a valid opaque
+		// file: path for a filename containing any of those.
 		uriPath := filepath.ToSlash(abs)
 		if !strings.HasPrefix(uriPath, "/") {
 			uriPath = "/" + uriPath
@@ -142,7 +158,8 @@ func buildReadOnlyDSN(dbPath string) (string, error) {
 
 	// Parse the caller query only to VALIDATE it (a malformed query is a hard
 	// error) — its contents are then discarded. Building from a fresh url.Values
-	// guarantees no caller _pragma or _txlock can leak through.
+	// guarantees no caller _pragma or _txlock can leak through. existingQuery is
+	// empty for a bare path (never split), so this is a no-op there.
 	if _, err := url.ParseQuery(existingQuery); err != nil {
 		return "", fmt.Errorf("opencode: invalid db DSN query for %q: %w", dbPath, err)
 	}

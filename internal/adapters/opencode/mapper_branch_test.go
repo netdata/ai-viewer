@@ -292,9 +292,14 @@ func TestMapSession_ToolBeforeStepIsTopLevel(t *testing.T) {
 	}
 }
 
-// --- file part before any LLM op → dropped (op_id NOT NULL) -------------------
+// --- file part before any LLM op → INF LogEntry, op 0 (round-4 P2-3) ----------
 
-func TestMapSession_FileBeforeLLMOpDropped(t *testing.T) {
+// TestMapSession_FileBeforeLLMOp pins the round-4 P2-3 contract for a file part
+// that arrives BEFORE any step-start: unlike the old PayloadRef (which had to be
+// dropped because payload_refs.op_id is NOT NULL), an INF LogEntry's OpSeq may be
+// 0, so the attachment is STILL surfaced — turn-scoped, op 0 — and no non-canonical
+// PayloadRef is emitted.
+func TestMapSession_FileBeforeLLMOp(t *testing.T) {
 	s := rootSession("ses_x", 0)
 	msgs := []messageWithParts{
 		mwp(asgMsg("msg_a", 1500, nil, "the-alias", "the-model", tokenCounts{}, 0, "", ""),
@@ -302,10 +307,27 @@ func TestMapSession_FileBeforeLLMOpDropped(t *testing.T) {
 		),
 	}
 	evs := run(t, s, msgs)
+	// No non-canonical PayloadRef at all.
 	for _, ev := range evs {
 		if p, ok := ev.(canonical.PayloadRefEvent); ok && p.PayloadKind == "user_attachment" {
-			t.Fatal("file PayloadRef before any LLM op must be dropped (op_id NOT NULL)")
+			t.Fatal("file part must NOT emit a non-canonical user_attachment PayloadRef (round-4 P2-3)")
 		}
+	}
+	// The attachment IS surfaced as an INF LogEntry with OpSeq 0 (no LLM op open).
+	var found int
+	for _, ev := range evs {
+		if l, ok := ev.(canonical.LogEntryEvent); ok && l.Message == "file attachment" {
+			found++
+			if l.Severity != "INF" {
+				t.Errorf("file-attachment severity = %q, want INF", l.Severity)
+			}
+			if l.OpSeq != 0 {
+				t.Errorf("file-attachment OpSeq = %d, want 0 (no LLM op open)", l.OpSeq)
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("file-attachment INF LogEntry count = %d, want 1 (surfaced even before any op)", found)
 	}
 }
 

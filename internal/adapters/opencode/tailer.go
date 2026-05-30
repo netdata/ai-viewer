@@ -205,9 +205,11 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan
 // cycle produced a change (so the loop switches to the active cadence).
 func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (bool, error) {
 	now := time.Now()
-	// Capture whether THIS probe is opened by a WAL write (vs the periodic safety
-	// net) BEFORE markProbe overwrites lastProbe — the boundary re-scan keys off it.
+	// Capture, BEFORE markProbe mutates the state, whether THIS probe is opened by
+	// a WAL write (vs the periodic safety net) AND whether any probe has already
+	// completed (priorProbe) — the boundary re-scan keys off both (round-4 P1).
 	walDriven := st.lastWALEvent.After(st.lastProbe)
+	priorProbe := st.priorProbe
 	changed, probed, err := detectChange(ctx, db, schema, *cur, st, now)
 	if err != nil {
 		return false, err
@@ -225,18 +227,26 @@ func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, so
 		}
 		return active, nil
 	}
-	// Boundary-millisecond re-scan (SOW-0005 round-3 P1-1): re-emit any session
-	// touched by an in-place UPDATE at exactly the cursor's boundary ms — the case
-	// the cheap MAX(id) path, the gated MAX(time_updated) > gate, and the forward
-	// delta's strict `> :tuid` tie-break all miss. It runs ONLY on the precise
-	// signature of that invisible update: a WAL-DRIVEN probe (a real opencode write
-	// fired the fsnotify hint — walDriven) on which NEITHER detector saw any advance
-	// (changed == false). An INSERT advances MAX(id) → changed == true → this is
-	// skipped and the forward delta above handles it (so a cold-Tail HEAD snapshot,
-	// whose only writes are inserts, never replays its boundary session). A steady
-	// idle DB fires no WAL event → never runs. The cursor is NOT advanced (the
-	// boundary rows are already at the watermark); re-emission is idempotent.
-	if probed && walDriven {
+	// Boundary-millisecond re-scan (SOW-0005 round-3 P1-1, completed in round-4 P1):
+	// re-emit any session touched by an in-place UPDATE at exactly the cursor's
+	// boundary ms — the case the cheap MAX(id) path, the gated MAX(time_updated) >
+	// gate, and the forward delta's strict `> :tuid` tie-break all miss (changed ==
+	// false). It runs on a gate-open probe (probed) under EITHER trigger:
+	//   - walDriven: a real opencode write fired the WAL fsnotify hint since the last
+	//     probe — the immediate, round-3 path.
+	//   - priorProbe: the SAFETY-NET path (round-4 P1). When the WAL hint is missed
+	//     (dropped fsnotify event, watcher setup failed, timer-only polling), the 60 s
+	//     net still opens the gate; once at least one probe has already run (priorProbe,
+	//     captured BEFORE markProbe), a same-ms in-place update is no longer stranded.
+	// The cold-Tail guard: the VERY FIRST probe of a fresh Tail has priorProbe==false
+	// and (for a HEAD snapshot) is not walDriven, so it does NOT replay the snapshot's
+	// boundary session; an INSERT after a cold snapshot advances MAX(id) → changed ==
+	// true → this is skipped and the forward delta handles it. AC#6 idle property is
+	// preserved: within the 60 s window an idle DB with no WAL event has probed ==
+	// false, so this never runs on an idle poll (it fires only when the gate opens —
+	// a WAL event or the 60 s net). The cursor is NOT advanced (the boundary rows are
+	// already at the watermark); re-emission is idempotent.
+	if probed && (walDriven || priorProbe) {
 		emitted, berr := emitBoundarySessions(ctx, db, schema, *cur, sourceID, out, logger, onError)
 		if berr != nil {
 			return active, berr

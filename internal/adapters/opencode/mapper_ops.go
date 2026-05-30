@@ -32,7 +32,7 @@ import (
 // still open at TURN end stays running (no finalize) per Edge #4 — only a NEW
 // step-start triggers the cancel.
 func (m *sessionMapper) openLLMOp(tc *turnContext, msg *messageData, p partRow, _ partData) []canonical.Event {
-	startUs := msToMicros(p.TimeCreatedMs)
+	startUs := m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (step-start)")
 	out := make([]canonical.Event, 0, 2)
 	if tc.llmOpOpen {
 		out = append(out, m.cancelOpenLLMOp(tc, startUs))
@@ -106,7 +106,7 @@ func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []
 		return nil
 	}
 	delta := tc.nextStepDelta()
-	endUs := msToMicros(p.TimeCreatedMs)
+	endUs := m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (step-finish)")
 	if endUs < tc.llmStartUs {
 		endUs = tc.llmStartUs
 	}
@@ -192,9 +192,9 @@ func (tc *turnContext) nextStepDelta() tokenCounts {
 func (m *sessionMapper) emitReasoningOp(tc *turnContext, p partRow, data partData) []canonical.Event {
 	tc.opSeq++
 	seq := tc.opSeq
-	startUs := msToMicros(data.Time.Start)
+	startUs := m.msToMicrosWarn(data.Time.Start, "part.data.time.start (reasoning)")
 	if startUs == 0 {
-		startUs = msToMicros(p.TimeCreatedMs)
+		startUs = m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (reasoning)")
 	}
 	out := make([]canonical.Event, 0, 3)
 	out = append(out, canonical.OpStartedEvent{
@@ -211,7 +211,7 @@ func (m *sessionMapper) emitReasoningOp(tc *turnContext, p partRow, data partDat
 		out = append(out, m.payloadRef(m.nextBase(startUs), tc.turnSeq, seq, "llm_reasoning", "text", p.ID, "text", int64(len(data.Text))))
 	}
 	if data.Time.End != nil {
-		endUs := msToMicros(*data.Time.End)
+		endUs := m.msToMicrosWarn(*data.Time.End, "part.data.time.end (reasoning)")
 		if endUs < startUs {
 			endUs = startUs
 		}
@@ -270,7 +270,7 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 		tc.opSeq++
 		sessSeq := tc.opSeq
 		out = append(out, canonical.OpStartedEvent{
-			EventBase:            m.nextBase(toolStartUs(data, p)),
+			EventBase:            m.nextBase(m.toolStartUs(data, p)),
 			SessionNativeID:      m.nativeID(),
 			TurnSeq:              tc.turnSeq,
 			Seq:                  sessSeq,
@@ -283,7 +283,7 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 	tc.opSeq++
 	seq := tc.opSeq
 	name, namespace := toolNameNamespace(data.Tool)
-	startUs := toolStartUs(data, p)
+	startUs := m.toolStartUs(data, p)
 	out = append(out, canonical.OpStartedEvent{
 		EventBase:       m.nextBase(startUs),
 		SessionNativeID: m.nativeID(),
@@ -300,7 +300,7 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 		out = append(out, m.payloadRef(m.nextBase(startUs), tc.turnSeq, seq, "tool_response", "json", p.ID, "state.output", -1))
 	}
 	if endPtr != nil {
-		endUs := msToMicros(*endPtr)
+		endUs := m.msToMicrosWarn(*endPtr, "part.data.state.time.end (tool)")
 		if endUs < startUs {
 			endUs = startUs
 		}
@@ -332,7 +332,7 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 // taskChildSessionID, toolNameNamespace) live in mapper_tools.go.
 
 // The non-op part emitters (emitTextPayload, recordPatch, emitCompactionLog,
-// emitRetryLog, emitFilePayload) live in mapper_emitters.go; finalizeTurn, the
+// emitRetryLog, emitFileLog) live in mapper_emitters.go; finalizeTurn, the
 // cumulative→delta token math, provider canonicalization, the turnContext
 // op-parent helper, and the PayloadRef URI seam live in mapper_turn.go (split out
 // to keep each file ≤400 lines).

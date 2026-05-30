@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/netdata/ai-viewer/internal/adapters"
 	// Side-effect import: the codex adapter registers its factory with
@@ -45,6 +46,14 @@ type configuredSource struct {
 	format   string
 	location string
 }
+
+// opencodeProbeTimeout bounds the one-time opencode auto-discovery ProbeStatus
+// COUNT(*) (SOW-0005 round-4 P3-1). The probe is best-effort observability; a
+// slow or locked opencode database must not stall startup discovery, so the probe
+// runs under this short deadline and discovery proceeds (source registered) on
+// timeout. 10 s is generous for a COUNT(*) even on a multi-GB database while still
+// bounding a pathological stall.
+const opencodeProbeTimeout = 10 * time.Second
 
 // resolveSources returns the source list to start. When the operator
 // passes any --source flag, auto-discovery is bypassed entirely (per
@@ -184,8 +193,14 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 			// Best-effort: a probe error (unreadable file, foreign schema) is
 			// logged as a probe_error attr and discovery STILL registers the
 			// source — counting must never block discovery. The COUNT(*) cost is
-			// a one-time startup hit (see opencode.ProbeStatus).
-			sessions, messages, parts, latest, perr := opencode.ProbeStatus(context.Background(), p.location)
+			// a one-time startup hit (see opencode.ProbeStatus). The probe is
+			// BOUNDED by a short timeout (SOW-0005 round-4 P3-1) so a slow/locked
+			// database cannot stall startup discovery indefinitely; on timeout the
+			// probe returns its error and discovery proceeds with the source
+			// registered (the counts are observability, not a gate).
+			probeCtx, cancelProbe := context.WithTimeout(context.Background(), opencodeProbeTimeout)
+			sessions, messages, parts, latest, perr := opencode.ProbeStatus(probeCtx, p.location)
+			cancelProbe()
 			attrs = append(attrs,
 				"sessions", sessions,
 				"messages", messages,

@@ -158,6 +158,37 @@ func (d *scanDest) warnCorrupt(col, _ string) {
 	}
 }
 
+// i64Required reads a REQUIRED int64 column (a cursor-watermark column —
+// time_updated) and returns an ERROR rather than coercing to 0 when the cell is
+// NULL/absent or present-but-unparseable (SOW-0005 round-4 P2-1). The delta
+// scanners feed this into the watermark key, so a corrupt value coerced to 0 would
+// persist a POISONED cursor (the watermark could regress to 0). Erroring the row
+// instead aborts the page so the cursor stays at the last good watermark — a
+// corrupt required cell never advances the durable resume state. The raw value is
+// NOT included in the error (it could be sensitive); only the table/column.
+func (d *scanDest) i64Required(idx columnIndex, col string) (int64, error) {
+	i, ok := idx[col]
+	if !ok || !d.holders[i].Valid {
+		return 0, fmt.Errorf("opencode: required column %q absent/NULL (table=%s); refusing to advance cursor on a missing watermark", col, d.table)
+	}
+	v, parsed := parseInt64Checked(d.holders[i].String)
+	if !parsed {
+		return 0, fmt.Errorf("opencode: corrupt required numeric cell (table=%s column=%s); refusing to advance cursor on a poisoned watermark", d.table, col)
+	}
+	return v, nil
+}
+
+// strRequired reads a REQUIRED string column (the cursor-watermark id) and returns
+// an ERROR when the cell is NULL/absent or empty (SOW-0005 round-4 P2-1). An empty
+// id cannot form a valid watermark tie-break, so it must not advance the cursor.
+func (d *scanDest) strRequired(idx columnIndex, col string) (string, error) {
+	i, ok := idx[col]
+	if !ok || !d.holders[i].Valid || d.holders[i].String == "" {
+		return "", fmt.Errorf("opencode: required column %q absent/NULL/empty (table=%s); refusing to advance cursor on a missing watermark id", col, d.table)
+	}
+	return d.holders[i].String, nil
+}
+
 // bytes returns the present column's raw value as bytes, or nil when absent/NULL
 // (used for the JSON data/model columns the mapper decodes).
 func (d *scanDest) bytes(idx columnIndex, col string) []byte {

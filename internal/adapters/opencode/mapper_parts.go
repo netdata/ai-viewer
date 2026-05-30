@@ -12,8 +12,8 @@ import (
 // table is adapter-opencode.md §"Per-table emit rules" (the part-type table):
 // step-start/step-finish bound an LLM op; reasoning/tool are nested ops;
 // text/patch are not ops (text → PayloadRef on the LLM op; patch → LLM-op
-// extras); compaction → INF log; retry → WRN log; file → PayloadRef; an unknown
-// $.type is forward-compat data skipped with one WARN.
+// extras); compaction → INF log; retry → WRN log; file → INF log (an attachment,
+// round-4 P2-3); an unknown $.type is forward-compat data skipped with one WARN.
 
 // turnContext holds the per-turn inference state mapMessage threads while
 // walking parts: the canonical turn Seq, the running op-seq counter, the
@@ -87,7 +87,7 @@ func (m *sessionMapper) mapMessage(mwp messageWithParts) ([]canonical.Event, err
 		// a corruption signal, not benign forward-compat drift (SOW-0005 round-3 P2-2).
 		// The row is skipped, not aborted (adapter-opencode.md §"Edge Cases" #1).
 		m.mwarn(fmt.Errorf("opencode: undecodable message.data (table=message id=%s); row skipped: %w", mwp.Message.ID, err))
-		base := m.nextBase(msToMicros(mwp.Message.TimeCreatedMs))
+		base := m.nextBase(m.msToMicrosWarn(mwp.Message.TimeCreatedMs, "message.time_created (undecodable)"))
 		return []canonical.Event{m.logEntry(base, "WRN", 0, 0,
 			"message data undecodable: "+err.Error(),
 			map[string]any{"message_id": mwp.Message.ID})}, nil
@@ -103,7 +103,7 @@ func (m *sessionMapper) mapMessage(mwp messageWithParts) ([]canonical.Event, err
 		return nil, nil
 	default:
 		// Unknown role: forward-compat skip with one WRN (types.go roleUnknown).
-		base := m.nextBase(msToMicros(mwp.Message.TimeCreatedMs))
+		base := m.nextBase(m.msToMicrosWarn(mwp.Message.TimeCreatedMs, "message.time_created (unknown role)"))
 		return []canonical.Event{m.logEntry(base, "WRN", 0, 0,
 			fmt.Sprintf("unknown message role %q", data.Role),
 			map[string]any{"message_id": mwp.Message.ID})}, nil
@@ -121,7 +121,7 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 		turnSeq:    m.turnSeq,
 		stepDeltas: computeStepDeltas(stepFinishTokens(mwp.Parts), m.mwarn),
 	}
-	startUs := msToMicros(mwp.Message.TimeCreatedMs)
+	startUs := m.msToMicrosWarn(mwp.Message.TimeCreatedMs, "message.time_created (turn start)")
 	out := make([]canonical.Event, 0, 4+2*len(mwp.Parts))
 
 	out = append(out, canonical.TurnStartedEvent{
@@ -167,7 +167,7 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 	// but succeeded on turn 5 is NOT marked failed.
 	if data.Error != nil {
 		m.failError = data.Error
-		m.failEndUs = turnEndUs(&data, mwp.Message)
+		m.failEndUs = m.turnEndUs(&data, mwp.Message)
 	} else {
 		m.failError = nil
 		m.failEndUs = 0
@@ -209,7 +209,7 @@ func (m *sessionMapper) mapPart(tc *turnContext, msg *messageData, p partRow) ([
 	case partRetry:
 		return m.emitRetryLog(tc, p, data), nil
 	case partFile:
-		return m.emitFilePayload(tc, p, data), nil
+		return m.emitFileLog(tc, p, data), nil
 	case partSnapshot, partSubtask, partAgent:
 		// Known-but-not-an-op part types observed as 0-count on the live DB
 		// (adapter-opencode.md §"part" distribution). They carry no op/payload

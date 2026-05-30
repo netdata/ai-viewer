@@ -7,11 +7,14 @@ import (
 )
 
 // This file holds the NON-OP part emitters the part walker (mapper_parts.go)
-// delegates to: text/file → PayloadRef, patch → LLM-op extras, compaction → INF
-// log, retry → WRN log. Split out of mapper_ops.go to keep each file ≤400 lines
-// (SOW-0005 round-2; the P1-C/P2-D additions pushed mapper_ops.go over budget).
-// The OP emitters (LLM/reasoning/tool + the task→session op) stay in
-// mapper_ops.go; the turn finalizer + token math in mapper_turn.go.
+// delegates to: text → PayloadRef, patch → LLM-op extras, compaction → INF log,
+// retry → WRN log, file → INF log (SOW-0005 round-4 P2-3: a file part is an
+// attachment, NOT a payload-with-op; it is surfaced as an INF LogEntry carrying
+// filename/url/mime in extras rather than a PayloadRef with a non-canonical
+// PayloadKind). Split out of mapper_ops.go to keep each file ≤400 lines (SOW-0005
+// round-2; the P1-C/P2-D additions pushed mapper_ops.go over budget). The OP
+// emitters (LLM/reasoning/tool + the task→session op) stay in mapper_ops.go; the
+// turn finalizer + token math in mapper_turn.go.
 
 // emitTextPayload handles a text part (adapter-opencode.md §"Per-table emit
 // rules": text is NOT an op; emit a PayloadRef for the assistant text scoped to
@@ -22,7 +25,7 @@ func (m *sessionMapper) emitTextPayload(tc *turnContext, p partRow) []canonical.
 	if tc.llmOpSeq == 0 {
 		return nil
 	}
-	return []canonical.Event{m.payloadRef(m.nextBase(msToMicros(p.TimeCreatedMs)), tc.turnSeq, tc.llmOpSeq, "llm_response", "text", p.ID, "text", -1)}
+	return []canonical.Event{m.payloadRef(m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (text)")), tc.turnSeq, tc.llmOpSeq, "llm_response", "text", p.ID, "text", -1)}
 }
 
 // recordPatch handles a patch part (adapter-opencode.md §"Per-table emit rules":
@@ -47,7 +50,7 @@ func (m *sessionMapper) recordPatch(tc *turnContext, data partData) []canonical.
 // emitCompactionLog handles a compaction part (adapter-opencode.md §"Per-table
 // emit rules": compaction → INF LogEntry). It records the auto flag.
 func (m *sessionMapper) emitCompactionLog(tc *turnContext, p partRow, data partData) []canonical.Event {
-	base := m.nextBase(msToMicros(p.TimeCreatedMs))
+	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (compaction)"))
 	return []canonical.Event{m.logEntry(base, "INF", tc.turnSeq, tc.llmOpSeq,
 		fmt.Sprintf("session compacted (auto=%t)", data.Auto),
 		map[string]any{"auto": data.Auto})}
@@ -56,28 +59,34 @@ func (m *sessionMapper) emitCompactionLog(tc *turnContext, p partRow, data partD
 // emitRetryLog handles a retry part (adapter-opencode.md §"Per-table emit rules":
 // retry → WRN LogEntry). It records the attempt number.
 func (m *sessionMapper) emitRetryLog(tc *turnContext, p partRow, data partData) []canonical.Event {
-	base := m.nextBase(msToMicros(p.TimeCreatedMs))
+	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (retry)"))
 	return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq,
 		fmt.Sprintf("API retry attempt %d", data.Attempt),
 		map[string]any{"attempt": data.Attempt})}
 }
 
-// emitFilePayload handles a file part (adapter-opencode.md §"Per-table emit
-// rules": file → PayloadRef kind=user_attachment, LocationURI=data.url). Unlike
-// the other PayloadRefs (which reference a SQLite field), the file URL is an
-// external location used verbatim. The ref attaches to the turn's most-recent
-// LLM op when one is open; when none is open it is DROPPED (op_id NOT NULL).
-func (m *sessionMapper) emitFilePayload(tc *turnContext, p partRow, data partData) []canonical.Event {
-	if tc.llmOpSeq == 0 || data.URL == "" {
+// emitFileLog handles a file part (adapter-opencode.md §"Per-table emit rules":
+// file → INF LogEntry). SOW-0005 round-4 P2-3: a file part is a user file
+// ATTACHMENT, not an op-scoped payload artifact. The canonical PayloadRefEvent
+// PayloadKind set (internal/canonical/events.go) is exactly
+// llm_request|llm_response|llm_sdk_request|llm_sdk_response|llm_reasoning|
+// tool_request|tool_response|log — none of which is a user file attachment — so
+// emitting a "user_attachment" PayloadRef violated the canonical contract. Instead
+// the attachment is surfaced as an INF LogEntry carrying filename/url/mime in its
+// extras, scoped to the turn and (when open) the LLM op — mirroring how
+// compaction/retry parts emit a LogEntry. A richer canonical attachment
+// PayloadKind is deferred to a follow-up SOW. Unlike the dropped PayloadRef path,
+// this is NOT gated on an open LLM op (a LogEntry's OpSeq may be 0): a file
+// attachment before any step-start is still surfaced, turn-scoped, op 0. A part
+// with no url/filename/mime at all emits nothing (no attachment to record).
+func (m *sessionMapper) emitFileLog(tc *turnContext, p partRow, data partData) []canonical.Event {
+	if data.URL == "" && data.Filename == "" && data.MIME == "" {
 		return nil
 	}
-	return []canonical.Event{canonical.PayloadRefEvent{
-		EventBase:       m.nextBase(msToMicros(p.TimeCreatedMs)),
-		SessionNativeID: m.nativeID(),
-		TurnSeq:         tc.turnSeq,
-		OpSeq:           tc.llmOpSeq,
-		PayloadKind:     "user_attachment",
-		Format:          "json",
-		LocationURI:     data.URL,
-	}}
+	extras := map[string]any{}
+	putStr(extras, "filename", data.Filename)
+	putStr(extras, "url", data.URL)
+	putStr(extras, "mime", data.MIME)
+	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (file)"))
+	return []canonical.Event{m.logEntry(base, "INF", tc.turnSeq, tc.llmOpSeq, "file attachment", extras)}
 }

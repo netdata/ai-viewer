@@ -9,12 +9,16 @@ import "strings"
 // mapper_ops.go to keep each file ≤ ~400 lines (mirrors codex's ops_tools.go).
 
 // toolStartUs returns the tool op's start timestamp (µs) from state.time.start,
-// falling back to the part's time_created when the state has no start.
-func toolStartUs(data partData, p partRow) int64 {
+// falling back to the part's time_created when the state has no start. It is a
+// mapper METHOD (not a free function) so the ms→µs conversion goes through the
+// warning-capable msToMicrosWarn (SOW-0005 round-4 P2-2): a crafted/corrupt huge
+// tool timestamp clamps AND surfaces a WARN rather than silently saturating, since
+// the result becomes an emitted op's Ts.
+func (m *sessionMapper) toolStartUs(data partData, p partRow) int64 {
 	if data.State != nil && data.State.Time.Start > 0 {
-		return msToMicros(data.State.Time.Start)
+		return m.msToMicrosWarn(data.State.Time.Start, "part.state.time.start")
 	}
-	return msToMicros(p.TimeCreatedMs)
+	return m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (tool)")
 }
 
 // toolTerminal derives a tool op's CANONICAL terminal status, end timestamp,

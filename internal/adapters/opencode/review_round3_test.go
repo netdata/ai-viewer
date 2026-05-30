@@ -18,14 +18,20 @@ import (
 
 // --- P1-1: same-ms in-place update at the boundary is re-emitted --------------
 
-// TestP1_1_BoundaryUpdateReEmitted pins the P1-1 fix: a cursor sits at (T, highID)
-// for a table; an already-seen LOW-id row lives at the SAME ms T (the canonical
-// "in-place update re-stamped to the same millisecond" case). The cheap MAX(id)
-// path is silent (no id past the high-water), the gated MAX(time_updated) > gate is
-// silent (boundary ms unchanged), and the forward delta's strict tie-break
-// (time_updated = T AND id > highID) excludes the low-id row — so without the fix
-// the row's session is lost forever. With a WAL-driven probe on which no detector
-// advances (walDriven && !changed), the boundary re-scan re-emits that session.
+// TestP1_1_BoundaryUpdateReEmitted pins the P1-1 fix (completed by round-4 P1): a
+// cursor sits at (T, highID) for a table; an already-seen LOW-id row lives at the
+// SAME ms T (the canonical "in-place update re-stamped to the same millisecond"
+// case). The cheap MAX(id) path is silent (no id past the high-water), the gated
+// MAX(time_updated) > gate is silent (boundary ms unchanged), and the forward
+// delta's strict tie-break (time_updated = T AND id > highID) excludes the low-id
+// row — so without the fix the row's session is lost forever. The boundary re-scan
+// re-emits that session on a gate-open probe under EITHER trigger:
+//   - a WAL-driven probe (walDriven), OR
+//   - a SAFETY-NET probe once at least one prior probe has run (priorProbe, round-4
+//     P1) — covering a DROPPED/absent WAL hint.
+//
+// The cold-Tail FIRST probe (priorProbe==false, no WAL) must NOT re-emit (the
+// HEAD-snapshot replay guard).
 func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -43,30 +49,50 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	// low-id row, with the monotonic high-water also above the low row — exactly the
 	// state in which the low-id boundary row is invisible to both detectors and the
 	// forward delta. MaxTimeUpdatedMs == 100 (the boundary T) on every tracked table.
-	cur := newCursor()
-	for _, table := range trackedTables {
-		cur = cur.withTable(table, TableWatermark{
-			MaxIDSeen:        "zzz_high", // > any planted id → cheap MAX(id) silent
-			MaxTimeUpdatedMs: 100,        // boundary T
-			MaxTimeUpdatedID: "zzz_high", // > prt_low → forward tie-break excludes it
-		})
+	freshCursor := func() Cursor {
+		c := newCursor()
+		for _, table := range trackedTables {
+			c = c.withTable(table, TableWatermark{
+				MaxIDSeen:        "zzz_high", // > any planted id → cheap MAX(id) silent
+				MaxTimeUpdatedMs: 100,        // boundary T
+				MaxTimeUpdatedID: "zzz_high", // > prt_low → forward tie-break excludes it
+			})
+		}
+		return c
 	}
 
-	// Sanity: with NO WAL event the gated probe still runs (safety net), but the
-	// boundary re-scan must NOT fire (walDriven == false) — proves it is not a blanket
-	// gate-open re-emit.
-	st := newPollState()
-	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // gate open via safety net, no WAL
+	// (a) Cold-Tail FIRST probe: a brand-new pollState (priorProbe==false) with NO
+	// WAL event. The gate opens via the immediately-due safety net, but the boundary
+	// re-scan must NOT fire — this is the HEAD-snapshot reconciliation, and replaying
+	// the snapshot's boundary session there would be spurious (round-4 P1 cold guard).
+	cur := freshCursor()
+	stCold := newPollState() // lastProbe zero ⇒ net immediately due; priorProbe false
 	out0 := make(chan canonical.Event, 64)
-	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out0, silentLogger(), func(error) {}); err != nil {
-		t.Fatalf("pollOnce (no WAL): %v", err)
+	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stCold, out0, silentLogger(), func(error) {}); err != nil {
+		t.Fatalf("pollOnce (cold first probe): %v", err)
 	}
 	if got := drainAll(out0); hasSession(got, "ses_b") {
-		t.Fatalf("boundary session re-emitted on a NON-WAL probe (should only fire on walDriven && !changed); got %d events", len(got))
+		t.Fatalf("boundary session re-emitted on the COLD first probe (priorProbe must guard it); got %d events", len(got))
 	}
 
-	// Now a WAL-driven probe with no detector advance: the boundary re-scan fires and
-	// re-emits ses_b's tree.
+	// (b) SAFETY-NET probe after a prior cycle: priorProbe is set (a probe already
+	// ran) and the net is due, with NO WAL event. Round-4 P1: the boundary re-scan
+	// NOW fires so a same-ms in-place update that arrived with a missed WAL hint is
+	// still surfaced.
+	cur = freshCursor()
+	stNet := newPollState()
+	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
+	outNet := make(chan canonical.Event, 256)
+	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stNet, outNet, silentLogger(), func(error) {}); err != nil {
+		t.Fatalf("pollOnce (safety-net probe): %v", err)
+	}
+	if got := drainAll(outNet); !hasSession(got, "ses_b") {
+		t.Fatalf("boundary re-scan did not re-emit ses_b on the safety-net probe (round-4 P1); got %d events", len(got))
+	}
+
+	// (c) WAL-driven probe with no detector advance: the boundary re-scan fires and
+	// re-emits ses_b's tree (the round-3 immediate path).
+	cur = freshCursor()
 	st2 := newPollState()
 	now := time.Now()
 	st2.markProbe(now.Add(-2 * timeUpdatedSafetyNet))
@@ -86,6 +112,52 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	// watermark; the re-scan only re-emits).
 	if cur.Tables["part"].MaxTimeUpdatedID != "zzz_high" {
 		t.Errorf("boundary re-scan advanced the cursor (MaxTimeUpdatedID=%q); it must not", cur.Tables["part"].MaxTimeUpdatedID)
+	}
+}
+
+// TestP1_1_CompactingClearsAtBoundaryReSurfacesOnSafetyNet pins the round-4 P1
+// completeness case the brief calls out: a session that was paused mid-compaction
+// (skipped, no events) has its time_compacting CLEARED by an in-place UPDATE that
+// lands at exactly the cursor's boundary ms T. That update moves neither MAX(id)
+// (no insert) nor MAX(time_updated) (boundary value unchanged), and the forward
+// delta's strict tie-break excludes the session row (id <= boundary highID) — so
+// without the safety-net boundary re-scan the now-clean session is stranded. With
+// priorProbe set and the net due (NO WAL event), the boundary re-scan re-surfaces
+// it and the session emits its tree (it is no longer skipped).
+func TestP1_1_CompactingClearsAtBoundaryReSurfacesOnSafetyNet(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	// A session whose whole tree sits at ms=100, time_compacting already CLEARED
+	// (NULL) — i.e. compaction finished, re-stamped to the same boundary ms.
+	insertSession(t, rw, "ses_comp", "", 100, 100, 0)
+	insertAssistantMessage(t, rw, "msg_comp", "ses_comp", 100, 100, 5, 2)
+	insertPart(t, rw, "prt_comp", "msg_comp", "ses_comp", 100, 100, stepFinishBody(5, 2, 0.01))
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, schema := introspect(t, path)
+
+	// Cursor already at the boundary (100, highID) on every table, with the monotonic
+	// high-water above the session/message/part ids → both detectors silent, forward
+	// delta tie-break excludes the rows.
+	cur := newCursor()
+	for _, table := range trackedTables {
+		cur = cur.withTable(table, TableWatermark{MaxIDSeen: "zzz_high", MaxTimeUpdatedMs: 100, MaxTimeUpdatedID: "zzz_high"})
+	}
+
+	st := newPollState()
+	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
+	out := make(chan canonical.Event, 256)
+	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); err != nil {
+		t.Fatalf("pollOnce (safety-net, compaction cleared at boundary): %v", err)
+	}
+	got := drainAll(out)
+	if !hasSession(got, "ses_comp") {
+		t.Fatalf("a session whose compaction cleared at the boundary ms was not re-surfaced by the safety-net boundary re-scan; got %d events", len(got))
+	}
+	if n := countKind(got, canonical.EvSessionStarted); n != 1 {
+		t.Errorf("re-surfaced compaction session SessionStarted count = %d, want 1", n)
 	}
 }
 
