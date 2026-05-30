@@ -23,7 +23,7 @@ func TestLoadSession_FoundAndMissing(t *testing.T) {
 	}
 	db, schema := introspect(t, path)
 
-	s, ok, err := loadSession(ctxBG(), db, schema, "ses_a")
+	s, ok, err := loadSession(ctxBG(), db, schema, "ses_a", func(error) {})
 	if err != nil {
 		t.Fatalf("loadSession: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestLoadSession_FoundAndMissing(t *testing.T) {
 		t.Errorf("loaded session = %+v, want id=ses_a parent=ses_parent created=100", s)
 	}
 
-	_, ok, err = loadSession(ctxBG(), db, schema, "ses_nope")
+	_, ok, err = loadSession(ctxBG(), db, schema, "ses_nope", func(error) {})
 	if err != nil {
 		t.Fatalf("loadSession(missing): %v", err)
 	}
@@ -62,7 +62,7 @@ func TestLoadSessionTree_Ordering(t *testing.T) {
 	}
 	db, schema := introspect(t, path)
 
-	tree, err := loadSessionTree(ctxBG(), db, schema, "ses_a")
+	tree, err := loadSessionTree(ctxBG(), db, schema, "ses_a", func(error) {})
 	if err != nil {
 		t.Fatalf("loadSessionTree: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestLoadSessionTree_ZeroMessages(t *testing.T) {
 	}
 	db, schema := introspect(t, path)
 
-	tree, err := loadSessionTree(ctxBG(), db, schema, "ses_empty")
+	tree, err := loadSessionTree(ctxBG(), db, schema, "ses_empty", func(error) {})
 	if err != nil {
 		t.Fatalf("loadSessionTree(empty): %v", err)
 	}
@@ -105,7 +105,7 @@ func TestLoadSessionTree_ZeroMessages(t *testing.T) {
 	}
 
 	// And loadAndMapSession over it yields exactly one SessionStarted, no more.
-	evs, err := loadAndMapSession(ctxBG(), db, schema, "opencode:test", "ses_empty")
+	evs, err := loadAndMapSession(ctxBG(), db, schema, "opencode:test", "ses_empty", func(error) {})
 	if err != nil {
 		t.Fatalf("loadAndMapSession(empty): %v", err)
 	}

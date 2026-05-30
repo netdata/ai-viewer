@@ -53,6 +53,13 @@ var readOnlyPragmas = []string{
 	"busy_timeout(5000)",
 }
 
+// txlockDeferred is the forced _txlock value: a deferred BEGIN takes its
+// snapshot on the first SELECT and never acquires a write lock. The DSN builder
+// drops any caller _txlock (e.g. "exclusive", which would open a write-path
+// BEGIN) and sets this, so the read-only contract holds even against a
+// maliciously-constructed path string (adapter-opencode.md §"Read Strategy").
+const txlockDeferred = "deferred"
+
 // maxOpenConns bounds the read pool. SOW-0005 Open Decision #1: two
 // connections — one for the watch poll, one for a rare presenter-triggered
 // re-read. A live multi-GB WAL database tolerates many concurrent readers,
@@ -75,16 +82,25 @@ const connMaxLifetime = 30 * time.Minute
 //
 // The resulting DSN always carries, in this order:
 //
-//	file:<abs-path>?mode=ro&_pragma=query_only(true)&_pragma=busy_timeout(5000)
+//	file:<abs-path>?_pragma=query_only(true)&_pragma=busy_timeout(5000)&_txlock=deferred&mode=ro
 //
 // mode=ro asks the OS to open the file O_RDONLY: SQLite cannot upgrade the
 // connection to writable, so it is the primary, OS-enforced guard. The
 // _pragma entries are the SQL-layer second line of defence.
 //
+// Read-safety policy (adapter-opencode.md §"Read Strategy"): the DSN is built
+// as an ALLOWLIST, not a denylist. ALL caller-supplied `_pragma` values are
+// DROPPED and replaced with exactly the readOnlyPragmas set, so no caller
+// pragma — colliding or not — survives. A write-path pragma the old denylist
+// did not name (wal_checkpoint(TRUNCATE), optimize, foreign_keys(on), …) can
+// therefore never reach the connection. `_txlock` is forced to `deferred`
+// (any caller `_txlock`, e.g. `exclusive`, is dropped) so a BEGIN can never
+// take a write lock. mode=ro is forced regardless of the caller.
+//
 // A DSN that is already a "file:" URI (or an in-memory ":memory:" form used
-// only by tests that want a throwaway shared cache) is passed through with
-// the read-only query parameters merged in, so callers may hand either a
-// bare path or a pre-built URI.
+// only by tests that want a throwaway shared cache) is accepted; its query is
+// parsed only to be DISCARDED and rebuilt from the read-only set, so callers
+// may hand either a bare path or a pre-built URI without weakening the guard.
 func buildReadOnlyDSN(dbPath string) (string, error) {
 	if dbPath == "" {
 		return "", fmt.Errorf("opencode: database path must be non-empty")
@@ -114,32 +130,20 @@ func buildReadOnlyDSN(dbPath string) (string, error) {
 		fileURI = "file:" + escapeURIPath(uriPath)
 	}
 
-	params, err := url.ParseQuery(existingQuery)
-	if err != nil {
+	// Parse the caller query only to VALIDATE it (a malformed query is a hard
+	// error) — its contents are then discarded. Building from a fresh url.Values
+	// guarantees no caller _pragma or _txlock can leak through.
+	if _, err := url.ParseQuery(existingQuery); err != nil {
 		return "", fmt.Errorf("opencode: invalid db DSN query for %q: %w", dbPath, err)
 	}
 
-	// mode=ro is the OS-level guard; the store always wins here.
+	params := url.Values{}
+	// mode=ro is the OS-level guard; forced regardless of the caller.
 	params.Set("mode", "ro")
-
-	// Strip any caller-supplied _pragma whose name collides with our
-	// read-only set, then append our values once. modernc.org/sqlite sorts
-	// the _pragma slice before executing, so appending without stripping
-	// would not guarantee our value wins; removing the collision by name is
-	// the same discipline internal/store uses.
-	if existing := params["_pragma"]; len(existing) > 0 {
-		kept := existing[:0]
-		for _, v := range existing {
-			if !pragmaNameCollides(v) {
-				kept = append(kept, v)
-			}
-		}
-		if len(kept) == 0 {
-			delete(params, "_pragma")
-		} else {
-			params["_pragma"] = kept
-		}
-	}
+	// _txlock=deferred: a read snapshot taken on first SELECT, never a write
+	// lock. Forced so a caller _txlock=exclusive cannot open a write-path BEGIN.
+	params.Set("_txlock", txlockDeferred)
+	// The ONLY pragmas on the connection are our read-only set (allowlist).
 	for _, p := range readOnlyPragmas {
 		params.Add("_pragma", p)
 	}
@@ -235,16 +239,6 @@ func isMemoryDSN(dsn string) bool {
 	return strings.HasPrefix(dsn, "file::memory:") ||
 		strings.Contains(dsn, ":memory:?") ||
 		strings.HasPrefix(dsn, ":memory:?")
-}
-
-// pragmaNameCollides reports whether the caller-supplied _pragma value names
-// one of the read-only pragmas the helper enforces (query_only, busy_timeout).
-// A schema-qualified form (e.g. "main.query_only(false)") is normalised to
-// its bare name first so it cannot slip past the strip pass and re-enable a
-// write path. Comparison is case-insensitive.
-func pragmaNameCollides(v string) bool {
-	name := pragmaName(v)
-	return name == "query_only" || name == "busy_timeout"
 }
 
 // pragmaName extracts the lowercase pragma identifier from a _pragma value,

@@ -52,14 +52,27 @@ func codexSessionsDir(home string) string {
 	return filepath.Join(home, ".codex", "sessions")
 }
 
-// opencodeDBPath returns the default opencode database file path,
-// ~/.local/share/opencode/opencode.db (deployment.md §"Source Auto-Discovery").
-// This is the single file the adapter opens read-only and the probe checks for
-// existence. opencode's $OPENCODE_DB override and per-channel
-// opencode-<channel>.db variants are out of scope for auto-discovery (point
-// --source opencode:<path> at a non-default database explicitly); mirroring
-// codexSessionsDir, this helper resolves only the documented default.
+// opencodeDBPath resolves the opencode database file path the auto-discovery
+// probe checks (deployment.md §"Source Auto-Discovery"). Resolution order:
+//
+//  1. $OPENCODE_DB, if non-empty — used VERBATIM as a full path to the database.
+//  2. else $XDG_DATA_HOME/opencode/opencode.db, if $XDG_DATA_HOME is non-empty.
+//  3. else ~/.local/share/opencode/opencode.db (the XDG default base).
+//
+// CAVEAT: $OPENCODE_DB is honoured as the conventional override name, but it
+// could NOT be confirmed against opencode's upstream source during this work
+// (the mirror was unavailable), so it is treated as best-effort. The XDG base
+// (~/.local/share == $XDG_DATA_HOME) IS opencode's verified default location.
+// Either way the probe os.Stats the resolved path and registers the source only
+// if it exists; pointing --source opencode:<path> at a non-default database
+// remains the explicit escape hatch.
 func opencodeDBPath(home string) string {
+	if db := os.Getenv("OPENCODE_DB"); db != "" {
+		return db
+	}
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "opencode", "opencode.db")
+	}
 	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
 }
 

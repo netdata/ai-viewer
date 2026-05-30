@@ -70,6 +70,33 @@ type partRow struct {
 	Data          []byte
 }
 
+// isStepFinish reports whether the part's body is a step-finish part, by peeking
+// ONLY at its $.type discriminator (a cheap decode of one field, not the whole
+// body). The turn-finalize predicate (turnIsTerminal) needs to know a message
+// carries ≥1 step-finish part even when the part's tokens fail to decode, so this
+// keys on type presence — not on the full partData decode succeeding. A malformed
+// body yields false (it has no recognizable type).
+func (p partRow) isStepFinish() bool {
+	return peekPartType(p.Data) == partStepFinish
+}
+
+// peekPartType decodes ONLY the $.type field of a part.data blob, returning the
+// classified partType (partUnknown for a malformed/typeless body). It is the
+// minimal-cost type probe the turn-finalize predicate uses, avoiding a second
+// full decodePartData on every part.
+func peekPartType(raw []byte) partType {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return partUnknown
+	}
+	var d struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &d) != nil {
+		return partUnknown
+	}
+	return classifyPartType(d.Type)
+}
+
 // sessionMessageRow is one row of the session_message sidecar (agent/model
 // switches). type is the discriminator; data is its raw body.
 type sessionMessageRow struct {
@@ -270,19 +297,31 @@ type toolState struct {
 
 // subAgentSessionID extracts state.metadata.sessionId — set on a tool part
 // where tool=="task" to name the spawned child session (adapter-opencode.md
-// §"Sub-Agent Linkage"). Returns "" when absent or malformed.
+// §"Sub-Agent Linkage"). Returns "" when absent or malformed. Retained for the
+// fuzz contract (it must never panic); callers that need to distinguish a
+// malformed-but-present blob use subAgentSessionIDChecked.
 func (s toolState) subAgentSessionID() string {
+	id, _ := s.subAgentSessionIDChecked()
+	return id
+}
+
+// subAgentSessionIDChecked extracts state.metadata.sessionId AND reports whether
+// the metadata was PRESENT but failed to decode (malformed). An absent/null
+// metadata yields ("", false) — nothing to warn about; a present-but-unparseable
+// blob yields ("", true) so the caller can surface a structured WARN rather than
+// silently dropping a possible sub-agent linkage (SOW-0005 P2.6).
+func (s toolState) subAgentSessionIDChecked() (id string, malformed bool) {
 	body := bytes.TrimSpace(s.Metadata)
 	if len(body) == 0 || bytes.Equal(body, []byte("null")) {
-		return ""
+		return "", false
 	}
 	var m struct {
 		SessionID string `json:"sessionId"`
 	}
 	if json.Unmarshal(body, &m) != nil {
-		return ""
+		return "", true
 	}
-	return m.SessionID
+	return m.SessionID, false
 }
 
 // partData is the decoded part.data body covering every variant. Type is

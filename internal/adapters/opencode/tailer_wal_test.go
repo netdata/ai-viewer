@@ -120,10 +120,10 @@ func TestQueryLayer_ClosedDBErrors(t *testing.T) {
 	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, scan); err == nil {
 		t.Error("scanTableDelta on a closed DB: want error")
 	}
-	if _, _, err := loadSession(ctxBG(), db, schema, "ses_a"); err == nil {
+	if _, _, err := loadSession(ctxBG(), db, schema, "ses_a", func(error) {}); err == nil {
 		t.Error("loadSession on a closed DB: want error")
 	}
-	if _, err := loadSessionTree(ctxBG(), db, schema, "ses_a"); err == nil {
+	if _, err := loadSessionTree(ctxBG(), db, schema, "ses_a", func(error) {}); err == nil {
 		t.Error("loadSessionTree on a closed DB: want error")
 	}
 }

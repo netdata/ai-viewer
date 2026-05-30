@@ -214,3 +214,38 @@ func TestCountLegacyJSON(t *testing.T) {
 		t.Fatalf("countLegacyJSON(missing) = %d, want 0", n)
 	}
 }
+
+// TestOpencodeDBPath_Resolution pins the opencode DB path resolution order
+// (SOW-0005 AC#8 / P1.4): $OPENCODE_DB verbatim wins; else $XDG_DATA_HOME derives
+// "<xdg>/opencode/opencode.db"; else the ~/.local/share default. Each case uses
+// t.Setenv so the process env is restored after the subtest.
+func TestOpencodeDBPath_Resolution(t *testing.T) {
+	// Not parallel: t.Setenv mutates process-wide env.
+	const home = "/home/u"
+
+	t.Run("OPENCODE_DB verbatim wins", func(t *testing.T) {
+		t.Setenv("OPENCODE_DB", "/custom/path/oc.db")
+		t.Setenv("XDG_DATA_HOME", "/xdg/data") // must be ignored when OPENCODE_DB set
+		if got := opencodeDBPath(home); got != "/custom/path/oc.db" {
+			t.Errorf("opencodeDBPath = %q, want /custom/path/oc.db ($OPENCODE_DB verbatim)", got)
+		}
+	})
+
+	t.Run("XDG_DATA_HOME derivation", func(t *testing.T) {
+		t.Setenv("OPENCODE_DB", "")
+		t.Setenv("XDG_DATA_HOME", "/xdg/data")
+		want := filepath.Join("/xdg/data", "opencode", "opencode.db")
+		if got := opencodeDBPath(home); got != want {
+			t.Errorf("opencodeDBPath = %q, want %q ($XDG_DATA_HOME derived)", got, want)
+		}
+	})
+
+	t.Run("home default", func(t *testing.T) {
+		t.Setenv("OPENCODE_DB", "")
+		t.Setenv("XDG_DATA_HOME", "")
+		want := filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+		if got := opencodeDBPath(home); got != want {
+			t.Errorf("opencodeDBPath = %q, want %q (~/.local/share default)", got, want)
+		}
+	})
+}

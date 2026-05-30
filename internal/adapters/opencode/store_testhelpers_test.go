@@ -324,8 +324,10 @@ func registerCountingDriver(t *testing.T) *queryLog {
 		if err != nil {
 			t.Fatalf("probe open for inner driver: %v", err)
 		}
+		// Close the probe on every exit path (including the t.Fatalf below, which
+		// runtime.Goexits without returning) so the throwaway handle never leaks.
+		defer func() { _ = probe.Close() }()
 		inner := probe.Driver()
-		_ = probe.Close()
 		sql.Register(countingDriverName, &countingDriver{inner: inner, log: countingDriverLog})
 		countingDriverReg.Store(true)
 	})

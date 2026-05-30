@@ -13,83 +13,57 @@ import (
 // This file holds the SHARED change-processing helper both poll loops use
 // (processChanges) and the poll-loop cadence STATE MACHINE (pollState). It is
 // split out of tailer.go to keep each file ≤400 lines. processChanges is the one
-// "delta → affected sessions → reload → map → emit → advance cursor" pipeline:
+// "delta → affected sessions → reload → map → emit → checkpoint" pipeline:
 // scanLoop runs it once over the whole backfill; tailLoop runs it per change
-// cycle. The page-level SourceProgress checkpoints inside the delta phase let a
-// restart resume mid-backfill (adapter-opencode.md §"Performance").
+// cycle.
+//
+// CHECKPOINT-AFTER-EMIT INVARIANT (SOW-0005 P1.1, data-loss fix): a
+// SourceProgress checkpoint carrying cursor W is emitted ONLY after every session
+// affected by rows ≤ W in this run has been reloaded, mapped, and emitted. The
+// pipeline therefore runs in BOUNDED BATCHES: each batch pages ≤ progressEveryRows
+// delta rows forward (advancing the per-table watermark), reloadAndEmits that
+// batch's affected sessions, and ONLY THEN checkpoints the batch cursor. A crash
+// or ctx-cancel mid-batch returns the LAST fully-committed cursor (the previous
+// batch's), never the in-progress batch's scanned watermark — so a restart from
+// the persisted cursor can never resume PAST rows whose canonical events were
+// never emitted (adapter-opencode.md §"Read Strategy" → "checkpoint-after-emit").
 
-// processChanges pages every tracked table forward from `cur`, derives the
-// affected session ids, reloads each affected session's full tree, maps it via
-// the pure mapper, and emits the events — returning the advanced cursor and
-// whether anything advanced. It is used by BOTH scanLoop (whole backfill) and
-// tailLoop (one cycle). SourceProgress is checkpointed during the delta phase
-// every ~progressEveryRows rows so a restart resumes mid-scan; the final
-// checkpoint is the caller's job (scanLoop emits one at the end; tailLoop's
-// pollOnce emits one after a productive cycle).
+// processChanges pages every tracked table forward from `cur` in bounded batches,
+// reloading+emitting each batch's affected sessions BEFORE checkpointing that
+// batch's cursor, and returns the advanced cursor + whether anything advanced. It
+// is used by BOTH scanLoop (whole backfill) and tailLoop (one cycle). The
+// returned cursor is always a checkpoint-safe one: every session for a row it
+// covers has been emitted.
 //
 // Re-emitting an unchanged/partly-changed session is harmless: the ingester's
 // idempotent upserts + the post-SOW-0004 idempotent catalog absorb it
 // (adapter-opencode.md §"Read Strategy" → "Full-session-tree load + map").
 func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, sourceID string, out chan<- canonical.Event, onError func(error)) (Cursor, bool, error) {
-	next, affected, advanced, err := collectDeltas(ctx, db, schema, cur, sourceID, out)
-	if err != nil {
-		return next, advanced, err
+	bp := &batchProcessor{
+		db:         db,
+		schema:     schema,
+		sourceID:   sourceID,
+		out:        out,
+		onError:    onError,
+		committed:  cur,                 // last cursor whose sessions are fully emitted
+		msgSession: map[string]string{}, // accumulates across batches (part→session fallback)
 	}
-	if len(affected) == 0 {
-		return next, advanced, nil
+	if err := bp.run(ctx); err != nil {
+		// On error/cancel the committed cursor is the last batch whose content was
+		// fully emitted — never the in-progress batch's scanned watermark.
+		return bp.committed, bp.advanced, err
 	}
-	if rerr := reloadAndEmit(ctx, db, schema, sourceID, affected, out, onError); rerr != nil {
-		return next, advanced, rerr
-	}
-	return next, advanced, nil
-}
-
-// collectDeltas pages all four tracked tables forward from the cursor, advancing
-// each table's watermark, accumulating the affected session ids, and emitting a
-// SourceProgress checkpoint every ~progressEveryRows rows so a backfill resumes
-// mid-scan. It returns the advanced cursor, the affected-session ids (first-seen
-// order), and whether any watermark advanced. The message→session map built from
-// the message delta lets a part with no denormalized session_id (old schema)
-// resolve its owner without a query.
-func collectDeltas(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, sourceID string, out chan<- canonical.Event) (Cursor, []string, bool, error) {
-	affected := newAffectedSet()
-	msgSession := map[string]string{}
-	advanced := false
-	rowsSinceCheckpoint := 0
-
-	// Order matters for the part→session fallback: message before part, so the
-	// message delta has populated msgSession when a part needs it. session and
-	// session_message contribute their own session_id directly.
-	for _, table := range trackedTables {
-		s := schema[table]
-		from := cur.Tables[table]
-		onRow := deltaRowHandler(ctx, db, table, s, affected, msgSession)
-
-		delta, err := scanTableDelta(ctx, db, s, from, onRow)
-		if err != nil {
-			return cur, affected.ids(), advanced, err
-		}
-		if delta.rowCount > 0 && watermarkAdvanced(from, delta.watermark) {
-			cur = cur.withTable(table, delta.watermark)
-			advanced = true
-		}
-		rowsSinceCheckpoint += delta.rowCount
-		if rowsSinceCheckpoint >= progressEveryRows {
-			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
-				return cur, affected.ids(), advanced, perr
-			}
-			rowsSinceCheckpoint = 0
-		}
-	}
-	return cur, affected.ids(), advanced, nil
+	return bp.committed, bp.advanced, nil
 }
 
 // deltaRowHandler returns the per-row scan callback for one table: it scans the
 // row into its typed struct, records the owning session id into the affected
 // set, and (for message rows) populates the message→session map the part
 // fallback consults. The returned closure matches scanTableDelta's onRow type
-// and reports the row's watermark key.
-func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchema, affected *affectedSet, msgSession map[string]string) func(*sql.Rows) (rowKey, error) {
+// and reports the row's watermark key. onError surfaces non-fatal per-row
+// anomalies (a session_message with an unknown type — adapter-opencode.md
+// §"Edge Cases" #1/§"session_message") without aborting the cycle.
+func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchema, affected *affectedSet, msgSession map[string]string, onError func(error)) func(*sql.Rows) (rowKey, error) {
 	idx := newColumnIndex(s)
 	n := len(s.Present)
 	switch table {
@@ -133,15 +107,47 @@ func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchem
 		}
 	default: // session_message
 		scan, row := scanSessionMessageRow(idx, n)
+		hasType := s.has("type")
 		return func(rows *sql.Rows) (rowKey, error) {
 			k, err := scan(rows)
 			if err != nil {
 				return k, err
 			}
 			affected.add(row.SessionID)
+			// Spec Edge #1 (§"session_message"): warn on an unrecognized
+			// session_message.type so a new opencode event variant is visible
+			// rather than silently absorbed. Introspection-aware: if the schema
+			// lacks the type column, skip silently (row.Type is "").
+			if hasType {
+				warnUnknownSessionMessageType(row.ID, row.Type, onError)
+			}
 			return k, nil
 		}
 	}
+}
+
+// knownSessionMessageTypes is the set of session_message.type discriminators the
+// adapter recognizes today (adapter-opencode.md §"session_message": only
+// agent-switched / model-switched ship currently; the upstream union is wider but
+// unpopulated). Any other value is forward-compatibility data surfaced via a WARN.
+var knownSessionMessageTypes = map[string]struct{}{
+	"agent-switched": {},
+	"model-switched": {},
+}
+
+// warnUnknownSessionMessageType emits one structured WARN via onError for a
+// session_message row whose type is not recognized (spec Edge #1). An empty type
+// (older schema with the column NULL, or absent) is not flagged — only a present
+// but unrecognized value. The row's session_id still drives the affected set
+// (the caller already added it), so the tree is reloaded regardless.
+func warnUnknownSessionMessageType(id, typ string, onError func(error)) {
+	if typ == "" {
+		return
+	}
+	if _, ok := knownSessionMessageTypes[typ]; ok {
+		return
+	}
+	onError(fmt.Errorf("opencode: unknown session_message type %q (table=session_message id=%s); skipping unrecognized event variant", typ, id))
 }
 
 // reloadAndEmit loads each affected session's full tree, maps it via the pure
@@ -154,7 +160,7 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		evs, err := loadAndMapSession(ctx, db, schema, sourceID, sid)
+		evs, err := loadAndMapSession(ctx, db, schema, sourceID, sid, onError)
 		if err != nil {
 			if isContextErr(err) {
 				return err
@@ -176,22 +182,26 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 
 // loadAndMapSession loads one session's row + full ordered tree and maps it,
 // returning the mapped events. A nil event slice (with nil error) means the
-// session row was not found (the caller surfaces errSessionGone). The mapper is
-// invoked WITHOUT a production URI builder here (chunk D injects it at the
-// adapter boundary); the deterministic default keeps op→payload linkage intact.
-func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, sourceID, sessionID string) ([]canonical.Event, error) {
-	s, ok, err := loadSession(ctx, db, schema, sessionID)
+// session row was not found (the caller surfaces errSessionGone). The mapper uses
+// the deterministic default PayloadRef URI builder (the production tailer path
+// injects no builder; defaultPayloadURI is the single source of truth). It also
+// resolves the session's TRUE tree root by walking the parent_id chain
+// (resolveRootID, SOW-0005 P2.4) and injects it so a nested sub-agent's
+// RootNativeID is the whole tree's root rather than its direct parent.
+func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, sourceID, sessionID string, onError func(error)) ([]canonical.Event, error) {
+	s, ok, err := loadSession(ctx, db, schema, sessionID, onError)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, nil
 	}
-	tree, err := loadSessionTree(ctx, db, schema, sessionID)
+	tree, err := loadSessionTree(ctx, db, schema, sessionID, onError)
 	if err != nil {
 		return nil, err
 	}
-	return mapSession(sourceID, s, tree)
+	root := resolveRootID(ctx, db, s.ID, s.ParentID, onError)
+	return mapSession(sourceID, s, tree, WithRootNativeID(root), WithOnWarn(onError))
 }
 
 // watermarkAdvanced reports whether b is strictly after a on the composite

@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -132,6 +133,22 @@ type sessionMapper struct {
 	// opencode-sqlite:// seam — see mapper_ops.go payloadURIBuilder). nil in
 	// mapper-only unit tests, where defaultPayloadURI is used.
 	uriBuilder payloadURIBuilder
+
+	// rootID is the resolved TRUE tree root of this session (the topmost ancestor
+	// of the parent_id chain), injected by the loader via WithRootNativeID
+	// (SOW-0005 P2.4). When empty, rootNativeID falls back to the direct-parent
+	// heuristic (the mapper-only path that has no DB to walk the chain). For a
+	// root session this is its own id; for a nested sub-agent it is the whole
+	// tree's root, not the direct parent.
+	rootID string
+
+	// warn surfaces a load-bearing decode failure (malformed session.model JSON,
+	// malformed task metadata) with structured context, so a corrupt field
+	// degrades to zero WITHOUT being silently swallowed (SOW-0005 P2.6; "no
+	// silent failures"). Injected by the loader (WithOnWarn → onError); a no-op in
+	// mapper-only unit tests. It NEVER aborts the session — the mapper degrades
+	// the affected field and continues.
+	warn func(error)
 }
 
 // MapOption configures mapSession. The only option today injects the chunk-D
@@ -146,6 +163,34 @@ func WithPayloadURIBuilder(b payloadURIBuilder) MapOption {
 	return func(m *sessionMapper) { m.uriBuilder = b }
 }
 
+// WithRootNativeID injects the resolved TRUE tree root for this session (the
+// topmost parent_id ancestor — SOW-0005 P2.4), which the loader computes via
+// resolveRootID by walking the parent_id chain. When unset (mapper-only tests
+// with no DB), rootNativeID falls back to the direct-parent heuristic. An empty
+// root is ignored (falls back), so a caller that cannot resolve it degrades
+// rather than emitting an empty RootNativeID.
+func WithRootNativeID(root string) MapOption {
+	return func(m *sessionMapper) { m.rootID = root }
+}
+
+// WithOnWarn injects a callback for load-bearing decode failures (SOW-0005 P2.6),
+// so a malformed session.model JSON or task metadata is surfaced with structured
+// context rather than silently degraded to zero. The loader wires this to the
+// adapter's onError; mapper-only tests may omit it (the failure then degrades
+// silently, as before, in the no-DB path).
+func WithOnWarn(warn func(error)) MapOption {
+	return func(m *sessionMapper) { m.warn = warn }
+}
+
+// mwarn surfaces a decode failure via the injected warn callback when one is set
+// (a no-op otherwise), so the pure mapper degrades a field without aborting and
+// WITHOUT silently swallowing the error (SOW-0005 P2.6).
+func (m *sessionMapper) mwarn(err error) {
+	if m.warn != nil {
+		m.warn(err)
+	}
+}
+
 // newSessionMapper constructs a mapper for one session.
 func newSessionMapper(sourceID string, s sessionRow) *sessionMapper {
 	return &sessionMapper{sourceID: sourceID, session: s}
@@ -154,11 +199,17 @@ func newSessionMapper(sourceID string, s sessionRow) *sessionMapper {
 // nativeID is the session's canonical native id (session.id).
 func (m *sessionMapper) nativeID() string { return m.session.ID }
 
-// rootNativeID returns the root of this session's tree: the parent when this is
-// a sub-agent (so the ingester resolver has a meaningful root pointer even
-// before the parent row lands — mirrors codex/claude_code), else the session's
-// own id (adapter-opencode.md §"Per-table emit rules").
+// rootNativeID returns the root of this session's tree. When the loader injected
+// a resolved root (WithRootNativeID — the topmost parent_id ancestor, SOW-0005
+// P2.4) that wins, so a >2-level nested sub-agent points at the true tree root,
+// not its direct parent. Without an injected root (mapper-only path with no DB to
+// walk), it falls back to the direct parent for a sub-agent (a meaningful pointer
+// even before the parent row lands — mirrors codex/claude_code), else the
+// session's own id (adapter-opencode.md §"Per-table emit rules").
 func (m *sessionMapper) rootNativeID() string {
+	if m.rootID != "" {
+		return m.rootID
+	}
 	if m.session.ParentID != "" {
 		return m.session.ParentID
 	}
@@ -202,14 +253,18 @@ func (m *sessionMapper) sessionStarted() canonical.SessionStartedEvent {
 }
 
 // sessionModel decodes the session.model JSON ({id, providerID, variant?}),
-// returning a zero modelRef when absent or malformed (forward-compatible: a
-// missing model column on an older schema yields nil bytes).
+// returning a zero modelRef when absent or malformed. An ABSENT model column
+// (older schema, nil bytes) is silent forward-compat; a PRESENT-but-malformed
+// blob is load-bearing (it drops the session's model/provider attribution), so it
+// is surfaced via mwarn with the session id rather than silently zeroed
+// (SOW-0005 P2.6). The field still degrades to zero — the session is not aborted.
 func (m *sessionMapper) sessionModel() modelRef {
 	if len(m.session.Model) == 0 {
 		return modelRef{}
 	}
 	var mr modelRef
-	if json.Unmarshal(m.session.Model, &mr) != nil {
+	if err := json.Unmarshal(m.session.Model, &mr); err != nil {
+		m.mwarn(fmt.Errorf("opencode: malformed session.model JSON (table=session id=%s field=model); model/provider omitted: %w", m.session.ID, err))
 		return modelRef{}
 	}
 	return mr

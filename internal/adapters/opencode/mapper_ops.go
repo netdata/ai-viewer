@@ -24,14 +24,28 @@ import (
 // from the assistant message: ProviderAlias is data.providerID verbatim; Provider
 // is the best-effort canonical mapping (default = alias) so the catalog seeds a
 // provider row (catalog.go seeds only when Provider != "") (AC#7).
+//
+// Force-close (adapter-opencode.md §"Edge Cases" #5): if the PREVIOUS LLM op is
+// still open (a step-start with no intervening step-finish), it is force-closed
+// with Status="cancelled" and a synthetic EndTs = THIS step-start's start ts,
+// emitted BEFORE the new OpStarted so the prior op is finalized in order. An op
+// still open at TURN end stays running (no finalize) per Edge #4 — only a NEW
+// step-start triggers the cancel.
 func (m *sessionMapper) openLLMOp(tc *turnContext, msg *messageData, p partRow, _ partData) []canonical.Event {
+	startUs := msToMicros(p.TimeCreatedMs)
+	out := make([]canonical.Event, 0, 2)
+	if tc.llmOpOpen {
+		out = append(out, m.cancelOpenLLMOp(tc, startUs))
+	}
+
 	tc.opSeq++
 	tc.llmOpSeq = tc.opSeq
-	tc.llmStartUs = msToMicros(p.TimeCreatedMs)
+	tc.llmOpOpen = true
+	tc.llmStartUs = startUs
 	tc.llmExtras = map[string]any{}
 	alias := msg.ProviderID
-	return []canonical.Event{canonical.OpStartedEvent{
-		EventBase:       m.nextBase(tc.llmStartUs),
+	out = append(out, canonical.OpStartedEvent{
+		EventBase:       m.nextBase(startUs),
 		SessionNativeID: m.nativeID(),
 		TurnSeq:         tc.turnSeq,
 		Seq:             tc.llmOpSeq,
@@ -41,7 +55,31 @@ func (m *sessionMapper) openLLMOp(tc *turnContext, msg *messageData, p partRow, 
 		Model:           msg.ModelID,
 		Provider:        canonicalProvider(alias),
 		ProviderAlias:   alias,
-	}}
+	})
+	return out
+}
+
+// cancelOpenLLMOp synthesizes the cancelled OpFinalizedEvent for a previously-
+// open LLM op that a new step-start supersedes (adapter-opencode.md §"Edge Cases"
+// #5). EndTs is the new step-start's start ts (nextStartUs), floored to the open
+// op's start so a clock anomaly never produces end < start. No tokens are folded
+// in — a cancelled step never finished its accounting; its step-finish (if any)
+// is consumed normally by the next closeLLMOp via stepCumIdx. The caller has
+// already confirmed tc.llmOpOpen.
+func (m *sessionMapper) cancelOpenLLMOp(tc *turnContext, nextStartUs int64) canonical.OpFinalizedEvent {
+	endUs := nextStartUs
+	if endUs < tc.llmStartUs {
+		endUs = tc.llmStartUs
+	}
+	tc.llmOpOpen = false
+	return canonical.OpFinalizedEvent{
+		EventBase:       m.nextBase(endUs),
+		SessionNativeID: m.nativeID(),
+		TurnSeq:         tc.turnSeq,
+		Seq:             tc.llmOpSeq,
+		Status:          "cancelled",
+		EndTs:           endUs,
+	}
 }
 
 // closeLLMOp handles a step-finish part: it closes the currently-open LLM op
@@ -66,6 +104,10 @@ func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []
 	if endUs < tc.llmStartUs {
 		endUs = tc.llmStartUs
 	}
+	// The op is now closed; a new step-start opens a fresh one. Clearing this
+	// before any cancelled-finalize check means a normal close is never
+	// force-cancelled (Edge #5 fires only when the prior op was still open).
+	tc.llmOpOpen = false
 	out := make([]canonical.Event, 0, 2)
 	// Re-emit the LLM OpStarted carrying any accumulated patch extras so they
 	// reach ops.extras_json before the finalize (idempotent UPDATE on (turn,seq)).
@@ -201,7 +243,14 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 
 	// task→session op (AC#4): emit the session op first so it is the topology
 	// parent. The tool op follows so the turn still records the task invocation.
-	if childID := taskChildSessionID(data); childID != "" {
+	childID, metaMalformed := taskChildSessionID(data)
+	if metaMalformed {
+		// Present-but-unparseable task metadata: a possible sub-agent linkage was
+		// dropped. Surface it (SOW-0005 P2.6) rather than silently losing the edge;
+		// the tool op below is still emitted so the task invocation is recorded.
+		m.mwarn(fmt.Errorf("opencode: malformed task metadata (table=part id=%s field=state.metadata); sub-agent linkage omitted", p.ID))
+	}
+	if childID != "" {
 		tc.opSeq++
 		sessSeq := tc.opSeq
 		out = append(out, canonical.OpStartedEvent{

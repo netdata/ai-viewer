@@ -114,11 +114,15 @@ func itoaWide(prefix string, n int) string {
 
 // clearOtherAdapterEnv unsets the env overrides for the codex/claude probes so an
 // opencode probe test sees only the HOME-rooted opencode DB (the other probes
-// look under HOME too, but their directories will not exist).
+// look under HOME too, but their directories will not exist). It also clears the
+// opencode resolution overrides ($OPENCODE_DB, $XDG_DATA_HOME) so the probe falls
+// through to the ~/.local/share default these tests plant under HOME.
 func clearOtherAdapterEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_DB", "")
+	t.Setenv("XDG_DATA_HOME", "")
 }
 
 // TestAutoDiscover_OpencodeProbe verifies acceptance #8: a synthetic opencode DB

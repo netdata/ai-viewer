@@ -278,6 +278,8 @@ Key choices:
 - `_pragma=foreign_keys(off)` — readers don't need FK enforcement; cheaper.
 - `_txlock=deferred` — defer BEGIN until first statement; for reads this just means "snapshot taken on first SELECT".
 
+**DSN is an ALLOWLIST, not a denylist (SOW-0005 P1.2).** `buildReadOnlyDSN` parses the caller-supplied query string only to VALIDATE it, then DISCARDS it and rebuilds the query from scratch with exactly: `mode=ro`, `_txlock=deferred`, and the fixed `readOnlyPragmas` set (`query_only(true)`, `busy_timeout(5000)`). Therefore NO caller-supplied `_pragma` survives — neither one that name-collides with the read-only set NOR a non-colliding write-path pragma (`wal_checkpoint(TRUNCATE)`, `optimize`, `foreign_keys(on)`, …) — and a caller `_txlock=exclusive` is replaced with `deferred`. A maliciously-constructed path string therefore cannot reach a write-path pragma or an exclusive (write-lock) BEGIN. The earlier denylist that stripped only colliding `_pragma` names is replaced by this allowlist.
+
 **Never** call `PRAGMA wal_checkpoint`, `PRAGMA optimize`, `VACUUM`, `BEGIN EXCLUSIVE`, or `ATTACH … AS … 'rwc'`. The connection MUST remain a pure reader.
 
 Connection pool settings:
@@ -302,13 +304,7 @@ The delta-query layer is the bridge between the watermark cursor and the pure ma
 
    Each page runs inside a `BEGIN DEFERRED` read transaction opened via `database/sql`'s `BeginTx{ReadOnly:true}` and committed promptly, keeping the WAL unpinned. Paging continues until a short page (`< 1000` rows) returns. The new max `(time_updated, id)` seen across all pages becomes the table's advanced watermark.
 
-   **Old-schema fallback (no `time_updated`).** A pre-`Timestamps`-mixin table that lacks `time_updated` (detected via `tableSchema.has("time_updated")`) is paged by primary key only:
-
-   ```sql
-   SELECT <present cols> FROM <table> WHERE id > :id ORDER BY id LIMIT 1000
-   ```
-
-   The watermark then advances on `MaxID` alone (`MaxTimeUpdatedMs` stays 0). This is the same dynamic-SELECT discipline as the current-schema path; only the predicate and ORDER BY degrade. All four tables on every observed opencode schema carry `time_updated`, so this is a forward-/backward-compatibility safeguard, not a hot path.
+   **No id-only fallback (SOW-0005 P3.1).** `time_updated` is a REQUIRED column for every tracked table (`requiredColumns`); `introspectAll` fails fast when it is absent, so a table that reaches a delta query ALWAYS has `time_updated`. The composite-key SELECT above is therefore the ONLY delta query. The earlier pre-`Timestamps`-mixin id-only fallback (`buildSelectByID`) was unreachable dead code — `introspectAll`'s required-column gate makes a `time_updated`-less table fatal upstream, never a delta-query input — and it was removed along with its introspection-bypassing isolation test.
 
 2. **Affected-session derivation.** From the changed rows, the layer computes the SET of session ids whose full tree must be reloaded and re-mapped:
    - a changed `session` row contributes its own `id`;
@@ -318,9 +314,13 @@ The delta-query layer is the bridge between the watermark cursor and the pure ma
 
    The set is de-duplicated: a session touched by several tables in one cycle is reloaded exactly once.
 
-3. **Full-session-tree load + map.** For each affected session id the layer loads the whole tree — the `session` row, all its `message` rows ordered by `(time_created, id)`, and each message's `part` rows ordered by `(id)` — assembles `[]messageWithParts`, and calls the pure mapper (`mapSession`) on it. Full-tree reload is mandatory, not partial: the mapper computes per-turn cumulative-token deltas across the ordered message list, so a partial reload would miscompute deltas. Re-emitting an unchanged session is harmless — the ingester's idempotent upserts + the (post-SOW-0004) idempotent catalog absorb it.
+3. **Full-session-tree load + map.** For each affected session id the layer loads the whole tree — the `session` row, all its `message` rows ordered by `(time_created, id)`, and each message's `part` rows ordered by `(id)`, all under ONE bounded read transaction (`loadSessionTree`) — assembles `[]messageWithParts`, and calls the pure mapper (`mapSession`) on it. Full-tree reload is mandatory, not partial: the mapper computes per-turn cumulative-token deltas across the ordered message list, so a partial reload would miscompute deltas. Re-emitting an unchanged session is harmless — the ingester's idempotent upserts + the (post-SOW-0004) idempotent catalog absorb it.
+
+   **True tree root (SOW-0005 P2.4).** Before mapping, the layer resolves the session's TRUE tree root by walking its `parent_id` chain to the topmost ancestor (`resolveRootID`: an indexed `SELECT parent_id FROM session WHERE id=?` walked up, read-only, depth-capped at 32 with a seen-set cycle guard) and injects it into the mapper (`WithRootNativeID`). A nested sub-agent's `RootNativeID` is therefore the whole tree's root, not its direct parent; `ParentNativeID` still points at the direct parent. If the chain cannot be fully resolved (a missing ancestor row, a cycle, or the depth cap), it falls back to the furthest resolvable ancestor (the direct parent on a one-step failure) and surfaces one WARN via `onError`.
 
    A session id observed in a delta whose `session` row cannot be loaded (deleted between pages, or a part/message orphaned from its session) is skipped with one structured error via `onError`; the cycle continues with the remaining sessions.
+
+**Checkpoint-after-emit invariant (SOW-0005 P1.1, data-loss fix).** A `SourceProgress` checkpoint carrying cursor `W` is emitted ONLY after every session affected by rows ≤ `W` in this run has been reloaded, mapped, and emitted. The pipeline (`processChanges` → `batchProcessor`) runs in BOUNDED BATCHES: each batch pages ≤ `progressEveryRows` delta rows forward ACROSS the tracked tables (one shared row budget, so a session touched by several tables is reloaded once per batch — cross-table dedupe), `reloadAndEmit`s that batch's affected sessions, and ONLY THEN advances the persisted cursor + checkpoints. On ctx-cancel/error mid-batch the LAST fully-committed cursor (the previous batch's) is returned, never the in-progress batch's scanned watermark — so a restart from the persisted cursor can never resume PAST rows whose canonical events were never emitted. The earlier scheme that emitted a `SourceProgress` every `progressEveryRows` rows DURING paging (before the affected sessions were emitted) advanced the watermark ahead of content and is replaced.
 
 ## Watch Strategy
 
@@ -420,7 +420,7 @@ The 1000-row page LIMIT keeps each read transaction short. The adapter pages unt
 
 `schema_hash` invalidates the cursor when opencode applies a new migration that affects shape we read; on mismatch the adapter logs a structured WARN, re-reads `__drizzle_migrations`, and continues without resetting the cursor (column drift is handled per-column; see Edge Cases). A full re-ingest is only triggered when a column we depend on disappears or its type changes incompatibly.
 
-`SourceProgress` events are emitted every 1000 rows or every 5 s during steady state, whichever comes first.
+`SourceProgress` events are emitted per BATCH, AFTER that batch's affected sessions are emitted (the checkpoint-after-emit invariant — see Read Strategy §"Full-session-tree load + map"). A batch's row budget is `progressEveryRows` (1000) across the tracked tables, so the persisted cursor advances at most one batch ahead of fully-emitted content, never past un-emitted content. The earlier "every 1000 rows or every 5 s" mid-paging cadence is superseded.
 
 ## Mapping to Canonical Events
 
@@ -469,7 +469,7 @@ When a new `message` row appears (role=`assistant`):
 - Emit `TurnStartedEvent` with:
   - `SessionNativeID = message.session_id`
   - `Seq = (count of prior assistant messages in same session) + 1`
-- When `data.time.completed` is set (or when the message has at least one `step-finish` part), emit `TurnFinalizedEvent` with the message-level `cost`/`tokens` and `Status` derived from `data.finish` (`stop`→completed, anything else→completed unless `data.error` is set).
+- Emit `TurnFinalizedEvent` ONLY when the turn is TERMINAL (`turnIsTerminal`): `data.time.completed` is set, OR `data.error` is present, OR the message has at least one `step-finish` part. Otherwise the turn is **RUNNING** — `TurnStartedEvent` with NO `TurnFinalizedEvent` (opencode writes the assistant `message` row LIVE while the turn is still in progress; finalizing every live row would wrongly mark an in-flight turn completed). A later poll re-emits the whole tree and finalizes the turn once it actually completes; the re-emit is idempotent. When terminal, `TurnFinalizedEvent` carries the message-level `cost`/per-turn token delta and `Status` derived from `data.finish` (`stop`→completed, anything else→completed unless `data.error` is set → failed).
 
 For each `part` row of the assistant message, walking in `id` order:
 
@@ -625,6 +625,7 @@ The five scenarios and what each pins:
 | `c_multi_provider` | multi-provider (AC#7): two turns with `providerID` anthropic then openai → each LLM op carries its `ProviderAlias` verbatim + canonical `Provider` (two catalog providers downstream). Also the two-level token model: per-op tokens reset per message (turn2 op = 300/80) while per-turn tokens are the session-level delta (turn2 turn = 200/50). |
 | `d_schema_drift` | graceful degrade on the pre-`20260510033149` schema (AC#5): `introspectAll` ACCEPTS it (required cols present), the dynamic SELECT omits the 9 missing optional `session` columns, SessionStarted carries empty `Model`/`AgentName` and Extras WITHOUT `providerID`/`variant`, while op/turn token+provider values survive (they come from `message.data`, untouched by the column drift). |
 | `e_cumulative_tokens` | cumulative→delta token math (AC#3): four step-finish parts with CUMULATIVE inputs 100/250/410/400 (outputs 20/50/90/80) → per-LLM-op deltas 100/150/160/0 and 20/30/40/0 (the 4th clamps to 0 because the cumulative decreased). The per-turn rollup is the message-level cumulative (400/80). |
+| `g_nested_subagent` | nested-root resolution (SOW-0005 P2.4): a 3-level tree root→child→grandchild. The grandchild's `RootNativeID` is the TRUE tree root (`ses_groot`), NOT its direct parent (`ses_gchild`), while its `ParentNativeID` is the direct parent — proving `resolveRootID` walks the chain to the top. Each session's turn finalizes (completed ts present, P1.3). |
 
 **Resume property (AC#6, scenario-level).** Complementary to chunk C's
 two-stage-insert `TestScanLoop_ResumeZeroDupesZeroGaps`, `golden_resume_test.go`

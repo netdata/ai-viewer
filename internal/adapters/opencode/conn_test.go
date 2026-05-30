@@ -218,42 +218,9 @@ func TestBuildReadOnlyDSN_ContainsContract(t *testing.T) {
 	}
 }
 
-// TestBuildReadOnlyDSN_StripsConflictingPragma asserts a caller-supplied
-// query_only(false) (or busy_timeout override, including a schema-qualified
-// form) is stripped before the helper appends its own value, so an operator
-// or a misconfiguration cannot re-enable writes via the path string.
-func TestBuildReadOnlyDSN_StripsConflictingPragma(t *testing.T) {
-	t.Parallel()
-	in := "file:/db/opencode.db?_pragma=query_only(false)&_pragma=main.busy_timeout(1)&_pragma=cache_size(-2000)"
-	dsn, err := buildReadOnlyDSN(in)
-	if err != nil {
-		t.Fatalf("buildReadOnlyDSN: %v", err)
-	}
-	_, query := splitQuery(dsn)
-	params, err := url.ParseQuery(query)
-	if err != nil {
-		t.Fatalf("parse query: %v", err)
-	}
-	for _, p := range params["_pragma"] {
-		name := pragmaName(p)
-		if name == "query_only" && p != "query_only(true)" {
-			t.Errorf("conflicting query_only survived: %q", p)
-		}
-		if name == "busy_timeout" && p != "busy_timeout(5000)" {
-			t.Errorf("conflicting busy_timeout survived: %q", p)
-		}
-	}
-	// Non-conflicting operator pragma must pass through untouched.
-	var sawCache bool
-	for _, p := range params["_pragma"] {
-		if pragmaName(p) == "cache_size" {
-			sawCache = true
-		}
-	}
-	if !sawCache {
-		t.Errorf("non-conflicting cache_size pragma was dropped: %v", params["_pragma"])
-	}
-}
+// The DSN allowlist tests (TestBuildReadOnlyDSN_AllowlistDropsAllCallerPragmas +
+// TestBuildReadOnlyDSN_MaliciousDSNNeutralised, SOW-0005 P1.2) live in
+// conn_dsn_test.go (split to keep this file ≤400 lines).
 
 // TestBuildReadOnlyDSN_Errors covers the rejected inputs: an empty path and a
 // query string that cannot be parsed.

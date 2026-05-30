@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 )
 
 // This file is the TREE-LOAD layer (SOW-0005 chunk C): given an affected session
@@ -47,9 +45,18 @@ func newColumnIndex(s tableSchema) columnIndex {
 // reads every column as a nullable holder, then the per-row decoder copies the
 // present ones into the typed struct via the columnIndex. This keeps a single
 // dynamic Scan path for every table shape.
+//
+// onWarn (optional) surfaces a CORRUPT numeric cell — a non-NULL value that is
+// not parseable as the column's numeric type — with table/column context, so a
+// corrupt time/cost/token cell degrades to 0 WITHOUT being silently swallowed
+// (SOW-0005 P2.6). The tree-load scanners (loadSession/loadMessages/loadParts —
+// the content path) set it; the delta-row scanners (which only derive the
+// affected-session set from id/session_id) leave it nil.
 type scanDest struct {
 	holders []sql.NullString
 	ptrs    []any
+	table   string
+	onWarn  func(error)
 }
 
 // newScanDest sizes the holders/pointers to n columns.
@@ -58,6 +65,14 @@ func newScanDest(n int) *scanDest {
 	for i := range d.holders {
 		d.ptrs[i] = &d.holders[i]
 	}
+	return d
+}
+
+// withWarn attaches a table label + onWarn callback so i64/f64 can surface a
+// corrupt numeric cell. Returns the receiver for chaining at the scan site.
+func (d *scanDest) withWarn(table string, onWarn func(error)) *scanDest {
+	d.table = table
+	d.onWarn = onWarn
 	return d
 }
 
@@ -72,20 +87,40 @@ func (d *scanDest) str(idx columnIndex, col string) string {
 
 // i64 returns the present column's int64 value, or 0 when absent/NULL. opencode
 // integer columns scan cleanly through a NullString (sqlite returns the decimal
-// text); strconv keeps the path uniform with the string columns.
+// text); strconv keeps the path uniform with the string columns. A non-NULL
+// value that fails to parse is CORRUPT — it degrades to 0 and is surfaced via the
+// attached onWarn (SOW-0005 P2.6) rather than silently swallowed.
 func (d *scanDest) i64(idx columnIndex, col string) int64 {
 	if i, ok := idx[col]; ok && d.holders[i].Valid {
-		return parseInt64(d.holders[i].String)
+		v, ok := parseInt64Checked(d.holders[i].String)
+		if !ok {
+			d.warnCorrupt(col, d.holders[i].String)
+		}
+		return v
 	}
 	return 0
 }
 
-// f64 returns the present column's float64 value, or 0 when absent/NULL.
+// f64 returns the present column's float64 value, or 0 when absent/NULL. A
+// non-NULL value that fails to parse is surfaced via onWarn (SOW-0005 P2.6).
 func (d *scanDest) f64(idx columnIndex, col string) float64 {
 	if i, ok := idx[col]; ok && d.holders[i].Valid {
-		return parseFloat64(d.holders[i].String)
+		v, ok := parseFloat64Checked(d.holders[i].String)
+		if !ok {
+			d.warnCorrupt(col, d.holders[i].String)
+		}
+		return v
 	}
 	return 0
+}
+
+// warnCorrupt surfaces a corrupt numeric cell via onWarn when one is attached.
+// The raw value is intentionally NOT logged (it could be sensitive); only the
+// table/column and a fixed message are reported.
+func (d *scanDest) warnCorrupt(col, _ string) {
+	if d.onWarn != nil {
+		d.onWarn(fmt.Errorf("opencode: corrupt numeric cell (table=%s column=%s); using 0", d.table, col))
+	}
 }
 
 // bytes returns the present column's raw value as bytes, or nil when absent/NULL
@@ -198,15 +233,20 @@ func scanSessionMessageRow(idx columnIndex, n int) (func(*sql.Rows) (rowKey, err
 }
 
 // --- full-session-tree load ---------------------------------------------------
+//
+// resolveRootID (the parent_id chain walk that gives a nested sub-agent its TRUE
+// tree root, SOW-0005 P2.4) lives in store_root.go (split to keep this file ≤400
+// lines).
 
 // loadSession loads one session row by id via the present-column SELECT. The
 // bool is false (with no error) when the row does not exist (the affected
 // session was deleted between the delta and the load); the caller skips it.
-func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string) (sessionRow, bool, error) {
+// onWarn surfaces a corrupt numeric cell (SOW-0005 P2.6); it may be nil.
+func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string, onWarn func(error)) (sessionRow, bool, error) {
 	s := schema["session"]
 	idx := newColumnIndex(s)
 	q := selectByIDList(s)
-	d := newScanDest(len(s.Present))
+	d := newScanDest(len(s.Present)).withWarn("session", onWarn)
 	err := db.QueryRowContext(ctx, q, id).Scan(d.ptrs...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sessionRow{}, false, nil
@@ -243,20 +283,20 @@ func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string) (
 // single read-only transaction so messages and parts share one consistent
 // snapshot (a concurrent opencode write mid-load cannot split a message from its
 // parts).
-func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionID string) ([]messageWithParts, error) {
+func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionID string, onWarn func(error)) ([]messageWithParts, error) {
 	tx, err := beginRO(ctx, db)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	msgs, err := loadMessages(ctx, tx, schema["message"], sessionID)
+	msgs, err := loadMessages(ctx, tx, schema["message"], sessionID, onWarn)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]messageWithParts, 0, len(msgs))
 	for i := range msgs {
-		parts, perr := loadParts(ctx, tx, schema["part"], msgs[i].ID)
+		parts, perr := loadParts(ctx, tx, schema["part"], msgs[i].ID, onWarn)
 		if perr != nil {
 			return nil, perr
 		}
@@ -272,7 +312,7 @@ func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionI
 // order column names come from the live schema; they are required columns
 // (introspectAll guarantees session_id/time_updated/data present), and
 // time_created is in wantedColumns for message on every schema.
-func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string) ([]messageRow, error) {
+func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string, onWarn func(error)) ([]messageRow, error) {
 	idx := newColumnIndex(s)
 	q := selectByColumn(s, "session_id", messageOrderBy(s))
 	rows, err := tx.QueryContext(ctx, q, sessionID)
@@ -286,7 +326,7 @@ func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID stri
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		d := newScanDest(len(s.Present))
+		d := newScanDest(len(s.Present)).withWarn("message", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
 			return nil, fmt.Errorf("opencode: scan message: %w", err)
 		}
@@ -306,7 +346,7 @@ func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID stri
 
 // loadParts reads a message's parts ordered by id (the natural lexicographic
 // Sonyflake order = creation order; adapter-opencode.md §"part").
-func loadParts(ctx context.Context, tx *sql.Tx, s tableSchema, messageID string) ([]partRow, error) {
+func loadParts(ctx context.Context, tx *sql.Tx, s tableSchema, messageID string, onWarn func(error)) ([]partRow, error) {
 	idx := newColumnIndex(s)
 	q := selectByColumn(s, "message_id", "id")
 	rows, err := tx.QueryContext(ctx, q, messageID)
@@ -320,7 +360,7 @@ func loadParts(ctx context.Context, tx *sql.Tx, s tableSchema, messageID string)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		d := newScanDest(len(s.Present))
+		d := newScanDest(len(s.Present)).withWarn("part", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
 			return nil, fmt.Errorf("opencode: scan part: %w", err)
 		}
@@ -339,62 +379,7 @@ func loadParts(ctx context.Context, tx *sql.Tx, s tableSchema, messageID string)
 	return out, nil
 }
 
-// --- present-column SELECT builders for point/ordered loads -------------------
-
-// presentColsSQL renders the quoted present-column list for a table schema, the
-// shared prefix of every load SELECT (never SELECT *).
-func presentColsSQL(s tableSchema) string {
-	cols := s.Present
-	quoted := make([]string, len(cols))
-	for i, c := range cols {
-		quoted[i] = quoteIdent(c)
-	}
-	return strings.Join(quoted, ", ")
-}
-
-// selectByIDList builds "SELECT <present> FROM <t> WHERE id = ?" for a point
-// load by primary key. Identifiers come from the fixed schema, never user input.
-func selectByIDList(s tableSchema) string {
-	return "SELECT " + presentColsSQL(s) + " FROM " + quoteIdent(s.Table) + " WHERE id = ?"
-}
-
-// selectByColumn builds "SELECT <present> FROM <t> WHERE <col> = ? ORDER BY
-// <orderBy>" for an ordered child load. col and orderBy are fixed schema
-// identifiers (session_id/message_id; the order key), never user input; orderBy
-// is already a comma-separated quoted key.
-func selectByColumn(s tableSchema, col, orderBy string) string {
-	return "SELECT " + presentColsSQL(s) + " FROM " + quoteIdent(s.Table) +
-		" WHERE " + quoteIdent(col) + " = ? ORDER BY " + orderBy
-}
-
-// messageOrderBy returns the message ordering key: "time_created", "id" when the
-// schema has time_created (every observed schema does), else "id" alone. The
-// mapper requires assistant messages in (time_created, id) order
-// (adapter-opencode.md §"Turn synthesis").
-func messageOrderBy(s tableSchema) string {
-	if s.has("time_created") {
-		return quoteIdent("time_created") + ", " + quoteIdent("id")
-	}
-	return quoteIdent("id")
-}
-
-// parseInt64 parses a decimal integer column value sqlite returned as text,
-// returning 0 for a non-numeric value (defensive — opencode integer columns are
-// always numeric, but a corrupt cell must not panic the loader).
-func parseInt64(s string) int64 {
-	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
-// parseFloat64 parses a real column value sqlite returned as text, returning 0
-// for a non-numeric value.
-func parseFloat64(s string) float64 {
-	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
+// The present-column SELECT builders (presentColsSQL/selectByIDList/
+// selectByColumn/messageOrderBy) and the numeric parse helpers
+// (parseInt64*/parseFloat64*) live in store_load_sql.go (split to keep this file
+// ≤400 lines).

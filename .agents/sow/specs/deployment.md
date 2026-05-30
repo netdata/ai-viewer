@@ -134,11 +134,21 @@ newest `__drizzle_migrations` name), read once at startup via
 `opencode.ProbeStatus`. A `ProbeStatus` error never blocks discovery: the source
 is still registered and the failure is logged as a `probe_error` attribute (the
 adapter's own `Scan`/`Tail` then surface any fatal schema problem via
-`/api/health`). The probe targets the default channel database path only;
-opencode's `$OPENCODE_DB` override and per-channel `opencode-<channel>.db`
-variants (anomalyco/opencode `packages/opencode/src/storage/db.ts`) are out of
-scope for auto-discovery — point `--source opencode:<path>` at a non-default
-database explicitly.
+`/api/health`).
+
+The opencode database path resolution order (`opencodeDBPath`, SOW-0005 P2.4) is:
+
+1. `$OPENCODE_DB`, if non-empty — used **verbatim** as a full path to the database.
+2. else `$XDG_DATA_HOME/opencode/opencode.db`, if `$XDG_DATA_HOME` is non-empty.
+3. else `~/.local/share/opencode/opencode.db` (the XDG default base).
+
+CAVEAT: `$OPENCODE_DB` is honoured as the conventional override name but could
+NOT be confirmed against opencode's upstream source during SOW-0005 (the mirror
+was unavailable), so it is treated as best-effort; the XDG base (`~/.local/share`
+== `$XDG_DATA_HOME`) IS opencode's verified default location. Per-channel
+`opencode-<channel>.db` variants (anomalyco/opencode
+`packages/opencode/src/storage/db.ts`) remain out of scope for auto-discovery —
+point `--source opencode:<path>` at a non-default database explicitly.
 
 The Chunk 11 v2 probe checks for the parent `sessions/` directory
 rather than the glob `*.json.gz` documented earlier: a freshly-bootstrapped

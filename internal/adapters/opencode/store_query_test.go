@@ -3,14 +3,14 @@ package opencode
 import (
 	"database/sql"
 	"sort"
+	"strings"
 	"testing"
-
-	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
 // This file pins the delta-query layer: paged delta SELECTs (watermark advance,
-// the LIMIT-1000 boundary, the time_updated tie-break), the old-schema
-// id-only fallback, and the affected-session derivation across all four tables.
+// the LIMIT-1000 boundary, the time_updated tie-break) and the affected-session
+// derivation across all four tables. time_updated is a required column, so there
+// is no id-only delta fallback (SOW-0005 P3.1).
 
 // scanMessagesFrom pages the message table from a watermark using scanTableDelta
 // and returns the changed messageRows + the advanced watermark + row count.
@@ -149,101 +149,11 @@ func TestDeltaQuery_PagesBeyond1000(t *testing.T) {
 	}
 }
 
-// TestDeltaQuery_OldSchemaIDFallback builds a part table WITHOUT time_updated and
-// asserts the id-only fallback pages it correctly (buildSelectByID), advancing
-// the watermark on MaxID alone with MaxTimeUpdatedMs staying 0.
-func TestDeltaQuery_OldSchemaIDFallback(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := dir + "/old.db"
-	rw, err := sql.Open(driverName, rwDSNFor(path))
-	if err != nil {
-		t.Fatalf("open rw: %v", err)
-	}
-	// A part table lacking time_updated (and session_id, to also exercise the
-	// message-id fallback path) but keeping the required id/message_id/data.
-	stmts := []string{
-		`CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL,
-			directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL,
-			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)`,
-		`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
-			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
-		// part: required cols are id/message_id/session_id/time_updated/data per
-		// requiredColumns; an old schema that lacks time_updated would be rejected
-		// by introspectAll. So this fixture keeps session_id+data but we drop
-		// time_updated to exercise the buildSelectByID branch directly (bypassing
-		// introspectAll's required-column gate by testing the schema in isolation).
-		`CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
-			time_created INTEGER NOT NULL, data TEXT NOT NULL)`,
-		`CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
-			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
-		`INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('prt_1','msg_1','ses_a',1,'{"type":"text"}')`,
-		`INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('prt_2','msg_1','ses_a',2,'{"type":"text"}')`,
-		`INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('prt_3','msg_1','ses_a',3,'{"type":"text"}')`,
-	}
-	for _, s := range stmts {
-		if _, err := rw.Exec(s); err != nil {
-			_ = rw.Close()
-			t.Fatalf("seed old: %v\nstmt: %s", err, s)
-		}
-	}
-	if err := rw.Close(); err != nil {
-		t.Fatalf("close rw: %v", err)
-	}
-
-	db := openRO(t, path)
-	// Introspect the part table directly (introspectAll would reject it for the
-	// missing required time_updated, which is exactly the gate; here we test the
-	// fallback SELECT path in isolation against a schema without time_updated).
-	ps, err := introspectTable(ctxBG(), db, "part")
-	if err != nil {
-		t.Fatalf("introspectTable(part): %v", err)
-	}
-	if ps.has("time_updated") {
-		t.Fatal("fixture part table unexpectedly has time_updated")
-	}
-
-	var got []partRow
-	idx := newColumnIndex(ps)
-	scan, row := scanPartRow(idx, len(ps.Present))
-	delta, err := scanTableDelta(ctxBG(), db, ps, TableWatermark{}, func(rows *sql.Rows) (rowKey, error) {
-		k, err := scan(rows)
-		if err != nil {
-			return k, err
-		}
-		got = append(got, *row)
-		return k, nil
-	})
-	if err != nil {
-		t.Fatalf("scanTableDelta(old part): %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("old-schema fallback returned %d parts, want 3", len(got))
-	}
-	if delta.watermark.MaxID != "prt_3" {
-		t.Errorf("old-schema watermark MaxID = %q, want prt_3", delta.watermark.MaxID)
-	}
-	if delta.watermark.MaxTimeUpdatedMs != 0 {
-		t.Errorf("old-schema watermark MaxTimeUpdatedMs = %d, want 0 (no time_updated)", delta.watermark.MaxTimeUpdatedMs)
-	}
-
-	// From {0, prt_1}: id-only fallback returns prt_2 and prt_3.
-	got2 := []partRow{}
-	scan2, row2 := scanPartRow(idx, len(ps.Present))
-	if _, err := scanTableDelta(ctxBG(), db, ps, TableWatermark{MaxID: "prt_1"}, func(rows *sql.Rows) (rowKey, error) {
-		k, err := scan2(rows)
-		if err != nil {
-			return k, err
-		}
-		got2 = append(got2, *row2)
-		return k, nil
-	}); err != nil {
-		t.Fatalf("scanTableDelta(old part from prt_1): %v", err)
-	}
-	if len(got2) != 2 || got2[0].ID != "prt_2" || got2[1].ID != "prt_3" {
-		t.Fatalf("old-schema fallback from prt_1: got %v, want [prt_2 prt_3]", partIDs(got2))
-	}
-}
+// NOTE: the old TestDeltaQuery_OldSchemaIDFallback was removed with the
+// buildSelectByID fallback it exercised (SOW-0005 P3.1). time_updated is a
+// required column on every tracked table (introspectAll fails fast without it),
+// so the id-only delta path was unreachable in production and its
+// introspectAll-bypassing isolation test pinned dead code.
 
 // TestAffectedSessions_AllTables asserts the affected-session derivation across
 // every table: a changed session, message, part (denormalized session_id), and
@@ -270,7 +180,7 @@ func TestAffectedSessions_AllTables(t *testing.T) {
 	db, schema := introspect(t, path)
 	next, advanced, err := collectDeltasOnly(t, db, schema, newCursor())
 	if err != nil {
-		t.Fatalf("collectDeltas: %v", err)
+		t.Fatalf("collectDeltasOnly: %v", err)
 	}
 	if !advanced {
 		t.Fatal("expected advanced=true with new rows")
@@ -290,14 +200,30 @@ func TestAffectedSessions_AllTables(t *testing.T) {
 	}
 }
 
-// collectDeltasOnly runs collectDeltas with a generously buffered out channel
-// (so the few SourceProgress checkpoints never block) and returns the affected
-// ids + advanced flag (test convenience).
+// collectDeltasOnly pages every tracked table forward from cur via the per-table
+// deltaRowHandler, accumulating the combined affected-session set (first-seen
+// order) and whether any watermark advanced — the affected-derivation half of the
+// change pipeline, isolated for the affected-set test. It mirrors what
+// batchProcessor.pageBatch does per table but across ALL tables into one set
+// (the test only inspects the derived session set, not emission/checkpointing).
 func collectDeltasOnly(t *testing.T, db *sql.DB, schema schemaSet, cur Cursor) ([]string, bool, error) {
 	t.Helper()
-	out := make(chan canonical.Event, 4096)
-	_, ids, advanced, err := collectDeltas(ctxBG(), db, schema, cur, "opencode:test", out)
-	return ids, advanced, err
+	affected := newAffectedSet()
+	msgSession := map[string]string{}
+	advanced := false
+	for _, table := range trackedTables {
+		s := schema[table]
+		from := cur.Tables[table]
+		onRow := deltaRowHandler(ctxBG(), db, table, s, affected, msgSession, func(error) {})
+		delta, err := scanTableDelta(ctxBG(), db, s, from, onRow)
+		if err != nil {
+			return affected.ids(), advanced, err
+		}
+		if delta.rowCount > 0 && watermarkAdvanced(from, delta.watermark) {
+			advanced = true
+		}
+	}
+	return affected.ids(), advanced, nil
 }
 
 // ids extracts message ids for assertion messages.
@@ -325,4 +251,56 @@ func sortedIDsTest(in []string) []string {
 	copy(out, in)
 	sort.Strings(out)
 	return out
+}
+
+// TestSessionMessage_UnknownTypeWarns is the P2.7 / spec Edge #1 proof: scanning a
+// session_message delta emits exactly one structured WARN for an UNRECOGNIZED
+// type and NONE for a known type, while BOTH rows still drive the affected-session
+// set (the warn never blocks the cycle). The known type ("model-switched") and the
+// unknown ("planned-future-thing") are scanned in one delta pass via the
+// session_message deltaRowHandler with a warn-capturing onError.
+func TestSessionMessage_UnknownTypeWarns(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	// Two session_message rows: a KNOWN type (no warn) and an UNKNOWN one (warn).
+	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
+		VALUES ('evt_known','ses_a','model-switched',1,1,'{}')`); err != nil {
+		t.Fatalf("insert known: %v", err)
+	}
+	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
+		VALUES ('evt_unknown','ses_b','planned-future-thing',2,2,'{}')`); err != nil {
+		t.Fatalf("insert unknown: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+
+	db, schema := introspect(t, path)
+	var ce collectErrs
+	affected := newAffectedSet()
+	s := schema["session_message"]
+	onRow := deltaRowHandler(ctxBG(), db, "session_message", s, affected, map[string]string{}, ce.onError)
+	if _, err := scanTableDelta(ctxBG(), db, s, TableWatermark{}, onRow); err != nil {
+		t.Fatalf("scanTableDelta(session_message): %v", err)
+	}
+
+	// Exactly one WARN, naming the unknown type; none for the known type.
+	if ce.count() != 1 {
+		t.Fatalf("session_message scan produced %d warnings, want exactly 1 (only the unknown type)", ce.count())
+	}
+	ce.mu.Lock()
+	msg := ce.errs[0].Error()
+	ce.mu.Unlock()
+	if !strings.Contains(msg, "planned-future-thing") || !strings.Contains(msg, "unknown session_message type") {
+		t.Errorf("warn = %q, want one naming the unknown type", msg)
+	}
+	// Both rows still drove the affected set (the warn does not skip the session).
+	got := map[string]bool{}
+	for _, id := range affected.ids() {
+		got[id] = true
+	}
+	if !got["ses_a"] || !got["ses_b"] {
+		t.Errorf("affected set = %v, want both ses_a and ses_b", affected.ids())
+	}
 }

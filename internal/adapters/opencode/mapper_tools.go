@@ -71,12 +71,15 @@ func toolBytesOut(data partData) int64 {
 // taskChildSessionID returns the spawned child session id for a tool='task'
 // part that carries state.metadata.sessionId, else "" (AC#4; adapter-opencode.md
 // §"Sub-Agent Linkage"). Only tool='task' qualifies — the session-op edge is the
-// task tool's dispatch, not any tool with a metadata.sessionId.
-func taskChildSessionID(data partData) string {
+// task tool's dispatch, not any tool with a metadata.sessionId. The second return
+// reports whether the task metadata was PRESENT but malformed, so the caller can
+// surface a structured WARN rather than silently dropping a sub-agent linkage
+// (SOW-0005 P2.6).
+func taskChildSessionID(data partData) (childID string, metaMalformed bool) {
 	if data.Tool != "task" || data.State == nil {
-		return ""
+		return "", false
 	}
-	return data.State.subAgentSessionID()
+	return data.State.subAgentSessionIDChecked()
 }
 
 // toolNameNamespace derives the canonical op Name and ToolNamespace from an

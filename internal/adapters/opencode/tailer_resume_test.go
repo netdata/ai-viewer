@@ -1,8 +1,10 @@
 package opencode
 
 import (
+	"context"
 	"database/sql"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -30,11 +32,11 @@ func eventFingerprint(ev canonical.Event) string {
 	case canonical.TurnFinalizedEvent:
 		return fp("turn_finalized", e.SessionNativeID, e.Seq)
 	case canonical.OpStartedEvent:
-		return fp("op_started", e.SessionNativeID, e.TurnSeq) + "|" + string(e.Kind) + "|" + itoa(e.Seq)
+		return fp("op_started", e.SessionNativeID, e.TurnSeq) + "|" + string(e.Kind) + "|" + strconv.Itoa(e.Seq)
 	case canonical.OpFinalizedEvent:
-		return fp("op_finalized", e.SessionNativeID, e.TurnSeq) + "|" + itoa(e.Seq)
+		return fp("op_finalized", e.SessionNativeID, e.TurnSeq) + "|" + strconv.Itoa(e.Seq)
 	case canonical.PayloadRefEvent:
-		return fp("payload_ref", e.SessionNativeID, e.TurnSeq) + "|" + itoa(e.OpSeq) + "|" + e.LocationURI
+		return fp("payload_ref", e.SessionNativeID, e.TurnSeq) + "|" + strconv.Itoa(e.OpSeq) + "|" + e.LocationURI
 	case canonical.LogEntryEvent:
 		return "log|" + e.SessionNativeID + "|" + e.Severity + "|" + e.Message
 	default:
@@ -42,17 +44,7 @@ func eventFingerprint(ev canonical.Event) string {
 	}
 }
 
-func fp(kind, sid string, seq int) string { return kind + "|" + sid + "|" + itoa(seq) }
-
-func itoa(n int) string {
-	if n < 0 {
-		return "-" + itoa(-n)
-	}
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	return itoa(n/10) + string(rune('0'+n%10))
-}
+func fp(kind, sid string, seq int) string { return kind + "|" + sid + "|" + strconv.Itoa(seq) }
 
 // contentFingerprints returns the sorted content-event fingerprints (excluding
 // SourceProgress) of an event slice — the multiset to compare across runs.
@@ -137,6 +129,99 @@ func TestScanLoop_ResumeZeroDupesZeroGaps(t *testing.T) {
 	}
 }
 
+// TestProcessChanges_CheckpointAfterEmit_NoLoss is the P1.1 data-loss regression.
+// It forces MORE THAN ONE batch (>progressEveryRows session rows) and CANCELS the
+// context right after the FIRST batch's SourceProgress checkpoint. It then asserts
+// the checkpoint-after-emit invariant: the returned (persisted) cursor covers
+// ONLY sessions whose content was emitted, so a RESUME from it re-emits every
+// not-yet-emitted session — the union of run-1 + resume is the COMPLETE session
+// set, zero skipped. The pre-P1.1 code advanced the watermark mid-paging BEFORE
+// emitting, so a cancel here would have persisted a cursor past un-emitted
+// sessions → permanent loss; this test fails against that behaviour.
+func TestProcessChanges_CheckpointAfterEmit_NoLoss(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+
+	// Seed > progressEveryRows session rows (each a bare session — no messages or
+	// parts) so the FIRST batch's shared budget is spent entirely within the
+	// session table, leaving the last session for a SECOND batch.
+	const total = progressEveryRows + 5
+	tx, _ := rw.Begin()
+	stmt, _ := tx.Prepare(`INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, agent, model, time_created, time_updated, time_archived)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+	for i := 1; i <= total; i++ {
+		if _, err := stmt.Exec(fmtID("ses", i), "prj", "", "slug", "/w", "T", "9.9.9", "a", "", int64(i), int64(i), nil); err != nil {
+			t.Fatalf("bulk insert session %d: %v", i, err)
+		}
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+
+	db, schema := introspect(t, path)
+
+	// run-1: a consumer that records SessionStarted ids and cancels the context as
+	// soon as it sees the FIRST SourceProgress (the first batch's checkpoint), so
+	// the run stops AFTER batch-1 committed but BEFORE batch-2 emits.
+	ctx, cancel := context.WithCancel(ctxBG())
+	defer cancel()
+	out := make(chan canonical.Event, 8192)
+	run1Seen := map[string]bool{}
+	doneConsume := make(chan struct{})
+	go func() {
+		defer close(doneConsume)
+		sawProgress := false
+		for ev := range out {
+			if s, ok := ev.(canonical.SessionStartedEvent); ok {
+				run1Seen[s.NativeID] = true
+			}
+			if ev.EventKind() == canonical.EvSourceProgress && !sawProgress {
+				sawProgress = true
+				cancel() // stop the producer right after the first checkpoint
+			}
+		}
+	}()
+
+	cur1, _, _ := processChanges(ctx, db, schema, newCursor(), "opencode:x", out, func(error) {})
+	close(out)
+	<-doneConsume
+
+	// run-1 must NOT have emitted every session (the cancel cut it short) — else
+	// the test is not exercising the resume path.
+	if len(run1Seen) >= total {
+		t.Fatalf("run-1 emitted all %d sessions; cancel did not cut the run short", total)
+	}
+
+	// Persist + reparse the cursor (the durable round-trip a daemon restart does).
+	reparsed, err := ParseCursor(cur1.String())
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+
+	// Resume from the persisted cursor with a fresh (uncancelled) context.
+	out2 := make(chan canonical.Event, 8192)
+	if _, _, err := processChanges(ctxBG(), db, schema, reparsed, "opencode:x", out2, func(error) {}); err != nil {
+		t.Fatalf("resume processChanges: %v", err)
+	}
+	for _, ev := range drainAll(out2) {
+		if s, ok := ev.(canonical.SessionStartedEvent); ok {
+			run1Seen[s.NativeID] = true
+		}
+	}
+
+	// Zero loss: the UNION of run-1 + resume must cover EVERY session. A session
+	// missing here would be one whose content was never emitted yet whose row the
+	// persisted cursor had advanced past — the data-loss bug P1.1 fixes.
+	if len(run1Seen) != total {
+		t.Fatalf("union of run-1 + resume covered %d sessions, want all %d (zero loss)", len(run1Seen), total)
+	}
+}
+
 // seedSessionsInto inserts sessions [lo, hi] (1-based, inclusive) into rw with
 // the SAME per-session structure and ids seedBackfillDB uses (ses_<i>/msg_<i>,
 // tokens 10*i/5*i, one step-start/step-finish/text triple), so the content
@@ -162,16 +247,16 @@ func multisetDiff(a, b []string) string {
 	if len(a) != len(b) {
 		var sb strings.Builder
 		sb.WriteString("length: baseline=")
-		sb.WriteString(itoa(len(a)))
+		sb.WriteString(strconv.Itoa(len(a)))
 		sb.WriteString(" resume=")
-		sb.WriteString(itoa(len(b)))
+		sb.WriteString(strconv.Itoa(len(b)))
 		sb.WriteString("\n")
 		sb.WriteString(firstMismatch(a, b))
 		return sb.String()
 	}
 	for i := range a {
 		if a[i] != b[i] {
-			return "at " + itoa(i) + ": baseline=" + a[i] + " resume=" + b[i]
+			return "at " + strconv.Itoa(i) + ": baseline=" + a[i] + " resume=" + b[i]
 		}
 	}
 	return ""
@@ -186,7 +271,7 @@ func firstMismatch(a, b []string) string {
 	}
 	for i := 0; i < n; i++ {
 		if a[i] != b[i] {
-			return "first diff @ " + itoa(i) + ": baseline=" + a[i] + " resume=" + b[i]
+			return "first diff @ " + strconv.Itoa(i) + ": baseline=" + a[i] + " resume=" + b[i]
 		}
 	}
 	if len(a) > n {

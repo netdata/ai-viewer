@@ -298,6 +298,43 @@ func TestGoldenInvariant_DSchemaDrift_MissingColumnsLoggedINF(t *testing.T) {
 	}
 }
 
+// TestGoldenInvariant_GNestedSubagent is the SOW-0005 P2.4 proof: in a 3-level
+// session tree (root → child → grandchild) every session's RootNativeID is the
+// TRUE tree root (ses_groot), NOT its direct parent. The grandchild is the
+// load-bearing case: the pre-P2.4 code set its RootNativeID to its direct parent
+// (ses_gchild); the chain-walk resolver must set it to ses_groot. ParentNativeID
+// still points at the DIRECT parent (the immediate link), so the two differ for
+// the grandchild — exactly what pins the fix.
+func TestGoldenInvariant_GNestedSubagent(t *testing.T) {
+	t.Parallel()
+	ev := scenarioEvents(t, "g_nested_subagent")
+
+	root := sessionStartByID(t, ev, "ses_groot")
+	if root.Kind != canonical.KindRoot {
+		t.Errorf("root Kind = %q, want root", root.Kind)
+	}
+	if root.RootNativeID != "ses_groot" {
+		t.Errorf("root RootNativeID = %q, want ses_groot (its own id)", root.RootNativeID)
+	}
+
+	child := sessionStartByID(t, ev, "ses_gchild")
+	if child.ParentNativeID != "ses_groot" || child.RootNativeID != "ses_groot" {
+		t.Errorf("child parent/root = %q/%q, want ses_groot/ses_groot", child.ParentNativeID, child.RootNativeID)
+	}
+
+	grand := sessionStartByID(t, ev, "ses_ggrand")
+	if grand.Kind != canonical.KindSubAgent {
+		t.Errorf("grandchild Kind = %q, want sub_agent", grand.Kind)
+	}
+	// The DIRECT parent is the child; the TRUE ROOT is the topmost ancestor.
+	if grand.ParentNativeID != "ses_gchild" {
+		t.Errorf("grandchild ParentNativeID = %q, want ses_gchild (direct parent)", grand.ParentNativeID)
+	}
+	if grand.RootNativeID != "ses_groot" {
+		t.Errorf("grandchild RootNativeID = %q, want ses_groot (tree root, NOT the direct parent ses_gchild)", grand.RootNativeID)
+	}
+}
+
 // countKindOpKind counts OpStartedEvents of a given OpKind.
 func countKindOpKind(events []canonical.Event, kind canonical.OpKind) int {
 	n := 0

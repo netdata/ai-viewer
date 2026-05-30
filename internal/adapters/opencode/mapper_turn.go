@@ -131,6 +131,27 @@ func turnStatus(data *messageData) (status, errClass string) {
 	return "completed", ""
 }
 
+// turnIsTerminal reports whether an assistant message represents a COMPLETED
+// turn — the predicate that gates TurnFinalizedEvent emission (adapter-opencode
+// .md §"Per-table emit rules": finalize ONLY when data.time.completed is set, or
+// the message carries an error, or it has at least one step-finish part).
+// opencode writes a turn's message row LIVE while the turn is still in progress
+// (data.time.completed nil, no step-finish part yet), so finalizing every
+// assistant message would wrongly mark an in-flight turn completed. A turn that
+// is not terminal stays RUNNING (TurnStarted with no TurnFinalized); a later
+// poll re-emits the whole tree and finalizes it once it actually completes (the
+// re-emit is idempotent — adapter-opencode.md §"Edge Cases" #4). hasStepFinish
+// is supplied by the part walk (mapMessage), which already decoded the parts.
+func turnIsTerminal(data *messageData, hasStepFinish bool) bool {
+	if data.Time.Completed != nil {
+		return true
+	}
+	if data.Error != nil && data.Error.Name != "" {
+		return true
+	}
+	return hasStepFinish
+}
+
 // turnEndUs returns a turn's end timestamp (µs): the assistant message's
 // data.time.completed when set, else the message row's time_created (a turn with
 // no completed ts is still ordered by its creation).

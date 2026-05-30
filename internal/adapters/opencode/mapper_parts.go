@@ -28,12 +28,20 @@ type turnContext struct {
 	// are not ops).
 	opSeq int
 
-	// llmOpSeq is the Seq of the currently-open LLM op (the most recent
-	// step-start not yet closed by a step-finish), or 0 when none is open. It is
-	// the ParentOpSeq for reasoning/tool ops and the OpSeq for text PayloadRefs
-	// and patch extras within the step (adapter-opencode.md "Op seq numbering
-	// within a turn").
+	// llmOpSeq is the Seq of the MOST RECENT LLM op, whether still open or
+	// already closed by a step-finish. It is the ParentOpSeq for reasoning/tool
+	// ops and the OpSeq for text PayloadRefs and patch extras within (or after)
+	// the step (adapter-opencode.md "Op seq numbering within a turn"). It stays
+	// set after a step-finish so a trailing reasoning/tool/text still nests under
+	// the LLM call that produced it; openLLMState reports whether it is OPEN.
 	llmOpSeq int
+	// llmOpOpen reports whether the most-recent LLM op (llmOpSeq) is still OPEN
+	// (a step-start with no intervening step-finish). It distinguishes the
+	// force-close case (a new step-start while the prior op is still open →
+	// emit a cancelled finalize, adapter-opencode.md §"Edge Cases" #5) from the
+	// normal case (a new step-start after the prior op already closed). Reset to
+	// false by closeLLMOp.
+	llmOpOpen bool
 	// llmStartUs is the open LLM op's start timestamp (µs), carried so the
 	// step-finish that closes it can supply a sane EndTs floor.
 	llmStartUs int64
@@ -108,22 +116,33 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 		Seq:             tc.turnSeq,
 	})
 
+	hasStepFinish := false
 	for i := range mwp.Parts {
 		evs, err := m.mapPart(tc, &data, mwp.Parts[i])
 		if err != nil {
 			return nil, err
 		}
+		if mwp.Parts[i].isStepFinish() {
+			hasStepFinish = true
+		}
 		out = append(out, evs...)
 	}
 
-	// Close any still-open LLM op at turn end (a step-start with no step-finish —
-	// adapter-opencode.md §"Edge Cases" #5: orphan step-start is a running LLM op
-	// with no finalize). We intentionally do NOT synthesize a cancelled finalize
-	// here in chunk B: the spec's force-close semantics are a tailer/reconcile
-	// concern; an unclosed op stays running, which the ingester records as
-	// running (matches the running-tool/running-reasoning behavior and AC edge).
+	// A step-start still OPEN at turn end (no step-finish closing it) stays a
+	// RUNNING LLM op with no finalize (adapter-opencode.md §"Edge Cases" #4/#5:
+	// orphan step-start is a running LLM op). It is the within-message force-close
+	// (a NEW step-start arriving) that synthesizes a cancelled finalize — handled
+	// in openLLMOp; the trailing open op is intentionally left running here.
 
-	out = append(out, m.finalizeTurn(tc, &data, mwp.Message))
+	// Finalize the turn ONLY when it is terminal (adapter-opencode.md §"Per-table
+	// emit rules": data.time.completed set, OR data.error, OR ≥1 step-finish
+	// part). opencode writes the assistant message row live while the turn is
+	// still running; a non-terminal turn stays RUNNING (TurnStarted with no
+	// TurnFinalized) and a later poll re-emits + finalizes it once it completes
+	// (idempotent). Without this gate every live row would be wrongly finalized.
+	if turnIsTerminal(&data, hasStepFinish) {
+		out = append(out, m.finalizeTurn(tc, &data, mwp.Message))
+	}
 
 	// Record the failed-terminal signal for the session (last error wins).
 	if data.Error != nil && data.Error.Name != "" {

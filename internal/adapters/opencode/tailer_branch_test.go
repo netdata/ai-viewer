@@ -143,15 +143,20 @@ func TestProcessChanges_NoChange(t *testing.T) {
 	_ = next
 }
 
-// TestCollectDeltas_MidScanCheckpoint asserts collectDeltas emits at least one
-// SourceProgress checkpoint when more than progressEveryRows rows are paged (so
-// a backfill resumes mid-scan).
-func TestCollectDeltas_MidScanCheckpoint(t *testing.T) {
+// TestProcessChanges_BatchedCheckpoint asserts processChanges emits at least one
+// SourceProgress checkpoint when more than progressEveryRows rows are paged (so a
+// backfill resumes mid-scan) AND that every checkpoint is preceded by the content
+// it covers — the checkpoint-after-emit invariant (SOW-0005 P1.1). Because all
+// rows belong to one session, the batched loop re-emits that session's tree each
+// batch, then checkpoints; the LAST event in the stream must therefore be a
+// SourceProgress (the final batch checkpoint), never a checkpoint with trailing
+// uncommitted content.
+func TestProcessChanges_BatchedCheckpoint(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path, rw := newEmptyDB(t, dir, "opencode.db")
 	insertSession(t, rw, "ses_a", "", 1, 1, 0)
-	// Insert > progressEveryRows messages so the checkpoint fires mid-paging.
+	// Insert > progressEveryRows messages so the loop runs more than one batch.
 	tx, _ := rw.Begin()
 	stmt, _ := tx.Prepare(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)`)
 	for i := 1; i <= progressEveryRows+50; i++ {
@@ -169,16 +174,32 @@ func TestCollectDeltas_MidScanCheckpoint(t *testing.T) {
 
 	db, schema := introspect(t, path)
 	out := make(chan canonical.Event, 8192)
-	_, _, advanced, err := collectDeltas(ctxBG(), db, schema, newCursor(), "opencode:test", out)
+	var ce collectErrs
+	_, advanced, err := processChanges(ctxBG(), db, schema, newCursor(), "opencode:test", out, ce.onError)
 	if err != nil {
-		t.Fatalf("collectDeltas: %v", err)
+		t.Fatalf("processChanges: %v", err)
 	}
 	if !advanced {
-		t.Error("collectDeltas with new rows reported advanced=false")
+		t.Error("processChanges with new rows reported advanced=false")
 	}
-	if n := countKind(drainAll(out), canonical.EvSourceProgress); n < 1 {
-		t.Errorf("collectDeltas paged > %d rows but emitted %d SourceProgress, want >= 1", progressEveryRows, n)
+	got := drainAll(out)
+	if n := countKind(got, canonical.EvSourceProgress); n < 1 {
+		t.Errorf("processChanges paged > %d rows but emitted %d SourceProgress, want >= 1", progressEveryRows, n)
 	}
+	// Checkpoint-after-emit: the final emitted event is the last batch's
+	// SourceProgress, so the run never ends with content past the last checkpoint.
+	if len(got) == 0 || got[len(got)-1].EventKind() != canonical.EvSourceProgress {
+		t.Errorf("last event = %v, want a SourceProgress checkpoint (checkpoint-after-emit)", lastKind(got))
+	}
+}
+
+// lastKind returns the kind of the last event (or "" for an empty slice) for
+// assertion messages.
+func lastKind(evs []canonical.Event) canonical.EventKind {
+	if len(evs) == 0 {
+		return ""
+	}
+	return evs[len(evs)-1].EventKind()
 }
 
 // TestDetectChange_TimeUpdatedPath asserts an in-place mutation (time_updated
@@ -230,8 +251,8 @@ func TestCoerceScanCursor_PureShaping(t *testing.T) {
 	}
 }
 
-// TestPureHelpers covers isContextErr, messageOrderBy, parseInt64/parseFloat64,
-// and buildSelectByID-without-time_created — the small branches.
+// TestPureHelpers covers isContextErr, messageOrderBy, and parseInt64/parseFloat64
+// — the small pure-helper branches.
 func TestPureHelpers(t *testing.T) {
 	t.Parallel()
 	if !isContextErr(context.Canceled) || !isContextErr(context.DeadlineExceeded) {
@@ -257,12 +278,9 @@ func TestPureHelpers(t *testing.T) {
 	if parseFloat64("1.5") != 1.5 || parseFloat64("nope") != 0 {
 		t.Error("parseFloat64 wrong")
 	}
-
-	// buildSelectByID for a schema without time_created still orders by id.
-	sel := noTC.buildSelectByID()
-	if !strings.Contains(sel, "WHERE id > ? ORDER BY id LIMIT 1000") {
-		t.Errorf("buildSelectByID = %q, want id-only paging", sel)
-	}
+	// NOTE: buildSelectByID and its assertion were removed with the id-only delta
+	// fallback (SOW-0005 P3.1) — time_updated is a required column, so the
+	// composite-key buildSelect is the only delta SELECT.
 }
 
 // TestEmitHelpers_CtxCancel covers the ctx-cancel branches of emitProgress and

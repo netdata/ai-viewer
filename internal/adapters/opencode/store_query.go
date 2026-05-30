@@ -86,16 +86,13 @@ func maxTimeUpdated(ctx context.Context, db *sql.DB, table string) (int64, error
 // (id, time_updated) so the paging loop advances the watermark without a second
 // Scan of the cursor. It pages until a short page (<deltaPageLimit) returns,
 // each page in its OWN short read transaction, and returns the advanced
-// watermark + total row count. The page SQL is the schema's dynamic SELECT
-// (buildSelect — present columns only; buildSelectByID on an old schema without
-// time_updated). Ordering is the cursor's composite key so a resume never
-// skips/duplicates a row at a tie.
+// watermark + total row count. The page SQL is the schema's dynamic composite-key
+// SELECT (buildSelect — present columns only). time_updated is a required column
+// (introspectAll enforces it), so there is no id-only fallback; ordering is the
+// cursor's composite (time_updated, id) key so a resume never skips/duplicates a
+// row at a tie.
 func scanTableDelta(ctx context.Context, db *sql.DB, s tableSchema, from TableWatermark, onRow func(rows *sql.Rows) (rowKey, error)) (tableDelta, error) {
-	hasTU := s.has("time_updated")
 	query := s.buildSelect()
-	if !hasTU {
-		query = s.buildSelectByID()
-	}
 
 	wm := from
 	total := 0
@@ -103,7 +100,7 @@ func scanTableDelta(ctx context.Context, db *sql.DB, s tableSchema, from TableWa
 		if err := ctx.Err(); err != nil {
 			return tableDelta{watermark: wm, rowCount: total}, err
 		}
-		page, err := scanOnePage(ctx, db, query, wm, hasTU, onRow)
+		page, err := scanOnePage(ctx, db, query, wm, onRow)
 		if err != nil {
 			return tableDelta{watermark: wm, rowCount: total}, err
 		}
@@ -125,12 +122,14 @@ type pageResult struct {
 	watermark TableWatermark
 }
 
-// scanOnePage runs one page of the delta query inside a fresh read-only tx,
-// invoking onRow per row and tracking the page's max watermark. The tx is
-// committed before returning so the WAL is released between pages (the snapshot
-// advances between pages, which is correct for a tailing reader). hasTU selects
-// the 3-param (time_updated, time_updated, id) bind vs the 1-param (id) bind.
-func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWatermark, hasTU bool, onRow func(rows *sql.Rows) (rowKey, error)) (pageResult, error) {
+// scanOnePage runs one page of the composite-key delta query inside a fresh
+// read-only tx, invoking onRow per row and tracking the page's max watermark. The
+// tx is committed before returning so the WAL is released between pages (the
+// snapshot advances between pages, which is correct for a tailing reader). The
+// bind is always the 3-param (time_updated, time_updated, id) form — time_updated
+// is a required column on every tracked table (introspectAll), so there is no
+// id-only variant.
+func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWatermark, onRow func(rows *sql.Rows) (rowKey, error)) (pageResult, error) {
 	tx, err := beginRO(ctx, db)
 	if err != nil {
 		return pageResult{}, err
@@ -139,18 +138,13 @@ func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWaterm
 	// Rollback a no-op (database/sql ignores rollback after commit).
 	defer func() { _ = tx.Rollback() }()
 
-	var rows *sql.Rows
-	if hasTU {
-		rows, err = tx.QueryContext(ctx, query, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedMs, from.MaxID)
-	} else {
-		rows, err = tx.QueryContext(ctx, query, from.MaxID)
-	}
+	rows, err := tx.QueryContext(ctx, query, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedMs, from.MaxID)
 	if err != nil {
 		return pageResult{}, fmt.Errorf("opencode: delta query: %w", err)
 	}
 
 	res := pageResult{watermark: from}
-	scanErr := iterDeltaPage(ctx, rows, hasTU, &res, onRow)
+	scanErr := iterDeltaPage(ctx, rows, &res, onRow)
 	_ = rows.Close()
 	if scanErr != nil {
 		return res, scanErr
@@ -166,8 +160,9 @@ func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWaterm
 
 // iterDeltaPage walks one page's rows, delegating each row's column scan to
 // onRow and advancing the page watermark from the (id, time_updated) onRow
-// reports. On an old schema (hasTU false) only id advances; time_updated stays 0.
-func iterDeltaPage(ctx context.Context, rows *sql.Rows, hasTU bool, res *pageResult, onRow func(rows *sql.Rows) (rowKey, error)) error {
+// reports. Both fields advance: time_updated is always present on a tracked
+// table.
+func iterDeltaPage(ctx context.Context, rows *sql.Rows, res *pageResult, onRow func(rows *sql.Rows) (rowKey, error)) error {
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -177,9 +172,7 @@ func iterDeltaPage(ctx context.Context, rows *sql.Rows, hasTU bool, res *pageRes
 			return err
 		}
 		res.n++
-		if hasTU {
-			res.watermark.MaxTimeUpdatedMs = key.timeUpdatedMs
-		}
+		res.watermark.MaxTimeUpdatedMs = key.timeUpdatedMs
 		res.watermark.MaxID = key.id
 	}
 	return nil
