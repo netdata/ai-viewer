@@ -242,6 +242,13 @@ var eventMsgTypes = map[string]struct{}{
 	"view_image_tool_call":       {},
 	"dynamic_tool_call_request":  {},
 	"dynamic_tool_call_response": {},
+	// Sub-agent collab lifecycle ends (F3): collab_agent_spawn_end carries the
+	// parent→child spawn link (sender_thread_id→new_thread_id); collab_close_end
+	// and collab_waiting_end are recognized so they never SourceError (they map to
+	// a DBG log, no canonical op — real corpus: 5 spawn / 72 close / 74 waiting).
+	"collab_agent_spawn_end": {},
+	"collab_close_end":       {},
+	"collab_waiting_end":     {},
 }
 
 // eventMsgNoOp are nested event_msg variants the adapter recognizes but

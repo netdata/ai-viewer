@@ -308,7 +308,7 @@ func TestSmallHelpers(t *testing.T) {
 		t.Error("mergeExtras did not merge")
 	}
 	// trackOp empty call_id is not tracked.
-	m.trackOp("", "t", 1, 1, canonical.OpTool, "x")
+	m.trackOp("", "t", 1, 1, canonical.OpTool, "x", "shell")
 	if len(m.openOps) != 0 {
 		t.Error("trackOp tracked an empty call_id")
 	}

@@ -25,8 +25,13 @@ func (m *fileMapper) mapTurnContext(rec record, advance func(int64) canonical.Ev
 		return nil
 	}
 	tsUs := m.recordTs(rec)
+	out := make([]canonical.Event, 0, 3)
+	// A new turn_id opening supersedes the prior open turn (F1/F2, spec edge #2/#3).
+	// supersedePriorTurn decides the prior turn's close status from ITS OWN format
+	// (NEW-format → failed/replaced; OLD-format → completed) and is a no-op for a
+	// re-activating turn_context with the SAME turn_id (post-compaction).
+	out = append(out, m.supersedePriorTurn(p.TurnID, advance, tsUs)...)
 	ts := m.openTurn(p.TurnID, tsUs)
-	out := make([]canonical.Event, 0, 2)
 	if ev := m.emitTurnStarted(ts, advance(tsUs)); ev != nil {
 		out = append(out, ev)
 	}
@@ -59,9 +64,12 @@ func (m *fileMapper) mapTurnContext(rec record, advance func(int64) canonical.Ev
 // mapCompacted handles a top-level compacted line (spec rule #20). It emits a
 // single compaction op (Kind=compaction, Name=compaction) with the
 // replacement_history size and a message preview in Extras; the full summary
-// body goes to a PayloadRef. response_item.compaction / context_compaction and
-// event_msg.context_compacted are handled the same way in ops_response.go /
-// ops_event.go so all compaction signals converge on OpCompaction (spec gap #4).
+// body goes to a PayloadRef. This is the data-bearing representation; the
+// adjacent event_msg.context_compacted bare marker (same timestamp) is its
+// companion and is SUPPRESSED so ONE op is emitted per compaction (F5, spec rule
+// #20). recordIdx-1 is the current record's index (mapRecord pre-incremented
+// recordIdx); recording it lets the immediately-following context_compacted
+// recognize itself as the companion.
 func (m *fileMapper) mapCompacted(rec record, advance func(int64) canonical.EventBase) []canonical.Event {
 	p := rec.Compacted
 	tsUs := m.recordTs(rec)
@@ -72,7 +80,28 @@ func (m *fileMapper) mapCompacted(rec record, advance func(int64) canonical.Even
 			extras["message_preview"] = prev
 		}
 	}
+	// recordIdx was pre-incremented in mapRecord, so recordIdx-1 is THIS line's
+	// index; recording it lets the immediately-following context_compacted detect
+	// adjacency (F5). recordIdx is always >= 1 here (this record was counted).
+	m.compactedSeen = true
+	m.compactedRecordIdx = m.recordIdx - 1
 	return m.emitCompactionOp(advance, tsUs, extras, "json")
+}
+
+// suppressContextCompacted reports whether an event_msg.context_compacted record
+// is the bare companion marker of the immediately-preceding top-level `compacted`
+// line and must NOT emit a second compaction op (F5). The real wire pair is two
+// adjacent lines (compacted then context_compacted) with identical timestamps;
+// only the data-bearing `compacted` produces the op. A context_compacted with no
+// preceding compacted (defensive) is NOT suppressed and emits the op itself.
+// recordIdx-1 is the current record's index; the companion is suppressed when the
+// recorded `compacted` index is exactly one before it (adjacent).
+func (m *fileMapper) suppressContextCompacted() bool {
+	// recordIdx-1 is THIS context_compacted's index; it is the companion when the
+	// recorded `compacted` index is exactly one before it (adjacent). recordIdx is
+	// >= 2 here (a session_meta/turn at minimum precedes any compaction pair), so
+	// recordIdx-2 does not underflow.
+	return m.compactedSeen && m.compactedRecordIdx+1 == m.recordIdx-1
 }
 
 // emitCompactionOp emits the OpStarted+OpFinalized compaction pair plus a
@@ -136,17 +165,20 @@ func (m *fileMapper) nextOp(ts *turnState) (int, int) {
 // trackOp records an in-flight op by call_id so its matching *_output (or an
 // enrichment event) finalizes/enriches the SAME op (spec rule #9, #14-16). A
 // call_id of "" is not tracked (an unpaired op finalizes inline or at turn end).
-func (m *fileMapper) trackOp(callID, turnID string, turnSeq, opSeq int, kind canonical.OpKind, name string) {
+// namespace is stored so a late-enrichment OpStarted re-emit (F4) restates the
+// op's tool_namespace faithfully.
+func (m *fileMapper) trackOp(callID, turnID string, turnSeq, opSeq int, kind canonical.OpKind, name, namespace string) {
 	if callID == "" {
 		return
 	}
 	m.openOps[callID] = &openOp{
-		turnID:  turnID,
-		turnSeq: turnSeq,
-		opSeq:   opSeq,
-		kind:    kind,
-		name:    name,
-		extras:  map[string]any{},
+		turnID:    turnID,
+		turnSeq:   turnSeq,
+		opSeq:     opSeq,
+		kind:      kind,
+		name:      name,
+		namespace: namespace,
+		extras:    map[string]any{},
 	}
 }
 

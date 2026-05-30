@@ -42,8 +42,10 @@ func FuzzParseLine(f *testing.F) {
 		[]byte(`{"timestamp":"2025-11-20T16:59:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":{"content":"ok"}}}`),
 		// response_item, custom_tool_call / output.
 		[]byte(`{"timestamp":"2025-11-20T16:59:11.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_2","name":"apply_patch","input":"*** Begin Patch","status":"completed"}}`),
-		// response_item, web_search_call.
+		// response_item, web_search_call WITH a call_id (older shape, tolerated).
 		[]byte(`{"timestamp":"2025-11-20T16:59:11.000Z","type":"response_item","payload":{"type":"web_search_call","call_id":"ws_1","status":"completed","action":{"type":"search","query":"q"}}}`),
+		// response_item, web_search_call with NO id/call_id (real shape, F7).
+		[]byte(`{"timestamp":"2025-11-20T16:59:11.000Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}}}`),
 		// response_item, compaction / context_compaction.
 		[]byte(`{"timestamp":"2025-11-20T16:59:11.000Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"BBBB"}}`),
 		[]byte(`{"timestamp":"2025-11-20T16:59:11.000Z","type":"response_item","payload":{"type":"context_compaction","encrypted_content":null}}`),
@@ -73,8 +75,13 @@ func FuzzParseLine(f *testing.F) {
 		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call_1","turn_id":"turn-1","success":true,"status":"completed","changes":{}}}`),
 		// event_msg, context_compacted (unit struct).
 		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"context_compacted"}}`),
-		// event_msg, web_search_end.
+		// event_msg, web_search_end (carries a call_id; pairs positionally, F7).
 		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"web_search_end","call_id":"ws_1","query":"q","action":{"type":"search"}}}`),
+		// event_msg, collab_agent_spawn_end (parent→child via new_thread_id, F3).
+		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"collab_agent_spawn_end","sender_thread_id":"parent-uuid","new_thread_id":"child-uuid","new_agent_nickname":"Dewey","new_agent_role":"explorer","model":"gpt-5.5","reasoning_effort":"high","status":"completed"}}`),
+		// event_msg, collab_close_end / collab_waiting_end (recognized, log-only, F3).
+		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"collab_close_end","call_id":"x"}}`),
+		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"collab_waiting_end","call_id":"y"}}`),
 		// event_msg, error (Extended).
 		[]byte(`{"timestamp":"2025-11-20T16:59:12.000Z","type":"event_msg","payload":{"type":"error","message":"boom"}}`),
 		// compacted top-level line with replacement_history.

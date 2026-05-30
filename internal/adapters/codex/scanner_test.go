@@ -166,6 +166,38 @@ func TestDiscover_MultiShardSorted(t *testing.T) {
 	}
 }
 
+// TestDiscover_ShardDepthRequired asserts a rollout-*.jsonl that is NOT at the
+// YYYY/MM/DD shard depth (directly under the root, or under a single date
+// component) is NOT discovered as a modern rollout (F8). Only the true
+// YYYY/MM/DD layout is ingested, mirroring recorder.rs:1325-1354.
+func TestDiscover_ShardDepthRequired(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// A real shard rollout (must be found).
+	good := filepath.Join(root, "2025", "11", "20", "rollout-2025-11-20T10-00-00-"+uuid7(1)+".jsonl")
+	writeFileBytes(t, good, completeSession("sid-good"))
+	// Stray rollout directly under the root (depth 0 — wrong).
+	writeFileBytes(t, filepath.Join(root, "rollout-2025-11-20T10-00-00-strayroot.jsonl"), completeSession("sid-stray0"))
+	// Stray rollout under a single date component (depth 1 — wrong).
+	writeFileBytes(t, filepath.Join(root, "2025", "rollout-2025-11-20T10-00-00-strayyear.jsonl"), completeSession("sid-stray1"))
+	// Stray rollout under YYYY/MM (depth 2 — wrong).
+	writeFileBytes(t, filepath.Join(root, "2025", "11", "rollout-2025-11-20T10-00-00-straymonth.jsonl"), completeSession("sid-stray2"))
+	// Stray rollout under a non-numeric subtree (wrong — not a date shard).
+	writeFileBytes(t, filepath.Join(root, "scratch", "x", "y", "rollout-2025-11-20T10-00-00-straydir.jsonl"), completeSession("sid-straydir"))
+
+	disc, err := discoverRollouts(root, nil)
+	if err != nil {
+		t.Fatalf("discoverRollouts: %v", err)
+	}
+	if len(disc.modern) != 1 {
+		t.Fatalf("modern count = %d, want 1 (only the YYYY/MM/DD shard rollout; F8); got %+v", len(disc.modern), disc.modern)
+	}
+	wantRel := "2025/11/20/rollout-2025-11-20T10-00-00-" + uuid7(1) + ".jsonl"
+	if disc.modern[0].rel != wantRel {
+		t.Errorf("rel = %q, want %q", disc.modern[0].rel, wantRel)
+	}
+}
+
 // TestDiscover_LegacyClassifiedSeparately asserts legacy flat .json files
 // directly under the root are returned in disc.legacy, not disc.modern, and
 // that a legacy-named .json inside a shard dir is NOT treated as legacy.
@@ -242,10 +274,14 @@ func TestScan_ResumeNoDupNoGap(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	path := shardPath(root, uuid7(1))
-	// First half: session_meta + turn_context (turn opened, not closed).
+	// First half: session_meta + turn_context + task_started (a NEW-format turn
+	// opened, not closed). task_started is included so the turn is unambiguously
+	// new-format — a fresh new-format open turn is left OPEN at EOF (F1), so phase 1
+	// emits no premature finalize and the resume mirrors the one-shot exactly.
 	half := []string{
 		metaLine("sid-r", `"exec"`),
 		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","started_at":1763664000}}`,
 	}
 	writeFileBytes(t, path, []byte(strings.Join(half, "\n")+"\n"))
 	// Keep mtime fresh so the partial turn is NOT stale-finalized.

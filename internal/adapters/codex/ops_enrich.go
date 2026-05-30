@@ -1,18 +1,23 @@
 package codex
 
-import (
-	"encoding/json"
-
-	"github.com/netdata/ai-viewer/internal/canonical"
-)
+import "github.com/netdata/ai-viewer/internal/canonical"
 
 // enrichOp merges telemetry from an event_msg end-event onto the op matched by
-// call_id, emitting an OpFinalizedEvent that re-states the op's terminal status
-// and carries the enrichment Extras (spec rule #14 exec_command_end, #11
-// web_search_end). It does NOT emit a second op — the ingester reconciles this
-// finalize with the op's existing (turn,seq) row (idempotent upsert). When no
-// op matches the call_id (the start was below a resume offset, or the end is
-// orphaned), it surfaces a DBG log so the enrichment is not silently lost.
+// call_id, so the enrichment Extras reach the op's ops.extras_json (F4, spec rule
+// #14 exec_command_end). The merge is ORDER-INDEPENDENT — real exec ordering is
+// exec_command_end BEFORE function_call_output in ~68-85% of files and after it
+// in the rest:
+//   - op still OPEN (exec-first, the common case): merge the extras onto the
+//     tracked op and stash any exec-derived terminal status; the op STAYS OPEN so
+//     its *_output finalizes it (mapToolOutput re-emits an OpStarted carrying the
+//     merged Extras at that point — OpFinalizedEvent has no Extras field, and the
+//     writer upserts (turn,seq), so the re-emit is an idempotent UPDATE, not a
+//     second op, satisfying rule #14 "do not emit a second op"). If no *_output
+//     ever arrives, the turn-close dangling finalize re-emits the Extras.
+//   - op already FINALIZED (output-first): look it up in finalizedOps and emit an
+//     OpStarted carrying the merged Extras to UPDATE the existing row.
+//   - op NOT locatable (start below a resume offset, or orphaned): a DBG log is
+//     the only honest surface (no op row to attach to).
 //
 // extractor builds the Extras map from the raw payload (nil → no extras, e.g.
 // image_generation_end which only marks completion). A blanked-output
@@ -20,28 +25,74 @@ import (
 // status stays the op's derived terminal status (spec rule #14).
 func (m *fileMapper) enrichOp(rec record, advance func(int64) canonical.EventBase, tsUs int64, extractor func([]byte) map[string]any) []canonical.Event {
 	p := rec.EventMsg
-	op, ok := m.openOps[p.CallID]
-	if !ok {
-		// The op may have already been finalized by its *_output before this
-		// end-event; re-state with the enrichment so the Extras still land.
-		return m.enrichFinalizedOrLog(rec, advance, tsUs, extractor)
-	}
 	var extras map[string]any
 	if extractor != nil {
 		extras = extractor(rec.Raw)
 	}
 	status, errClass := enrichStatus(rec.Raw)
-	if status == "" {
-		// No explicit status/exit_code on the end-event: leave the op's terminal
-		// status to its *_output (or turn-close inference). Emit nothing here but
-		// record the extras on the tracked op so its eventual finalize carries
-		// them (the finalize path reads op.extras when present).
-		mergeExtras(op, extras)
+
+	op, ok := m.openOps[p.CallID]
+	if !ok {
+		// The op may have already been finalized by its *_output before this
+		// end-event (the ~15-32% output-first ordering): re-emit an OpStarted onto
+		// the finalized op so the Extras still land (F4).
+		return m.enrichFinalizedOp(p.CallID, advance, tsUs, p.Type, extras)
+	}
+	// Op still open (exec-first): stash extras + the exec-derived status on the op
+	// and leave it open. Its *_output (or the turn-close dangling finalize) emits
+	// the canonical OpFinalized AND re-emits an OpStarted carrying these Extras.
+	mergeExtras(op, extras)
+	if status != "" {
+		op.enrichStatus = status
+		op.enrichErrClass = errClass
+	}
+	return nil
+}
+
+// enrichFinalizedOp handles an end-event whose op was already finalized by its
+// *_output (output-first ordering, ~15-32% of exec files) (F4). It re-emits an
+// OpStarted carrying the enrichment Extras to UPDATE the existing op row
+// (idempotent on (turn,seq) — NOT a second op). When the op cannot be located in
+// finalizedOps (start below a resume offset, or orphaned), a DBG log is the only
+// honest surface. The end-event's status is NOT re-applied here: the *_output
+// already produced the canonical finalize, and the enrichment is supplementary.
+func (m *fileMapper) enrichFinalizedOp(callID string, advance func(int64) canonical.EventBase, tsUs int64, evType string, extras map[string]any) []canonical.Event {
+	fop, ok := m.finalizedOps[callID]
+	if !ok {
+		log := map[string]any{"call_id": callID}
+		for k, v := range extras {
+			log[k] = v
+		}
+		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "enrich_"+evType, log)}
+	}
+	if len(extras) == 0 {
 		return nil
 	}
-	op.finalized = true
-	mergeExtras(op, extras)
-	fin := canonical.OpFinalizedEvent{
+	return []canonical.Event{m.reemitOpStarted(fop, advance, tsUs, extras)}
+}
+
+// finalizeWithExtras emits the op's OpFinalized AND, when the op accumulated
+// enrichment Extras, a re-emitted OpStarted that carries them onto (turn,seq)
+// (F4, spec rule #14). The OpStarted is emitted FIRST so the op row exists with
+// its Extras before the finalize updates its terminal status; both upsert the
+// same (turn,seq) row. The op's kind/name/namespace are restated so the re-emit
+// is faithful (the writer keeps the original start_ts via MIN).
+func (m *fileMapper) finalizeWithExtras(op *openOp, advance func(int64) canonical.EventBase, tsUs int64, status, errClass string) []canonical.Event {
+	out := make([]canonical.Event, 0, 2)
+	if len(op.extras) > 0 {
+		out = append(out, canonical.OpStartedEvent{
+			EventBase:       advance(tsUs),
+			SessionNativeID: m.nativeID,
+			TurnSeq:         op.turnSeq,
+			Seq:             op.opSeq,
+			ParentOpSeq:     -1,
+			Kind:            op.kind,
+			Name:            op.name,
+			ToolNamespace:   op.namespace,
+			Extras:          op.extras,
+		})
+	}
+	out = append(out, canonical.OpFinalizedEvent{
 		EventBase:       advance(tsUs),
 		SessionNativeID: m.nativeID,
 		TurnSeq:         op.turnSeq,
@@ -49,28 +100,72 @@ func (m *fileMapper) enrichOp(rec record, advance func(int64) canonical.EventBas
 		Status:          status,
 		ErrorClass:      errClass,
 		EndTs:           tsUs,
-	}
-	delete(m.openOps, p.CallID)
-	return withExtrasLog(m, advance, tsUs, fin, op.extras)
+	})
+	return out
 }
 
-// enrichFinalizedOrLog handles an end-event whose op is no longer tracked (its
-// *_output already finalized it, or its start was below a resume offset). It
-// re-emits an OpFinalizedEvent ONLY when the end-event carries an explicit
-// status AND the op can be located in a turn — otherwise it surfaces a DBG log
-// so the enrichment is visible without inventing an op reference. Because a
-// finalized op was deleted from openOps, this path cannot recover the (turn,seq)
-// and therefore always logs (the *_output already produced the canonical
-// finalize; the enrichment is supplementary telemetry).
-func (m *fileMapper) enrichFinalizedOrLog(rec record, advance func(int64) canonical.EventBase, tsUs int64, extractor func([]byte) map[string]any) []canonical.Event {
-	p := rec.EventMsg
-	extras := map[string]any{"call_id": p.CallID}
-	if extractor != nil {
-		for k, v := range extractor(rec.Raw) {
-			extras[k] = v
-		}
+// reemitOpStarted builds an idempotent OpStarted that carries enrichment Extras
+// onto an already-finalized op's (turn,seq) row (F4). The writer's ON CONFLICT
+// UPDATE merges the Extras and keeps the original start_ts (MIN) and status
+// (the finalize already set it), so this only adds the late telemetry.
+func (m *fileMapper) reemitOpStarted(fop finalizedOp, advance func(int64) canonical.EventBase, tsUs int64, extras map[string]any) canonical.Event {
+	return canonical.OpStartedEvent{
+		EventBase:       advance(tsUs),
+		SessionNativeID: m.nativeID,
+		TurnSeq:         fop.turnSeq,
+		Seq:             fop.opSeq,
+		ParentOpSeq:     -1,
+		Kind:            fop.kind,
+		Name:            fop.name,
+		ToolNamespace:   fop.namespace,
+		Extras:          extras,
 	}
-	return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "enrich_"+p.Type, extras)}
+}
+
+// recordFinalizedOp records a now-finalized op so a LATE enrichment event can
+// merge Extras onto it via reemitOpStarted (F4). The op's kind/name/namespace are
+// preserved so the re-emit restates the op faithfully.
+func (m *fileMapper) recordFinalizedOp(callID string, op *openOp) {
+	if callID == "" {
+		return
+	}
+	m.finalizedOps[callID] = finalizedOp{
+		turnSeq:   op.turnSeq,
+		opSeq:     op.opSeq,
+		kind:      op.kind,
+		name:      op.name,
+		namespace: op.namespace,
+	}
+}
+
+// enrichWebSearch handles event_msg.web_search_end (F7, spec rule #11). It pairs
+// POSITIONALLY with the active turn's most-recent open web_search op
+// (openWebSearch), because web_search_call carries no correlation key. It
+// finalizes that op completed and re-emits an OpStarted carrying the query Extras
+// (OpFinalized has no Extras field). When no web_search is open (the end is
+// orphaned, or its call was below a resume offset), a DBG log keeps it visible.
+func (m *fileMapper) enrichWebSearch(rec record, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
+	ws := m.openWebSearch
+	if ws == nil {
+		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "web_search_end_no_call", nil)}
+	}
+	m.openWebSearch = nil
+	extras := webSearchExtras(rec.Raw)
+	op, ok := m.openOps[ws.syntheticCallID]
+	if !ok {
+		// The op was already finalized (e.g. at a prior turn close) — re-emit onto
+		// its row via the positional ref.
+		fop := finalizedOp{turnSeq: ws.turnSeq, opSeq: ws.opSeq, kind: canonical.OpTool, name: "web_search", namespace: "web"}
+		if len(extras) == 0 {
+			return nil
+		}
+		return []canonical.Event{m.reemitOpStarted(fop, advance, tsUs, extras)}
+	}
+	op.finalized = true
+	mergeExtras(op, extras)
+	delete(m.openOps, ws.syntheticCallID)
+	m.recordFinalizedOp(ws.syntheticCallID, op)
+	return m.finalizeWithExtras(op, advance, tsUs, "completed", "")
 }
 
 // enrichMcp handles event_msg.mcp_tool_call_end (spec rule #15). It re-stamps
@@ -102,6 +197,7 @@ func (m *fileMapper) enrichMcp(rec record, advance func(int64) canonical.EventBa
 		namespace = "mcp:" + server
 	}
 	op.name = name
+	op.namespace = namespace
 	status, errClass := mcpResultStatus(rec.Raw)
 	op.finalized = true
 	out := []canonical.Event{
@@ -126,6 +222,7 @@ func (m *fileMapper) enrichMcp(rec record, advance func(int64) canonical.EventBa
 		},
 	}
 	delete(m.openOps, p.CallID)
+	m.recordFinalizedOp(p.CallID, op)
 	return out
 }
 
@@ -150,6 +247,7 @@ func (m *fileMapper) enrichPatchApply(rec record, advance func(int64) canonical.
 		EndTs:           tsUs,
 	}
 	delete(m.openOps, p.CallID)
+	m.recordFinalizedOp(p.CallID, op)
 	return []canonical.Event{fin}
 }
 
@@ -167,160 +265,6 @@ func mergeExtras(op *openOp, extras map[string]any) {
 	}
 }
 
-// withExtrasLog appends a DBG LogEntry carrying the op's enrichment extras after
-// its finalize, so exec/web telemetry is visible in the Logs tab even though the
-// canonical OpFinalized carries no Extras field. Returns the finalize alone when
-// there are no extras.
-func withExtrasLog(m *fileMapper, advance func(int64) canonical.EventBase, tsUs int64, fin canonical.OpFinalizedEvent, extras map[string]any) []canonical.Event {
-	out := []canonical.Event{fin}
-	if len(extras) > 0 {
-		out = append(out, m.logEntry(advance(tsUs), "DBG", "op_enrichment", extras))
-	}
-	return out
-}
-
-// execCommandExtras extracts the exec_command_end telemetry merged into the op
-// (spec rule #14): exit_code, duration, cwd, source, and the truncated
-// aggregated_output length (the body itself is blanked at the source in Limited
-// mode — only aggregated_output survives, truncated to 10 KB).
-func execCommandExtras(raw []byte) map[string]any {
-	var env struct {
-		Payload struct {
-			ExitCode         *int64 `json:"exit_code"`
-			Duration         any    `json:"duration"`
-			Cwd              string `json:"cwd"`
-			Source           string `json:"source"`
-			AggregatedOutput string `json:"aggregated_output"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(raw, &env) != nil {
-		return nil
-	}
-	extras := map[string]any{}
-	if env.Payload.ExitCode != nil {
-		extras["exec_exit_code"] = *env.Payload.ExitCode
-	}
-	if env.Payload.Cwd != "" {
-		extras["exec_cwd"] = env.Payload.Cwd
-	}
-	if env.Payload.Source != "" {
-		extras["exec_source"] = env.Payload.Source
-	}
-	if env.Payload.AggregatedOutput != "" {
-		extras["exec_output_bytes"] = len(env.Payload.AggregatedOutput)
-	}
-	if len(extras) == 0 {
-		return nil
-	}
-	return extras
-}
-
-// webSearchExtras extracts event_msg.web_search_end query/action (spec rule #11).
-func webSearchExtras(raw []byte) map[string]any {
-	var env struct {
-		Payload struct {
-			Query string `json:"query"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(raw, &env) != nil {
-		return nil
-	}
-	if env.Payload.Query == "" {
-		return nil
-	}
-	return map[string]any{"query": trimPreview(env.Payload.Query, previewMax)}
-}
-
-// enrichStatus derives a terminal status/ErrorClass from an end-event carrying
-// an exit_code (spec rule #14). exit_code 0 → completed; non-zero → failed
-// (command_failed). A blanked output is NOT an error (spec rule #14). Returns
-// ("", "") when the event carries no exit_code (status left to the *_output).
-func enrichStatus(raw []byte) (status, errClass string) {
-	var env struct {
-		Payload struct {
-			ExitCode *int64 `json:"exit_code"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(raw, &env) != nil {
-		return "", ""
-	}
-	if env.Payload.ExitCode == nil {
-		return "", ""
-	}
-	if *env.Payload.ExitCode == 0 {
-		return "completed", ""
-	}
-	return "failed", "command_failed"
-}
-
-// mcpInvocation extracts mcp_tool_call_end.invocation.{server,tool} (spec rule
-// #15). Returns ("","") when absent.
-func mcpInvocation(raw []byte) (server, tool string) {
-	var env struct {
-		Payload struct {
-			Invocation struct {
-				Server string `json:"server"`
-				Tool   string `json:"tool"`
-			} `json:"invocation"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(raw, &env) != nil {
-		return "", ""
-	}
-	return env.Payload.Invocation.Server, env.Payload.Invocation.Tool
-}
-
-// mcpResultStatus derives status from mcp_tool_call_end.result, a
-// Result<CallToolResult, String> serialized as {"Ok":...} or {"Err":"..."} (spec
-// rule #15, protocol.rs:2191-2228). An Err, or a CallToolResult with
-// is_error=true, is failed; anything else completed.
-func mcpResultStatus(raw []byte) (status, errClass string) {
-	var env struct {
-		Payload struct {
-			Result json.RawMessage `json:"result"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(raw, &env) != nil {
-		return "completed", ""
-	}
-	body := jsonTrim(env.Payload.Result)
-	if len(body) == 0 {
-		return "completed", ""
-	}
-	var res struct {
-		Err json.RawMessage `json:"Err"`
-		Ok  struct {
-			IsError bool `json:"is_error"`
-		} `json:"Ok"`
-	}
-	if json.Unmarshal(body, &res) != nil {
-		return "completed", ""
-	}
-	if len(jsonTrim(res.Err)) > 0 || res.Ok.IsError {
-		return "failed", "tool_error"
-	}
-	return "completed", ""
-}
-
-// patchApplyStatus derives status from patch_apply_end.success/status (spec rule
-// #16). success=false → failed; an explicit status string maps directly. Default
-// completed.
-func patchApplyStatus(raw []byte) (status, errClass string) {
-	var env struct {
-		Payload struct {
-			Success *bool  `json:"success"`
-			Status  string `json:"status"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(raw, &env) != nil {
-		return "completed", ""
-	}
-	if env.Payload.Success != nil && !*env.Payload.Success {
-		return "failed", "patch_failed"
-	}
-	switch env.Payload.Status {
-	case "failed", "error":
-		return "failed", "patch_failed"
-	}
-	return "completed", ""
-}
+// The narrow JSON decoders for the enrichment end-events (execCommandExtras,
+// webSearchExtras, enrichStatus, mcpInvocation, mcpResultStatus,
+// patchApplyStatus) live in ops_enrich_decode.go.

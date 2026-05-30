@@ -164,9 +164,11 @@ func TestMapper_TurnBoundaryNewFormat(t *testing.T) {
 }
 
 // TestMapper_TurnBoundaryOldFormat asserts the old format (turn_context only, no
-// task_started/complete) opens a turn per turn_id; the running turn stays open
-// at clean EOF (no clean finalize — SOW C#3) (spec rule #2,#22; edge #3;
-// acceptance #3).
+// task_started/complete) opens a turn per turn_id, and a NEW turn_context closes
+// the prior OLD-format turn COMPLETED (F1, spec edge #3 — there is no task_complete
+// to close it). The last turn stays open until EOF (closed by finalizeAtEOF, not
+// exercised in this mapper-only test). No SessionFinalized (SOW C#3) (spec rule
+// #2,#22; edge #3; acceptance #3).
 func TestMapper_TurnBoundaryOldFormat(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid-old")
@@ -180,12 +182,18 @@ func TestMapper_TurnBoundaryOldFormat(t *testing.T) {
 	if got := countKind(events, canonical.EvTurnStarted); got != 2 {
 		t.Fatalf("TurnStarted count = %d, want 2 (one per turn_id)", got)
 	}
-	// Clean EOF: no TurnFinalized, no SessionFinalized (SOW C#3).
-	if got := countKind(events, canonical.EvTurnFinalized); got != 0 {
-		t.Errorf("TurnFinalized count = %d, want 0 at clean EOF", got)
+	// F1: the second turn_context closes the first OLD-format turn COMPLETED; the
+	// second turn stays open (no further boundary, no EOF-close in this test).
+	tf := turnFinals(events)
+	if len(tf) != 1 {
+		t.Fatalf("TurnFinalized count = %d, want 1 (turn t1 superseded by t2)", len(tf))
 	}
+	if tf[0].Status != "completed" || tf[0].ErrorClass != "" || tf[0].Seq != 1 {
+		t.Errorf("superseded turn finalize = {Status:%q ErrorClass:%q Seq:%d}, want {completed  1}", tf[0].Status, tf[0].ErrorClass, tf[0].Seq)
+	}
+	// No SessionFinalized (codex has no per-session terminal signal — SOW C#3).
 	if got := countKind(events, canonical.EvSessionFinalized); got != 0 {
-		t.Errorf("SessionFinalized count = %d, want 0 at clean EOF", got)
+		t.Errorf("SessionFinalized count = %d, want 0 (stays running)", got)
 	}
 }
 
@@ -479,9 +487,12 @@ func TestMapper_Compaction(t *testing.T) {
 	}
 }
 
-// TestMapper_ContextCompactionVariants asserts response_item.compaction,
-// response_item.context_compaction, and event_msg.context_compacted all converge
-// on a compaction op (spec rule #20, gap #4).
+// TestMapper_ContextCompactionVariants asserts each compaction representation, in
+// ISOLATION, converges on exactly one compaction op (spec rule #20, gap #4). The
+// response_item forms are forward-compat (0 real files); a LONE
+// event_msg.context_compacted (no preceding `compacted`) emits the op via the F5
+// defensive path. The adjacent-companion SUPPRESSION (compacted + context_compacted
+// pair → ONE op) is asserted separately in TestMapper_CompactionPairSuppressed.
 func TestMapper_ContextCompactionVariants(t *testing.T) {
 	t.Parallel()
 	for _, line := range []string{
@@ -504,28 +515,72 @@ func TestMapper_ContextCompactionVariants(t *testing.T) {
 	}
 }
 
+// TestMapper_CompactionPairSuppressed asserts the REAL compaction wire shape — a
+// data-bearing top-level `compacted` line IMMEDIATELY followed by a bare
+// event_msg.context_compacted marker (same timestamp) — produces EXACTLY ONE
+// compaction op (F5, spec rule #20). The op comes from `compacted` (carries the
+// message preview); the adjacent context_compacted is suppressed.
+func TestMapper_CompactionPairSuppressed(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"compacted","payload":{"message":"summary so far","replacement_history":[{"type":"message"}]}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"context_compacted"}}`,
+	}
+	events := runLines(t, m, lines)
+	compactions := 0
+	var op canonical.OpStartedEvent
+	for _, s := range opStarts(events) {
+		if s.Kind == canonical.OpCompaction {
+			compactions++
+			op = s
+		}
+	}
+	if compactions != 1 {
+		t.Fatalf("compaction op count = %d, want 1 (the adjacent context_compacted must be suppressed; F5)", compactions)
+	}
+	// The single op must be the data-bearing one (from `compacted`).
+	if op.Extras["message_preview"] != "summary so far" {
+		t.Errorf("compaction op did not carry the data-bearing `compacted` preview; extras=%v", op.Extras)
+	}
+}
+
 // TestMapper_ExecCommandEndEnrichesNoSecondOp asserts exec_command_end enriches
-// the matching tool op (it finalizes via exit_code) without emitting a second
-// op-start (spec rule #14).
+// the matching tool op (it finalizes via exit_code) without creating a second op
+// ROW (F4, spec rule #14). The enrichment lands via an OpStarted re-emit on the
+// SAME (turn,seq) — an idempotent UPDATE — so op count is measured by DISTINCT op
+// seq, and the exec Extras must reach that op.
 func TestMapper_ExecCommandEndEnrichesNoSecondOp(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid")
+	// exec-first ordering: exec_command_end (enrichment) arrives BEFORE the
+	// function_call_output (which finalizes the op carrying the stashed Extras).
 	lines := []string{
 		metaLine("sid", `"exec"`),
 		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}`,
 		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}`,
 		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","exit_code":0,"aggregated_output":"out","cwd":"<ROOT>","source":"model"}}`,
+		`{"timestamp":"` + tsDone + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"out"}}`,
 	}
 	events := runLines(t, m, lines)
 
-	toolStarts := 0
+	toolSeqs := map[int]struct{}{}
+	enriched := false
 	for _, s := range opStarts(events) {
 		if s.Kind == canonical.OpTool {
-			toolStarts++
+			toolSeqs[s.Seq] = struct{}{}
+			if code, ok := s.Extras["exec_exit_code"]; ok && code == int64(0) {
+				enriched = true
+			}
 		}
 	}
-	if toolStarts != 1 {
-		t.Fatalf("tool op starts = %d, want 1 (exec_command_end must not add a second op)", toolStarts)
+	if len(toolSeqs) != 1 {
+		t.Fatalf("distinct tool op seqs = %d, want 1 (exec_command_end must not add a second op row)", len(toolSeqs))
+	}
+	if !enriched {
+		t.Errorf("exec_command_end Extras did not reach the tool op via the OpStarted re-emit (F4)")
 	}
 	// The op is finalized completed (exit_code 0).
 	completed := false
@@ -539,8 +594,10 @@ func TestMapper_ExecCommandEndEnrichesNoSecondOp(t *testing.T) {
 	}
 }
 
-// TestMapper_ExecCommandEndNonZeroExitFails asserts a non-zero exit_code
-// finalizes the op failed/command_failed (spec rule #14).
+// TestMapper_ExecCommandEndNonZeroExitFails asserts a non-zero exit_code is
+// authoritative over a benign-looking output: the op finalizes failed/
+// command_failed even though the function_call_output text ("done") does not
+// itself look like an error (F4, spec rule #14).
 func TestMapper_ExecCommandEndNonZeroExitFails(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid")
@@ -549,6 +606,7 @@ func TestMapper_ExecCommandEndNonZeroExitFails(t *testing.T) {
 		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
 		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}`,
 		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","exit_code":2,"aggregated_output":""}}`,
+		`{"timestamp":"` + tsDone + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}`,
 	}
 	events := runLines(t, m, lines)
 	failed := false
@@ -558,7 +616,7 @@ func TestMapper_ExecCommandEndNonZeroExitFails(t *testing.T) {
 		}
 	}
 	if !failed {
-		t.Errorf("non-zero exit did not finalize failed/command_failed")
+		t.Errorf("non-zero exit did not finalize failed/command_failed (exit_code must win over benign output)")
 	}
 }
 
@@ -643,25 +701,35 @@ func TestMapper_SandboxDeniedOutput(t *testing.T) {
 }
 
 // TestMapper_WebSearchOp asserts a web_search_call + web_search_end produces one
-// web tool op enriched by the end event (spec rule #11).
+// web tool op enriched by the end event (spec rule #11, F7). web_search_call
+// carries no correlation key, so the end pairs POSITIONALLY; the enrichment lands
+// via an idempotent OpStarted re-emit on the SAME (turn,seq), so the op count is
+// measured by DISTINCT op seq, not by raw OpStarted-event count.
 func TestMapper_WebSearchOp(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid")
 	lines := []string{
 		metaLine("sid", `"exec"`),
 		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
-		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"web_search_call","call_id":"w1","status":"completed","action":{"type":"search","query":"q"}}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}}}`,
 		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"web_search_end","call_id":"w1","query":"q"}}`,
 	}
 	events := runLines(t, m, lines)
-	web := 0
+	webSeqs := map[int]struct{}{}
+	enriched := false
 	for _, s := range opStarts(events) {
 		if s.Name == "web_search" && s.ToolNamespace == "web" {
-			web++
+			webSeqs[s.Seq] = struct{}{}
+			if q, ok := s.Extras["query"]; ok && q == "q" {
+				enriched = true
+			}
 		}
 	}
-	if web != 1 {
-		t.Fatalf("web_search op count = %d, want 1", web)
+	if len(webSeqs) != 1 {
+		t.Fatalf("distinct web_search op seqs = %d, want 1", len(webSeqs))
+	}
+	if !enriched {
+		t.Fatalf("web_search op was not enriched with the query from web_search_end (F7)")
 	}
 }
 
@@ -681,16 +749,21 @@ func TestMapper_NoCleanFinalize(t *testing.T) {
 	if got := countKind(events, canonical.EvSessionFinalized); got != 0 {
 		t.Fatalf("SessionFinalized count = %d, want 0 (no clean-EOF finalize)", got)
 	}
-	// And finalizeStale on a clean session (no open turn) emits nothing.
-	if extra := m.finalizeStale(1_700_000_000_000_000); len(extra) != 0 {
-		t.Fatalf("finalizeStale on clean session emitted %d events, want 0", len(extra))
+	// And finalizeAtEOF on a clean session (no open turn) emits nothing whether or
+	// not the file is stale (F1).
+	if extra := m.finalizeAtEOF(false, 1_700_000_000_000_000); len(extra) != 0 {
+		t.Fatalf("finalizeAtEOF(fresh) on clean session emitted %d events, want 0", len(extra))
+	}
+	if extra := m.finalizeAtEOF(true, 1_700_000_000_000_000); len(extra) != 0 {
+		t.Fatalf("finalizeAtEOF(stale) on clean session emitted %d events, want 0", len(extra))
 	}
 }
 
-// TestMapper_SyntheticStaleFinalize asserts a hanging turn (no task_complete)
-// yields a synthetic TurnFinalized(failed,incomplete) + SessionFinalized(failed,
-// incomplete) ONLY when the scanner calls finalizeStale (spec rule #23, SOW
-// C#3, acceptance #5h).
+// TestMapper_SyntheticStaleFinalize asserts a hanging NEW-format turn (saw a
+// task_started, no task_complete) yields a synthetic TurnFinalized(failed,
+// incomplete) + SessionFinalized(failed,incomplete) ONLY when the scanner calls
+// finalizeAtEOF with stale=true (spec rule #23, SOW C#3, acceptance #5h). A fresh
+// new-format file (stale=false) leaves the turn open (F1).
 func TestMapper_SyntheticStaleFinalize(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid-crash")
@@ -706,9 +779,15 @@ func TestMapper_SyntheticStaleFinalize(t *testing.T) {
 		t.Fatalf("pre-EOF TurnFinalized = %d, want 0", got)
 	}
 
-	// Scanner determines mtime is stale ≥ 1h and calls finalizeStale.
+	// A FRESH new-format file (stale=false) leaves the hanging turn open: no
+	// finalize, and a later stale sweep can still close it (F1).
+	if fresh := m.finalizeAtEOF(false, 1_763_700_000_000_000); len(fresh) != 0 {
+		t.Fatalf("finalizeAtEOF(fresh) on a hanging new-format turn emitted %d events, want 0", len(fresh))
+	}
+
+	// Scanner later determines mtime is stale ≥ 1h and calls finalizeAtEOF(true).
 	const staleUs = 1_763_700_000_000_000
-	stale := m.finalizeStale(staleUs)
+	stale := m.finalizeAtEOF(true, staleUs)
 
 	if countKind(stale, canonical.EvTurnFinalized) != 1 {
 		t.Fatalf("stale finalize: TurnFinalized = %d, want 1", countKind(stale, canonical.EvTurnFinalized))
@@ -740,8 +819,41 @@ func TestMapper_SyntheticStaleFinalize(t *testing.T) {
 		t.Errorf("stale dangling op finalize cancelled = %d, want 1", cancelled)
 	}
 	// Idempotent: a second call emits nothing.
-	if again := m.finalizeStale(staleUs); len(again) != 0 {
-		t.Fatalf("second finalizeStale emitted %d events, want 0 (idempotent)", len(again))
+	if again := m.finalizeAtEOF(true, staleUs); len(again) != 0 {
+		t.Fatalf("second finalizeAtEOF emitted %d events, want 0 (idempotent)", len(again))
+	}
+}
+
+// TestMapper_OldFormatClosesCompletedAtEOF asserts an OLD-format session
+// (turn_context-only, no task_started) closes its last turn COMPLETED at EOF
+// regardless of staleness, and emits NO SessionFinalizedEvent (F1, spec edge #3).
+func TestMapper_OldFormatClosesCompletedAtEOF(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid-old")
+	lines := []string{
+		`{"timestamp":"` + tsMeta + `","type":"session_meta","payload":{"id":"sid-old","source":"cli","cli_version":"0.61.0"}}`,
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.1-codex-max"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}`,
+		`{"timestamp":"` + tsDone + `","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`,
+	}
+	events := runLines(t, m, lines)
+	if got := countKind(events, canonical.EvTurnFinalized); got != 0 {
+		t.Fatalf("pre-EOF TurnFinalized = %d, want 0", got)
+	}
+	// FRESH file: the old-format turn still closes completed at EOF (F1 — the bug
+	// was that only stale files were finalized, mislabeling 38% of the corpus).
+	const eofUs = 1_763_700_000_000_000
+	out := m.finalizeAtEOF(false, eofUs)
+	tf := turnFinals(out)
+	if len(tf) != 1 || tf[0].Status != "completed" || tf[0].ErrorClass != "" {
+		t.Fatalf("old-format EOF finalize = %+v, want one {completed }", tf)
+	}
+	if got := countKind(out, canonical.EvSessionFinalized); got != 0 {
+		t.Fatalf("old-format EOF SessionFinalized = %d, want 0 (stays running, SOW C#3)", got)
+	}
+	// Idempotent.
+	if again := m.finalizeAtEOF(true, eofUs); len(again) != 0 {
+		t.Fatalf("second finalizeAtEOF emitted %d events, want 0 (idempotent)", len(again))
 	}
 }
 

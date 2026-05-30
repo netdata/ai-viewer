@@ -126,7 +126,10 @@ func reportLegacy(cur Cursor, legacy []string, onError func(error)) Cursor {
 func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID string, start FileCursor, out chan<- canonical.Event, onError func(error)) (FileCursor, int, error) {
 	// Containment guard on EVERY rollout open (security.md §6): a *.jsonl symlink
 	// planted in a watched shard dir after Tail starts would otherwise be opened.
-	// Open the RESOLVED path, not the original (no TOCTOU). A refused path
+	// The resolved path is containment-checked before it is opened, and the
+	// RESOLVED path is what gets opened (not the original symlink). The window
+	// between the check and the open is an accepted limitation for this localhost,
+	// read-only tool (no O_NOFOLLOW hardening this round; F9). A refused path
 	// surfaces a SourceError (the caller logs the returned error) and is skipped.
 	resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, r.abs)
 	if cerr != nil {
@@ -211,15 +214,22 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 		cur.LastTsUs = mapper.lastTsUs
 	}
 
-	// EOF-finalize (rule #23): finalize a hanging open turn failed/incomplete
-	// ONLY when the file is fully read AND its mtime is stale ≥ 1 h. The mapper
-	// owns the open-turn decision (finalizeStale is a no-op for a cleanly-ended
-	// session — SOW C#3: no clean-EOF completed finalize). A fresh file leaves
-	// the turn open for the next append. The synthetic end timestamp is the file
-	// mtime in micros (mapper_finalize.go).
+	// EOF-finalize (rule #23, spec edge #3, F1): when the file is FULLY read, ask
+	// the mapper to finalize a hanging open turn. The mapper owns the open-turn
+	// decision and splits on format + staleness (mapper_finalize.go):
+	//   - OLD-format open turn (turn_context-only): closed COMPLETED at EOF
+	//     regardless of staleness (spec edge #3 "close at EOF"); no
+	//     SessionFinalized (SOW C#3).
+	//   - NEW-format open turn: closed failed/incomplete + SessionFinalized ONLY
+	//     when the mtime is stale ≥ 1 h (rule #23); a fresh file leaves it open.
+	//   - clean end / no open turn: nothing (stays running, SOW C#3).
+	// This is called UNCONDITIONALLY at full-read EOF (not only when stale) and
+	// passed the stale bool, so the OLD-format completed-close fires on fresh files
+	// too (F1). The synthetic end timestamp is the file mtime in micros.
 	fullyRead := res.advanced >= size
-	if fullyRead && time.Since(info.ModTime()) >= staleAfter {
-		for _, ev := range mapper.finalizeStale(mtimeUs) {
+	if fullyRead {
+		stale := time.Since(info.ModTime()) >= staleAfter
+		for _, ev := range mapper.finalizeAtEOF(stale, mtimeUs) {
 			select {
 			case <-ctx.Done():
 				return cur, res.emitted, ctx.Err()

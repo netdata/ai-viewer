@@ -157,9 +157,9 @@ References: `codex-rs/protocol/src/models.rs:750-903`. Tagged union; the variant
 | `custom_tool_call_output` | `CustomToolCallOutput` | `call_id`, `output` (same shape as function_call_output) |
 | `tool_search_call`, `tool_search_output` | tool-search subsystem | |
 | `web_search_call` | `WebSearchCall` | `call_id`, `status`, `action` (e.g. `{type:"search", query}`) |
-| `image_generation_call` | `ImageGenerationCall` | `id`, `status`, `revised_prompt`, `result` |
-| `compaction` | `Compaction` | `encrypted_content` (opaque) |
-| `context_compacted` | `ContextCompaction` | `encrypted_content`\|null — companion summary item |
+| `image_generation_call` | `ImageGenerationCall` | `id`, `status`, `revised_prompt`, `result` — **0 real files** (forward-compat only) |
+| `compaction` | `Compaction` | `encrypted_content` (opaque) — **0 real files** (forward-compat only) |
+| `context_compaction` | `ContextCompaction` | `encrypted_content`\|null — **0 real files** (forward-compat only). NOTE: distinct from the real `event_msg.context_compacted` bare marker (rule #20), which is the actual compaction companion that occurs in the corpus. |
 | `ghost_snapshot` | `Other` (catch-all) | observed in real files; not in the persisted-allowlist enum but slips through as `Other`; older lines stripped during reconstruction (`recorder.rs:836,926`) |
 
 The `ResponseItem` enum has `#[serde(other)] Other` (`models.rs:901`), so any unknown variant deserializes successfully — the adapter MUST be forgiving and emit `LogEntry` at most once per unknown variant.
@@ -342,10 +342,10 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
     - Same as function_call/output. `tool_namespace = "custom"`.
 
 11. **`response_item` payload `web_search_call` / `event_msg.web_search_end`:**
-    - Single op: Kind=`tool`, Name=`web_search`, ToolNamespace=`web`. Pair the `response_item` (start) with the `event_msg.web_search_end` carrying `query` and `action`.
+    - Single op: Kind=`tool`, Name=`web_search`, ToolNamespace=`web`. **`web_search_call` carries NEITHER `id` NOR `call_id`** (real corpus: 483 files, no call-side correlation key), so it CANNOT pair by key. Pair the `response_item` (start) POSITIONALLY with the next `event_msg.web_search_end` in the same turn — track the most-recent open web_search op per turn and finalize it on the next `web_search_end` (which DOES carry a `call_id`, but in a different correlation space). The end carries `query` and `action`, merged onto the op's Extras via an OpStarted re-emit (F7).
 
 12. **`response_item` payload `image_generation_call` / `event_msg.image_generation_end`:**
-    - Op: Kind=`tool`, Name=`image_generation`, ToolNamespace=`media`.
+    - Op: Kind=`tool`, Name=`image_generation`, ToolNamespace=`media`. **UNOBSERVED: 0 real files for both `image_generation_call` and `image_generation_end`** — this mapping is forward-compat only and has no fixture coverage (no real data exists to sanitize). `image_generation_call` would use `id` (not `call_id`); the code keeps the path but does not pair beyond the active-turn fallback (F7).
 
 13. **`response_item` payload `local_shell_call` / `local_shell_call_output`:**
     - LEGACY ONLY (does not occur in modern `.jsonl`). When ingesting legacy `.json` files: Kind=`tool`, Name=`shell`, ToolNamespace=`shell`.
@@ -372,8 +372,8 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 19. **`event_msg` payload `agent_message`:**
     - Companion to the assistant `response_item.message`. Adapter emits only the `response_item` (see #7); uses `event_msg.agent_message` only to populate `TurnFinalized.LastAgentMessage` Extras (for the UI "latest answer" preview).
 
-20. **`event_msg` payload `context_compacted` AND top-level `compacted` line:**
-    - Both signal compaction. Emit a single Op Kind=`internal`, Name=`compaction`, Extras={`replacement_history_size`, `message_preview`}. The body goes to PayloadRef Format=`json`.
+20. **Top-level `compacted` line AND its companion `event_msg.context_compacted`:**
+    - These are TWO representations of ONE compaction, written as ADJACENT lines with IDENTICAL timestamps (real workstation corpus: 293 `compacted` + 258 `event_msg.context_compacted`). The top-level `compacted` is data-bearing (`{message, replacement_history}`); the `event_msg.context_compacted` is a bare `{type}` marker. Emit exactly ONE Op Kind=`compaction`, Name=`compaction`, Extras={`replacement_history_size`, `message_preview`} from the data-bearing `compacted` line; SUPPRESS the adjacent `event_msg.context_compacted` so it does NOT produce a second op. A lone `event_msg.context_compacted` with no preceding `compacted` (defensive) emits the op itself. The body goes to PayloadRef Format=`json`. (Note: `response_item.compaction` / `response_item.context_compaction` have ZERO real files — they are forward-compat only; if a future CLI emits one it converges on the same OpCompaction.)
 
 21. **`event_msg` payload `ghost_snapshot`:**
     - Codex internal book-keeping for resume — strip and ignore (`recorder.rs:836,926` shows upstream strips them during read).
@@ -382,9 +382,24 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
     - Some older sessions (e.g. cli 0.61.0) have `turn_context` only, no task_started/complete. Newer (>= ~0.93.0) emit both. Adapter must treat either as the turn boundary signal — whichever arrives first opens the turn, whichever last closes it.
 
 23. **EOF without any `task_complete` or `turn_aborted` for the most recent turn:**
-    - Turn is still in-flight (running session) OR codex crashed.
-    - If file mtime is recent (< 5 min): keep turn open, ingest more on next event.
-    - If file mtime is stale (>= 1 hour): emit `TurnFinalizedEvent(Status="failed", ErrorClass="incomplete")` and `SessionFinalizedEvent(Status="failed", ErrorClass="incomplete")`. (`turn_aborted` upstream uses similar logic when codex restarts on a crashed session.)
+    The EOF-finalize splits on the most-recent open turn's FORMAT (whether a
+    `task_started` was ever seen for it) — this is the F1 fix; an earlier draft
+    treated all formats identically and mislabeled the large pure-old-format
+    corpus as crashes:
+    - **OLD-format turn (turn_context-only, no `task_started` — cli < ~0.93):**
+      close `TurnFinalizedEvent(Status="completed")` at EOF, REGARDLESS of
+      staleness (edge #3 "close at EOF"; ~38% of the real corpus is pure
+      old-format ending cleanly with no completion marker). NO
+      `SessionFinalizedEvent` — codex has no per-session terminal signal (C#3);
+      the session stays `running`.
+    - **NEW-format turn (a `task_started` opened it, no `task_complete`):** the
+      turn is still in-flight on a fresh file — keep it open and ingest more on
+      the next event. Only when the file mtime is stale (≥ 1 hour) is it treated
+      as a crash: emit `TurnFinalizedEvent(Status="failed", ErrorClass="incomplete")`
+      and `SessionFinalizedEvent(Status="failed", ErrorClass="incomplete")`.
+      (`turn_aborted` upstream uses similar logic when codex restarts on a crashed
+      session.)
+    - **No open turn (clean end, or none opened):** nothing — stays `running`.
 
 24. **No `session_meta` line ever seen (corrupt file or pre-write crash):**
     - Emit `SourceError` and skip the file. Cursor.offset stays 0 so it is retried on next CREATE-style event.
@@ -411,9 +426,13 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 | `event_msg.token_count` | turn rollups + LLM op ctx_used/ctx_max |
 | `event_msg.user_message` | dedup with response_item.message(user); use as canonical user op |
 | `event_msg.agent_message` | dedup with response_item.message(assistant); populate TurnFinalized.LastAgentMessage |
-| `compacted` line / `response_item.context_compaction` / `event_msg.context_compacted` | one Op Kind=internal Name=compaction |
-| EOF without task_complete + file mtime-stale ≥ 1 h | synthetic `TurnFinalizedEvent(failed,incomplete)` + `SessionFinalizedEvent(failed,incomplete)` |
-| EOF clean (most recent event is task_complete) | **no `SessionFinalizedEvent`** — session stays `running` (codex has no per-session terminal signal; rollouts are resumable and metadata-appendable per `recorder.rs:1610`). UI uses `last_activity_ts` for staleness, identical to claude-code. |
+| `compacted` line (+ adjacent `event_msg.context_compacted` companion, suppressed) | one Op Kind=compaction Name=compaction |
+| lone `event_msg.context_compacted` (no preceding `compacted`) | one Op Kind=compaction Name=compaction (defensive) |
+| `response_item.compaction` / `response_item.context_compaction` | forward-compat only (0 real files); converges on one OpCompaction if ever emitted |
+| EOF, OLD-format open turn (turn_context-only, no task_started) | `TurnFinalizedEvent(completed)` at EOF regardless of staleness (edge #3); **no `SessionFinalizedEvent`** (F1) |
+| EOF, NEW-format open turn (saw task_started), file mtime-stale ≥ 1 h | synthetic `TurnFinalizedEvent(failed,incomplete)` + `SessionFinalizedEvent(failed,incomplete)` |
+| EOF, NEW-format open turn, file FRESH (< 1 h) | turn stays open (still in-flight); no finalize (F1) |
+| EOF clean (most recent event is task_complete / no open turn) | **no `SessionFinalizedEvent`** — session stays `running` (codex has no per-session terminal signal; rollouts are resumable and metadata-appendable per `recorder.rs:1610`). UI uses `last_activity_ts` for staleness, identical to claude-code. |
 | unknown `type` or unknown `payload.type` | `SourceError` (once per variant) + `LogEntry` |
 
 ### Cost calculation
@@ -430,12 +449,13 @@ Codex supports sub-agents (`SubAgentSource::ThreadSpawn`) and forks (`forked_fro
 
 - **Sub-agent**: `session_meta.payload.source = {"subagent": {"thread_spawn": {"parent_thread_id": "<uuid>", "depth": N, "agent_nickname": "...", "agent_role": "..."}}}` and `thread_source = "subagent"`. The parent session's rollout file does NOT inline the child; it appears separately and the parent is identified via `parent_thread_id`.
 - **Fork**: `session_meta.payload.forked_from_id = "<uuid>"` — branched/resumed from another session.
-- **`event_msg.collab_agent_spawn_begin`/`_end`** in the PARENT rollout name the spawn but the `_begin` event is NOT persisted (`policy.rs:215`). Only `_end` is. The `_end` event carries `agent_ref.thread_id` linking parent→child.
+- **`event_msg.collab_agent_spawn_begin`/`_end`** in the PARENT rollout name the spawn but the `_begin` event is NOT persisted (`policy.rs:215`). Only `_end` is. The `_end` event carries the parent→child link as `sender_thread_id` (parent) → `new_thread_id` (child), alongside `new_agent_nickname`, `new_agent_role`, `model`, `reasoning_effort`, and `status`. (Real workstation corpus: 5 `collab_agent_spawn_end` files; the field is `new_thread_id`, NOT `agent_ref.thread_id` as an earlier draft of this spec wrongly stated.)
+- **`event_msg.collab_close_end`** (72 files) and **`event_msg.collab_waiting_end`** (74 files) also appear in collab sessions. They carry no parent→child edge the topology view needs, so the adapter recognizes them (no `SourceError`) and surfaces each as a `LogEntry` only — no canonical op.
 
 Adapter behavior:
 - Emit `SessionStartedEvent.ParentNativeID = parent_thread_id` when the child's `session_meta.source` is `subagent`.
 - Emit `SessionStartedEvent.ParentNativeID = forked_from_id` otherwise when `forked_from_id` is present.
-- In the parent, when an `event_msg.collab_agent_spawn_end` line appears, emit an Op Kind=`session`, Name=`spawn`, ChildSessionNativeID=`agent_ref.thread_id`. (If the child rollout file doesn't yet exist at that moment, the ingester's foreign-key constraint must be relaxed temporarily — the canonical-events spec allows out-of-order child arrival.)
+- In the parent, when an `event_msg.collab_agent_spawn_end` line appears, emit an Op Kind=`session`, Name=`spawn`, ChildSessionNativeID=`new_thread_id`. (If the child rollout file doesn't yet exist at that moment, the ingester's foreign-key constraint must be relaxed temporarily — the canonical-events spec allows out-of-order child arrival.)
 - A sub-agent rollout file with `parent_thread_id` referring to an unknown session is recorded with `parent_session_id` set to NULL and a `LogEntry` warning; reconciled when the parent appears.
 
 Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1`, with named nicknames (Raman, Tesla, Nash, Boyle, etc.) and role `"explorer"`.

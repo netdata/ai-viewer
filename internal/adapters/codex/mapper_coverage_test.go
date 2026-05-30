@@ -246,30 +246,41 @@ func TestMapper_ModelLearnedOnceAcrossTurns(t *testing.T) {
 	}
 }
 
-// TestMapper_EnrichOnAlreadyFinalizedOpLogs covers enrichFinalizedOrLog: an
-// exec_command_end whose op was ALREADY finalized by its function_call_output
-// surfaces a DBG enrichment log (spec rule #14 supplementary telemetry).
-func TestMapper_EnrichOnAlreadyFinalizedOpLogs(t *testing.T) {
+// TestMapper_EnrichOnAlreadyFinalizedOpReemits covers the output-first exec
+// ordering (~15-32% of real files, F4): an exec_command_end whose op was ALREADY
+// finalized by its function_call_output re-emits an OpStarted carrying the exec
+// Extras onto the SAME (turn,seq) — an idempotent UPDATE, NOT a DBG log (spec
+// rule #14). The enrichment must land in ops.extras_json regardless of order.
+func TestMapper_EnrichOnAlreadyFinalizedOpReemits(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid")
 	lines := []string{
 		metaLine("sid", `"exec"`),
 		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
 		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}`,
-		// output finalizes c1 first (deletes it from openOps).
+		// output finalizes c1 first (deletes it from openOps) — output-first order.
 		`{"timestamp":"` + tsEvent + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}`,
 		// exec_command_end now arrives for the already-finalized op.
 		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","exit_code":0,"aggregated_output":"ok","source":"model"}}`,
 	}
 	events := runLines(t, m, lines)
-	dbg := false
-	for _, ev := range events {
-		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "enrich_exec_command_end" {
-			dbg = true
+	// The enrichment must arrive as a re-emitted OpStarted (same turn/seq as the
+	// shell op) carrying exec_* Extras — NOT a DBG log.
+	reemit := false
+	for _, s := range opStarts(events) {
+		if s.Name == "shell" && s.Seq == 1 {
+			if code, ok := s.Extras["exec_exit_code"]; ok && code == int64(0) {
+				reemit = true
+			}
 		}
 	}
-	if !dbg {
-		t.Errorf("late exec_command_end on finalized op did not surface a DBG enrichment log")
+	if !reemit {
+		t.Errorf("late exec_command_end on finalized op did not re-emit an OpStarted carrying exec Extras (F4)")
+	}
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "enrich_exec_command_end" {
+			t.Errorf("late exec_command_end logged instead of re-emitting onto the op (F4 regression)")
+		}
 	}
 }
 
@@ -372,19 +383,221 @@ func TestMapper_ReasoningContentRaw(t *testing.T) {
 	}
 }
 
-// TestMapper_TokenCountBeforeAnyTurnDropped covers mapTokenCount's nil-turn path
-// (token_count before any turn opened).
-func TestMapper_TokenCountBeforeAnyTurnDropped(t *testing.T) {
+// TestMapper_TokenCountBeforeAnyTurnLogs covers mapTokenCount's nil-turn path
+// (token_count before any turn opened): it must surface a DBG
+// "token_count_no_turn" log, NOT drop silently (F6, spec rule #6 "no silent
+// failures").
+func TestMapper_TokenCountBeforeAnyTurnLogs(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid")
 	lines := []string{
 		metaLine("sid", `"exec"`),
-		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5}}}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"token_count","turn_id":"ghost","info":{"last_token_usage":{"input_tokens":5}}}}`,
 	}
 	events := runLines(t, m, lines)
-	// No turn → no rollup, no crash, no token_count-derived event.
+	// No turn → no rollup, no crash, no token_count-derived turn finalize.
 	if got := countKind(events, canonical.EvTurnFinalized); got != 0 {
 		t.Errorf("TurnFinalized = %d, want 0", got)
+	}
+	// But a DBG log MUST surface the dropped count (F6).
+	logged := false
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "token_count_no_turn" {
+			logged = true
+			if le.Extras["turn_id"] != "ghost" {
+				t.Errorf("token_count_no_turn log turn_id = %v, want ghost", le.Extras["turn_id"])
+			}
+		}
+	}
+	if !logged {
+		t.Errorf("token_count with no open turn was dropped silently (F6 regression: must DBG-log)")
+	}
+}
+
+// TestMapper_CollabSpawnSessionOp covers collab_agent_spawn_end (F3): a
+// session/spawn op whose ChildSessionNativeID is new_thread_id (NOT
+// agent_ref.thread_id), carrying the spawned agent metadata in Extras.
+func TestMapper_CollabSpawnSessionOp(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("parent-sid")
+	lines := []string{
+		metaLine("parent-sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"collab_agent_spawn_end","sender_thread_id":"parent-sid","new_thread_id":"child-uuid","new_agent_nickname":"Dewey","new_agent_role":"explorer","status":"completed"}}`,
+	}
+	events := runLines(t, m, lines)
+	var spawn *canonical.OpStartedEvent
+	for i := range events {
+		if s, ok := events[i].(canonical.OpStartedEvent); ok && s.Kind == canonical.OpSession && s.Name == "spawn" {
+			sc := s
+			spawn = &sc
+		}
+	}
+	if spawn == nil {
+		t.Fatalf("no session/spawn op emitted for collab_agent_spawn_end (F3)")
+	}
+	if spawn.ChildSessionNativeID != "child-uuid" {
+		t.Errorf("ChildSessionNativeID = %q, want child-uuid (new_thread_id, NOT agent_ref)", spawn.ChildSessionNativeID)
+	}
+	if spawn.Extras["relationship"] != "sub_agent" || spawn.Extras["new_agent_nickname"] != "Dewey" {
+		t.Errorf("spawn extras = %v, want relationship=sub_agent + nickname Dewey", spawn.Extras)
+	}
+}
+
+// TestMapper_CollabCloseAndWaitingRecognized covers collab_close_end and
+// collab_waiting_end (F3): recognized (runLines would Fatalf on an unknown
+// payload type via parseLine), surfaced as a DBG log, and producing NO canonical
+// op.
+func TestMapper_CollabCloseAndWaitingRecognized(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"collab_close_end","call_id":"x"}}`,
+		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"collab_waiting_end","call_id":"y"}}`,
+	}
+	// runLines Fatalf's on a parse error, so reaching here proves the types are
+	// recognized (no errUnknownPayloadType).
+	events := runLines(t, m, lines)
+	// No session/spawn or other op from these markers.
+	for _, s := range opStarts(events) {
+		if s.Kind == canonical.OpSession {
+			t.Errorf("collab_close_end/waiting_end wrongly produced a session op")
+		}
+	}
+	closeLogged, waitLogged := false, false
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok {
+			if le.Message == "event_msg:collab_close_end" {
+				closeLogged = true
+			}
+			if le.Message == "event_msg:collab_waiting_end" {
+				waitLogged = true
+			}
+		}
+	}
+	if !closeLogged || !waitLogged {
+		t.Errorf("collab_close_end/waiting_end not surfaced as DBG logs (close=%v wait=%v)", closeLogged, waitLogged)
+	}
+}
+
+// TestMapper_CollabSpawnNoChildLogs covers mapCollabSpawn's no-child branch (F3):
+// a collab_agent_spawn_end with no new_thread_id surfaces a DBG log and emits no
+// session op. Also covers spawnStatus's failed branch via a "failed" status.
+func TestMapper_CollabSpawnNoChildLogs(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"collab_agent_spawn_end","sender_thread_id":"p","status":"failed"}}`,
+	}
+	events := runLines(t, m, lines)
+	for _, s := range opStarts(events) {
+		if s.Kind == canonical.OpSession {
+			t.Errorf("collab_agent_spawn_end with no new_thread_id wrongly produced a session op")
+		}
+	}
+	logged := false
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "collab_agent_spawn_end_no_child" {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Errorf("collab_agent_spawn_end with no child did not surface a DBG log (F3)")
+	}
+	// spawnStatus failed branch (a spawned child + status=failed → op finalized failed).
+	if got := spawnStatus("failed"); got != "failed" {
+		t.Errorf("spawnStatus(failed) = %q, want failed", got)
+	}
+	if got := spawnStatus("completed"); got != "completed" {
+		t.Errorf("spawnStatus(completed) = %q, want completed", got)
+	}
+}
+
+// TestMapper_WebSearchEndOrphanLogs covers enrichWebSearch's no-call branch (F7):
+// a web_search_end with no preceding web_search_call surfaces a DBG log.
+func TestMapper_WebSearchEndOrphanLogs(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"web_search_end","call_id":"orphan","query":"q"}}`,
+	}
+	events := runLines(t, m, lines)
+	logged := false
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "web_search_end_no_call" {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Errorf("orphan web_search_end did not surface a DBG log (F7)")
+	}
+}
+
+// TestMapper_LateEnrichOrphanLogs covers enrichFinalizedOp's not-locatable branch
+// (F4): an exec_command_end whose call_id matches NO op (neither open nor
+// finalized) surfaces a DBG log rather than inventing an op reference.
+func TestMapper_LateEnrichOrphanLogs(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"ghost","exit_code":0,"aggregated_output":"x"}}`,
+	}
+	events := runLines(t, m, lines)
+	logged := false
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "enrich_exec_command_end" {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Errorf("orphan exec_command_end did not surface a DBG log (F4 not-locatable path)")
+	}
+}
+
+// TestMapper_OutputFirstExecEnrich covers the output-first ordering where the
+// function_call_output finalizes the op BEFORE the exec_command_end, so the late
+// exec_command_end re-emits onto the finalized op via finalizedOps (F4). Also
+// covers mapToolOutput's finalizedOps PayloadRef-attach branch via a duplicate
+// output line.
+func TestMapper_OutputFirstExecEnrich(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}`,
+		`{"timestamp":"` + tsEvent + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}`,
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","exit_code":0,"aggregated_output":"ok","cwd":"<ROOT>"}}`,
+		// A second (duplicate) output for the now-finalized op: its tool_response
+		// PayloadRef should still attach via finalizedOps, not warn.
+		`{"timestamp":"` + tsDone + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok-again"}}`,
+	}
+	events := runLines(t, m, lines)
+	// The late exec_command_end re-emitted onto the shell op carrying exec_exit_code.
+	reemit := false
+	for _, s := range opStarts(events) {
+		if s.Name == "shell" {
+			if _, ok := s.Extras["exec_exit_code"]; ok {
+				reemit = true
+			}
+		}
+	}
+	if !reemit {
+		t.Errorf("output-first late exec_command_end did not re-emit exec Extras onto the op (F4)")
+	}
+	// No tool_output_unmatched warn for the duplicate output (it attaches via finalizedOps).
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "tool_output_unmatched" {
+			t.Errorf("duplicate output on a finalized op wrongly warned tool_output_unmatched (F4)")
+		}
 	}
 }
 

@@ -160,7 +160,20 @@ Producer of codex canonical rows: the new adapter's `Scan` (backfill) + `Tail` (
 
 ## Implementation
 
-(Empty placeholder. Filled as chunks complete.)
+Chunks A–E delivered the adapter (parser, cursor, mapper state machine, scanner/tailer, payloads, adapter wiring, discovery probe, fixtures). Round-2 review fixes (F1–F9) landed on top, all within `internal/adapters/codex/`, the additive `cmd/ai-viewer-ingest/sources.go` probe (F8 only), and the F3/F5/F7 spec corrections in `adapter-codex.md`:
+
+- **F1+F2 — turn lifecycle.** `turnState.sawTaskStarted` discriminates NEW-format (task_started) from OLD-format (turn_context-only) turns. `supersedePriorTurn` (mapper_turn.go) closes a prior open turn when a new turn_id opens via EITHER turn_context or task_started: NEW-format prior → failed/replaced (edge #2); OLD-format prior → completed (edge #3). `finalizeStale` was replaced by `finalizeAtEOF(stale bool, nowUs int64)` (mapper_finalize.go): OLD-format open turns close completed at EOF regardless of staleness; NEW-format open turns close failed/incomplete + SessionFinalized ONLY when stale; scanner.go now calls it UNCONDITIONALLY at full-read EOF passing the stale bool.
+- **F3 — collab.** `collab_agent_spawn_end`/`collab_close_end`/`collab_waiting_end` added to `eventMsgTypes`; `mapCollabSpawn` (ops_collab.go) emits Op Kind=session Name=spawn ChildSessionNativeID=new_thread_id; close/waiting → DBG log, no op. Spec corrected (sender_thread_id→new_thread_id; close/waiting documented).
+- **F4 — enrichment to op Extras (order-independent).** Late enrichment lands via a re-emitted OpStarted (idempotent UPDATE on (turn,seq)); a `finalizedOps` lookup re-emits onto already-finalized ops; exec-first ordering stashes extras+status on the open op and re-emits at the *_output finalize; an exec exit_code is authoritative over a benign output string. The always-log path is gone (only logs when the op truly can't be located).
+- **F5 — compaction dedup.** ONE op from the data-bearing top-level `compacted`; the adjacent `event_msg.context_compacted` (same timestamp) is suppressed; a lone context_compacted (defensive) still emits. Spec rule #20 + table + response_item rows corrected (response_item.compaction/context_compaction = 0 real files).
+- **F6 — token_count.** `mapTokenCount` emits a DBG `token_count_no_turn` log instead of silently dropping; dead `_ = tsUs` removed.
+- **F7 — web_search positional pairing.** `web_search_call` (no id) tracked as the active turn's `openWebSearch`; `enrichWebSearch` pairs the following `web_search_end` positionally. image_generation kept forward-compat (no fixture). Spec rules #11/#12 corrected.
+- **F8 — shard depth.** `hasShardDepth` (discovery.go) requires three numeric path components before `rollout-*.jsonl`; applied in discoverRollouts, rolloutForRel (tailer.go), and countRolloutFiles (sources.go via codexAtShardDepth).
+- **F9 — TOCTOU comment.** scanner.go containment comment softened to state the check-then-open window is an accepted localhost read-only limitation.
+
+File splits to honor the ~400-line budget: `ops_collab.go` (F3), `ops_enrich_decode.go` (enrichment JSON decoders), `mapper_state.go` (turn/op state types), and `payloadURI`/`payloadRef` moved to `payloads.go`.
+
+Fixtures: regenerated `b_old_turncontext` (EOF-completed close), `e_compaction` (real compacted + adjacent context_compacted), `f_exec_truncated` (exec-first ordering); added `i_collab_spawn`, `j_replaced_turn`, `k_web_search`. All synthetic + sanitized (`<ROOT>`, `git@github.com:example/example.git`, synthetic UUIDs).
 
 ## Validation
 
@@ -168,7 +181,27 @@ Producer of codex canonical rows: the new adapter's `Scan` (backfill) + `Tail` (
 
 ## Reviews
 
-(Empty placeholder. Filled as external reviewers run.)
+### Round 1 (2026-05-30) — codex + glm + minimax, parallel, on the whole adapter
+
+- **minimax**: SAFE TO MERGE, 0 P1, 1 P2 (golden coverage of `role=developer`/`system` messages). Rubber-stamped — falsely claimed `mapTokenCount` logs the no-turn case (it does not; see F6).
+- **glm**: SAFE TO MERGE, 0 P1, 3 P2 (enrichment-to-log; `mapTokenCount` silent drop; spec #23 "5 min" wording) + 4 P3.
+- **codex**: NOT SAFE TO MERGE, 1 P1 + 5 P2 + 2 P3. The decisive reviewer; surfaced the real spec-conformance gaps the others missed.
+
+Adjudicated on ground truth (spec lines + a read-only investigation of the real `~/.codex/sessions/` corpus, 2,660 modern + 19 legacy files). Every finding was verified against code+spec+real-data, not taken on reviewer say-so. The real-data evidence **confirmed all of codex's findings AND corrected their details** (codex guessed some wire shapes wrong):
+
+| # | Sev | Finding | Ground-truth verdict |
+|---|---|---|---|
+| F1 | P1 | Old `turn_context`-only sessions never close their last turn → stale-finalize marks them `failed/incomplete` | CONFIRMED. spec edge #3 (adapter-codex.md:449) says close at EOF. **1,006 real files (38%)** are pure old-format, ending cleanly with no completion marker — all would be mislabeled crashes. `b_old_turncontext` golden hid it (fresh test mtime). |
+| F2 | P2 | `task_started` replacing an open turn doesn't finalize the prior `failed/replaced` | CONFIRMED. spec edge #2 (adapter-codex.md:447). `openTurn` (mapper_turn.go:192) doesn't close the prior turn. |
+| F3 | P2 | `collab_agent_spawn_end` treated as unknown → SourceError; loses parent→child spawn op | CONFIRMED real (5 files, 88 lines). **Spec is wrong**: real link is `sender_thread_id`→`new_thread_id`, NOT `agent_ref.thread_id` (adapter-codex.md:433). Also `collab_close_end` (72), `collab_waiting_end` (74) exist and are unhandled. |
+| F4 | P2 | exec/patch enrichment doesn't reach op Extras (OpFinalizedEvent has no Extras field) → degrades to a log | CONFIRMED. spec rule #14 (adapter-codex.md:354) requires merge into op Extras. Real order is `exec_command_end` BEFORE `function_call_output` in ~68-85% (the rest output-first) — enrichment is lost in BOTH orders. Fix must be order-independent. |
+| F5 | P2 | Compaction emits two ops; spec wants one | CONFIRMED. spec rule #20 (adapter-codex.md:375) + table (:414). Real pair is top-level `compacted` (293 files, data-bearing) + adjacent `event_msg.context_compacted` (258 files, bare marker, same timestamp) — **two representations of one event**. `response_item.compaction`/`context_compaction` have **0 real files** (the `e_compaction` fixture used a shape that never occurs). |
+| F6 | P2 | `mapTokenCount` silently drops a no-turn `token_count` with no log (dead `_ = tsUs`) | CONFIRMED (glm). ops_event.go:166-172 — comment promises a DBG log the code never emits; violates "no silent failures". |
+| F7 | P2 | `web_search_call`/`image_generation_call` won't pair with their end events | CONFIRMED + REFINED. codex guessed `id`; real `web_search_call` (483 files) carries **neither `id` nor `call_id`** — no call-side key, must pair positionally with the following `web_search_end` (which carries `call_id`). `image_generation_*` has **0 real files** (dead/forward-compat). |
+| F8 | P3 | Discovery matches `rollout-*.jsonl` at any depth, not just `YYYY/MM/DD` | CONFIRMED minor. discovery.go:115 / tailer.go:350 / sources.go:210. |
+| F9 | P3 | Symlink containment check-then-open TOCTOU; comment overclaims "no TOCTOU" | CONFIRMED minor (matches merged claude_code). Soften the overclaiming comment; full O_NOFOLLOW hardening deferred. |
+
+**Decided fix plan (round 2):** code fixes to match the (mostly already-correct) spec + spec corrections where the spec had wrong wire shapes (F3 collab fields, F5/F7 dead variants) + regenerated goldens (the round-1 goldens were partly circular — built by the same understanding as the code) + new real-shape fixtures (collab spawn, replaced turn, old-format-stale, realistic web_search + compaction + exec-first ordering). All code fixes stay within `internal/adapters/codex/` + the additive `sources.go` probe; no canonical/ingest/store change. F9 hardening and `image_generation` real-shape coverage (no real data exists) are documented as accepted limitations.
 
 ## Outcome
 

@@ -47,11 +47,28 @@ func (m *fileMapper) mapEventMsg(rec record, advance func(int64) canonical.Event
 	case "patch_apply_end":
 		return m.enrichPatchApply(rec, advance, tsUs), nil
 	case "web_search_end":
-		return m.enrichOp(rec, advance, tsUs, webSearchExtras), nil
+		return m.enrichWebSearch(rec, advance, tsUs), nil
 	case "image_generation_end":
 		return m.enrichOp(rec, advance, tsUs, nil), nil
+	case "collab_agent_spawn_end":
+		// Parent→child sub-agent spawn (spec "Sub-Agent Linkage", F3): emit a
+		// session op whose ChildSessionNativeID is new_thread_id (NOT
+		// agent_ref.thread_id — the real link is sender_thread_id→new_thread_id).
+		return m.mapCollabSpawn(rec, advance, tsUs), nil
+	case "collab_close_end", "collab_waiting_end":
+		// Recognized collab lifecycle markers (F3): keep visible as a DBG log; no
+		// canonical op (they carry no parent→child edge the topology view needs).
+		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "event_msg:"+p.Type, nil)}, nil
 	case "context_compacted":
-		// event_msg.context_compacted → OpCompaction (spec rule #20, gap #4).
+		// event_msg.context_compacted is the bare companion marker of the adjacent
+		// top-level `compacted` line (same timestamp) — TWO representations of ONE
+		// compaction (F5, spec rule #20). The op is emitted from the data-bearing
+		// `compacted`; this companion is suppressed so exactly ONE op is produced.
+		// A context_compacted with no preceding `compacted` (defensive) emits the
+		// op itself so a lone marker is not lost.
+		if m.suppressContextCompacted() {
+			return nil, nil
+		}
 		return m.emitCompactionOp(advance, tsUs, map[string]any{"trigger": "auto"}, "json"), nil
 	case "error":
 		return []canonical.Event{m.logEntry(advance(tsUs), "ERR", "error", errorExtras(p))}, nil
@@ -80,8 +97,15 @@ func (m *fileMapper) mapTaskStarted(rec record, advance func(int64) canonical.Ev
 	if sa := startedAtMicros(rec.Raw); sa > startUs {
 		startUs = sa
 	}
+	out := make([]canonical.Event, 0, 4)
+	// A new turn_id opening supersedes the prior open turn (F1/F2, spec edge #2/#3).
+	// In a new-format session task_started follows turn_context, so the prior turn
+	// is usually already superseded by the turn_context handler; this call covers
+	// the task_started-first ordering and is a no-op for the same turn_id. The
+	// prior turn's close status is decided by ITS OWN format inside the helper.
+	out = append(out, m.supersedePriorTurn(p.TurnID, advance, startUs)...)
 	ts := m.openTurn(p.TurnID, startUs)
-	out := make([]canonical.Event, 0, 1)
+	ts.sawTaskStarted = true
 	if ev := m.emitTurnStarted(ts, advance(startUs)); ev != nil {
 		out = append(out, ev)
 	}
@@ -165,10 +189,10 @@ func (m *fileMapper) mapTokenCount(rec record, advance func(int64) canonical.Eve
 	ts := m.tokenTurn(p.TurnID)
 	if ts == nil {
 		// No turn to attribute to yet (token_count before any turn opened):
-		// surface a DBG log so it is visible and drop the counts (they cannot be
-		// attributed; rare and not load-bearing).
-		_ = tsUs
-		return nil
+		// surface a DBG log so it is visible — never drop silently (spec rule #6
+		// "no silent failures"; F6). The counts cannot be attributed (rare and
+		// not load-bearing), but the drop is recorded with the offending turn_id.
+		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "token_count_no_turn", map[string]any{"turn_id": p.TurnID})}
 	}
 	ts.addTokenUsage(info)
 	return nil

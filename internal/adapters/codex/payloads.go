@@ -3,6 +3,8 @@ package codex
 import (
 	"fmt"
 	"path/filepath"
+
+	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
 // payloadLocationURI builds a containment-checked "file://<resolved-abs>"
@@ -55,4 +57,62 @@ func resolveWithinRoot(root, abs string) (string, bool, error) {
 		return "", false, fmt.Errorf("resolve root %q: %w", root, err)
 	}
 	return withinResolvedRoot(resolvedRoot, abs)
+}
+
+// payloadURI builds the PayloadRef LocationURI for a body inline in this
+// rollout file at the given 1-based line number (spec rule #6/#7/#8, edge #7).
+// The form is "file://<symlink-resolved-abs>#L<line>" so the presenter reads the
+// exact record on demand without ai-viewer ever copying the body into SQLite.
+//
+// Containment (Chunk D, security.md §6): the absolute path is resolved through
+// symlinks and verified to stay inside the configured sessions root via
+// payloadLocationURI. The "#L<line>" anchor is appended AFTER the file:// path is
+// built so the anchor is identical to Chunk B's contract
+// (TestMapper_PayloadRefLineAnchor). When m.root is empty (mapper-only tests) the
+// containment resolve is skipped and the cleaned absolute path is used; when
+// m.absPath is empty the URI is just the line anchor.
+//
+// The scanner is the authoritative containment gate: readRollout (scanner.go)
+// refuses any file that resolves outside the root BEFORE a single line is
+// streamed, so by the time the mapper builds a ref the owning file is already
+// known to be contained. A resolve failure or apparent escape here (e.g. the
+// file removed between the scanner's open and this build — impossible while the
+// scanner holds the fd, but handled defensively) therefore falls back to the
+// cleaned absolute path rather than dropping the anchor, keeping the ref usable
+// and the op→payload linkage (payload_refs.op_id NOT NULL) intact.
+func (m *fileMapper) payloadURI(lineNo int) string {
+	anchor := ""
+	if lineNo > 0 {
+		anchor = fmt.Sprintf("#L%d", lineNo)
+	}
+	if m.absPath == "" {
+		return anchor
+	}
+	uri, err := payloadLocationURI(m.root, m.absPath)
+	if err != nil {
+		// Containment resolve failed (escape or unresolvable). The scanner
+		// already vetted the file before streaming, so fall back to the cleaned
+		// absolute path rather than emit a lossy ref.
+		uri = "file://" + filepath.ToSlash(filepath.Clean(m.absPath))
+	}
+	return uri + anchor
+}
+
+// payloadRef builds a PayloadRefEvent for a body inline in this rollout at the
+// record currently being mapped (m.lineNo). It is scoped to the owning op
+// (turnSeq/opSeq) so it references an op that EXISTS — payload_refs.op_id is NOT
+// NULL REFERENCES ops(id), so an orphan ref would FK-roll-back the ingest batch
+// (mirrors claude_code's P1.1a discipline). OriginalBytes is the byte length of
+// the verbatim line so the presenter can budget a read; -1 when unknown.
+func (m *fileMapper) payloadRef(base canonical.EventBase, turnSeq, opSeq int, kind, format string, originalBytes int64) canonical.PayloadRefEvent {
+	return canonical.PayloadRefEvent{
+		EventBase:       base,
+		SessionNativeID: m.nativeID,
+		TurnSeq:         turnSeq,
+		OpSeq:           opSeq,
+		PayloadKind:     kind,
+		Format:          format,
+		LocationURI:     m.payloadURI(m.lineNo),
+		OriginalBytes:   originalBytes,
+	}
 }

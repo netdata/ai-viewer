@@ -346,13 +346,15 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty 
 // modern rollout is "YYYY/MM/DD/rollout-….jsonl". The abs path is built under
 // the RESOLVED root so the containment open in readRollout resolves cleanly.
 // Returns false when rel is not a recognized modern rollout (a legacy .json, an
-// ignored name, or a path with no rollout basename).
+// ignored name, a path with no rollout basename, OR a rollout-*.jsonl at the
+// wrong shard depth — F8: only the YYYY/MM/DD layout is ingested, so a stray
+// file directly under the root is not tailed even if a Write event fires on it).
 func rolloutForRel(resolvedRoot, rel string) (rollout, bool) {
 	base := rel
 	if i := strings.LastIndex(rel, "/"); i >= 0 {
 		base = rel[i+1:]
 	}
-	if !modernNameRe.MatchString(base) {
+	if !modernNameRe.MatchString(base) || !hasShardDepth(rel) {
 		return rollout{}, false
 	}
 	abs := filepath.Join(resolvedRoot, filepath.FromSlash(rel))

@@ -202,11 +202,12 @@ const codexRolloutPrefix = "rollout-"
 const codexArchivedDir = "archived_sessions"
 
 // countRolloutFiles returns the number of modern sharded codex rollouts
-// ("rollout-*.jsonl") under the sessions root, walking the YYYY/MM/DD shards at
-// any depth and pruning archived_sessions/. Returns 0 on any walk error — the
-// count is observability for acceptance #8, not a gate, so it is read
-// best-effort and never blocks discovery. Mirrors discovery.go's modern match
-// (^rollout-.*\.jsonl$) without importing the adapter package.
+// ("rollout-*.jsonl") under the sessions root, counting ONLY files at the
+// YYYY/MM/DD shard depth and pruning archived_sessions/. Returns 0 on any walk
+// error — the count is observability for acceptance #8, not a gate, so it is
+// read best-effort and never blocks discovery. Mirrors discovery.go's modern
+// match (^rollout-.*\.jsonl$) AND its shard-depth requirement (F8) without
+// importing the adapter package, so the surfaced count matches what is ingested.
 func countRolloutFiles(root string) int {
 	n := 0
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -223,12 +224,40 @@ func countRolloutFiles(root string) int {
 			return nil
 		}
 		name := d.Name()
-		if strings.HasPrefix(name, codexRolloutPrefix) && strings.HasSuffix(name, ".jsonl") {
+		if strings.HasPrefix(name, codexRolloutPrefix) && strings.HasSuffix(name, ".jsonl") && codexAtShardDepth(root, path) {
 			n++
 		}
 		return nil
 	})
 	return n
+}
+
+// codexAtShardDepth reports whether path is a rollout at the required YYYY/MM/DD
+// shard depth relative to root: exactly three leading numeric path components
+// then the basename (F8). Mirrors discovery.go's hasShardDepth without importing
+// the adapter package, so countRolloutFiles never over-counts a stray
+// rollout-*.jsonl placed at the wrong depth. A relpath failure counts the file
+// out (best-effort observability).
+func codexAtShardDepth(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts[:3] {
+		if len(p) == 0 {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // countLegacyJSON returns the number of legacy flat codex rollouts

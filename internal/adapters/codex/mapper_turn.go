@@ -246,6 +246,41 @@ func (m *fileMapper) finalizeTurn(ts *turnState, base canonical.EventBase, endUs
 	}
 }
 
+// supersedePriorTurn closes the most-recent still-open turn when a NEW turn_id
+// opens (via turn_context OR task_started), deciding the close status from the
+// PRIOR turn's OWN format (F1/F2, spec edge #2/#3):
+//   - NEW-format prior (it saw a task_started but no task_complete/turn_aborted):
+//     close FAILED/replaced — the user interrupted and re-prompted (edge #2).
+//     Dangling ops on it are cancelled.
+//   - OLD-format prior (turn_context-only, never saw a task_started): close
+//     COMPLETED — an old-format session has no task_complete, so the next
+//     turn_context boundary is its only close signal (edge #3). Dangling ops on it
+//     are completed (it finished cleanly).
+//
+// It is a no-op when there is no prior open turn or the prior turn IS this
+// turn_id (a re-announce / a turn_context re-emitted post-compaction for the same
+// turn). Called from BOTH the turn_context and task_started handlers; in a
+// new-format session task_started follows turn_context, so the turn_context call
+// supersedes the prior turn and the task_started call is then a same-id no-op.
+// turnExtrasLog is emitted for the closed turn so its metadata is not lost.
+func (m *fileMapper) supersedePriorTurn(newTurnID string, advance func(int64) canonical.EventBase, atUs int64) []canonical.Event {
+	prior := m.mostRecentOpenTurn()
+	if prior == nil || prior.codexTurnID == newTurnID {
+		return nil
+	}
+	status, errClass, danglingStatus := "completed", "", "completed"
+	if prior.sawTaskStarted {
+		status, errClass, danglingStatus = "failed", "replaced", "cancelled"
+	}
+	base := func() canonical.EventBase { return advance(atUs) }
+	out := m.finalizeDanglingOps(prior.codexTurnID, base, atUs, danglingStatus)
+	out = append(out, m.finalizeTurn(prior, base(), atUs, status, errClass))
+	if ev := m.turnExtrasLog(prior, base()); ev != nil {
+		out = append(out, ev)
+	}
+	return out
+}
+
 // finalizeDanglingOps finalizes every op still open under the given turn at turn
 // close, with the supplied status (spec rule #4 — "completed inferred or unknown
 // if no output ever arrived" at task_complete; edge #9 — "cancelled" at abort/
@@ -266,22 +301,40 @@ func (m *fileMapper) finalizeDanglingOps(turnID string, base func() canonical.Ev
 	out := make([]canonical.Event, 0, len(ops))
 	for _, p := range ops {
 		p.op.finalized = true
-		fin := canonical.OpFinalizedEvent{
+		// If a prior enrichment (e.g. exec_command_end) stashed Extras on this
+		// still-open op, re-emit an OpStarted carrying them so they reach
+		// ops.extras_json before the dangling finalize (F4, spec rule #14). The
+		// writer upserts (turn,seq), so this is an idempotent UPDATE.
+		if len(p.op.extras) > 0 {
+			out = append(out, canonical.OpStartedEvent{
+				EventBase:       base(),
+				SessionNativeID: m.nativeID,
+				TurnSeq:         p.op.turnSeq,
+				Seq:             p.op.opSeq,
+				ParentOpSeq:     -1,
+				Kind:            p.op.kind,
+				Name:            p.op.name,
+				ToolNamespace:   p.op.namespace,
+				Extras:          p.op.extras,
+			})
+		}
+		// An exec-derived status (exit_code) from an exec_command_end with no
+		// following *_output is authoritative over the generic dangling status (F4).
+		opStatus, opErrClass := status, ""
+		if p.op.enrichStatus != "" {
+			opStatus, opErrClass = p.op.enrichStatus, p.op.enrichErrClass
+		}
+		out = append(out, canonical.OpFinalizedEvent{
 			EventBase:       base(),
 			SessionNativeID: m.nativeID,
 			TurnSeq:         p.op.turnSeq,
 			Seq:             p.op.opSeq,
-			Status:          status,
+			Status:          opStatus,
+			ErrorClass:      opErrClass,
 			EndTs:           endUs,
-		}
-		if len(p.op.extras) > 0 {
-			// Enrichment already merged onto the op carries no canonical
-			// finalize field beyond status; the extras live on the OpStarted's
-			// Extras (set at enrichment time), so nothing extra to attach here.
-			_ = p.op.extras
-		}
-		out = append(out, fin)
+		})
 		delete(m.openOps, p.callID)
+		m.recordFinalizedOp(p.callID, p.op)
 	}
 	return out
 }

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -41,7 +42,7 @@ func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) can
 	if bodyBytes > 0 {
 		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
 	}
-	m.trackOp(p.CallID, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, name)
+	m.trackOp(p.CallID, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, name, namespace)
 	return out
 }
 
@@ -56,36 +57,97 @@ func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) can
 func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	op, ok := m.openOps[p.CallID]
 	if !ok || op.finalized {
-		// Unmatched / already-finalized output: surface and skip (spec edge #10).
+		// The op may already exist and be finalized because its enrichment
+		// end-event (exec_command_end) was the close signal in a rare path, OR the
+		// output is genuinely orphaned. If we can locate the op (finalizedOps),
+		// attach the tool_response PayloadRef to it rather than warning (spec rule
+		// #9 — the body still belongs to the op). Only a truly unmatched output
+		// surfaces a WRN (spec edge #10).
+		if fop, found := m.finalizedOps[p.CallID]; found && bodyBytes > 0 {
+			return []canonical.Event{m.payloadRef(advance(tsUs), fop.turnSeq, fop.opSeq, "tool_response", "json", bodyBytes)}
+		}
 		return []canonical.Event{m.logEntry(advance(tsUs), "WRN", "tool_output_unmatched", map[string]any{"call_id": p.CallID})}
 	}
 	op.finalized = true
 	status, errClass := outputStatus(p.Output)
-	out := []canonical.Event{
-		canonical.OpFinalizedEvent{
+	// A prior exec_command_end (exec-first ~68-85% ordering) may have stashed an
+	// authoritative exit_code-derived status; it WINS over a benign-looking output
+	// string (a non-zero exit with terse stdout must finalize failed) (F4).
+	if op.enrichStatus != "" {
+		status, errClass = op.enrichStatus, op.enrichErrClass
+	}
+	out := make([]canonical.Event, 0, 3)
+	// If a prior enrichment (exec_command_end BEFORE function_call_output — the
+	// ~68-85% exec ordering) stashed Extras on the op, re-emit an OpStarted
+	// carrying them so they reach ops.extras_json (F4, spec rule #14). The writer
+	// upserts (turn,seq), so this is an idempotent UPDATE, not a second op.
+	if len(op.extras) > 0 {
+		out = append(out, canonical.OpStartedEvent{
 			EventBase:       advance(tsUs),
 			SessionNativeID: m.nativeID,
 			TurnSeq:         op.turnSeq,
 			Seq:             op.opSeq,
-			Status:          status,
-			ErrorClass:      errClass,
-			EndTs:           tsUs,
-		},
+			ParentOpSeq:     -1,
+			Kind:            op.kind,
+			Name:            op.name,
+			ToolNamespace:   op.namespace,
+			Extras:          op.extras,
+		})
 	}
+	out = append(out, canonical.OpFinalizedEvent{
+		EventBase:       advance(tsUs),
+		SessionNativeID: m.nativeID,
+		TurnSeq:         op.turnSeq,
+		Seq:             op.opSeq,
+		Status:          status,
+		ErrorClass:      errClass,
+		EndTs:           tsUs,
+	})
 	if bodyBytes > 0 {
 		out = append(out, m.payloadRef(advance(tsUs), op.turnSeq, op.opSeq, "tool_response", "json", bodyBytes))
 	}
 	delete(m.openOps, p.CallID)
+	// Record the finalized op so a LATER exec_command_end (output-first ~15-32%
+	// ordering) can still merge its Extras via an OpStarted re-emit (F4).
+	m.recordFinalizedOp(p.CallID, op)
 	return out
 }
 
-// mapWebSearchCall handles response_item.web_search_call (spec rule #11). It
-// emits a tool op (Name=web_search, namespace=web). The companion
-// event_msg.web_search_end enriches it with the query/action (ops_event.go); the
-// op is tracked by call_id for that enrichment and finalized at turn close if no
-// end arrives.
+// mapWebSearchCall handles response_item.web_search_call (spec rule #11, F7). It
+// emits a tool op (Name=web_search, namespace=web). web_search_call carries
+// NEITHER id NOR call_id, so the op is NOT tracked by call_id; instead it is
+// recorded as the active turn's most-recent open web_search op (openWebSearch)
+// for POSITIONAL pairing with the companion event_msg.web_search_end (which DOES
+// carry a call_id, but for a DIFFERENT correlation space). If no end arrives the
+// op finalizes at turn close as a dangling op (it is tracked under a synthetic
+// per-op call_id so finalizeDanglingOps closes it).
 func (m *fileMapper) mapWebSearchCall(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
-	return m.emitSingleToolOp(p.CallID, "web_search", "web", advance, tsUs, bodyBytes)
+	ts := m.ensureTurn(tsUs)
+	out := make([]canonical.Event, 0, 2)
+	if ev := m.emitTurnStarted(ts, advance(tsUs)); ev != nil {
+		out = append(out, ev)
+	}
+	turnSeq, opSeq := m.nextOp(ts)
+	out = append(out, canonical.OpStartedEvent{
+		EventBase:       advance(tsUs),
+		SessionNativeID: m.nativeID,
+		TurnSeq:         turnSeq,
+		Seq:             opSeq,
+		ParentOpSeq:     -1,
+		Kind:            canonical.OpTool,
+		Name:            "web_search",
+		ToolNamespace:   "web",
+	})
+	if bodyBytes > 0 {
+		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
+	}
+	// Track under a synthetic call_id so a turn-close dangling-finalize closes it
+	// if no web_search_end arrives; the synthetic id never collides with a real
+	// call_id (the "ws#" prefix is not a codex call_id form).
+	synthetic := fmt.Sprintf("ws#%d:%d", turnSeq, opSeq)
+	m.trackOp(synthetic, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, "web_search", "web")
+	m.openWebSearch = &openWebSearchRef{turnID: m.activeTurnID, turnSeq: turnSeq, opSeq: opSeq, syntheticCallID: synthetic}
+	return out
 }
 
 // mapImageGenCall handles response_item.image_generation_call (spec rule #12):
@@ -123,7 +185,7 @@ func (m *fileMapper) emitSingleToolOp(callID, name, namespace string, advance fu
 	if bodyBytes > 0 {
 		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
 	}
-	m.trackOp(callID, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, name)
+	m.trackOp(callID, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, name, namespace)
 	return out
 }
 

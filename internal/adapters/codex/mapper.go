@@ -2,7 +2,6 @@ package codex
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -41,9 +40,11 @@ const provider = "openai"
 //
 // The mapper is PURE with respect to I/O: it reads no files and watches no
 // directories. The scanner/tailer (Chunk C) drives it line-by-line via
-// mapRecord and, at EOF, asks finalizeStale whether a hanging turn must be
-// synthetically failed (the scanner owns file mtime; the mapper owns the
-// open-turn state — spec rule #23, SOW C#3).
+// mapRecord and, at full-read EOF, calls finalizeAtEOF (passing the file's stale
+// bool) so the mapper can close a hanging turn: OLD-format turns close completed
+// at EOF, NEW-format turns close failed/incomplete only when stale (the scanner
+// owns file mtime; the mapper owns the open-turn state — spec rule #23, edge #3,
+// SOW C#3, F1).
 //
 // State persists across Scan→Tail of the same file via the rebuild path
 // (mirrors claude_code): the scanner replays the chain from offset 0 to
@@ -105,8 +106,9 @@ type fileMapper struct {
 	// A turn_id of "" is the absent-turn_id fallback bucket (old CLI without
 	// turn_id — spec edge #3); it shares the same map under the empty key.
 	turns map[string]*turnState
-	// turnOrder lists turn_ids in open order so finalizeStale can find the most
-	// recent still-open turn deterministically (spec rule #23).
+	// turnOrder lists turn_ids in open order so finalizeAtEOF / the
+	// replaced/superseded-turn helpers can find the most recent still-open turn
+	// deterministically (spec rule #23, edge #2/#3).
 	turnOrder []string
 	// turnSeqCounter is the last assigned 1-based turn Seq. Monotone per file.
 	turnSeqCounter int
@@ -124,14 +126,46 @@ type fileMapper struct {
 	// op (spec rule #9, #14, #15, #16). A call_id of "" is never tracked.
 	openOps map[string]*openOp
 
+	// finalizedOps maps a finalized op's call_id to where it was emitted so a
+	// LATE enrichment event (exec_command_end / patch_apply_end arriving AFTER the
+	// op's *_output already finalized it) can still merge its Extras onto the op
+	// via an idempotent OpStarted re-emit (F4, spec rule #14). Real exec ordering
+	// is exec_command_end BEFORE function_call_output in ~68-85% of files but the
+	// other ~15-32% put it after — the enrichment must reach the op in BOTH
+	// orders. Entries persist for the life of the file (small; one per tool op).
+	finalizedOps map[string]finalizedOp
+
+	// openWebSearch is the most-recently-opened, not-yet-paired web_search op in
+	// the active turn (F7). web_search_call carries NEITHER id NOR call_id, so its
+	// companion event_msg.web_search_end (which DOES carry call_id) cannot pair by
+	// key — it pairs POSITIONALLY with the most-recent open web_search op in the
+	// same turn. nil when no web_search awaits an end. Cleared on pairing or at
+	// turn close (the op then finalizes as a dangling op).
+	openWebSearch *openWebSearchRef
+
 	// seenUserCallIDs dedups user input across response_item.message(role=user)
 	// and event_msg.user_message (spec rule #6, #18). Keyed on a content
 	// fingerprint so the second arrival is suppressed regardless of order.
 	seenUser map[string]struct{}
 
-	// finalized guards finalizeStale so the synthetic finalize is emitted at
-	// most once per file even if the scanner calls it more than once.
-	staleFinalized bool
+	// eofFinalized guards finalizeAtEOF so the EOF-finalize is emitted at most
+	// once per file even if the scanner calls it more than once. It is set only
+	// when a terminal decision is made (an OLD-format turn closed completed, a
+	// stale NEW-format turn closed failed, or no open turn); a FRESH new-format
+	// file with an open turn does NOT set it, so a later stale sweep can still
+	// close that turn (F1).
+	eofFinalized bool
+
+	// compactedSeen reports whether any top-level `compacted` line has emitted a
+	// compaction op (F5), and compactedRecordIdx is the recordIdx of the most
+	// recent such line. The real wire shape is a data-bearing top-level `compacted`
+	// line IMMEDIATELY followed by a bare event_msg.context_compacted marker with
+	// the SAME timestamp — two representations of ONE compaction. The op is emitted
+	// from `compacted`; the adjacent context_compacted is suppressed (no second op)
+	// when it is the very next record. A context_compacted with no preceding
+	// compacted (defensive) emits the op itself (spec rule #20).
+	compactedSeen      bool
+	compactedRecordIdx uint64
 
 	// lastTsUs is the timestamp (micros) of the most recent record carrying one.
 	// Observability only (cursor LastTsUs). Stays 0 for a file whose records all
@@ -139,83 +173,8 @@ type fileMapper struct {
 	lastTsUs int64
 }
 
-// turnState tracks one synthesized turn's accumulation between its open
-// (turn_context or task_started) and its close (task_complete / turn_aborted /
-// stale finalize). Token rollup is the C#1 model: TokensIn/Out are the SUM of
-// per-call last_token_usage over the token_count events attributed to this turn
-// — never a delta of the cumulative total_token_usage (spec rule #4, #17).
-type turnState struct {
-	// seq is the canonical 1-based turn Seq.
-	seq int
-	// codexTurnID is the source turn_id (UUID), surfaced in
-	// turns.extras_json.codex_turn_id (spec "Canonical Model Gaps" #2). Empty
-	// for the absent-turn_id fallback turn.
-	codexTurnID string
-	// opSeq is the 1-based op counter within this turn.
-	opSeq int
-	// started reports whether a TurnStartedEvent was already emitted for this
-	// turn (idempotency across turn_context + task_started — spec rule #2, #3).
-	started bool
-	// finalized reports whether a TurnFinalizedEvent was already emitted, so a
-	// duplicate task_complete / a later stale finalize does not double-close.
-	finalized bool
-	// startTsUs is the turn's open timestamp (micros), used as a floor for the
-	// synthetic stale-finalize EndTs (spec rule #23).
-	startTsUs int64
-	// tokensIn / tokensOut accumulate the C#1 per-call last_token_usage rollup
-	// (spec rule #4, #17).
-	tokensIn  int64
-	tokensOut int64
-	// tokensCacheRead / tokensCacheWrite accumulate the per-call cached-token
-	// split when newer rollouts report it (canonical-events.md codex cache row).
-	tokensCacheRead  int64
-	tokensCacheWrite int64
-	// ctxMax is the model_context_window stashed from task_started /
-	// token_count, applied to the turn's last LLM op at finalize (spec rule #3,
-	// #17).
-	ctxMax int64
-	// sandbox is the sandbox_policy.type snapshotted from the turn's
-	// turn_context, surfaced in turns.extras_json.sandbox (spec rule #2,
-	// "Canonical Model Gaps" #3).
-	sandbox string
-	// effort / approvalPolicy are turn_context policy snapshots for turn extras.
-	effort         string
-	approvalPolicy string
-	// ttftMs is task_complete.time_to_first_token_ms, surfaced in
-	// turns.extras_json.ttft_ms (spec "Canonical Model Gaps" #8).
-	ttftMs int64
-	// lastAgentMessage is event_msg.agent_message.message, surfaced in
-	// TurnFinalized extras as the UI "latest answer" preview (spec rule #19).
-	lastAgentMessage string
-	// lastLLMOpSeq is the op Seq of the most recent LLM op in this turn, so a
-	// trailing token_count attaches CtxUsed/CtxMax to it (spec rule #17). 0 when
-	// no LLM op has been emitted yet.
-	lastLLMOpSeq int
-	// lastLLMEndTs is the EndTs of the turn's last LLM op, preserved so a
-	// token_count re-finalize that adds CtxUsed/CtxMax does not clobber the op's
-	// real end timestamp (the ingester reconciles fields on the (turn,seq)
-	// upsert — canonical-events.md §Idempotency).
-	lastLLMEndTs int64
-	// lastLLMCtxUsed is the cumulative total_token_usage observed for the turn's
-	// last LLM op (spec rule #17). The op's CtxUsed is set from this at finalize.
-	lastLLMCtxUsed int64
-}
-
-// openOp records where an in-flight op was emitted so its finalize / enrichment
-// lands under the same turn/op (spec rule #9, #14-16).
-type openOp struct {
-	turnID  string
-	turnSeq int
-	opSeq   int
-	kind    canonical.OpKind
-	name    string
-	// extras accumulates enrichment (exec_command_end, mcp_tool_call_end,
-	// patch_apply_end) merged onto the op's OpFinalized (spec rule #14-16). The
-	// adapter does NOT emit a second op for an enrichment event.
-	extras map[string]any
-	// finalized guards against a second *_output finalizing the same op.
-	finalized bool
-}
+// The per-file inference STATE TYPES (turnState, openOp, finalizedOp,
+// openWebSearchRef) live in mapper_state.go.
 
 // mapperConfig bundles the per-file inputs newFileMapper needs.
 type mapperConfig struct {
@@ -242,6 +201,7 @@ func newFileMapper(cfg mapperConfig) *fileMapper {
 		agentName:      cfg.agentName,
 		turns:          map[string]*turnState{},
 		openOps:        map[string]*openOp{},
+		finalizedOps:   map[string]finalizedOp{},
 		seenUser:       map[string]struct{}{},
 	}
 }
@@ -397,60 +357,7 @@ func (m *fileMapper) activeTurnSeq() int {
 	return 0
 }
 
-// payloadURI builds the PayloadRef LocationURI for a body inline in this
-// rollout file at the given 1-based line number (spec rule #6/#7/#8, edge #7).
-// The form is "file://<symlink-resolved-abs>#L<line>" so the presenter reads the
-// exact record on demand without ai-viewer ever copying the body into SQLite.
-//
-// Containment (Chunk D, security.md §6): the absolute path is resolved through
-// symlinks and verified to stay inside the configured sessions root via
-// payloadLocationURI (payloads.go). The "#L<line>" anchor is appended AFTER the
-// file:// path is built so the anchor is identical to Chunk B's contract
-// (TestMapper_PayloadRefLineAnchor). When m.root is empty (mapper-only tests)
-// the containment resolve is skipped and the cleaned absolute path is used; when
-// m.absPath is empty the URI is just the line anchor.
-//
-// The scanner is the authoritative containment gate: readRollout (scanner.go)
-// refuses any file that resolves outside the root BEFORE a single line is
-// streamed, so by the time the mapper builds a ref the owning file is already
-// known to be contained. A resolve failure or apparent escape here (e.g. the
-// file removed between the scanner's open and this build — impossible while the
-// scanner holds the fd, but handled defensively) therefore falls back to the
-// cleaned absolute path rather than dropping the anchor, keeping the ref usable
-// and the op→payload linkage (payload_refs.op_id NOT NULL) intact.
-func (m *fileMapper) payloadURI(lineNo int) string {
-	anchor := ""
-	if lineNo > 0 {
-		anchor = fmt.Sprintf("#L%d", lineNo)
-	}
-	if m.absPath == "" {
-		return anchor
-	}
-	uri, err := payloadLocationURI(m.root, m.absPath)
-	if err != nil {
-		// Containment resolve failed (escape or unresolvable). The scanner
-		// already vetted the file before streaming, so fall back to the cleaned
-		// absolute path rather than emit a lossy ref.
-		uri = "file://" + filepath.ToSlash(filepath.Clean(m.absPath))
-	}
-	return uri + anchor
-}
-
-// payloadRef builds a PayloadRefEvent for a body inline in this rollout at the
-// record currently being mapped (m.lineNo). It is scoped to the owning op
-// (turnSeq/opSeq) so it references an op that EXISTS — payload_refs.op_id is NOT
-// NULL REFERENCES ops(id), so an orphan ref would FK-roll-back the ingest batch
-// (mirrors claude_code's P1.1a discipline). OriginalBytes is the byte length of
-// the verbatim line so the presenter can budget a read; -1 when unknown.
-func (m *fileMapper) payloadRef(base canonical.EventBase, turnSeq, opSeq int, kind, format string, originalBytes int64) canonical.PayloadRefEvent {
-	return canonical.PayloadRefEvent{
-		EventBase:       base,
-		SessionNativeID: m.nativeID,
-		TurnSeq:         turnSeq,
-		OpSeq:           opSeq,
-		PayloadKind:     kind,
-		Format:          format,
-		LocationURI:     m.payloadURI(m.lineNo),
-		OriginalBytes:   originalBytes,
-	}
-}
+// payloadURI and payloadRef (the PayloadRef LocationURI builder + the
+// op-scoped PayloadRefEvent constructor) live in payloads.go alongside the
+// symlink-containment helper they call, keeping mapper.go focused on the per-file
+// inference state and dispatch.

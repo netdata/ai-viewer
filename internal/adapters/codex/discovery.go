@@ -26,6 +26,34 @@ const archivedSessionsDir = "archived_sessions"
 // name like "x-rollout-….jsonl" or "rollout-….jsonl.bak" does not match.
 var modernNameRe = regexp.MustCompile(`^rollout-.*\.jsonl$`)
 
+// shardComponentRe matches a single numeric path component of a YYYY/MM/DD
+// shard. The upstream layout is strictly numeric date shards
+// (codex-rs/rollout/src/recorder.rs:1325-1354), so a non-numeric component
+// (e.g. "rollout-…jsonl" placed directly under sessions/, or under a
+// "scratch/" dir) is NOT a real rollout location and must not be ingested (F8).
+var shardComponentRe = regexp.MustCompile(`^[0-9]+$`)
+
+// hasShardDepth reports whether rel (forward-slashed, root-relative) is a modern
+// rollout at the required YYYY/MM/DD shard depth: exactly three leading numeric
+// path components followed by the "rollout-….jsonl" basename (four components
+// total). A stray "rollout-….jsonl" directly under the sessions root, or at the
+// wrong depth, returns false so discovery, the tailer, and the observability
+// counts all agree on what is ingestable (F8; spec §"Filesystem Layout",
+// recorder.rs:1325-1354). The basename match itself is the caller's job; this
+// only validates the shard prefix and component count.
+func hasShardDepth(rel string) bool {
+	parts := strings.Split(rel, "/")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts[:3] {
+		if !shardComponentRe.MatchString(p) {
+			return false
+		}
+	}
+	return true
+}
+
 // legacyNameRe matches a legacy flat rollout filename: "rollout-*.json" (no
 // time component, directly under sessions/; spec §"Legacy `.json` layout").
 var legacyNameRe = regexp.MustCompile(`^rollout-.*\.json$`)
@@ -113,12 +141,18 @@ func discoverRollouts(root string, onError func(error)) (discovered, error) {
 		atRoot := filepath.Dir(path) == resolvedRoot
 		switch {
 		case modernNameRe.MatchString(name):
-			if !withinSourceRoot(resolvedRoot, path, onError) {
-				return nil
-			}
 			rel, rrErr := relPath(resolvedRoot, path)
 			if rrErr != nil {
 				onError(fmt.Errorf("codex: relpath rollout %s: %w; skipping", path, rrErr))
+				return nil
+			}
+			// Require the YYYY/MM/DD shard depth (F8): a stray rollout-*.jsonl
+			// directly under the root, or at the wrong depth, is not a real codex
+			// rollout location (recorder.rs:1325-1354) and is silently ignored.
+			if !hasShardDepth(rel) {
+				return nil
+			}
+			if !withinSourceRoot(resolvedRoot, path, onError) {
 				return nil
 			}
 			out.modern = append(out.modern, rollout{rel: rel, abs: path})
