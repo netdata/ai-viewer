@@ -158,7 +158,28 @@ Open (implementer-verify, not blocking): the message-level per-turn cumulative-t
 
 ## Implementation
 
-(Empty placeholder. Filled as chunks complete.)
+### Chunk C — delta-query layer + poll-loop tailer (2026-05-30)
+
+Delivered the SQL delta-query layer and the poll-loop tailer (the backfill scan loop + the realtime poll loop). Purely additive inside `internal/adapters/opencode/`; no sibling adapter, `canonical`, `ingest`, or `store` package touched. Read-only invariant held: the only production DB open is the chunk-A `openReadOnly` helper, and every transaction is `BeginTx{ReadOnly:true}` (BEGIN DEFERRED); no write-path pragma anywhere.
+
+Files:
+
+- `store_query.go` (NEW, 241 lines) — paged delta query per table (`scanTableDelta` → `scanOnePage`, each page its own short read tx; pages until a short page), the cheap PK-indexed `maxID` probe, the expensive gated `maxTimeUpdated` probe, the affected-session set (`affectedSet`, first-seen dedup), and `resolvePartSession` (denormalized `session_id` → message-map → indexed `message_id` lookup fallback).
+- `store_load.go` (NEW, 400 lines) — full-session-tree load (`loadSession`, `loadSessionTree` → ordered `[]messageWithParts`), the per-table dynamic-column scanners (present-columns only, never `SELECT *`), and the present-column point/ordered SELECT builders. `errSessionGone` for an affected id whose row vanished.
+- `store.go` (MODIFIED) — added `buildSelectByID` companion to `tableSchema` (the old-schema `time_updated`-absent fallback: `WHERE id > ? ORDER BY id LIMIT 1000`).
+- `tailer.go` (NEW, 357 lines) — `scanLoop` (backfill), `tailLoop` (realtime follow with the idle/active/WAL-floor cadence state machine), `pollOnce`, `detectChange` (cheap `MAX(id)` every poll; gated `MAX(time_updated)`), the pure `shouldProbeTimeUpdated` gate (AC#6), `watchWAL` (best-effort fsnotify hint with non-fatal missing-WAL fallback), `emitProgress`/`emitEvents` (ctx-aware, codex shape).
+- `tailer_changes.go` (NEW, 309 lines) — the shared `processChanges` pipeline (delta → affected → reload → map → emit → advance), `collectDeltas` (with the every-~1000-rows `SourceProgress` checkpoint), `reloadAndEmit`, `loadAndMapSession`, the `pollState` cadence machine, and `coerceScanCursor` + `schemaFingerprint` (records a present-column schema-shape hash into the cursor; the `__drizzle_migrations`-name hash is deferred to chunk D).
+- Tests (NEW): `store_query_test.go`, `store_load_test.go`, `store_testhelpers_test.go` (synthetic-DB builders + a registered query-counting `driver.Driver` wrapper), `tailer_test.go`, `tailer_gate_test.go` (AC#6 pure gate + cadence), `tailer_counting_test.go` (literal no-idle-`MAX(time_updated)` via the counter), `tailer_resume_test.go` (zero-dupes/zero-gaps), `tailer_branch_test.go`, `tailer_wal_test.go`, `tailer_pollcycle_test.go`.
+
+Key decisions locked (honoring the recorded SOW/spec):
+
+- **Delta page SQL** = `buildSelect` (present columns) with `WHERE time_updated > :u OR (time_updated = :u AND id > :id) ORDER BY time_updated, id LIMIT 1000`; old-schema fallback (no `time_updated`) = `buildSelectByID` (`WHERE id > :id ORDER BY id`), watermark advancing on `MaxID` only. Chosen from the introspected schema (`tableSchema.has("time_updated")`), never crashes.
+- **Affected-session derivation**: session row → own id; message → `session_id`; part → denormalized `session_id` (fallback to `message_id`→`session_id` lookup on a hypothetical old schema lacking it); session_message → `session_id`. De-duplicated; full-tree reload per affected session (the mapper's per-turn cumulative-token delta requires the whole ordered message list).
+- **Cadence state machine**: idle 2 s / active 500 ms / 250 ms floor for 5 s after a WAL fsnotify event; next interval = min(active|idle, floor-while-open).
+- **`MAX(time_updated)` gate (AC#6)**: pure `shouldProbeTimeUpdated(now, lastWALEvent, lastProbe, safetyNet)` = `lastWALEvent.After(lastProbe) || now.Sub(lastProbe) >= 60s`. Proven false on idle polls by both the pure-truth-table test and the query-counting-driver test (zero `MAX(time_updated)` across 5 idle polls; `MAX(id)` runs every poll).
+- **WAL-watch-missing fallback**: a missing `-wal` file / Add failure / watcher error → one `onError` + a closed hint channel → pure timer polling; the 60 s safety net still catches in-place mutations. A watcher error never kills the loop.
+
+Gates (run 2026-05-30): `go build ./...` exit 0; `go vet` exit 0; `golangci-lint` 0 issues; `gosec -severity medium -confidence medium ./...` exit 0 (two justified `// #nosec G202` on `MAX(id)`/`MAX(time_updated)` where the only interpolated token is a fixed `trackedTables` name via `quoteIdent`); `go test -race -cover` pass at **91.6%** (package was 96.1% pre-chunk; the delta is the new code's defensive error branches, all new code ≥ target). All new `.go` files ≤ 400 lines.
 
 ## Validation
 

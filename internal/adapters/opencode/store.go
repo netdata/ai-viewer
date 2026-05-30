@@ -225,6 +225,36 @@ func (s tableSchema) buildSelect() string {
 	return b.String()
 }
 
+// buildSelectByID renders the OLD-SCHEMA delta-read SELECT for a table that
+// lacks the time_updated column (a pre-Timestamps-mixin schema). It names the
+// same present columns as buildSelect (never SELECT *) but pages by the primary
+// key alone, since there is no time_updated to order by:
+//
+//	WHERE id > ?  ORDER BY id LIMIT 1000
+//
+// The single positional parameter is max_id. The delta-query layer (store_query
+// .go) selects this form when tableSchema.has("time_updated") is false; the
+// watermark then advances on MaxID only (adapter-opencode.md §"Read Strategy" →
+// "Old-schema fallback"). All four tables on every observed opencode schema
+// carry time_updated, so this is a compatibility safeguard, not a hot path.
+func (s tableSchema) buildSelectByID() string {
+	cols := s.Present
+	if len(cols) == 0 {
+		return "SELECT 1 WHERE 0"
+	}
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = quoteIdent(c)
+	}
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	b.WriteString(strings.Join(quoted, ", "))
+	b.WriteString(" FROM ")
+	b.WriteString(quoteIdent(s.Table))
+	b.WriteString(" WHERE id > ? ORDER BY id LIMIT 1000")
+	return b.String()
+}
+
 // quoteIdent wraps a SQL identifier in double quotes, escaping any embedded
 // double quote per SQLite identifier rules. All identifiers passed here are
 // from the adapter's fixed column/table sets, never operator input; the

@@ -281,6 +281,40 @@ Connection pool settings:
 
 Read transactions: every query batch wraps in `BEGIN DEFERRED ... COMMIT` so the adapter sees a consistent snapshot across multi-statement cursors. Long transactions on a WAL DB pin the WAL and stop checkpointing, so each cycle keeps its transaction shorter than 1 s of wall time. If a backfill must read more than a few thousand rows, it does so in **paged transactions** (close the transaction every N rows, then start a new one), accepting that the snapshot advances between pages.
 
+### Delta query, affected-session derivation, and tree load (Chunk C)
+
+The delta-query layer is the bridge between the watermark cursor and the pure mapper. It runs three steps per change cycle, each in its own short read transaction:
+
+1. **Paged delta query per tracked table.** Each `session`/`message`/`part`/`session_message` table is paged from its `TableWatermark` with the composite-key SELECT (`buildSelect`, naming only live columns — never `SELECT *`):
+
+   ```sql
+   SELECT <present cols> FROM <table>
+   WHERE time_updated > :u OR (time_updated = :u AND id > :id)
+   ORDER BY time_updated, id LIMIT 1000
+   ```
+
+   Each page runs inside a `BEGIN DEFERRED` read transaction opened via `database/sql`'s `BeginTx{ReadOnly:true}` and committed promptly, keeping the WAL unpinned. Paging continues until a short page (`< 1000` rows) returns. The new max `(time_updated, id)` seen across all pages becomes the table's advanced watermark.
+
+   **Old-schema fallback (no `time_updated`).** A pre-`Timestamps`-mixin table that lacks `time_updated` (detected via `tableSchema.has("time_updated")`) is paged by primary key only:
+
+   ```sql
+   SELECT <present cols> FROM <table> WHERE id > :id ORDER BY id LIMIT 1000
+   ```
+
+   The watermark then advances on `MaxID` alone (`MaxTimeUpdatedMs` stays 0). This is the same dynamic-SELECT discipline as the current-schema path; only the predicate and ORDER BY degrade. All four tables on every observed opencode schema carry `time_updated`, so this is a forward-/backward-compatibility safeguard, not a hot path.
+
+2. **Affected-session derivation.** From the changed rows, the layer computes the SET of session ids whose full tree must be reloaded and re-mapped:
+   - a changed `session` row contributes its own `id`;
+   - a changed `message` row contributes its `session_id`;
+   - a changed `part` row contributes its `session_id` (the `part` table denormalizes `session_id`); on a hypothetical old schema where `part` lacks `session_id`, the owning session is resolved via an indexed `SELECT session_id FROM message WHERE id = :message_id` lookup (with the changed-message delta consulted first to avoid the query);
+   - a changed `session_message` row contributes its `session_id`.
+
+   The set is de-duplicated: a session touched by several tables in one cycle is reloaded exactly once.
+
+3. **Full-session-tree load + map.** For each affected session id the layer loads the whole tree — the `session` row, all its `message` rows ordered by `(time_created, id)`, and each message's `part` rows ordered by `(id)` — assembles `[]messageWithParts`, and calls the pure mapper (`mapSession`) on it. Full-tree reload is mandatory, not partial: the mapper computes per-turn cumulative-token deltas across the ordered message list, so a partial reload would miscompute deltas. Re-emitting an unchanged session is harmless — the ingester's idempotent upserts + the (post-SOW-0004) idempotent catalog absorb it.
+
+   A session id observed in a delta whose `session` row cannot be loaded (deleted between pages, or a part/message orphaned from its session) is skipped with one structured error via `onError`; the cycle continues with the remaining sessions.
+
 ## Watch Strategy
 
 SQLite does not notify external consumers of writes. The adapter has two complementary signals:
@@ -308,6 +342,36 @@ If any value exceeds the cursor's recorded watermark, the adapter performs a del
 Rationale for the floor at 250 ms (not lower): opencode writes can be very chatty (one transaction per part), and we are not a real-time replication layer — 250 ms is well below human perception for the UI's SSE updates.
 
 Rationale for using `time_updated` over `id` (rowid) for the watermark: opencode rewrites in-place to update `tokens`, `cost`, `status` etc. on existing rows (via Drizzle `.$onUpdate`). An `id`-based cursor would miss these mutations. `time_updated` catches both inserts and updates.
+
+### Poll-loop state machine and the `MAX(time_updated)` gate (Chunk C)
+
+The realtime tailer is a timer-driven poll loop with an fsnotify wakeup hint. It is implemented as two free functions Chunk D's `adapter.go` calls (mirroring codex's free-function tailer rather than methods on the `Adapter` struct):
+
+- `scanLoop(ctx, dbPath, sourceID, since, out, onError) (Cursor, error)` — the historical backfill: introspect once, record the schema hash into the cursor, page every tracked table from `since`, derive affected sessions, reload + map each, emit, checkpoint `SourceProgress` every ~1000 rows processed and once at the end, return the advanced cursor.
+- `tailLoop(ctx, dbPath, sourceID, cur, out, onError) error` — the realtime follow until `ctx` is cancelled (returns `nil` on cancel).
+
+**Cadence intervals** (decided, SOW-0005 Open Decision #2):
+
+- **Idle** poll interval: 2 s (the previous cycle produced no change).
+- **Active** poll interval: 500 ms (the previous cycle produced a change).
+- **WAL-event floor**: 250 ms for a 5 s window after an `opencode.db-wal` fsnotify Write/Chmod event.
+
+The next interval is the minimum of the active/idle interval and the WAL-event floor when the floor window is open.
+
+**Cheap primary change check.** Every poll first runs the PK-indexed `MAX(id)` per table (a b-tree lookup on the time-prefixed Sonyflake PK, ~µs). When any table's `MAX(id)` exceeds the cursor's `MaxID`, the cycle runs the delta+reload+emit path. On a current schema this catches every INSERT.
+
+**The gated `MAX(time_updated)` probe.** In-place row mutations (token totals, status, archive) do NOT change `MAX(id)`, so they are caught by the unindexed `MAX(time_updated)` probe — which on the 585k-row `part` table is a 400–800 ms full scan and therefore MUST NOT run on every idle poll. It runs only when the gate is open. The gate predicate is a pure function:
+
+```
+shouldProbeTimeUpdated(now, lastWALEvent, lastProbe, safetyNet) =
+    lastWALEvent.After(lastProbe)  ||  now.Sub(lastProbe) >= safetyNet
+```
+
+i.e. the probe is issued only when (a) a WAL-mtime fsnotify event has fired since the last probe, OR (b) the 60 s safety-net interval has elapsed since the last probe. `safetyNet` is **60 s** (decided, matching Performance §"suspect activity gate" and AC#6). During steady-state idle with no WAL events the predicate is false on every poll, so the expensive scan never runs — the property AC#6 pins.
+
+**WAL fsnotify hint.** The loop sets up an fsnotify watch on the `opencode.db-wal` companion path (`<dbPath>-wal`) as a wakeup hint only. A Write/Chmod event records `lastWALEvent = now` (opening the 250 ms floor window and the probe gate). The hint is best-effort: if the WAL file does not exist, the watch `Add` fails, or the watcher errors, that is **non-fatal** — the loop logs once via `onError` and falls back to pure timer polling (the 60 s safety net still guarantees in-place mutations are eventually seen). A watcher error never terminates the loop.
+
+**Manual reload** (`/api/sources/<id>/reload`) is out of scope for Chunk C (the route does not exist yet); when added it will force one immediate cycle with the probe gate open.
 
 ## Cursor
 
