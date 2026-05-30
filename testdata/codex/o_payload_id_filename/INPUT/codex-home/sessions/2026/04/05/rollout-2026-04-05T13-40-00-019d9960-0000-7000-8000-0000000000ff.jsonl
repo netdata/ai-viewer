@@ -1,0 +1,6 @@
+{"timestamp":"2026-04-05T13:40:00.100Z","type":"session_meta","payload":{"id":"019d9960-0000-7000-8000-000000000091","timestamp":"2026-04-05T13:40:00.100Z","cwd":"<ROOT>/project","originator":"codex_exec","cli_version":"0.128.0","source":"exec","git":{"commit_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","branch":"main","repository_url":"git@github.com:example/example.git"}}}
+{"timestamp":"2026-04-05T13:40:00.200Z","type":"turn_context","payload":{"turn_id":"019d9960-1111-7000-8000-0000000000a1","cwd":"<ROOT>/project","model":"gpt-5.5","effort":"high","approval_policy":"never","sandbox_policy":{"type":"workspace-write"},"summary":"none"}}
+{"timestamp":"2026-04-05T13:40:00.300Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019d9960-1111-7000-8000-0000000000a1","started_at":1775742000,"model_context_window":258400}}
+{"timestamp":"2026-04-05T13:40:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"say hello"}]}}
+{"timestamp":"2026-04-05T13:40:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}
+{"timestamp":"2026-04-05T13:40:02.500Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"019d9960-1111-7000-8000-0000000000a1","completed_at":1775742002,"duration_ms":2500}}

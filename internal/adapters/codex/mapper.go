@@ -135,13 +135,15 @@ type fileMapper struct {
 	// orders. Entries persist for the life of the file (small; one per tool op).
 	finalizedOps map[string]finalizedOp
 
-	// openWebSearch is the most-recently-opened, not-yet-paired web_search op in
-	// the active turn (F7). web_search_call carries NEITHER id NOR call_id, so its
-	// companion event_msg.web_search_end (which DOES carry call_id) cannot pair by
-	// key — it pairs POSITIONALLY with the most-recent open web_search op in the
-	// same turn. nil when no web_search awaits an end. Cleared on pairing or at
-	// turn close (the op then finalizes as a dangling op).
-	openWebSearch *openWebSearchRef
+	// openWebSearch is a FIFO QUEUE of not-yet-paired web_search ops, in open order
+	// (F7/G4). web_search_call carries NEITHER id NOR call_id, so its companion
+	// event_msg.web_search_end (which DOES carry call_id) cannot pair by key — it
+	// pairs POSITIONALLY: each web_search_end finalizes the OLDEST open web_search op
+	// (front of the queue), so interleaved searches pair in order and none are left
+	// dangling out of sequence. Entries are appended on web_search_call, removed on
+	// pairing (front) or when their turn closes (finalizeDanglingOps closes the op
+	// and pruneClosedWebSearch drops the stale ref).
+	openWebSearch []*openWebSearchRef
 
 	// seenUserCallIDs dedups user input across response_item.message(role=user)
 	// and event_msg.user_message (spec rule #6, #18). Keyed on a content

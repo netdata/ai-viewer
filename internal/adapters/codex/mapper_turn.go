@@ -14,6 +14,16 @@ import (
 // (mapper-only tests feeding session_meta directly) this derives them from the
 // payload so the event is complete either way.
 func applySessionMeta(ev *canonical.SessionStartedEvent, p *sessionMetaPayload, m *fileMapper) {
+	// session_meta.payload.id is the AUTHORITATIVE native id (spec adapter-codex.md
+	// :290 — parent_thread_id / forked_from_id reference this UUID). It overrides
+	// the filename-seeded value (the scanner derives the id from the rollout
+	// filename as a fallback for a file whose body id is absent). Assigning both
+	// ev.NativeID and m.nativeID makes every subsequent turn/op/log event carry the
+	// authoritative id; RootNativeID is re-derived below (G5).
+	if p.ID != "" {
+		ev.NativeID = p.ID
+		m.nativeID = p.ID
+	}
 	kind, parent := p.classifySource()
 	// forked_from_id wins as the parent only when source did not already name a
 	// sub-agent parent (a fork and a sub-agent are mutually exclusive shapes;
@@ -336,7 +346,25 @@ func (m *fileMapper) finalizeDanglingOps(turnID string, base func() canonical.Ev
 		delete(m.openOps, p.callID)
 		m.recordFinalizedOp(p.callID, p.op)
 	}
+	m.pruneWebSearchQueue(turnID)
 	return out
+}
+
+// pruneWebSearchQueue drops any open web_search refs belonging to a now-closed
+// turn from the FIFO queue (G4), so a web_search_end in a LATER turn never pairs
+// with a stale ref whose op was already dangling-finalized. Preserves FIFO order
+// for the surviving refs.
+func (m *fileMapper) pruneWebSearchQueue(turnID string) {
+	if len(m.openWebSearch) == 0 {
+		return
+	}
+	kept := m.openWebSearch[:0]
+	for _, ws := range m.openWebSearch {
+		if ws.turnID != turnID {
+			kept = append(kept, ws)
+		}
+	}
+	m.openWebSearch = kept
 }
 
 // addTokenUsage folds one token_count event into the attributed turn's C#1

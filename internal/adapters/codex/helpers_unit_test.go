@@ -230,10 +230,18 @@ func TestMcpInvocationAndExecExtras(t *testing.T) {
 	if s, tool := mcpInvocation([]byte(`{bad`)); s != "" || tool != "" {
 		t.Errorf("mcpInvocation(malformed) = {%q %q}, want empty", s, tool)
 	}
-	// execCommandExtras: all fields
-	ex := execCommandExtras([]byte(`{"payload":{"exit_code":0,"cwd":"<ROOT>","source":"model","aggregated_output":"abc"}}`))
-	if ex["exec_exit_code"] != int64(0) || ex["exec_cwd"] != "<ROOT>" || ex["exec_source"] != "model" || ex["exec_output_bytes"] != 3 {
+	// execCommandExtras: all fields, including duration {secs,nanos}→ms (G3).
+	ex := execCommandExtras([]byte(`{"payload":{"exit_code":0,"cwd":"<ROOT>","source":"model","aggregated_output":"abc","duration":{"secs":1,"nanos":250000000}}}`))
+	if ex["exec_exit_code"] != int64(0) || ex["exec_cwd"] != "<ROOT>" || ex["exec_source"] != "model" || ex["exec_output_bytes"] != 3 || ex["exec_duration_ms"] != int64(1250) {
 		t.Errorf("execCommandExtras = %+v", ex)
+	}
+	// duration {secs:0,nanos:0} is a real sub-ms value → exec_duration_ms=0, present.
+	if ex := execCommandExtras([]byte(`{"payload":{"exit_code":0,"duration":{"secs":0,"nanos":0}}}`)); ex["exec_duration_ms"] != int64(0) {
+		t.Errorf("execCommandExtras zero-duration = %+v, want exec_duration_ms=0", ex)
+	}
+	// absent duration → no exec_duration_ms key (G3 -1 sentinel suppressed).
+	if ex := execCommandExtras([]byte(`{"payload":{"exit_code":0}}`)); ex == nil || ex["exec_duration_ms"] != nil {
+		t.Errorf("execCommandExtras no-duration = %+v, want no exec_duration_ms", ex)
 	}
 	// empty payload → nil
 	if ex := execCommandExtras([]byte(`{"payload":{}}`)); ex != nil {
@@ -243,15 +251,48 @@ func TestMcpInvocationAndExecExtras(t *testing.T) {
 	if ex := execCommandExtras([]byte(`{bad`)); ex != nil {
 		t.Errorf("execCommandExtras(malformed) = %+v, want nil", ex)
 	}
-	// webSearchExtras
-	if w := webSearchExtras([]byte(`{"payload":{"query":"q"}}`)); w["query"] != "q" {
-		t.Errorf("webSearchExtras = %+v", w)
+	// webSearchExtras: query + action object (G4).
+	w := webSearchExtras([]byte(`{"payload":{"query":"q","action":{"type":"search","query":"q","queries":["q","q2"]}}}`))
+	if w["query"] != "q" {
+		t.Errorf("webSearchExtras query = %+v", w)
+	}
+	act, ok := w["action"].(map[string]any)
+	if !ok || act["type"] != "search" || act["query"] != "q" || act["queries"] != nil {
+		t.Errorf("webSearchExtras action = %+v (queries[] must be dropped)", w["action"])
+	}
+	// action open_page → url surfaced (no query/pattern).
+	w2 := webSearchExtras([]byte(`{"payload":{"action":{"type":"open_page","url":"https://e.invalid/p"}}}`))
+	if a, _ := w2["action"].(map[string]any); a["type"] != "open_page" || a["url"] != "https://e.invalid/p" || w2["query"] != nil {
+		t.Errorf("webSearchExtras open_page = %+v", w2)
+	}
+	// action find_in_page → pattern surfaced.
+	w3 := webSearchExtras([]byte(`{"payload":{"action":{"type":"find_in_page","pattern":"needle","url":"https://e.invalid/p"}}}`))
+	if a, _ := w3["action"].(map[string]any); a["pattern"] != "needle" || a["url"] != "https://e.invalid/p" {
+		t.Errorf("webSearchExtras find_in_page = %+v", w3)
+	}
+	// action with no type → dropped; query-only still works.
+	if w := webSearchExtras([]byte(`{"payload":{"query":"q","action":{"url":"x"}}}`)); w["query"] != "q" || w["action"] != nil {
+		t.Errorf("webSearchExtras typeless-action = %+v, want query only", w)
 	}
 	if w := webSearchExtras([]byte(`{"payload":{}}`)); w != nil {
 		t.Errorf("webSearchExtras(empty) = %+v, want nil", w)
 	}
 	if w := webSearchExtras([]byte(`{bad`)); w != nil {
 		t.Errorf("webSearchExtras(malformed) = %+v, want nil", w)
+	}
+	// patchApplyExtras (G2): success + status surfaced.
+	pe := patchApplyExtras([]byte(`{"payload":{"success":false,"status":"failed"}}`))
+	if pe["patch_success"] != false || pe["patch_status"] != "failed" {
+		t.Errorf("patchApplyExtras = %+v", pe)
+	}
+	if pe := patchApplyExtras([]byte(`{"payload":{"success":true}}`)); pe["patch_success"] != true || pe["patch_status"] != nil {
+		t.Errorf("patchApplyExtras success-only = %+v", pe)
+	}
+	if pe := patchApplyExtras([]byte(`{"payload":{}}`)); pe != nil {
+		t.Errorf("patchApplyExtras(empty) = %+v, want nil", pe)
+	}
+	if pe := patchApplyExtras([]byte(`{bad`)); pe != nil {
+		t.Errorf("patchApplyExtras(malformed) = %+v, want nil", pe)
 	}
 }
 

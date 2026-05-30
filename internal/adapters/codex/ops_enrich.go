@@ -35,12 +35,17 @@ func (m *fileMapper) enrichOp(rec record, advance func(int64) canonical.EventBas
 	if !ok {
 		// The op may have already been finalized by its *_output before this
 		// end-event (the ~15-32% output-first ordering): re-emit an OpStarted onto
-		// the finalized op so the Extras still land (F4).
-		return m.enrichFinalizedOp(p.CallID, advance, tsUs, p.Type, extras)
+		// the finalized op so the Extras land AND, when the exec carries an explicit
+		// exit_code, a CORRECTING OpFinalized so a non-zero exit overrides the
+		// output-derived status (G1, spec rule #5/#14 — exit_code is authoritative
+		// in BOTH orders).
+		return m.enrichFinalizedOp(p.CallID, advance, tsUs, p.Type, extras, status, errClass)
 	}
 	// Op still open (exec-first): stash extras + the exec-derived status on the op
 	// and leave it open. Its *_output (or the turn-close dangling finalize) emits
-	// the canonical OpFinalized AND re-emits an OpStarted carrying these Extras.
+	// the canonical OpFinalized AND re-emits an OpStarted carrying these Extras. The
+	// exec status WINS over the output-string heuristic when exec carries an
+	// explicit exit_code (spec rule #5/#14).
 	mergeExtras(op, extras)
 	if status != "" {
 		op.enrichStatus = status
@@ -50,13 +55,15 @@ func (m *fileMapper) enrichOp(rec record, advance func(int64) canonical.EventBas
 }
 
 // enrichFinalizedOp handles an end-event whose op was already finalized by its
-// *_output (output-first ordering, ~15-32% of exec files) (F4). It re-emits an
+// *_output (output-first ordering, ~15-32% of exec files) (F4/G1). It re-emits an
 // OpStarted carrying the enrichment Extras to UPDATE the existing op row
-// (idempotent on (turn,seq) — NOT a second op). When the op cannot be located in
-// finalizedOps (start below a resume offset, or orphaned), a DBG log is the only
-// honest surface. The end-event's status is NOT re-applied here: the *_output
-// already produced the canonical finalize, and the enrichment is supplementary.
-func (m *fileMapper) enrichFinalizedOp(callID string, advance func(int64) canonical.EventBase, tsUs int64, evType string, extras map[string]any) []canonical.Event {
+// (idempotent on (turn,seq) — NOT a second op) AND, when the end-event carries an
+// authoritative terminal status (an exec exit_code — spec rule #5/#14), a
+// CORRECTING OpFinalized so a failed exec that was provisionally finalized
+// completed by its output string is upserted to failed/command_failed (G1). When
+// the op cannot be located in finalizedOps (start below a resume offset, or
+// orphaned), a DBG log is the only honest surface.
+func (m *fileMapper) enrichFinalizedOp(callID string, advance func(int64) canonical.EventBase, tsUs int64, evType string, extras map[string]any, status, errClass string) []canonical.Event {
 	fop, ok := m.finalizedOps[callID]
 	if !ok {
 		log := map[string]any{"call_id": callID}
@@ -65,10 +72,38 @@ func (m *fileMapper) enrichFinalizedOp(callID string, advance func(int64) canoni
 		}
 		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "enrich_"+evType, log)}
 	}
-	if len(extras) == 0 {
+	out := make([]canonical.Event, 0, 2)
+	if len(extras) > 0 {
+		out = append(out, m.reemitOpStarted(fop, advance, tsUs, extras))
+	}
+	// An explicit exit_code-derived status corrects the op's terminal status in the
+	// output-first ordering: the *_output already finalized it (often completed off a
+	// benign-looking output), but a non-zero exit_code is authoritative (G1, spec
+	// rule #5/#14). The writer upserts on (turn,seq), so this overwrites the status.
+	if status != "" {
+		out = append(out, m.correctFinalizedOp(fop, advance, tsUs, status, errClass))
+	}
+	if len(out) == 0 {
 		return nil
 	}
-	return []canonical.Event{m.reemitOpStarted(fop, advance, tsUs, extras)}
+	return out
+}
+
+// correctFinalizedOp emits an OpFinalized that re-applies an authoritative
+// terminal status onto an already-finalized op's (turn,seq) row (G1). Used when an
+// exec_command_end exit_code (output-first ordering) must override the status the
+// op's *_output provisionally set. The writer's ON CONFLICT upsert overwrites the
+// status/errClass on the existing row; EndTs is the enrichment event's timestamp.
+func (m *fileMapper) correctFinalizedOp(fop finalizedOp, advance func(int64) canonical.EventBase, tsUs int64, status, errClass string) canonical.Event {
+	return canonical.OpFinalizedEvent{
+		EventBase:       advance(tsUs),
+		SessionNativeID: m.nativeID,
+		TurnSeq:         fop.turnSeq,
+		Seq:             fop.opSeq,
+		Status:          status,
+		ErrorClass:      errClass,
+		EndTs:           tsUs,
+	}
 }
 
 // finalizeWithExtras emits the op's OpFinalized AND, when the op accumulated
@@ -138,18 +173,19 @@ func (m *fileMapper) recordFinalizedOp(callID string, op *openOp) {
 	}
 }
 
-// enrichWebSearch handles event_msg.web_search_end (F7, spec rule #11). It pairs
-// POSITIONALLY with the active turn's most-recent open web_search op
-// (openWebSearch), because web_search_call carries no correlation key. It
-// finalizes that op completed and re-emits an OpStarted carrying the query Extras
-// (OpFinalized has no Extras field). When no web_search is open (the end is
-// orphaned, or its call was below a resume offset), a DBG log keeps it visible.
+// enrichWebSearch handles event_msg.web_search_end (F7/G4, spec rule #11). It
+// pairs POSITIONALLY with the OLDEST open web_search op (the FRONT of the
+// openWebSearch FIFO queue), because web_search_call carries no correlation key;
+// FIFO order means interleaved searches pair in the order they opened. It
+// finalizes that op completed and re-emits an OpStarted carrying the query +
+// action Extras (OpFinalized has no Extras field). When no web_search is open
+// (the end is orphaned, or its call was below a resume offset), a DBG log keeps it
+// visible.
 func (m *fileMapper) enrichWebSearch(rec record, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
-	ws := m.openWebSearch
+	ws := m.dequeueWebSearch()
 	if ws == nil {
 		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "web_search_end_no_call", nil)}
 	}
-	m.openWebSearch = nil
 	extras := webSearchExtras(rec.Raw)
 	op, ok := m.openOps[ws.syntheticCallID]
 	if !ok {
@@ -166,6 +202,26 @@ func (m *fileMapper) enrichWebSearch(rec record, advance func(int64) canonical.E
 	delete(m.openOps, ws.syntheticCallID)
 	m.recordFinalizedOp(ws.syntheticCallID, op)
 	return m.finalizeWithExtras(op, advance, tsUs, "completed", "")
+}
+
+// dequeueWebSearch pops the OLDEST open web_search op (front of the FIFO queue)
+// for positional pairing with a web_search_end (G4). Returns nil when the queue is
+// empty (an orphaned end). Skips refs whose op already finalized at a turn close
+// (its synthetic call_id is gone from openOps) so a stale front entry never
+// shadows a still-open later search.
+func (m *fileMapper) dequeueWebSearch() *openWebSearchRef {
+	for len(m.openWebSearch) > 0 {
+		ws := m.openWebSearch[0]
+		m.openWebSearch = m.openWebSearch[1:]
+		if _, stillOpen := m.openOps[ws.syntheticCallID]; stillOpen {
+			return ws
+		}
+		// The op was finalized at a prior turn close; its query/action can no longer
+		// be paired meaningfully — keep scanning for a still-open search. (Pairing a
+		// closed op would just re-stamp Extras; the FIFO contract is to pair the
+		// oldest STILL-OPEN search, so we drop the closed ref and continue.)
+	}
+	return nil
 }
 
 // enrichMcp handles event_msg.mcp_tool_call_end (spec rule #15). It re-stamps
@@ -226,29 +282,32 @@ func (m *fileMapper) enrichMcp(rec record, advance func(int64) canonical.EventBa
 	return out
 }
 
-// enrichPatchApply handles event_msg.patch_apply_end (spec rule #16). It
-// finalizes the matching apply_patch op with the success/status from the event.
-// When no op matches, it surfaces a DBG log.
+// enrichPatchApply handles event_msg.patch_apply_end (spec rule #16,
+// adapter-codex.md:361). It is ORDER-INDEPENDENT (G2), mirroring the exec fix:
+//   - op still OPEN (the apply_patch function_call_output has not arrived):
+//     finalize the op with the success/status-derived terminal status and merge
+//     {patch_success, patch_status} into its Extras via an OpStarted re-emit.
+//   - op already FINALIZED (output-first): re-emit an OpStarted carrying the
+//     extras AND a correcting OpFinalized so success=false upserts the op to
+//     failed/patch_failed (spec rule #16 "Set Op Status accordingly").
+//   - op NOT locatable: a DBG log is the only honest surface.
 func (m *fileMapper) enrichPatchApply(rec record, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
 	p := rec.EventMsg
-	op, ok := m.openOps[p.CallID]
 	status, errClass := patchApplyStatus(rec.Raw)
+	extras := patchApplyExtras(rec.Raw)
+	op, ok := m.openOps[p.CallID]
 	if !ok {
-		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "enrich_patch_apply_end", map[string]any{"call_id": p.CallID, "status": status})}
+		// Output-first ordering: the op was already finalized by its
+		// function_call_output — merge the extras and correct the status on its row.
+		return m.enrichFinalizedOp(p.CallID, advance, tsUs, p.Type, extras, status, errClass)
 	}
 	op.finalized = true
-	fin := canonical.OpFinalizedEvent{
-		EventBase:       advance(tsUs),
-		SessionNativeID: m.nativeID,
-		TurnSeq:         op.turnSeq,
-		Seq:             op.opSeq,
-		Status:          status,
-		ErrorClass:      errClass,
-		EndTs:           tsUs,
-	}
+	mergeExtras(op, extras)
 	delete(m.openOps, p.CallID)
 	m.recordFinalizedOp(p.CallID, op)
-	return []canonical.Event{fin}
+	// finalizeWithExtras emits the OpStarted (carrying patch_success/patch_status)
+	// followed by the OpFinalized with the success-derived status.
+	return m.finalizeWithExtras(op, advance, tsUs, status, errClass)
 }
 
 // mergeExtras folds enrichment extras onto a tracked op so its eventual finalize

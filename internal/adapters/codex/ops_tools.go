@@ -113,13 +113,14 @@ func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) c
 	return out
 }
 
-// mapWebSearchCall handles response_item.web_search_call (spec rule #11, F7). It
-// emits a tool op (Name=web_search, namespace=web). web_search_call carries
+// mapWebSearchCall handles response_item.web_search_call (spec rule #11, F7/G4).
+// It emits a tool op (Name=web_search, namespace=web). web_search_call carries
 // NEITHER id NOR call_id, so the op is NOT tracked by call_id; instead it is
-// recorded as the active turn's most-recent open web_search op (openWebSearch)
-// for POSITIONAL pairing with the companion event_msg.web_search_end (which DOES
-// carry a call_id, but for a DIFFERENT correlation space). If no end arrives the
-// op finalizes at turn close as a dangling op (it is tracked under a synthetic
+// appended to the FIFO queue of open web_search ops (openWebSearch) for POSITIONAL
+// pairing with a later event_msg.web_search_end (which DOES carry a call_id, but
+// for a DIFFERENT correlation space). Each web_search_end finalizes the OLDEST
+// queued op, so interleaved searches pair in order. If no end arrives the op
+// finalizes at turn close as a dangling op (it is tracked under a synthetic
 // per-op call_id so finalizeDanglingOps closes it).
 func (m *fileMapper) mapWebSearchCall(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	ts := m.ensureTurn(tsUs)
@@ -146,7 +147,7 @@ func (m *fileMapper) mapWebSearchCall(p *responseItemPayload, advance func(int64
 	// call_id (the "ws#" prefix is not a codex call_id form).
 	synthetic := fmt.Sprintf("ws#%d:%d", turnSeq, opSeq)
 	m.trackOp(synthetic, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, "web_search", "web")
-	m.openWebSearch = &openWebSearchRef{turnID: m.activeTurnID, turnSeq: turnSeq, opSeq: opSeq, syntheticCallID: synthetic}
+	m.openWebSearch = append(m.openWebSearch, &openWebSearchRef{turnID: m.activeTurnID, turnSeq: turnSeq, opSeq: opSeq, syntheticCallID: synthetic})
 	return out
 }
 

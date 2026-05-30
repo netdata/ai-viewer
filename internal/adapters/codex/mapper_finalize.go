@@ -43,8 +43,18 @@ func (m *fileMapper) finalizeAtEOF(stale bool, nowUs int64) []canonical.Event {
 	}
 	if !ts.sawTaskStarted {
 		// OLD-format: close COMPLETED at EOF regardless of staleness (spec edge #3).
+		// EndTs MUST be the turn's LAST-ACTIVITY timestamp (m.lastTsUs, the max
+		// record ts in the file — which, for the most-recent open turn, IS that
+		// turn's last activity), NOT the file mtime / wall-clock (G6). A clean
+		// old-format turn ended when its last record was written; using the live
+		// mtime made the golden non-deterministic (CI-flaky) and semantically wrong.
+		// Fall back to nowUs only when no record carried a timestamp (lastTsUs == 0).
+		endUs := m.lastTsUs
+		if endUs == 0 {
+			endUs = nowUs
+		}
 		m.eofFinalized = true
-		return m.closeOpenTurnAtEOF(ts, nowUs, "completed", "", false)
+		return m.closeOpenTurnAtEOF(ts, endUs, "completed", "", false)
 	}
 	// NEW-format: only a stale file's hanging turn is a crash (rule #23). A fresh
 	// file's turn is still running — leave it open (do NOT set eofFinalized, so a
@@ -61,10 +71,12 @@ func (m *fileMapper) finalizeAtEOF(stale bool, nowUs int64) []canonical.Event {
 // old-format turn), the turn is finalized with the supplied status/errClass, its
 // turn-extras log is emitted, and — only when withSessionFinalize is set (the
 // stale new-format crash path) — a SessionFinalizedEvent(failed, incomplete) is
-// appended (the ONLY SessionFinalizedEvent codex emits; SOW C#3). endUs is
-// floored at the turn's start so the synthetic close never predates the open.
-func (m *fileMapper) closeOpenTurnAtEOF(ts *turnState, nowUs int64, status, errClass string, withSessionFinalize bool) []canonical.Event {
-	endUs := nowUs
+// appended (the ONLY SessionFinalizedEvent codex emits; SOW C#3). closeUs is the
+// close timestamp: the turn's last-activity ts for the OLD-format completed close
+// (deterministic, G6) or the file mtime for the stale new-format crash close. It
+// is floored at the turn's start so the synthetic close never predates the open.
+func (m *fileMapper) closeOpenTurnAtEOF(ts *turnState, closeUs int64, status, errClass string, withSessionFinalize bool) []canonical.Event {
+	endUs := closeUs
 	if endUs < ts.startTsUs {
 		endUs = ts.startTsUs
 	}

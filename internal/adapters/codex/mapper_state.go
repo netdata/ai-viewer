@@ -116,11 +116,12 @@ type finalizedOp struct {
 	namespace string
 }
 
-// openWebSearchRef records the most-recent open web_search op in the active turn
-// for POSITIONAL pairing with event_msg.web_search_end (F7). web_search_call
-// carries no correlation key, so the end pairs by position, not call_id.
+// openWebSearchRef records one open web_search op for POSITIONAL pairing with
+// event_msg.web_search_end (F7/G4). web_search_call carries no correlation key, so
+// the end pairs by FIFO position (oldest open search first), not call_id.
 // syntheticCallID is the openOps key the call was tracked under, so the end can
-// finalize the SAME op and remove it from the dangling set.
+// finalize the SAME op and remove it from the dangling set. turnID lets a
+// turn-close prune drop refs belonging to a now-closed turn.
 type openWebSearchRef struct {
 	turnID          string
 	turnSeq         int

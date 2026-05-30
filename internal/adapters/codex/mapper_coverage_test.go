@@ -675,3 +675,187 @@ func TestMapper_LateSessionMetaNoSecondStart(t *testing.T) {
 		t.Fatalf("SessionStarted count = %d, want 1 (no second start on late meta)", got)
 	}
 }
+
+// TestMapper_NativeIDFromPayloadID covers G5: the mapper is seeded with a
+// FILENAME-derived nativeID, but session_meta.payload.id is AUTHORITATIVE and must
+// override it on the session AND every subsequent event. The scanner seeds the
+// filename id as a fallback; the body id wins (spec adapter-codex.md:290).
+func TestMapper_NativeIDFromPayloadID(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("file-id") // filename-derived fallback
+	lines := []string{
+		metaLine("meta-id", `"exec"`), // payload.id is the authoritative id
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}`,
+	}
+	events := runLines(t, m, lines)
+	s := firstStarted(t, events)
+	if s.NativeID != "meta-id" || s.RootNativeID != "meta-id" {
+		t.Errorf("session ids = {NativeID:%q RootNativeID:%q}, want both meta-id (payload.id wins, G5)", s.NativeID, s.RootNativeID)
+	}
+	// Every op/turn event must carry the authoritative id, not the filename fallback.
+	for _, st := range opStarts(events) {
+		if st.SessionNativeID != "meta-id" {
+			t.Errorf("op SessionNativeID = %q, want meta-id (G5)", st.SessionNativeID)
+		}
+	}
+	if m.nativeID != "meta-id" {
+		t.Errorf("m.nativeID = %q, want meta-id (G5)", m.nativeID)
+	}
+}
+
+// TestMapper_MultiWebSearchFIFO covers G4: two web_search_call ops followed by two
+// web_search_end events pair in FIFO order (oldest open search first), each
+// carrying its own query+action Extras. Also exercises pruneWebSearchQueue's
+// survivor path: a leftover unpaired search from turn 1 is dropped when turn 1
+// closes, so a turn-2 web_search_end does not pair with it.
+func TestMapper_MultiWebSearchFIFO(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"web_search_call","action":{"type":"search","query":"alpha"}}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"web_search_call","action":{"type":"open_page","url":"https://e.invalid/p"}}}`,
+		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"web_search_end","call_id":"x1","query":"alpha","action":{"type":"search","query":"alpha"}}}`,
+		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"web_search_end","call_id":"x2","action":{"type":"open_page","url":"https://e.invalid/p"}}}`,
+	}
+	events := runLines(t, m, lines)
+	// The first-opened web_search op (Seq 1) must carry the search action (paired
+	// with the FIRST end); the second (Seq 2) the open_page (the SECOND end). Seqs
+	// are 1 and 2 because the turn opens no other op before them.
+	var firstAction, secondAction map[string]any
+	for _, st := range opStarts(events) {
+		if st.Name != "web_search" || st.Extras == nil {
+			continue
+		}
+		if a, ok := st.Extras["action"].(map[string]any); ok {
+			switch st.Seq {
+			case 1:
+				firstAction = a
+			case 2:
+				secondAction = a
+			}
+		}
+	}
+	if firstAction == nil || firstAction["type"] != "search" {
+		t.Errorf("Seq1 (oldest search) action = %+v, want type=search (FIFO, G4)", firstAction)
+	}
+	if secondAction == nil || secondAction["type"] != "open_page" {
+		t.Errorf("Seq2 (newer search) action = %+v, want type=open_page (FIFO, G4)", secondAction)
+	}
+	// Both web_search ops finalized completed; no orphan log.
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "web_search_end_no_call" {
+			t.Errorf("FIFO pairing wrongly logged an orphan end (G4)")
+		}
+	}
+}
+
+// TestMapper_WebSearchPruneAcrossTurns covers G4's pruneWebSearchQueue survivor
+// path: an unpaired web_search_call in turn 1 is dropped when turn 1 closes, so a
+// web_search_end in turn 2 does NOT pair with the stale turn-1 ref (it is an
+// orphan).
+func TestMapper_WebSearchPruneAcrossTurns(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
+		// An unpaired web_search_call in turn 1.
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"web_search_call","action":{"type":"search","query":"dangling"}}}`,
+		// turn 1 closes — its open web_search op is dangling-finalized and pruned.
+		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}`,
+		// turn 2 opens; a web_search_end with no in-turn call must be an orphan.
+		`{"timestamp":"` + tsDone + `","type":"turn_context","payload":{"turn_id":"t2","model":"m"}}`,
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}`,
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"web_search_end","call_id":"x9","query":"late"}}`,
+	}
+	events := runLines(t, m, lines)
+	orphan := false
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "web_search_end_no_call" {
+			orphan = true
+		}
+	}
+	if !orphan {
+		t.Errorf("turn-2 web_search_end paired with a stale turn-1 ref instead of logging orphan (G4 prune)")
+	}
+}
+
+// TestMapper_PatchApplyOpenOpFailed covers G2's open-op path: a patch_apply_end
+// arriving while the apply_patch op is still OPEN (no function_call_output yet)
+// finalizes it with the success-derived status AND merges {patch_success,
+// patch_status} into Extras.
+func TestMapper_PatchApplyOpenOpFailed(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{}","call_id":"p1"}}`,
+		`{"timestamp":"` + tsEvent + `","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"p1","success":false,"status":"failed"}}`,
+	}
+	events := runLines(t, m, lines)
+	// The apply_patch op is finalized failed/patch_failed with merged extras.
+	gotFailed, gotExtras := false, false
+	for _, f := range opFinals(events) {
+		if f.Status == "failed" && f.ErrorClass == "patch_failed" {
+			gotFailed = true
+		}
+	}
+	for _, st := range opStarts(events) {
+		if st.Name == "apply_patch" && st.Extras != nil && st.Extras["patch_success"] == false && st.Extras["patch_status"] == "failed" {
+			gotExtras = true
+		}
+	}
+	if !gotFailed {
+		t.Errorf("open-op patch_apply_end did not finalize failed/patch_failed (G2)")
+	}
+	if !gotExtras {
+		t.Errorf("open-op patch_apply_end did not merge patch_success/patch_status Extras (G2)")
+	}
+}
+
+// TestMapper_OutputFirstExecFailedCorrects covers G1: an output-first
+// exec_command_end(exit≠0) emits a CORRECTING OpFinalized(failed, command_failed)
+// onto the op that its function_call_output had provisionally finalized completed.
+func TestMapper_OutputFirstExecFailedCorrects(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}`,
+		// Output-first: provisional completed off a benign-looking output string.
+		`{"timestamp":"` + tsEvent + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"some output"}}`,
+		// Late exec_command_end with a non-zero exit_code → authoritative failed.
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","exit_code":2,"aggregated_output":"some output","duration":{"secs":0,"nanos":500000000}}}`,
+	}
+	events := runLines(t, m, lines)
+	fins := opFinals(events)
+	// The shell op (Seq 1 — it is the turn's first op) must END with a corrected
+	// failed/command_failed finalize (the LAST finalize on its (turn,seq) wins via
+	// the writer upsert).
+	var lastSeq1 *canonical.OpFinalizedEvent
+	for i := range fins {
+		if fins[i].Seq == 1 {
+			f := fins[i]
+			lastSeq1 = &f
+		}
+	}
+	if lastSeq1 == nil || lastSeq1.Status != "failed" || lastSeq1.ErrorClass != "command_failed" {
+		t.Errorf("output-first failed exec: last Seq1 finalize = %+v, want failed/command_failed (G1)", lastSeq1)
+	}
+	// The exec extras (exit_code, duration_ms) reached the op via an OpStarted re-emit.
+	reemit := false
+	for _, st := range opStarts(events) {
+		if st.Name == "shell" && st.Extras != nil && st.Extras["exec_exit_code"] == int64(2) && st.Extras["exec_duration_ms"] == int64(500) {
+			reemit = true
+		}
+	}
+	if !reemit {
+		t.Errorf("output-first failed exec did not re-emit exec_exit_code/exec_duration_ms Extras (G1/G3)")
+	}
+}

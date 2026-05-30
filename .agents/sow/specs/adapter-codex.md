@@ -351,14 +351,15 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
     - LEGACY ONLY (does not occur in modern `.jsonl`). When ingesting legacy `.json` files: Kind=`tool`, Name=`shell`, ToolNamespace=`shell`.
 
 14. **`event_msg` payload `exec_command_end`:**
-    - Used for telemetry enrichment — the matching `function_call`/`function_call_output` pair carries the same `call_id` and produces the op. The `exec_command_end` adds: parsed_cmd, exit_code, duration, source. Adapter merges these into the op's Extras: `{exec_exit_code, exec_duration_ms, exec_cwd, exec_source}`. **Do not** emit a second op.
+    - Used for telemetry enrichment — the matching `function_call`/`function_call_output` pair carries the same `call_id` and produces the op. The `exec_command_end` adds: parsed_cmd, exit_code, duration, source. Adapter merges these into the op's Extras: `{exec_exit_code, exec_duration_ms, exec_cwd, exec_source}`. The `duration` is a Rust `Duration` object `{secs, nanos}` (real corpus: always this shape) normalized to integer `exec_duration_ms = secs*1000 + nanos/1e6`. **Do not** emit a second op.
+    - The `exit_code` is AUTHORITATIVE for the op's terminal status, ORDER-INDEPENDENTLY (G1, rule #5): non-zero `exit_code` → op `failed` / ErrorClass `command_failed`; `exit_code` 0 → `completed`. When `exec_command_end` arrives BEFORE the `function_call_output` (~68-85%), the exec status is stashed and WINS over the output-string heuristic at finalize. When it arrives AFTER (output-first, ~15-32%), the adapter emits a CORRECTING `OpFinalized` on the op's `(turn,seq)` so a non-zero exit overrides a provisionally-`completed` op. A blanked `aggregated_output` is NOT an error.
     - Note: `aggregated_output` is truncated to 10 KB at the source; `stdout`/`stderr`/`formatted_output` are blanked (`policy.rs:51-59`). Adapter cannot recover full output.
 
 15. **`event_msg` payload `mcp_tool_call_end`:**
     - For MCP-routed function calls (which appear ALSO as `function_call`/`function_call_output` with `name = "<server>.<tool>"` or via the `namespace` field). The `invocation` field gives canonical (server, tool). Use it to set `tool_namespace = "mcp:" + server` and `name = tool` on the matching op.
 
 16. **`event_msg` payload `patch_apply_end`:**
-    - Telemetry for an `apply_patch` `function_call`. Merge `success`, `status` into the op's Extras. Set Op Status accordingly.
+    - Telemetry for an `apply_patch` `function_call`. Merge `success`, `status` into the op's Extras as `{patch_success, patch_status}`. Set Op Status accordingly (success=false → `failed` / ErrorClass `patch_failed`). ORDER-INDEPENDENT, mirroring exec (G2): an `apply_patch` op still open is finalized here with the extras merged; an already-finalized op (output-first) gets the extras re-emitted plus a correcting `OpFinalized` on its `(turn,seq)`.
 
 17. **`event_msg` payload `token_count`:**
     - Stream of token accounting snapshots. Each carries cumulative `total_token_usage` and the per-call `last_token_usage`, plus optional `model_context_window`.
@@ -389,7 +390,12 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
     - **OLD-format turn (turn_context-only, no `task_started` — cli < ~0.93):**
       close `TurnFinalizedEvent(Status="completed")` at EOF, REGARDLESS of
       staleness (edge #3 "close at EOF"; ~38% of the real corpus is pure
-      old-format ending cleanly with no completion marker). NO
+      old-format ending cleanly with no completion marker). `EndTs` is the turn's
+      **last-activity timestamp** (the max record timestamp in the file — for the
+      most-recent open turn this IS its last activity), NOT the file mtime /
+      wall-clock: a clean old-format turn ended when its last record was written,
+      and using the live mtime makes the emitted stream non-deterministic across
+      runs (CI-flaky golden) and semantically wrong (G6). NO
       `SessionFinalizedEvent` — codex has no per-session terminal signal (C#3);
       the session stays `running`.
     - **NEW-format turn (a `task_started` opened it, no `task_complete`):** the
@@ -429,7 +435,7 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 | `compacted` line (+ adjacent `event_msg.context_compacted` companion, suppressed) | one Op Kind=compaction Name=compaction |
 | lone `event_msg.context_compacted` (no preceding `compacted`) | one Op Kind=compaction Name=compaction (defensive) |
 | `response_item.compaction` / `response_item.context_compaction` | forward-compat only (0 real files); converges on one OpCompaction if ever emitted |
-| EOF, OLD-format open turn (turn_context-only, no task_started) | `TurnFinalizedEvent(completed)` at EOF regardless of staleness (edge #3); **no `SessionFinalizedEvent`** (F1) |
+| EOF, OLD-format open turn (turn_context-only, no task_started) | `TurnFinalizedEvent(completed)` at EOF regardless of staleness, `EndTs` = turn's last-activity ts (deterministic, NOT mtime — G6); **no `SessionFinalizedEvent`** (F1) |
 | EOF, NEW-format open turn (saw task_started), file mtime-stale ≥ 1 h | synthetic `TurnFinalizedEvent(failed,incomplete)` + `SessionFinalizedEvent(failed,incomplete)` |
 | EOF, NEW-format open turn, file FRESH (< 1 h) | turn stays open (still in-flight); no finalize (F1) |
 | EOF clean (most recent event is task_complete / no open turn) | **no `SessionFinalizedEvent`** — session stays `running` (codex has no per-session terminal signal; rollouts are resumable and metadata-appendable per `recorder.rs:1610`). UI uses `last_activity_ts` for staleness, identical to claude-code. |

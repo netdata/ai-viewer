@@ -203,6 +203,22 @@ Adjudicated on ground truth (spec lines + a read-only investigation of the real 
 
 **Decided fix plan (round 2):** code fixes to match the (mostly already-correct) spec + spec corrections where the spec had wrong wire shapes (F3 collab fields, F5/F7 dead variants) + regenerated goldens (the round-1 goldens were partly circular — built by the same understanding as the code) + new real-shape fixtures (collab spawn, replaced turn, old-format-stale, realistic web_search + compaction + exec-first ordering). All code fixes stay within `internal/adapters/codex/` + the additive `sources.go` probe; no canonical/ingest/store change. F9 hardening and `image_generation` real-shape coverage (no real data exists) are documented as accepted limitations.
 
+### Round 2 (2026-05-30) — same scope + fix notes
+
+- **minimax**: SAFE, no new issues, 1 benign P2 (the LLM op's CtxUsed re-finalize is a second OpFinalized — verified idempotent, carries `completed`+valid EndTs, does not clobber).
+- **glm**: found G6 (P2) empirically — ran `b_old_turncontext` twice and the old-format EOF `turn_finalized` EndTs differed between runs (`1780138387665997` vs `1780143627970705`, ~2026-05-30 wall-clock), i.e. the old-format EOF turn-close uses the file's live mtime as EndTs → **non-deterministic golden (CI-flaky) + semantically wrong**. CONFIRMED. Fix (G6): old-format EOF turn-close EndTs = the turn's last-activity timestamp (deterministic, from data), not the file mtime. Regenerate b_old_turncontext.
+- **codex**: NOT SAFE. Confirmed F1/F2/F3/F5/F6/F8/F9 resolved; **F4 and F7 only partially fixed**, plus a NativeID-source gap. All verified against ground truth (codex 100% accurate across both rounds):
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| G1 | P1 | output-first `exec_command_end(exit≠0)` adds extras via OpStarted but never emits a correcting `OpFinalized(failed)` → failed exec stays `completed` | CONFIRMED. ops_enrich.go:57-58 ("status NOT re-applied"); `enrichStatus` exists but unused on the finalized path. exit_code is authoritative (spec rule #5/#14) in BOTH orders. |
+| G2 | P2 | `patch_apply_end` not order-independent (openOps-only) and doesn't merge `success`/`status` extras (spec :361) | CONFIRMED. ops_enrich.go:234-240. |
+| G3 | P2 | `exec_duration_ms` (spec :354) decoded but never emitted; golden circular | CONFIRMED. ops_enrich_decode.go:18 decodes `Duration`, :27-39 drops it. |
+| G4 | P2 | web_search single-slot state mis-pairs interleaved searches; `action` (spec :345) dropped | CONFIRMED. ops_tools.go:149 single `openWebSearch`; webSearchExtras decodes only `query`. |
+| G5 | P2 | NativeID seeded from filename, not authoritative `session_meta.payload.id` (spec :290) | CONFIRMED. mapper.go:287 seeds from filename; applySessionMeta never assigns `p.ID`. Hidden where filename==payload.id. |
+
+**Round-3 fix plan:** (G1) exec exit_code authoritative for op status in both orders — exec-first applies at finalize, output-first emits a corrected `OpFinalized(failed,command_failed)` via the finalizedOps lookup; (G2) patch_apply_end uses the same finalizedOps path + merges success/status; (G3) emit `exec_duration_ms` (normalize the duration value to ms); (G4) FIFO queue of open web_search ops per turn + decode/emit `action`; (G5) set NativeID from `payload.id` (filename only as fallback). Add fixtures: failed-exec (output-first, corrected status), patch_apply_end, multi-web-search, and regenerate f_exec_truncated with `exec_duration_ms`.
+
 ## Outcome
 
 Pending.
