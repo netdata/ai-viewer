@@ -115,7 +115,7 @@ func TestPollStateNextInterval(t *testing.T) {
 
 	t.Run("idle is 2s", func(t *testing.T) {
 		t.Parallel()
-		st := newPollState()
+		st := newPollState(false)
 		if d := st.nextInterval(now); d != idlePollInterval {
 			t.Errorf("idle interval = %v, want %v", d, idlePollInterval)
 		}
@@ -123,7 +123,7 @@ func TestPollStateNextInterval(t *testing.T) {
 
 	t.Run("active is 500ms", func(t *testing.T) {
 		t.Parallel()
-		st := newPollState()
+		st := newPollState(false)
 		st.markCycle(true, now)
 		if d := st.nextInterval(now); d != activePollInterval {
 			t.Errorf("active interval = %v, want %v", d, activePollInterval)
@@ -132,7 +132,7 @@ func TestPollStateNextInterval(t *testing.T) {
 
 	t.Run("wal floor overrides idle within window", func(t *testing.T) {
 		t.Parallel()
-		st := newPollState()
+		st := newPollState(false)
 		st.markWALEvent(now)
 		if d := st.nextInterval(now.Add(1 * time.Second)); d != walFloorInterval {
 			t.Errorf("interval within WAL window = %v, want %v (floor)", d, walFloorInterval)
@@ -141,7 +141,7 @@ func TestPollStateNextInterval(t *testing.T) {
 
 	t.Run("wal floor expires after window", func(t *testing.T) {
 		t.Parallel()
-		st := newPollState()
+		st := newPollState(false)
 		st.markWALEvent(now)
 		// After the 5 s window, idle cadence resumes.
 		if d := st.nextInterval(now.Add(walFloorWindow + time.Second)); d != idlePollInterval {
@@ -151,7 +151,7 @@ func TestPollStateNextInterval(t *testing.T) {
 
 	t.Run("active still floored within wal window", func(t *testing.T) {
 		t.Parallel()
-		st := newPollState()
+		st := newPollState(false)
 		st.markCycle(true, now)
 		st.markWALEvent(now)
 		if d := st.nextInterval(now.Add(time.Second)); d != walFloorInterval {
@@ -165,7 +165,7 @@ func TestPollStateNextInterval(t *testing.T) {
 // starts after in-place mutations reconciles them on the first cycle.
 func TestPollStateFirstProbeGateOpen(t *testing.T) {
 	t.Parallel()
-	st := newPollState()
+	st := newPollState(false)
 	now := time.Unix(1_700_000_000, 0)
 	if !shouldProbeTimeUpdated(now, st.lastWALEvent, st.lastProbe, timeUpdatedSafetyNet) {
 		t.Error("first poll gate should be OPEN (zero lastProbe ⇒ net immediately due)")

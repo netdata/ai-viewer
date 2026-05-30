@@ -70,47 +70,31 @@ func TestReloadAndEmit_CtxCancel(t *testing.T) {
 	}
 }
 
-// TestResolvePartSession_Fallbacks covers all three resolvePartSession branches:
-// denormalized session_id present, message-map fallback, and indexed lookup.
-func TestResolvePartSession_Fallbacks(t *testing.T) {
+// TestResolvePartSession pins the SIMPLIFIED resolver (SOW-0005 round-6 P3-2): the
+// part table's session_id is a REQUIRED column (requiredColumns["part"]) — its
+// absence is fatal upstream in introspectAll — so the resolver reads the denormalized
+// value directly. There is no message-lookup fallback (the old-schema branch was
+// unreachable and removed, same class as the round-3 P3-1 dead-fallback removal). The
+// resolver is now a PURE function of the partRow (no ctx/db/map), so it needs no DB.
+func TestResolvePartSession(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	path, rw := newEmptyDB(t, dir, "opencode.db")
-	insertSession(t, rw, "ses_a", "", 1, 1, 0)
-	insertAssistantMessage(t, rw, "msg_a", "ses_a", 2, 2, 1, 1)
-	if err := rw.Close(); err != nil {
-		t.Fatalf("close rw: %v", err)
-	}
-	db := openRO(t, path)
 
-	// 1) Denormalized session_id present → returned directly (no query).
+	// Denormalized (required) session_id present → returned directly.
 	p := partRow{ID: "prt_1", MessageID: "msg_a", SessionID: "ses_a"}
-	if sid, err := resolvePartSession(ctxBG(), db, true, p, map[string]string{}); err != nil || sid != "ses_a" {
+	if sid, err := resolvePartSession(p); err != nil || sid != "ses_a" {
 		t.Fatalf("denormalized: sid=%q err=%v, want ses_a/nil", sid, err)
 	}
 
-	// 2) No session_id (hasSessionID=false) but message map has it → no query.
-	p2 := partRow{ID: "prt_2", MessageID: "msg_a"}
-	if sid, err := resolvePartSession(ctxBG(), db, false, p2, map[string]string{"msg_a": "ses_map"}); err != nil || sid != "ses_map" {
-		t.Fatalf("map fallback: sid=%q err=%v, want ses_map/nil", sid, err)
+	// Empty session_id → ERROR (defence in depth; the delta scanner's requiredOwner
+	// already errors the page before this, but the resolver must never derive an
+	// empty affected session that affectedSet.add would silently drop → cursor gap).
+	pEmpty := partRow{ID: "prt_empty", MessageID: "msg_a", SessionID: ""}
+	sid, err := resolvePartSession(pEmpty)
+	if err == nil {
+		t.Fatalf("empty session_id must ERROR (got sid=%q, nil err); a silent empty would gap the cursor", sid)
 	}
-
-	// 3) No session_id, not in map → indexed lookup on message PK.
-	p3 := partRow{ID: "prt_3", MessageID: "msg_a"}
-	if sid, err := resolvePartSession(ctxBG(), db, false, p3, map[string]string{}); err != nil || sid != "ses_a" {
-		t.Fatalf("indexed lookup: sid=%q err=%v, want ses_a/nil", sid, err)
-	}
-
-	// 4) Empty message id → empty (no query, no error).
-	p4 := partRow{ID: "prt_4"}
-	if sid, err := resolvePartSession(ctxBG(), db, false, p4, map[string]string{}); err != nil || sid != "" {
-		t.Fatalf("empty message id: sid=%q err=%v, want \"\"/nil", sid, err)
-	}
-
-	// 5) Unknown message id → ErrNoRows handled as empty.
-	p5 := partRow{ID: "prt_5", MessageID: "msg_nope"}
-	if sid, err := resolvePartSession(ctxBG(), db, false, p5, map[string]string{}); err != nil || sid != "" {
-		t.Fatalf("unknown message id: sid=%q err=%v, want \"\"/nil", sid, err)
+	if !strings.Contains(err.Error(), "empty session_id") {
+		t.Errorf("error = %v, want an empty-session_id refusal naming the part", err)
 	}
 }
 
@@ -224,7 +208,7 @@ func TestDetectChange_TimeUpdatedPath(t *testing.T) {
 	mid, _ := maxID(ctxBG(), db, "session")
 	cur = cur.withTable("session", TableWatermark{MaxIDSeen: mid, MaxTimeUpdatedMs: 50, MaxTimeUpdatedID: mid})
 
-	st := newPollState() // zero lastProbe ⇒ gate open (net immediately due)
+	st := newPollState(false) // zero lastProbe ⇒ gate open (net immediately due)
 	changed, probed, err := detectChange(ctxBG(), db, schema, cur, &st, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("detectChange: %v", err)

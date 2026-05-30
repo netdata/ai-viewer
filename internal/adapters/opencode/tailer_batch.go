@@ -18,16 +18,15 @@ import (
 // A batch spans the tracked tables with ONE shared row budget (≈progressEveryRows
 // rows TOTAL, not per-table) so a session touched by several tables in the same
 // run is reloaded+emitted ONCE per batch (cross-table dedupe), exactly as the
-// pre-P1.1 single-pass did — only the checkpoint timing changed. Tables are paged
-// in trackedTables order within a batch so the message delta populates msgSession
-// before the part delta consults it (old-schema part→session fallback).
+// pre-P1.1 single-pass did — only the checkpoint timing changed. A part's owning
+// session is its REQUIRED denormalized session_id (resolvePartSession), so the
+// batch no longer threads a message→session map (the old-schema fallback that
+// needed one was unreachable and removed — SOW-0005 round-6 P3-2).
 
 // batchProcessor drives the batched delta→emit→checkpoint loop for one run. It
 // owns the running committed cursor (advanced only after a batch's sessions are
-// emitted AND checkpointed), the per-table scan position (the watermark each
-// table has been paged to so far, which may be ahead of committed mid-batch), and
-// the cross-batch message→session map (the old-schema part→session fallback needs
-// message rows seen earlier in the run).
+// emitted AND checkpointed) and the per-table scan position (the watermark each
+// table has been paged to so far, which may be ahead of committed mid-batch).
 type batchProcessor struct {
 	db       *sql.DB
 	schema   schemaSet
@@ -49,10 +48,6 @@ type batchProcessor struct {
 	done map[string]bool
 	// advanced reports whether any watermark advanced across the whole run.
 	advanced bool
-	// msgSession maps message ids seen in THIS run's message deltas to their
-	// session id, so a part lacking a denormalized session_id (old schema) can
-	// resolve its owner without a query even across batch boundaries.
-	msgSession map[string]string
 }
 
 // run pages every tracked table forward in bounded cross-table batches, emitting
@@ -117,7 +112,7 @@ func (bp *batchProcessor) collectBatch(ctx context.Context) (batchResult, error)
 		// buffered in sink and flushed by scanOnePage AFTER each page's tx closes
 		// (SOW-0005 round-5 P2-1) — never emitted with the WAL snapshot pinned.
 		sink := &warnSink{}
-		onRow := deltaRowHandler(ctx, bp.db, table, s, affected, bp.msgSession, sink.collect)
+		onRow := deltaRowHandler(table, s, affected, sink.collect)
 		query := s.buildSelect()
 		for total < progressEveryRows {
 			if err := ctx.Err(); err != nil {

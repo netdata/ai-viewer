@@ -267,7 +267,7 @@ func TestP3C_SingleBatchEmitsOneSourceProgress(t *testing.T) {
 	db, schema := introspect(t, path)
 	out := make(chan canonical.Event, 256)
 	cur := newCursor()
-	st := newPollState()
+	st := newPollState(false)
 	advanced, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
 	if err != nil {
 		t.Fatalf("pollOnce: %v", err)

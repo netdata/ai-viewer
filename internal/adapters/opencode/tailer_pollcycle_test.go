@@ -29,7 +29,7 @@ func TestPollOnce_ProductiveCycle(t *testing.T) {
 
 	out := make(chan canonical.Event, 256)
 	cur := newCursor()
-	st := newPollState()
+	st := newPollState(false)
 	advanced, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
 	if err != nil {
 		t.Fatalf("pollOnce: %v", err)
@@ -164,7 +164,7 @@ func TestTailLoop_WALHintWakesCycle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
 	}()
 	defer func() { cancel(); <-done }()
 

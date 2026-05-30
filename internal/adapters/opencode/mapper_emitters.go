@@ -57,12 +57,20 @@ func (m *sessionMapper) emitCompactionLog(tc *turnContext, p partRow, data partD
 }
 
 // emitRetryLog handles a retry part (adapter-opencode.md §"Per-table emit rules":
-// retry → WRN LogEntry). It records the attempt number.
+// retry → WRN LogEntry message `API retry attempt <n>: <error.name>`). It records
+// the attempt number AND the triggering error's name (opencode's RetryPart carries
+// an `error: ApiError` whose `name` classifies the failure — SOW-0005 round-6 P3-1).
+// When the error name is absent (older/forward-compat retry part), the message and
+// extras omit it so an empty `: ` suffix never leaks.
 func (m *sessionMapper) emitRetryLog(tc *turnContext, p partRow, data partData) []canonical.Event {
 	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (retry)"))
-	return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq,
-		fmt.Sprintf("API retry attempt %d", data.Attempt),
-		map[string]any{"attempt": data.Attempt})}
+	msg := fmt.Sprintf("API retry attempt %d", data.Attempt)
+	extras := map[string]any{"attempt": data.Attempt}
+	if data.Error.Name != "" {
+		msg += ": " + data.Error.Name
+		extras["error.name"] = data.Error.Name
+	}
+	return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq, msg, extras)}
 }
 
 // emitFileLog handles a file part (adapter-opencode.md §"Per-table emit rules":

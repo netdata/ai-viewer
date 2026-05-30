@@ -95,7 +95,7 @@ func TestP2_2_EmptyOwningIDErrorsNoCursorAdvance(t *testing.T) {
 
 			affected := newAffectedSet()
 			sink := &warnSink{}
-			onRow := deltaRowHandler(ctxBG(), db, tc.table, schema[tc.table], affected, map[string]string{}, sink.collect)
+			onRow := deltaRowHandler(tc.table, schema[tc.table], affected, sink.collect)
 			from := TableWatermark{MaxTimeUpdatedMs: 50, MaxTimeUpdatedID: "aaa", MaxIDSeen: "aaa"}
 			delta, err := scanTableDelta(ctxBG(), db, schema[tc.table], from, onRow, sink, func(error) {})
 			if err == nil {
@@ -133,7 +133,7 @@ func TestP2_2_ValidOwningIDUnaffected(t *testing.T) {
 
 	affected := newAffectedSet()
 	sink := &warnSink{}
-	onRow := deltaRowHandler(ctxBG(), db, "message", schema["message"], affected, map[string]string{}, sink.collect)
+	onRow := deltaRowHandler("message", schema["message"], affected, sink.collect)
 	delta, err := scanTableDelta(ctxBG(), db, schema["message"], TableWatermark{}, onRow, sink, func(error) {})
 	if err != nil {
 		t.Fatalf("valid row must scan cleanly, got %v", err)

@@ -50,12 +50,13 @@ func boundarySelect(s tableSchema) string {
 //
 // This is READ-ONLY and does NOT touch the cursor: the boundary rows are already
 // AT the watermark, so re-emitting their session trees is the only effect (the
-// ingester absorbs the re-emission idempotently). Tables are scanned in
-// trackedTables order so the message bucket populates msgSession before the part
-// bucket consults it (old-schema part→session resolver).
+// ingester absorbs the re-emission idempotently). A part's owning session is its
+// REQUIRED denormalized session_id (resolvePartSession), so the boundary re-scan no
+// longer threads a message→session map (SOW-0005 round-6 P3-2 removed the unreachable
+// old-schema fallback that needed one). Tables are still scanned in trackedTables
+// order for deterministic first-seen affected ordering.
 func boundaryAffectedSessions(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, onError func(error)) ([]string, error) {
 	affected := newAffectedSet()
-	msgSession := map[string]string{}
 	for _, table := range trackedTables {
 		s := schema[table]
 		if !s.has("time_updated") {
@@ -65,7 +66,7 @@ func boundaryAffectedSessions(ctx context.Context, db *sql.DB, schema schemaSet,
 		if ms == 0 {
 			continue // no boundary watermark yet (cold start)
 		}
-		if err := scanBoundaryBucket(ctx, db, table, s, ms, affected, msgSession, onError); err != nil {
+		if err := scanBoundaryBucket(ctx, db, table, s, ms, affected, onError); err != nil {
 			return affected.ids(), err
 		}
 	}
@@ -83,14 +84,14 @@ func boundaryAffectedSessions(ctx context.Context, db *sql.DB, schema schemaSet,
 // rolled back FIRST (explicitly), and the buffered warnings are flushed through
 // onError only after the snapshot is released. A fatal row error (a corrupt
 // REQUIRED watermark/owning-id cell) is likewise surfaced after the tx closes.
-func scanBoundaryBucket(ctx context.Context, db *sql.DB, table string, s tableSchema, ms int64, affected *affectedSet, msgSession map[string]string, onError func(error)) error {
+func scanBoundaryBucket(ctx context.Context, db *sql.DB, table string, s tableSchema, ms int64, affected *affectedSet, onError func(error)) error {
 	tx, err := beginRO(ctx, db)
 	if err != nil {
 		return err
 	}
 
 	sink := &warnSink{}
-	onRow := deltaRowHandler(ctx, db, table, s, affected, msgSession, sink.collect)
+	onRow := deltaRowHandler(table, s, affected, sink.collect)
 	rows, err := tx.QueryContext(ctx, boundarySelect(s), ms)
 	if err != nil {
 		_ = tx.Rollback()

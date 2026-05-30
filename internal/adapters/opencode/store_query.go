@@ -3,7 +3,6 @@ package opencode
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 )
 
@@ -236,28 +235,20 @@ func (a *affectedSet) add(id string) {
 func (a *affectedSet) ids() []string { return a.order }
 
 // resolvePartSession returns the owning session id for a changed part row. The
-// part table denormalizes session_id (adapter-opencode.md §"part"), so the
-// direct value is used when present. On a hypothetical old schema where the part
-// table lacks session_id, the owner is resolved via an indexed lookup on the
-// message PK (message_id → session_id), consulting the already-fetched message
-// deltas first to avoid the query. msgSession maps the message ids seen in this
-// cycle's message delta to their session id.
-func resolvePartSession(ctx context.Context, db *sql.DB, hasSessionID bool, p partRow, msgSession map[string]string) (string, error) {
-	if hasSessionID && p.SessionID != "" {
-		return p.SessionID, nil
+// part table denormalizes session_id (adapter-opencode.md §"part"), and session_id
+// is a REQUIRED part column (requiredColumns["part"], store.go) — introspectAll makes
+// its absence FATAL upstream, so a part table that reaches this layer ALWAYS has it.
+// The round-2 P2-B old-schema message-lookup fallback (message_id → session_id via a
+// pool query, consulting an in-run message→session map first) was therefore
+// UNREACHABLE in production and was removed (SOW-0005 round-6 P3-2; same class as the
+// round-3 P3-1 dead-fallback removal). The delta scanner (scanPartRow → requiredOwner,
+// round-5 P2-2) already ERRORS the page on an empty/corrupt session_id before this is
+// reached, so p.SessionID is non-empty here; the empty guard remains as defence in
+// depth (it returns an error rather than deriving an empty affected session, which
+// affectedSet.add would silently drop while the row "succeeded" → a cursor gap).
+func resolvePartSession(p partRow) (string, error) {
+	if p.SessionID == "" {
+		return "", fmt.Errorf("opencode: part %s has empty session_id (required column); refusing to derive an empty affected session", p.ID)
 	}
-	if sid, ok := msgSession[p.MessageID]; ok {
-		return sid, nil
-	}
-	if p.MessageID == "" {
-		return "", nil
-	}
-	var sid sql.NullString
-	if err := db.QueryRowContext(ctx, `SELECT session_id FROM message WHERE id = ?`, p.MessageID).Scan(&sid); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
-		}
-		return "", fmt.Errorf("opencode: resolve part %s session: %w", p.ID, err)
-	}
-	return sid.String, nil
+	return p.SessionID, nil
 }

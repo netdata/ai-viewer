@@ -34,6 +34,16 @@ type pollState struct {
 	// re-scan so a same-ms in-place update that arrived with a DROPPED/absent WAL
 	// event is still eventually surfaced. Set by markProbe.
 	priorProbe bool
+	// boundaryReal reports whether the cursor's current boundary ms is a position
+	// whose bucket was ALREADY emitted — so the round-6 P1 "re-scan before the
+	// forward delta when changed==true" path may run without replaying a never-emitted
+	// cold-Tail HEAD snapshot. It starts true for a WARM Tail (resumed from a Scan
+	// cursor: Scan already emitted the boundary) and false for a COLD Tail (HEAD
+	// snapshot: follow-from-now, boundary never emitted); pollOnce flips it true once
+	// the cursor first advances (the new boundary is the just-emitted forward
+	// position). It does NOT gate the `!changed` boundary path, which the round-4
+	// priorProbe cold guard already protects.
+	boundaryReal bool
 }
 
 // newPollState returns the initial state: idle, no WAL event yet, a zero
@@ -41,8 +51,15 @@ type pollState struct {
 // guaranteeing the initial cycle reconciles in-place mutations that arrived
 // before tailing started), and priorProbe=false so that first probe does NOT run
 // the safety-net boundary re-scan (cold-Tail replay guard, round-4 P1).
-func newPollState() pollState {
-	return pollState{}
+//
+// warmStart seeds boundaryReal (SOW-0005 round-6 P1): a WARM Tail resumed from a
+// Scan cursor inherits a boundary whose bucket Scan already emitted, so the
+// changed==true boundary re-scan may run from the first poll; a COLD Tail (HEAD
+// snapshot, follow-from-now) starts boundaryReal=false so it does not replay the
+// never-emitted snapshot boundary on the first post-snapshot forward change
+// (pollOnce flips boundaryReal true once the cursor first advances).
+func newPollState(warmStart bool) pollState {
+	return pollState{boundaryReal: warmStart}
 }
 
 // markWALEvent records a WAL fsnotify event at t, opening the 250 ms floor window

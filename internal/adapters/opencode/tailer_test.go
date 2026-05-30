@@ -191,7 +191,7 @@ func TestTailLoop_PicksUpNewSession(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
 	}()
 	// ONE combined teardown: cancel FIRST, then wait. A separate `defer cancel()`
 	// + `defer wg.Wait()` would run LIFO (wait before cancel) and deadlock — the
@@ -247,7 +247,9 @@ func TestTailLoop_CtxCancelReturnsNil(t *testing.T) {
 	out := make(chan canonical.Event, 4096)
 	var ce collectErrs
 	done := make(chan error, 1)
-	go func() { done <- tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError) }()
+	go func() {
+		done <- tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
+	}()
 	// Let it establish + run one cycle, then cancel.
 	time.Sleep(200 * time.Millisecond)
 	cancel()
@@ -270,7 +272,7 @@ func TestTailLoop_MissingDBBenign(t *testing.T) {
 	defer cancel()
 	out := make(chan canonical.Event, 4)
 	var ce collectErrs
-	if err := tailLoop(ctx, missing, "opencode:"+missing, newCursor(), out, silentLogger(), ce.onError); err != nil {
+	if err := tailLoop(ctx, missing, "opencode:"+missing, newCursor(), false, out, silentLogger(), ce.onError); err != nil {
 		t.Fatalf("tailLoop(missing) = %v, want nil", err)
 	}
 	if ce.count() == 0 {

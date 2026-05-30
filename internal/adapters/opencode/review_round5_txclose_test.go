@@ -121,7 +121,7 @@ func TestP2_1_DeltaWarnEmittedAfterTxClosed(t *testing.T) {
 	onError, fired, txClosed := txOpenProbe(db)
 	sink := &warnSink{}
 	affected := newAffectedSet()
-	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, sink.collect)
+	onRow := deltaRowHandler("session", schema["session"], affected, sink.collect)
 	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, onRow, sink, onError); err != nil {
 		t.Fatalf("scanTableDelta (corrupt optional must not abort): %v", err)
 	}

@@ -42,7 +42,13 @@ func toolTerminal(data partData) (status string, endPtr *int64, errMsg string, h
 	case "error":
 		// opencode "error" → canonical "failed" (the only valid terminal-error op
 		// status); the detail rides in errMsg → OpFinalizedEvent.ErrorMessage.
-		return "failed", st.Time.End, st.Error, st.Output != "" || st.Error != ""
+		// hasOutput keys ONLY on state.output (SOW-0005 round-6 P2-1): a failed tool
+		// usually carries only state.error and NO output, so a tool_response PayloadRef
+		// at field=state.output would point at a body that does not exist (the future
+		// resolver would fetch nothing). The failure detail is carried by ErrorMessage
+		// (state.error), not a payload ref. A failed tool that produced partial output
+		// before failing still gets the ref (state.output != "").
+		return "failed", st.Time.End, st.Error, st.Output != ""
 	case "running", "pending":
 		// In-flight: OpStarted only, no finalize (adapter-opencode.md §"Edge
 		// Cases" #4). A later poll observing the part now completed re-emits the

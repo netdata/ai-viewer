@@ -40,14 +40,13 @@ import (
 // (adapter-opencode.md §"Read Strategy" → "Full-session-tree load + map").
 func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, sourceID string, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (Cursor, bool, error) {
 	bp := &batchProcessor{
-		db:         db,
-		schema:     schema,
-		sourceID:   sourceID,
-		out:        out,
-		logger:     orDefaultLogger(logger),
-		onError:    onError,
-		committed:  cur,                 // last cursor whose sessions are fully emitted
-		msgSession: map[string]string{}, // accumulates across batches (part→session fallback)
+		db:        db,
+		schema:    schema,
+		sourceID:  sourceID,
+		out:       out,
+		logger:    orDefaultLogger(logger),
+		onError:   onError,
+		committed: cur, // last cursor whose sessions are fully emitted
 	}
 	if err := bp.run(ctx); err != nil {
 		// On error/cancel the committed cursor is the last batch whose content was
@@ -59,16 +58,20 @@ func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Curso
 
 // deltaRowHandler returns the per-row scan callback for one table: it scans the
 // row into its typed struct, records the owning session id into the affected
-// set, and (for message rows) populates the message→session map the part
-// fallback consults. The returned closure matches scanTableDelta's onRow type
-// and reports the row's watermark key. onError is threaded into the per-table
-// scanner (round-4 P2-1): a corrupt OPTIONAL numeric cell surfaces a WARN and
-// degrades to 0, while a corrupt REQUIRED watermark cell (id/time_updated)
-// returns an ERROR that aborts the page so the cursor never advances to a
-// poisoned watermark. onError ALSO surfaces non-fatal per-row anomalies (a
-// session_message with an unknown type — adapter-opencode.md §"Edge Cases"
-// #1/§"session_message") without aborting the cycle.
-func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchema, affected *affectedSet, msgSession map[string]string, onError func(error)) func(*sql.Rows) (rowKey, error) {
+// set, and reports the row's watermark key. The returned closure matches
+// scanTableDelta's onRow type. onError is threaded into the per-table scanner
+// (round-4 P2-1): a corrupt OPTIONAL numeric cell surfaces a WARN and degrades to
+// 0, while a corrupt REQUIRED watermark/owning-id cell (id/time_updated/session_id)
+// returns an ERROR that aborts the page so the cursor never advances to a poisoned
+// watermark or an empty affected session. onError ALSO surfaces non-fatal per-row
+// anomalies (a session_message with an unknown type — adapter-opencode.md §"Edge
+// Cases" #1/§"session_message") without aborting the cycle.
+//
+// A part's owning session is its REQUIRED denormalized session_id (resolvePartSession;
+// session_id is in requiredColumns["part"], so the old-schema message-lookup fallback
+// was unreachable and removed — SOW-0005 round-6 P3-2). The message→session map the
+// fallback once consulted is therefore gone too.
+func deltaRowHandler(table string, s tableSchema, affected *affectedSet, onError func(error)) func(*sql.Rows) (rowKey, error) {
 	idx := newColumnIndex(s)
 	n := len(s.Present)
 	switch table {
@@ -90,20 +93,16 @@ func deltaRowHandler(ctx context.Context, db *sql.DB, table string, s tableSchem
 				return k, err
 			}
 			affected.add(row.SessionID)
-			if row.ID != "" {
-				msgSession[row.ID] = row.SessionID
-			}
 			return k, nil
 		}
 	case "part":
 		scan, row := scanPartRow(idx, n, onError)
-		hasSessionID := s.has("session_id")
 		return func(rows *sql.Rows) (rowKey, error) {
 			k, err := scan(rows)
 			if err != nil {
 				return k, err
 			}
-			sid, rerr := resolvePartSession(ctx, db, hasSessionID, *row, msgSession)
+			sid, rerr := resolvePartSession(*row)
 			if rerr != nil {
 				return k, rerr
 			}

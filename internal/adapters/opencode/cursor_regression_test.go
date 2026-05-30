@@ -111,7 +111,7 @@ func TestP1A_OldRowUpdateDoesNotReArmIdleScan(t *testing.T) {
 	log.reset()
 
 	now := time.Unix(1_700_000_000, 0)
-	st := newPollState()
+	st := newPollState(false)
 	st.markProbe(now)                       // lastProbe = now → 60 s net not yet due
 	st.lastWALEvent = now.Add(-time.Second) // a WAL event BEFORE the probe → gate stays CLOSED
 

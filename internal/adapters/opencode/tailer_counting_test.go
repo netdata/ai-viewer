@@ -44,7 +44,7 @@ func TestDetectChange_NoIdleMaxTimeUpdated(t *testing.T) {
 	// Idle poll state: a recent probe and NO WAL event since, so the gate is
 	// CLOSED for the whole run (the window is far from the 60 s net).
 	now := time.Unix(1_700_000_000, 0)
-	st := newPollState()
+	st := newPollState(false)
 	st.markProbe(now) // lastProbe = now → net not yet due
 	// lastWALEvent stays zero (before lastProbe) → no WAL-driven probe.
 
@@ -95,7 +95,7 @@ func TestDetectChange_GateOpenRunsProbe(t *testing.T) {
 	log.reset()
 
 	now := time.Unix(1_700_000_000, 0)
-	st := newPollState()
+	st := newPollState(false)
 	st.markProbe(now)
 	st.markWALEvent(now.Add(time.Second)) // WAL event AFTER the last probe → gate open
 

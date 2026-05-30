@@ -66,7 +66,7 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	// re-scan must NOT fire — this is the HEAD-snapshot reconciliation, and replaying
 	// the snapshot's boundary session there would be spurious (round-4 P1 cold guard).
 	cur := freshCursor()
-	stCold := newPollState() // lastProbe zero ⇒ net immediately due; priorProbe false
+	stCold := newPollState(false) // lastProbe zero ⇒ net immediately due; priorProbe false
 	out0 := make(chan canonical.Event, 64)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stCold, out0, silentLogger(), func(error) {}); err != nil {
 		t.Fatalf("pollOnce (cold first probe): %v", err)
@@ -80,7 +80,7 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	// NOW fires so a same-ms in-place update that arrived with a missed WAL hint is
 	// still surfaced.
 	cur = freshCursor()
-	stNet := newPollState()
+	stNet := newPollState(false)
 	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
 	outNet := make(chan canonical.Event, 256)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stNet, outNet, silentLogger(), func(error) {}); err != nil {
@@ -93,7 +93,7 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	// (c) WAL-driven probe with no detector advance: the boundary re-scan fires and
 	// re-emits ses_b's tree (the round-3 immediate path).
 	cur = freshCursor()
-	st2 := newPollState()
+	st2 := newPollState(false)
 	now := time.Now()
 	st2.markProbe(now.Add(-2 * timeUpdatedSafetyNet))
 	st2.markWALEvent(now) // lastWALEvent.After(lastProbe) → walDriven
@@ -146,7 +146,7 @@ func TestP1_1_CompactingClearsAtBoundaryReSurfacesOnSafetyNet(t *testing.T) {
 		cur = cur.withTable(table, TableWatermark{MaxIDSeen: "zzz_high", MaxTimeUpdatedMs: 100, MaxTimeUpdatedID: "zzz_high"})
 	}
 
-	st := newPollState()
+	st := newPollState(false)
 	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
 	out := make(chan canonical.Event, 256)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); err != nil {

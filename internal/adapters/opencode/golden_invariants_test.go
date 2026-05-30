@@ -409,3 +409,60 @@ func TestGoldenInvariant_IFailedAssistant(t *testing.T) {
 		t.Errorf("turn1 ErrorClass = %q, want MessageAbortedError", tf.ErrorClass)
 	}
 }
+
+// TestGoldenInvariant_JFileAttachment pins SOW-0005 round-4 P2-3 + round-6 P3-3
+// end-to-end: a file part flows through the full load→map pipeline as an INF
+// LogEntry carrying {filename,url,mime} in extras, and the stream emits NO
+// PayloadRefEvent at all (a file attachment has no canonical PayloadKind — the
+// removed "user_attachment" kind was a contract violation). Keyed on canonical
+// fields so a future -update-golden cannot launder a regression that re-introduced
+// a non-canonical PayloadRef for a file part.
+func TestGoldenInvariant_JFileAttachment(t *testing.T) {
+	t.Parallel()
+	ev := scenarioEvents(t, "j_file_attachment")
+
+	// NO PayloadRef anywhere — the file part must not emit one (and nothing else in
+	// this scenario does either: text/tool parts are absent).
+	if got := countKind(ev, canonical.EvPayloadRef); got != 0 {
+		t.Fatalf("PayloadRef count = %d, want 0 (a file part is a LogEntry, not a payload ref; round-6 P3-3)", got)
+	}
+	// Defence in depth: any PayloadRef that DID slip through must at least carry a
+	// canonical kind (this also guards the assertion above against a kind rename).
+	for _, e := range ev {
+		if p, ok := e.(canonical.PayloadRefEvent); ok && !canonicalPayloadKinds[p.PayloadKind] {
+			t.Fatalf("non-canonical PayloadRef kind=%q emitted for the file-attachment scenario", p.PayloadKind)
+		}
+	}
+
+	// Exactly one INF LogEntry "file attachment" with the three extras, scoped to the
+	// turn and the open LLM op.
+	var found int
+	for _, e := range ev {
+		l, ok := e.(canonical.LogEntryEvent)
+		if !ok || l.Message != "file attachment" {
+			continue
+		}
+		found++
+		if l.Severity != "INF" {
+			t.Errorf("file-attachment LogEntry severity = %q, want INF", l.Severity)
+		}
+		if l.Source != Format {
+			t.Errorf("file-attachment LogEntry source = %q, want %q", l.Source, Format)
+		}
+		if l.Extras["filename"] != "diagram.png" {
+			t.Errorf("extras.filename = %v, want diagram.png", l.Extras["filename"])
+		}
+		if l.Extras["mime"] != "image/png" {
+			t.Errorf("extras.mime = %v, want image/png", l.Extras["mime"])
+		}
+		if l.Extras["url"] != "https://cdn.example.invalid/diagram.png" {
+			t.Errorf("extras.url = %v, want the verbatim data.url", l.Extras["url"])
+		}
+		if l.TurnSeq != 1 || l.OpSeq != 1 {
+			t.Errorf("file-attachment LogEntry scope = (turn %d, op %d), want (1, 1)", l.TurnSeq, l.OpSeq)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("file-attachment INF LogEntry count = %d, want 1", found)
+	}
+}

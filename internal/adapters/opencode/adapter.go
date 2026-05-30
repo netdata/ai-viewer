@@ -118,7 +118,12 @@ func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- c
 // history. Mirrors codex.Tail.
 func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
 	var cur Cursor
-	if a.scanCursor != nil {
+	// warmStart distinguishes a Tail resumed from a Scan cursor (the boundary bucket
+	// was already emitted by Scan) from a cold HEAD-snapshot Tail (follow-from-now,
+	// boundary never emitted). It seeds the round-6 P1 boundaryReal gate so a cold Tail
+	// never replays its snapshot boundary on the first post-snapshot forward change.
+	warmStart := a.scanCursor != nil
+	if warmStart {
 		cur = a.coerceCursor(*a.scanCursor)
 	} else {
 		snap, err := a.snapshotCursor(ctx)
@@ -127,7 +132,7 @@ func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
 		}
 		cur = snap
 	}
-	return tailLoop(ctx, a.dbPath, a.sourceID, cur, out, a.logger, a.onError)
+	return tailLoop(ctx, a.dbPath, a.sourceID, cur, warmStart, out, a.logger, a.onError)
 }
 
 // ParseCursor implements canonical.Adapter. Empty input yields the zero Cursor;

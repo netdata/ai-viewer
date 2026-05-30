@@ -287,6 +287,17 @@ type partTimes struct {
 	End   *int64 `json:"end"`
 }
 
+// partError is the tagged error object on a `retry` part: opencode's RetryPart
+// carries `error: ApiError`, an `{name, data}` tagged union (anomalyco/opencode
+// — packages/sdk RetryPart/ApiError). Only Name is load-bearing for the retry
+// LogEntry (adapter-opencode.md §"Per-table emit rules": `retry` → WRN with the
+// attempt AND error.name). The data body is dropped — it can carry sensitive
+// response content the adapter never copies. An absent error decodes to a zero
+// partError (Name == "").
+type partError struct {
+	Name string `json:"name"`
+}
+
 // toolState is the part.data.state tagged union for a tool part
 // (message-v2.ts:248-308). Only the load-bearing fields are typed; Input and
 // Metadata stay raw for the mapper (bytes_in approximation, sub-agent
@@ -354,7 +365,8 @@ type partData struct {
 	// compaction:
 	Auto bool `json:"auto"`
 	// retry:
-	Attempt int `json:"attempt"`
+	Attempt int       `json:"attempt"`
+	Error   partError `json:"error"` // retry: the ApiError that triggered the attempt
 	// file:
 	MIME     string `json:"mime"`
 	Filename string `json:"filename"`

@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -634,6 +635,81 @@ func TestMapSession_ToolOpStatusError(t *testing.T) {
 	if toolFin.ErrorClass != defaultErrorClass {
 		t.Fatalf("tool ErrorClass = %q want %q (P1-C carries a class label)", toolFin.ErrorClass, defaultErrorClass)
 	}
+	// SOW-0005 round-6 P2-1: this failed tool carries ONLY state.error (no
+	// state.output), so NO tool_response PayloadRef may be emitted — the future
+	// resolver would fetch a state.output body that does not exist. The detail is
+	// already in ErrorMessage above.
+	for _, ev := range evs {
+		if p, ok := ev.(canonical.PayloadRefEvent); ok && p.PayloadKind == "tool_response" {
+			t.Fatalf("failed tool with only state.error emitted a tool_response PayloadRef (uri=%q); none must be emitted (round-6 P2-1)", p.LocationURI)
+		}
+	}
+}
+
+// TestMapSession_FailedToolNoOutputNoPayloadRef pins SOW-0005 round-6 P2-1 directly:
+// a failed tool (state.status="error") whose state has ONLY an error string and NO
+// state.output emits NO tool_response PayloadRef (its detail rides in ErrorMessage),
+// while a COMPLETED tool WITH state.output still emits the tool_response ref. The two
+// cases share one mapSession run so the gate (state.output != "", not the status) is
+// pinned against both shapes at once.
+func TestMapSession_FailedToolNoOutputNoPayloadRef(t *testing.T) {
+	s := rootSession("ses_x", 0)
+	end := int64(2600)
+	// A failed tool with only state.error (no output).
+	failNoOut := func(id string) partRow {
+		state := map[string]any{
+			"status": "error",
+			"input":  map[string]any{"command": "make"},
+			"error":  "command failed",
+			"time":   map[string]any{"start": int64(2000), "end": end},
+		}
+		raw, _ := json.Marshal(map[string]any{"type": "tool", "callID": "c1", "tool": "bash", "state": state})
+		return partRow{ID: id, MessageID: "msg_a", SessionID: "ses_x", Data: raw}
+	}
+	msgs := []messageWithParts{
+		mwp(asgMsg("msg_a", 1500, nil, "the-alias", "the-model", tokenCounts{}, 0, "", ""),
+			stepStart("prt_1"),
+			failNoOut("prt_fail"), // failed, only state.error → NO ref
+			toolPart("prt_ok", "read", "completed", 2700, &end, nil), // completed WITH output → ref
+		),
+	}
+	evs := run(t, s, msgs)
+
+	// Collect tool_response refs and the part ids they point at.
+	var refParts []string
+	for _, ev := range evs {
+		if p, ok := ev.(canonical.PayloadRefEvent); ok && p.PayloadKind == "tool_response" {
+			refParts = append(refParts, p.LocationURI)
+		}
+	}
+	// Exactly ONE tool_response ref, for the completed tool (prt_ok) — never for the
+	// failed-no-output tool (prt_fail).
+	if len(refParts) != 1 {
+		t.Fatalf("tool_response PayloadRef count = %d (%v), want exactly 1 (the completed tool with output)", len(refParts), refParts)
+	}
+	if !strings.Contains(refParts[0], "part_id=prt_ok") {
+		t.Errorf("the sole tool_response ref points at %q, want the completed tool prt_ok", refParts[0])
+	}
+	for _, u := range refParts {
+		if strings.Contains(u, "part_id=prt_fail") {
+			t.Fatalf("failed tool prt_fail (only state.error) emitted a tool_response ref %q (round-6 P2-1: must not)", u)
+		}
+	}
+
+	// The failed tool still finalizes failed with ErrorMessage carrying state.error.
+	var failFin *canonical.OpFinalizedEvent
+	for i, f := range opFinals(evs) {
+		if f.Status == "failed" {
+			ff := opFinals(evs)[i]
+			failFin = &ff
+		}
+	}
+	if failFin == nil {
+		t.Fatal("failed tool produced no OpFinalized with status=failed")
+	}
+	if failFin.ErrorMessage != "command failed" {
+		t.Errorf("failed tool ErrorMessage = %q, want %q (detail rides in ErrorMessage, not a payload ref)", failFin.ErrorMessage, "command failed")
+	}
 }
 
 func TestMapSession_RunningToolNoFinalize(t *testing.T) {
@@ -900,6 +976,9 @@ func TestMapSession_CompactionInfoLog(t *testing.T) {
 	}
 }
 
+// TestMapSession_RetryWarnLog pins the retry → WRN LogEntry, including the
+// triggering error's name in the message AND extras (SOW-0005 round-6 P3-1).
+// retryPart builds an error with name "RateLimit".
 func TestMapSession_RetryWarnLog(t *testing.T) {
 	s := rootSession("ses_x", 0)
 	msgs := []messageWithParts{
@@ -909,14 +988,59 @@ func TestMapSession_RetryWarnLog(t *testing.T) {
 		),
 	}
 	evs := run(t, s, msgs)
-	var found bool
-	for _, ev := range evs {
+	var retryLog *canonical.LogEntryEvent
+	for i, ev := range evs {
 		if l, ok := ev.(canonical.LogEntryEvent); ok && l.Severity == "WRN" {
-			found = true
+			le := evs[i].(canonical.LogEntryEvent)
+			retryLog = &le
 		}
 	}
-	if !found {
+	if retryLog == nil {
 		t.Fatal("no WRN LogEntry for retry")
+	}
+	// The message carries the attempt AND the error name (P3-1).
+	if retryLog.Message != "API retry attempt 3: RateLimit" {
+		t.Errorf("retry WRN message = %q, want %q (attempt + error.name)", retryLog.Message, "API retry attempt 3: RateLimit")
+	}
+	if retryLog.Extras["error.name"] != "RateLimit" {
+		t.Errorf("retry WRN extras[error.name] = %v, want RateLimit", retryLog.Extras["error.name"])
+	}
+	if retryLog.Extras["attempt"] != 3 {
+		t.Errorf("retry WRN extras[attempt] = %v, want 3", retryLog.Extras["attempt"])
+	}
+}
+
+// TestMapSession_RetryWarnLogNoErrorName pins the forward-compat fallback (P3-1):
+// a retry part with NO error.name emits the bare "API retry attempt <n>" message
+// with no trailing ": " and no error.name extra (an older/partial retry part).
+func TestMapSession_RetryWarnLogNoErrorName(t *testing.T) {
+	s := rootSession("ses_x", 0)
+	bareRetry := func(id string, attempt int) partRow {
+		raw, _ := json.Marshal(map[string]any{"type": "retry", "attempt": attempt})
+		return partRow{ID: id, MessageID: "msg_a", SessionID: "ses_x", Data: raw}
+	}
+	msgs := []messageWithParts{
+		mwp(asgMsg("msg_a", 1500, nil, "the-alias", "the-model", tokenCounts{}, 0, "", ""),
+			stepStart("prt_1"),
+			bareRetry("prt_2", 2),
+		),
+	}
+	evs := run(t, s, msgs)
+	var retryLog *canonical.LogEntryEvent
+	for i, ev := range evs {
+		if l, ok := ev.(canonical.LogEntryEvent); ok && l.Severity == "WRN" {
+			le := evs[i].(canonical.LogEntryEvent)
+			retryLog = &le
+		}
+	}
+	if retryLog == nil {
+		t.Fatal("no WRN LogEntry for retry")
+	}
+	if retryLog.Message != "API retry attempt 2" {
+		t.Errorf("retry WRN message = %q, want bare %q (no error.name → no ': ' suffix)", retryLog.Message, "API retry attempt 2")
+	}
+	if _, ok := retryLog.Extras["error.name"]; ok {
+		t.Errorf("retry WRN extras must omit error.name when absent; got %v", retryLog.Extras["error.name"])
 	}
 }
 

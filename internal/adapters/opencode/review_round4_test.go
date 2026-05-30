@@ -82,7 +82,7 @@ func TestP2_1_CorruptOptionalCellWarnsDegradesToZero(t *testing.T) {
 	// The WARN is buffered in sink during the page tx and flushed via the
 	// scanTableDelta onError AFTER the tx closes (round-5 P2-1).
 	sink := &warnSink{}
-	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, sink.collect)
+	onRow := deltaRowHandler("session", schema["session"], affected, sink.collect)
 	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, onRow, sink, func(e error) { warns = append(warns, e) }); err != nil {
 		t.Fatalf("scanTableDelta: corrupt OPTIONAL cell must NOT abort the page, got %v", err)
 	}
@@ -119,7 +119,7 @@ func TestP2_1_CorruptRequiredCellErrorsNoCursorAdvance(t *testing.T) {
 
 	affected := newAffectedSet()
 	sink := &warnSink{}
-	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, sink.collect)
+	onRow := deltaRowHandler("session", schema["session"], affected, sink.collect)
 	from := TableWatermark{MaxTimeUpdatedMs: 50, MaxTimeUpdatedID: "aaa", MaxIDSeen: "aaa"}
 	delta, err := scanTableDelta(ctxBG(), db, schema["session"], from, onRow, sink, func(error) {})
 	if err == nil {
