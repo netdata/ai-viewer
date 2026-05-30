@@ -501,7 +501,7 @@ Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1
 
 13. **File renamed/moved**: codex does not rename files. If an operator manually renames or moves a rollout file, the adapter sees a Delete event on the old path and Create on the new path; cursor entry for the old path is left stale. Optional cleanup after N days.
 
-14. **Two rollouts with the same `id`**: not observed but theoretically possible (codex could resume into a forked thread). Treat as separate canonical sessions keyed on `(source_id, native_id+":"+file_basename)` to avoid collision; emit a LogEntry warning.
+14. **Two rollouts with the same `id`**: not observed (0 of the 2,566 modern files on the reference workstation) but theoretically possible (codex could resume into a forked thread). The intended behavior is to treat them as separate canonical sessions keyed on `(source_id, native_id+":"+file_basename)` with a LogEntry warning. **v1 limitation (SOW-0004):** the adapter uses the authoritative `session_meta.payload.id` as `NativeID`, and the ingester upserts sessions on `(source_id, native_id)`, so two same-`id` rollout files would COLLAPSE into one canonical session rather than disambiguate. The basename-disambiguation is deferred to **SOW-0022** (requires cross-file id-collision detection the per-file adapter does not have today). Unobserved edge; no data loss within a single session.
 
 15. **`originator` variants**: observed `codex_cli_rs`, `codex_exec`, `codex-tui`. Treat as identifying string; surface in Extras.
 
