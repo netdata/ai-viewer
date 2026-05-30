@@ -884,6 +884,43 @@ rather than drop it or ask the operator.
 
 Not merged. Fixes delegated; re-review same scope + these notes (Round 9) before merge.
 
+### Round 9 (2026-05-30) — codex + glm + minimax (full scope + Round-8 fix notes)
+
+glm → safe to merge (2 cosmetic P3). minimax → inconclusive (harness limit). **codex →
+NOT safe: 2 P1 + 1 P2 + 1 P3.** Adjudication:
+
+- **[P1.9a — operator identity in a tracked test] FIXED + committed (dcb8301).** A test case
+  used a REAL MCP namespace from the operator's environment (`playwright_<name>`) embedding
+  the operator's first name (`parser_test.go:136`). Scrubbed to a synthetic namespace. ROOT
+  CAUSE of the gate miss: `scan-secrets.sh` matched the operator name with `\b`, and `\b`
+  treats `_` as a word char, so `\b<name>\b` never fired for `<tool>_<name>`. Fixed the
+  scanner to use a non-alphanumeric token boundary on both sides (`_` = delimiter) and added
+  a self-test regression case (`server_<name>` is flagged; `Scanner` prefix near-miss stays
+  clean). Self-test 21/21; full scan clean (488 files). This was the urgent one — done first.
+- **[P1.9b — late-meta parent-op finalize] DOCUMENTED as a format-unreachable limitation
+  (not fixed — fixing it would be machinery for a case the format cannot produce).** codex's
+  scenario needs Scan to consume a parent + a COMPLETED child sidechain BEFORE the
+  `.meta.json` exists, then the meta to appear during a live Tail; the resolver then links
+  the op→child but no parent replay rebuilds the deferral, so the parent Agent op never
+  finalizes. VERIFIED UNREACHABLE on real data: the `.meta.json` is written at subagent
+  SPAWN, so it predates the child's completion in 15/15 sampled real subagent pairs
+  (meta mtime ≤ child-jsonl mtime). i.e. whenever Scan sees a *completed* child, the meta
+  already exists and the linkage+finalize path has it. Documented in §8.1 as an explicit
+  assumption (meta-at-spawn ⇒ present before child completion) + the pathological-lag
+  limitation (status lags until the next full scan, which re-reads with the meta present).
+  Per "don't add handling for scenarios that can't happen" + fit-for-purpose.
+- **[P2.9 — swallowed discovery-walk errors] FIX.** `collectMetaPaths` (`scanner.go:366-374`)
+  ignores non-`IsNotExist` `WalkDir` errors; `markExistingDirty`/`addWatchTree`
+  (`tailer.go:239-242`,`:275-278`) drop walk errors. Surface them via `onError` (no-silent-
+  failures contract) so an unreadable subtree/meta/watch is visible in `/api/health`.
+- **[P3.9 — graft spec wording] FIX.** `adapter-claude-code.md:768-774` says the writer graft
+  preserves `toolUseId`/`childNativeId`/`parentNativeId`; the code grafts only `toolUseId`
+  and `childNativeId` (`parentNativeId` is re-derived by `SessionStarted`, not grafted).
+  Align the wording (`ingester.md` is already correct).
+
+P2.9 + P3.9 + the P1.9b §8.1 documentation delegated together. Re-review same scope +
+these notes (Round 10) before merge.
+
 ## Outcome
 
 Pending.

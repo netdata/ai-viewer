@@ -769,10 +769,15 @@ land independently:
    EXCEPT the `aiViewer` stash sub-object, which it grafts back (via `json_set`, not
    `json_patch`) whenever a re-emit omits it — so a parent op or child-session
    re-emit lacking the stash cannot erase a previously recorded
-   `toolUseId`/`childNativeId`/`parentNativeId`, and a re-emit that legitimately
+   `toolUseId`/`childNativeId`, and a re-emit that legitimately
    carries a JSON `null` attribute value never deletes a key (the `json_patch`
-   RFC-7386 delete-on-null hazard). See `ingester.md` (the `graftAiViewerExtras`
-   invariant).
+   RFC-7386 delete-on-null hazard). The grafted keys are exactly `toolUseId` and
+   `childNativeId` (the resolver-owned join keys, `ingester.md`'s
+   `aiViewerStashKeys`); `parentNativeId` is NOT grafted — it is re-derived and
+   written fresh by `applySessionStarted` on every `SessionStarted` re-emit (it is
+   part of the wholesale `extras` build, alongside `rootNativeId`/`parentOpKey`), so
+   it cannot be lost by a re-emit that carries it. See `ingester.md` (the
+   `graftAiViewerExtras` invariant).
 
 2. **Agent op finalize is inherently child-side, via the terminal
    assistant-text completion marker (adapter).** The parent transcript has NO
@@ -962,6 +967,28 @@ land independently:
    (AgentName) and never re-emits a `SessionStarted` / `OpStarted` / `OpFinalized`,
    so no `catalog_*` aggregate changes on a meta rewrite. The from-0 re-read
    machinery (`forceFromZero`, `metaParentRels`, `metaChildRels`) is gone.
+
+   - **Known limitation — late-meta parent-op finalize (format-unreachable).** The
+     catalog-safe late-meta repair (the `SessionUpdatedEvent` above) repairs the
+     child's `AgentName` and re-stashes its `toolUseId`, so the resolver's
+     `linkOpChildrenByToolUse` pass links the parent op→child edge once the meta
+     lands. It does NOT, however, rebuild the in-memory parent-op finalize deferral:
+     the repair is meta-only and re-reads no transcript, so it cannot re-park a
+     completed child against its parent op. There is therefore one pathological
+     ordering the repair does not finalize: Scan consumes a parent transcript AND a
+     COMPLETED child sidechain BEFORE the child's `.meta.json` exists, and the
+     `.meta.json` then appears during a live Tail. In that case the op→child link is
+     repaired but the parent `Agent` op gets no `OpFinalizedEvent` from this path.
+     This is UNREACHABLE on real claude-code data: the `.meta.json` is written at
+     subagent SPAWN, so it predates the child's completion — confirmed on real
+     workstation data, meta mtime ≤ child-transcript mtime in 15/15 sampled subagent
+     pairs. Whenever Scan observes a *completed* child, its `.meta.json` therefore
+     already exists, and the normal finalize path (§8.1 item 2) has the deferral. The
+     residual (a meta delayed past its child's completion, which the format does not
+     produce) is a benign lag, not a correctness loss: the parent Agent op's status
+     stays `running` only until the next full Scan, which re-reads the parent with
+     the meta present and finalizes it normally. No finalize-via-resolver machinery
+     is added for a case the format cannot produce (fit-for-purpose).
 
 ## 9. Compaction Handling
 

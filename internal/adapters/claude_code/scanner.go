@@ -273,8 +273,9 @@ func readSessionMetas(resolvedRoot, sessionDir string, onError func(error)) meta
 	// Two-phase (mirrors aiagent_v3 list-then-open): collect meta paths in
 	// the walk, then read them after the walk returns. Reading inside the
 	// WalkDir callback is a TOCTOU-prone pattern (gosec G122); separating the
-	// phases keeps the read off the callback path.
-	paths := collectMetaPaths(subDir)
+	// phases keeps the read off the callback path. A walk error over an
+	// unreadable subtree is surfaced via onError (P2.9) and the walk continues.
+	paths := collectMetaPaths(subDir, onError)
 	for _, path := range paths {
 		// Containment guard returning the RESOLVED path so the read opens it, not
 		// the original (P2.4a, no TOCTOU). A path that escapes the root surfaces a
@@ -360,14 +361,27 @@ func readMetaCapped(resolvedAbs string) ([]byte, error) {
 var errMetaTooLarge = errors.New("claude_code: meta sidecar too large")
 
 // collectMetaPaths walks dir and returns the absolute paths of every
-// agent-*.meta.json found, sorted for determinism. A missing dir yields an
-// empty slice. The walk records names only — file reads happen after the
-// walk returns (see readSessionMetas / metaHashes).
-func collectMetaPaths(dir string) []string {
+// agent-*.meta.json found, sorted for determinism. A missing dir
+// (os.IsNotExist) yields an empty slice and is NOT an error. The walk records
+// names only — file reads happen after the walk returns (see readSessionMetas /
+// metaHashes). A non-IsNotExist walk error (an unreadable subtree — e.g. a
+// directory the daemon cannot read) is surfaced via onError so it is visible in
+// /api/health and the Sources panel (P2.9, no-silent-failures contract) and the
+// walk continues past it, so the sidecars it CAN read are still collected.
+func collectMetaPaths(dir string, onError func(error)) []string {
+	if onError == nil {
+		onError = func(error) {}
+	}
 	var paths []string
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
+				return filepath.SkipDir
+			}
+			onError(fmt.Errorf("claude_code: walk metas under %s: %w", path, err))
+			// Continue past an unreadable entry: SkipDir on a directory prunes
+			// just that subtree; a file error is reported and skipped.
+			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
@@ -396,7 +410,9 @@ func collectMetaPaths(dir string) []string {
 func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]string, error) {
 	_ = root // rel keys are computed against resolvedRoot (identical subtree); see doc.
 	out := map[string]string{}
-	paths := collectMetaPaths(resolvedRoot)
+	// A walk error over an unreadable meta subtree is surfaced via onError (P2.9)
+	// and the walk continues past it; the sidecars it CAN read are still hashed.
+	paths := collectMetaPaths(resolvedRoot, onError)
 	for _, path := range paths {
 		// Containment guard returning the RESOLVED path so the hash reads it, not
 		// the original (P2.4a, no TOCTOU).

@@ -503,6 +503,82 @@ func TestMetaHashes_SymlinkedRootDescends(t *testing.T) {
 	}
 }
 
+// TestCollectMetaPaths_WalkErrorSurfaced pins P2.9 (SOW-0003 Round 9): a
+// non-IsNotExist WalkDir error over an unreadable meta subtree is surfaced via
+// onError (no-silent-failures contract, so it shows in /api/health and the
+// Sources panel) while the walk continues past it and still collects the
+// sidecars it CAN read. An ABSENT dir is NOT an error. Tests the smallest seam
+// (the walk callback's error handling) because forcing a real permission error
+// is the most reliable way to exercise it in the sandbox.
+func TestCollectMetaPaths_WalkErrorSurfaced(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission restrictions")
+	}
+	base := t.TempDir()
+	subDir := filepath.Join(base, "sess-1", "subagents")
+	// A readable sidecar alongside an unreadable nested subtree.
+	readable := filepath.Join(subDir, "agent-readable000.meta.json")
+	writeFileBytes(t, readable, []byte(`{"agentType":"Explore","toolUseId":"toolu_1"}`))
+	blocked := filepath.Join(subDir, "nested")
+	writeFileBytes(t, filepath.Join(blocked, "agent-hidden00000.meta.json"),
+		[]byte(`{"agentType":"Plan","toolUseId":"toolu_2"}`))
+	// Drop read+exec on the nested dir so WalkDir cannot descend into it: the
+	// callback is invoked with a non-nil err for that path.
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Skipf("chmod unsupported: %v", err)
+	}
+	defer func() { _ = os.Chmod(blocked, 0o755) }() // restore so TempDir cleanup works
+
+	var mu sync.Mutex
+	var errs []string
+	paths := collectMetaPaths(subDir, func(e error) {
+		mu.Lock()
+		errs = append(errs, e.Error())
+		mu.Unlock()
+	})
+
+	// Some filesystems still allow descending a 0o000 dir; only assert the
+	// error path when the unreadable subtree truly blocked the walk.
+	if len(errs) == 0 {
+		t.Skip("filesystem allowed descending an unreadable dir; walk-error seam not exercised")
+	}
+	sawWalkErr := false
+	for _, e := range errs {
+		if strings.Contains(e, "walk metas under") {
+			sawWalkErr = true
+		}
+	}
+	if !sawWalkErr {
+		t.Fatalf("unreadable meta subtree did not surface a walk SourceError (P2.9); errs=%v", errs)
+	}
+	// Happy path unchanged: the readable sibling is still collected.
+	foundReadable := false
+	for _, p := range paths {
+		if p == readable {
+			foundReadable = true
+		}
+	}
+	if !foundReadable {
+		t.Fatalf("walk did not continue past the unreadable subtree to collect the readable sidecar; paths=%v", paths)
+	}
+}
+
+// TestCollectMetaPaths_AbsentDirNoError pins the other half of P2.9: an absent
+// meta dir (os.IsNotExist) is NOT an error — no onError call, empty result.
+func TestCollectMetaPaths_AbsentDirNoError(t *testing.T) {
+	t.Parallel()
+	absent := filepath.Join(t.TempDir(), "does-not-exist", "subagents")
+	var errs []string
+	paths := collectMetaPaths(absent, func(e error) { errs = append(errs, e.Error()) })
+	if len(errs) != 0 {
+		t.Fatalf("absent meta dir surfaced %d error(s), want 0; errs=%v", len(errs), errs)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("absent meta dir returned %d paths, want 0", len(paths))
+	}
+}
+
 // TestScan_EmptyRootNoEvents verifies a missing projects root is tolerated.
 func TestScan_EmptyRootNoEvents(t *testing.T) {
 	t.Parallel()

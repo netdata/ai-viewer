@@ -206,7 +206,7 @@ func handleEvent(watcher *fsnotify.Watcher, resolvedRoot, root string, ev fsnoti
 	if ev.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
 			addWatchTree(watcher, resolvedRoot, ev.Name, watched, onError)
-			markExistingDirty(resolvedRoot, ev.Name, dirty, metaDirty)
+			markExistingDirty(resolvedRoot, ev.Name, dirty, metaDirty, onError)
 			return
 		}
 	}
@@ -235,10 +235,24 @@ func handleEvent(watcher *fsnotify.Watcher, resolvedRoot, root string, ev fsnoti
 // window). The periodic tick's addWatchTree handles dirs; this handles the
 // files already inside them. base is the RESOLVED root so the keys it records
 // match the scan cursor keys under a symlinked projects root (SOW-0003 P1.7d;
-// see handleEvent).
-func markExistingDirty(base, dir string, dirty, metaDirty map[string]struct{}) {
+// see handleEvent). A non-IsNotExist walk error over an unreadable subtree is
+// surfaced via onError (P2.9, no-silent-failures contract) so an inaccessible
+// freshly-created dir is visible in /api/health; the walk continues past it.
+func markExistingDirty(base, dir string, dirty, metaDirty map[string]struct{}, onError func(error)) {
+	if onError == nil {
+		onError = func(error) {}
+	}
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			if !os.IsNotExist(err) {
+				onError(fmt.Errorf("claude_code: walk new dir %s: %w", path, err))
+			}
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		rel, rerr := relPath(base, path)
@@ -271,9 +285,19 @@ func relOrBase(base, abs string) string {
 // symlink-resolved projects root: a directory that resolves outside it (a
 // planted symlink escaping the source) is refused with a SourceError and not
 // watched (spec §6.1, P2e). SkipDir prunes the escaping subtree from the walk.
+// A non-IsNotExist walk error over an unreadable subtree is surfaced via
+// onError (P2.9, no-silent-failures contract) so a directory that cannot be
+// descended — and therefore cannot be watched — is visible in /api/health
+// rather than silently dropped; the walk continues past it.
 func addWatchTree(watcher *fsnotify.Watcher, resolvedRoot, dir string, watched map[string]struct{}, onError func(error)) {
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if !os.IsNotExist(err) {
+				onError(fmt.Errorf("claude_code: walk watch tree %s: %w", path, err))
+			}
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !d.IsDir() {
