@@ -32,6 +32,13 @@ const subagentsDir = "subagents"
 // while bounding pathological allocations.
 const scanBufferMax = 8 * 1024 * 1024
 
+// metaReadMax bounds a single `.meta.json` sidecar read (spec §6.1, P2.6b). A
+// sidecar is a tiny JSON object (agentType, toolUseId, description, a few
+// scalars); 1 MB is far above any legitimate size while bounding a pathological
+// or hostile oversized sidecar — a meta exceeding it is skipped with a
+// SourceError rather than read into memory.
+const metaReadMax = 1 * 1024 * 1024
+
 // progressEveryEvents bounds how frequently SourceProgress is emitted by
 // record count (spec §7 "every N lines or T ms").
 const progressEveryEvents = 200
@@ -239,10 +246,13 @@ func relPath(root, abs string) (string, error) {
 
 // metaMap is the toolUseId→agentId map recovered from a session dir's
 // sidecar .meta.json files, plus the per-agent agentType (the subagent's
-// effective AgentName). Keyed lookups are by agentId.
+// effective AgentName) and the inverse agentId→toolUseId map (the child's own
+// join key, stamped into its SessionStarted extras so the resolver can link the
+// parent Agent op by toolUseId without re-reading any transcript, §8.1).
 type metaMap struct {
 	toolUseToAgent map[string]string
 	agentType      map[string]string
+	agentToolUse   map[string]string
 }
 
 // readSessionMetas reads every agent-*.meta.json under a session dir's
@@ -255,7 +265,7 @@ type metaMap struct {
 // root is refused with a SourceError and skipped, so its (potentially
 // sensitive) content is never absorbed into a session's extras.
 func readSessionMetas(resolvedRoot, sessionDir string, onError func(error)) metaMap {
-	mm := metaMap{toolUseToAgent: map[string]string{}, agentType: map[string]string{}}
+	mm := metaMap{toolUseToAgent: map[string]string{}, agentType: map[string]string{}, agentToolUse: map[string]string{}}
 	if sessionDir == "" {
 		return mm
 	}
@@ -279,19 +289,16 @@ func readSessionMetas(resolvedRoot, sessionDir string, onError func(error)) meta
 			continue
 		}
 		agentID := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(path), metaExt), "agent-")
-		raw, readErr := os.ReadFile(resolvedPath) // #nosec G304 G122 -- reading the containment-checked RESOLVED path collected from a filtered walk under the configured read-only projects root
+		raw, readErr := readMetaCapped(resolvedPath)
 		if readErr != nil {
-			// A present-but-unreadable meta silently fails the toolUseId→agentId
-			// linkage repair and the child's AgentName; surface it (P2.4b, no
-			// silent failure) so /api/health shows it.
+			// A present-but-unreadable or oversized meta silently fails the
+			// toolUseId→agentId linkage and the child's AgentName; surface it (P2.4b
+			// read failure / P2.6b size cap, no silent failure) so /api/health shows it.
 			onError(fmt.Errorf("claude_code: read meta %s: %w", path, readErr))
 			continue
 		}
-		var meta struct {
-			AgentType string `json:"agentType"`
-			ToolUseID string `json:"toolUseId"`
-		}
-		if jerr := json.Unmarshal(raw, &meta); jerr != nil {
+		meta, jerr := parseMeta(raw)
+		if jerr != nil {
 			onError(fmt.Errorf("claude_code: parse meta %s: %w", path, jerr))
 			continue
 		}
@@ -300,10 +307,57 @@ func readSessionMetas(resolvedRoot, sessionDir string, onError func(error)) meta
 		}
 		if meta.ToolUseID != "" {
 			mm.toolUseToAgent[meta.ToolUseID] = agentID
+			mm.agentToolUse[agentID] = meta.ToolUseID
 		}
 	}
 	return mm
 }
+
+// sidecarMeta is the subset of a subagent `.meta.json` the adapter consumes.
+type sidecarMeta struct {
+	AgentType string `json:"agentType"`
+	ToolUseID string `json:"toolUseId"`
+}
+
+// parseMeta decodes a `.meta.json` body into the consumed fields.
+func parseMeta(raw []byte) (sidecarMeta, error) {
+	var meta sidecarMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return sidecarMeta{}, err
+	}
+	return meta, nil
+}
+
+// readMetaCapped reads a `.meta.json` sidecar bounded at metaReadMax (spec §6.1,
+// P2.6b). The path MUST be a containment-checked, symlink-RESOLVED path (the caller
+// resolves via withinResolvedRoot and passes the resolved path, no TOCTOU). A
+// present sidecar larger than the cap returns errMetaTooLarge WITHOUT reading the
+// whole file (the os.File size is stat-checked first), so a pathological or hostile
+// oversized sidecar cannot force an unbounded allocation. An empty/absent file is
+// the caller's concern (os.Open error is returned as-is).
+func readMetaCapped(resolvedAbs string) ([]byte, error) {
+	f, err := os.Open(resolvedAbs) // #nosec G304 -- reading the containment-checked RESOLVED path (withinResolvedRoot) from the configured read-only projects root
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	if info, statErr := f.Stat(); statErr == nil && info.Size() > metaReadMax {
+		return nil, fmt.Errorf("%w (%d bytes > %d)", errMetaTooLarge, info.Size(), metaReadMax)
+	}
+	// Bound the read regardless of the stat (defence against a grow-after-stat or a
+	// stat that under-reports): read at most metaReadMax+1 and reject if it overflows.
+	raw, err := io.ReadAll(io.LimitReader(f, metaReadMax+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > metaReadMax {
+		return nil, fmt.Errorf("%w (exceeds %d)", errMetaTooLarge, metaReadMax)
+	}
+	return raw, nil
+}
+
+// errMetaTooLarge signals a `.meta.json` sidecar exceeding metaReadMax (P2.6b).
+var errMetaTooLarge = errors.New("claude_code: meta sidecar too large")
 
 // collectMetaPaths walks dir and returns the absolute paths of every
 // agent-*.meta.json found, sorted for determinism. A missing dir yields an
@@ -330,16 +384,19 @@ func collectMetaPaths(dir string) []string {
 // metaHashes returns a map of meta-file relative path → sha256 of content
 // for every .meta.json under the projects root. Used by the tail/scan loop
 // to detect sidecar rewrites (spec §7 step 4). Two-phase like
-// readSessionMetas: collect paths, then read off the walk callback. root is the
-// UNRESOLVED configured root (the walk source and the cursor-key relativisation
-// base, per spec §7); resolvedRoot is the symlink-resolved root used for the
-// per-path containment check WITHOUT re-resolving it per file (P2-perf).
-// Each meta path is containment-checked before it is read (spec §6.1, P1.3): a
-// symlinked .meta.json resolving outside the root is refused (SourceError) and
-// skipped.
+// readSessionMetas: collect paths, then read off the walk callback. The walk
+// descends the symlink-RESOLVED root (P2.6c): filepath.WalkDir does NOT descend
+// INTO a symlinked walk-root, so walking the unresolved root would hash zero
+// sidecars under a legitimately-symlinked projects root. resolvedRoot is the
+// symlink-resolved root (the walk source AND the rel-key base — the rel is
+// identical whether computed against root or resolvedRoot since the subtree is the
+// same, so it matches discovery's relPath(root, …) keys). Each meta read is
+// size-capped (P2.6b) and the read failure / oversize surfaces a SourceError
+// (P2.4b, no silent failure).
 func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]string, error) {
+	_ = root // rel keys are computed against resolvedRoot (identical subtree); see doc.
 	out := map[string]string{}
-	paths := collectMetaPaths(root)
+	paths := collectMetaPaths(resolvedRoot)
 	for _, path := range paths {
 		// Containment guard returning the RESOLVED path so the hash reads it, not
 		// the original (P2.4a, no TOCTOU).
@@ -352,15 +409,16 @@ func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]stri
 			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", path))
 			continue
 		}
-		rel, rerr := relPath(root, path)
+		rel, rerr := relPath(resolvedRoot, path)
 		if rerr != nil {
 			onError(fmt.Errorf("claude_code: relpath meta %s: %w", path, rerr))
 			continue
 		}
-		raw, readErr := os.ReadFile(resolvedPath) // #nosec G304 G122 -- reading the containment-checked RESOLVED path collected from a filtered walk under the configured read-only projects root
+		raw, readErr := readMetaCapped(resolvedPath)
 		if readErr != nil {
-			// A present-but-unreadable meta silently fails the rewrite-detection
-			// that drives the late-meta linkage repair; surface it (P2.4b).
+			// A present-but-unreadable or oversized meta silently fails the
+			// rewrite-detection that drives the late-meta AgentName repair; surface
+			// it (P2.4b read failure / P2.6b size cap).
 			onError(fmt.Errorf("claude_code: read meta %s: %w", path, readErr))
 			continue
 		}
@@ -429,6 +487,7 @@ func readTranscript(ctx context.Context, root string, t transcript, sourceID str
 		parentNativeID: t.parentNativeID,
 		kind:           t.kind,
 		agentName:      agentNameFor(t, mm),
+		toolUseID:      toolUseIDFor(t, mm),
 		toolUseToAgent: mm.toolUseToAgent,
 		root:           root,
 		sessionDir:     t.sessionDir,
@@ -477,6 +536,18 @@ func agentNameFor(t transcript, mm metaMap) string {
 	}
 	agentID := agentIDFromNative(t.nativeID)
 	return mm.agentType[agentID]
+}
+
+// toolUseIDFor returns the child's own toolUseId for a sub_agent transcript (from
+// its sidecar `.meta.json.toolUseId`), or "" for a main session or when the sidecar
+// is absent. This is the child-side join key the resolver matches against the parent
+// `Agent` op's stashed toolUseId to link the op→child edge without re-reading any
+// transcript (spec §8.1, P1.6).
+func toolUseIDFor(t transcript, mm metaMap) string {
+	if t.kind != canonical.KindSubAgent || mm.agentToolUse == nil {
+		return ""
+	}
+	return mm.agentToolUse[agentIDFromNative(t.nativeID)]
 }
 
 // agentIDFromNative extracts the agentId from a synthetic subagent NativeID

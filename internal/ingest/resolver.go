@@ -115,6 +115,9 @@ func (r *resolver) linkOrphans(ctx context.Context) error {
 	if err := r.linkOpChildren(ctx, tx, affected); err != nil {
 		return err
 	}
+	if err := r.linkOpChildrenByToolUse(ctx, tx, affected); err != nil {
+		return err
+	}
 	if err := r.emitResolverNotify(ctx, tx, affected); err != nil {
 		return err
 	}
@@ -237,6 +240,58 @@ RETURNING session_id
 	}
 	if r.logger != nil && len(affected) > before {
 		r.logger.Debug("resolver: linked orphan op children", "affected", len(affected)-before)
+	}
+	return nil
+}
+
+// linkOpChildrenByToolUse re-links ops.child_session_id by matching the parent op's
+// stashed toolUseId (ops.extras_json.aiViewer.toolUseId) to a child session's stashed
+// toolUseId (sessions.extras_json.aiViewer.toolUseId) in the SAME source. This is the
+// additive, meta-independent bridge the claude-code adapter relies on (SOW-0003 P1.6):
+// a parent `Agent` op tailed BEFORE its sidecar `.meta.json` carries no
+// ChildSessionNativeID (so the childNativeId pass above cannot link it), but it does
+// carry the toolUseId from its own assistant.tool_use block, and the child session —
+// once read with its sidecar — carries the same toolUseId. Linking them at the DB
+// layer needs no transcript re-read (a re-read would double-count the accumulating
+// catalog_* rollups). It records the op's OWNING (parent) session id into affected so
+// an open parent-detail view refetches (sse-protocol.md §session_changed).
+//
+// The pass is purely additive: an op with no aiViewer.toolUseId stash matches nothing,
+// so adapters that do not stash it (ai-agent v2/v3) are unaffected. source_id is
+// resolved by joining through the op's session row (ops carry no source_id). The
+// child is matched on (same source, matching toolUseId) and must NOT be the op's own
+// session (c.id <> ops.session_id) — defence against a degenerate self-match.
+// modernc.org/sqlite supports UPDATE … FROM and UPDATE … RETURNING.
+func (r *resolver) linkOpChildrenByToolUse(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	before := len(affected)
+	rows, err := tx.QueryContext(ctx, `
+UPDATE ops SET child_session_id = (
+    SELECT c.id FROM sessions c
+     JOIN sessions parent ON parent.id = ops.session_id
+     WHERE c.source_id = parent.source_id
+       AND c.id <> ops.session_id
+       AND json_extract(c.extras_json, '$.aiViewer.toolUseId') = json_extract(ops.extras_json, '$.aiViewer.toolUseId')
+)
+WHERE ops.child_session_id IS NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.toolUseId') IS NOT NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.toolUseId') <> ''
+  AND EXISTS (
+      SELECT 1 FROM sessions c
+       JOIN sessions parent ON parent.id = ops.session_id
+       WHERE c.source_id = parent.source_id
+         AND c.id <> ops.session_id
+         AND json_extract(c.extras_json, '$.aiViewer.toolUseId') = json_extract(ops.extras_json, '$.aiViewer.toolUseId')
+  )
+RETURNING session_id
+`)
+	if err != nil {
+		return fmt.Errorf("resolver UPDATE op child by toolUseId: %w", err)
+	}
+	if err := scanLinkedRows(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE op child by toolUseId: %w", err)
+	}
+	if r.logger != nil && len(affected) > before {
+		r.logger.Debug("resolver: linked orphan op children by toolUseId", "affected", len(affected)-before)
 	}
 	return nil
 }

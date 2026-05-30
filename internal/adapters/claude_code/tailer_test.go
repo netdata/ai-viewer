@@ -2,6 +2,7 @@ package claude_code
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,65 @@ func TestTail_NewProjectDirWatched(t *testing.T) {
 	}
 }
 
+// TestTail_SymlinkedProjectsRootWatched pins P2.6c (SOW-0003 Round 6): when the
+// configured projects root is ITSELF a symlink (e.g. ~/.claude → an external volume),
+// the Tail watch tree must walk the symlink-RESOLVED root — filepath.WalkDir does not
+// descend INTO a symlinked walk-root, so watching the unresolved root would Add() zero
+// directories and silently miss every transcript. A transcript created under the
+// resolved tree after Tail starts must still be picked up.
+func TestTail_SymlinkedProjectsRootWatched(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	// Seed a project dir so the resolved tree has depth to walk.
+	writeFileBytes(t, filepath.Join(realRoot, "-home-user-x", "seed.jsonl"),
+		[]byte(`{"type":"user","uuid":"s1","sessionId":"seed","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+	linkRoot := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	// Configure the adapter with the SYMLINKED root.
+	a, err := New(linkRoot, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan canonical.Event, 256)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = a.Tail(ctx, out) }()
+
+	time.Sleep(200 * time.Millisecond)
+	// Append a new record to the existing project dir under the REAL tree (the
+	// dir was watched at startup only if the walk descended the resolved root).
+	appendFileBytes(t, filepath.Join(realRoot, "-home-user-x", "seed.jsonl"),
+		[]byte(`{"type":"assistant","uuid":"a1","sessionId":"seed","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3},"content":[{"type":"text","text":"hello"}]},"timestamp":"2026-05-26T10:00:09.000Z"}`+"\n"))
+
+	deadline := time.After(8 * time.Second)
+	var got []canonical.Event
+	for {
+		select {
+		case ev := <-out:
+			got = append(got, ev)
+			// The appended assistant record produces an LLM op under session "seed".
+			for _, e := range got {
+				if op, ok := e.(canonical.OpStartedEvent); ok &&
+					op.SessionNativeID == "seed" && op.Kind == canonical.OpLLM {
+					cancel()
+					wg.Wait()
+					return
+				}
+			}
+		case <-deadline:
+			cancel()
+			wg.Wait()
+			t.Fatalf("timeout: append under a symlinked projects root not picked up (P2.6c — Tail watch did not descend the resolved root); got %d events", len(got))
+		}
+	}
+}
+
 // TestTail_SymlinkTranscriptEscapeRefused pins P1.3 for the TAIL read path: a
 // `*.jsonl` symlink created in a watched directory AFTER Tail starts, resolving
 // OUTSIDE the projects root, must be refused before it is opened — its content
@@ -312,24 +372,27 @@ func TestRelOrBase(t *testing.T) {
 	}
 }
 
-// TestHashFile verifies hashFile reads and hashes a file, and reports false
-// for a missing path.
-func TestHashFile(t *testing.T) {
+// TestReadMetaCapped verifies readMetaCapped reads and returns a small sidecar's
+// bytes, rejects an oversized sidecar with errMetaTooLarge WITHOUT reading it all,
+// and returns a read error for a missing path (no silent skip — P2.5a/P2.6b).
+func TestReadMetaCapped(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "x.json")
 	writeFileBytes(t, path, []byte(`{"a":1}`))
-	h, err := hashFile(path)
-	if err != nil || h == "" {
-		t.Fatalf("hashFile = (%q,%v), want a hash", h, err)
+	raw, err := readMetaCapped(path)
+	if err != nil || string(raw) != `{"a":1}` {
+		t.Fatalf("readMetaCapped = (%q,%v), want the file bytes", raw, err)
 	}
-	if h != hashBytes([]byte(`{"a":1}`)) {
-		t.Fatalf("hashFile hash mismatch")
+	// A read error is RETURNED, not swallowed: the caller surfaces a SourceError.
+	if _, err := readMetaCapped(filepath.Join(tmp, "missing")); err == nil {
+		t.Fatal("readMetaCapped(missing) should return a read error, not nil")
 	}
-	// A read error is RETURNED, not swallowed (P2.5a): the caller surfaces it as a
-	// SourceError rather than silently skipping a present-but-broken meta.
-	if _, err := hashFile(filepath.Join(tmp, "missing")); err == nil {
-		t.Fatal("hashFile(missing) should return a read error, not nil")
+	// An oversized sidecar is rejected with errMetaTooLarge.
+	big := filepath.Join(tmp, "big.json")
+	writeFileBytes(t, big, make([]byte, metaReadMax+1))
+	if _, err := readMetaCapped(big); !errors.Is(err, errMetaTooLarge) {
+		t.Fatalf("readMetaCapped(oversized) err = %v, want errMetaTooLarge", err)
 	}
 }
 
@@ -363,38 +426,14 @@ func TestFlushDirty_MetaSeenSkipsUnchanged(t *testing.T) {
 	}
 }
 
-// TestMetaParentRel verifies the subagent-meta → parent-transcript relative
-// path derivation used by the late-meta re-read (P1.3b): a meta under
-// "<proj>/<sessionId>/subagents/.../agent-<id>.meta.json" maps to
-// "<proj>/<sessionId>.jsonl"; a non-subagent path is rejected.
-func TestMetaParentRel(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		metaRel    string
-		wantParent string
-		wantOK     bool
-	}{
-		{"-home-x/sess-1/subagents/agent-abc.meta.json", "-home-x/sess-1.jsonl", true},
-		{"-home-x/sess-1/subagents/wf/agent-def.meta.json", "-home-x/sess-1.jsonl", true},
-		{"deep/proj/sess-9/subagents/agent-z.meta.json", "deep/proj/sess-9.jsonl", true},
-		{"-home-x/sess-1.jsonl", "", false},        // not a meta
-		{"-home-x/loose.meta.json", "", false},     // meta without a subagents/ segment
-		{"subagents/agent-x.meta.json", "", false}, // no session-id parent before subagents
-	}
-	for _, c := range cases {
-		got, ok := metaParentRel(c.metaRel)
-		if ok != c.wantOK || got != c.wantParent {
-			t.Errorf("metaParentRel(%q) = (%q, %v), want (%q, %v)", c.metaRel, got, ok, c.wantParent, c.wantOK)
-		}
-	}
-}
-
-// TestScanThenTail_LateMetaRepairsChildAgentName pins P2.4c: a child subagent
-// transcript read BEFORE its `.meta.json` exists emits its SessionStarted with an
-// empty AgentName. When the meta arrives in a later Tail flush, the adapter must
-// re-read the CHILD transcript (not only the parent) so the child SessionStarted
-// re-emits carrying the agentType AgentName. Without the child re-read the
-// AgentName would stay permanently empty.
+// TestScanThenTail_LateMetaRepairsChildAgentName pins the Round-6 catalog-safe
+// AgentName repair: a child subagent transcript read BEFORE its `.meta.json` exists
+// emits its SessionStarted with an empty AgentName. When the meta arrives in a later
+// Tail flush, the adapter must repair the child's AgentName by emitting a
+// catalog-safe SessionUpdatedEvent{AgentName=agentType} — NOT by re-reading the child
+// transcript (which would re-emit SessionStarted/OpStarted/OpFinalized and
+// double-count the catalog rollups, P1.6). Without the repair the AgentName stays
+// permanently empty.
 func TestScanThenTail_LateMetaRepairsChildAgentName(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -437,8 +476,15 @@ func TestScanThenTail_LateMetaRepairsChildAgentName(t *testing.T) {
 	for {
 		select {
 		case ev := <-tailOut:
-			if ss, ok := ev.(canonical.SessionStartedEvent); ok &&
-				ss.NativeID == child && ss.AgentName == "Explore" {
+			// The repair is a catalog-safe SessionUpdatedEvent (NOT a re-emitted
+			// SessionStarted). A re-emitted SessionStarted would be a P1.6 regression.
+			if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.NativeID == child {
+				cancel()
+				<-done
+				t.Fatalf("late-meta repair re-emitted a SessionStartedEvent for child %q (P1.6 regression — must be a SessionUpdatedEvent)", child)
+			}
+			if su, ok := ev.(canonical.SessionUpdatedEvent); ok &&
+				su.NativeID == child && su.AgentName == "Explore" {
 				cancel()
 				<-done
 				return
@@ -446,54 +492,8 @@ func TestScanThenTail_LateMetaRepairsChildAgentName(t *testing.T) {
 		case <-deadline:
 			cancel()
 			<-done
-			t.Fatalf("child session %q never re-emitted with AgentName=Explore after the late .meta.json (P2.4c)", child)
+			t.Fatalf("child session %q AgentName never repaired via SessionUpdated after the late .meta.json", child)
 		}
-	}
-}
-
-// TestMetaChildRel verifies the subagent-meta → sibling child-transcript rel
-// derivation used by the late-meta child re-read (P2.4c): a subagent meta maps
-// to its sibling agent-<id>.jsonl; a non-meta or non-subagent path is rejected.
-func TestMetaChildRel(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		metaRel   string
-		wantChild string
-		wantOK    bool
-	}{
-		{"-home-x/sess-1/subagents/agent-abc.meta.json", "-home-x/sess-1/subagents/agent-abc.jsonl", true},
-		{"-home-x/sess-1/subagents/wf/agent-def.meta.json", "-home-x/sess-1/subagents/wf/agent-def.jsonl", true},
-		{"-home-x/sess-1.jsonl", "", false},        // not a meta
-		{"-home-x/loose.meta.json", "", false},     // meta without a subagents/ segment
-		{"subagents/agent-x.meta.json", "", false}, // no session-id parent before subagents
-	}
-	for _, c := range cases {
-		got, ok := metaChildRel(c.metaRel)
-		if ok != c.wantOK || got != c.wantChild {
-			t.Errorf("metaChildRel(%q) = (%q, %v), want (%q, %v)", c.metaRel, got, ok, c.wantChild, c.wantOK)
-		}
-	}
-}
-
-// TestMetaChildRels_SkipsAbsentChild verifies metaChildRels only returns child
-// rels whose sibling transcript exists on disk (an absent sidechain is skipped;
-// it is read normally when it appears).
-func TestMetaChildRels_SkipsAbsentChild(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	proj := filepath.Join(root, "-home-user-x")
-	// A meta whose sibling child transcript EXISTS.
-	present := "-home-user-x/sess-1/subagents/agent-present.meta.json"
-	writeFileBytes(t, filepath.Join(proj, "sess-1", "subagents", "agent-present.jsonl"), []byte("{}\n"))
-	// A meta whose sibling child transcript is ABSENT.
-	absent := "-home-user-x/sess-1/subagents/agent-absent.meta.json"
-
-	out := metaChildRels(root, map[string]struct{}{present: {}, absent: {}})
-	if _, ok := out["-home-user-x/sess-1/subagents/agent-present.jsonl"]; !ok {
-		t.Errorf("metaChildRels dropped a child whose transcript exists: %v", out)
-	}
-	if _, ok := out["-home-user-x/sess-1/subagents/agent-absent.jsonl"]; ok {
-		t.Errorf("metaChildRels returned a child whose transcript is absent: %v", out)
 	}
 }
 
@@ -591,11 +591,11 @@ func TestFinalizedSnapshot(t *testing.T) {
 }
 
 // TestFlushDirty_UnreadableMetaSurfacesError pins P2.5a: a PRESENT but unreadable
-// subagent .meta.json on the Tail meta-hash checkpoint path surfaces a
-// SourceError (no silent failure). A meta path that exists in-root but cannot be
-// read (here: a directory at the meta path, so os.ReadFile fails) must drive an
-// onError, not be silently skipped. Before the fix hashFile swallowed the read
-// error and returned ok=false, masking the broken sidecar.
+// subagent .meta.json on the Tail meta-change path surfaces a SourceError (no
+// silent failure). A meta path that exists in-root but cannot be read (here: a
+// directory at the meta path, so the read fails) must drive an onError, not be
+// silently skipped — otherwise a broken sidecar whose rewrite should drive the
+// AgentName repair is masked.
 func TestFlushDirty_UnreadableMetaSurfacesError(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -624,14 +624,14 @@ func TestFlushDirty_UnreadableMetaSurfacesError(t *testing.T) {
 	if err := flushDirty(context.Background(), resolvedRoot, tmp, "claude-code:"+tmp, map[string]struct{}{}, metaDirty, &cur, newTailDeferral(), out, onError); err != nil {
 		t.Fatalf("flushDirty: %v", err)
 	}
-	var sawHashErr bool
+	var sawReadErr bool
 	for _, e := range errs {
-		if strings.Contains(e, "agent-abc.meta.json") && strings.Contains(e, "hash meta") {
-			sawHashErr = true
+		if strings.Contains(e, "agent-abc.meta.json") && strings.Contains(e, "read meta") {
+			sawReadErr = true
 		}
 	}
-	if !sawHashErr {
-		t.Fatalf("unreadable meta on the Tail hash path did not surface a SourceError (P2.5a); errs=%v", errs)
+	if !sawReadErr {
+		t.Fatalf("unreadable meta on the Tail meta-change path did not surface a SourceError (P2.5a); errs=%v", errs)
 	}
 }
 

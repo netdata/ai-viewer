@@ -53,6 +53,12 @@ type fileMapper struct {
 	// agentName seeds SessionStartedEvent.AgentName (subagent: agentType
 	// from .meta.json; main: filled later from custom/ai title).
 	agentName string
+	// toolUseID is a sub_agent's own join key (its `.meta.json.toolUseId`),
+	// stamped into the child SessionStarted's extras.aiViewer.toolUseId so the
+	// resolver can link the parent `Agent` op by toolUseId without re-reading any
+	// transcript (spec §8.1, P1.6). Empty for a main session or when the sidecar
+	// is absent.
+	toolUseID string
 	// absPath is the transcript's absolute path on disk, used as the
 	// PayloadRef LocationURI for inline bodies (toolUseResult, file
 	// attachments, compaction summaries live inline in the jsonl) and for
@@ -182,6 +188,9 @@ type mapperConfig struct {
 	parentNativeID string
 	kind           canonical.SessionKind
 	agentName      string
+	// toolUseID is the sub_agent's own join key (its `.meta.json.toolUseId`).
+	// Empty for a main session or when the sidecar is absent.
+	toolUseID      string
 	toolUseToAgent map[string]string
 	// root is the configured projects root (absolute) for PayloadRef
 	// containment; sessionDir locates spill files. Both may be empty in
@@ -203,6 +212,7 @@ func newFileMapper(cfg mapperConfig) *fileMapper {
 		parentNativeID: cfg.parentNativeID,
 		kind:           cfg.kind,
 		agentName:      cfg.agentName,
+		toolUseID:      cfg.toolUseID,
 		absPath:        cfg.absPath,
 		root:           cfg.root,
 		sessionDir:     cfg.sessionDir,
@@ -330,6 +340,13 @@ func (m *fileMapper) sessionStarted0(rec record, base canonical.EventBase) canon
 	}
 	if rec.Env.Slug != "" {
 		extras["slug"] = rec.Env.Slug
+	}
+	// A sub_agent stamps its own toolUseId (from its `.meta.json`) so the resolver
+	// links the parent `Agent` op by toolUseId without re-reading any transcript
+	// (spec §8.1, P1.6). The writer merges this into sessions.extras_json.aiViewer
+	// alongside parentNativeId/rootNativeId.
+	if m.toolUseID != "" {
+		extras["aiViewer"] = map[string]any{"toolUseId": m.toolUseID}
 	}
 	return canonical.SessionStartedEvent{
 		EventBase:      base,

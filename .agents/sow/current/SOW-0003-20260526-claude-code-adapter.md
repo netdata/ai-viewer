@@ -672,6 +672,125 @@ claude_code **84.8%** (new functions `withFinalized`/`finalizedSet`/`restoreFina
 `finalizedSnapshot`/`hashFile` all 100%). Each P1/P2 test confirmed to FAIL without its fix
 (genuine regression guards).
 
+### Round 6 (2026-05-30) — codex + glm + minimax (full scope + Round-5 fix notes)
+
+glm + minimax → "safe to merge". **codex → NOT safe: 1 P1 + 4 P2.** Crucially, codex now
+CONFIRMS the finalize logic is correct ("completion flag sweep total; park retraction's
+three cases correct; parked/finalized cursor restore correct") — the multi-round finalize
+tar pit is CLOSED. The P1 is in a DIFFERENT subsystem: the late-meta repair this SOW added.
+
+- **[P1.6] Late-meta from-0 re-emit double-counts the catalog rollups.** Verified on ground
+  truth: `internal/ingest/catalog.go` increments on conflict everywhere (`session_count+1`
+  :42/:54, `call_count+1` :91/:108/:228, `total_tokens_*/cost/duration += ?` :161-211). Main
+  rows are idempotent (ON CONFLICT DO UPDATE/COALESCE) but the catalog ACCUMULATES, so the
+  Round-3/4/5 late-meta `forceFromZero` re-read (emission enabled) re-emits
+  SessionStarted/OpStarted/OpFinalized and double-counts agents/cwds/model+tool call_count/
+  tokens/cost/duration on a `.meta.json` rewrite. **Decision (CTO): remove the from-0 re-emit
+  entirely and repair linkage WITHOUT re-emitting any catalog-counted event:**
+  - **Op→child linkage becomes meta-independent + re-emit-free.** The parent `Agent` op
+    stashes the `toolUseId` it already has from its own `assistant.tool_use` block
+    (`ops.go:202` `blk.ID`; no `.meta.json` needed). The child session carries its own
+    `toolUseId` (the child `.meta.json` has `ToolUseID`, loaded whenever the child transcript
+    is read). The resolver links `ops.child_session_id` by matching the parent op's stashed
+    `toolUseId` to the child session's `toolUseId` at the DB layer — no transcript re-read, no
+    catalog touch, and no dependency on meta-vs-transcript arrival order (strictly more robust
+    than the prior childNativeId stash, which needed the meta at parent-map time).
+  - **Child `AgentName` repair stays live but catalog-safe.** `applySessionUpdated`
+    (`writer.go:301`) makes NO catalog call (only `applySessionStarted` :295 hits
+    `catalog_agents`), so a late child-meta change emits a `SessionUpdated{AgentName}` —
+    catalog-safe — instead of a full from-0 re-emit.
+  - Delete `forceFromZero` / `metaParentRels` / `metaChildRels`. Net: simpler + the
+    corruption root is gone.
+- **[P1.6-followup] The catalog's increment-on-conflict is an INGESTER-WIDE latent bug**
+  (the defensive truncation-rescan path in any adapter would also double-count). That is out
+  of this adapter's scope. Filed as a follow-up SOW (catalog idempotency under event
+  re-emission) in `pending/` — NOT folded into SOW-0003.
+- **[P2.6a] TOCTOU is inherent to check-then-open** (opening the resolved pathname narrows
+  but does not eliminate a same-user check→open race). Fix: SOFTEN the spec claim
+  (`adapter-claude-code.md:602`) from "zero TOCTOU" to "opens the resolved path (best-effort
+  containment for a single-user read-only tool); not a defense against a same-user race".
+- **[P2.6b] Meta sidecars are unbounded reads** (`os.ReadFile` on `.meta.json`). Fix: cap
+  meta reads at a fixed size (reject/skip + SourceError beyond it), mirroring `scanBufferMax`.
+- **[P2.6c] Symlinked projects ROOT not fully supported** — `addWatchTree`/`collectMetaPaths`
+  walk the UNRESOLVED root; `WalkDir` won't follow a symlinked walk-root, so Tail watches +
+  meta-hash refreshes silently miss the tree. Fix: walk the resolved root (Scan already
+  resolves it; thread the resolved root into the Tail watch + meta-hash walks).
+- **[P2.6d] `childNativeId`/`toolUseId` op stash can be erased** by a later parent re-emit
+  whose `extras_json` is replaced wholesale (`writer.go:456-467`) without the stash. Once
+  linkage is meta-independent (P1.6) and re-emit is removed, the wipe window shrinks; the fix
+  is to merge (not replace) the `aiViewer` stash sub-object on op upsert so a re-emit never
+  drops an existing stash.
+
+This is a TECHNICAL decision set, owned and decided by the assistant (CTO) — recorded here,
+not escalated. Operator pushed back on an earlier (wrongly-escalated) "which fix?" question;
+see memory `feedback-cto-owns-technical-decisions`.
+
+Not merged. Fixes delegated; re-review same scope + these notes (Round 7) before merge.
+
+#### Fixes applied (2026-05-30) — all 5 findings landed + pinned by tests
+
+The from-0 late-meta re-emit is GONE; op→child linkage is now meta-independent and
+re-emit-free, so a `.meta.json` rewrite can never double-count the catalog.
+
+- **P1.6 (late-meta from-0 re-emit double-counts catalog) — DONE.** Split into four
+  cooperating changes, none of which re-emits a catalog-counted event:
+  1. **Parent op stashes `toolUseId` unconditionally** — `ops.go` mapAssistant Agent
+     branch now sets `started.Extras.aiViewer.toolUseId = blk.ID` for EVERY Agent op
+     (regardless of meta presence); it still also sets `ChildSessionNativeID` +
+     `agentOps` deferral when the meta IS known.
+  2. **Child session carries its `toolUseId`** — `scanner.go` `metaMap` gained
+     `agentToolUse` (agentId→toolUseId); `mapperConfig`/`fileMapper` gained
+     `toolUseID`; `mapper.go` `sessionStarted0` stamps
+     `extras.aiViewer.toolUseId` on a sub_agent SessionStarted. The writer's
+     `mergeExtras` preserves it alongside `parentNativeId`/`rootNativeId`.
+  3. **Resolver `linkOpChildrenByToolUse`** — `resolver.go` adds an ADDITIVE pass:
+     for ops with `child_session_id IS NULL` and `extras_json.$.aiViewer.toolUseId`
+     set, link to the same-source session whose `extras_json.$.aiViewer.toolUseId`
+     matches (joined through the op's parent session for `source_id`), notifying the
+     parent session. The existing `linkOpChildren` (childNativeId) pass is UNCHANGED.
+     aiagent v2/v3 stash no `toolUseId` → the pass matches zero rows (audited).
+  4. **AgentName repair via `SessionUpdated`** — `tailer.go` `flushDirty` emits a
+     catalog-safe `SessionUpdatedEvent{NativeID:<childNative>, AgentName:<agentType>}`
+     for each changed subagent meta (read directly, bounded), instead of re-reading
+     the child transcript. Removed `forceFromZero`, `metaParentRels`, `metaChildRels`,
+     `metaParentRel`, `metaChildRel`.
+  Pinned by: `internal/ingest/resolver_op_child_test.go::TestResolver_LinksOpChildByToolUseId`
+  (+ a no-op assert for an aiagent-shaped op carrying no toolUseId); a new ingester
+  test `TestCatalog_MetaRewriteNoDoubleCount` (apply Started/OpStarted/OpFinalized once,
+  snapshot catalog rollups, apply a SessionUpdated AgentName repair, assert every
+  `catalog_*` aggregate unchanged); `claude_code` `mapper_test.go` (parent op carries
+  toolUseId always; child session carries toolUseId); `tailer_test.go`
+  `TestScanThenTail_LateMetaRepairsChildAgentName` retained, now asserting a
+  `SessionUpdatedEvent` (not a re-emitted `SessionStarted`).
+- **P2.6b (unbounded meta reads) — DONE.** `scanner.go` `metaReadMax` cap; a present
+  sidecar exceeding it is skipped with a `SourceError` (via `onError`) and never read
+  into memory. Applied to `readSessionMetas`, `metaHashes`, the Tail `hashFile`, and
+  the new meta-`agentType` repair read. Pinned by
+  `scanner_test.go::TestScan_OversizedMetaSurfacesError`.
+- **P2.6c (symlinked projects root not walked) — DONE.** `tailer.go` `addWatchTree`
+  and `scanner.go` `collectMetaPaths`/`metaHashes` walk the symlink-RESOLVED root.
+  Pinned by `tailer_test.go::TestTail_SymlinkedProjectsRootWatched` and
+  `scanner_test.go::TestMetaHashes_SymlinkedRootDescends`.
+- **P2.6d (op `aiViewer` stash erased by stash-free re-emit) — DONE.** `writer.go`
+  `applyOpStarted` now MERGES `extras_json` on conflict
+  (`json_patch(ops.extras_json, excluded.extras_json)`) instead of replacing it, so a
+  re-emit lacking the `aiViewer` stash cannot drop a previously-stashed
+  `toolUseId`/`childNativeId`. Pinned by
+  `writer_test.go::TestApplyOpStarted_StashSurvivesReEmitWithoutStash`.
+- **P2.6a (TOCTOU overclaim) — DONE (spec only).** `adapter-claude-code.md` §6.1
+  softened from "no TOCTOU" to best-effort containment for a single-user read-only
+  tool that narrows but does not eliminate a same-user check→open race.
+
+Spec deltas landed same-change: `adapter-claude-code.md` §5.4 (Agent op stashes
+toolUseId always; child session carries toolUseId; late-meta repaired without
+re-emit), §8.1 items 1 + 3 (toolUseId stash + additive resolver bridge; AgentName via
+SessionUpdated; from-0 re-emit removed; finalized cursor durability now serves only
+the restart boundary), §6.1 (meta size cap, resolved-root walk, softened TOCTOU), §6.2
+(meta WRITE → SessionUpdated AgentName), §7 (finalized durability wording);
+`ingester.md` (the two op→child resolver passes incl. the additive toolUseId pass; the
+op `extras_json` merge-on-conflict invariant). No migration (ops.extras_json column +
+the aiViewer stash already exist; cursor lost the from-0 helpers, gained nothing).
+
 ## Outcome
 
 Pending.

@@ -446,6 +446,12 @@ ON CONFLICT (session_id, seq) DO NOTHING
 	if err != nil {
 		return fmt.Errorf("writer: marshal op extras: %w", err)
 	}
+	// extras_json is MERGED on conflict (json_patch), not replaced wholesale, so a
+	// re-emit of the same op whose extras lack the resolver's aiViewer stash
+	// (childNativeId / toolUseId) cannot erase a join key the resolver still needs —
+	// a wholesale replace would permanently orphan the op→child edge (P2.6d). The
+	// CASE preserves the existing extras when the re-emit carries none, adopts the
+	// new extras when the row had none, and merges otherwise (idempotent).
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq,
@@ -464,7 +470,11 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
     start_ts       = MIN(ops.start_ts, excluded.start_ts),
     parent_op_id   = COALESCE(ops.parent_op_id, excluded.parent_op_id),
     child_session_id = COALESCE(ops.child_session_id, excluded.child_session_id),
-    extras_json    = excluded.extras_json
+    extras_json    = CASE
+        WHEN excluded.extras_json IS NULL THEN ops.extras_json
+        WHEN ops.extras_json IS NULL THEN excluded.extras_json
+        ELSE json_patch(ops.extras_json, excluded.extras_json)
+    END
 `,
 		opID, turnID, sessionID, parentOpID, ev.Seq,
 		string(ev.Kind), ev.Name, nullIfEmpty(ev.ToolNamespace), nullIfEmpty(ev.Model), nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),

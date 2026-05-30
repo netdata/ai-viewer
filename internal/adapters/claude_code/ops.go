@@ -199,6 +199,15 @@ func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.Even
 		}
 		if blk.Name == "Agent" {
 			started.Kind = canonical.OpSession
+			// Stash the toolUseId (the assistant.tool_use block id) UNCONDITIONALLY
+			// — it is the meta-independent parent→child join key the resolver matches
+			// against the child session's own toolUseId (spec §8.1, P1.6). This works
+			// even when the sidecar `.meta.json` has not been read yet (the
+			// parent-before-meta case), so the op→child link no longer needs a
+			// catalog-double-counting transcript re-read on a late meta.
+			if blk.ID != "" {
+				started.Extras = map[string]any{"aiViewer": map[string]any{"toolUseId": blk.ID}}
+			}
 			if agentID, ok := m.toolUseToAgent[blk.ID]; ok && agentID != "" {
 				childID := childNativeID(m.nativeID, agentID)
 				started.ChildSessionNativeID = childID

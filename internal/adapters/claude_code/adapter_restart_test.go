@@ -400,6 +400,24 @@ func agentOpStartedChild(events []canonical.Event) (string, bool) {
 	return child, found
 }
 
+// agentOpStartedToolUseId reports the toolUseId stash on the parent Agent OpStarted
+// (turn 1, op 2), or "" when absent. Mirrors the mapper-side extras shape.
+func agentOpStartedToolUseId(events []canonical.Event) string {
+	out := ""
+	for _, ev := range events {
+		if os, ok := ev.(canonical.OpStartedEvent); ok &&
+			os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
+			os.TurnSeq == 1 && os.Seq == 2 {
+			if av, ok := os.Extras["aiViewer"].(map[string]any); ok {
+				if s, ok := av["toolUseId"].(string); ok {
+					out = s
+				}
+			}
+		}
+	}
+	return out
+}
+
 // writeParentAgentOpNoMeta writes the parent transcript with the Agent tool_use
 // but does NOT write the linking .meta.json (the late-meta scenario, P1.3b).
 func writeParentAgentOpNoMeta(t *testing.T, root string) {
@@ -416,13 +434,17 @@ func metaPath(root string) string {
 	return filepath.Join(root, "-home-user-x", durParentSession, "subagents", "agent-"+durAgentID+".meta.json")
 }
 
-// TestScanThenTail_LateMetaRepairsAgentChildLink pins P1.3b: when the parent's
-// Agent tool_use is tailed BEFORE its .meta.json exists, the Agent op is first
-// emitted with NO child link; when the .meta.json arrives in a later flush, the
-// adapter re-reads the parent and RE-EMITS the Agent OpStarted now carrying the
-// resolved ChildSessionNativeID (idempotent UPDATE at the ingester). Without the
-// late-meta re-read the linkage would be permanently lost.
-func TestScanThenTail_LateMetaRepairsAgentChildLink(t *testing.T) {
+// TestScanThenTail_LateMetaParentOpStashesToolUseIdNoReEmit pins P1.6 (SOW-0003
+// Round 6): when the parent's Agent tool_use is read BEFORE its `.meta.json` exists,
+// the Agent op (a) carries its toolUseId stash — the meta-independent parent→child
+// join key the resolver matches — and (b) has an empty ChildSessionNativeID. When the
+// `.meta.json` later arrives during Tail, the adapter must NOT re-read the parent and
+// re-emit its Agent OpStarted (the old from-0 re-emit double-counted the catalog,
+// P1.6). The op→child link is repaired by the resolver's toolUseId match (covered by
+// the ingester test TestResolver_LinksOpChildByToolUseId), not by a transcript
+// re-read here. This test asserts the stash is present and that NO re-emitted parent
+// Agent OpStarted appears after the late meta.
+func TestScanThenTail_LateMetaParentOpStashesToolUseIdNoReEmit(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeParentAgentOpNoMeta(t, root)
@@ -431,18 +453,24 @@ func TestScanThenTail_LateMetaRepairsAgentChildLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// Scan reads the parent. No meta yet → the Agent op has an empty child link.
+	// Scan reads the parent. No meta yet → the Agent op has an empty child link but
+	// MUST carry the toolUseId stash (the meta-independent join key).
 	scanOut := make(chan canonical.Event, 256)
 	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if child, ok := agentOpStartedChild(drainBuffered(scanOut)); !ok {
+	scanEvents := drainBuffered(scanOut)
+	if child, ok := agentOpStartedChild(scanEvents); !ok {
 		t.Fatal("Agent op not emitted during Scan")
 	} else if child != "" {
 		t.Fatalf("Agent op already linked to %q before the meta exists; test premise broken", child)
 	}
+	if got := agentOpStartedToolUseId(scanEvents); got != parentAgentToolUseID {
+		t.Fatalf("parent Agent op toolUseId stash = %q, want %q (the meta-independent join key)", got, parentAgentToolUseID)
+	}
 
-	// Tail on the SAME instance; after the watch is live, create the .meta.json.
+	// Tail on the SAME instance; after the watch is live, create the .meta.json. The
+	// adapter must NOT re-emit the parent Agent OpStarted (no from-0 re-read).
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tailOut := make(chan canonical.Event, 256)
@@ -453,23 +481,27 @@ func TestScanThenTail_LateMetaRepairsAgentChildLink(t *testing.T) {
 	writeFileBytes(t, metaPath(root),
 		[]byte(`{"agentType":"Explore","description":"explore","toolUseId":"`+parentAgentToolUseID+`"}`))
 
-	wantChild := childNativeID(durParentSession, durAgentID)
-	deadline := time.After(8 * time.Second)
-	for {
+	// Watch for a grace window: any re-emitted parent Agent OpStarted is a P1.6
+	// regression (it would re-count the catalog). The child AgentName repair
+	// (SessionUpdated) is allowed and ignored here.
+	deadline := time.After(tailTickInterval + 1500*time.Millisecond)
+	reEmits := 0
+	for stop := false; !stop; {
 		select {
 		case ev := <-tailOut:
 			if os, ok := ev.(canonical.OpStartedEvent); ok &&
 				os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
-				os.TurnSeq == 1 && os.Seq == 2 && os.ChildSessionNativeID == wantChild {
-				cancel()
-				<-done
-				return
+				os.TurnSeq == 1 && os.Seq == 2 {
+				reEmits++
 			}
 		case <-deadline:
-			cancel()
-			<-done
-			t.Fatalf("Agent op never re-emitted with the resolved ChildSessionNativeID after the late .meta.json (P1.3b); want child %q", wantChild)
+			stop = true
 		}
+	}
+	cancel()
+	<-done
+	if reEmits != 0 {
+		t.Fatalf("late .meta.json re-emitted the parent Agent OpStarted %d times during Tail (P1.6 regression — must be re-emit-free)", reEmits)
 	}
 }
 
@@ -865,15 +897,15 @@ func TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay(t *testing.T) {
 	}
 }
 
-// TestScanThenTail_LateMetaChildReReadNoDoubleFinalize pins P2.5c: a child
-// finalized during Scan must NOT be re-finalized when a LATE `.meta.json` rewrite
-// during Tail forces the child sidechain to be re-read from offset 0 (the P2.4c
-// child re-read). That re-read makes the terminal assistant-text record "newly
-// read" again (lastRecordEmitted=true), so the in-memory finalize gate alone
-// would re-emit. The durable `finalized` set — persisted in the Scan cursor and
-// restored on Tail startup — suppresses the second emit. Exactly one finalize
-// must be observed across Scan + Tail.
-func TestScanThenTail_LateMetaChildReReadNoDoubleFinalize(t *testing.T) {
+// TestScanThenTail_LateMetaRewriteNoDoubleFinalize pins the Round-6 invariant that a
+// `.meta.json` rewrite during Tail emits NO additional parent Agent-op finalize. In
+// Round 6 the late-meta path no longer re-reads any child transcript (the from-0
+// re-emit was removed to stop catalog double-counting, P1.6), so a meta rewrite can
+// no longer re-mark a finalized child — the property is now even stronger than the
+// old durable-`finalized`-set guard (which is still exercised across the Scan→Tail
+// boundary). Exactly one finalize must be observed across Scan + Tail; a meta rewrite
+// adds none.
+func TestScanThenTail_LateMetaRewriteNoDoubleFinalize(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	// Parent + child + meta ALL present at Scan time → the child completes and the
@@ -931,7 +963,9 @@ func TestScanThenTail_LateMetaChildReReadNoDoubleFinalize(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 	// Changed content (different description) → hash differs from the cursor's
-	// metaSeen → the meta is "changed" → the child is force-re-read from 0.
+	// metaSeen → the meta is "changed". In Round 6 this triggers ONLY a catalog-safe
+	// SessionUpdated AgentName repair — no child transcript re-read — so it must emit
+	// NO parent Agent-op finalize.
 	writeFileBytes(t, metaPath(root),
 		[]byte(`{"agentType":"Explore","description":"explore-rewritten","toolUseId":"`+parentAgentToolUseID+`"}`))
 
@@ -951,6 +985,6 @@ func TestScanThenTail_LateMetaChildReReadNoDoubleFinalize(t *testing.T) {
 	cancel()
 	<-done
 	if extra != 0 {
-		t.Fatalf("late-meta child re-read in Tail emitted %d additional OpFinalized for the parent Agent op, want 0 (P2.5c durable finalized set)", extra)
+		t.Fatalf("late-meta rewrite in Tail emitted %d additional OpFinalized for the parent Agent op, want 0 (Round 6: no re-read, durable finalized set)", extra)
 	}
 }

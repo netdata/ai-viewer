@@ -540,8 +540,8 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 | `assistant` (model != `<synthetic>`) | `OpStartedEvent(Kind='llm', Model, Provider='anthropic', Name=Model)` covering the LLM call; for each `tool_use` block in `content[]`, an additional `OpStartedEvent(Kind='tool', Name=name, ToolNamespace=mcp_server or '')`; `OpFinalizedEvent` for the LLM op with tokens from `message.usage` |
 | `assistant` (model == `<synthetic>`) | `LogEntry` `INF`; no LLM op emitted |
 | `assistant.content[].type=="thinking"` | nested `OpStartedEvent`/`OpFinalizedEvent` with `Kind='reasoning'`, `ParentOpSeq=<the LLM op>`, `BytesOut=len(thinking)` |
-| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, ChildSessionNativeID=<parent sessionId>:agent:<agentId>)`; the `OpFinalizedEvent` is deferred until the spawned subagent sidechain is fully read AND its terminal record is an assistant-text completion marker (see §8.1, §485). The parent transcript has NO `tool_result` for the Agent tool, so the op is finalized from the child's end state, not from a `tool_result` block. When the linking `.meta.json` lands after the parent's `Agent` block was already tailed, the parent's `OpStarted` is re-emitted (idempotent UPDATE) carrying the now-resolved `ChildSessionNativeID` (§8.1). |
-| Each subagent jsonl file | a separate canonical Session (`Kind='sub_agent'`, parent linkage via `ParentNativeID`); turn/op inference identical to main session |
+| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, Extras.aiViewer.toolUseId=<the Agent tool_use block id>)`, ALWAYS carrying the `toolUseId` stash (the meta-independent parent→child join key, §8.1); plus `ChildSessionNativeID=<parent sessionId>:agent:<agentId>` WHEN the sidecar `.meta.json` is already known at map time. The `OpFinalizedEvent` is deferred until the spawned subagent sidechain is fully read AND its terminal record is an assistant-text completion marker (see §8.1, §485). The parent transcript has NO `tool_result` for the Agent tool, so the op is finalized from the child's end state, not from a `tool_result` block. When the linking `.meta.json` lands after the parent's `Agent` block was already tailed, the op→child link is repaired by the resolver matching the op's stashed `toolUseId` to the child session's stashed `toolUseId` — NO transcript re-read, no catalog double-count (§8.1). |
+| Each subagent jsonl file | a separate canonical Session (`Kind='sub_agent'`, parent linkage via `ParentNativeID`, `Extras.aiViewer.toolUseId=<the child's .meta.json.toolUseId>` when the sidecar is known — the join key the resolver matches against the parent op's stashed `toolUseId`, §8.1); turn/op inference identical to main session |
 | `system.subtype=="turn_duration"` | `TurnFinalizedEvent` for the just-completed turn |
 | `system.subtype=="api_error"` | `LogEntry` severity `ERR`; if the next record is a synthetic assistant or absence-of-assistant, mark the in-flight LLM op `status='failed', error_class=api_error_<status>` |
 | `system.subtype=="compact_boundary"` | BOTH a `LogEntry` `INF` (Message `compact_boundary`, Extras carry the full `compactMetadata`) AND a synthetic op `OpKind='compaction'` carrying `Ts=record.timestamp`, `EndTs=Ts+durationMs*1000`, `BytesIn=preTokens`, `BytesOut=postTokens`, and `Extras=` the FULL `compactMetadata` (`trigger`, `preTokens`, `postTokens`, `durationMs`, AND `preservedSegment` + `preservedMessages`). Subsequent records' `parentUuid` may be `null` (post-compaction chain restart); the adapter must accept that without error. See §9. |
@@ -599,9 +599,13 @@ Containment is **uniform across every read path**, not only Scan-time transcript
 
 A symlink planted after the watch is established is therefore refused on the read path, not merely at startup discovery.
 
-**The read opens the symlink-resolved path, not the original (no TOCTOU).** The containment guard resolves a path with `filepath.EvalSymlinks` and then the adapter `os.Open`/`os.ReadFile`s the **resolved** path the guard returned — never the original unresolved path. Opening the original after checking the resolved one would leave a time-of-check/time-of-use window: a symlink swapped between the check and the open would redirect the read outside the root even though the check passed. Because the resolved path is fully symlink-evaluated, no further swap can redirect it. This applies UNIFORMLY to every file open in the adapter: transcript opens (Scan + Tail), subagent `.meta.json` reads (Scan + Tail), the Tail meta-hash checkpoint read, and the orphan-root earliest-timestamp probe. No code path opens an unresolved discovery-time path.
+**The read opens the symlink-resolved path as best-effort containment.** The containment guard resolves a path with `filepath.EvalSymlinks` and then the adapter `os.Open`/`os.ReadFile`s the **resolved** path the guard returned — never the original unresolved path. Opening the original after checking the resolved one would leave a wider time-of-check/time-of-use window: a symlink swapped between the check and the open would redirect the read outside the root even though the check passed; opening the already-resolved path closes that obvious window because the resolved path is fully symlink-evaluated. This applies UNIFORMLY to every file open in the adapter: transcript opens (Scan + Tail), subagent `.meta.json` reads (Scan + Tail), the Tail meta-hash checkpoint read, and the orphan-root earliest-timestamp probe. No code path opens an unresolved discovery-time path. This NARROWS but does not ELIMINATE a same-user check-then-open race: ai-viewer is a single-user, read-only tool reading files the same user owns, so a malicious same-user swap is outside its threat model — the resolved-path open is defense-in-depth containment against an accidental or stray symlink, not a guarantee against a determined same-user attacker who can race the resolve. Treat it as best-effort containment, not a hard TOCTOU-free property.
 
 **Meta read/parse failures surface a `SourceError` (no silent failure).** A subagent `.meta.json` that is PRESENT but cannot be read (`os.ReadFile` error) or cannot be parsed (`json.Unmarshal` error) carries the `toolUseId → agentId` linkage and the subagent's `agentType`; silently dropping it would silently fail the parent-`Agent`-op→child link repair and lose the child's `AgentName`. The adapter therefore surfaces a `SourceError` (via the `OnError` callback → `sources.parse_errors` + a `log_entries` ERR row, visible in `/api/health` and the Sources panel) on a present meta file's read or parse failure. This holds on EVERY meta read path, including the Tail meta-hash checkpoint: a meta whose content cannot be read when the checkpoint hashes it surfaces a `SourceError` rather than being silently skipped (the silent skip would mask a broken sidecar whose rewrite should have driven the late-meta linkage repair). A genuinely-absent meta dir or file is NOT an error — the structural path-based linkage still works without the sidecar; only a present-but-broken sidecar is surfaced.
+
+**Meta reads are size-capped.** A `.meta.json` sidecar is a tiny JSON object (`agentType`, `toolUseId`, `description`, a few scalars). The adapter caps every meta read at a fixed `metaReadMax` (mirroring the spirit of the transcript-line `scanBufferMax`): a sidecar whose size exceeds the cap is NOT read into memory — it is skipped with a `SourceError` (so a pathological or hostile oversized sidecar cannot force an unbounded allocation). The cap applies UNIFORMLY to every meta read: the Scan/Tail `agentType` + `toolUseId` read, the meta-hash checkpoint read, and the Tail late-meta `AgentName`-repair read. A present-but-oversized sidecar is surfaced (not silently dropped); a genuinely-absent sidecar is still not an error.
+
+**The Tail watch walk and the meta-hash walk descend the symlink-RESOLVED root.** `filepath.WalkDir` does not descend INTO a symlinked walk-root, so a legitimately symlinked projects root (e.g. `~/.claude` → an external volume) would make the Tail watch tree and the meta-hash refresh silently miss every directory and file under it if they walked the unresolved configured root. Both walks therefore start from the resolved root (resolved once at startup, the same value used for per-path containment), so a symlinked projects root is fully watched and its sidecars are fully hashed. Per-path containment is still judged against the resolved root.
 
 On `CREATE` of a new directory at depth 1 (a new project dir), the watcher `Add()`s the new dir.
 
@@ -611,7 +615,7 @@ On `CREATE` of a new directory at depth 2 (a new session subdir under a project)
 
 - `CREATE` on `*.jsonl` → backfill from offset 0, then watch.
 - `WRITE` (or Linux `MODIFY`) on a watched `*.jsonl` → read from last-known offset to EOF, parse line by line, advance offset.
-- `WRITE` on `*.meta.json` (subagent sidecar) → re-read the small JSON file; update the session's `extras_json` from the metadata (it can change if `description` is rewritten on resume).
+- `WRITE` on `*.meta.json` (subagent sidecar) → re-read the small (size-capped) JSON file. On a content change the adapter repairs the child session's `AgentName` by emitting a catalog-safe `SessionUpdatedEvent{AgentName=agentType}` (NOT a transcript re-read; §8.1). The op→child link is repaired separately by the resolver's `toolUseId` match (§8.1) and needs no meta re-read.
 - `RENAME` / `MOVED_FROM` / `MOVED_TO` — not used by claude-code in normal operation (it appends in place). The adapter logs these but does not act on them in Phase 2.
 - `DELETE` — operator deleted a project directory or jsonl. The adapter logs and stops watching the missing file. Existing rows in SQLite remain (read-only viewer; data is never deleted).
 
@@ -675,7 +679,7 @@ The cursor is the adapter's resume contract. Shape (JSON, stored in `sources.cur
 
 Keys are paths **relative to the configured root** (`~/.claude/projects/`). The adapter never stores absolute paths in the cursor — moving the projects dir or running under a different `CLAUDE_CONFIG_DIR` shifts the root, not every cursor key.
 
-`parked` and `finalized` are the durable Agent-op-finalization state described in §8.1: `parked` carries the completion timestamps of subagent children that completed before their parent `Agent` op was known (so a restart can still finalize the parent when the op appears), and `finalized` carries the child ids already finalized (so a restart or a late-`.meta.json` child re-read does not re-emit a finalize). Both are JSON `omitempty` so cursors that predate them still parse, and both are observability/durability state only — they do NOT participate in `After()` ordering, which is keyed solely on per-file byte offsets.
+`parked` and `finalized` are the durable Agent-op-finalization state described in §8.1: `parked` carries the completion timestamps of subagent children that completed before their parent `Agent` op was known (so a restart can still finalize the parent when the op appears), and `finalized` carries the child ids already finalized (so a restart does not re-emit a finalize across the Scan→Tail / process boundary). Both are JSON `omitempty` so cursors that predate them still parse, and both are observability/durability state only — they do NOT participate in `After()` ordering, which is keyed solely on per-file byte offsets.
 
 On startup:
 
@@ -709,18 +713,50 @@ Resume case: an interrupted subagent (Claude Code can `/resume` an agent) append
 Two ordering hazards arise because the parent `Agent` op and the child session
 land independently:
 
-1. **Op→child link survives child-after-parent ordering (ingester).** The parent's
-   `OpStartedEvent(Kind='session')` carries `ChildSessionNativeID`, but the child
-   `sessions` row may not exist yet when the parent op is written (the parent
-   transcript is read before, or in a different batch than, the child sidechain).
-   The writer therefore sets `ops.child_session_id` only when the child row is
-   already present; otherwise it **stashes the child native id in
-   `ops.extras_json.aiViewer.childNativeId`** (mirroring the
-   `sessions.extras_json.aiViewer.parentNativeId` stash). The background resolver
-   pass re-links `ops.child_session_id` from that stash once a session with the
-   matching `(source_id, native_id)` lands, and emits a `session_changed` notify
-   for the affected **parent** session so an open UI refetches. This mirrors the
-   session parent/root re-link the resolver already performs.
+1. **Op→child link survives child-after-parent ordering, meta-independently and
+   re-emit-free (ingester).** The parent's `OpStartedEvent(Kind='session')` and the
+   child `sessions` row land independently and in either order, and the link must
+   never depend on re-reading a transcript (a re-read re-emits catalog-counted
+   events and would double-count the `catalog_*` rollups, which accumulate on
+   conflict — §catalog idempotency). The adapter therefore stashes the join key on
+   BOTH ends from data each side already has, and the resolver links them at the DB
+   layer:
+
+   - **Parent op stashes the `toolUseId` unconditionally.** The parent `Agent`
+     `tool_use` block carries its own `id` (the `assistant.tool_use.id`); the
+     adapter stamps it into `OpStartedEvent.Extras.aiViewer.toolUseId` for EVERY
+     `Agent` op — regardless of whether the sidecar `.meta.json` has been read yet.
+     This is the canonical parent→child join key (§4.2: the child's
+     `.meta.json.toolUseId` equals this `id`). When the meta IS already known at
+     map time the op additionally carries `ChildSessionNativeID` (the direct link,
+     resolved by the existing `childNativeId` pass below); the `toolUseId` stash is
+     the meta-independent fallback that works even when the meta is not yet read.
+
+   - **Child session carries its own `toolUseId`.** When the adapter synthesizes a
+     sub-agent `SessionStartedEvent`, it includes the child's `toolUseId` (from its
+     `.meta.json.toolUseId`, available whenever the child transcript is read with
+     its sidecar) in `SessionStartedEvent.Extras.aiViewer.toolUseId`. The writer
+     merges this into `sessions.extras_json.aiViewer` (alongside `parentNativeId` /
+     `rootNativeId`), so the durable child row carries the join key.
+
+   - **The resolver links by `toolUseId`, additively.** A dedicated resolver pass
+     (`linkOpChildrenByToolUse`) re-links `ops.child_session_id` for any op whose
+     `child_session_id` is still NULL and whose
+     `extras_json.aiViewer.toolUseId` is set, to the session in the SAME source
+     whose `extras_json.aiViewer.toolUseId` matches (joined through the op's parent
+     session for `source_id`, since ops carry no `source_id` column). It emits a
+     `session_changed` notify for the affected **parent** session so an open UI
+     refetches. This pass is purely additive: an adapter that does not stash
+     `aiViewer.toolUseId` (aiagent v2/v3) matches zero rows and is unaffected.
+
+   The earlier `ChildSessionNativeID` → `ops.extras_json.aiViewer.childNativeId`
+   stash + `linkOpChildren` resolver pass REMAINS UNCHANGED (aiagent v2/v3 rely on
+   it; claude-code also benefits from it when the meta was present at map time). The
+   `toolUseId` pass is the second, additive bridge that closes the late-meta gap
+   (the parent `Agent` op tailed before its `.meta.json`) WITHOUT any transcript
+   re-read. The writer stashes (and never drops on a later upsert) the `aiViewer`
+   sub-object so a parent re-emit lacking the stash cannot erase a previously
+   recorded `toolUseId`/`childNativeId` (§op-stash merge below).
 
 2. **Agent op finalize is inherently child-side, via the terminal
    assistant-text completion marker (adapter).** The parent transcript has NO
@@ -834,19 +870,16 @@ land independently:
      child still emits nothing.
 
    - **The `finalized` set is also cursor-durable (no re-finalize after a
-     restart or a late-meta child re-read).** The `finalized` set is persisted in
-     the cursor too (a `finalized` list of child native ids, JSON `omitempty` so
-     older cursors still parse), checkpointed alongside `parked` on every
-     `SourceProgress` and restored on Tail startup. The loop-lifetime `finalized`
-     set guards against a re-finalize WITHIN one process lifetime, but two paths
-     cross the lifetime boundary: (a) a child finalized during Scan, then a Tail in
-     the same or a restarted process; and (b) the late-`.meta.json` child re-read,
-     which re-reads the child sidechain from offset 0 with emission enabled — that
-     re-read makes the terminal assistant-text record "newly read" again
-     (`lastRecordEmitted == true`), so the in-memory gate alone would re-mark the
-     child complete and re-emit the finalize. Consulting the persisted `finalized`
-     set in the pairing step suppresses that second emit: a child whose id is in the
-     restored `finalized` set is never finalized again. Like `parked`, this is
+     restart).** The `finalized` set is persisted in the cursor too (a `finalized`
+     list of child native ids, JSON `omitempty` so older cursors still parse),
+     checkpointed alongside `parked` on every `SourceProgress` and restored on Tail
+     startup. The loop-lifetime `finalized` set guards against a re-finalize WITHIN
+     one process lifetime; persisting it carries that guard across the lifetime
+     boundary — a child finalized during Scan and then re-observed by a Tail in the
+     same or a restarted process is not finalized a second time. (The late-meta
+     repair no longer re-reads any child transcript — §8.1 item 3 — so it can no
+     longer re-mark a finalized child; the cursor-durable `finalized` set now serves
+     only the Scan→Tail / restart boundary.) Like `parked`, this is
      observability/durability state only — it does not participate in cursor
      `After()` ordering — and it does NOT change the normal finalize behavior (a
      child finalized for the first time still emits exactly once).
@@ -854,40 +887,41 @@ land independently:
    The finalize's `EndTs` is the child's terminal assistant-text record's
    timestamp (its implicit completion time).
 
-3. **Late `.meta.json` repairs the Agent-op child linkage (adapter).** The
-   parent's `Agent` op carries `ChildSessionNativeID` (and records an `agentOps`
-   deferral entry) only when the sidecar's `toolUseId → agentId` mapping is
-   already known when the parent's `Agent` `tool_use` block is read. The parent
-   transcript and the sidecar `.meta.json` land independently, so Tail may read
-   the parent's `Agent` block in flush N before the `.meta.json` arrives in flush
-   N+1; the op would then be written with no child link and no deferral, and a
-   meta-only flush does not otherwise re-read the parent, so the resolver (which
-   needs the stashed `childNativeId`) could never repair it. To close this, a Tail
-   flush that observes a meta change **re-reads the affected session's parent
-   transcript(s) from offset 0 with emission ENABLED** (emitFrom = 0, not the
-   cursor) for that flush, so the `Agent` `OpStarted` is RE-EMITTED now carrying
-   the resolved `ChildSessionNativeID`. The ingester op write is idempotent
-   (`ON CONFLICT (turn_id, seq) DO UPDATE`, with `child_session_id =
-   COALESCE(...)` plus the writer's `childNativeId` stash), so the re-emit UPDATES
-   the existing op's child link rather than duplicating; the resolver then links
-   the child once it lands. This re-read fires only on a meta change (rare), so
-   the churn is acceptable, and it does NOT regress the "a normal replay emits
-   nothing" property of the finalize machinery above (the finalize stays
-   emit-gated; only the parent's `OpStarted` re-emits, and it is an idempotent
-   UPDATE).
+3. **Late `.meta.json` is repaired WITHOUT any transcript re-read (catalog-safe).**
+   The parent transcript and the sidecar `.meta.json` land independently, so Tail
+   may read the parent's `Agent` block in flush N before the `.meta.json` arrives
+   in flush N+1, and a child sidechain read before its `.meta.json` emitted its
+   `SessionStarted` with an empty `AgentName`. An earlier design re-read the parent
+   AND child transcripts from offset 0 WITH EMISSION on a meta change to repair
+   both. That re-emitted `SessionStarted` / `OpStarted` / `OpFinalized` — events the
+   `catalog_*` rollups COUNT on conflict (`session_count + 1`, `call_count + 1`,
+   `total_tokens_* += …`, `total_cost_usd += …`, `total_duration_us += …`) — so a
+   single `.meta.json` rewrite DOUBLE-COUNTED the catalog. That from-0 re-emit is
+   REMOVED. The two repairs it served are now done without re-emitting any
+   catalog-counted event:
 
-   The meta also carries the subagent's `agentType`, which seeds the CHILD
-   session's `AgentName` (§5.2). A child sidechain read BEFORE its `.meta.json`
-   landed therefore emitted its `SessionStarted` with an empty `AgentName`.
-   Re-reading only the parent (above) repairs the op→child link but leaves the
-   child session's `AgentName` empty. So a meta change ALSO forces a re-read of
-   the affected session's CHILD subagent transcript(s) from offset 0 with emission
-   ENABLED, re-emitting the child `SessionStarted` now carrying the `agentType`
-   `AgentName`. The ingester upserts session `AgentName` via
-   `COALESCE(NULLIF(excluded.agent_name, ''), agent_name)`, so the re-emit with the
-   now-known name updates the previously-empty value. Like the parent re-read, this
-   is an idempotent UPDATE that fires only on a (rare) meta change and does not
-   affect the finalize gating.
+   - **Op→child link** no longer needs the parent re-read at all: it is handled by
+     the meta-independent `toolUseId` stash + `linkOpChildrenByToolUse` resolver
+     pass (item 1 above). The parent op stamped its `toolUseId` at map time
+     regardless of meta arrival; once the child session lands carrying the same
+     `toolUseId`, the resolver links them at the DB layer. No transcript is re-read.
+
+   - **Child `AgentName`** is repaired by emitting a **`SessionUpdatedEvent`**
+     carrying `{NativeID: <child native id>, AgentName: <agentType>}` when a Tail
+     flush observes the child's `.meta.json` content change. `applySessionUpdated`
+     makes NO catalog call (only `applySessionStarted` touches `catalog_agents` /
+     `catalog_cwds`), so this repair is catalog-safe by construction, and the
+     ingester upserts the name via `COALESCE(NULLIF(?, ''), agent_name)` so a
+     previously-empty `AgentName` is filled while a non-empty one is preserved. The
+     adapter reads the changed meta's `agentType` directly (the same bounded read it
+     already does for the `toolUseId → agentId` map) and emits one
+     `SessionUpdatedEvent` per changed subagent meta whose `agentType` is non-empty;
+     no child transcript is re-read.
+
+   Net: a `.meta.json` rewrite emits at most a catalog-safe `SessionUpdatedEvent`
+   (AgentName) and never re-emits a `SessionStarted` / `OpStarted` / `OpFinalized`,
+   so no `catalog_*` aggregate changes on a meta rewrite. The from-0 re-read
+   machinery (`forceFromZero`, `metaParentRels`, `metaChildRels`) is gone.
 
 ## 9. Compaction Handling
 

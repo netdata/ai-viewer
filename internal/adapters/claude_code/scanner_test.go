@@ -434,6 +434,75 @@ func TestScan_MalformedMetaSurfacesError(t *testing.T) {
 	}
 }
 
+// TestScan_OversizedMetaSurfacesError pins P2.6b (SOW-0003 Round 6): a PRESENT
+// `.meta.json` sidecar larger than metaReadMax must NOT be read into memory — it is
+// skipped with a SourceError. A `.meta.json` is normally a tiny object; an oversized
+// one is pathological/hostile and must not force an unbounded allocation. Without the
+// cap, os.ReadFile would slurp the whole file.
+func TestScan_OversizedMetaSurfacesError(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	subDir := filepath.Join(proj, "sess-1", "subagents")
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.jsonl"),
+		[]byte(`{"type":"user","uuid":"su1","isSidechain":true,"agentId":"aaa111bbb222ccc","sessionId":"sess-1","message":{"role":"user","content":"task"},"timestamp":"2026-05-26T10:00:05.000Z"}`+"\n"))
+	// A present meta sidecar whose size exceeds metaReadMax (valid JSON, but
+	// padded past the cap so the only reason to reject it is the size guard).
+	pad := make([]byte, metaReadMax+1)
+	for i := range pad {
+		pad[i] = 'x'
+	}
+	oversized := []byte(`{"agentType":"general-purpose","toolUseId":"toolu_1","pad":"` + string(pad) + `"}`)
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.meta.json"), oversized)
+
+	_, errs := collectErrors(t, root)
+	var sawCapErr bool
+	for _, e := range errs {
+		if strings.Contains(e, "agent-aaa111bbb222ccc.meta.json") &&
+			(strings.Contains(e, "too large") || strings.Contains(e, "exceeds")) {
+			sawCapErr = true
+		}
+	}
+	if !sawCapErr {
+		t.Fatalf("oversized .meta.json did not surface a size-cap SourceError (P2.6b); errs=%v", errs)
+	}
+}
+
+// TestMetaHashes_SymlinkedRootDescends pins P2.6c (SOW-0003 Round 6): metaHashes must
+// walk the symlink-RESOLVED root, because filepath.WalkDir does not descend INTO a
+// symlinked walk-root. A projects root that is itself a symlink (e.g. ~/.claude → an
+// external volume) would otherwise hash ZERO sidecars, silently breaking the
+// rewrite-detection that drives the late-meta AgentName repair.
+func TestMetaHashes_SymlinkedRootDescends(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	subDir := filepath.Join(realRoot, "-home-user-x", "sess-1", "subagents")
+	writeFileBytes(t, filepath.Join(subDir, "agent-aaa111bbb222ccc.meta.json"),
+		[]byte(`{"agentType":"Explore","toolUseId":"toolu_1"}`))
+
+	// A symlinked projects root pointing at realRoot.
+	linkRoot := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(linkRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	// Walk the UNRESOLVED (symlinked) root as the configured root; the resolved
+	// root is threaded for containment + descent. With the fix, the walk descends
+	// the resolved tree and finds the sidecar.
+	hashes, herr := metaHashes(linkRoot, resolved, func(error) {})
+	if herr != nil {
+		t.Fatalf("metaHashes: %v", herr)
+	}
+	if len(hashes) == 0 {
+		t.Fatalf("metaHashes found 0 sidecars under a symlinked projects root (P2.6c — WalkDir did not descend the resolved root)")
+	}
+}
+
 // TestScan_EmptyRootNoEvents verifies a missing projects root is tolerated.
 func TestScan_EmptyRootNoEvents(t *testing.T) {
 	t.Parallel()

@@ -114,6 +114,127 @@ func TestMapper_SubAgentSessionFields(t *testing.T) {
 	}
 }
 
+// extrasToolUseId extracts extras["aiViewer"]["toolUseId"] from an event's
+// Extras map, or "" when absent. Test-only helper for the §8.1 toolUseId-stash
+// assertions.
+func extrasToolUseId(extras map[string]any) string {
+	av, ok := extras["aiViewer"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := av["toolUseId"].(string)
+	return s
+}
+
+// TestMapper_AgentOpAlwaysStashesToolUseId pins P1.6 (SOW-0003 Round 6): a parent
+// `Agent` tool_use op ALWAYS carries its toolUseId (the assistant.tool_use block id)
+// in Extras.aiViewer.toolUseId — regardless of whether the sidecar `.meta.json` was
+// read. This is the meta-independent parent→child join key the resolver matches; it
+// must be present even when no agentMap is supplied (the parent-before-meta case),
+// where ChildSessionNativeID is necessarily empty.
+func TestMapper_AgentOpAlwaysStashesToolUseId(t *testing.T) {
+	t.Parallel()
+	const toolUseID = "toolu_agent_1"
+	// NO agentMap → the meta is not known; ChildSessionNativeID will be empty, but
+	// the toolUseId stash MUST still be present.
+	events := mapAll(t, "parent-sess", "", canonical.KindRoot, "", nil,
+		`{"type":"assistant","uuid":"a1","sessionId":"parent-sess","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"`+toolUseID+`","name":"Agent","input":{"description":"explore"}}]},"timestamp":"2026-05-26T10:00:02.000Z"}`,
+	)
+	var found bool
+	for _, ev := range events {
+		op, ok := ev.(canonical.OpStartedEvent)
+		if !ok || op.Kind != canonical.OpSession {
+			continue
+		}
+		found = true
+		if op.ChildSessionNativeID != "" {
+			t.Fatalf("ChildSessionNativeID = %q, want empty (no meta); test premise broken", op.ChildSessionNativeID)
+		}
+		if got := extrasToolUseId(op.Extras); got != toolUseID {
+			t.Fatalf("Agent op toolUseId stash = %q, want %q (must be stashed even without the meta)", got, toolUseID)
+		}
+	}
+	if !found {
+		t.Fatal("no OpSession (Agent) op emitted")
+	}
+}
+
+// TestMapper_AgentOpStashesToolUseIdWithMeta verifies the stash is ALSO present when
+// the meta IS known (so ChildSessionNativeID is set too): the toolUseId stash and the
+// direct child link coexist.
+func TestMapper_AgentOpStashesToolUseIdWithMeta(t *testing.T) {
+	t.Parallel()
+	const toolUseID = "toolu_agent_1"
+	agentMap := map[string]string{toolUseID: "abc123def456789"}
+	events := mapAll(t, "parent-sess", "", canonical.KindRoot, "", agentMap,
+		`{"type":"assistant","uuid":"a1","sessionId":"parent-sess","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"`+toolUseID+`","name":"Agent","input":{"description":"explore"}}]},"timestamp":"2026-05-26T10:00:02.000Z"}`,
+	)
+	for _, ev := range events {
+		op, ok := ev.(canonical.OpStartedEvent)
+		if !ok || op.Kind != canonical.OpSession {
+			continue
+		}
+		if op.ChildSessionNativeID != "parent-sess:agent:abc123def456789" {
+			t.Fatalf("ChildSessionNativeID = %q, want the resolved child id", op.ChildSessionNativeID)
+		}
+		if got := extrasToolUseId(op.Extras); got != toolUseID {
+			t.Fatalf("Agent op toolUseId stash = %q, want %q (must coexist with the child link)", got, toolUseID)
+		}
+		return
+	}
+	t.Fatal("no OpSession (Agent) op emitted")
+}
+
+// TestMapper_SubAgentSessionStashesToolUseId pins P1.6: a sub-agent session's
+// SessionStartedEvent carries its own toolUseId (from its `.meta.json.toolUseId`) in
+// Extras.aiViewer.toolUseId — the join key the resolver matches against the parent
+// Agent op's stashed toolUseId. The mapper receives it via mapperConfig.toolUseID.
+func TestMapper_SubAgentSessionStashesToolUseId(t *testing.T) {
+	t.Parallel()
+	const toolUseID = "toolu_agent_1"
+	m := newFileMapper(mapperConfig{
+		sourceID:       "src",
+		absPath:        "/abs/x.jsonl",
+		nativeID:       "parent:agent:abc123def456789",
+		parentNativeID: "parent",
+		kind:           canonical.KindSubAgent,
+		agentName:      "Explore",
+		toolUseID:      toolUseID,
+	})
+	rec, _, err := parseLine([]byte(`{"type":"user","uuid":"u1","isSidechain":true,"agentId":"abc123def456789","sessionId":"parent","message":{"role":"user","content":"task"},"timestamp":"2026-05-26T10:00:05.000Z"}`))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	evs, err := m.mapRecord(rec)
+	if err != nil {
+		t.Fatalf("mapRecord: %v", err)
+	}
+	ss, ok := evs[0].(canonical.SessionStartedEvent)
+	if !ok {
+		t.Fatalf("first event is %T, want SessionStartedEvent", evs[0])
+	}
+	if got := extrasToolUseId(ss.Extras); got != toolUseID {
+		t.Fatalf("child session toolUseId stash = %q, want %q", got, toolUseID)
+	}
+}
+
+// TestMapper_RootSessionNoToolUseIdStash verifies a ROOT (non-sub-agent) session
+// does NOT stash a toolUseId (only sub-agents carry the child-side join key), so the
+// resolver's toolUseId pass never matches a root session as a "child".
+func TestMapper_RootSessionNoToolUseIdStash(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "root-sess", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"root-sess","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+	)
+	ss, ok := events[0].(canonical.SessionStartedEvent)
+	if !ok {
+		t.Fatalf("first event is %T, want SessionStartedEvent", events[0])
+	}
+	if got := extrasToolUseId(ss.Extras); got != "" {
+		t.Fatalf("root session carried a toolUseId stash %q, want none", got)
+	}
+}
+
 // TestMapper_CompactionOp verifies acceptance #4: a compact_boundary emits a
 // first-class OpKind='compaction' op with the documented field mapping, and
 // the post-compaction isCompactSummary user message does NOT open a turn.

@@ -58,7 +58,12 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 		return nil
 	}
 	watched := map[string]struct{}{}
-	addWatchTree(watcher, resolvedRoot, root, watched, onError)
+	// Walk the RESOLVED root (P2.6c): filepath.WalkDir does not descend INTO a
+	// symlinked walk-root, so walking the unresolved configured root would Add()
+	// zero directories under a legitimately-symlinked projects root and silently
+	// miss the entire tree. handleEvent still passes newly-created dirs (real
+	// paths) as they appear; fsnotify dedups any overlapping Add().
+	addWatchTree(watcher, resolvedRoot, resolvedRoot, watched, onError)
 
 	dirty := make(map[string]struct{}, 16)
 	metaDirty := make(map[string]struct{}, 16)
@@ -130,8 +135,9 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			// (new project dir, new session dir, new subagents/ dir). The
 			// Agent-op finalize is event-driven (paired in flushDirty when a
 			// child completes), so the tick does no finalize work — it only
-			// rescans for new dirs and checkpoints progress (spec §8.1).
-			addWatchTree(watcher, resolvedRoot, root, watched, onError)
+			// rescans for new dirs and checkpoints progress (spec §8.1). Walk the
+			// RESOLVED root so a symlinked projects root is fully descended (P2.6c).
+			addWatchTree(watcher, resolvedRoot, resolvedRoot, watched, onError)
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return perr
 			}
@@ -393,82 +399,31 @@ func (d *tailDeferral) finalizedSnapshot() map[string]struct{} {
 
 // flushDirty re-reads every dirty transcript from its cursor offset and
 // re-reads every changed meta file, updating the shared cursor. Emits a
-// SourceProgress checkpoint at the end. A meta change additionally forces a
-// re-read of the affected session's parent transcript(s) FROM OFFSET 0 WITH
-// EMISSION (spec §8.1) so a late `.meta.json` re-emits the parent's `Agent`
-// OpStarted carrying the now-resolved ChildSessionNativeID (idempotent UPDATE
-// at the ingester); the resolver then links the child.
+// SourceProgress checkpoint at the end. A meta change repairs the child
+// subagent's AgentName by emitting a catalog-safe SessionUpdatedEvent — NOT by
+// re-reading any transcript (spec §8.1, P1.6): a from-0 re-emit would re-emit
+// SessionStarted/OpStarted/OpFinalized and double-count the accumulating
+// catalog_* rollups. The op→child link is repaired separately by the resolver's
+// toolUseId match (the parent op stashed its toolUseId at map time, §8.1), so no
+// transcript re-read is needed for linkage either.
 func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty, metaDirty map[string]struct{}, cur *Cursor, def *tailDeferral, out chan<- canonical.Event, onError func(error)) error {
-	// Record meta-file hashes first so a transcript flushed in the same
-	// cycle picks up the freshest metaMap. A meta whose content hash is
-	// unchanged from the cursor's metaSeen is skipped — a bare touch/mtime
-	// bump does not warrant re-reading (spec §7 step 4). changedMetas collects
-	// the metas whose content actually changed this flush, so only those drive
-	// a parent re-read (a no-op touch must not re-emit the parent).
-	changedMetas := make(map[string]struct{}, len(metaDirty))
-	for rel := range metaDirty {
-		abs := filepath.Join(root, filepath.FromSlash(rel))
-		// Containment guard on the Tail meta-hash read (spec §6.1, P1.3, P2.5a): a
-		// .meta.json symlink planted in a watched dir after Tail starts must be
-		// refused before its content is hashed/read, and the hash must open the
-		// RESOLVED path the guard returns (no TOCTOU), not the original. resolvedRoot
-		// is pre-resolved so this does not re-run EvalSymlinks on the root per meta.
-		resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, abs)
-		if cerr != nil {
-			onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", rel, cerr))
-			continue
-		}
-		if !ok {
-			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", rel))
-			continue
-		}
-		h, herr := hashFile(resolvedAbs)
-		if herr != nil {
-			// A present-but-unreadable meta silently failing the rewrite-detection
-			// would mask a broken sidecar whose rewrite should drive the late-meta
-			// linkage repair; surface it (P2.5a, no silent failure).
-			onError(fmt.Errorf("claude_code: hash meta %s: %w", rel, herr))
-			continue
-		}
-		if cur.metaSeen(rel) == h {
-			continue
-		}
-		*cur = cur.withMetaSeen(rel, h)
-		changedMetas[rel] = struct{}{}
+	// Process changed metas first. A meta whose content hash is unchanged from the
+	// cursor's metaSeen is skipped — a bare touch/mtime bump does not warrant a
+	// re-read (spec §7 step 4). A changed subagent meta drives a catalog-safe
+	// AgentName repair (below).
+	if err := flushChangedMetas(ctx, resolvedRoot, root, sourceID, metaDirty, cur, out, onError); err != nil {
+		return err
 	}
 
-	// A changed meta repairs the linkage of its session's parent transcript AND
-	// the child subagent's AgentName: force BOTH re-read from offset 0 with
-	// emission (spec §8.1, late meta). The parent re-emit carries the resolved
-	// ChildSessionNativeID; the child re-emit carries the agentType AgentName
-	// (P2.4c) — a child read before its meta would otherwise keep an empty
-	// AgentName forever. The forced files join the dirty set (so they are read
-	// this flush) and forceFromZero (so they are read with emitFrom=0, not the
-	// cursor).
-	forceFromZero := metaParentRels(root, changedMetas)
-	for rel := range metaChildRels(root, changedMetas) {
-		forceFromZero[rel] = struct{}{}
-	}
-	dirtyAll := dirty
-	if len(forceFromZero) > 0 {
-		dirtyAll = make(map[string]struct{}, len(dirty)+len(forceFromZero))
-		for rel := range dirty {
-			dirtyAll[rel] = struct{}{}
-		}
-		for rel := range forceFromZero {
-			dirtyAll[rel] = struct{}{}
-		}
-	}
-
-	if len(dirtyAll) == 0 {
+	if len(dirty) == 0 {
 		if len(metaDirty) == 0 {
 			return nil
 		}
 		return emitProgress(ctx, sourceID, *cur, out)
 	}
 
-	names := make([]string, 0, len(dirtyAll))
-	for n := range dirtyAll {
+	names := make([]string, 0, len(dirty))
+	for n := range dirty {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -492,14 +447,6 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 			mm = cached
 		}
 		fc := cur.fileCursor(rel)
-		if _, force := forceFromZero[rel]; force {
-			// Re-emit the parent from the start so its Agent OpStarted carries
-			// the resolved ChildSessionNativeID. A zero cursor reads 0→EOF with
-			// emitFrom=0 (everything emitted, all idempotent upserts). The parent
-			// has no child sidechain records, so this re-read marks no child
-			// completed — Part 1's finalize gating is unaffected.
-			fc = FileCursor{}
-		}
 		updated, _, mapper, rerr := readTranscript(ctx, root, t, sourceID, mm, fc, out, onError)
 		if rerr != nil {
 			if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
@@ -535,87 +482,96 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 	return emitProgress(ctx, sourceID, *cur, out)
 }
 
-// metaParentRels maps each changed `.meta.json` relative path to its session's
-// parent root-transcript relative path ("<proj>/<sessionId>.jsonl"), the file
-// whose `Agent` OpStarted must be re-emitted to repair a late linkage (spec
-// §8.1). A meta lives at "<proj>/<sessionId>/subagents/.../agent-<id>.meta.json";
-// the parent transcript is "<proj>/<sessionId>.jsonl". The parent must exist on
-// disk and be containment-safe (the re-read itself re-checks containment). A
-// rel that is not a subagent meta path is skipped.
-func metaParentRels(root string, changedMetas map[string]struct{}) map[string]struct{} {
-	out := map[string]struct{}{}
-	for rel := range changedMetas {
-		parentRel, ok := metaParentRel(rel)
-		if !ok {
-			continue
-		}
-		abs := filepath.Join(root, filepath.FromSlash(parentRel))
-		if info, err := os.Stat(abs); err != nil || info.IsDir() {
-			// Orphan-root session (no parent .jsonl) or a not-yet-created
-			// parent: nothing to re-emit. The structural linkage still works
-			// once the parent appears and is read normally.
-			continue
-		}
-		out[parentRel] = struct{}{}
+// flushChangedMetas hashes every dirty `.meta.json`, records the new hash in the
+// cursor for those whose content changed, and repairs the affected child
+// subagent's `AgentName` by emitting a catalog-safe `SessionUpdatedEvent` (spec
+// §8.1, P1.6). It does NOT re-read any transcript: a from-0 re-emit would re-emit
+// SessionStarted/OpStarted/OpFinalized and double-count the accumulating catalog_*
+// rollups. The op→child link is repaired separately by the resolver's toolUseId
+// match. Each meta read is containment-checked (RESOLVED path, no TOCTOU), size-
+// capped (P2.6b), and surfaces a SourceError on a present-but-broken/oversized
+// sidecar (P2.4b/P2.5a). A no-op touch (unchanged hash) emits nothing.
+func flushChangedMetas(ctx context.Context, resolvedRoot, root, sourceID string, metaDirty map[string]struct{}, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
+	rels := make([]string, 0, len(metaDirty))
+	for rel := range metaDirty {
+		rels = append(rels, rel)
 	}
-	return out
+	sort.Strings(rels) // deterministic emission order
+	for _, rel := range rels {
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		// Containment guard returning the RESOLVED path so the read opens it, not
+		// the original (P1.3/P2.5a, no TOCTOU). resolvedRoot is pre-resolved so this
+		// does not re-run EvalSymlinks on the root per meta.
+		resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, abs)
+		if cerr != nil {
+			onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", rel, cerr))
+			continue
+		}
+		if !ok {
+			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", rel))
+			continue
+		}
+		raw, rerr := readMetaCapped(resolvedAbs)
+		if rerr != nil {
+			// A present-but-unreadable or oversized meta silently failing the
+			// rewrite-detection would mask a broken sidecar whose rewrite should
+			// drive the AgentName repair; surface it (P2.5a read / P2.6b size).
+			onError(fmt.Errorf("claude_code: read meta %s: %w", rel, rerr))
+			continue
+		}
+		h := hashBytes(raw)
+		if cur.metaSeen(rel) == h {
+			continue // unchanged content; a bare touch must not re-emit.
+		}
+		*cur = cur.withMetaSeen(rel, h)
+
+		// Repair the child's AgentName via a catalog-safe SessionUpdatedEvent
+		// (applySessionUpdated makes no catalog call) — never a transcript re-read.
+		childNative, isSubagent := subagentMetaNative(rel)
+		if !isSubagent {
+			continue
+		}
+		meta, perr := parseMeta(raw)
+		if perr != nil {
+			onError(fmt.Errorf("claude_code: parse meta %s: %w", rel, perr))
+			continue
+		}
+		if meta.AgentType == "" {
+			continue // nothing to repair.
+		}
+		ev := canonical.SessionUpdatedEvent{
+			EventBase: canonical.EventBase{SourceID: sourceID, SourceSeq: 0, Ts: 0},
+			NativeID:  childNative,
+			AgentName: meta.AgentType,
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case out <- ev:
+		}
+	}
+	return nil
 }
 
-// metaChildRels maps each changed `.meta.json` relative path to its OWN child
-// subagent-transcript relative path (the sibling `agent-<id>.jsonl`), the file
-// whose `SessionStarted` must be re-emitted so the child's `AgentName` picks up
-// the now-known `agentType` (spec §8.1, P2.4c). The child path is the meta path
-// with the `.meta.json` suffix replaced by `.jsonl`. The child must exist on
-// disk (the re-read itself re-checks containment). A rel that is not a subagent
-// meta path, or whose sibling transcript is absent, is skipped.
-func metaChildRels(root string, changedMetas map[string]struct{}) map[string]struct{} {
-	out := map[string]struct{}{}
-	for rel := range changedMetas {
-		childRel, ok := metaChildRel(rel)
-		if !ok {
-			continue
-		}
-		abs := filepath.Join(root, filepath.FromSlash(childRel))
-		if info, err := os.Stat(abs); err != nil || info.IsDir() {
-			// The child sidechain is not present yet: nothing to re-read. It will
-			// be read normally (with the now-known meta) when it appears.
-			continue
-		}
-		out[childRel] = struct{}{}
-	}
-	return out
-}
-
-// metaChildRel derives the sibling child-transcript rel from a subagent meta
-// rel: "<...>/agent-<id>.meta.json" → "<...>/agent-<id>.jsonl". Returns
-// ("", false) when rel is not a subagent meta path.
-func metaChildRel(metaRel string) (string, bool) {
+// subagentMetaNative derives the child sub-agent's synthetic native id
+// ("<parent sessionId>:agent:<agentId>") from a subagent meta rel
+// ("<proj>/<sessionId>/subagents/.../agent-<id>.meta.json"). Returns ("", false)
+// when rel is not a subagent meta path (no "subagents" segment with a session-id
+// parent, or not an agent-*.meta.json file).
+func subagentMetaNative(metaRel string) (string, bool) {
 	if !strings.HasSuffix(metaRel, metaExt) {
 		return "", false
 	}
-	// Confirm it is a subagent meta (has a "subagents" segment with a session-id
-	// parent), reusing metaParentRel's structural check.
-	if _, ok := metaParentRel(metaRel); !ok {
+	base := metaRel[strings.LastIndex(metaRel, "/")+1:]
+	if !strings.HasPrefix(base, "agent-") {
 		return "", false
 	}
-	return strings.TrimSuffix(metaRel, metaExt) + transcriptExt, true
-}
-
-// metaParentRel derives the parent root-transcript rel from a subagent meta
-// rel. "<proj>/<sessionId>/subagents/.../agent-<id>.meta.json" →
-// "<proj>/<sessionId>.jsonl". Returns ("", false) when rel has no "subagents"
-// segment with a session-id parent.
-func metaParentRel(metaRel string) (string, bool) {
-	if !strings.HasSuffix(metaRel, metaExt) {
-		return "", false
-	}
+	agentID := strings.TrimPrefix(strings.TrimSuffix(base, metaExt), "agent-")
 	parts := strings.Split(metaRel, "/")
 	for i, p := range parts {
 		if p == subagentsDir && i >= 2 {
 			sessionID := parts[i-1]
-			projParts := parts[:i-1]
-			rel := strings.Join(append(append([]string{}, projParts...), sessionID+transcriptExt), "/")
-			return rel, true
+			return childNativeID(sessionID, agentID), true
 		}
 	}
 	return "", false
@@ -699,18 +655,4 @@ func transcriptForRel(root, rel string) (transcript, bool) {
 		kind:       canonical.KindRoot,
 		sessionDir: sessionDir,
 	}, true
-}
-
-// hashFile returns the sha256 hex of a file's content. It MUST be given a
-// containment-checked, symlink-RESOLVED path (the caller resolves via
-// withinResolvedRoot and passes the resolved path, P2.5a — no TOCTOU). A read
-// error is RETURNED (not swallowed) so the caller can surface a SourceError
-// rather than silently skipping a present-but-broken meta (spec §6.1). Used by
-// flushDirty to checkpoint meta-file state.
-func hashFile(resolvedAbs string) (string, error) {
-	raw, err := os.ReadFile(resolvedAbs) // #nosec G304 -- reading the containment-checked RESOLVED path (withinResolvedRoot) from the watched tree under the configured root
-	if err != nil {
-		return "", err
-	}
-	return hashBytes(raw), nil
 }

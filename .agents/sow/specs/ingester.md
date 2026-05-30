@@ -142,6 +142,14 @@ or a re-scan of a changed file) at the SQL layer:
 - `sessions`, `turns`, `ops` use `INSERT ... ON CONFLICT DO UPDATE` with
   `COALESCE` on update, keyed on their natural identity (`(source_id,
   native_id)`, `(session_id, seq)`, `(turn_id, seq)`).
+  - `ops.extras_json` is MERGED on conflict (`json_patch(ops.extras_json,
+    excluded.extras_json)`), not replaced wholesale, so the resolver's
+    `aiViewer` stash sub-object (`childNativeId` / `toolUseId`) survives a
+    later re-emit of the same op whose `extras_json` lacks the stash. A
+    wholesale replace would let a stash-free re-emit erase a join key the
+    resolver still needs, permanently orphaning the op→child edge. The merge
+    is idempotent (re-applying the same extras yields the same row) and does
+    not affect adapters whose op extras carry no `aiViewer` sub-object.
 - `payload_refs` and `log_entries` (migration `0003`) carry
   natural-identity UNIQUE indexes and insert with `ON CONFLICT DO
   NOTHING`:
@@ -219,6 +227,14 @@ UPDATE sessions
 ```
 
 The `parent_native_id` is persisted into `extras_json.aiViewer.parentNativeId` at insert time so the resolver can re-run against the durable state. This is implementation detail of the ingester (the field is not part of the public schema or API contract).
+
+The resolver also re-links **op→child** edges, by two complementary passes (both run inside the same transaction as the parent/root link, and both add the affected **parent** session id to the notify set):
+
+1. `linkOpChildren` — re-links `ops.child_session_id` from `ops.extras_json.aiViewer.childNativeId` (stashed when a parent child-session op was written before its child `sessions` row existed) once a session with the matching `(source_id, native_id)` lands. Used by every adapter that emits `OpStartedEvent.ChildSessionNativeID` (ai-agent v2/v3, claude-code when the child native id is known at op-write time).
+
+2. `linkOpChildrenByToolUse` — an ADDITIVE pass for adapters that cannot know the child native id at op-write time. It re-links `ops.child_session_id` for any op whose `child_session_id` is still NULL and whose `extras_json.aiViewer.toolUseId` is set, to the session in the SAME source whose `extras_json.aiViewer.toolUseId` matches (joined through the op's parent session for `source_id`, since `ops` carry no `source_id`). This is how the claude-code adapter links a parent `Agent` op tailed BEFORE its sidecar `.meta.json` to its child session, without re-reading any transcript (which would double-count the accumulating `catalog_*` rollups). An adapter that does not stash `aiViewer.toolUseId` matches zero rows, so this pass is a no-op for ai-agent and any other format.
+
+Both op→child passes (like the session parent/root passes) emit a `session_changed` notify for the affected parent session so an open parent-detail view refetches once the child op edge resolves.
 
 Because the resolver mutates `parent_session_id` / `root_session_id` **outside**
 the normal batch-writer path, it must emit its own `notify` rows in the **same
