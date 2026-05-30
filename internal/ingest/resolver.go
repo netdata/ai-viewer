@@ -261,6 +261,17 @@ RETURNING session_id
 // resolved by joining through the op's session row (ops carry no source_id). The
 // child is matched on (same source, matching toolUseId) and must NOT be the op's own
 // session (c.id <> ops.session_id) — defence against a degenerate self-match.
+//
+// The match is ADDITIONALLY constrained to the op's STRUCTURAL child (SOW-0003 P2.7e):
+// the matched child must descend from the op's owning (parent) session — either its
+// resolved foreign key already points at the parent (c.parent_session_id = parent.id)
+// or its stashed parent native id names the parent (c.extras_json.$.aiViewer.parentNativeId
+// = parent.native_id, the pre-resolution stash). Without this, two sessions in ONE
+// source sharing (or forging) the same toolUseId let the scalar subquery pick an
+// arbitrary same-source child; the structural constraint forces each parent op to link
+// to ITS OWN child. The constraint stays additive: claude-code sub-agents always carry
+// parentNativeId (and the parent FK resolves shortly after), so genuine links still
+// match; an op without a toolUseId stash still matches zero rows (aiagent unaffected).
 // modernc.org/sqlite supports UPDATE … FROM and UPDATE … RETURNING.
 func (r *resolver) linkOpChildrenByToolUse(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
 	before := len(affected)
@@ -271,6 +282,10 @@ UPDATE ops SET child_session_id = (
      WHERE c.source_id = parent.source_id
        AND c.id <> ops.session_id
        AND json_extract(c.extras_json, '$.aiViewer.toolUseId') = json_extract(ops.extras_json, '$.aiViewer.toolUseId')
+       AND (
+            c.parent_session_id = parent.id
+            OR json_extract(c.extras_json, '$.aiViewer.parentNativeId') = parent.native_id
+       )
 )
 WHERE ops.child_session_id IS NULL
   AND json_extract(ops.extras_json, '$.aiViewer.toolUseId') IS NOT NULL
@@ -281,6 +296,10 @@ WHERE ops.child_session_id IS NULL
        WHERE c.source_id = parent.source_id
          AND c.id <> ops.session_id
          AND json_extract(c.extras_json, '$.aiViewer.toolUseId') = json_extract(ops.extras_json, '$.aiViewer.toolUseId')
+         AND (
+              c.parent_session_id = parent.id
+              OR json_extract(c.extras_json, '$.aiViewer.parentNativeId') = parent.native_id
+         )
   )
 RETURNING session_id
 `)

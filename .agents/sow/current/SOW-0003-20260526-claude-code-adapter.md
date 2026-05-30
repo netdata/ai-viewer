@@ -791,6 +791,60 @@ the restart boundary), §6.1 (meta size cap, resolved-root walk, softened TOCTOU
 op `extras_json` merge-on-conflict invariant). No migration (ops.extras_json column +
 the aiViewer stash already exist; cursor lost the from-0 helpers, gained nothing).
 
+### Round 7 (2026-05-30) — codex + glm + minimax (full scope + Round-6 fix notes)
+
+minimax → inconclusive (stopped mid-review). glm → safe to merge (1 P2: `LIMIT 1` on the
+toolUseId subquery; 1 P3). **codex → NOT safe: 2 P1 + 2 P2 + 1 P3**, all verified by my own
+ground-truth audit. codex ENDORSES the re-emit-free direction ("good") but the Round-6
+implementation is incomplete — the SAME incomplete-sweep failure (fixed op extras, missed
+session extras; fixed the walk, missed the cursor keys). Complete it:
+
+- **[P1.7a] child-before-meta still orphaned.** The late-meta repair emits
+  `SessionUpdatedEvent{AgentName}` only — NO `toolUseId` (`tailer.go:542-546`) — and the
+  resolver requires the child row to carry `extras.aiViewer.toolUseId` (`resolver.go:268`).
+  So: parent op read before meta (has toolUseId) + child transcript read before its own meta
+  (no toolUseId on child) + meta arrives later → AgentName repaired, link never made. **Fix:**
+  the late-meta `SessionUpdated` also carries `extras.aiViewer.toolUseId` (the meta has
+  `ToolUseID`); `applySessionUpdated` applies it.
+- **[P1.7b] session extras_json replaced wholesale.** `writer.go:286`
+  `extras_json = excluded.extras_json` — a stash-free session re-emit erases the child's
+  `aiViewer.toolUseId` stash (the P2.6d merge fixed OP extras only; SESSION extras was
+  missed). **Fix:** preserve the `aiViewer` stash on session-extras conflict too.
+- **[P2.7c — and the right fix for P2.6d] aiViewer-preserve must be SURGICAL, not json_patch.**
+  codex: `json_patch(ops.extras_json, excluded.extras_json)` (`writer.go:473`) treats a JSON
+  `null` value as DELETE (RFC 7386), and aiagent_v3 copies arbitrary attrs into op extras
+  (`aiagent_v3/ops.go:71-80`) — so a replay with `{"x":null}` deletes key `x`: a shared-
+  ingester aiagent regression I introduced. **Fix (both op AND session extras):** take
+  `excluded.extras_json` wholesale (no null-delete) but graft back the existing `aiViewer`
+  sub-object when the new extras lacks it (`json_set`/`json_insert`, NOT `json_patch`).
+- **[P1.7d] symlinked root re-emits history → catalog double-count.** P2.6c made the WALK use
+  the resolved root, but fsnotify event paths + `markExistingDirty` derive cursor keys
+  relative to the UNRESOLVED root (`tailer.go:190-217,226-240`), while scan cursor keys are
+  relative to the configured root (`cursor.go:17-21`). For `link→real`, a tail key becomes
+  `../real/...`, misses the cursor entry, and `readTranscript` re-reads from 0 → re-emits
+  history → catalog double-count. **Fix:** derive ALL cursor keys (scan + tail) consistently
+  against the same (configured) root; keep the WALK on the resolved root but map discovered
+  paths back to configured-root-relative keys. Pin with a test asserting NO history replay on
+  a symlinked-root tail.
+- **[P2.7e] resolver toolUseId match unconstrained.** `linkOpChildrenByToolUse`
+  (`resolver.go:268-284`) matches only (source, toolUseId); duplicate/forged toolUseIds in one
+  source pick an arbitrary child. **Fix:** additionally constrain by the child's structural
+  parent (`child.parent_session_id = parent.id` OR
+  `child.extras.aiViewer.parentNativeId = parent.native_id`); ambiguity test. (Stronger than
+  glm's `LIMIT 1` — correctness, not just determinism.)
+- **[P3.7] stale wording.** Remove dead late-meta-re-read comments (`cursor.go:37-43`,
+  `tailer.go:74-77,374-377`); fix the spec self-contradiction on whether the parent Agent op
+  carries `ChildSessionNativeID` unconditionally (`adapter-claude-code.md:703-708` vs
+  `:725-733`) — it is conditional on the meta being present at parent-map time.
+
+Enumerated COMPLETE this time: extras-preserve covers BOTH session + op tables via the SAME
+surgical (non-json_patch) graft; cursor-key consistency covers scan + tail + markExistingDirty.
+Owned + decided by the assistant (CTO), recorded not escalated. If a linkage bug recurs after
+THIS complete sweep, escalate the genuine simplicity tradeoff (drop live late-meta linkage
+entirely) to the operator.
+
+Not merged. Fixes delegated; re-review same scope + these notes (Round 8) before merge.
+
 ## Outcome
 
 Pending.

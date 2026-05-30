@@ -142,14 +142,30 @@ or a re-scan of a changed file) at the SQL layer:
 - `sessions`, `turns`, `ops` use `INSERT ... ON CONFLICT DO UPDATE` with
   `COALESCE` on update, keyed on their natural identity (`(source_id,
   native_id)`, `(session_id, seq)`, `(turn_id, seq)`).
-  - `ops.extras_json` is MERGED on conflict (`json_patch(ops.extras_json,
-    excluded.extras_json)`), not replaced wholesale, so the resolver's
-    `aiViewer` stash sub-object (`childNativeId` / `toolUseId`) survives a
-    later re-emit of the same op whose `extras_json` lacks the stash. A
-    wholesale replace would let a stash-free re-emit erase a join key the
-    resolver still needs, permanently orphaning the op→child edge. The merge
-    is idempotent (re-applying the same extras yields the same row) and does
-    not affect adapters whose op extras carry no `aiViewer` sub-object.
+  - **The `sessions` and `ops` UPSERT `extras_json` is REPLACED wholesale on
+    conflict EXCEPT the resolver's `aiViewer` stash sub-object, which is grafted
+    back from the existing row whenever the re-emit omits it** (the shared
+    `graftAiViewerExtras` expression). Both tables are full re-emits of the same
+    natural-identity row, so the new (`excluded`) extras win wholesale for every
+    key the re-emit carries; the ONLY key preserved across a stash-free re-emit is
+    `$.aiViewer` (`childNativeId` / `toolUseId`), the join key the resolver needs.
+    A wholesale replace WITHOUT the graft would let a stash-free re-emit erase that
+    join key and permanently orphan the op→child edge.
+  - **The graft uses `json_set`, NOT `json_patch`.** `json_patch` (RFC 7386
+    merge-patch) treats a JSON `null` VALUE as a DELETE directive, and adapters copy
+    arbitrary source attributes into op extras (e.g. `aiagent_v3` emits
+    `extras["attr."+k] = v`), so a replay carrying `{"attr.x": null}` under
+    `json_patch` would silently DELETE key `attr.x` from the stored row — a
+    cross-adapter data-loss regression. Taking `excluded` wholesale never deletes a
+    key for a null value; `json_set` only ADDS the grafted `$.aiViewer` and never
+    interprets a null. The behaviour is idempotent (re-applying the same extras
+    yields the same row) and is a no-op graft for adapters whose extras carry no
+    `aiViewer` sub-object.
+  - The partial `applySessionUpdated` UPDATE (a `SessionUpdatedEvent`, which is NOT
+    a full re-emit) still MERGES via `json_patch` by design — a partial metadata
+    update must combine with the existing `aiViewer` stash (e.g. the late-meta
+    `toolUseId` repair merges into the child's `parentNativeId`/`rootNativeId`), and
+    its inputs never carry explicit nulls.
 - `payload_refs` and `log_entries` (migration `0003`) carry
   natural-identity UNIQUE indexes and insert with `ON CONFLICT DO
   NOTHING`:
@@ -232,7 +248,7 @@ The resolver also re-links **op→child** edges, by two complementary passes (bo
 
 1. `linkOpChildren` — re-links `ops.child_session_id` from `ops.extras_json.aiViewer.childNativeId` (stashed when a parent child-session op was written before its child `sessions` row existed) once a session with the matching `(source_id, native_id)` lands. Used by every adapter that emits `OpStartedEvent.ChildSessionNativeID` (ai-agent v2/v3, claude-code when the child native id is known at op-write time).
 
-2. `linkOpChildrenByToolUse` — an ADDITIVE pass for adapters that cannot know the child native id at op-write time. It re-links `ops.child_session_id` for any op whose `child_session_id` is still NULL and whose `extras_json.aiViewer.toolUseId` is set, to the session in the SAME source whose `extras_json.aiViewer.toolUseId` matches (joined through the op's parent session for `source_id`, since `ops` carry no `source_id`). This is how the claude-code adapter links a parent `Agent` op tailed BEFORE its sidecar `.meta.json` to its child session, without re-reading any transcript (which would double-count the accumulating `catalog_*` rollups). An adapter that does not stash `aiViewer.toolUseId` matches zero rows, so this pass is a no-op for ai-agent and any other format.
+2. `linkOpChildrenByToolUse` — an ADDITIVE pass for adapters that cannot know the child native id at op-write time. It re-links `ops.child_session_id` for any op whose `child_session_id` is still NULL and whose `extras_json.aiViewer.toolUseId` is set, to the session in the SAME source whose `extras_json.aiViewer.toolUseId` matches (joined through the op's parent session for `source_id`, since `ops` carry no `source_id`). The match is ADDITIONALLY constrained to the op's STRUCTURAL child: the candidate child must descend from the op's owning (parent) session — its resolved foreign key already points at the parent (`child.parent_session_id = parent.id`) OR its stashed parent native id names the parent (`child.extras_json.aiViewer.parentNativeId = parent.native_id`). Without this, two sessions in one source sharing or forging the same `toolUseId` would let the scalar subquery pick an arbitrary same-source child; the structural constraint forces each parent op to link to its own child. This is how the claude-code adapter links a parent `Agent` op tailed BEFORE its sidecar `.meta.json` to its child session, without re-reading any transcript (which would double-count the accumulating `catalog_*` rollups). An adapter that does not stash `aiViewer.toolUseId` matches zero rows, so this pass is a no-op for ai-agent and any other format.
 
 Both op→child passes (like the session parent/root passes) emit a `session_changed` notify for the affected parent session so an open parent-detail view refetches once the child op edge resolves.
 

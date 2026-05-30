@@ -37,11 +37,11 @@ type Cursor struct {
 	// Finalized is the set of child session native ids whose parent `Agent` op
 	// has already been finalized. It persists the in-memory `finalized` guard so a
 	// finalize emitted during Scan (or a previous process lifetime) is not
-	// re-emitted by a Tail catch-up or — critically — by the late-`.meta.json`
-	// child re-read, which re-reads the child sidechain from offset 0 with
-	// emission enabled and so would otherwise re-mark the terminal assistant-text
-	// record as newly read (spec §8.1, P2.5c). Stored as a sorted slice (set
-	// semantics). `omitempty` keeps cursors that predate this field parseable.
+	// re-emitted across the Scan→Tail handoff or a daemon restart (spec §8.1,
+	// P2.5c). The late-`.meta.json` repair no longer re-reads any child transcript
+	// (§8.1 item 3 — it emits a catalog-safe SessionUpdated instead), so this set
+	// now serves only the Scan→Tail / restart boundary. Stored as a sorted slice
+	// (set semantics). `omitempty` keeps cursors that predate this field parseable.
 	// Observability/durability only — not part of After() ordering.
 	Finalized []string `json:"finalized,omitempty"`
 	// Version is the on-disk format version. Defaults to cursorVersion on

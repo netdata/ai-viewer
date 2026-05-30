@@ -120,6 +120,70 @@ type pricingMissKey struct {
 	kind     string
 }
 
+// aiViewerStashKeys are the resolver-owned join keys under `$.aiViewer` that must
+// survive a stash-free re-emit (SOW-0003 P2.6d/P1.7b/P2.7c). `toolUseId` is the
+// claude-code meta-independent op→child join key; `childNativeId` is the
+// ChildSessionNativeID stash used by every adapter that knows the child native id
+// at op-write time. Both are grafted back PER-KEY (not as a whole `$.aiViewer`
+// object) because the sessions writer ALWAYS rewrites `$.aiViewer` with
+// `parentNativeId`/`rootNativeId`, so the re-emit's `$.aiViewer` is present-but-
+// incomplete — a whole-object graft would never fire for sessions.
+var aiViewerStashKeys = []string{"toolUseId", "childNativeId"}
+
+// graftAiViewerExtras returns the ON CONFLICT extras_json expression shared by the
+// sessions and ops UPSERT paths (applySessionStarted, applyOpStarted). Both are
+// full re-emits of the same natural-identity row, so the new (`excluded`) extras
+// REPLACE the existing extras WHOLESALE — EXCEPT each resolver join key under
+// `$.aiViewer` (aiViewerStashKeys), which is grafted back from the existing row
+// whenever the re-emit omits it.
+//
+// Why a per-key graft and NOT json_patch (SOW-0003 P2.7c, RFC 7386): SQLite's
+// json_patch treats a JSON `null` VALUE as a DELETE directive, and adapters copy
+// arbitrary source attributes into op extras (aiagent_v3 ops.go: `extras["attr."+k]
+// = v`). A replay whose extras legitimately carry `{"attr.x":null}` would, under
+// json_patch, DELETE key `attr.x` — a shared-ingester data-loss regression. Taking
+// `excluded` wholesale and json_set-ing only the named stash keys never deletes a
+// key for a null value (json_set with a NULL value would CREATE a null-valued key,
+// which is why the graft is GUARDED to fire only when the existing row actually has
+// the key and the re-emit lacks it — it never introduces a spurious null).
+//
+// existingCol is the existing-row extras_json column reference (e.g.
+// "ops.extras_json" or "sessions.extras_json"); the new value is always
+// `excluded.extras_json`.
+//
+// Shape (one graftOne layer per stash key, nested over `excluded.extras_json`):
+//
+//	CASE
+//	  WHEN excluded.extras_json IS NULL THEN <existing>   -- re-emit carried none; stash survives
+//	  WHEN <existing> IS NULL           THEN excluded.extras_json  -- nothing to preserve
+//	  ELSE graftKey(graftKey(excluded.extras_json, toolUseId), childNativeId)
+//	END
+//
+// where graftKey(base, K) = CASE WHEN <existing>.$.aiViewer.K NOT NULL AND
+// base.$.aiViewer.K IS NULL THEN json_set(base, '$.aiViewer.K', <existing>.$.aiViewer.K)
+// ELSE base END (json_set auto-creates `$.aiViewer` when base lacks it, e.g. ops).
+func graftAiViewerExtras(existingCol string) string {
+	base := "excluded.extras_json"
+	for _, key := range aiViewerStashKeys {
+		base = graftAiViewerKey(base, existingCol, key)
+	}
+	return fmt.Sprintf(`CASE
+    WHEN excluded.extras_json IS NULL THEN %[1]s
+    WHEN %[1]s IS NULL THEN excluded.extras_json
+    ELSE (%[2]s)
+END`, existingCol, base)
+}
+
+// graftAiViewerKey returns an expression that grafts the existing row's
+// `$.aiViewer.<key>` onto base ONLY when the existing row has it and base lacks it,
+// otherwise base unchanged. See graftAiViewerExtras.
+func graftAiViewerKey(base, existingCol, key string) string {
+	path := "'$.aiViewer." + key + "'"
+	return fmt.Sprintf(`CASE WHEN json_extract(%[1]s, %[3]s) IS NOT NULL AND json_extract(%[2]s, %[3]s) IS NULL
+        THEN json_set(%[2]s, %[3]s, json_extract(%[1]s, %[3]s))
+        ELSE %[2]s END`, existingCol, base, path)
+}
+
 func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 	return &writer{
 		sourceID:           sourceID,
@@ -267,6 +331,14 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	if kind == "" {
 		kind = string(canonical.KindRoot)
 	}
+	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
+	// `aiViewer` stash sub-object, which is grafted back when a stash-free
+	// re-emit omits it (SOW-0003 P1.7b). The claude-code sub-agent SessionStarted
+	// stashes the child's `toolUseId` in `aiViewer`; a later stash-free session
+	// re-emit (e.g. a parent-map re-read) that wholesale-replaced extras would
+	// erase that join key and permanently orphan the op→child edge. The graft
+	// (json_set, NOT json_patch) preserves the stash without the json_patch
+	// null-as-delete hazard (see graftAiViewerExtras).
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
@@ -283,7 +355,7 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
     call_path         = COALESCE(NULLIF(excluded.call_path, ''), sessions.call_path),
     start_ts          = MIN(sessions.start_ts, excluded.start_ts),
     last_activity_ts  = MAX(sessions.last_activity_ts, excluded.last_activity_ts),
-    extras_json       = excluded.extras_json
+    extras_json       = `+graftAiViewerExtras("sessions.extras_json")+`
 `,
 		id, w.sourceID, ev.NativeID, parentID, rootID,
 		kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model), nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
@@ -446,12 +518,16 @@ ON CONFLICT (session_id, seq) DO NOTHING
 	if err != nil {
 		return fmt.Errorf("writer: marshal op extras: %w", err)
 	}
-	// extras_json is MERGED on conflict (json_patch), not replaced wholesale, so a
-	// re-emit of the same op whose extras lack the resolver's aiViewer stash
-	// (childNativeId / toolUseId) cannot erase a join key the resolver still needs —
-	// a wholesale replace would permanently orphan the op→child edge (P2.6d). The
-	// CASE preserves the existing extras when the re-emit carries none, adopts the
-	// new extras when the row had none, and merges otherwise (idempotent).
+	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
+	// `aiViewer` stash sub-object, which is grafted back when a stash-free re-emit
+	// omits it (SOW-0003 P2.6d/P2.7c). A re-emit of the same op whose extras lack
+	// the resolver stash (childNativeId / toolUseId) must not erase a join key the
+	// resolver still needs — a wholesale replace would permanently orphan the
+	// op→child edge. The graft uses json_set (NOT json_patch): json_patch would
+	// interpret a JSON `null` VALUE as a DELETE (RFC 7386), and adapters copy
+	// arbitrary source attributes into op extras (aiagent_v3 `extras["attr."+k]`),
+	// so a replay carrying `{"attr.x":null}` would silently drop key `attr.x`.
+	// See graftAiViewerExtras.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq,
@@ -470,11 +546,7 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
     start_ts       = MIN(ops.start_ts, excluded.start_ts),
     parent_op_id   = COALESCE(ops.parent_op_id, excluded.parent_op_id),
     child_session_id = COALESCE(ops.child_session_id, excluded.child_session_id),
-    extras_json    = CASE
-        WHEN excluded.extras_json IS NULL THEN ops.extras_json
-        WHEN ops.extras_json IS NULL THEN excluded.extras_json
-        ELSE json_patch(ops.extras_json, excluded.extras_json)
-    END
+    extras_json    = `+graftAiViewerExtras("ops.extras_json")+`
 `,
 		opID, turnID, sessionID, parentOpID, ev.Seq,
 		string(ev.Kind), ev.Name, nullIfEmpty(ev.ToolNamespace), nullIfEmpty(ev.Model), nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),

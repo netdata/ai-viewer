@@ -864,9 +864,9 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	// Persist the parked completions that survived pairing (children still
 	// awaiting their parent op) so a restart can restore them (P2.4d), and the
 	// finalized set so a child finalized during THIS Scan is not re-finalized by
-	// the subsequent Tail catch-up or a late-meta re-read (P2.5c). Finalized
-	// children were dropped from def.completed and added to def.finalized by
-	// pairCompletedFinalizations, so the parked snapshot excludes them and the
+	// the subsequent Tail catch-up replay across the Scan→Tail handoff (P2.5c).
+	// Finalized children were dropped from def.completed and added to def.finalized
+	// by pairCompletedFinalizations, so the parked snapshot excludes them and the
 	// finalized snapshot includes them.
 	cur = cur.withParked(def.parkedSnapshot())
 	cur = cur.withFinalized(def.finalizedSnapshot())

@@ -72,10 +72,9 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	// Seed its parked completions AND its already-finalized set from the persisted
 	// cursor: a child that completed before its parent op was known — and was
 	// checkpointed before a restart — is still finalizable when the parent op
-	// appears (P2.4d), and a child already finalized in a previous lifetime (or
-	// during Scan) is not re-finalized by the catch-up or the late-meta re-read
-	// (P2.5c). Restore `finalized` FIRST so restoreParked's already-finalized guard
-	// sees it.
+	// appears (P2.4d), and a child already finalized during Scan or a previous
+	// process lifetime is not re-finalized by the Tail catch-up replay (P2.5c).
+	// Restore `finalized` FIRST so restoreParked's already-finalized guard sees it.
 	deferral := newTailDeferral()
 	deferral.restoreFinalized(cur.finalizedSet())
 	deferral.restoreParked(cur.Parked)
@@ -187,7 +186,19 @@ func catchUpFromCursor(ctx context.Context, resolvedRoot, root, sourceID string,
 // the watch set. Transcript writes mark the relative path dirty; meta-file
 // writes mark the meta path dirty. Removes/renames are logged, not acted on
 // (spec §6.2).
+//
+// Cursor keys are derived against the RESOLVED root, NOT the configured root
+// (SOW-0003 P1.7d): every watched dir is Add()ed from the resolved-root walk
+// (tailLoop seeds addWatchTree with resolvedRoot), so fsnotify reports event
+// paths under the resolved root. Under a symlinked projects root (root →
+// resolvedRoot), keying with relPath(root, …) would yield "../<real>/…" and miss
+// the scan cursor entry (whose key is relPath(root, root/…) = "<proj>/…"),
+// re-reading the file from offset 0 and re-emitting history → catalog
+// double-count. relPath(resolvedRoot, resolvedRoot/…) yields the SAME "<proj>/…"
+// key the scan side records, so scan and tail keys are identical for one file
+// regardless of root symlinking.
 func handleEvent(watcher *fsnotify.Watcher, resolvedRoot, root string, ev fsnotify.Event, watched, dirty, metaDirty map[string]struct{}, onError func(error)) {
+	_ = root // cursor keys are resolvedRoot-relative; root only documents the configured source.
 	// A newly created directory must be watched (fsnotify is non-recursive).
 	// Files written into it BEFORE we Add() the watch would be missed, so we
 	// also walk the new dir and mark any transcripts/metas already present as
@@ -195,18 +206,18 @@ func handleEvent(watcher *fsnotify.Watcher, resolvedRoot, root string, ev fsnoti
 	if ev.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
 			addWatchTree(watcher, resolvedRoot, ev.Name, watched, onError)
-			markExistingDirty(root, ev.Name, dirty, metaDirty)
+			markExistingDirty(resolvedRoot, ev.Name, dirty, metaDirty)
 			return
 		}
 	}
 	base := filepath.Base(ev.Name)
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		if strings.HasSuffix(base, transcriptExt) || strings.HasSuffix(base, metaExt) {
-			onError(fmt.Errorf("claude_code: %s removed/renamed", relOrBase(root, ev.Name)))
+			onError(fmt.Errorf("claude_code: %s removed/renamed", relOrBase(resolvedRoot, ev.Name)))
 		}
 		return
 	}
-	rel, err := relPath(root, ev.Name)
+	rel, err := relPath(resolvedRoot, ev.Name)
 	if err != nil {
 		return
 	}
@@ -222,13 +233,15 @@ func handleEvent(watcher *fsnotify.Watcher, resolvedRoot, root string, ev fsnoti
 // transcript / meta file already present as dirty, so the next flush reads
 // content written into the dir before the watch was added (the create-race
 // window). The periodic tick's addWatchTree handles dirs; this handles the
-// files already inside them.
-func markExistingDirty(root, dir string, dirty, metaDirty map[string]struct{}) {
+// files already inside them. base is the RESOLVED root so the keys it records
+// match the scan cursor keys under a symlinked projects root (SOW-0003 P1.7d;
+// see handleEvent).
+func markExistingDirty(base, dir string, dirty, metaDirty map[string]struct{}) {
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		rel, rerr := relPath(root, path)
+		rel, rerr := relPath(base, path)
 		if rerr != nil {
 			return nil
 		}
@@ -242,10 +255,10 @@ func markExistingDirty(root, dir string, dirty, metaDirty map[string]struct{}) {
 	})
 }
 
-// relOrBase returns the root-relative path for logging, falling back to the
-// basename when the path is outside root.
-func relOrBase(root, abs string) string {
-	if rel, err := relPath(root, abs); err == nil {
+// relOrBase returns the base-relative path for logging, falling back to the
+// basename when the path is outside base.
+func relOrBase(base, abs string) string {
+	if rel, err := relPath(base, abs); err == nil {
 		return rel
 	}
 	return filepath.Base(abs)
@@ -373,8 +386,9 @@ func (d *tailDeferral) restoreParked(parked map[string]int64) {
 
 // restoreFinalized seeds the deferral's `finalized` set from a cursor's persisted
 // `finalized` slice (spec §8.1, P2.5c), so a finalize emitted in a previous
-// process lifetime (or during Scan) is not re-emitted by a Tail catch-up or the
-// late-meta child re-read. Restore only adds; existing entries are preserved.
+// process lifetime (or during Scan) is not re-emitted by a Tail catch-up replay
+// across the Scan→Tail / restart boundary. Restore only adds; existing entries
+// are preserved.
 func (d *tailDeferral) restoreFinalized(finalized map[string]struct{}) {
 	if d == nil {
 		return
@@ -536,13 +550,27 @@ func flushChangedMetas(ctx context.Context, resolvedRoot, root, sourceID string,
 			onError(fmt.Errorf("claude_code: parse meta %s: %w", rel, perr))
 			continue
 		}
-		if meta.AgentType == "" {
-			continue // nothing to repair.
+		// Repair the child's AgentName AND stash its `toolUseId` (SOW-0003 P1.7a).
+		// A child sidechain read BEFORE its own `.meta.json` emitted a SessionStarted
+		// with no `aiViewer.toolUseId` (the join key was unknown), so the resolver's
+		// `linkOpChildrenByToolUse` pass — which matches the parent op's stashed
+		// toolUseId against the CHILD session's stashed toolUseId — could never link
+		// it. Emitting the toolUseId now (catalog-safe via applySessionUpdated, which
+		// json_patch-merges it into the child's `aiViewer` alongside
+		// parentNativeId/rootNativeId) closes the child-before-meta gap WITHOUT a
+		// transcript re-read. A meta with neither field carries nothing to repair.
+		if meta.AgentType == "" && meta.ToolUseID == "" {
+			continue
+		}
+		var extras map[string]any
+		if meta.ToolUseID != "" {
+			extras = map[string]any{"aiViewer": map[string]any{"toolUseId": meta.ToolUseID}}
 		}
 		ev := canonical.SessionUpdatedEvent{
 			EventBase: canonical.EventBase{SourceID: sourceID, SourceSeq: 0, Ts: 0},
 			NativeID:  childNative,
 			AgentName: meta.AgentType,
+			Extras:    extras,
 		}
 		select {
 		case <-ctx.Done():
