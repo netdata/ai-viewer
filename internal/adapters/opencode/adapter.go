@@ -91,7 +91,7 @@ func (a *Adapter) Format() string { return Format }
 // work rather than replaying from HEAD.
 func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error {
 	start := a.coerceCursor(since)
-	final, sErr := scanLoop(ctx, a.dbPath, a.sourceID, start, out, a.onError)
+	final, sErr := scanLoop(ctx, a.dbPath, a.sourceID, start, out, a.logger, a.onError)
 	// Record the final watermark even on cancellation so a Tail that follows a
 	// context-cancelled Scan still resumes from the watermark reached so far (the
 	// cursor reflects only fully-consumed rows). On a hard error it is still the
@@ -127,7 +127,7 @@ func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
 		}
 		cur = snap
 	}
-	return tailLoop(ctx, a.dbPath, a.sourceID, cur, out, a.onError)
+	return tailLoop(ctx, a.dbPath, a.sourceID, cur, out, a.logger, a.onError)
 }
 
 // ParseCursor implements canonical.Adapter. Empty input yields the zero Cursor;

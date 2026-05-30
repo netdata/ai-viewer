@@ -86,7 +86,7 @@ func TestScanLoop_IntrospectFatal(t *testing.T) {
 
 	out := make(chan canonical.Event, 16)
 	var ce collectErrs
-	_, err := scanLoop(ctxBG(), path, "opencode:"+path, newCursor(), out, ce.onError)
+	_, err := scanLoop(ctxBG(), path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	if err == nil {
 		t.Fatal("scanLoop over a schema missing a required column: want fatal error")
 	}
@@ -124,6 +124,20 @@ func TestReloadAndEmit_GenericErrorViaOnError(t *testing.T) {
 	}
 }
 
+// TestOrDefaultLogger covers the nil-guard scanLoop/tailLoop apply to the logger
+// param so a direct test caller passing nil does not panic: nil yields a non-nil
+// logger (slog.Default()), and a supplied logger is returned unchanged.
+func TestOrDefaultLogger(t *testing.T) {
+	t.Parallel()
+	if got := orDefaultLogger(nil); got == nil {
+		t.Fatal("orDefaultLogger(nil) = nil, want a non-nil default logger")
+	}
+	custom := silentLogger()
+	if got := orDefaultLogger(custom); got != custom {
+		t.Errorf("orDefaultLogger(custom) returned a different logger, want the same instance")
+	}
+}
+
 // TestTailLoop_WALHintWakesCycle exercises the tailLoop WAL-hint branch end to
 // end: with a live WAL companion, a write to it (plus a new row) wakes a cycle
 // faster than the idle cadence and the new session surfaces.
@@ -148,7 +162,7 @@ func TestTailLoop_WALHintWakesCycle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, ce.onError)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	}()
 	defer func() { cancel(); <-done }()
 

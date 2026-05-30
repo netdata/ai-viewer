@@ -83,7 +83,7 @@ func TestScanLoop_BackfillEmitsAll(t *testing.T) {
 
 	out := make(chan canonical.Event, 4096)
 	var ce collectErrs
-	cur, err := scanLoop(ctxBG(), path, "opencode:"+path, newCursor(), out, ce.onError)
+	cur, err := scanLoop(ctxBG(), path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	if err != nil {
 		t.Fatalf("scanLoop: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestScanLoop_MissingDBBenign(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such.db")
 	out := make(chan canonical.Event, 4)
 	var ce collectErrs
-	cur, err := scanLoop(ctxBG(), missing, "opencode:"+missing, newCursor(), out, ce.onError)
+	cur, err := scanLoop(ctxBG(), missing, "opencode:"+missing, newCursor(), out, silentLogger(), ce.onError)
 	if err != nil {
 		t.Fatalf("scanLoop(missing) = %v, want nil", err)
 	}
@@ -149,7 +149,7 @@ func TestScanLoop_CtxCancelMidScan(t *testing.T) {
 	var ce collectErrs
 	done := make(chan error, 1)
 	go func() {
-		_, err := scanLoop(ctx, path, "opencode:"+path, newCursor(), out, ce.onError)
+		_, err := scanLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 		done <- err
 	}()
 	select {
@@ -185,7 +185,7 @@ func TestTailLoop_PicksUpNewSession(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, ce.onError)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	}()
 	// ONE combined teardown: cancel FIRST, then wait. A separate `defer cancel()`
 	// + `defer wg.Wait()` would run LIFO (wait before cancel) and deadlock — the
@@ -241,7 +241,7 @@ func TestTailLoop_CtxCancelReturnsNil(t *testing.T) {
 	out := make(chan canonical.Event, 4096)
 	var ce collectErrs
 	done := make(chan error, 1)
-	go func() { done <- tailLoop(ctx, path, "opencode:"+path, newCursor(), out, ce.onError) }()
+	go func() { done <- tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError) }()
 	// Let it establish + run one cycle, then cancel.
 	time.Sleep(200 * time.Millisecond)
 	cancel()
@@ -264,7 +264,7 @@ func TestTailLoop_MissingDBBenign(t *testing.T) {
 	defer cancel()
 	out := make(chan canonical.Event, 4)
 	var ce collectErrs
-	if err := tailLoop(ctx, missing, "opencode:"+missing, newCursor(), out, ce.onError); err != nil {
+	if err := tailLoop(ctx, missing, "opencode:"+missing, newCursor(), out, silentLogger(), ce.onError); err != nil {
 		t.Fatalf("tailLoop(missing) = %v, want nil", err)
 	}
 	if ce.count() == 0 {

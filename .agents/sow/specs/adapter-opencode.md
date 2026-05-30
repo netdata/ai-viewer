@@ -354,8 +354,10 @@ Rationale for using `time_updated` over `id` (rowid) for the watermark: opencode
 
 The realtime tailer is a timer-driven poll loop with an fsnotify wakeup hint. It is implemented as two free functions Chunk D's `adapter.go` calls (mirroring codex's free-function tailer rather than methods on the `Adapter` struct):
 
-- `scanLoop(ctx, dbPath, sourceID, since, out, onError) (Cursor, error)` — the historical backfill: introspect once, record the schema hash into the cursor, page every tracked table from `since`, derive affected sessions, reload + map each, emit, checkpoint `SourceProgress` every ~1000 rows processed and once at the end, return the advanced cursor.
-- `tailLoop(ctx, dbPath, sourceID, cur, out, onError) error` — the realtime follow until `ctx` is cancelled (returns `nil` on cancel).
+- `scanLoop(ctx, dbPath, sourceID, since, out, logger, onError) (Cursor, error)` — the historical backfill: introspect once, emit one INFO per missing optional column (see Edge Cases #1), record the schema hash into the cursor, page every tracked table from `since`, derive affected sessions, reload + map each, emit, checkpoint `SourceProgress` every ~1000 rows processed and once at the end, return the advanced cursor.
+- `tailLoop(ctx, dbPath, sourceID, cur, out, logger, onError) error` — the realtime follow until `ctx` is cancelled (returns `nil` on cancel); also emits the missing-optional-column INFO set once at its introspection.
+
+The `logger` parameter is `*slog.Logger`, threaded from `Adapter.logger` (non-nil after `New`, which defaults to `slog.Default()`); both loops guard a nil logger defensively (`slog.Default()`) so a direct test caller passing nil does not panic.
 
 **Adapter Scan→Tail cursor hand-off (Chunk D).** `adapter.go` mirrors codex: `Scan` records the final advanced cursor on the `Adapter` instance (`scanCursor`) even on `ctx` cancellation, and a following `Tail` on the SAME instance resumes from it instead of snapshotting current HEAD — closing the data-loss window where rows committed between `Scan` finishing and `Tail` starting would otherwise be skipped. Any re-emission of an already-seen session tree is absorbed by the ingester's idempotent upserts. A **cold `Tail`** (no preceding `Scan`, e.g. a resumed daemon whose `Scan` ran in a previous process) builds a HEAD-snapshot cursor: open read-only, introspect, and set each tracked table's watermark to its current `MAX(id)` + `MAX(time_updated)` (via `maxID`/`maxTimeUpdated`). This is the SQLite analogue of codex stat'ing current file sizes — `Tail` then follows from NOW rather than replaying full history. The HEAD snapshot also records the real `__drizzle_migrations` schema hash into the cursor. A missing/unreadable database during the snapshot surfaces one structured error and `Tail` returns cleanly (the daemon keeps serving other sources).
 
@@ -555,7 +557,7 @@ Op | Source field |
 1. **Schema drift across opencode versions.** Sessions span ~30 migrations. Older rows may lack `cost`, `tokens_input`, `tokens_output`, `tokens_reasoning`, `tokens_cache_read`, `tokens_cache_write` (added by `20260510033149`), `workspace_id` (added by `20260227213759`), `path` (added by `20260428004200`), `agent`, `model`, `time_compacting`, `time_archived`. Drizzle adds them with NOT-NULL DEFAULT 0 or NULL where appropriate; all rows in the operator's DB have the columns now, but the column **values** are zero on old rows. The adapter:
    - At startup, queries `PRAGMA table_info(session)`, `PRAGMA table_info(message)`, `PRAGMA table_info(part)`, `PRAGMA table_info(session_message)`.
    - Builds the SELECT list dynamically — naming only known columns; never `SELECT *`.
-   - Tolerates missing columns by emitting empty/zero values in the canonical event and logging a structured INF on first occurrence per (table, column).
+   - Tolerates missing columns by emitting empty/zero values in the canonical event and emitting one structured INFO log per wanted-but-absent OPTIONAL column, at introspection time. The log carries a stable message (`opencode: optional column absent on this database schema; omitted from projection (old opencode version)`) plus structured keys `table` and `column`, emitted in a deterministic order (tables in `trackedTables` order, columns sorted). Required-column loss is fatal upstream (`introspectAll`), so every column that reaches the INFO path is an optional one the dynamic SELECT silently omitted. `Scan` and `Tail` EACH emit this set once on (re)start — they each introspect once, so on the rare old-schema path the missing-column set appears twice per source lifetime; that per-phase duplication is accepted (it is not deduplicated across phases). Production wiring: `tailer.go` `logMissingColumns` is called right after `introspectAll` succeeds in both `scanLoop` and `tailLoop`; the logger is threaded from `Adapter.logger` (`adapter.go` `Scan`/`Tail`).
    - Tolerates unknown tables and unknown `session_message.type`/`part.data.type` by skipping with a structured WARN.
 
 2. **Soft delete.** `session.time_archived` is set when a session is archived in the opencode UI (2 sessions on the operator's DB). The adapter treats archive as `SessionFinalizedEvent` with `Status="completed"`. The data is never physically deleted by opencode under normal operation; the FK ON DELETE CASCADE only fires if a project is deleted, which would cascade to sessions+messages+parts. The adapter should not delete its own canonical rows when an opencode row disappears (deletion is rare and we want history). A follow-up SOW will decide deletion semantics.
@@ -577,6 +579,86 @@ Op | Source field |
 10. **Database may be `:memory:` or absent.** When opencode is not installed (or run with `OPENCODE_DB=:memory:`), the file path won't exist. The adapter logs an ERR `source not configured` once and disables itself; it does not retry forever.
 
 11. **Sensitive content.** `session.title`, `session.directory`, `message.data.summary.title`, every `text`/`reasoning` part, every tool `state.input`/`state.output`, and every `patch.files` entry contain real operator data. ai-viewer never copies these into its own database except as references (via `payload_refs.location_uri`). The presenter fetches them on demand at request time and is the only component that materializes payload bytes.
+
+## Testing / Golden Fixtures (Chunk E)
+
+The adapter's row→event behaviour is pinned by a committed golden suite plus
+direct per-scenario invariant assertions and a `data`-JSON fuzz target. This is
+the SQLite analogue of the codex golden harness (`codex/golden_test.go`).
+
+**Fixture format — `fixture.sql`, never a binary `.db`.** The repo commits ZERO
+binary database fixtures (opaque to diffs, can't be secret-scanned). Each scenario
+under `testdata/opencode/<scenario>/` ships a human-reviewable `fixture.sql`
+(`CREATE TABLE` + `INSERT`s, the faithful real schema for normal scenarios; the
+reduced pre-`20260510033149` schema for the drift scenario). At run time the
+golden harness (`buildFixtureDB`) builds a throwaway SQLite database in
+`t.TempDir()` from `fixture.sql` via a SEPARATE read-write `database/sql`
+connection (production NEVER opens opencode.db read-write — this is the harness
+constructing the fixture), closes the writer, and the adapter under test reopens
+the path strictly read-only through `New`/`openReadOnly`. All fixture content is
+synthetic and invented (ids like `ses_happy01`/`prt_a01`, providers
+`anthropic`/`openai`, models `claude-x`/`gpt-y`); the operator's real database is
+never read or copied (R5).
+
+**Golden encoding.** `golden_test.go` auto-discovers every `testdata/opencode/*/`
+directory, scans the built DB, filters out `SourceProgressEvent` (a checkpoint,
+not content), and serialises the remaining events one `{kind,payload}` JSONL line
+per event into `expected.jsonl`. The only absolute path embedded in a
+non-SourceProgress event is the `SourceID` (`opencode:<dbPath>`), rewritten to
+`opencode:<ROOT>` for portability and PII hygiene. The `opencode-sqlite://?part_id=&field=`
+PayloadRef URIs are DB-relative (no path, no basename) and need no substitution.
+Run `go test ./internal/adapters/opencode/ -update-golden` to regenerate; the
+generator is deterministic (every non-SourceProgress `Ts` derives from a fixture
+row timestamp ×1000 — no wall-clock leaks), so regeneration is byte-idempotent.
+
+**Goldens are not self-justifying.** A `-update-golden` run pins whatever the code
+emitted, regressions included. `golden_invariants_test.go` therefore re-scans each
+fixture and asserts the load-bearing invariant keyed on canonical-event FIELDS
+(not golden text), so a regression fails there even after a golden refresh.
+
+The five scenarios and what each pins:
+
+| scenario | pins |
+|---|---|
+| `a_happy` | baseline `session→turn→op` tree: root SessionStarted → TurnStarted → LLM op (step-start) → reasoning op (+ `llm_reasoning` PayloadRef) → `llm_response` PayloadRef (text) → tool op (+ `tool_response` PayloadRef) → LLM op_finalized (step-finish) → TurnFinalized; NO SessionFinalized (running). PayloadRef URIs + ms→µs. |
+| `b_subagent_task` | sub-agent linkage BOTH ways (AC#4): the child `session.parent_id` row maps to `Kind=sub_agent`+`ParentNativeID`/`RootNativeID`=parent; the parent's `tool='task'` part (with `state.metadata.sessionId`) emits BOTH a session Op (`Kind=session`, `ChildSessionNativeID`, the topology parent, emitted first) AND a tool Op (`Kind=tool`, `name=task`) in the same turn. |
+| `c_multi_provider` | multi-provider (AC#7): two turns with `providerID` anthropic then openai → each LLM op carries its `ProviderAlias` verbatim + canonical `Provider` (two catalog providers downstream). Also the two-level token model: per-op tokens reset per message (turn2 op = 300/80) while per-turn tokens are the session-level delta (turn2 turn = 200/50). |
+| `d_schema_drift` | graceful degrade on the pre-`20260510033149` schema (AC#5): `introspectAll` ACCEPTS it (required cols present), the dynamic SELECT omits the 9 missing optional `session` columns, SessionStarted carries empty `Model`/`AgentName` and Extras WITHOUT `providerID`/`variant`, while op/turn token+provider values survive (they come from `message.data`, untouched by the column drift). |
+| `e_cumulative_tokens` | cumulative→delta token math (AC#3): four step-finish parts with CUMULATIVE inputs 100/250/410/400 (outputs 20/50/90/80) → per-LLM-op deltas 100/150/160/0 and 20/30/40/0 (the 4th clamps to 0 because the cumulative decreased). The per-turn rollup is the message-level cumulative (400/80). |
+
+**Resume property (AC#6, scenario-level).** Complementary to chunk C's
+two-stage-insert `TestScanLoop_ResumeZeroDupesZeroGaps`, `golden_resume_test.go`
+pins the durability properties expressible over a STATIC fixture: (a) a re-scan
+from the final cursor (persisted+reparsed) emits ZERO content events (no duplicate
+on restart), (b) two cold scans from the zero cursor emit the identical content
+multiset (no nondeterministic drop/duplicate), and (c) on the two-session
+`b_subagent_task` fixture a re-scan from the final cursor re-emits neither session
+(the watermark advances past every session touched in one cycle). Together:
+resume/re-scan never drops or duplicates a content event.
+
+**`data`-JSON fuzz.** `data_fuzz_test.go` fuzzes `decodeMessageData` (the
+message.data user|assistant union) and `decodePartData` (the part.data 12-variant
+`$.type` union) — the untrusted-bytes boundary where a malformed/truncated blob
+from the live database meets the adapter (opencode's analogue of codex's
+`FuzzParseLine`). Contract: the decoder NEVER panics on any input — it returns a
+struct or a wrapped error; the typed helpers reachable from a decoded value
+(`role`/`kind`/`subAgentSessionID`/`modelID`/`reasoningKind`) must also not panic.
+Seeds cover both message roles, all 12 part variants (incl. the `tool='task'`
+metadata.sessionId edge), unknown `$.type`/role, and malformed/truncated/empty/
+deeply-nested bodies.
+
+**AC#5 INF logging (wired).** The "one INFO log per missing optional column"
+promise (Edge Cases #1) is implemented: `tailer.go` `logMissingColumns` iterates
+each table's `tableSchema.Missing` right after `introspectAll` succeeds in BOTH
+`scanLoop` and `tailLoop`, emitting one `logger.Info(...)` per (table, column)
+with the stable message + `table`/`column` keys. `TestGoldenInvariant_DSchemaDrift_MissingColumnsLoggedINF`
+(`golden_invariants_test.go`) proves it: it `Scan`s the `d_schema_drift` fixture
+through the public adapter with a record-capturing `slog.Handler`
+(`golden_loghandler_test.go` `captureHandler`) and asserts the set of logged
+(table, column) pairs equals the set introspection reports Missing — exactly one
+INFO record per missing column, nothing extra. The `d_schema_drift` golden still
+pins the graceful DEGRADE (accept + omit columns + zero values); the INF set is
+not serialised into `expected.jsonl` (it is a log, not a canonical event).
 
 ## Canonical Model Gaps
 

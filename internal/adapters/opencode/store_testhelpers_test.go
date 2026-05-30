@@ -6,6 +6,8 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -358,6 +360,11 @@ func openCounting(t *testing.T, path string) (*sql.DB, *queryLog) {
 
 // ctxBG is a tiny alias to keep test call sites short.
 func ctxBG() context.Context { return context.Background() }
+
+// silentLogger is a discard slog.Logger for scanLoop/tailLoop call sites where
+// the missing-column INF output is NOT under test (the drift assertion uses its
+// own record-capturing handler instead).
+func silentLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // fmtID zero-pads an integer into a 12-wide lexicographically-sortable suffix so
 // synthetic ids sort in creation order like real Sonyflake ids.

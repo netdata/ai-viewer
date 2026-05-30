@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -92,7 +93,8 @@ func emitEvents(ctx context.Context, evs []canonical.Event, out chan<- canonical
 // A missing DB file surfaces one structured error via onError and returns
 // (since, nil) so the daemon keeps serving other sources (mirrors codex's
 // missing-root handling). ctx cancellation returns ctx.Err() promptly.
-func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out chan<- canonical.Event, onError func(error)) (Cursor, error) {
+func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (Cursor, error) {
+	logger = orDefaultLogger(logger)
 	onError = orNoop(onError)
 	db, err := openReadOnly(ctx, dbPath, withMaxOpenConns(2))
 	if err != nil {
@@ -110,6 +112,11 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 		// silently emitting nothing.
 		return since, fmt.Errorf("opencode: scan introspect %s: %w", dbPath, err)
 	}
+	// Surface optional column drift once per (table, column). Scan and Tail each
+	// log this set once on every (re)start; that per-phase duplication is
+	// acceptable for this rare old-schema path (introspection runs twice — once
+	// per phase — by design, see adapter.go Scan→Tail hand-off).
+	logMissingColumns(logger, schema)
 
 	cur := recordSchemaHash(ctx, db, coerceScanCursor(since), onError)
 	cur, _, err = processChanges(ctx, db, schema, cur, sourceID, out, onError)
@@ -134,7 +141,8 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 // once via onError and the loop falls back to pure timer polling (the 60 s
 // safety net still guarantees in-place mutations are eventually seen). A watcher
 // error never terminates the loop.
-func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error)) error {
+func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) error {
+	logger = orDefaultLogger(logger)
 	onError = orNoop(onError)
 	db, err := openReadOnly(ctx, dbPath, withMaxOpenConns(2))
 	if err != nil {
@@ -149,6 +157,10 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan
 	if err != nil {
 		return fmt.Errorf("opencode: tail introspect %s: %w", dbPath, err)
 	}
+	// Surface optional column drift once per (table, column). Scan logs the same
+	// set once too; the per-phase duplication on this rare old-schema path is
+	// acceptable (introspection runs once per phase by design).
+	logMissingColumns(logger, schema)
 	cur = recordSchemaHash(ctx, db, coerceScanCursor(cur), onError)
 
 	walEvents, closeWatch := watchWAL(dbPath, onError)
@@ -269,6 +281,33 @@ func orNoop(onError func(error)) func(error) {
 		return func(error) {}
 	}
 	return onError
+}
+
+// orDefaultLogger guards a nil logger so a direct test caller passing nil does
+// not panic. Production always passes a.logger (non-nil after New), so this is
+// defence-in-depth, not a hot path.
+func orDefaultLogger(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		return slog.Default()
+	}
+	return logger
+}
+
+// logMissingColumns emits exactly one INF per wanted-but-absent OPTIONAL column
+// across the introspected tables, satisfying AC#5 / adapter-opencode.md
+// §"Edge Cases" #1. Required-column loss is fatal upstream (introspectAll), so
+// every column reaching here is an optional one the dynamic SELECT silently
+// omitted; this surfaces the drift so an operator sees WHY a column reads zero
+// on an old opencode database. Iteration is deterministic: tables in
+// trackedTables order, columns already sorted by introspectTable
+// (sort.Strings(s.Missing)).
+func logMissingColumns(logger *slog.Logger, schema schemaSet) {
+	for _, table := range trackedTables {
+		for _, col := range schema[table].Missing {
+			logger.Info("opencode: optional column absent on this database schema; omitted from projection (old opencode version)",
+				"table", table, "column", col)
+		}
+	}
 }
 
 // watchWAL sets up a best-effort fsnotify watch on the opencode.db-wal companion

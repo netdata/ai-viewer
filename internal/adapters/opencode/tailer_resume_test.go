@@ -80,7 +80,7 @@ func TestScanLoop_ResumeZeroDupesZeroGaps(t *testing.T) {
 	baselinePath := seedBackfillDB(t, t.TempDir(), 6)
 	baseOut := make(chan canonical.Event, 8192)
 	var ce0 collectErrs
-	if _, err := scanLoop(ctxBG(), baselinePath, "opencode:x", newCursor(), baseOut, ce0.onError); err != nil {
+	if _, err := scanLoop(ctxBG(), baselinePath, "opencode:x", newCursor(), baseOut, silentLogger(), ce0.onError); err != nil {
 		t.Fatalf("baseline scanLoop: %v", err)
 	}
 	baseline := contentFingerprints(drainAll(baseOut))
@@ -96,7 +96,7 @@ func TestScanLoop_ResumeZeroDupesZeroGaps(t *testing.T) {
 
 	out1 := make(chan canonical.Event, 8192)
 	var ce1 collectErrs
-	cur1, err := scanLoop(ctxBG(), path, "opencode:x", newCursor(), out1, ce1.onError)
+	cur1, err := scanLoop(ctxBG(), path, "opencode:x", newCursor(), out1, silentLogger(), ce1.onError)
 	if err != nil {
 		t.Fatalf("first-half scanLoop: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestScanLoop_ResumeZeroDupesZeroGaps(t *testing.T) {
 
 	out2 := make(chan canonical.Event, 8192)
 	var ce2 collectErrs
-	if _, err := scanLoop(ctxBG(), path, "opencode:x", reparsed, out2, ce2.onError); err != nil {
+	if _, err := scanLoop(ctxBG(), path, "opencode:x", reparsed, out2, silentLogger(), ce2.onError); err != nil {
 		t.Fatalf("second-half scanLoop: %v", err)
 	}
 	part2 := contentFingerprints(drainAll(out2))
