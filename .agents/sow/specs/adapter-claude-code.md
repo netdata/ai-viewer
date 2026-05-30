@@ -90,7 +90,7 @@ Optionally, when workflow runs group related agents:
 ~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/<subdir>/agent-<agentId>.jsonl
 ```
 
-Additionally, large tool results may be spilled to per-session files under the session dir (`tool-results/<id>.txt`):
+Additionally, oversized Bash/PowerShell tool OUTPUT may be spilled to per-session files under the session dir (`tool-results/<id>.txt`), referenced by `persistedOutputPath`. NOTE: this `tool-results/` spill is distinct from a `compact_file_reference` record, which points at the ORIGINAL project file the model read (outside the projects root), NOT at a `tool-results/` spill — see §3.4:
 
 ```text
 ~/.claude/projects/<sanitized-cwd>/<sessionId>/tool-results/<id>.txt

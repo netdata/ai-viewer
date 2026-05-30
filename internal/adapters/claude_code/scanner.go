@@ -740,7 +740,9 @@ func shouldSurfaceParseError(mapper *fileMapper, perr error) bool {
 }
 
 // errLineTooLong signals that a single transcript line exceeded
-// scanBufferMax. The caller surfaces it via onError and skips to EOF.
+// scanBufferMax. The caller surfaces it via onError, drains just that
+// oversized line up to its terminating newline, and continues reading the
+// rest of the file (spec §6.3, P2.5) — it does NOT skip to EOF.
 var errLineTooLong = errors.New("claude_code: line exceeds scan buffer")
 
 // readOneLine reads one '\n'-terminated record from br, returning the line

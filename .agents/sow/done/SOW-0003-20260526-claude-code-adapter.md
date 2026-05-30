@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: blanket Phase-2 sign-off (2026-05-29); moved to current/. SOW-0001 prerequisite is completed. Pre-Implementation Gate filled; spec delta D1 landed; adapter built (C2-C7) + gate-verified by the orchestrator; external review pending before merge + close.
+Sub-state: delivered + merged (PR #28, 2026-05-30). Built under blanket Phase-2 sign-off; adapter + ingester touchpoints implemented, gate-verified, and converged through 11 external-review rounds (codex + glm + minimax) — final round unanimous "safe to merge", 0 P1/P2. Catalog-idempotency follow-up tracked as SOW-0020 (pending).
 
 ## Requirements
 
@@ -923,8 +923,48 @@ these notes (Round 10) before merge.
 
 ## Outcome
 
-Pending.
+The `claude-code` adapter is delivered and merged (PR #28). It Scans + Tails
+`~/.claude/projects/<cwd>/<sessionId>.jsonl` transcripts, their
+`subagents/agent-<id>.jsonl` sidechains, and `.meta.json` sidecars with durable
+byte-offset cursors; maps every observed record type to the canonical model
+(turns, ops, compaction as a first-class op, log entries, payload refs); links
+parent `Agent` ops to child sub-agent sessions re-emit-free (a meta-independent
+`toolUseId` stash + a parent-constrained ingester resolver pass); finalizes
+Agent ops child-side on the §485 terminal-assistant-text completion marker;
+contains every read path to the symlink-resolved projects root; fails soft on a
+broken discovery subtree; and is wired by an auto-discovery probe. The ingester
+gained a defensive orphan-payload-ref guard, an `aiViewer`-stash-preserving op/
+session extras graft (json_set, no null-delete), and the additive toolUseId
+resolver pass — all gated so the aiagent adapters are unaffected. Covered by unit,
+fuzz, golden (a–g), and an end-to-end adapter→writer seam test.
+
+Converged through 11 external-review rounds (codex + glm + minimax). codex drove
+the substantive findings every round; the final round was unanimous "safe to
+merge", 0 P1/P2. One accepted limitation is documented in `adapter-claude-code.md`
+§8.1 (a cosmetic, self-healing parent-op status lag in a narrow live-Tail
+meta-spawn race). The catalog-rollup idempotency-under-re-emission concern is an
+ingester-wide follow-up tracked as **SOW-0020** (`pending/`).
 
 ## Lessons / Follow-Ups
 
-Pending.
+- **Incomplete pattern-sweeps were the dominant failure mode across rounds:** a fix
+  addressed the reviewer's cited line but missed sibling instances of the same
+  class — op-extras vs session-extras graft, 3-of-4 then 4-of-5 discovery walks,
+  tail-only vs scan+tail meta repair. What finally converged: ENUMERATE every
+  instance of a class up front and, where possible, STRUCTURALLY UNIFY (one shared
+  function) so the instances cannot drift apart. Hand subagents the complete
+  instance list, not just the cited line.
+- **Adjudicate reviews on ground truth, never on convergence:** glm + minimax
+  returned "safe to merge" in rounds where codex found real P1 blockers (FK
+  rollback, premature finalize, catalog double-count). codex earned the gate role.
+- **The format has no explicit sub-agent completion marker.** Two heuristics
+  (child-EOF, quiescent-EOF) failed review; the verified §485 "terminal
+  assistant-text record" signal converged. Live late-meta status-lag is accepted,
+  not chased with re-read/re-emit machinery (it would re-introduce catalog
+  double-counting).
+- **Secret-scanner gap:** the operator-name rule used `\b`, which treats `_` as a
+  word char, so `<tool>_<name>` (a real leak — an MCP namespace embedding the
+  operator's name) evaded it. Fixed to a non-alphanumeric token boundary + a
+  regression test. The scanner self-derives its ban-list from git authorship.
+- **Follow-up:** SOW-0020 — make `catalog_*` rollups idempotent under event
+  re-emission (a latent ingester-wide concern beyond this adapter).
