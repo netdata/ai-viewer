@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisite met: SOW-0001 Phase 1 Foundation is in `done/` (canonical event types + ingest pipeline + store + adapter registry + pricing + CI gates) — this SOW reuses that infrastructure unchanged. Pre-Implementation Gate filled 2026-05-30 (see below).
+Sub-state: delivered + merged (PR #29) after 6 external-review rounds; moved to `done/`. Originally:active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisite met: SOW-0001 Phase 1 Foundation is in `done/` (canonical event types + ingest pipeline + store + adapter registry + pricing + CI gates) — this SOW reuses that infrastructure unchanged. Pre-Implementation Gate filled 2026-05-30 (see below).
 
 ## Requirements
 
@@ -266,8 +266,22 @@ The original gate scoped this SOW to `internal/adapters/codex/` + the additive `
 
 ## Outcome
 
-Pending.
+Delivered the `codex` adapter end-to-end (PR #29, merged after 6 external-review rounds + green CI). 5 implementation chunks (A parser+cursor, B mapper/state-machine, C scanner/tailer, D payloads+wiring+auto-discovery, E golden fixtures+integration) + 6 review/fix rounds. Acceptance #1–8 met: registered as `"codex"`; ingests every persisted RolloutItem/payload variant with per-variant SourceError tolerance; turn-boundary dual-format (cli 0.61 turn_context-only vs ≥0.93 task_started/complete); reasoning split; byte-offset cursor with zero-dup/zero-gap resume + truncation defense; FuzzParseLine gate; auto-discovery probe (`$CODEX_HOME/sessions`) with modern/legacy counts. Final gates: golangci 0, gosec 0, `go test -race ./...` 13/13, codex coverage 92.6%, ingest 88.5%, goldens byte-identical, secret + AI-attribution scans clean.
+
+CTO decisions recorded in the gate + reviews: sum-of-`last_token_usage` token rollup (C#1); claude-code-model session finalize, no clean-EOF completed (C#3); exec exit_code authoritative for op status order-independently; web_search positional pairing (no call-side id); NativeID from `payload.id`. The catalog-idempotency-under-re-emission fix (SOW-0020) was absorbed here as a prerequisite and benefits all adapters.
 
 ## Lessons / Follow-Ups
 
-Pending.
+Lessons:
+
+- **External review is load-bearing, and codex is the decisive reviewer.** Per-round findings: codex 6→5→2→2→1→0; glm/minimax rubber-stamped most rounds (minimax once *falsely* claimed a log was emitted — caught only by reading the code). Adjudicate every finding on ground truth (spec lines + the real `~/.codex` corpus), never on reviewer convergence. The real-data investigation repeatedly *corrected* codex's wire-shape guesses (web_search has no id; collab uses new_thread_id not agent_ref; compaction companion is event_msg.context_compacted).
+- **Golden fixtures built by the same understanding as the code are circular.** Round-1 goldens encoded the code's (wrong) assumptions; codex caught the old-format-stale mislabel (38% of real files) precisely because the fixture used a fresh mtime. Line-check every expected.jsonl against the spec, and seed fixtures from real wire shapes.
+- **Op re-emission breaks incremental aggregates.** The codex adapter (replay-from-0 + enrichment correction + EOF finalize) is the first heavy re-emitter; it exposed that the catalog ADDs unconditionally. Idempotency needs insert-signal counting + persisted-prior delta + effective-post-upsert identity (empty→prior). A *derived* catalog (recompute from the ops table) would be more robust — candidate for the quality-cluster SOWs.
+- **git add hygiene:** a specific-path `git add` once listed `sources.go` but omitted its `sources_test.go`, shipping code without its test; always verify `git status` covers source+tests before commit.
+
+Follow-ups (filed):
+
+- **SOW-0021** — turn-extras carrier: `turns.extras_json` is unreachable (no Extras on canonical turn events); codex surfaces codex_turn_id/sandbox/ttft_ms via an interim `turn_meta` LogEntry.
+- **SOW-0022** — codex duplicate-rollout-id disambiguation (same `payload.id` files collapse in v1; unobserved).
+- **Legacy `.json`** (R1) — Phase-2.5: ingest the 19 legacy flat files (v1 emits one SourceError/file).
+- **SOW-0020** — superseded by this SOW's catalog-idempotency work; closed.
