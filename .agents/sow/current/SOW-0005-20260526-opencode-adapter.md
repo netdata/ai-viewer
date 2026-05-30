@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: awaits operator approval before moving to current/. Prerequisite: SOW-0001 Phase 1 Foundation completed (canonical event types + ingest pipeline + store) — this SOW reuses that infrastructure.
+Sub-state: active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisites met: SOW-0001 Phase 1 in `done/`; SOW-0004 (codex) merged, which left the catalog idempotent under op re-emission (reused here). Pre-Implementation Gate filled 2026-05-30 (below).
 
 ## Requirements
 
@@ -82,7 +82,79 @@ Risks:
 
 ## Pre-Implementation Gate
 
-(To be filled by the assistant picking this SOW up. Required before moving to `current/`.)
+Filled 2026-05-30. A readiness-briefing subagent re-probed the live `opencode.db` read-only (`immutable=1`); load-bearing claims (the read-only DSN, acceptance #1-8) were re-verified against ground truth before this gate.
+
+### Problem / model
+
+Additive feature: a new `opencode` adapter that projects OpenCode's **SQLite** session store onto the canonical event model. Unlike the four JSONL/file adapters (byte-offset cursor + fsnotify-on-append), opencode keeps everything in one SQLite DB (`~/.local/share/opencode/opencode.db`, WAL, Drizzle-managed, ~4.36 GB live, 20 migrations). So the read model is SQL delta-queries + a watermark cursor + DB polling, not line streaming. The adapter is a read-only projection from `session`/`message`/`part`/`session_message` rows → canonical events, reusing the registry/payloads/golden patterns from `codex`/`claude_code` but replacing parser+scanner+stream+tailer with a query layer + poll loop.
+
+### Evidence reviewed
+
+- `.agents/sow/specs/adapter-opencode.md` (567 lines, evidence-driven) — primary contract.
+- Live DB re-probe (read-only, 2026-05-30): `session` 7,775 (6,335 root / 1,440 child / 2 archived), `message` 144,551 (assistant `data` keys role/time/error/parentID/modelID/providerID/mode/path/cost/tokens), `part` 667,335 (tool 230,606 / step-start 133,186 / step-finish 132,595 / text 83,367 / reasoning 75,361 / patch 11,686 / compaction 495 / file 22 / retry 17), `session_message` 5,975 (**only** agent-switched + model-switched). `event`/`event_sequence` = 0 (ignore). Latest migration `20260510033149_session_usage`.
+- `internal/store/store.go:303-318` — `buildDSN` forces `foreign_keys(on)`+`busy_timeout(5000)`, readers add `query_only(true)`; this is ai-viewer's OWN-DB reader (not for the external opencode.db). `internal/canonical/events.go` — `TurnFinalizedEvent` carries `TokensCacheRead/Write`+`CostUSD` (per-turn cache accounting works) but NO `Extras` (turn-extras unreachable — SOW-0021); `OpFinalizedEvent` carries cache tokens + ProviderAlias; `KindSubAgent`/`OpReasoning`/`OpSession`/`OpCompaction` exist (no canonical change needed).
+- `internal/adapters/{codex,claude_code}/` — structural template; `registry.go` self-registration; codex `discovery.go`/golden harness.
+- SOW-0005 Acceptance #1-8 + Risks R1-R5.
+
+### Affected contracts & surfaces
+
+- **NEW** package `internal/adapters/opencode/` (SQLite-backed; see structural map).
+- **ADDITIVE** `cmd/ai-viewer-ingest/sources.go`: a 5th auto-discovery probe (`$OPENCODE_DB` else `~/.local/share/opencode/opencode.db`) + a `__drizzle_migrations` schema-hash + count helper (acceptance #8); blank-import for `init()` registration.
+- **ADDITIVE** `testdata/opencode/<scenario>/` — synthetic SQLite fixtures built by a fixture-builder.
+- **NO** change to `internal/canonical/` (all target fields exist), `internal/ingest/` (catalog already idempotent post-SOW-0004), `internal/store/` schema, or sibling adapters.
+
+### Spec deltas (LANDED before tests/code, committed with this gate)
+
+1. adapter-opencode.md task→session rule (was "TBD; emit both"): ratified to **emit both** (tool Op + session Op; session op is the topology parent).
+2. adapter-opencode.md per-turn token rule (was "to be verified"): firmed to **delta from the previous assistant message's cumulative totals**, with an explicit implementer-verify-on-live-DB note (the step-finish cumulative pattern is verified; the message-level pattern is the analogous one level up, not yet independently confirmed).
+
+### Patterns to reuse vs differ (briefing §B)
+
+- **Reuse**: `init()→adapters.Register("opencode", Factory)`; `Adapter` struct + compile-time `var _ canonical.Adapter`; `Name()/Format()/ParseCursor()`; Scan-then-Tail single-thread lifecycle; fail-soft `onError`; codex `discovery.go` → the auto-discovery probe; the golden_test harness shape (seed a `.db` instead of files).
+- **Differ**: parser+scanner+stream+tailer → a **`store.go` query layer** (prepared delta SQL + `database/sql` rows) + a **poll loop** (2 s idle / 500 ms active / 250 ms post-WAL-fsnotify; coarse fsnotify on `opencode.db-wal` as a wakeup hint only). `payloads.go` emits `opencode-sqlite://…?part_id=&field=…` URIs (spec 420-426), not `file://`. `mapper.go` keeps turn/op-synthesis but walks message+part trees.
+
+### Cursor model (decision)
+
+Per-table two-watermark JSON: `{version, schema_hash, tables:{session,message,part,session_message:{max_id, max_time_updated}}}`. Primary watermark = `MAX(id)` (the 30-char Sonyflake PK is time-prefixed + monotonic + PK-indexed → `WHERE id > :last` is cheap). `MAX(time_updated)` (13-digit ms, **unindexed** — a part-table full scan ~400-800 ms) catches in-place mutations and is gated to run only after an `opencode.db-wal` mtime change or a 60 s safety net. Delta page: `… WHERE time_updated>:u OR (time_updated=:u AND id>:id) ORDER BY time_updated,id LIMIT 1000`, page until empty. Scan→Tail resumes from persisted watermarks; re-reads are absorbed by the ingester's idempotent upserts + the now-idempotent catalog.
+
+### Canonical mapping (briefing §D)
+
+Session=`session` row; Turn=assistant `message` (seq by `(time_created,id)`); LLM-Op=`step-start`→`step-finish`; Tool-Op=`tool` part (namespace derived, e.g. `github_get_file_contents`→`github`/`get_file_contents`); Reasoning-Op=`reasoning` part; text/patch are not ops (text→presenter read; patch→op extras); compaction→INF LogEntry; retry→WRN LogEntry. Terminal status: assistant `data.time.completed` NULL → `running`; `data.error` → `failed` (ErrorClass=`data.error.name`); `time_archived` → `completed`; else stays `running` (no per-session terminal, like claude-code/codex). **Cumulative-token delta (AC#3, verified):** step-finish `tokens.*` are cumulative within a message → emit per-op deltas via one `computeStepDeltas`. Sub-agent (AC#4): `parent_id` child → `Kind=sub_agent`+ParentNativeID; `tool='task'` with `state.metadata.sessionId` → tool Op + session Op. Multi-provider (AC#7): `ProviderAlias=data.providerID` verbatim; `Provider`=best-effort canonical (default=alias). Turn-extras (cwd etc.) deferred to SOW-0021 (no canonical turn Extras); per-turn cache tokens DO work via `TurnFinalizedEvent`.
+
+### Risk & blast radius
+
+Purely additive (new package + registry blank-import + additive `sources.go` probe); no canonical/ingest/store change (target fields exist; catalog idempotent post-SOW-0004). **R1 (CRITICAL) read-safety:** the opencode writer is live + concurrent on a 4.36 GB DB — layered defense: own helper opens `mode=ro` (OS `O_RDONLY`) + `query_only(true)` + `busy_timeout`, never calls any write-path pragma, each delta page in its own short `BEGIN DEFERRED` (<1 s) to avoid pinning the WAL / blocking the writer's checkpoint; acceptance #2's six write-probes pin it. **R2 (CRITICAL)** cumulative-token miscount → `computeStepDeltas` + AC#3 golden. **R4** part-table `MAX(time_updated)` full scan → gated by `MAX(id)` primary + WAL-mtime. **R5** fixtures are synthetic SQLite (never copy the operator DB).
+
+### Sensitive-data plan
+
+Every committed fixture under `testdata/opencode/` is a synthetic SQLite file built by a fixture-builder writing only sanitized, schema-shaped data (synthetic titles/dirs/prompts; `git@github.com:example/example.git`; no operator PII). The live DB is consulted ONLY for shape verification (`PRAGMA table_info`), never copied. `scripts/scan-secrets.sh` is the net.
+
+### Implementation plan (chunked; each = spec → failing tests → subagent impl → gates → integrate)
+
+- **Chunk A** — read-only connection helper (own DSN constant + the 6 write-probe test, AC#2) + the watermark `cursor.go` + typed row/`data`-JSON structs + `store.go` schema introspection (`PRAGMA table_info` → dynamic SELECT, AC#5).
+- **Chunk B** — `mapper.go` row→event synthesis: session/turn/op trees, terminal status, `computeStepDeltas` (AC#3), reasoning/tool/patch/compaction/retry, sub_agent + task→session linkage (AC#4), provider alias (AC#7).
+- **Chunk C** — `store.go` delta queries + the poll-loop tailer (WAL-mtime fsnotify hint + idle/active cadence; `MAX(time_updated)` gating, AC#6).
+- **Chunk D** — `payloads.go` (`opencode-sqlite://` URIs) + `adapter.go` (Scan/Tail/ParseCursor + `init()`) + the `sources.go` auto-discovery probe + `__drizzle_migrations` schema-hash/counts (AC#8) + registry_test.
+- **Chunk E** — fixture-builder + synthetic-DB golden scenarios (happy, sub-agent+task-child, multi-provider, old-schema-drift, cumulative-token) + restart/resume + idle-no-MAX(time_updated) integration tests + fuzz on the `data`-JSON decode.
+
+### Validation plan (acceptance → tests)
+
+#1 registry_test asserts `"opencode"`. #2 `readonly_test.go` (6 write-probes error). #3 `tokens_delta_test.go` (100/250/410 → 100/150/160). #4 golden parent+task-child (both edges). #5 `schema_drift_test.go` (pre-`20260510033149` fixture, dynamic SELECT omits missing cols, one INF/col). #6 restart/resume integration + query-counter (no idle `MAX(time_updated)`). #7 multi-provider golden (two catalog_providers + provider_alias). #8 `cmd/ai-viewer-ingest/sources_test.go` (probe registers a fixture DB, reports counts + latest migration). Plus a `data`-JSON fuzz target.
+
+### Artifact impact plan
+
+Producer: the adapter's Scan (watermark backfill) + Tail (poll loop). Refresh: WAL-mtime fsnotify hint / poll cadence → delta query. Repair: cursor corruption → re-read from zero watermark (idempotent upserts absorb). Served by the existing presenter/REST + the now-idempotent catalog; `/api/sources` + `/api/health` report the opencode source + (session/message/part counts, latest migration) (AC#8). No DB migration (ai-viewer schema unchanged).
+
+### Open decisions — DECIDED by CTO (recorded)
+
+1. **Connection helper:** the adapter uses its OWN read-only helper (DSN `mode=ro&_pragma=query_only(true)&_pragma=busy_timeout(5000)`, `MaxOpenConns(2)`), NOT `store.OpenReader` (that targets ai-viewer's own DB + forces `foreign_keys(on)`/pool 8). The helper's DSN is a tested constant; acceptance #2's six write-probes are its contract. `foreign_keys` is immaterial for a read-only connection. **Decided.**
+2. **Poll cadence:** 2 s idle / 500 ms active / 250 ms floor after a WAL-mtime fsnotify event (ratify spec). **Decided.**
+3. **Cursor granularity:** per-table `MAX(id)` (primary, PK-indexed) + `MAX(time_updated)` (gated by WAL-mtime / 60 s). **Decided.**
+4. **Turn-extras:** opencode per-turn extras (cwd, etc.) are DEFERRED to SOW-0021 (no canonical turn `Extras` carrier); do NOT half-build a write path; per-turn cache tokens use the existing `TurnFinalizedEvent` fields. State the limitation. **Decided.**
+5. **task→session op:** emit BOTH the tool Op and the session Op (session = topology parent). **Decided** (spec ratified above).
+6. **Provider alias:** `ProviderAlias = data.providerID` verbatim; `Provider` = best-effort canonical (default = alias unchanged). **Decided.**
+
+Open (implementer-verify, not blocking): the message-level per-turn cumulative-token pattern (spec row firmed but flagged for live-DB confirmation before pinning the golden); whether `immutable=1` is ever used in production (NO — production uses `mode=ro` to respect the live WAL; `immutable=1` only for static test fixtures).
 
 ## Implementation
 

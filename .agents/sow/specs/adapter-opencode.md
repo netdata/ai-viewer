@@ -405,7 +405,7 @@ For each `part` row of the assistant message, walking in `id` order:
 | `reasoning` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`reasoning`, ParentOpSeq=current LLM Op) using `data.time.start`/`data.time.end`; on missing `end`, `Status="running"` and end ts is null |
 | `text` | NOT an op; surface as the assistant's final text. Skip canonical-event emission; the presenter retrieves text via a payload-style read. |
 | `tool` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`tool`, ParentOpSeq=current LLM Op, name=`tool`, ToolNamespace=derived from `tool` (e.g. `github_get_file_contents` → namespace `github`, name `get_file_contents`)) using `state.time.start`/`state.time.end`; `Status` derived from `state.status` |
-| `tool` where `tool='task'` AND `state.metadata.sessionId` set | additionally emit `OpStartedEvent` of kind=`session` with `ChildSessionNativeID = state.metadata.sessionId`, alongside the tool Op (or instead of — TBD; current decision: emit both, with `session` op as the parent so the sub-agent attaches in the topology view) |
+| `tool` where `tool='task'` AND `state.metadata.sessionId` set | emit BOTH the tool Op AND an `OpStartedEvent` of kind=`session` with `ChildSessionNativeID = state.metadata.sessionId` (SOW-0005 decision: emit both; the `session` op is the topology parent so the sub-agent attaches in the topology view) |
 | `patch` | NOT an op; record in extras of the surrounding LLM op for the "Files changed" UI tab |
 | `compaction` | emit `LogEntry` severity=`INF`, source=`opencode`, message=`session compacted (auto=<bool>)` |
 | `retry` | emit `LogEntry` severity=`WRN`, message=`API retry attempt <attempt>: <error.name>` |
@@ -457,7 +457,7 @@ Op | Source field |
 | `op.kind=llm, model` | parent `message.data.modelID` |
 | `op.kind=llm, provider` | parent `message.data.providerID` |
 | `op.tokens_in/out/cost` | from the step-finish part: `part.data.tokens.input`, `.output`, `.cost`. NOTE: step-finish tokens **appear cumulative across steps within one assistant message** based on observed data (a sequence of input tokens 17438, 23075, 31713, 35407, … all monotonically increasing). The adapter records the **delta** between successive step-finish values within the same message, not the raw value, so per-LLM-op tokens are correct. |
-| `turn.tokens_in/out/cost` | from the assistant `message.data.tokens.input/output/cost` (those are the session totals at completion; we use the **delta from the previous assistant message's totals** for per-turn tokens — to be verified during implementation; this is also the rule the opencode UI uses) |
+| `turn.tokens_in/out/cost` | from the assistant `message.data.tokens.input/output/cost`. SOW-0005 decision: per-turn tokens are the **delta from the previous assistant message's cumulative totals** within the session (matching the opencode UI). The implementer MUST confirm the cumulative pattern on the live DB before pinning the golden — the step-finish cumulative pattern (row above / AC#3) is verified; this message-level pattern is the analogous one level up and is not yet independently confirmed. |
 | `session.tokens_in/out/cost` | the rolled-up `session` columns (`tokens_input`, `tokens_output`, `cost`) when present; fall back to summing turns for sessions written before migration `20260510033149` |
 | `ctx_max` | static pricing table per `(providerID, modelID)`; opencode does not store it |
 | `ctx_used` | `tokens.input + tokens.cache.read` at the most recent step-finish for the turn |
