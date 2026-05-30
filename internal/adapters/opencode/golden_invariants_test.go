@@ -235,8 +235,9 @@ func TestGoldenInvariant_DSchemaDrift(t *testing.T) {
 }
 
 // TestGoldenInvariant_DSchemaDrift_MissingColumnsLoggedINF is the AC#5 INF-logging
-// proof. Against the pre-`20260510033149` schema (session lacks the 9 optional
-// columns the dynamic SELECT omits), a Scan through the public adapter must emit
+// proof. Against the pre-`20260510033149` schema (session lacks the optional
+// columns the dynamic SELECT omits — including time_compacting, SOW-0005 round-2
+// P2-E), a Scan through the public adapter must emit
 // exactly one INFO record per missing optional column, each carrying the matching
 // `table`+`column` attributes. The set of logged (table, column) pairs must equal
 // the set of columns introspection reports Missing — no more, no less. (Scan and

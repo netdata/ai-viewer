@@ -207,8 +207,8 @@ func TestRecordSchemaHash_MismatchContinuesPreservingWatermarks(t *testing.T) {
 	// A persisted cursor from an EARLIER schema (stale hash) with live watermarks.
 	stale := newCursor().
 		withSchemaHash("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef").
-		withTable("session", TableWatermark{MaxID: "ses_9", MaxTimeUpdatedMs: 1779}).
-		withTable("message", TableWatermark{MaxID: "msg_9", MaxTimeUpdatedMs: 1780})
+		withTable("session", TableWatermark{MaxIDSeen: "ses_9", MaxTimeUpdatedMs: 1779, MaxTimeUpdatedID: "ses_9"}).
+		withTable("message", TableWatermark{MaxIDSeen: "msg_9", MaxTimeUpdatedMs: 1780, MaxTimeUpdatedID: "msg_9"})
 
 	var ce collectErrs
 	got := recordSchemaHash(ctxBG(), db, stale, ce.onError)
@@ -217,10 +217,10 @@ func TestRecordSchemaHash_MismatchContinuesPreservingWatermarks(t *testing.T) {
 		t.Fatalf("hash not re-stamped: got %q, want %q", got.SchemaHash, newHash)
 	}
 	// Watermarks must be preserved (NOT reset).
-	if w := got.Tables["session"]; w.MaxID != "ses_9" || w.MaxTimeUpdatedMs != 1779 {
+	if w := got.Tables["session"]; w.MaxIDSeen != "ses_9" || w.MaxTimeUpdatedMs != 1779 || w.MaxTimeUpdatedID != "ses_9" {
 		t.Errorf("session watermark reset on mismatch: %+v", w)
 	}
-	if w := got.Tables["message"]; w.MaxID != "msg_9" || w.MaxTimeUpdatedMs != 1780 {
+	if w := got.Tables["message"]; w.MaxIDSeen != "msg_9" || w.MaxTimeUpdatedMs != 1780 || w.MaxTimeUpdatedID != "msg_9" {
 		t.Errorf("message watermark reset on mismatch: %+v", w)
 	}
 	// A structured WARN must have been surfaced.
@@ -319,13 +319,13 @@ func TestRecordSchemaHash_ReadErrorKeepsPriorCursor(t *testing.T) {
 	}
 
 	prior := newCursor().withSchemaHash("priorhash").
-		withTable("session", TableWatermark{MaxID: "ses_5", MaxTimeUpdatedMs: 99})
+		withTable("session", TableWatermark{MaxIDSeen: "ses_5", MaxTimeUpdatedMs: 99, MaxTimeUpdatedID: "ses_5"})
 	var ce collectErrs
 	got := recordSchemaHash(ctxBG(), db, prior, ce.onError)
 	if got.SchemaHash != "priorhash" {
 		t.Errorf("recordSchemaHash on read error changed the hash to %q, want prior 'priorhash'", got.SchemaHash)
 	}
-	if w := got.Tables["session"]; w.MaxID != "ses_5" || w.MaxTimeUpdatedMs != 99 {
+	if w := got.Tables["session"]; w.MaxIDSeen != "ses_5" || w.MaxTimeUpdatedMs != 99 || w.MaxTimeUpdatedID != "ses_5" {
 		t.Errorf("recordSchemaHash on read error mutated watermarks: %+v", w)
 	}
 	if ce.count() == 0 {

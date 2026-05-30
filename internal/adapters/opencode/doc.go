@@ -34,12 +34,15 @@
 // # Watermark cursor
 //
 // opencode IDs are time-prefixed Sonyflake strings (ses_/msg_/prt_/evt_),
-// lexicographically sortable as time and PK-indexed. The cursor records,
-// per table, the highest observed (MaxID, MaxTimeUpdatedMs). MaxID is the
-// primary watermark (PK b-tree, cheap WHERE id > :last); MaxTimeUpdatedMs
-// is an unindexed full-scan fallback that catches in-place mutations and
-// is gated to run only after WAL activity (later chunks). There are no
-// byte offsets — the file-adapter cursor model does not apply here.
+// lexicographically sortable as time and PK-indexed. The cursor records, per
+// table, TWO independent watermarks (SOW-0005 round-2 P1-A split): MaxIDSeen,
+// the MONOTONIC highest id ever observed (the cheap, PK-b-tree insert check
+// MAX(id) > MaxIDSeen — it never regresses, so an in-place update of an old row
+// cannot re-arm the expensive scan); and the (MaxTimeUpdatedMs, MaxTimeUpdatedID)
+// PAGING POSITION, the last-paged row's (time_updated, id) pair that the delta
+// query binds and that catches in-place mutations (the unindexed MAX(time_updated)
+// probe, gated to run only after WAL activity). There are no byte offsets — the
+// file-adapter cursor model does not apply here.
 //
 // This file (doc.go) and the package siblings deliver only the read-only
 // foundation: the connection helper, the watermark cursor, the typed row

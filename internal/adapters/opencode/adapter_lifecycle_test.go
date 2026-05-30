@@ -202,8 +202,10 @@ func TestAdapter_SnapshotCursor(t *testing.T) {
 		wantMaxID, _ := maxID(ctxBG(), db, table)
 		wantMaxTU, _ := maxTimeUpdated(ctxBG(), db, table)
 		w := cur.Tables[table]
-		if w.MaxID != wantMaxID || w.MaxTimeUpdatedMs != wantMaxTU {
-			t.Errorf("table %q snapshot watermark = %+v, want {MaxID:%q MaxTimeUpdatedMs:%d}", table, w, wantMaxID, wantMaxTU)
+		// A cold-Tail HEAD snapshot starts both the monotonic high-water and the
+		// paging-position id at MAX(id) (SOW-0005 round-2 P1-A).
+		if w.MaxIDSeen != wantMaxID || w.MaxTimeUpdatedID != wantMaxID || w.MaxTimeUpdatedMs != wantMaxTU {
+			t.Errorf("table %q snapshot watermark = %+v, want {MaxIDSeen:%q MaxTimeUpdatedID:%q MaxTimeUpdatedMs:%d}", table, w, wantMaxID, wantMaxID, wantMaxTU)
 		}
 	}
 	// The real migration-name hash is recorded.

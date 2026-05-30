@@ -132,105 +132,9 @@ func (d *scanDest) bytes(idx columnIndex, col string) []byte {
 	return nil
 }
 
-// --- per-table delta-row scanners (driven by scanTableDelta) ------------------
-
-// scanSessionRow reads one session delta row into a sessionRow via the present
-// columns and reports its watermark key. Missing optional columns (old schema)
-// stay zero.
-func scanSessionRow(idx columnIndex, n int) (func(*sql.Rows) (rowKey, error), *sessionRow) {
-	var out sessionRow
-	fn := func(rows *sql.Rows) (rowKey, error) {
-		d := newScanDest(n)
-		if err := rows.Scan(d.ptrs...); err != nil {
-			return rowKey{}, fmt.Errorf("opencode: scan session row: %w", err)
-		}
-		out = sessionRow{
-			ID:             d.str(idx, "id"),
-			ProjectID:      d.str(idx, "project_id"),
-			ParentID:       d.str(idx, "parent_id"),
-			Slug:           d.str(idx, "slug"),
-			Directory:      d.str(idx, "directory"),
-			Title:          d.str(idx, "title"),
-			Version:        d.str(idx, "version"),
-			Agent:          d.str(idx, "agent"),
-			Model:          d.bytes(idx, "model"),
-			Cost:           d.f64(idx, "cost"),
-			TokensInput:    d.i64(idx, "tokens_input"),
-			TokensOutput:   d.i64(idx, "tokens_output"),
-			TokensReason:   d.i64(idx, "tokens_reasoning"),
-			TokensCacheRd:  d.i64(idx, "tokens_cache_read"),
-			TokensCacheWr:  d.i64(idx, "tokens_cache_write"),
-			TimeCreatedMs:  d.i64(idx, "time_created"),
-			TimeUpdatedMs:  d.i64(idx, "time_updated"),
-			TimeArchivedMs: d.i64(idx, "time_archived"),
-		}
-		return rowKey{id: out.ID, timeUpdatedMs: out.TimeUpdatedMs}, nil
-	}
-	return fn, &out
-}
-
-// scanMessageRow reads one message delta row into a messageRow.
-func scanMessageRow(idx columnIndex, n int) (func(*sql.Rows) (rowKey, error), *messageRow) {
-	var out messageRow
-	fn := func(rows *sql.Rows) (rowKey, error) {
-		d := newScanDest(n)
-		if err := rows.Scan(d.ptrs...); err != nil {
-			return rowKey{}, fmt.Errorf("opencode: scan message row: %w", err)
-		}
-		out = messageRow{
-			ID:            d.str(idx, "id"),
-			SessionID:     d.str(idx, "session_id"),
-			TimeCreatedMs: d.i64(idx, "time_created"),
-			TimeUpdatedMs: d.i64(idx, "time_updated"),
-			Data:          d.bytes(idx, "data"),
-		}
-		return rowKey{id: out.ID, timeUpdatedMs: out.TimeUpdatedMs}, nil
-	}
-	return fn, &out
-}
-
-// scanPartRow reads one part delta row into a partRow.
-func scanPartRow(idx columnIndex, n int) (func(*sql.Rows) (rowKey, error), *partRow) {
-	var out partRow
-	fn := func(rows *sql.Rows) (rowKey, error) {
-		d := newScanDest(n)
-		if err := rows.Scan(d.ptrs...); err != nil {
-			return rowKey{}, fmt.Errorf("opencode: scan part row: %w", err)
-		}
-		out = partRow{
-			ID:            d.str(idx, "id"),
-			MessageID:     d.str(idx, "message_id"),
-			SessionID:     d.str(idx, "session_id"),
-			TimeCreatedMs: d.i64(idx, "time_created"),
-			TimeUpdatedMs: d.i64(idx, "time_updated"),
-			Data:          d.bytes(idx, "data"),
-		}
-		return rowKey{id: out.ID, timeUpdatedMs: out.TimeUpdatedMs}, nil
-	}
-	return fn, &out
-}
-
-// scanSessionMessageRow reads one session_message delta row into a
-// sessionMessageRow.
-func scanSessionMessageRow(idx columnIndex, n int) (func(*sql.Rows) (rowKey, error), *sessionMessageRow) {
-	var out sessionMessageRow
-	fn := func(rows *sql.Rows) (rowKey, error) {
-		d := newScanDest(n)
-		if err := rows.Scan(d.ptrs...); err != nil {
-			return rowKey{}, fmt.Errorf("opencode: scan session_message row: %w", err)
-		}
-		out = sessionMessageRow{
-			ID:            d.str(idx, "id"),
-			SessionID:     d.str(idx, "session_id"),
-			Type:          d.str(idx, "type"),
-			TimeCreatedMs: d.i64(idx, "time_created"),
-			TimeUpdatedMs: d.i64(idx, "time_updated"),
-			Data:          d.bytes(idx, "data"),
-		}
-		return rowKey{id: out.ID, timeUpdatedMs: out.TimeUpdatedMs}, nil
-	}
-	return fn, &out
-}
+// The per-table delta-row scanners (scanSessionRow/scanMessageRow/scanPartRow/
+// scanSessionMessageRow) live in store_scan.go (split to keep each file ≤400
+// lines).
 
 // --- full-session-tree load ---------------------------------------------------
 //
@@ -255,24 +159,25 @@ func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string, o
 		return sessionRow{}, false, fmt.Errorf("opencode: load session %s: %w", id, err)
 	}
 	return sessionRow{
-		ID:             d.str(idx, "id"),
-		ProjectID:      d.str(idx, "project_id"),
-		ParentID:       d.str(idx, "parent_id"),
-		Slug:           d.str(idx, "slug"),
-		Directory:      d.str(idx, "directory"),
-		Title:          d.str(idx, "title"),
-		Version:        d.str(idx, "version"),
-		Agent:          d.str(idx, "agent"),
-		Model:          d.bytes(idx, "model"),
-		Cost:           d.f64(idx, "cost"),
-		TokensInput:    d.i64(idx, "tokens_input"),
-		TokensOutput:   d.i64(idx, "tokens_output"),
-		TokensReason:   d.i64(idx, "tokens_reasoning"),
-		TokensCacheRd:  d.i64(idx, "tokens_cache_read"),
-		TokensCacheWr:  d.i64(idx, "tokens_cache_write"),
-		TimeCreatedMs:  d.i64(idx, "time_created"),
-		TimeUpdatedMs:  d.i64(idx, "time_updated"),
-		TimeArchivedMs: d.i64(idx, "time_archived"),
+		ID:               d.str(idx, "id"),
+		ProjectID:        d.str(idx, "project_id"),
+		ParentID:         d.str(idx, "parent_id"),
+		Slug:             d.str(idx, "slug"),
+		Directory:        d.str(idx, "directory"),
+		Title:            d.str(idx, "title"),
+		Version:          d.str(idx, "version"),
+		Agent:            d.str(idx, "agent"),
+		Model:            d.bytes(idx, "model"),
+		Cost:             d.f64(idx, "cost"),
+		TokensInput:      d.i64(idx, "tokens_input"),
+		TokensOutput:     d.i64(idx, "tokens_output"),
+		TokensReason:     d.i64(idx, "tokens_reasoning"),
+		TokensCacheRd:    d.i64(idx, "tokens_cache_read"),
+		TokensCacheWr:    d.i64(idx, "tokens_cache_write"),
+		TimeCreatedMs:    d.i64(idx, "time_created"),
+		TimeUpdatedMs:    d.i64(idx, "time_updated"),
+		TimeArchivedMs:   d.i64(idx, "time_archived"),
+		TimeCompactingMs: d.i64(idx, "time_compacting"),
 	}, true, nil
 }
 
@@ -283,6 +188,15 @@ func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string, o
 // single read-only transaction so messages and parts share one consistent
 // snapshot (a concurrent opencode write mid-load cannot split a message from its
 // parts).
+//
+// Parts are loaded with ONE query for the whole session (SOW-0005 round-2 P2-B),
+// NOT one query per message: the former per-message loop ran N queries for an
+// N-message session, holding the read tx longer and allocating heavily. The part
+// table denormalizes session_id, so a single WHERE session_id = ? ORDER BY
+// (message_id, id) returns every part already grouped by message; the rows are
+// then partitioned in memory and attached to each message in its (time_created,
+// id) order. The per-message order is preserved because the query orders by id
+// within each message_id, matching loadParts' old ORDER BY id.
 func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionID string, onWarn func(error)) ([]messageWithParts, error) {
 	tx, err := beginRO(ctx, db)
 	if err != nil {
@@ -294,13 +208,13 @@ func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionI
 	if err != nil {
 		return nil, err
 	}
+	partsByMessage, err := loadSessionParts(ctx, tx, schema["part"], sessionID, msgs, onWarn)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]messageWithParts, 0, len(msgs))
 	for i := range msgs {
-		parts, perr := loadParts(ctx, tx, schema["part"], msgs[i].ID, onWarn)
-		if perr != nil {
-			return nil, perr
-		}
-		out = append(out, messageWithParts{Message: msgs[i], Parts: parts})
+		out = append(out, messageWithParts{Message: msgs[i], Parts: partsByMessage[msgs[i].ID]})
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("opencode: commit tree tx: %w", err)
@@ -344,37 +258,80 @@ func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID stri
 	return out, nil
 }
 
-// loadParts reads a message's parts ordered by id (the natural lexicographic
-// Sonyflake order = creation order; adapter-opencode.md §"part").
-func loadParts(ctx context.Context, tx *sql.Tx, s tableSchema, messageID string, onWarn func(error)) ([]partRow, error) {
-	idx := newColumnIndex(s)
-	q := selectByColumn(s, "message_id", "id")
-	rows, err := tx.QueryContext(ctx, q, messageID)
-	if err != nil {
-		return nil, fmt.Errorf("opencode: load parts for %s: %w", messageID, err)
+// loadSessionParts reads ALL of a session's parts in ONE query and groups them by
+// message_id (SOW-0005 round-2 P2-B — replaces the per-message N+1 loop). The part
+// table denormalizes session_id, so the fast path is a single
+// WHERE session_id = ? ORDER BY (message_id, id). On a hypothetical OLD schema
+// where part lacks session_id (it is a required column today, so this is
+// defence-in-depth), it falls back to a single WHERE message_id IN (...) over the
+// session's message ids — still ONE query, never N. Returns a map keyed by
+// message_id; a message with no parts is simply absent (nil slice on lookup).
+func loadSessionParts(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string, msgs []messageRow, onWarn func(error)) (map[string][]partRow, error) {
+	if s.has("session_id") {
+		return loadPartsBySession(ctx, tx, s, sessionID, onWarn)
 	}
-	defer func() { _ = rows.Close() }()
+	return loadPartsByMessageIDs(ctx, tx, s, msgs, onWarn)
+}
 
-	var out []partRow
+// loadPartsBySession is the fast path: ONE indexed query over the denormalized
+// session_id, ordered (message_id, id) so each message's parts arrive contiguous
+// and in creation order. scanPartRows partitions them by message_id.
+func loadPartsBySession(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string, onWarn func(error)) (map[string][]partRow, error) {
+	q := selectByColumn(s, "session_id", quoteIdent("message_id")+", "+quoteIdent("id"))
+	rows, err := tx.QueryContext(ctx, q, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: load parts for session %s: %w", sessionID, err)
+	}
+	return scanPartRows(ctx, rows, s, onWarn, "session "+sessionID)
+}
+
+// loadPartsByMessageIDs is the old-schema fallback (part lacks session_id): ONE
+// query with a WHERE message_id IN (?,?,...) over the session's message ids,
+// ordered (message_id, id). Still one query, not N. An empty message set returns
+// an empty map without querying.
+func loadPartsByMessageIDs(ctx context.Context, tx *sql.Tx, s tableSchema, msgs []messageRow, onWarn func(error)) (map[string][]partRow, error) {
+	if len(msgs) == 0 {
+		return map[string][]partRow{}, nil
+	}
+	ids := make([]any, len(msgs))
+	for i := range msgs {
+		ids[i] = msgs[i].ID
+	}
+	q := selectPartsByMessageIDs(s, len(ids))
+	rows, err := tx.QueryContext(ctx, q, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: load parts by message ids: %w", err)
+	}
+	return scanPartRows(ctx, rows, s, onWarn, "message-id set")
+}
+
+// scanPartRows scans a part result set and partitions the rows into a map keyed by
+// message_id, preserving the query's (message_id, id) order within each group. It
+// owns closing rows. label is used only in error context.
+func scanPartRows(ctx context.Context, rows *sql.Rows, s tableSchema, onWarn func(error), label string) (map[string][]partRow, error) {
+	defer func() { _ = rows.Close() }()
+	idx := newColumnIndex(s)
+	out := map[string][]partRow{}
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		d := newScanDest(len(s.Present)).withWarn("part", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
-			return nil, fmt.Errorf("opencode: scan part: %w", err)
+			return nil, fmt.Errorf("opencode: scan part (%s): %w", label, err)
 		}
-		out = append(out, partRow{
+		p := partRow{
 			ID:            d.str(idx, "id"),
 			MessageID:     d.str(idx, "message_id"),
 			SessionID:     d.str(idx, "session_id"),
 			TimeCreatedMs: d.i64(idx, "time_created"),
 			TimeUpdatedMs: d.i64(idx, "time_updated"),
 			Data:          d.bytes(idx, "data"),
-		})
+		}
+		out[p.MessageID] = append(out[p.MessageID], p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("opencode: iterate parts: %w", err)
+		return nil, fmt.Errorf("opencode: iterate parts (%s): %w", label, err)
 	}
 	return out, nil
 }

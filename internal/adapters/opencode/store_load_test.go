@@ -105,9 +105,12 @@ func TestLoadSessionTree_ZeroMessages(t *testing.T) {
 	}
 
 	// And loadAndMapSession over it yields exactly one SessionStarted, no more.
-	evs, err := loadAndMapSession(ctxBG(), db, schema, "opencode:test", "ses_empty", func(error) {})
+	evs, skipped, err := loadAndMapSession(ctxBG(), db, schema, "opencode:test", "ses_empty", silentLogger(), func(error) {})
 	if err != nil {
 		t.Fatalf("loadAndMapSession(empty): %v", err)
+	}
+	if skipped {
+		t.Fatal("loadAndMapSession(empty) reported skipped; want emit")
 	}
 	if n := countKind(evs, canonical.EvSessionStarted); n != 1 {
 		t.Errorf("empty session emitted %d SessionStarted, want 1", n)

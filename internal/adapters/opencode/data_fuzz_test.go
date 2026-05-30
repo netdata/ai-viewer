@@ -70,6 +70,10 @@ func partDataSeeds() [][]byte {
 		[]byte(`{"type":"tool","tool":"task","state":{"status":"completed","metadata":"oops","time":{"start":1,"end":2}}}`),
 		// Unknown $.type (forward-compat → partUnknown, not an error).
 		[]byte(`{"type":"brand_new_part","x":1}`),
+		// Crafted/corrupt step-finish token values at the int64 extremes (SOW-0005
+		// round-2 P2-F): the cumulative→delta subtraction must clamp, not wrap/panic.
+		[]byte(`{"type":"step-finish","reason":"stop","tokens":{"input":9223372036854775807,"output":-9223372036854775808,"cache":{"read":9223372036854775807,"write":-1}}}`),
+		[]byte(`{"type":"step-finish","reason":"stop","tokens":{"input":-9223372036854775808,"output":9223372036854775807,"total":9223372036854775807}}`),
 		// $.type absent.
 		[]byte(`{"text":"orphan"}`),
 		// Empty / null / blank / garbage.
@@ -126,6 +130,12 @@ func FuzzDecodePartData(f *testing.F) {
 			if d.State != nil {
 				_ = d.State.subAgentSessionID()
 			}
+			// The decoded tokens flow into the cumulative→delta math, whose checked
+			// subtraction must clamp (not wrap/panic) on crafted extremes (P2-F). A
+			// single-element sequence exercises the first-snapshot path; a two-element
+			// sequence (the same tokens twice) exercises the prev-subtraction path.
+			_ = computeStepDeltas([]tokenCounts{d.Tokens}, nil)
+			_ = computeStepDeltas([]tokenCounts{d.Tokens, d.Tokens}, nil)
 		}
 	})
 }

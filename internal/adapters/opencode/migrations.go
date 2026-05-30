@@ -45,7 +45,14 @@ var errNoMigrationsTable = errors.New("opencode: __drizzle_migrations table not 
 // column is nullable in opencode's schema) so a stray empty name never pollutes
 // the hash or masquerades as the latest migration.
 func readMigrations(ctx context.Context, db *sql.DB) (names []string, latest string, err error) {
-	if !migrationsTablePresent(ctx, db) {
+	present, presentErr := migrationsTablePresent(ctx, db)
+	if presentErr != nil {
+		// A genuine query error (corruption, ctx-cancel, closed DB) is NOT "table
+		// missing" — propagate it so the caller surfaces the failure rather than
+		// silently degrading to no-migrations (SOW-0005 round-2 P2-C).
+		return nil, "", presentErr
+	}
+	if !present {
 		return nil, "", errNoMigrationsTable
 	}
 	// id is the Drizzle auto-increment applied-order key; ORDER BY id ASC gives
@@ -76,16 +83,22 @@ func readMigrations(ctx context.Context, db *sql.DB) (names []string, latest str
 }
 
 // migrationsTablePresent reports whether __drizzle_migrations exists, via
-// sqlite_master. This is the cheap precheck that lets readMigrations return the
-// soft sentinel for a foreign/old database instead of surfacing the driver's
-// "no such table" as a hard error. The name is a fixed constant, bound as a
-// parameter here (sqlite_master.name accepts a bind, unlike a PRAGMA argument).
-func migrationsTablePresent(ctx context.Context, db *sql.DB) bool {
-	var present int
-	err := db.QueryRowContext(ctx,
+// sqlite_master, returning (present, err). It queries the catalog (which always
+// exists), so a NON-nil err is a GENUINE fault (corruption, ctx-cancel, closed
+// DB) — NOT a missing table — and is propagated so readMigrations does not
+// silently treat it as "no migrations" (SOW-0005 round-2 P2-C: the prior version
+// folded every error into present=false, hiding real failures). A clean count of
+// 0 is the only soft-absent case (a foreign/old database); it returns
+// (false, nil). The name is a fixed constant, bound as a parameter here
+// (sqlite_master.name accepts a bind, unlike a PRAGMA argument).
+func migrationsTablePresent(ctx context.Context, db *sql.DB) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
-		migrationsTable).Scan(&present)
-	return err == nil && present > 0
+		migrationsTable).Scan(&count); err != nil {
+		return false, fmt.Errorf("opencode: probe %s presence: %w", migrationsTable, err)
+	}
+	return count > 0, nil
 }
 
 // schemaHash returns the hex SHA-256 of the ordered migration-name list — the

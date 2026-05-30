@@ -36,7 +36,7 @@ var wantedColumns = map[string][]string{
 		"id", "project_id", "parent_id", "slug", "directory", "title",
 		"version", "agent", "model", "cost", "tokens_input", "tokens_output",
 		"tokens_reasoning", "tokens_cache_read", "tokens_cache_write",
-		"time_created", "time_updated", "time_archived",
+		"time_created", "time_updated", "time_archived", "time_compacting",
 	},
 	"message": {
 		"id", "session_id", "time_created", "time_updated", "data",

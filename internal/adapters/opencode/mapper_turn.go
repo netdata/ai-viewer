@@ -1,6 +1,8 @@
 package opencode
 
 import (
+	"fmt"
+	"math"
 	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -20,12 +22,12 @@ import (
 // CUMULATIVELY within a message (adapter-opencode.md §"Tool calls and Models",
 // "Canonical Model Gaps" #3): input 100,250,410 → per-op 100,150,160. Each field
 // (input/output/reasoning/cache.read/cache.write) is deltad independently against
-// the running previous cumulative. A non-monotonic value (a reset or an
-// out-of-order observation) would yield a negative delta, which would corrupt
-// cost; it is CLAMPED to 0 (spec gap #3 — reconciliation recomputes the whole
-// message; a clamp keeps a transient observation from emitting negatives). The
-// first snapshot's delta is itself (previous = zero).
-func computeStepDeltas(cumulative []tokenCounts) []tokenCounts {
+// the running previous cumulative via a CHECKED subtraction (subClampWarn): a
+// non-monotonic value yields a negative delta CLAMPED to 0, and a crafted/corrupt
+// value whose subtraction would OVERFLOW int64 is clamped to [0, MaxInt64] with a
+// WARN rather than wrapping (SOW-0005 round-2 P2-F). The first snapshot's delta is
+// itself (previous = zero). onWarn (may be nil) surfaces an overflow with context.
+func computeStepDeltas(cumulative []tokenCounts, onWarn func(error)) []tokenCounts {
 	if len(cumulative) == 0 {
 		return nil
 	}
@@ -33,13 +35,13 @@ func computeStepDeltas(cumulative []tokenCounts) []tokenCounts {
 	var prev tokenCounts
 	for i, cur := range cumulative {
 		out[i] = tokenCounts{
-			Input:     nonNeg(cur.Input - prev.Input),
-			Output:    nonNeg(cur.Output - prev.Output),
-			Reasoning: nonNeg(cur.Reasoning - prev.Reasoning),
-			Total:     nonNeg(cur.Total - prev.Total),
+			Input:     subClampWarn(cur.Input, prev.Input, "step-finish tokens.input", onWarn),
+			Output:    subClampWarn(cur.Output, prev.Output, "step-finish tokens.output", onWarn),
+			Reasoning: subClampWarn(cur.Reasoning, prev.Reasoning, "step-finish tokens.reasoning", onWarn),
+			Total:     subClampWarn(cur.Total, prev.Total, "step-finish tokens.total", onWarn),
 			Cache: cacheTokens{
-				Read:  nonNeg(cur.Cache.Read - prev.Cache.Read),
-				Write: nonNeg(cur.Cache.Write - prev.Cache.Write),
+				Read:  subClampWarn(cur.Cache.Read, prev.Cache.Read, "step-finish tokens.cache.read", onWarn),
+				Write: subClampWarn(cur.Cache.Write, prev.Cache.Write, "step-finish tokens.cache.write", onWarn),
 			},
 		}
 		prev = cur
@@ -54,6 +56,28 @@ func nonNeg(v int64) int64 {
 		return 0
 	}
 	return v
+}
+
+// subClampWarn returns a-b clamped to [0, MaxInt64], detecting int64 overflow on
+// the subtraction (a crafted/corrupt cumulative value) and surfacing a WARN with
+// the field label rather than wrapping (SOW-0005 round-2 P2-F). On overflow it
+// clamps: a positive overflow (a huge, b very negative) saturates to MaxInt64; a
+// negative overflow clamps to 0 (negative token counts are meaningless). The
+// normal non-monotonic case (a<b, no overflow) still clamps to 0 via nonNeg.
+func subClampWarn(a, b int64, field string, onWarn func(error)) int64 {
+	d := a - b
+	// Overflow on a-b iff the sign of b differs from the sign of a AND the sign of
+	// the result differs from the sign of a (standard signed-subtraction overflow).
+	if (b < 0) != (a < 0) && (d < 0) != (a < 0) {
+		if onWarn != nil {
+			onWarn(fmt.Errorf("opencode: %s delta overflow (%d-%d); clamped (P2-F)", field, a, b))
+		}
+		if a > 0 {
+			return math.MaxInt64
+		}
+		return 0
+	}
+	return nonNeg(d)
 }
 
 // jsonTrimBytes returns the raw JSON with surrounding whitespace trimmed,
@@ -83,13 +107,15 @@ func (m *sessionMapper) finalizeTurn(tc *turnContext, data *messageData, msg mes
 	cum := data.Tokens
 	var delta tokenCounts
 	if m.havePrevTurn {
+		// Checked subtraction (subClampWarn): a crafted/corrupt cumulative value
+		// clamps with a WARN instead of wrapping int64 (SOW-0005 round-2 P2-F).
 		delta = tokenCounts{
-			Input:     nonNeg(cum.Input - m.prevTurnTokens.Input),
-			Output:    nonNeg(cum.Output - m.prevTurnTokens.Output),
-			Reasoning: nonNeg(cum.Reasoning - m.prevTurnTokens.Reasoning),
+			Input:     subClampWarn(cum.Input, m.prevTurnTokens.Input, "turn tokens.input", m.mwarn),
+			Output:    subClampWarn(cum.Output, m.prevTurnTokens.Output, "turn tokens.output", m.mwarn),
+			Reasoning: subClampWarn(cum.Reasoning, m.prevTurnTokens.Reasoning, "turn tokens.reasoning", m.mwarn),
 			Cache: cacheTokens{
-				Read:  nonNeg(cum.Cache.Read - m.prevTurnTokens.Cache.Read),
-				Write: nonNeg(cum.Cache.Write - m.prevTurnTokens.Cache.Write),
+				Read:  subClampWarn(cum.Cache.Read, m.prevTurnTokens.Cache.Read, "turn tokens.cache.read", m.mwarn),
+				Write: subClampWarn(cum.Cache.Write, m.prevTurnTokens.Cache.Write, "turn tokens.cache.write", m.mwarn),
 			},
 		}
 	} else {
@@ -120,13 +146,34 @@ func (m *sessionMapper) finalizeTurn(tc *turnContext, data *messageData, msg mes
 	}
 }
 
+// defaultErrorClass is the safe ErrorClass label for an error object that
+// carries no name (SOW-0005 round-2 P2-A). It is a CLASS string (a human label
+// for the failure category), NOT a canonical op/turn status, so a generic
+// constant here is correct — the terminal status is "failed", and this only
+// names the error class when the source did not.
+const defaultErrorClass = "error"
+
+// errorClass returns the ErrorClass for an assistant error, defaulting to
+// defaultErrorClass when the source supplied an error object with an empty name
+// (SOW-0005 round-2 P2-A: error PRESENCE is what makes a turn failed; a missing
+// name must not blank the class). err must be non-nil.
+func errorClass(err *assistantError) string {
+	if err.Name != "" {
+		return err.Name
+	}
+	return defaultErrorClass
+}
+
 // turnStatus derives a turn's terminal status (adapter-opencode.md §"Per-table
-// emit rules"): data.error present → failed (ErrorClass = error.name); else
+// emit rules"): an error OBJECT being PRESENT → failed (ErrorClass = error.name,
+// or defaultErrorClass when the name is empty — SOW-0005 round-2 P2-A); else
 // completed (data.finish="stop" or any non-error finish all map to completed —
 // opencode does not record a per-turn aborted distinct from a session error).
+// The predicate is error PRESENCE (data.Error != nil), not a non-empty name: an
+// opencode error object with an empty name is still a failure.
 func turnStatus(data *messageData) (status, errClass string) {
-	if data.Error != nil && data.Error.Name != "" {
-		return "failed", data.Error.Name
+	if data.Error != nil {
+		return "failed", errorClass(data.Error)
 	}
 	return "completed", ""
 }
@@ -142,11 +189,13 @@ func turnStatus(data *messageData) (status, errClass string) {
 // poll re-emits the whole tree and finalizes it once it actually completes (the
 // re-emit is idempotent — adapter-opencode.md §"Edge Cases" #4). hasStepFinish
 // is supplied by the part walk (mapMessage), which already decoded the parts.
+// Error PRESENCE (data.Error != nil) is terminal regardless of the error name
+// (SOW-0005 round-2 P2-A).
 func turnIsTerminal(data *messageData, hasStepFinish bool) bool {
 	if data.Time.Completed != nil {
 		return true
 	}
-	if data.Error != nil && data.Error.Name != "" {
+	if data.Error != nil {
 		return true
 	}
 	return hasStepFinish

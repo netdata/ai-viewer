@@ -40,7 +40,7 @@ var ocSchemaStmts = []string{
 		tokens_cache_read INTEGER NOT NULL DEFAULT 0,
 		tokens_cache_write INTEGER NOT NULL DEFAULT 0,
 		time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
-		time_archived INTEGER)`,
+		time_archived INTEGER, time_compacting INTEGER)`,
 	`CREATE TABLE message (
 		id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
 		time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,

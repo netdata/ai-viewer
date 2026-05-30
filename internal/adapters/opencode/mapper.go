@@ -3,6 +3,7 @@ package opencode
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -120,12 +121,14 @@ type sessionMapper struct {
 	// determinism across re-emits matters.
 	recordIdx uint64
 
-	// failError / failEndUs carry the session's failed-terminal signal,
-	// populated by mapAssistantTurn when an assistant message carries
-	// data.error. The LAST erroring message wins (messages are walked in order),
-	// matching adapter-opencode.md §"Per-table emit rules" ("the last assistant
-	// message carrying data.error"). sessionFinalized consumes them when the
-	// session is not archived. failError stays nil for a clean session.
+	// failError / failEndUs carry the session's failed-terminal signal as the
+	// LAST assistant turn's terminal error (SOW-0005 round-2 P1-B). mapAssistantTurn
+	// SETS them when a turn carries data.error and CLEARS them when a turn does not,
+	// so they reflect only the final turn's state — matching adapter-opencode.md
+	// §"Per-table emit rules" ("failure is the LAST assistant message's state"). A
+	// session that errored on an early turn but whose last turn succeeded is NOT
+	// failed. sessionFinalized consumes them when the session is not archived.
+	// failError stays nil for a clean (or recovered) session.
 	failError *assistantError
 	failEndUs int64
 
@@ -294,8 +297,10 @@ func (m *sessionMapper) sessionExtras(mr modelRef) map[string]any {
 //
 //   - time_archived set  → SessionFinalized(completed, EndTs = archived ms→µs).
 //     Archival is the only clean terminal signal opencode records.
-//   - else last assistant message carries data.error → SessionFinalized(failed,
-//     ErrorClass = error.name, EndTs = that message's completed-or-created ts).
+//   - else the LAST assistant turn carries data.error → SessionFinalized(failed,
+//     ErrorClass = error.name or defaultErrorClass when empty, EndTs = that
+//     message's completed-or-created ts). A session whose last turn recovered is
+//     NOT failed even if an earlier turn errored (SOW-0005 round-2 P1-B).
 //   - else running: NO SessionFinalized (opencode never finalizes a session, it
 //     only archives — like claude-code/codex which have no per-session terminal).
 //
@@ -317,7 +322,7 @@ func (m *sessionMapper) sessionFinalized() canonical.Event {
 			EventBase:  m.nextBase(m.failEndUs),
 			NativeID:   m.session.ID,
 			Status:     canonical.StatusFailed,
-			ErrorClass: m.failError.Name,
+			ErrorClass: errorClass(m.failError), // defaultErrorClass when name empty (P2-A)
 			EndTs:      m.failEndUs,
 		}
 		return ev
@@ -328,11 +333,19 @@ func (m *sessionMapper) sessionFinalized() canonical.Event {
 // msToMicros converts opencode's native milliseconds to canonical microseconds.
 // A non-positive input (absent timestamp) maps to 0 so an unset column never
 // fabricates a 1970-adjacent time (adapter-opencode.md §"Edge Cases" #6 — the
-// single ms→µs conversion point for session-level times; per-part/turn times
-// convert in mapper_parts.go via the same helper).
+// single ms→µs conversion point). It SATURATES at math.MaxInt64 rather than
+// WRAPPING on a crafted/corrupt huge ms value (SOW-0005 round-2 P2-F): a wrapped
+// timestamp would become negative and reorder events nonsensically. A clamped
+// timestamp is a safe degradation (the event sorts at the far future, visibly
+// anomalous) and this conversion has no error channel, so the clamp is silent;
+// the load-bearing token accounting that DOES carry a warn surfaces its own
+// overflow WARN (computeStepDeltas / finalizeTurn via mwarn).
 func msToMicros(ms int64) int64 {
 	if ms <= 0 {
 		return 0
+	}
+	if ms > math.MaxInt64/1000 {
+		return math.MaxInt64
 	}
 	return ms * 1000
 }

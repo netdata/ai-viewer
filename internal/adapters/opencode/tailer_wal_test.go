@@ -143,7 +143,7 @@ func TestProcessChanges_CollectError(t *testing.T) {
 		t.Fatalf("close ro db: %v", err)
 	}
 	out := make(chan canonical.Event, 16)
-	if _, _, err := processChanges(ctxBG(), db, schema, newCursor(), "opencode:test", out, func(error) {}); err == nil {
+	if _, _, err := processChanges(ctxBG(), db, schema, newCursor(), "opencode:test", out, silentLogger(), func(error) {}); err == nil {
 		t.Error("processChanges over a closed DB: want error")
 	}
 }

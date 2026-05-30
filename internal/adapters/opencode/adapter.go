@@ -169,9 +169,11 @@ func (a *Adapter) coerceCursor(c canonical.Cursor) Cursor {
 // events (existing content is Scan's job). It opens read-only, introspects the
 // schema, sets each tracked table's watermark to its current MAX(id) +
 // MAX(time_updated), and records the real __drizzle_migrations schema hash. This
-// is the SQLite analogue of codex stat'ing current file sizes. A table on an old
-// schema without time_updated contributes MaxID only (MaxTimeUpdatedMs stays 0),
-// matching the delta-query fallback.
+// is the SQLite analogue of codex stat'ing current file sizes. At a HEAD snapshot
+// the monotonic high-water (MaxIDSeen) and the (time_updated, id) paging-position
+// id (MaxTimeUpdatedID) both start at the current MAX(id) — paging then follows
+// strictly from NOW (SOW-0005 round-2 P1-A). A table on an old schema without
+// time_updated contributes the id watermarks only (MaxTimeUpdatedMs stays 0).
 func (a *Adapter) snapshotCursor(ctx context.Context) (Cursor, error) {
 	db, err := openReadOnly(ctx, a.dbPath, withMaxOpenConns(2))
 	if err != nil {
@@ -197,7 +199,7 @@ func (a *Adapter) snapshotCursor(ctx context.Context) (Cursor, error) {
 				return Cursor{}, mErr
 			}
 		}
-		cur = cur.withTable(table, TableWatermark{MaxID: mid, MaxTimeUpdatedMs: mtu})
+		cur = cur.withTable(table, TableWatermark{MaxIDSeen: mid, MaxTimeUpdatedMs: mtu, MaxTimeUpdatedID: mid})
 	}
 	return recordSchemaHash(ctx, db, cur, a.onError), nil
 }

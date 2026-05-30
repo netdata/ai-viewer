@@ -261,22 +261,22 @@ That ordered name list serves two purposes (chunk D):
 
 The defining constraint: opencode's writer holds the database open and may commit transactions at any time. ai-viewer is a strict read-only consumer. The adapter MUST:
 
-1. Open with `mode=ro&_journal_mode=WAL&_busy_timeout=5000&_txlock=deferred`.
+1. Open with `mode=ro&_txlock=deferred` plus the fixed read-only PRAGMA set below.
 2. Use `modernc.org/sqlite` (CGO-free, per AGENTS.md tech stack).
-3. Open a **fresh connection per poll cycle** or keep a pool with `SetMaxOpenConns(1)` for the read path. Opening read-only against a WAL-mode database is non-blocking for the writer — multiple readers and a single writer can proceed concurrently (SQLite WAL guarantee). Concrete DSN:
+3. Open a **fresh connection per poll cycle** or keep a pool with `SetMaxOpenConns(1)` for the read path. Opening read-only against a WAL-mode database is non-blocking for the writer — multiple readers and a single writer can proceed concurrently (SQLite WAL guarantee). Concrete DSN (the one `buildReadOnlyDSN` rebuilds, `conn.go`):
 
 ```
-file:%2Fhome%2Foperator%2F.local%2Fshare%2Fopencode%2Fopencode.db?mode=ro&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=query_only(true)&_pragma=foreign_keys(off)&_txlock=deferred
+file:%2Fhome%2Foperator%2F.local%2Fshare%2Fopencode%2Fopencode.db?mode=ro&_txlock=deferred&_pragma=query_only(true)&_pragma=busy_timeout(5000)
 ```
 
 Key choices:
 
 - `mode=ro` — refuse any write at the OS level. The OS opens the file `O_RDONLY`; SQLite cannot upgrade the connection.
 - `_pragma=query_only(true)` — defense-in-depth; rejects any UPDATE/INSERT/DELETE at the SQL layer.
-- `_pragma=journal_mode(WAL)` — does NOT change the file (the writer already set it); confirms our connection enters WAL reader mode so we read a consistent snapshot from the WAL checkpoint and never block the writer.
 - `_pragma=busy_timeout(5000)` — wait up to 5 s when an exclusive lock is held (which should be rare in WAL mode but happens during `PRAGMA wal_checkpoint(TRUNCATE)`).
-- `_pragma=foreign_keys(off)` — readers don't need FK enforcement; cheaper.
 - `_txlock=deferred` — defer BEGIN until first statement; for reads this just means "snapshot taken on first SELECT".
+
+**No `journal_mode` in the DSN (SOW-0005 round-2 P3-B).** `conn.go`'s `readOnlyPragmas` allowlist deliberately OMITS `journal_mode(WAL)`: the journal mode is a WRITER concern recorded in the database header by whoever created/opened it read-write (opencode), and a read-only connection inherits the database's existing mode — it cannot (and must not try to) change it. Setting `journal_mode` on a `mode=ro` connection is a no-op at best and an attempted write at worst; either way it earns nothing, so the reader simply does not send it. The reader still gets WAL-reader snapshot semantics automatically because the database file is already in WAL mode. Likewise `foreign_keys(off)` is not sent — FK enforcement only matters for writes, and the reader issues none.
 
 **DSN is an ALLOWLIST, not a denylist (SOW-0005 P1.2).** `buildReadOnlyDSN` parses the caller-supplied query string only to VALIDATE it, then DISCARDS it and rebuilds the query from scratch with exactly: `mode=ro`, `_txlock=deferred`, and the fixed `readOnlyPragmas` set (`query_only(true)`, `busy_timeout(5000)`). Therefore NO caller-supplied `_pragma` survives — neither one that name-collides with the read-only set NOR a non-colliding write-path pragma (`wal_checkpoint(TRUNCATE)`, `optimize`, `foreign_keys(on)`, …) — and a caller `_txlock=exclusive` is replaced with `deferred`. A maliciously-constructed path string therefore cannot reach a write-path pragma or an exclusive (write-lock) BEGIN. The earlier denylist that stripped only colliding `_pragma` names is replaced by this allowlist.
 

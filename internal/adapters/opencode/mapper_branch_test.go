@@ -208,8 +208,12 @@ func TestMapSession_KnownNoOpParts(t *testing.T) {
 	}
 }
 
-// --- tool with unknown status + an end → finalized at that end ----------------
+// --- tool with unknown status + an end → finalized "completed" at that end ----
 
+// TestMapSession_ToolUnknownStatusWithEnd pins the P1-C audit (SOW-0005 round-2):
+// a FUTURE/unknown opencode tool status that carries an end still finalizes, but
+// with the CANONICAL status "completed" (it ended) — never the raw opencode
+// string, which is not a canonical op status (canonical-events.md:196).
 func TestMapSession_ToolUnknownStatusWithEnd(t *testing.T) {
 	s := rootSession("ses_x", 0)
 	end := int64(2600)
@@ -226,14 +230,20 @@ func TestMapSession_ToolUnknownStatusWithEnd(t *testing.T) {
 			stepStart("prt_1"), p),
 	}
 	evs := run(t, s, msgs)
+	// No finalize may carry the raw opencode status.
+	for _, f := range opFinals(evs) {
+		if f.Status == "weird-future-status" {
+			t.Fatalf("finalize carries the raw opencode status %q (P1-C: must be canonical)", f.Status)
+		}
+	}
 	var fin *canonical.OpFinalizedEvent
 	for i, f := range opFinals(evs) {
-		if f.Status == "weird-future-status" {
+		if f.Status == "completed" {
 			fin = &opFinals(evs)[i]
 		}
 	}
 	if fin == nil {
-		t.Fatal("unknown-status tool with an end must still finalize")
+		t.Fatal("unknown-status tool with an end must finalize with canonical status 'completed'")
 	}
 	if fin.EndTs != end*1000 {
 		t.Fatalf("EndTs = %d want %d", fin.EndTs, end*1000)

@@ -122,8 +122,8 @@ func TestAdapter_ParseCursor(t *testing.T) {
 	if c == nil {
 		t.Fatal("ParseCursor(\"\") = nil cursor")
 	}
-	// Round-trip a non-empty cursor.
-	seed := newCursor().withTable("session", TableWatermark{MaxID: "ses_9", MaxTimeUpdatedMs: 42})
+	// Round-trip a non-empty cursor (current v2 split-watermark shape).
+	seed := newCursor().withTable("session", TableWatermark{MaxIDSeen: "ses_9", MaxTimeUpdatedMs: 42, MaxTimeUpdatedID: "ses_9"})
 	got, err := a.ParseCursor(seed.String())
 	if err != nil {
 		t.Fatalf("ParseCursor(round-trip): %v", err)
@@ -131,9 +131,14 @@ func TestAdapter_ParseCursor(t *testing.T) {
 	if !got.After(newCursor()) {
 		t.Error("round-tripped cursor should be After the empty cursor")
 	}
-	// Bad version is rejected.
-	if _, err := a.ParseCursor(`{"version":999}`); err == nil {
-		t.Error("ParseCursor(bad version) = nil error, want non-nil")
+	// A future/unknown version is NOT an error — it re-scans from zero (our own
+	// cursor shape drifting is recoverable by an idempotent backfill; SOW-0005 P1-A).
+	reScan, err := a.ParseCursor(`{"version":999}`)
+	if err != nil {
+		t.Errorf("ParseCursor(unknown version) = %v, want nil (re-scan from zero)", err)
+	}
+	if tc, ok := reScan.(Cursor); !ok || tc.hasProgress() {
+		t.Errorf("ParseCursor(unknown version) = %+v, want a fresh zero cursor", reScan)
 	}
 }
 

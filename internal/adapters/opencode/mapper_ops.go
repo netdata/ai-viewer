@@ -44,6 +44,12 @@ func (m *sessionMapper) openLLMOp(tc *turnContext, msg *messageData, p partRow, 
 	tc.llmStartUs = startUs
 	tc.llmExtras = map[string]any{}
 	alias := msg.ProviderID
+	// Snapshot the op identity so the patch-enrichment re-emit (closeLLMOp) is
+	// self-contained and survives the writer's unconditional ops.name update (P2-D).
+	tc.llmName = msg.ModelID
+	tc.llmModel = msg.ModelID
+	tc.llmProvider = canonicalProvider(alias)
+	tc.llmProviderAlias = alias
 	out = append(out, canonical.OpStartedEvent{
 		EventBase:       m.nextBase(startUs),
 		SessionNativeID: m.nativeID(),
@@ -51,10 +57,10 @@ func (m *sessionMapper) openLLMOp(tc *turnContext, msg *messageData, p partRow, 
 		Seq:             tc.llmOpSeq,
 		ParentOpSeq:     -1,
 		Kind:            canonical.OpLLM,
-		Name:            msg.ModelID,
-		Model:           msg.ModelID,
-		Provider:        canonicalProvider(alias),
-		ProviderAlias:   alias,
+		Name:            tc.llmName,
+		Model:           tc.llmModel,
+		Provider:        tc.llmProvider,
+		ProviderAlias:   tc.llmProviderAlias,
 	})
 	return out
 }
@@ -111,6 +117,10 @@ func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []
 	out := make([]canonical.Event, 0, 2)
 	// Re-emit the LLM OpStarted carrying any accumulated patch extras so they
 	// reach ops.extras_json before the finalize (idempotent UPDATE on (turn,seq)).
+	// The re-emit carries the FULL op identity (Name/Model/Provider/ProviderAlias),
+	// not just Extras: the ingest writer updates ops.name UNCONDITIONALLY (model/
+	// provider are COALESCE-protected, name is NOT — writer.go:587), so an
+	// identity-less re-emit would BLANK ops.name (SOW-0005 round-2 P2-D).
 	if len(tc.llmExtras) > 0 {
 		out = append(out, canonical.OpStartedEvent{
 			EventBase:       m.nextBase(tc.llmStartUs),
@@ -119,6 +129,10 @@ func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []
 			Seq:             tc.llmOpSeq,
 			ParentOpSeq:     -1,
 			Kind:            canonical.OpLLM,
+			Name:            tc.llmName,
+			Model:           tc.llmModel,
+			Provider:        tc.llmProvider,
+			ProviderAlias:   tc.llmProviderAlias,
 			Extras:          tc.llmExtras,
 		})
 	}
@@ -288,12 +302,21 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 		if endUs < startUs {
 			endUs = startUs
 		}
+		// A failed tool op carries an ErrorClass label alongside the opencode detail
+		// (state.error → ErrorMessage). opencode's tool error is a bare string with
+		// no class, so the class is the generic defaultErrorClass (SOW-0005 round-2
+		// P1-C). A non-failed status carries neither.
+		var errClass string
+		if status == "failed" {
+			errClass = defaultErrorClass
+		}
 		out = append(out, canonical.OpFinalizedEvent{
 			EventBase:       m.nextBase(endUs),
 			SessionNativeID: m.nativeID(),
 			TurnSeq:         tc.turnSeq,
 			Seq:             seq,
 			Status:          status,
+			ErrorClass:      errClass,
 			ErrorMessage:    errMsg,
 			EndTs:           endUs,
 			BytesIn:         toolBytesIn(data),
@@ -306,77 +329,8 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 // The pure tool helpers (toolStartUs, toolTerminal, toolBytesIn/Out,
 // taskChildSessionID, toolNameNamespace) live in mapper_tools.go.
 
-// --- text / patch / file / compaction / retry ---------------------------------
-
-// emitTextPayload handles a text part (adapter-opencode.md §"Per-table emit
-// rules": text is NOT an op; emit a PayloadRef for the assistant text scoped to
-// the turn's most-recent LLM op). When no LLM op is open yet (a text part before
-// any step-start) the ref is DROPPED — payload_refs.op_id is NOT NULL, so a ref
-// with no op would FK-roll-back the ingest batch (mirrors codex's discipline).
-func (m *sessionMapper) emitTextPayload(tc *turnContext, p partRow) []canonical.Event {
-	if tc.llmOpSeq == 0 {
-		return nil
-	}
-	return []canonical.Event{m.payloadRef(m.nextBase(msToMicros(p.TimeCreatedMs)), tc.turnSeq, tc.llmOpSeq, "llm_response", "text", p.ID, "text", -1)}
-}
-
-// recordPatch handles a patch part (adapter-opencode.md §"Per-table emit rules":
-// patch is NOT an op; record file-change info in the surrounding LLM op's extras
-// for the "Files changed" UI tab). The info is stashed on tc.llmExtras and
-// re-emitted onto the LLM op at step-finish (closeLLMOp). When no LLM op is open
-// the patch is dropped (no op to attach to); this is rare (patch always follows a
-// step-start in practice). Returns no events of its own.
-func (m *sessionMapper) recordPatch(tc *turnContext, data partData) []canonical.Event {
-	if tc.llmOpSeq == 0 || tc.llmExtras == nil {
-		return nil
-	}
-	if data.Hash != "" {
-		tc.llmExtras["patch_hash"] = data.Hash
-	}
-	if len(data.Files) > 0 {
-		tc.llmExtras["patch_files"] = data.Files
-	}
-	return nil
-}
-
-// emitCompactionLog handles a compaction part (adapter-opencode.md §"Per-table
-// emit rules": compaction → INF LogEntry). It records the auto flag.
-func (m *sessionMapper) emitCompactionLog(tc *turnContext, p partRow, data partData) []canonical.Event {
-	base := m.nextBase(msToMicros(p.TimeCreatedMs))
-	return []canonical.Event{m.logEntry(base, "INF", tc.turnSeq, tc.llmOpSeq,
-		fmt.Sprintf("session compacted (auto=%t)", data.Auto),
-		map[string]any{"auto": data.Auto})}
-}
-
-// emitRetryLog handles a retry part (adapter-opencode.md §"Per-table emit rules":
-// retry → WRN LogEntry). It records the attempt number.
-func (m *sessionMapper) emitRetryLog(tc *turnContext, p partRow, data partData) []canonical.Event {
-	base := m.nextBase(msToMicros(p.TimeCreatedMs))
-	return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq,
-		fmt.Sprintf("API retry attempt %d", data.Attempt),
-		map[string]any{"attempt": data.Attempt})}
-}
-
-// emitFilePayload handles a file part (adapter-opencode.md §"Per-table emit
-// rules": file → PayloadRef kind=user_attachment, LocationURI=data.url). Unlike
-// the other PayloadRefs (which reference a SQLite field), the file URL is an
-// external location used verbatim. The ref attaches to the turn's most-recent
-// LLM op when one is open; when none is open it is DROPPED (op_id NOT NULL).
-func (m *sessionMapper) emitFilePayload(tc *turnContext, p partRow, data partData) []canonical.Event {
-	if tc.llmOpSeq == 0 || data.URL == "" {
-		return nil
-	}
-	return []canonical.Event{canonical.PayloadRefEvent{
-		EventBase:       m.nextBase(msToMicros(p.TimeCreatedMs)),
-		SessionNativeID: m.nativeID(),
-		TurnSeq:         tc.turnSeq,
-		OpSeq:           tc.llmOpSeq,
-		PayloadKind:     "user_attachment",
-		Format:          "json",
-		LocationURI:     data.URL,
-	}}
-}
-
-// finalizeTurn, the cumulative→delta token math, provider canonicalization, the
-// turnContext op-parent helper, and the PayloadRef URI seam live in
-// mapper_turn.go (split out to keep this file ≤ ~400 lines).
+// The non-op part emitters (emitTextPayload, recordPatch, emitCompactionLog,
+// emitRetryLog, emitFilePayload) live in mapper_emitters.go; finalizeTurn, the
+// cumulative→delta token math, provider canonicalization, the turnContext
+// op-parent helper, and the PayloadRef URI seam live in mapper_turn.go (split out
+// to keep each file ≤400 lines).

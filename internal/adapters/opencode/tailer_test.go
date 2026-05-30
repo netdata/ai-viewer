@@ -108,8 +108,14 @@ func TestScanLoop_BackfillEmitsAll(t *testing.T) {
 		wantMaxID, _ := maxID(ctxBG(), db, table)
 		wantMaxTU, _ := maxTimeUpdated(ctxBG(), db, table)
 		w := cur.Tables[table]
-		if w.MaxID != wantMaxID {
-			t.Errorf("table %q cursor MaxID = %q, want DB max %q", table, w.MaxID, wantMaxID)
+		// After a full backfill the monotonic high-water AND the (time_updated, id)
+		// paging-position id both reach the DB's MAX(id) (the fixture is monotonic,
+		// so the last-paged row carries the greatest id) (SOW-0005 round-2 P1-A).
+		if w.MaxIDSeen != wantMaxID {
+			t.Errorf("table %q cursor MaxIDSeen = %q, want DB max %q", table, w.MaxIDSeen, wantMaxID)
+		}
+		if w.MaxTimeUpdatedID != wantMaxID {
+			t.Errorf("table %q cursor MaxTimeUpdatedID = %q, want DB max %q", table, w.MaxTimeUpdatedID, wantMaxID)
 		}
 		if w.MaxTimeUpdatedMs != wantMaxTU {
 			t.Errorf("table %q cursor MaxTimeUpdatedMs = %d, want DB max %d", table, w.MaxTimeUpdatedMs, wantMaxTU)

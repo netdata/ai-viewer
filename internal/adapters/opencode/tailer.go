@@ -6,10 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -119,12 +116,15 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 	logMissingColumns(logger, schema)
 
 	cur := recordSchemaHash(ctx, db, coerceScanCursor(since), onError)
-	cur, _, err = processChanges(ctx, db, schema, cur, sourceID, out, onError)
+	// SourceProgress is checkpointed by the batch processor (commitBatch),
+	// per-batch, AFTER each batch's affected sessions are emitted — the
+	// checkpoint-after-emit invariant. The trailing emitProgress that used to fire
+	// here was a SECOND emit of the same final cursor and is removed (SOW-0005
+	// round-2 P3-C: one checkpoint layer only). A backfill that pages any rows ends
+	// on a batch that advanced, so at least one checkpoint always fires.
+	cur, _, err = processChanges(ctx, db, schema, cur, sourceID, out, logger, onError)
 	if err != nil {
 		return cur, err
-	}
-	if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
-		return cur, perr
 	}
 	return cur, nil
 }
@@ -182,7 +182,7 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan
 			st.markWALEvent(time.Now())
 			resetTimer(timer, st.nextInterval(time.Now()))
 		case <-timer.C:
-			advanced, perr := pollOnce(ctx, db, schema, &cur, sourceID, &st, out, onError)
+			advanced, perr := pollOnce(ctx, db, schema, &cur, sourceID, &st, out, logger, onError)
 			if perr != nil {
 				if errors.Is(perr, context.Canceled) || errors.Is(perr, context.DeadlineExceeded) {
 					return nil
@@ -198,9 +198,12 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan
 
 // pollOnce runs one poll cycle: the cheap MAX(id) change check per table, the
 // gated MAX(time_updated) probe, and — when either indicates change — the
-// delta+reload+emit path with a SourceProgress checkpoint. Returns whether the
+// delta+reload+emit path. SourceProgress is checkpointed by the batch processor
+// (commitBatch), per batch, AFTER that batch's sessions are emitted; the trailing
+// emitProgress that used to fire here was a SECOND emit of the same cursor and is
+// removed (SOW-0005 round-2 P3-C: one checkpoint layer only). Returns whether the
 // cycle produced a change (so the loop switches to the active cadence).
-func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan<- canonical.Event, onError func(error)) (bool, error) {
+func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (bool, error) {
 	now := time.Now()
 	changed, probed, err := detectChange(ctx, db, schema, *cur, st, now)
 	if err != nil {
@@ -212,15 +215,10 @@ func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, so
 	if !changed {
 		return false, nil
 	}
-	next, advanced, perr := processChanges(ctx, db, schema, *cur, sourceID, out, onError)
+	next, advanced, perr := processChanges(ctx, db, schema, *cur, sourceID, out, logger, onError)
 	*cur = next
 	if perr != nil {
 		return advanced, perr
-	}
-	if advanced {
-		if cperr := emitProgress(ctx, sourceID, *cur, out); cperr != nil {
-			return advanced, cperr
-		}
 	}
 	return advanced, nil
 }
@@ -231,14 +229,24 @@ func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, so
 // (shouldProbeTimeUpdated). The second return reports whether the probe ran (so
 // the caller records lastProbe). A table on an old schema without time_updated
 // is checked by MAX(id) alone.
+//
+// The cheap path compares MAX(id) against MaxIDSeen — the MONOTONIC high-water,
+// NOT the (time_updated, id) paging position (SOW-0005 round-2 P1-A). The
+// pre-P1-A code compared against the paging-position id, which an in-place
+// UPDATE of an OLD row regressed to a small value, leaving MAX(id) permanently
+// greater so this "cheap" path falsely reported a change on every idle poll →
+// the expensive (time_updated, id) full scan ran forever. Comparing against the
+// never-regressing MaxIDSeen makes an INSERT the only thing this path fires on;
+// in-place mutations of existing rows are caught only by the gated
+// MAX(time_updated) probe below, exactly as AC#6 intends.
 func detectChange(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, st *pollState, now time.Time) (changed, probed bool, err error) {
-	// Cheap path: MAX(id) per table.
+	// Cheap path: MAX(id) per table vs the monotonic high-water.
 	for _, table := range trackedTables {
 		mid, mErr := maxID(ctx, db, table)
 		if mErr != nil {
 			return false, false, mErr
 		}
-		if mid > cur.Tables[table].MaxID {
+		if mid > cur.Tables[table].MaxIDSeen {
 			return true, false, nil
 		}
 	}
@@ -310,87 +318,5 @@ func logMissingColumns(logger *slog.Logger, schema schemaSet) {
 	}
 }
 
-// watchWAL sets up a best-effort fsnotify watch on the opencode.db-wal companion
-// path and returns a channel that fires (a bare struct{}) on each Write/Chmod
-// event plus a close func. It is a WAKEUP HINT ONLY: a missing WAL file, an Add
-// failure, or a watcher error is reported once via onError and yields a closed
-// channel so the caller falls back to pure timer polling. The watch is on the
-// PARENT directory (the WAL file may not exist yet, and watching a not-yet-
-// existing file fails); events are filtered to the WAL basename.
-func watchWAL(dbPath string, onError func(error)) (<-chan struct{}, func()) {
-	walPath := dbPath + "-wal"
-	dir := filepath.Dir(walPath)
-	walBase := filepath.Base(walPath)
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		onError(fmt.Errorf("opencode: wal watcher (falling back to timer polling): %w", err))
-		return closedHintChan(), func() {}
-	}
-	if aerr := watcher.Add(dir); aerr != nil {
-		onError(fmt.Errorf("opencode: watch wal dir %s (falling back to timer polling): %w", dir, aerr))
-		_ = watcher.Close()
-		return closedHintChan(), func() {}
-	}
-
-	hint := make(chan struct{}, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(hint)
-		for {
-			select {
-			case <-done:
-				return
-			case ev, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if filepath.Base(ev.Name) != walBase {
-					continue
-				}
-				if ev.Op&(fsnotify.Write|fsnotify.Chmod|fsnotify.Create) == 0 {
-					continue
-				}
-				// Non-blocking notify: a pending hint already wakes the next poll.
-				select {
-				case hint <- struct{}{}:
-				default:
-				}
-			case werr, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				// A watcher error never terminates the tail loop; report and
-				// keep the watch (or let the timer net carry it).
-				onError(fmt.Errorf("opencode: wal watcher error: %w", werr))
-			}
-		}
-	}()
-
-	closeWatch := func() {
-		close(done)
-		_ = watcher.Close()
-	}
-	return hint, closeWatch
-}
-
-// closedHintChan returns an already-closed hint channel, used when the WAL watch
-// cannot be established so the tail loop falls back to pure timer polling.
-func closedHintChan() <-chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
-}
-
-// resetTimer safely resets a timer to fire after d, draining any pending fire so
-// the next select sees only the new deadline (the standard time.Timer reset
-// idiom).
-func resetTimer(t *time.Timer, d time.Duration) {
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
-	}
-	t.Reset(d)
-}
+// The WAL fsnotify wakeup-hint machinery (watchWAL/closedHintChan) and the
+// resetTimer idiom live in tailer_wal.go (split to keep each file ≤400 lines).

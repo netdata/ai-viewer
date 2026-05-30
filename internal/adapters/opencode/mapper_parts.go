@@ -49,6 +49,17 @@ type turnContext struct {
 	// be re-emitted onto the LLM op at step-finish via an idempotent OpStarted
 	// re-emit (mirrors codex's enrichment re-emit; the writer upserts (turn,seq)).
 	llmExtras map[string]any
+	// llmName / llmModel / llmProvider / llmProviderAlias snapshot the open LLM op's
+	// identity (from the assistant message) so the patch-enrichment OpStarted
+	// re-emit in closeLLMOp is SELF-CONTAINED. The ingest writer updates ops.name
+	// UNCONDITIONALLY (model/provider are COALESCE-protected, name is NOT — writer.go
+	// :587), so a re-emit that omitted Name would BLANK ops.name. Carrying the full
+	// identity makes the re-emit survive the unconditional update (SOW-0005 round-2
+	// P2-D).
+	llmName          string
+	llmModel         string
+	llmProvider      string
+	llmProviderAlias string
 
 	// stepCumIdx is the index of the NEXT step-finish within the message, used
 	// to address the precomputed per-step deltas. The deltas are computed once
@@ -105,7 +116,7 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 	m.turnSeq++
 	tc := &turnContext{
 		turnSeq:    m.turnSeq,
-		stepDeltas: computeStepDeltas(stepFinishTokens(mwp.Parts)),
+		stepDeltas: computeStepDeltas(stepFinishTokens(mwp.Parts), m.mwarn),
 	}
 	startUs := msToMicros(mwp.Message.TimeCreatedMs)
 	out := make([]canonical.Event, 0, 4+2*len(mwp.Parts))
@@ -144,10 +155,19 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 		out = append(out, m.finalizeTurn(tc, &data, mwp.Message))
 	}
 
-	// Record the failed-terminal signal for the session (last error wins).
-	if data.Error != nil && data.Error.Name != "" {
+	// Track the session's failed-terminal signal as the LAST assistant turn's
+	// terminal error, NOT a sticky OR (SOW-0005 round-2 P1-B). Messages are walked
+	// in order, so: if THIS turn carries an error, record it (error PRESENCE, not a
+	// non-empty name — P2-A); if it does NOT, CLEAR any previously-tracked error
+	// (a later turn recovered, so the session did not end failed). sessionFinalized
+	// then reflects only the last turn's state — a session that errored on turn 3
+	// but succeeded on turn 5 is NOT marked failed.
+	if data.Error != nil {
 		m.failError = data.Error
 		m.failEndUs = turnEndUs(&data, mwp.Message)
+	} else {
+		m.failError = nil
+		m.failEndUs = 0
 	}
 	return out, nil
 }

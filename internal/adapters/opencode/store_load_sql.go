@@ -37,6 +37,19 @@ func selectByColumn(s tableSchema, col, orderBy string) string {
 		" WHERE " + quoteIdent(col) + " = ? ORDER BY " + orderBy
 }
 
+// selectPartsByMessageIDs builds the old-schema fallback part query (SOW-0005
+// round-2 P2-B): "SELECT <present> FROM part WHERE message_id IN (?,?,...) ORDER
+// BY (message_id, id)" with n placeholders. Used only when the part table lacks
+// the denormalized session_id (a hypothetical very old schema). n must be > 0;
+// the caller guarantees it (an empty message set never queries). The placeholders
+// are positional binds, never interpolated values, so this is injection-safe.
+func selectPartsByMessageIDs(s tableSchema, n int) string {
+	placeholders := strings.Repeat("?, ", n-1) + "?"
+	return "SELECT " + presentColsSQL(s) + " FROM " + quoteIdent(s.Table) +
+		" WHERE " + quoteIdent("message_id") + " IN (" + placeholders + ")" +
+		" ORDER BY " + quoteIdent("message_id") + ", " + quoteIdent("id")
+}
+
 // messageOrderBy returns the message ordering key: "time_created", "id" when the
 // schema has time_created (every observed schema does), else "id" alone. The
 // mapper requires assistant messages in (time_created, id) order

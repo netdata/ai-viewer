@@ -47,6 +47,13 @@ type sessionRow struct {
 	TimeCreatedMs  int64
 	TimeUpdatedMs  int64
 	TimeArchivedMs int64 // 0 => not archived; set => SessionFinalized completed
+	// TimeCompactingMs is non-zero WHILE a compaction is running on this session
+	// (opencode sets session.time_compacting). The tailer PAUSES emitting a
+	// session's tree while this is non-zero — compaction reshapes message/part rows,
+	// so reading mid-compaction would emit partial/stale content. It re-emits once
+	// the column clears (its time_updated bumps, re-surfacing the session in a later
+	// delta) (adapter-opencode.md §"Edge Cases" #8; SOW-0005 round-2 P2-E).
+	TimeCompactingMs int64
 }
 
 // messageRow is one row of the message table. data is the raw discriminated

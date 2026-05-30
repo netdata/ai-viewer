@@ -57,15 +57,19 @@ func TestDeltaQuery_WatermarkFilters(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("from zero: got %d messages, want 3", len(got))
 	}
-	if delta.watermark.MaxTimeUpdatedMs != 300 || delta.watermark.MaxID != "msg_3" {
-		t.Errorf("advanced watermark = %+v, want {300, msg_3}", delta.watermark)
+	if delta.watermark.MaxTimeUpdatedMs != 300 || delta.watermark.MaxTimeUpdatedID != "msg_3" {
+		t.Errorf("advanced paging position = %+v, want {300, msg_3}", delta.watermark)
+	}
+	// The monotonic high-water also reaches the greatest id paged (P1-A).
+	if delta.watermark.MaxIDSeen != "msg_3" {
+		t.Errorf("advanced MaxIDSeen = %q, want msg_3", delta.watermark.MaxIDSeen)
 	}
 	if delta.rowCount != 3 {
 		t.Errorf("rowCount = %d, want 3", delta.rowCount)
 	}
 
 	// From msg_2's watermark: only msg_3.
-	got2, _ := scanMessagesFrom(t, db, schema, TableWatermark{MaxTimeUpdatedMs: 200, MaxID: "msg_2"})
+	got2, _ := scanMessagesFrom(t, db, schema, TableWatermark{MaxTimeUpdatedMs: 200, MaxTimeUpdatedID: "msg_2"})
 	if len(got2) != 1 || got2[0].ID != "msg_3" {
 		t.Fatalf("from {200,msg_2}: got %+v, want [msg_3]", ids(got2))
 	}
@@ -88,13 +92,13 @@ func TestDeltaQuery_TieBreak(t *testing.T) {
 
 	// From {500, msg_a}: the tiebreak must return only msg_b (id > msg_a at the
 	// same time_updated), NOT re-return msg_a.
-	got, _ := scanMessagesFrom(t, db, schema, TableWatermark{MaxTimeUpdatedMs: 500, MaxID: "msg_a"})
+	got, _ := scanMessagesFrom(t, db, schema, TableWatermark{MaxTimeUpdatedMs: 500, MaxTimeUpdatedID: "msg_a"})
 	if len(got) != 1 || got[0].ID != "msg_b" {
 		t.Fatalf("tiebreak from {500,msg_a}: got %v, want [msg_b]", ids(got))
 	}
 
 	// From {500, ""} (empty id at that time): both rows return.
-	gotBoth, _ := scanMessagesFrom(t, db, schema, TableWatermark{MaxTimeUpdatedMs: 499, MaxID: ""})
+	gotBoth, _ := scanMessagesFrom(t, db, schema, TableWatermark{MaxTimeUpdatedMs: 499, MaxTimeUpdatedID: ""})
 	if len(gotBoth) != 2 {
 		t.Fatalf("from {499,\"\"}: got %d, want 2", len(gotBoth))
 	}
@@ -138,8 +142,8 @@ func TestDeltaQuery_PagesBeyond1000(t *testing.T) {
 	if delta.rowCount != total {
 		t.Errorf("rowCount = %d, want %d", delta.rowCount, total)
 	}
-	if delta.watermark.MaxID != fmtID("msg", total) || delta.watermark.MaxTimeUpdatedMs != int64(total) {
-		t.Errorf("final watermark = %+v, want {%d, %s}", delta.watermark, total, fmtID("msg", total))
+	if delta.watermark.MaxTimeUpdatedID != fmtID("msg", total) || delta.watermark.MaxTimeUpdatedMs != int64(total) || delta.watermark.MaxIDSeen != fmtID("msg", total) {
+		t.Errorf("final watermark = %+v, want paging {%d, %s} + MaxIDSeen %s", delta.watermark, total, fmtID("msg", total), fmtID("msg", total))
 	}
 	// Rows must be globally ordered by (time_updated, id) across page seams.
 	for i := 1; i < len(got); i++ {

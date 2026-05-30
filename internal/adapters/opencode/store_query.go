@@ -138,7 +138,7 @@ func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWaterm
 	// Rollback a no-op (database/sql ignores rollback after commit).
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, query, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedMs, from.MaxID)
+	rows, err := tx.QueryContext(ctx, query, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedID)
 	if err != nil {
 		return pageResult{}, fmt.Errorf("opencode: delta query: %w", err)
 	}
@@ -159,9 +159,14 @@ func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWaterm
 }
 
 // iterDeltaPage walks one page's rows, delegating each row's column scan to
-// onRow and advancing the page watermark from the (id, time_updated) onRow
-// reports. Both fields advance: time_updated is always present on a tracked
-// table.
+// onRow and advancing the watermark from each row's (id, time_updated). The
+// PAGING POSITION (MaxTimeUpdatedMs, MaxTimeUpdatedID) is set to the last-paged
+// row (rows arrive in (time_updated, id) order, so the last row is the max
+// position). MaxIDSeen is raised MONOTONICALLY to the greatest id seen — never
+// regressing — so an in-place UPDATE of an OLD row (which sorts LAST by
+// time_updated but carries a small id) advances the paging position WITHOUT
+// pulling the cheap-detect high-water backwards (SOW-0005 round-2 P1-A). time_
+// updated is always present on a tracked table, so both position fields advance.
 func iterDeltaPage(ctx context.Context, rows *sql.Rows, res *pageResult, onRow func(rows *sql.Rows) (rowKey, error)) error {
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
@@ -173,7 +178,8 @@ func iterDeltaPage(ctx context.Context, rows *sql.Rows, res *pageResult, onRow f
 		}
 		res.n++
 		res.watermark.MaxTimeUpdatedMs = key.timeUpdatedMs
-		res.watermark.MaxID = key.id
+		res.watermark.MaxTimeUpdatedID = key.id
+		res.watermark = res.watermark.advanceMaxIDSeen(key.id)
 	}
 	return nil
 }

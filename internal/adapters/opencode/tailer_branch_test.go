@@ -32,7 +32,7 @@ func TestReloadAndEmit_SessionGoneSkipped(t *testing.T) {
 	out := make(chan canonical.Event, 256)
 	var ce collectErrs
 	// "ses_ghost" has no session row → errSessionGone; "ses_real" emits normally.
-	err := reloadAndEmit(ctxBG(), db, schema, "opencode:test", []string{"ses_ghost", "ses_real"}, out, ce.onError)
+	err := reloadAndEmit(ctxBG(), db, schema, "opencode:test", []string{"ses_ghost", "ses_real"}, out, silentLogger(), ce.onError)
 	if err != nil {
 		t.Fatalf("reloadAndEmit: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestReloadAndEmit_CtxCancel(t *testing.T) {
 	cancel()
 	out := make(chan canonical.Event) // unbuffered; a non-ctx-aware emit would hang
 	var ce collectErrs
-	err := reloadAndEmit(ctx, db, schema, "opencode:test", []string{"ses_real"}, out, ce.onError)
+	err := reloadAndEmit(ctx, db, schema, "opencode:test", []string{"ses_real"}, out, silentLogger(), ce.onError)
 	if !isContextErr(err) {
 		t.Fatalf("reloadAndEmit(cancelled) = %v, want context error", err)
 	}
@@ -126,11 +126,11 @@ func TestProcessChanges_NoChange(t *testing.T) {
 	for _, table := range trackedTables {
 		mid, _ := maxID(ctxBG(), db, table)
 		mtu, _ := maxTimeUpdated(ctxBG(), db, table)
-		cur = cur.withTable(table, TableWatermark{MaxID: mid, MaxTimeUpdatedMs: mtu})
+		cur = cur.withTable(table, TableWatermark{MaxIDSeen: mid, MaxTimeUpdatedMs: mtu, MaxTimeUpdatedID: mid})
 	}
 
 	out := make(chan canonical.Event, 256)
-	next, advanced, err := processChanges(ctxBG(), db, schema, cur, "opencode:test", out, func(error) {})
+	next, advanced, err := processChanges(ctxBG(), db, schema, cur, "opencode:test", out, silentLogger(), func(error) {})
 	if err != nil {
 		t.Fatalf("processChanges: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestProcessChanges_BatchedCheckpoint(t *testing.T) {
 	db, schema := introspect(t, path)
 	out := make(chan canonical.Event, 8192)
 	var ce collectErrs
-	_, advanced, err := processChanges(ctxBG(), db, schema, newCursor(), "opencode:test", out, ce.onError)
+	_, advanced, err := processChanges(ctxBG(), db, schema, newCursor(), "opencode:test", out, silentLogger(), ce.onError)
 	if err != nil {
 		t.Fatalf("processChanges: %v", err)
 	}
@@ -203,7 +203,8 @@ func lastKind(evs []canonical.Event) canonical.EventKind {
 }
 
 // TestDetectChange_TimeUpdatedPath asserts an in-place mutation (time_updated
-// bumped, MaxID unchanged) is caught only via the gated MAX(time_updated) probe.
+// bumped, id already covered by MaxIDSeen) is caught only via the gated
+// MAX(time_updated) probe, never the cheap MAX(id) path (SOW-0005 round-2 P1-A).
 func TestDetectChange_TimeUpdatedPath(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -214,11 +215,14 @@ func TestDetectChange_TimeUpdatedPath(t *testing.T) {
 	}
 	db, schema := introspect(t, path)
 
-	// Cursor at the current MaxID but a LOWER time_updated watermark, simulating
-	// an in-place row update (same id, bumped time_updated) we have not seen.
+	// Cursor whose monotonic high-water (MaxIDSeen) already saw the current MAX(id)
+	// but whose time_updated paging position is LOWER, simulating an in-place row
+	// update (same id, bumped time_updated) we have not yet paged. The cheap MAX(id)
+	// check must NOT fire (MaxIDSeen already covers the id); only the gated
+	// MAX(time_updated) probe catches the mutation (SOW-0005 round-2 P1-A).
 	cur := newCursor()
 	mid, _ := maxID(ctxBG(), db, "session")
-	cur = cur.withTable("session", TableWatermark{MaxID: mid, MaxTimeUpdatedMs: 50})
+	cur = cur.withTable("session", TableWatermark{MaxIDSeen: mid, MaxTimeUpdatedMs: 50, MaxTimeUpdatedID: mid})
 
 	st := newPollState() // zero lastProbe ⇒ gate open (net immediately due)
 	changed, probed, err := detectChange(ctxBG(), db, schema, cur, &st, time.Unix(1_700_000_000, 0))

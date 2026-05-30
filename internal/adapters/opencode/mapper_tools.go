@@ -17,11 +17,16 @@ func toolStartUs(data partData, p partRow) int64 {
 	return msToMicros(p.TimeCreatedMs)
 }
 
-// toolTerminal derives a tool op's terminal status, end timestamp, error
-// message, and whether an output body exists, from state.status/time/error/output
-// (adapter-opencode.md §"Tool calls and Models"). A running/pending state has no
-// end (endPtr nil → no finalize). completed/error carry an end and an output
-// body (error carries state.error as the message).
+// toolTerminal derives a tool op's CANONICAL terminal status, end timestamp,
+// error message, and whether an output body exists, from
+// state.status/time/error/output (adapter-opencode.md §"Tool calls and Models").
+// The returned status is ALWAYS in the canonical op-status set
+// (running|completed|failed|cancelled|truncated — canonical-events.md:196):
+// opencode's "error" maps to canonical "failed" (SOW-0005 round-2 P1-C; the raw
+// "error" string is NOT a canonical status and breaks status consumers), and an
+// unknown future opencode status maps to "completed" once it carries an end
+// (it finished) else "" (running, no finalize). A running/pending state has no
+// end (endPtr nil → no finalize). failed carries state.error as the message.
 func toolTerminal(data partData) (status string, endPtr *int64, errMsg string, hasOutput bool) {
 	if data.State == nil {
 		return "", nil, "", false
@@ -31,19 +36,24 @@ func toolTerminal(data partData) (status string, endPtr *int64, errMsg string, h
 	case "completed":
 		return "completed", st.Time.End, "", st.Output != ""
 	case "error":
-		return "error", st.Time.End, st.Error, st.Output != "" || st.Error != ""
+		// opencode "error" → canonical "failed" (the only valid terminal-error op
+		// status); the detail rides in errMsg → OpFinalizedEvent.ErrorMessage.
+		return "failed", st.Time.End, st.Error, st.Output != "" || st.Error != ""
 	case "running", "pending":
 		// In-flight: OpStarted only, no finalize (adapter-opencode.md §"Edge
 		// Cases" #4). A later poll observing the part now completed re-emits the
-		// whole tree and finalizes it (chunk C).
-		return st.Status, nil, "", false
+		// whole tree and finalizes it (chunk C). No canonical status is emitted
+		// (endPtr nil suppresses the finalize), so the raw "running"/"pending"
+		// string is never surfaced AS a canonical op status.
+		return "", nil, "", false
 	default:
-		// Unknown status: treat as completed-with-end when an end exists, else
-		// running. Forward-compat — a new opencode tool-state status decodes here.
+		// Unknown future opencode status: keep the emitted status canonical. If it
+		// carries an end it finished → "completed"; otherwise leave it running (no
+		// finalize). Never surface the raw opencode string as a canonical status.
 		if st.Time.End != nil {
-			return st.Status, st.Time.End, st.Error, st.Output != ""
+			return "completed", st.Time.End, st.Error, st.Output != ""
 		}
-		return st.Status, nil, "", false
+		return "", nil, "", false
 	}
 }
 

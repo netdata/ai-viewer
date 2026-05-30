@@ -30,7 +30,7 @@ func TestPollOnce_ProductiveCycle(t *testing.T) {
 	out := make(chan canonical.Event, 256)
 	cur := newCursor()
 	st := newPollState()
-	advanced, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, func(error) {})
+	advanced, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
 	if err != nil {
 		t.Fatalf("pollOnce: %v", err)
 	}
@@ -44,15 +44,17 @@ func TestPollOnce_ProductiveCycle(t *testing.T) {
 	if n := countKind(got, canonical.EvSourceProgress); n < 1 {
 		t.Errorf("productive pollOnce emitted %d SourceProgress, want >= 1", n)
 	}
-	// The cursor must have advanced past the inserted rows.
-	if cur.Tables["session"].MaxID != "ses_a" {
-		t.Errorf("cursor session MaxID = %q, want ses_a", cur.Tables["session"].MaxID)
+	// The cursor must have advanced past the inserted rows: the monotonic
+	// high-water (which gates the second no-op poll's cheap MAX(id) check) reaches
+	// the inserted session id (SOW-0005 round-2 P1-A).
+	if cur.Tables["session"].MaxIDSeen != "ses_a" {
+		t.Errorf("cursor session MaxIDSeen = %q, want ses_a", cur.Tables["session"].MaxIDSeen)
 	}
 
 	// A SECOND pollOnce over the now-current cursor is a no-op (advanced=false,
 	// nothing emitted) — proves the cheap MAX(id) gate closes after catch-up.
 	out2 := make(chan canonical.Event, 16)
-	adv2, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out2, func(error) {})
+	adv2, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out2, silentLogger(), func(error) {})
 	if err != nil {
 		t.Fatalf("pollOnce (second): %v", err)
 	}
@@ -115,7 +117,7 @@ func TestReloadAndEmit_GenericErrorViaOnError(t *testing.T) {
 
 	out := make(chan canonical.Event, 16)
 	var ce collectErrs
-	err := reloadAndEmit(ctxBG(), db, schema, "opencode:test", []string{"ses_a"}, out, ce.onError)
+	err := reloadAndEmit(ctxBG(), db, schema, "opencode:test", []string{"ses_a"}, out, silentLogger(), ce.onError)
 	if err != nil {
 		t.Fatalf("reloadAndEmit should surface the load error via onError, not return it: %v", err)
 	}

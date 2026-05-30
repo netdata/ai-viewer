@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -32,6 +33,7 @@ type batchProcessor struct {
 	schema   schemaSet
 	sourceID string
 	out      chan<- canonical.Event
+	logger   *slog.Logger
 	onError  func(error)
 
 	// committed is the last cursor whose every affected session has been emitted.
@@ -145,7 +147,7 @@ func (bp *batchProcessor) collectBatch(ctx context.Context) (batchResult, error)
 // advanced.
 func (bp *batchProcessor) commitBatch(ctx context.Context, batch batchResult) error {
 	if len(batch.affected) > 0 {
-		if err := reloadAndEmit(ctx, bp.db, bp.schema, bp.sourceID, batch.affected, bp.out, bp.onError); err != nil {
+		if err := reloadAndEmit(ctx, bp.db, bp.schema, bp.sourceID, batch.affected, bp.out, bp.logger, bp.onError); err != nil {
 			return err
 		}
 	}

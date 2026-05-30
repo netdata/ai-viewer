@@ -34,7 +34,7 @@ func TestDetectChange_NoIdleMaxTimeUpdated(t *testing.T) {
 	for _, table := range trackedTables {
 		mid, _ := maxID(ctxBG(), db, table)
 		mtu, _ := maxTimeUpdated(ctxBG(), db, table)
-		cur = cur.withTable(table, TableWatermark{MaxID: mid, MaxTimeUpdatedMs: mtu})
+		cur = cur.withTable(table, TableWatermark{MaxIDSeen: mid, MaxTimeUpdatedMs: mtu, MaxTimeUpdatedID: mid})
 	}
 
 	// Reset the recorded SQL AFTER the watermark-priming queries above so we only
@@ -90,7 +90,7 @@ func TestDetectChange_GateOpenRunsProbe(t *testing.T) {
 	for _, table := range trackedTables {
 		mid, _ := maxID(ctxBG(), db, table)
 		mtu, _ := maxTimeUpdated(ctxBG(), db, table)
-		cur = cur.withTable(table, TableWatermark{MaxID: mid, MaxTimeUpdatedMs: mtu})
+		cur = cur.withTable(table, TableWatermark{MaxIDSeen: mid, MaxTimeUpdatedMs: mtu, MaxTimeUpdatedID: mid})
 	}
 	log.reset()
 

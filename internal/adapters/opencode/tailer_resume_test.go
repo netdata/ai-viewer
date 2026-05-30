@@ -187,7 +187,7 @@ func TestProcessChanges_CheckpointAfterEmit_NoLoss(t *testing.T) {
 		}
 	}()
 
-	cur1, _, _ := processChanges(ctx, db, schema, newCursor(), "opencode:x", out, func(error) {})
+	cur1, _, _ := processChanges(ctx, db, schema, newCursor(), "opencode:x", out, silentLogger(), func(error) {})
 	close(out)
 	<-doneConsume
 
@@ -205,7 +205,7 @@ func TestProcessChanges_CheckpointAfterEmit_NoLoss(t *testing.T) {
 
 	// Resume from the persisted cursor with a fresh (uncancelled) context.
 	out2 := make(chan canonical.Event, 8192)
-	if _, _, err := processChanges(ctxBG(), db, schema, reparsed, "opencode:x", out2, func(error) {}); err != nil {
+	if _, _, err := processChanges(ctxBG(), db, schema, reparsed, "opencode:x", out2, silentLogger(), func(error) {}); err != nil {
 		t.Fatalf("resume processChanges: %v", err)
 	}
 	for _, ev := range drainAll(out2) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -38,12 +39,13 @@ import (
 // Re-emitting an unchanged/partly-changed session is harmless: the ingester's
 // idempotent upserts + the post-SOW-0004 idempotent catalog absorb it
 // (adapter-opencode.md §"Read Strategy" → "Full-session-tree load + map").
-func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, sourceID string, out chan<- canonical.Event, onError func(error)) (Cursor, bool, error) {
+func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, sourceID string, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (Cursor, bool, error) {
 	bp := &batchProcessor{
 		db:         db,
 		schema:     schema,
 		sourceID:   sourceID,
 		out:        out,
+		logger:     orDefaultLogger(logger),
 		onError:    onError,
 		committed:  cur,                 // last cursor whose sessions are fully emitted
 		msgSession: map[string]string{}, // accumulates across batches (part→session fallback)
@@ -155,17 +157,23 @@ func warnUnknownSessionMessageType(id, typ string, onError func(error)) {
 // between the delta and the load, or an orphaned part/message) is skipped with
 // one structured error and the cycle continues with the rest
 // (adapter-opencode.md §"Read Strategy"). ctx cancellation stops promptly.
-func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID string, affected []string, out chan<- canonical.Event, onError func(error)) error {
+func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID string, affected []string, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) error {
 	for _, sid := range affected {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		evs, err := loadAndMapSession(ctx, db, schema, sourceID, sid, onError)
+		evs, skipped, err := loadAndMapSession(ctx, db, schema, sourceID, sid, logger, onError)
 		if err != nil {
 			if isContextErr(err) {
 				return err
 			}
 			onError(err)
+			continue
+		}
+		if skipped {
+			// Session paused mid-compaction (time_compacting non-NULL). It is NOT
+			// emitted this cycle and re-surfaces in a later delta when the column
+			// clears (its time_updated bumps) — adapter-opencode.md §"Edge Cases" #8.
 			continue
 		}
 		if evs == nil {
@@ -181,27 +189,40 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 }
 
 // loadAndMapSession loads one session's row + full ordered tree and maps it,
-// returning the mapped events. A nil event slice (with nil error) means the
-// session row was not found (the caller surfaces errSessionGone). The mapper uses
-// the deterministic default PayloadRef URI builder (the production tailer path
-// injects no builder; defaultPayloadURI is the single source of truth). It also
-// resolves the session's TRUE tree root by walking the parent_id chain
-// (resolveRootID, SOW-0005 P2.4) and injects it so a nested sub-agent's
-// RootNativeID is the whole tree's root rather than its direct parent.
-func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, sourceID, sessionID string, onError func(error)) ([]canonical.Event, error) {
+// returning (events, skipped, error). skipped=true means the session is paused
+// mid-compaction (time_compacting non-NULL) and must NOT be emitted this cycle
+// (SOW-0005 round-2 P2-E / adapter-opencode.md §"Edge Cases" #8); the caller
+// continues without emitting and the session re-surfaces when the column clears.
+// A nil event slice with skipped=false (and nil error) means the session row was
+// not found (the caller surfaces errSessionGone). The mapper uses the
+// deterministic default PayloadRef URI builder (the production tailer path injects
+// no builder; defaultPayloadURI is the single source of truth). It also resolves
+// the session's TRUE tree root by walking the parent_id chain (resolveRootID,
+// SOW-0005 P2.4) and injects it so a nested sub-agent's RootNativeID is the whole
+// tree's root rather than its direct parent.
+func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, sourceID, sessionID string, logger *slog.Logger, onError func(error)) (evs []canonical.Event, skipped bool, err error) {
 	s, ok, err := loadSession(ctx, db, schema, sessionID, onError)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !ok {
-		return nil, nil
+		return nil, false, nil
+	}
+	if s.TimeCompactingMs > 0 {
+		// Pause: compaction is reshaping this session's message/part rows, so reading
+		// now would emit partial/stale content. Skip emitting this cycle; the session
+		// re-appears in a later delta when time_compacting clears (P2-E).
+		orDefaultLogger(logger).Info("opencode: session compaction in progress; skipping tree emit this cycle (re-emits when time_compacting clears)",
+			"session_id", sessionID)
+		return nil, true, nil
 	}
 	tree, err := loadSessionTree(ctx, db, schema, sessionID, onError)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	root := resolveRootID(ctx, db, s.ID, s.ParentID, onError)
-	return mapSession(sourceID, s, tree, WithRootNativeID(root), WithOnWarn(onError))
+	evs, err = mapSession(sourceID, s, tree, WithRootNativeID(root), WithOnWarn(onError))
+	return evs, false, err
 }
 
 // watermarkAdvanced reports whether b is strictly after a on the composite

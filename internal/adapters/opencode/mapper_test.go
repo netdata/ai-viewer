@@ -422,7 +422,7 @@ func TestComputeStepDeltas_AC3(t *testing.T) {
 		{Input: 250, Output: 25, Reasoning: 3, Cache: cacheTokens{Read: 2500, Write: 5}},
 		{Input: 410, Output: 40, Reasoning: 6, Cache: cacheTokens{Read: 4100, Write: 5}},
 	}
-	got := computeStepDeltas(cums)
+	got := computeStepDeltas(cums, nil)
 	wantIn := []int64{100, 150, 160}
 	wantOut := []int64{10, 15, 15}
 	wantReason := []int64{1, 2, 3}
@@ -460,7 +460,7 @@ func TestComputeStepDeltas_NonMonotonicClampsToZero(t *testing.T) {
 		{Input: 100}, // regression
 		{Input: 150},
 	}
-	got := computeStepDeltas(cums)
+	got := computeStepDeltas(cums, nil)
 	want := []int64{300, 0, 50}
 	for i := range got {
 		if got[i].Input != want[i] {
@@ -470,7 +470,7 @@ func TestComputeStepDeltas_NonMonotonicClampsToZero(t *testing.T) {
 }
 
 func TestComputeStepDeltas_Empty(t *testing.T) {
-	if got := computeStepDeltas(nil); len(got) != 0 {
+	if got := computeStepDeltas(nil, nil); len(got) != 0 {
 		t.Fatalf("computeStepDeltas(nil) len = %d want 0", len(got))
 	}
 }
@@ -572,6 +572,11 @@ func TestMapSession_ToolOpBuiltinNoNamespace(t *testing.T) {
 	}
 }
 
+// TestMapSession_ToolOpStatusError pins P1-C (SOW-0005 round-2): an opencode tool
+// whose state.status == "error" must finalize with the CANONICAL op status
+// "failed" (NOT the non-canonical "error"), carrying the opencode detail in
+// ErrorClass (a class label) + ErrorMessage (state.error). canonical op statuses
+// are running|completed|failed|cancelled|truncated (canonical-events.md:196).
 func TestMapSession_ToolOpStatusError(t *testing.T) {
 	s := rootSession("ses_x", 0)
 	end := int64(2500)
@@ -593,17 +598,26 @@ func TestMapSession_ToolOpStatusError(t *testing.T) {
 	}
 	evs := run(t, s, msgs)
 	fin := opFinals(evs)
-	var toolFin *canonical.OpFinalizedEvent
+	// No finalize may carry the non-canonical "error" status.
 	for i := range fin {
 		if fin[i].Status == "error" {
+			t.Fatalf("tool OpFinalized carries non-canonical status %q (P1-C: must be 'failed')", fin[i].Status)
+		}
+	}
+	var toolFin *canonical.OpFinalizedEvent
+	for i := range fin {
+		if fin[i].Status == "failed" {
 			toolFin = &fin[i]
 		}
 	}
 	if toolFin == nil {
-		t.Fatalf("no tool OpFinalized with status=error in %d finals", len(fin))
+		t.Fatalf("no tool OpFinalized with status=failed in %d finals (P1-C: opencode 'error' → canonical 'failed')", len(fin))
 	}
 	if toolFin.ErrorMessage != "boom" {
 		t.Fatalf("tool error message = %q want boom", toolFin.ErrorMessage)
+	}
+	if toolFin.ErrorClass != defaultErrorClass {
+		t.Fatalf("tool ErrorClass = %q want %q (P1-C carries a class label)", toolFin.ErrorClass, defaultErrorClass)
 	}
 }
 

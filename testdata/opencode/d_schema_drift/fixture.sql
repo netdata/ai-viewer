@@ -1,11 +1,12 @@
 -- d_schema_drift: a pre-20260510033149_session_usage opencode schema. The
 -- session table LACKS the optional columns added by later migrations:
 --   agent, model, cost, tokens_input, tokens_output, tokens_reasoning,
---   tokens_cache_read, tokens_cache_write, time_archived (9 columns).
+--   tokens_cache_read, tokens_cache_write, time_archived, time_compacting
+--   (10 columns; time_compacting added to the wanted set in SOW-0005 round-2 P2-E).
 -- It keeps the REQUIRED id/time_created/time_updated (+ the always-present
 -- project_id/parent_id/slug/directory/title/version), so introspectAll must
 -- ACCEPT it (graceful degrade — adapter-opencode.md "Edge Cases" #1, AC#5), the
--- dynamic SELECT must OMIT the 9 missing columns (never SELECT *), and the
+-- dynamic SELECT must OMIT the missing columns (never SELECT *), and the
 -- emitted events must carry empty/zero session-level values for them:
 --   SessionStarted.Model="" (session.model absent), .AgentName="" (session.agent
 --   absent), and Extras WITHOUT providerID/variant (both come from session.model).
@@ -14,13 +15,16 @@
 -- touch — so the op still carries Provider=anthropic/Model=claude-x and the turn
 -- still carries its tokens.
 --
--- NOTE (chunk-E finding, reported to the orchestrator): the spec/AC#5 promise of
--- "one INF log per missing optional column" is NOT yet wired in production
--- (tableSchema.Missing is computed in store.go but consumed nowhere; the Adapter
--- .logger is never used to log it). This fixture therefore pins the graceful
--- DEGRADE (accept + omit-columns + zero values), and golden_invariants_test.go
--- documents the absent INF as a real gap rather than faking an expected.logs.
--- All ids/timestamps synthetic.
+-- The spec/AC#5 promise of "one INF log per missing optional column" IS wired in
+-- production: tailer.go logMissingColumns iterates tableSchema.Missing right
+-- after introspectAll in both scanLoop and tailLoop, emitting one INFO per
+-- (table, column) via the Adapter.logger threaded from adapter.go Scan/Tail.
+-- This fixture pins both halves: the graceful DEGRADE (accept + omit-columns +
+-- zero values) via golden_invariants_test.go:TestGoldenInvariant_DSchemaDrift,
+-- and the INF emission via TestGoldenInvariant_DSchemaDrift_MissingColumnsLoggedINF
+-- (a record-capturing slog.Handler asserts the logged (table,column) set equals
+-- the introspected Missing set). The INF set is a log, not a canonical event, so
+-- it is correctly absent from expected.jsonl. All ids/timestamps synthetic.
 
 CREATE TABLE session (
 	id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
