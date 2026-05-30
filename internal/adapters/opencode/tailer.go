@@ -111,7 +111,7 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 		return since, fmt.Errorf("opencode: scan introspect %s: %w", dbPath, err)
 	}
 
-	cur := coerceScanCursor(since, schema)
+	cur := recordSchemaHash(ctx, db, coerceScanCursor(since), onError)
 	cur, _, err = processChanges(ctx, db, schema, cur, sourceID, out, onError)
 	if err != nil {
 		return cur, err
@@ -149,7 +149,7 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan
 	if err != nil {
 		return fmt.Errorf("opencode: tail introspect %s: %w", dbPath, err)
 	}
-	cur = coerceScanCursor(cur, schema)
+	cur = recordSchemaHash(ctx, db, coerceScanCursor(cur), onError)
 
 	walEvents, closeWatch := watchWAL(dbPath, onError)
 	defer closeWatch()

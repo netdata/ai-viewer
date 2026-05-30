@@ -114,10 +114,9 @@ against. Each existing location becomes a source; missing locations
 are silently skipped.
 
 Phase 1 shipped the `aiagent_v3` and `aiagent_v2` adapters; Phase 2 added
-`claude-code` (SOW-0003) and `codex` (SOW-0004), both now wired into the
-binary. The `opencode` row is reserved for its Phase 2 SOW (SOW-0005); its
-adapter package is not yet compiled in. The `Format` column is the registry
-key the adapter registers under (note `claude-code` is hyphenated).
+`claude-code` (SOW-0003), `codex` (SOW-0004), and `opencode` (SOW-0005), all now
+wired into the binary. The `Format` column is the registry key the adapter
+registers under (note `claude-code` is hyphenated).
 
 | Format | Probe | Status |
 |---|---|---|
@@ -125,7 +124,21 @@ key the adapter registers under (note `claude-code` is hyphenated).
 | aiagent_v2 | `~/.ai-agent/sessions/` exists | live (Chunk 11) |
 | claude-code | `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) exists | live (SOW-0003) |
 | codex | `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`) exists | live (SOW-0004) |
-| opencode | `~/.local/share/opencode/opencode.db` exists | adapter pending (Phase 2 SOW) |
+| opencode | `~/.local/share/opencode/opencode.db` exists (a regular file) | live (SOW-0005) |
+
+The `opencode` probe `os.Stat`s a single regular file (the SQLite database),
+unlike the four directory probes above; `os.Stat` succeeds on either. When the
+file exists the source is registered read-only and the discovery log line
+carries `sessions`, `messages`, `parts` row counts and `latest_migration` (the
+newest `__drizzle_migrations` name), read once at startup via
+`opencode.ProbeStatus`. A `ProbeStatus` error never blocks discovery: the source
+is still registered and the failure is logged as a `probe_error` attribute (the
+adapter's own `Scan`/`Tail` then surface any fatal schema problem via
+`/api/health`). The probe targets the default channel database path only;
+opencode's `$OPENCODE_DB` override and per-channel `opencode-<channel>.db`
+variants (anomalyco/opencode `packages/opencode/src/storage/db.ts`) are out of
+scope for auto-discovery — point `--source opencode:<path>` at a non-default
+database explicitly.
 
 The Chunk 11 v2 probe checks for the parent `sessions/` directory
 rather than the glob `*.json.gz` documented earlier: a freshly-bootstrapped

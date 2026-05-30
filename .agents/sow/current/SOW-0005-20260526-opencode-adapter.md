@@ -181,6 +181,37 @@ Key decisions locked (honoring the recorded SOW/spec):
 
 Gates (run 2026-05-30): `go build ./...` exit 0; `go vet` exit 0; `golangci-lint` 0 issues; `gosec -severity medium -confidence medium ./...` exit 0 (two justified `// #nosec G202` on `MAX(id)`/`MAX(time_updated)` where the only interpolated token is a fixed `trackedTables` name via `quoteIdent`); `go test -race -cover` pass at **91.6%** (package was 96.1% pre-chunk; the delta is the new code's defensive error branches, all new code ≥ target). All new `.go` files ≤ 400 lines.
 
+### Chunk D — payloads + adapter wiring + auto-discovery + real schema-hash (2026-05-30)
+
+Wired the chunk-A/B/C pure pieces into a registered `canonical.Adapter`, formalized the payload-URI grammar in `payloads.go`, replaced chunk C's present-column placeholder with the REAL `__drizzle_migrations` schema hash, and added the opencode auto-discovery probe (AC#8). Purely additive inside `internal/adapters/opencode/` plus the documented `cmd/ai-viewer-ingest/sources.go` integration point; no sibling adapter, `canonical`, `ingest`, `store`, or `presenter` touched. Read-only invariant held: every new production DB open goes through the chunk-A `openReadOnly` helper (`adapter.go:snapshotCursor`, `migrations.go:ProbeStatus`); no write-path pragma, no `rwc`, no `mkdir`, no `ATTACH`.
+
+Files (NEW):
+
+- `payloads.go` (47 lines) — `buildPayloadURI(partID, field)`, the SINGLE source of truth for the `opencode-sqlite://?part_id=<id>&field=<field>` grammar, URL-encoding both values via `net/url`. No resolver/parser (no consumer yet — that would be dead code; the `/api/payloads` resolver is a separate Phase-2 SOW).
+- `migrations.go` (190 lines) — `readMigrations` (ordered `name` list by `id ASC` + latest; missing-table → `errNoMigrationsTable` soft sentinel), `schemaHash` (length-prefixed sha256 of the ordered names — injection-safe framing, replacing the chunk-C present-column fingerprint), `readSchemaHash`/`recordSchemaHash` (the poll-loop hook; mismatch → WARN + re-read + watermarks preserved), and `ProbeStatus` (read-only session/message/part `COUNT(*)` + latest migration for AC#8, degrading gracefully on a foreign DB).
+- `adapter.go` (218 lines) — the registered `Adapter` (mirrors codex): `New`/`Name`/`Format`, `Scan` (records `scanCursor` even on cancel), `Tail` (resumes from `scanCursor` or cold-`snapshotCursor` HEAD), `ParseCursor`, `coerceCursor`, `snapshotCursor` (HEAD watermarks via `maxID`/`maxTimeUpdated` + real schema hash), `Factory`, `init()→adapters.Register(Format, Factory)`, `var _ canonical.Adapter`.
+- Tests (NEW): `payloads_test.go`, `migrations_test.go`, `adapter_test.go` (construction + cursor), `adapter_lifecycle_test.go` (Scan/Tail/snapshot lifecycle), `cmd/ai-viewer-ingest/discovery_test.go` (codex probe tests, split from `sources_test.go`).
+
+Files (MODIFIED):
+
+- `mapper_turn.go` — `defaultPayloadURI` now delegates to `payloads.go:buildPayloadURI` (byte-identical; the chunk-B mapper goldens are unchanged, confirmed by the full-repo `go test`).
+- `tailer.go` / `tailer_changes.go` — `coerceScanCursor` reduced to pure cursor-shaping (Tables/Version); the REAL migration-name hash is recorded by the new `recordSchemaHash`, called by `scanLoop`/`tailLoop` after `introspectAll`. The chunk-C `schemaFingerprint` placeholder is fully removed.
+- `cmd/ai-viewer-ingest/sources.go` — named import of the opencode adapter (registers via `init()` AND exposes `ProbeStatus`), an `opencode` probe entry (`opencodeDBPath(home)`, a regular-file `os.Stat`), and a `case "opencode"` rich-attrs branch logging `sessions`/`messages`/`parts`/`latest_migration` (best-effort: a `ProbeStatus` error logs `probe_error` and still registers the source). The discovery counters + path helpers were extracted to a new `discovery.go` to bring `sources.go` back under the 400-line budget (it was already 464 at HEAD; the split also reduces that pre-existing overage).
+
+Key decisions locked (honoring the recorded SOW/spec):
+
+- **Scan→Tail cursor hand-off**: `Scan` records the final watermark on the instance even on ctx-cancel; `Tail` resumes from it. A cold `Tail` (no preceding `Scan`) snapshots current HEAD per table (`maxID`+`maxTimeUpdated`) + records the schema hash, so it follows from NOW (the SQLite analogue of codex stat'ing EOF). Re-emission is absorbed by idempotent upserts.
+- **Real schema hash**: `sha256` of the `__drizzle_migrations.name` list ordered by `id ASC` (application order), length-prefixed so the digest is unambiguous regardless of name content. On a tail-time mismatch the loop logs a structured WARN, re-reads, and CONTINUES without resetting watermarks (column drift is per-column via the dynamic SELECT) — spec adapter-opencode.md §"Cursor". A missing `__drizzle_migrations` (foreign/old DB) leaves the hash empty and degrades gracefully.
+- **Payload-URI grammar home**: `payloads.go` is the single source of truth; the mapper default delegates to it; behavior is byte-identical so chunk-B goldens are unchanged.
+- **Probe reporting + graceful degradation**: `ProbeStatus` opens read-only, `COUNT(*)`s the three tables, reads the latest migration; a missing table → count 0 + soft error (not a hard failure), a hard open failure → returned so discovery logs it but the source still registers.
+
+Carried-forward chunk-C notes resolved:
+
+1. **`buildSelectByID` reachability**: KEEP (not dead code). It is reached by `scanTableDelta` (store_query.go:96-97) when `!s.has("time_updated")`. The migration history shows `time_updated` is part of the base `Timestamps` mixin on all four tracked tables across the entire observed schema (adapter-opencode.md lists `time_updated INTEGER NOT NULL` for session/message/part/session_message), so on every observed schema `time_updated` IS universal — but the fallback remains a genuine, tested backward-compat safeguard (tailer tests + `TestPureHelpers` cover it). It should NOT be flagged for removal.
+2. **`schemaFingerprint` placeholder**: fully removed. `coerceScanCursor` no longer computes any hash; the real `__drizzle_migrations`-name digest is recorded by `recordSchemaHash` at scan/tail/snapshot start.
+
+Gates (run 2026-05-30): `go build ./...` exit 0; `go vet ./internal/adapters/opencode/... ./cmd/ai-viewer-ingest/...` exit 0; `golangci-lint` **0 issues**; `gosec -severity medium -confidence medium ./...` exit 0 (added one justified `// #nosec G202` on the `__drizzle_migrations` name read — fixed package constant via `quoteIdent`, never user input); `go test -race -cover` pass — **opencode 91.8%** (up from chunk-C's 91.6%, no regression), cmd unchanged at 47.8%; full-repo `go test -race ./...` all pass (mapper goldens intact); `scan-secrets.sh` PASS. Every new/modified `.go` file ≤ 400 lines.
+
 ## Validation
 
 (Empty placeholder. Filled at SOW close.)

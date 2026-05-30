@@ -2,12 +2,9 @@ package opencode
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -263,47 +260,49 @@ func (s *pollState) nextInterval(now time.Time) time.Duration {
 // --- cursor shaping -----------------------------------------------------------
 
 // coerceScanCursor normalises a cursor for use: a nil/zero Tables map is
-// initialised, the version is set, and the schema hash is recorded so a later
-// migration is detectable. The watermarks are NOT reset (column drift is handled
-// per-column; only a depended-on column vanishing forces a re-ingest — a chunk-D
-// concern). Returns a ready-to-page cursor.
-//
-// The schema hash here is a fingerprint of the PRESENT columns across the tracked
-// tables (the shape the dynamic SELECTs read), NOT the __drizzle_migrations name
-// list — reading that table is a chunk-D concern (AC#8). A change in the present-
-// column shape (a migration that adds/removes a column the adapter reads) flips
-// the fingerprint, which is exactly the column-drift signal the cursor's
-// SchemaHash exists to surface; chunk D may replace it with the migration-name
-// hash without changing the watermark semantics.
-func coerceScanCursor(c Cursor, schema schemaSet) Cursor {
+// initialised and the version is set. The watermarks are NOT reset (column drift
+// is handled per-column; only a depended-on column vanishing forces a re-ingest).
+// The schema hash is recorded SEPARATELY by the poll loops via withSchemaHash
+// after reading __drizzle_migrations (recordSchemaHash) — it is the REAL
+// migration-name digest (schemaHash in migrations.go), replacing chunk C's
+// interim present-column-shape fingerprint. Keeping the hash out of this function
+// keeps it a pure cursor-shaping helper. Returns a ready-to-page cursor.
+func coerceScanCursor(c Cursor) Cursor {
 	if c.Tables == nil {
 		c = newCursor()
 	}
 	if c.Version == 0 {
 		c.Version = cursorVersion
 	}
-	if schema != nil {
-		c = c.withSchemaHash(schemaFingerprint(schema))
-	}
 	return c
 }
 
-// schemaFingerprint returns a stable hex digest of the present-column shape across
-// the tracked tables. Tables and their present columns are emitted in a fixed
-// order (trackedTables order; Present is already in wantedColumns order) so the
-// digest is deterministic for a given schema and changes only when the readable
-// shape changes.
-func schemaFingerprint(schema schemaSet) string {
-	var b strings.Builder
-	for _, table := range trackedTables {
-		b.WriteString(table)
-		b.WriteByte(':')
-		for _, col := range schema[table].Present {
-			b.WriteString(col)
-			b.WriteByte(',')
-		}
-		b.WriteByte(';')
+// recordSchemaHash reads __drizzle_migrations once and stamps the REAL
+// migration-name schema hash (schemaHash) onto the cursor (adapter-opencode.md
+// §"Cursor"). Called by scanLoop and tailLoop right after introspectAll, while
+// the read-only DB is open.
+//
+// Mismatch behaviour (spec adapter-opencode.md §"Cursor"): when the incoming
+// cursor already carries a different hash (opencode applied a migration between
+// runs), the change is logged as a structured WARN via onError, the hash is
+// re-read, and the loop CONTINUES without resetting watermarks — column drift is
+// handled per-column by the dynamic SELECT, so a benign migration (a new column
+// the adapter does not read, a data migration) never forces a re-ingest. A
+// genuine read error (corrupt journal) is non-fatal here: the prior hash is kept
+// and onError is notified, so the backfill/poll still proceeds.
+func recordSchemaHash(ctx context.Context, db *sql.DB, c Cursor, onError func(error)) Cursor {
+	hash, err := readSchemaHash(ctx, db)
+	if err != nil {
+		onError(fmt.Errorf("opencode: read schema hash (keeping prior, continuing): %w", err))
+		return c
 	}
-	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:])
+	if hash == "" {
+		// No __drizzle_migrations (foreign/old DB): leave any prior hash as-is;
+		// there is nothing authoritative to record.
+		return c
+	}
+	if c.SchemaHash != "" && c.SchemaHash != hash {
+		onError(fmt.Errorf("opencode: schema hash changed (migration applied); re-reading, watermarks preserved: %.12s… → %.12s…", c.SchemaHash, hash))
+	}
+	return c.withSchemaHash(hash)
 }

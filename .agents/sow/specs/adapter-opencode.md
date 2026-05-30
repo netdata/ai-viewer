@@ -248,7 +248,14 @@ Observed on the operator's DB: **0 rows** in both tables. This is an opencode-in
 | `name` TEXT NULL | migration directory name |
 | `applied_at` TEXT NULL | |
 
-Observed: 20 migrations applied (range `20260127222353_familiar_lady_ursula` … `20260511000411_data_migration_state`). The adapter queries this table at startup to determine which optional columns are present (see Edge Cases).
+Observed: 20 migrations applied (range `20260127222353_familiar_lady_ursula` … `20260511000411_data_migration_state`). opencode applies migrations from a journal of `{sql, timestamp, name}` entries ordered by the migration directory name, which embeds a `YYYYMMDDHHMMSS` timestamp prefix (anomalyco/opencode `packages/opencode/src/storage/db.ts`); Drizzle's standard `__drizzle_migrations` row carries an auto-increment `id` that increases in application order. The adapter reads the `name` column ordered by `id ASC` (application order) at scan/tail start.
+
+That ordered name list serves two purposes (chunk D):
+
+- **Schema hash.** `schema_hash` in the cursor (see Cursor) is `sha256(strings.Join(names, "\n"))` over the ordered names — a stable digest that changes only when opencode applies a new migration. It supersedes chunk C's interim present-column-shape fingerprint (which hashed the readable column shape as a placeholder before this table was read). The watermark semantics are unchanged: a hash mismatch logs a structured WARN, re-reads, and continues WITHOUT resetting watermarks (column drift is handled per-column by the dynamic SELECT; a depended-on column vanishing is the only re-ingest trigger).
+- **Latest migration / counts (AC#8).** `latest_migration` is the name with the highest `id` (last applied). The auto-discovery probe (`ProbeStatus`) reads it alongside `COUNT(*)` of `session`/`message`/`part` so `/api/health` and the discovery log surface what the source will yield. A missing `__drizzle_migrations` table (a very old or foreign SQLite file) is non-fatal: the probe returns empty names + a soft sentinel, the schema hash is left empty, and no migration is reported — the adapter degrades rather than crashing.
+
+`ProbeStatus` opens the database read-only via the same `openReadOnly` helper. The three `COUNT(*)` queries are full counts; on a multi-GB database that costs a few hundred ms ONCE at startup, which is acceptable for a one-time discovery probe (the steady-state tailer never runs them). A table that does not exist makes its count 0 and is noted as a soft error rather than failing the probe, so a foreign SQLite file the probe stumbles on degrades gracefully.
 
 ## Read Strategy
 
@@ -349,6 +356,8 @@ The realtime tailer is a timer-driven poll loop with an fsnotify wakeup hint. It
 
 - `scanLoop(ctx, dbPath, sourceID, since, out, onError) (Cursor, error)` — the historical backfill: introspect once, record the schema hash into the cursor, page every tracked table from `since`, derive affected sessions, reload + map each, emit, checkpoint `SourceProgress` every ~1000 rows processed and once at the end, return the advanced cursor.
 - `tailLoop(ctx, dbPath, sourceID, cur, out, onError) error` — the realtime follow until `ctx` is cancelled (returns `nil` on cancel).
+
+**Adapter Scan→Tail cursor hand-off (Chunk D).** `adapter.go` mirrors codex: `Scan` records the final advanced cursor on the `Adapter` instance (`scanCursor`) even on `ctx` cancellation, and a following `Tail` on the SAME instance resumes from it instead of snapshotting current HEAD — closing the data-loss window where rows committed between `Scan` finishing and `Tail` starting would otherwise be skipped. Any re-emission of an already-seen session tree is absorbed by the ingester's idempotent upserts. A **cold `Tail`** (no preceding `Scan`, e.g. a resumed daemon whose `Scan` ran in a previous process) builds a HEAD-snapshot cursor: open read-only, introspect, and set each tracked table's watermark to its current `MAX(id)` + `MAX(time_updated)` (via `maxID`/`maxTimeUpdated`). This is the SQLite analogue of codex stat'ing current file sizes — `Tail` then follows from NOW rather than replaying full history. The HEAD snapshot also records the real `__drizzle_migrations` schema hash into the cursor. A missing/unreadable database during the snapshot surfaces one structured error and `Tail` returns cleanly (the daemon keeps serving other sources).
 
 **Cadence intervals** (decided, SOW-0005 Open Decision #2):
 
@@ -489,7 +498,13 @@ LocationURI = "opencode-sqlite://opencode.db?part_id=<prt_...>&field=state.outpu
 
 The presenter resolves this scheme by re-querying SQLite for the named field. This keeps payloads out of ai-viewer's own database (they may be hundreds of MB total) and respects the read-only contract.
 
-**Mapper/URI seam (SOW-0005 chunk split).** The row→event mapper (chunk B) is pure and DB-agnostic: it knows the owning `part.id` and the `field` path (`state.output`, `state.input`, `text`, …) but NOT how to build the final `opencode-sqlite://` URI (the database basename + escaping live with the connection/discovery layer). It therefore emits each `PayloadRefEvent` carrying the `part_id` and `field` in `LocationURI` via a single injected builder function (default for mapper-only tests: a deterministic relative `opencode-sqlite://?part_id=<id>&field=<field>` form with no db basename). Chunk D supplies the production builder that prefixes the resolved database basename. This mirrors codex, whose mapper defers `file://` construction to a `payloadURI` helper. The PayloadRef field map per part type:
+**Mapper/URI seam (SOW-0005 chunk split).** The row→event mapper (chunk B) is pure and DB-agnostic: it knows the owning `part.id` and the `field` path (`state.output`, `state.input`, `text`, …) but NOT how to build the final `opencode-sqlite://` URI. The canonical URI grammar lives in ONE place — `payloads.go`'s `buildPayloadURI(partID, field)` (chunk D) — mirroring how codex/claude_code keep URI construction in their `payloads.go`. The grammar is:
+
+- scheme `opencode-sqlite` (no host, no path);
+- query params `part_id=<id>&field=<field>`, with both values URL-encoded via `net/url` so a part id or field path containing a reserved character is safe;
+- producing exactly `opencode-sqlite://?part_id=<id>&field=<field>`.
+
+The mapper's built-in default (`defaultPayloadURI`, used in mapper-only unit tests) delegates to `buildPayloadURI`, so there is a single source of truth and the relative form is byte-identical to chunk B's contract. The future `/api/payloads` resolver (a separate Phase-2 SOW, NOT this chunk) will look up the owning source's database path from the `payload_ref`'s `source_id` and `SELECT part.<field>` for that `part_id` read-only; chunk D builds NO resolver/parser (there is no consumer yet — that would be dead code). This mirrors codex, whose mapper defers `file://` construction to a `payloadURI` helper. The PayloadRef field map per part type:
 
 | part type | PayloadKind | field |
 |---|---|---|

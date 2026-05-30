@@ -201,16 +201,17 @@ func (tc *turnContext) parentSeq() int {
 type payloadURIBuilder func(partID, field string) string
 
 // defaultPayloadURI is the mapper's built-in PayloadRef URI builder, used when
-// no production builder is injected (mapper-only unit tests). It emits the
-// relative opencode-sqlite:// form WITHOUT a database basename:
+// no production builder is injected (mapper-only unit tests). It delegates to
+// buildPayloadURI in payloads.go — the single source of truth for the
+// opencode-sqlite:// grammar (SOW-0005 chunk D) — so the relative form here and
+// the form an injected production builder uses share one definition. The form is:
 //
 //	opencode-sqlite://?part_id=<id>&field=<field>
 //
-// Chunk D replaces it with a builder that prefixes the resolved db basename
-// (opencode-sqlite://opencode.db?part_id=…&field=…). The relative form is a
-// valid, deterministic anchor for tests and keeps the op→payload linkage intact.
+// Behaviour is byte-identical to the pre-chunk-D literal: for the Sonyflake part
+// ids and fixed field names opencode emits, every character is URL-unreserved.
 func defaultPayloadURI(partID, field string) string {
-	return "opencode-sqlite://?part_id=" + partID + "&field=" + field
+	return buildPayloadURI(partID, field)
 }
 
 // payloadURI builds a PayloadRef LocationURI for the given part/field via the

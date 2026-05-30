@@ -212,31 +212,21 @@ func TestDetectChange_TimeUpdatedPath(t *testing.T) {
 	}
 }
 
-// TestCoerceScanCursor_RecordsSchemaHash asserts coerceScanCursor records a
-// non-empty schema fingerprint and that different schemas yield different hashes.
-func TestCoerceScanCursor_RecordsSchemaHash(t *testing.T) {
+// TestCoerceScanCursor_PureShaping asserts coerceScanCursor only normalises the
+// Tables map and Version and does NOT record a schema hash (the hash is recorded
+// separately by recordSchemaHash after __drizzle_migrations is read — SOW-0005
+// chunk D, replacing chunk C's present-column placeholder).
+func TestCoerceScanCursor_PureShaping(t *testing.T) {
 	t.Parallel()
-	pathCur := seedBackfillDB(t, t.TempDir(), 1)
-	_, cur := introspect(t, pathCur)
-
-	c := coerceScanCursor(newCursor(), cur)
-	if c.SchemaHash == "" {
-		t.Fatal("coerceScanCursor did not record a schema hash")
+	c := coerceScanCursor(Cursor{})
+	if c.Tables == nil {
+		t.Error("coerceScanCursor did not initialise the Tables map")
 	}
-
-	pathOld := seedOldSchemaDB(t, t.TempDir())
-	dbOld := openRO(t, pathOld)
-	oldSet, err := introspectAll(ctxBG(), dbOld)
-	if err != nil {
-		t.Fatalf("introspect old: %v", err)
+	if c.Version != cursorVersion {
+		t.Errorf("coerceScanCursor Version = %d, want %d", c.Version, cursorVersion)
 	}
-	cOld := coerceScanCursor(newCursor(), oldSet)
-	if cOld.SchemaHash == c.SchemaHash {
-		t.Error("current and old schemas produced the same fingerprint (shape differs)")
-	}
-	// Nil schema leaves the hash untouched (no panic).
-	if got := coerceScanCursor(newCursor(), nil); got.SchemaHash != "" {
-		t.Errorf("nil-schema coerce set a hash: %q", got.SchemaHash)
+	if c.SchemaHash != "" {
+		t.Errorf("coerceScanCursor recorded a schema hash %q; the hash is recordSchemaHash's job", c.SchemaHash)
 	}
 }
 
