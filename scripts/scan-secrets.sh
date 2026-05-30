@@ -12,7 +12,7 @@
 #
 #   Rule 1 — operator identity. Banned EVERYWHERE with zero tolerance,
 #            case-insensitively. Real email domains, the real home path
-#            (literal + URL-encoded), and the given/sur-name (word-bounded so
+#            (literal + URL-encoded), and the given/sur-name (token-bounded ('_' = delimiter) so
 #            unrelated tokens like cost_usd or costing never match). The
 #            patterns are assembled from non-contiguous fragments at runtime so
 #            this PUBLIC file never contains the operator identity as a literal.
@@ -74,7 +74,7 @@ SELF_REL="scripts/scan-secrets.sh"
 # Rule 1 — operator identity. Banned everywhere (no INPUT exemption).
 #   - the operator's email addresses
 #   - home path (literal and URL-encoded)
-#   - the operator's name, word-bounded + case-insensitive (-w on the whole
+#   - the operator's name, token-bounded ('_' = delimiter) + case-insensitive (-w on the whole
 #     line is too coarse for JSON, so the name rule is matched case-insensitively
 #     with explicit \b boundaries here, and -i is applied to ALL three Rule-1
 #     patterns below so mixed-/upper-case forms of the email, home path, and
@@ -108,7 +108,7 @@ SELF_REL="scripts/scan-secrets.sh"
 #            is the local-part of each derived email, the space-stripped
 #            lowercase of each derived name, and the basename of $HOME (covers
 #            the local runner's home dir).
-#   - NAME:  each whitespace-separated word of each derived name, word-bounded.
+#   - NAME:  each whitespace-separated word of each derived name, token-bounded ('_' = delimiter).
 # Self-exclusion (SELF_REL skip below) stops a self-hit on the scanner, but the
 # real protection is that nothing identity-bearing is committed here at all.
 #
@@ -186,7 +186,7 @@ derive_rule1() {
   local words=() w word_seen=""
   for v in "${names[@]}"; do
     # Intentional word-splitting: a derived name like "First Last" must yield
-    # the words "First" and "Last", each banned word-bounded below.
+    # the words "First" and "Last", each banned token-bounded ('_' = delimiter) below.
     # shellcheck disable=SC2086
     for w in $v; do
       [[ -z "$w" ]] && continue
@@ -212,10 +212,19 @@ derive_rule1() {
     R1_HOME="${R1_HOME}|%2[Ff]home%2[Ff]${stem}|%2[Ff]Users%2[Ff]${stem}"
   done
 
-  # Build NAME pattern: each derived name word, ERE-escaped, word-bounded.
+  # Build NAME pattern: each derived name word, ERE-escaped, bounded on BOTH
+  # sides by a NON-ALPHANUMERIC token boundary ((^|[^A-Za-z0-9]) … ([^A-Za-z0-9]|$))
+  # — NOT \b. \b treats '_' as a word character, so "\bcosta\b" MISSES an operator
+  # name embedded after an underscore (e.g. an MCP namespace "playwright_<name>" —
+  # a real leak that slipped past the old gate). Treating '_' (and every other
+  # non-alphanumeric) as a delimiter catches "<sep><name>" and "<name><sep>", while
+  # the TRAILING boundary still rejects a longer word that merely shares the name
+  # as a prefix ("Scanner" must not match the banned word "Scan") and a leading
+  # alphanumeric rejects "…CostA…" inside "TestCostAlias". This is stricter than
+  # \b only where it must be: '_' is a delimiter, not part of the word.
   R1_NAME=""
   for w in "${words[@]}"; do
-    R1_NAME="${R1_NAME}${R1_NAME:+|}\\b$(ere_escape "$w")\\b"
+    R1_NAME="${R1_NAME}${R1_NAME:+|}(^|[^A-Za-z0-9])$(ere_escape "$w")([^A-Za-z0-9]|\$)"
   done
   # If no names were derived (email-only identity), the name pattern is empty;
   # emit_raw treats an empty regex as "nothing to match" (skipped below).

@@ -133,7 +133,7 @@ func TestSplitToolName(t *testing.T) {
 		{"Read", "Read", "builtin"},
 		{"Agent", "Agent", "builtin"},
 		{"mcp__github__create_issue", "create_issue", "mcp:github"},
-		{"mcp__playwright_costa__browser_click", "browser_click", "mcp:playwright_costa"},
+		{"mcp__playwright_demo__browser_click", "browser_click", "mcp:playwright_demo"},
 		{"mcp__malformed", "mcp__malformed", "builtin"},
 	}
 	for _, c := range cases {
