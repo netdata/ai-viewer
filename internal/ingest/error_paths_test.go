@@ -57,7 +57,7 @@ func TestUpsertProvider_EmptyAliasOK(t *testing.T) {
 	ctx := context.Background()
 	_ = ensureSourceRowDirect(ctx, db, "src", "fmt", "/loc")
 	tx, _ := db.BeginTx(ctx, nil)
-	if err := upsertProvider(ctx, tx, "anthropic", "", 1000); err != nil {
+	if err := upsertProvider(ctx, tx, "anthropic", "", 1000, 1); err != nil {
 		t.Fatalf("upsertProvider: %v", err)
 	}
 	_ = tx.Commit()
@@ -253,7 +253,7 @@ func TestUpsertProvider_FailsOnDeadTx(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	ctx, tx := rolledTx(t, db)
-	if err := upsertProvider(ctx, tx, "p", "", 1); err == nil {
+	if err := upsertProvider(ctx, tx, "p", "", 1, 1); err == nil {
 		t.Fatal("expected error on rolled-back tx")
 	}
 }
@@ -265,7 +265,7 @@ func TestCatalog_OnOpFinalized_RolledTx(t *testing.T) {
 	c := newCatalogWriter(NopPricer{})
 	err := c.onOpFinalized(ctx, tx, "any-op-id", canonical.OpFinalizedEvent{
 		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
-	})
+	}, opPriorTotals{})
 	if err == nil {
 		t.Fatal("expected error on rolled-back tx")
 	}
@@ -309,11 +309,12 @@ func TestCatalog_OnOpStarted_RolledTx(t *testing.T) {
 	_, db := openTestStore(t)
 	ctx, tx := rolledTx(t, db)
 	c := newCatalogWriter(NopPricer{})
-	// LLM branch with provider+model.
+	// LLM branch with provider+model. A genuine insert (inserted=true) has no prior
+	// identity to migrate, so pass an empty priorOpIdentity (SOW-0004 I1 signature).
 	err := c.onOpStarted(ctx, tx, canonical.OpStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
 		Kind:      canonical.OpLLM, Provider: "anthropic", Model: "m",
-	})
+	}, true, priorOpIdentity{})
 	if err == nil {
 		t.Fatal("expected error on rolled-back tx (llm branch)")
 	}
@@ -322,9 +323,36 @@ func TestCatalog_OnOpStarted_RolledTx(t *testing.T) {
 	err = c.onOpStarted(ctx2, tx2, canonical.OpStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
 		Kind:      canonical.OpTool, Name: "read",
-	})
+	}, true, priorOpIdentity{})
 	if err == nil {
 		t.Fatal("expected error on rolled-back tx (tool branch)")
+	}
+	// Identity-migration error paths (SOW-0004 I1): an existing op (inserted=false)
+	// whose catalog identity CHANGED triggers removeOpContribution before the upsert;
+	// on a rolled-back tx that UPDATE fails, exercising the migrate-out error return.
+	// Tool kind (namespace change) and LLM kind (provider/model change) cover both
+	// catalog-table branches.
+	ctx3, tx3 := rolledTx(t, db)
+	err = c.onOpStarted(ctx3, tx3, canonical.OpStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
+		Kind:      canonical.OpTool, Name: "read", ToolNamespace: "mcp:srv",
+	}, false, priorOpIdentity{
+		found: true, kind: string(canonical.OpTool), name: "read", toolNamespace: "custom",
+		totals: opPriorTotals{found: true, status: "completed"},
+	})
+	if err == nil {
+		t.Fatal("expected error on rolled-back tx (tool migrate-out)")
+	}
+	ctx4, tx4 := rolledTx(t, db)
+	err = c.onOpStarted(ctx4, tx4, canonical.OpStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "x", SourceSeq: 1, Ts: 1},
+		Kind:      canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5",
+	}, false, priorOpIdentity{
+		found: true, kind: string(canonical.OpLLM), name: "message", provider: "openai", model: "old-model",
+		totals: opPriorTotals{found: true, status: "completed"},
+	})
+	if err == nil {
+		t.Fatal("expected error on rolled-back tx (llm migrate-out)")
 	}
 }
 

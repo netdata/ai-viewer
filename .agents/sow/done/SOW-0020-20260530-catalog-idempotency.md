@@ -2,10 +2,9 @@
 
 ## Status
 
-Status: pending
+Status: closed
 
-Sub-state: proposed (2026-05-30) during SOW-0003 Round-6 review. Awaiting operator sign-off.
-Independent of the adapters; an ingester-layer correctness fix.
+Sub-state: SUPERSEDED 2026-05-30 by SOW-0004 (codex adapter), which absorbed this catalog-idempotency-under-re-emission fix as a prerequisite: `onOpStarted` counts a call once per op (insert-signal) and migrates the contribution on an identity change keyed on the effective post-upsert identity (empty→prior); `onOpFinalized` applies a now-minus-prior delta. The fix is adapter-agnostic and benefits aiagent_v2/v3 + claude_code + codex. See SOW-0004 `## Reviews` rounds 4–6 and `internal/ingest/{catalog.go,catalog_migrate.go,writer.go}` + `catalog_idempotency_test.go`. Moved to `done/` as a closed (superseded) record. Originally: proposed during SOW-0003 Round-6 review as an independent ingester-layer correctness fix.
 
 ## Requirements
 

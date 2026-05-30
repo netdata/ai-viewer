@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisite met: SOW-0001 Phase 1 Foundation is in `done/` (canonical event types + ingest pipeline + store + adapter registry + pricing + CI gates) — this SOW reuses that infrastructure unchanged. Pre-Implementation Gate filled 2026-05-30 (see below).
+Sub-state: delivered + merged (PR #29) after 6 external-review rounds; moved to `done/`. Originally:active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisite met: SOW-0001 Phase 1 Foundation is in `done/` (canonical event types + ingest pipeline + store + adapter registry + pricing + CI gates) — this SOW reuses that infrastructure unchanged. Pre-Implementation Gate filled 2026-05-30 (see below).
 
 ## Requirements
 
@@ -160,7 +160,20 @@ Producer of codex canonical rows: the new adapter's `Scan` (backfill) + `Tail` (
 
 ## Implementation
 
-(Empty placeholder. Filled as chunks complete.)
+Chunks A–E delivered the adapter (parser, cursor, mapper state machine, scanner/tailer, payloads, adapter wiring, discovery probe, fixtures). Round-2 review fixes (F1–F9) landed on top, all within `internal/adapters/codex/`, the additive `cmd/ai-viewer-ingest/sources.go` probe (F8 only), and the F3/F5/F7 spec corrections in `adapter-codex.md`:
+
+- **F1+F2 — turn lifecycle.** `turnState.sawTaskStarted` discriminates NEW-format (task_started) from OLD-format (turn_context-only) turns. `supersedePriorTurn` (mapper_turn.go) closes a prior open turn when a new turn_id opens via EITHER turn_context or task_started: NEW-format prior → failed/replaced (edge #2); OLD-format prior → completed (edge #3). `finalizeStale` was replaced by `finalizeAtEOF(stale bool, nowUs int64)` (mapper_finalize.go): OLD-format open turns close completed at EOF regardless of staleness; NEW-format open turns close failed/incomplete + SessionFinalized ONLY when stale; scanner.go now calls it UNCONDITIONALLY at full-read EOF passing the stale bool.
+- **F3 — collab.** `collab_agent_spawn_end`/`collab_close_end`/`collab_waiting_end` added to `eventMsgTypes`; `mapCollabSpawn` (ops_collab.go) emits Op Kind=session Name=spawn ChildSessionNativeID=new_thread_id; close/waiting → DBG log, no op. Spec corrected (sender_thread_id→new_thread_id; close/waiting documented).
+- **F4 — enrichment to op Extras (order-independent).** Late enrichment lands via a re-emitted OpStarted (idempotent UPDATE on (turn,seq)); a `finalizedOps` lookup re-emits onto already-finalized ops; exec-first ordering stashes extras+status on the open op and re-emits at the *_output finalize; an exec exit_code is authoritative over a benign output string. The always-log path is gone (only logs when the op truly can't be located).
+- **F5 — compaction dedup.** ONE op from the data-bearing top-level `compacted`; the adjacent `event_msg.context_compacted` (same timestamp) is suppressed; a lone context_compacted (defensive) still emits. Spec rule #20 + table + response_item rows corrected (response_item.compaction/context_compaction = 0 real files).
+- **F6 — token_count.** `mapTokenCount` emits a DBG `token_count_no_turn` log instead of silently dropping; dead `_ = tsUs` removed.
+- **F7 — web_search positional pairing.** `web_search_call` (no id) tracked as the active turn's `openWebSearch`; `enrichWebSearch` pairs the following `web_search_end` positionally. image_generation kept forward-compat (no fixture). Spec rules #11/#12 corrected.
+- **F8 — shard depth.** `hasShardDepth` (discovery.go) requires three numeric path components before `rollout-*.jsonl`; applied in discoverRollouts, rolloutForRel (tailer.go), and countRolloutFiles (sources.go via codexAtShardDepth).
+- **F9 — TOCTOU comment.** scanner.go containment comment softened to state the check-then-open window is an accepted localhost read-only limitation.
+
+File splits to honor the ~400-line budget: `ops_collab.go` (F3), `ops_enrich_decode.go` (enrichment JSON decoders), `mapper_state.go` (turn/op state types), and `payloadURI`/`payloadRef` moved to `payloads.go`.
+
+Fixtures: regenerated `b_old_turncontext` (EOF-completed close), `e_compaction` (real compacted + adjacent context_compacted), `f_exec_truncated` (exec-first ordering); added `i_collab_spawn`, `j_replaced_turn`, `k_web_search`. All synthetic + sanitized (`<ROOT>`, `git@github.com:example/example.git`, synthetic UUIDs).
 
 ## Validation
 
@@ -168,12 +181,107 @@ Producer of codex canonical rows: the new adapter's `Scan` (backfill) + `Tail` (
 
 ## Reviews
 
-(Empty placeholder. Filled as external reviewers run.)
+### Round 1 (2026-05-30) — codex + glm + minimax, parallel, on the whole adapter
+
+- **minimax**: SAFE TO MERGE, 0 P1, 1 P2 (golden coverage of `role=developer`/`system` messages). Rubber-stamped — falsely claimed `mapTokenCount` logs the no-turn case (it does not; see F6).
+- **glm**: SAFE TO MERGE, 0 P1, 3 P2 (enrichment-to-log; `mapTokenCount` silent drop; spec #23 "5 min" wording) + 4 P3.
+- **codex**: NOT SAFE TO MERGE, 1 P1 + 5 P2 + 2 P3. The decisive reviewer; surfaced the real spec-conformance gaps the others missed.
+
+Adjudicated on ground truth (spec lines + a read-only investigation of the real `~/.codex/sessions/` corpus, 2,660 modern + 19 legacy files). Every finding was verified against code+spec+real-data, not taken on reviewer say-so. The real-data evidence **confirmed all of codex's findings AND corrected their details** (codex guessed some wire shapes wrong):
+
+| # | Sev | Finding | Ground-truth verdict |
+|---|---|---|---|
+| F1 | P1 | Old `turn_context`-only sessions never close their last turn → stale-finalize marks them `failed/incomplete` | CONFIRMED. spec edge #3 (adapter-codex.md:449) says close at EOF. **1,006 real files (38%)** are pure old-format, ending cleanly with no completion marker — all would be mislabeled crashes. `b_old_turncontext` golden hid it (fresh test mtime). |
+| F2 | P2 | `task_started` replacing an open turn doesn't finalize the prior `failed/replaced` | CONFIRMED. spec edge #2 (adapter-codex.md:447). `openTurn` (mapper_turn.go:192) doesn't close the prior turn. |
+| F3 | P2 | `collab_agent_spawn_end` treated as unknown → SourceError; loses parent→child spawn op | CONFIRMED real (5 files, 88 lines). **Spec is wrong**: real link is `sender_thread_id`→`new_thread_id`, NOT `agent_ref.thread_id` (adapter-codex.md:433). Also `collab_close_end` (72), `collab_waiting_end` (74) exist and are unhandled. |
+| F4 | P2 | exec/patch enrichment doesn't reach op Extras (OpFinalizedEvent has no Extras field) → degrades to a log | CONFIRMED. spec rule #14 (adapter-codex.md:354) requires merge into op Extras. Real order is `exec_command_end` BEFORE `function_call_output` in ~68-85% (the rest output-first) — enrichment is lost in BOTH orders. Fix must be order-independent. |
+| F5 | P2 | Compaction emits two ops; spec wants one | CONFIRMED. spec rule #20 (adapter-codex.md:375) + table (:414). Real pair is top-level `compacted` (293 files, data-bearing) + adjacent `event_msg.context_compacted` (258 files, bare marker, same timestamp) — **two representations of one event**. `response_item.compaction`/`context_compaction` have **0 real files** (the `e_compaction` fixture used a shape that never occurs). |
+| F6 | P2 | `mapTokenCount` silently drops a no-turn `token_count` with no log (dead `_ = tsUs`) | CONFIRMED (glm). ops_event.go:166-172 — comment promises a DBG log the code never emits; violates "no silent failures". |
+| F7 | P2 | `web_search_call`/`image_generation_call` won't pair with their end events | CONFIRMED + REFINED. codex guessed `id`; real `web_search_call` (483 files) carries **neither `id` nor `call_id`** — no call-side key, must pair positionally with the following `web_search_end` (which carries `call_id`). `image_generation_*` has **0 real files** (dead/forward-compat). |
+| F8 | P3 | Discovery matches `rollout-*.jsonl` at any depth, not just `YYYY/MM/DD` | CONFIRMED minor. discovery.go:115 / tailer.go:350 / sources.go:210. |
+| F9 | P3 | Symlink containment check-then-open TOCTOU; comment overclaims "no TOCTOU" | CONFIRMED minor (matches merged claude_code). Soften the overclaiming comment; full O_NOFOLLOW hardening deferred. |
+
+**Decided fix plan (round 2):** code fixes to match the (mostly already-correct) spec + spec corrections where the spec had wrong wire shapes (F3 collab fields, F5/F7 dead variants) + regenerated goldens (the round-1 goldens were partly circular — built by the same understanding as the code) + new real-shape fixtures (collab spawn, replaced turn, old-format-stale, realistic web_search + compaction + exec-first ordering). All code fixes stay within `internal/adapters/codex/` + the additive `sources.go` probe; no canonical/ingest/store change. F9 hardening and `image_generation` real-shape coverage (no real data exists) are documented as accepted limitations.
+
+### Round 2 (2026-05-30) — same scope + fix notes
+
+- **minimax**: SAFE, no new issues, 1 benign P2 (the LLM op's CtxUsed re-finalize is a second OpFinalized — verified idempotent, carries `completed`+valid EndTs, does not clobber).
+- **glm**: found G6 (P2) empirically — ran `b_old_turncontext` twice and the old-format EOF `turn_finalized` EndTs differed between runs (`1780138387665997` vs `1780143627970705`, ~2026-05-30 wall-clock), i.e. the old-format EOF turn-close uses the file's live mtime as EndTs → **non-deterministic golden (CI-flaky) + semantically wrong**. CONFIRMED. Fix (G6): old-format EOF turn-close EndTs = the turn's last-activity timestamp (deterministic, from data), not the file mtime. Regenerate b_old_turncontext.
+- **codex**: NOT SAFE. Confirmed F1/F2/F3/F5/F6/F8/F9 resolved; **F4 and F7 only partially fixed**, plus a NativeID-source gap. All verified against ground truth (codex 100% accurate across both rounds):
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| G1 | P1 | output-first `exec_command_end(exit≠0)` adds extras via OpStarted but never emits a correcting `OpFinalized(failed)` → failed exec stays `completed` | CONFIRMED. ops_enrich.go:57-58 ("status NOT re-applied"); `enrichStatus` exists but unused on the finalized path. exit_code is authoritative (spec rule #5/#14) in BOTH orders. |
+| G2 | P2 | `patch_apply_end` not order-independent (openOps-only) and doesn't merge `success`/`status` extras (spec :361) | CONFIRMED. ops_enrich.go:234-240. |
+| G3 | P2 | `exec_duration_ms` (spec :354) decoded but never emitted; golden circular | CONFIRMED. ops_enrich_decode.go:18 decodes `Duration`, :27-39 drops it. |
+| G4 | P2 | web_search single-slot state mis-pairs interleaved searches; `action` (spec :345) dropped | CONFIRMED. ops_tools.go:149 single `openWebSearch`; webSearchExtras decodes only `query`. |
+| G5 | P2 | NativeID seeded from filename, not authoritative `session_meta.payload.id` (spec :290) | CONFIRMED. mapper.go:287 seeds from filename; applySessionMeta never assigns `p.ID`. Hidden where filename==payload.id. |
+
+**Round-3 fix plan:** (G1) exec exit_code authoritative for op status in both orders — exec-first applies at finalize, output-first emits a corrected `OpFinalized(failed,command_failed)` via the finalizedOps lookup; (G2) patch_apply_end uses the same finalizedOps path + merges success/status; (G3) emit `exec_duration_ms` (normalize the duration value to ms); (G4) FIFO queue of open web_search ops per turn + decode/emit `action`; (G5) set NativeID from `payload.id` (filename only as fallback). Add fixtures: failed-exec (output-first, corrected status), patch_apply_end, multi-web-search, and regenerate f_exec_truncated with `exec_duration_ms`.
+
+### Round 3 (2026-05-30) — same scope + fix notes
+
+- **glm**: SAFE TO MERGE, P1:0 P2:0 P3:0 — all G1–G6 "correctly and completely resolved".
+- **minimax**: SAFE, all G1–G6 correct, zero regressions, ready to merge.
+- **codex**: NOT SAFE. Confirmed G1–G6 resolved, but the round-2/3 op re-emission collides with a non-idempotent catalog:
+
+| # | Sev | Finding | Ground-truth verdict |
+|---|---|---|---|
+| H1 | P1 | Late-enrichment op re-emission double-counts catalog rollups (re-emit `OpStarted` → `call_count+1` again; correcting `OpFinalized` → failure/tokens/duration added again); also fires even when status is unchanged (exit 0) | CONFIRMED. catalog.go:108/143 ADD unconditionally (not idempotent). |
+| H2 | P2 | `finalizeAtEOF` re-fires the EOF `TurnFinalized` on every unchanged rescan/restart (`eofFinalized` is per-mapper-instance; the cursor has no EOF-finalized marker) | CONFIRMED. scanner.go:230 + mapper.go:153 + cursor.go:43. |
+
+**Root-cause decision (CTO).** The double-count is the **catalog-idempotency-under-re-emission** gap already tracked as **SOW-0020**. It is **pre-existing and structural** (catalog.go ADDs on every event; merged `claude_code` also re-emits Op events at ops.go:75/138/505) and currently **latent** (no shipped API/presenter reads `catalog_*`; only the future stats UI / SOW-0007 will). The codex adapter cannot be simultaneously status-correct (G1) and catalog-non-corrupting (H1) without idempotent catalog aggregation, so SOW-0020 is a genuine prerequisite. Decision: absorb the SOW-0020 catalog-idempotency fix into this convergence (a justified, in-scope-by-necessity ingest change — see Pre-Implementation Gate Addendum below), plus the codex-scoped hygiene fixes.
+
+**Round-4 fix plan:** (H1a, ingest) make the catalog idempotent under op re-emission — `onOpStarted` counts a call once per op (only on a genuine insert), and `onOpFinalized` contributes failure/tokens/duration once / by delta so a corrected re-finalize updates rather than double-adds; (H1b, codex) store the prior terminal status in `finalizedOp` and emit the correcting `OpFinalized` ONLY when the status actually changes (no spurious re-finalize for exit 0); (H2, codex) persist an EOF-finalized marker in the cursor so `finalizeAtEOF` does not re-fire on an unchanged rescan/restart. Add ingest tests pinning catalog idempotency under a re-emitted op, and a restart test pinning no duplicate EOF finalize.
+
+### Pre-Implementation Gate Addendum (2026-05-30) — ingest scope expansion
+
+The original gate scoped this SOW to `internal/adapters/codex/` + the additive `sources.go` probe, with "no canonical/ingest/store change". Round-3 review (codex H1) proved the codex adapter cannot be correct without idempotent catalog aggregation under op re-emission (a pre-existing `internal/ingest/catalog.go` gap, SOW-0020, that the codex replay-from-0 + enrichment + EOF-finalize design is the first to heavily exercise). Scope is therefore expanded to include the catalog-idempotency fix in `internal/ingest/catalog.go` (and a minimal `writer.go` insert-vs-update signal if needed). Blast radius: the change makes catalog rollups idempotent for ALL adapters (benefits aiagent_v2/v3 + claude_code, which also re-emit); it is additive-correctness (aggregates become correct under re-emission, unchanged for single-emission). SOW-0020 is superseded by this work and will be closed referencing this SOW.
+
+### Round 4 (2026-05-30) — same scope + H1/H2 fix notes
+
+- **minimax**: SAFE — all H-fixes correct, zero regressions.
+- **glm**: SAFE — H1/H1b/H2 architecturally sound; 2 P3 (spec drift: `ingester.md` catalog semantics + cursor JSON missing `eof_finalized_size`; a theoretical same-tx SELECT "race" that is not a bug).
+- **codex**: NOT SAFE — confirmed same-identity catalog idempotency, status-correction delta-once, exit-0 no-spurious-refinalize, unchanged-rescan suppression, and truncation-clears-marker are all CORRECT; found 2 narrower edges + 1 spec drift:
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| I1 | P1 | Catalog call_count still double-counts when an `OpStarted` re-emit CHANGES the catalog identity (MCP enrichment corrects `custom`→`mcp:server` for the same op → a new catalog_tools row inserts at count 1 while the placeholder key already counted it); finalize deltas also strand on the old key | CONFIRMED. catalog.go:123 inserts a fresh count for the corrected key; my H1a only handled SAME-identity re-emit. |
+| I2 | P2 | EOF marker keys on file SIZE, so a metadata-only `session_meta` append (real: `openai/codex recorder.rs:1615`) grows size → `finalizeAtEOF` re-fires an old-format turn's `TurnFinalized` and moves its end-ts to the metadata append (lastTsUs updates on every record) | CONFIRMED. scanner.go:236 + mapper.go:225/251 + mapper_finalize.go:44. |
+| I3 | P3 | `ingester.md` (+ adapter-codex.md cursor JSON) still document the pre-H1a catalog semantics + omit `eof_finalized_size` | CONFIRMED spec drift (also glm). |
+
+**Round-5 fix plan:** (I1, ingest) on an `OpStarted` re-emit whose catalog identity changed, MOVE the contribution (call_count + any finalize totals) from the old key to the new key instead of inserting a second count — capture the op's prior persisted (kind,name,tool_namespace,model,provider,alias) before the upsert and, when it differs, decrement the old catalog row and increment the new; test `function_call`→MCP-enrichment keeps total call_count = 1. (I2, codex) track turn-local last-activity separately from file `lastTsUs` for the old-format EOF close-ts, and suppress a second EOF close when a size-growing append carried no new TURN content (e.g. mark the turn EOF-finalized, not just the file size); test: EOF-close an old-format turn, append only `session_meta`, rescan → no new `TurnFinalized`, stable end-ts. (I3, spec) update `ingester.md` catalog semantics (OpStarted counts on insert; OpFinalized applies a delta) + add `eof_finalized_size` to the adapter-codex.md cursor JSON.
+
+### Round 5 (2026-05-30) — same scope + I1/I2/I3 fix notes
+
+- **glm**: SAFE TO MERGE — ran a deep catalog-migration audit (negative call_count, SQL injection, sibling regressions); found nothing.
+- **minimax**: SAFE — I1/I2/I3 correct + complete, no regressions.
+- **codex**: NOT SAFE — confirmed I2 (EOF suppression), I3 (spec), and I1's full-identity/finalized-prior/pre-finalize/same-identity/kind-change paths all CORRECT; found ONE P2 (no P1, no other issues):
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| J1 | P2 | Catalog migration compares the RAW event identity, but the ops UPSERT preserves omitted fields via `COALESCE(NULLIF(excluded.x,''), ops.x)` (writer.go:588-591). A PARTIAL re-emit (empty provider/model/namespace) → migration wrongly sees "changed" → drains the old key + skips/mis-books the new → drained aggregate | CONFIRMED. catalog_migrate.go compared `ev.*` not the effective post-upsert identity. Latent (catalog unread). |
+
+**Round 6 (2026-05-30) — J1 fix.** `effectiveOpIdentity(ev, prior)` (catalog_migrate.go) applies the same empty→prior rule as the SQL upsert; `onOpStarted` computes it ONCE and threads it through the identity-change compare, the call-count booking key, and the migrated-totals destination. A partial/empty-omitted re-emit now resolves to the prior identity → seen as UNCHANGED → no drain. Regression tests `TestCatalog_LLMReEmitEmptyProviderModelNoDrain` + `TestCatalog_ToolReEmitEmptyNamespaceNoMigrate` (both fail pre-fix, pass post-fix); all prior migration + idempotency tests still pass. Ingest-only; gates green (golangci 0, gosec 0, race all pass, ingest coverage 88.5%, goldens byte-identical).
 
 ## Outcome
 
-Pending.
+Delivered the `codex` adapter end-to-end (PR #29, merged after 6 external-review rounds + green CI). 5 implementation chunks (A parser+cursor, B mapper/state-machine, C scanner/tailer, D payloads+wiring+auto-discovery, E golden fixtures+integration) + 6 review/fix rounds. Acceptance #1–8 met: registered as `"codex"`; ingests every persisted RolloutItem/payload variant with per-variant SourceError tolerance; turn-boundary dual-format (cli 0.61 turn_context-only vs ≥0.93 task_started/complete); reasoning split; byte-offset cursor with zero-dup/zero-gap resume + truncation defense; FuzzParseLine gate; auto-discovery probe (`$CODEX_HOME/sessions`) with modern/legacy counts. Final gates: golangci 0, gosec 0, `go test -race ./...` 13/13, codex coverage 92.6%, ingest 88.5%, goldens byte-identical, secret + AI-attribution scans clean.
+
+CTO decisions recorded in the gate + reviews: sum-of-`last_token_usage` token rollup (C#1); claude-code-model session finalize, no clean-EOF completed (C#3); exec exit_code authoritative for op status order-independently; web_search positional pairing (no call-side id); NativeID from `payload.id`. The catalog-idempotency-under-re-emission fix (SOW-0020) was absorbed here as a prerequisite and benefits all adapters.
 
 ## Lessons / Follow-Ups
 
-Pending.
+Lessons:
+
+- **External review is load-bearing, and codex is the decisive reviewer.** Per-round findings: codex 6→5→2→2→1→0; glm/minimax rubber-stamped most rounds (minimax once *falsely* claimed a log was emitted — caught only by reading the code). Adjudicate every finding on ground truth (spec lines + the real `~/.codex` corpus), never on reviewer convergence. The real-data investigation repeatedly *corrected* codex's wire-shape guesses (web_search has no id; collab uses new_thread_id not agent_ref; compaction companion is event_msg.context_compacted).
+- **Golden fixtures built by the same understanding as the code are circular.** Round-1 goldens encoded the code's (wrong) assumptions; codex caught the old-format-stale mislabel (38% of real files) precisely because the fixture used a fresh mtime. Line-check every expected.jsonl against the spec, and seed fixtures from real wire shapes.
+- **Op re-emission breaks incremental aggregates.** The codex adapter (replay-from-0 + enrichment correction + EOF finalize) is the first heavy re-emitter; it exposed that the catalog ADDs unconditionally. Idempotency needs insert-signal counting + persisted-prior delta + effective-post-upsert identity (empty→prior). A *derived* catalog (recompute from the ops table) would be more robust — candidate for the quality-cluster SOWs.
+- **git add hygiene:** a specific-path `git add` once listed `sources.go` but omitted its `sources_test.go`, shipping code without its test; always verify `git status` covers source+tests before commit.
+
+Follow-ups (filed):
+
+- **SOW-0021** — turn-extras carrier: `turns.extras_json` is unreachable (no Extras on canonical turn events); codex surfaces codex_turn_id/sandbox/ttft_ms via an interim `turn_meta` LogEntry.
+- **SOW-0022** — codex duplicate-rollout-id disambiguation (same `payload.id` files collapse in v1; unobserved).
+- **Legacy `.json`** (R1) — Phase-2.5: ingest the 19 legacy flat files (v1 emits one SourceError/file).
+- **SOW-0020** — superseded by this SOW's catalog-idempotency work; closed.

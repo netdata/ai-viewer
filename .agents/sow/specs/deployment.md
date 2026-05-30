@@ -113,17 +113,18 @@ the default locations of every adapter the binary was compiled
 against. Each existing location becomes a source; missing locations
 are silently skipped.
 
-Phase 1 (Chunk 11 onward) ships only the `aiagent_v3` and `aiagent_v2`
-adapters, so only the first two rows of the table below are wired into
-the binary. The remaining rows are reserved for future Phase 2 SOWs
-that introduce the matching adapter packages.
+Phase 1 shipped the `aiagent_v3` and `aiagent_v2` adapters; Phase 2 added
+`claude-code` (SOW-0003) and `codex` (SOW-0004), both now wired into the
+binary. The `opencode` row is reserved for its Phase 2 SOW (SOW-0005); its
+adapter package is not yet compiled in. The `Format` column is the registry
+key the adapter registers under (note `claude-code` is hyphenated).
 
 | Format | Probe | Status |
 |---|---|---|
 | aiagent_v3 | `~/.ai-agent/sessions/session/` exists | live (Chunk 11) |
 | aiagent_v2 | `~/.ai-agent/sessions/` exists | live (Chunk 11) |
-| claude_code | `~/.claude/projects/` exists | adapter pending (Phase 2 SOW) |
-| codex | `~/.codex/sessions/` exists | adapter pending (Phase 2 SOW) |
+| claude-code | `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) exists | live (SOW-0003) |
+| codex | `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`) exists | live (SOW-0004) |
 | opencode | `~/.local/share/opencode/opencode.db` exists | adapter pending (Phase 2 SOW) |
 
 The Chunk 11 v2 probe checks for the parent `sessions/` directory

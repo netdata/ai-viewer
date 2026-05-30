@@ -285,9 +285,15 @@ Inline upserts run per event in Chunk 7:
 - `OpStartedEvent{Kind=llm}` → `catalog_providers` (provider, alias), `catalog_models` (provider, model).
 - `OpStartedEvent{Kind=tool}` → `catalog_tools` (namespace, name).
 - `SessionStartedEvent` → `catalog_agents` (source_format, agent_name) when agent_name is set; `catalog_cwds` (source_format, cwd) when cwd is set.
-- `OpFinalizedEvent` → increments call_count / failure_count / totals on the catalog row matching the parent OpStartedEvent.
+- `OpFinalizedEvent` → applies a `(now − prior)` DELTA to call_count's siblings — failure_count / total_tokens_* / total_cost_usd / total_duration_us — on the catalog row matching the parent OpStartedEvent (see below).
 
-The catalog rows use SQLite's `ON CONFLICT (...) DO UPDATE SET first_seen=MIN(first_seen, excluded.first_seen), last_seen=MAX(last_seen, excluded.last_seen), call_count=call_count+1, ...` so the rollups are eventually consistent with the ops table.
+`first_seen` / `last_seen` floors/ceilings and the `ctx_max` seed are always idempotent (`MIN`/`MAX`/`COALESCE`) and run on every event. The accumulating counters are made idempotent under **op re-emission** — adapters that replay from offset 0 on resume, or carry late enrichment that corrects an op's status/identity, re-emit `OpStarted`/`OpFinalized` for the same `(turn, seq)` (SOW-0004 H1a/I1, superseded SOW-0020):
+
+- **`call_count` increments from `OpStarted` ONLY on a genuine new op** — the writer probes whether the op's `ops` row already exists BEFORE the upsert (`requireOpExists` / `opPriorIdentity`); a same-identity re-emit is an UPDATE and adds 0, so a replay/enrichment re-emit never double-counts. `call_count = call_count + ?` where the bind is 1 on insert, 0 on a same-identity re-emit.
+- **`call_count` is MIGRATED, not duplicated, when an op's catalog identity CHANGES.** A re-emitted `OpStarted` may correct the op's identity on the same `(turn, seq)` — the codex case is MCP enrichment re-stamping a heuristic `tool_namespace="custom"`→`"mcp:<server>"` (and the tool name). The writer captures the op's prior persisted identity + already-booked totals before the upsert; when the identity differs, it DECREMENTS the old catalog row's `call_count` by 1 and subtracts the op's booked failure/tokens/cost/duration totals, then re-books them under the new key (+1 call, + the migrated totals). One physical op therefore contributes to exactly ONE catalog row (its FINAL identity), `call_count = 1`.
+- **`OpFinalizedEvent` applies a `(now − prior)` delta.** The writer reads the op's persisted terminal contribution (status → failure, tokens, cost, duration) BEFORE the finalize UPDATE overwrites it, then the catalog moves each total by `(new − prior)`. A first finalize sees a zero prior (delta = full contribution, identical to single-emission). A corrected re-finalize (e.g. codex output-first `exec` exit≠0 flipping a provisional `completed`→`failed`) moves `failure_count` by exactly ±1 and leaves unchanged totals at delta 0. `ctx_max` stays `MAX`-based (idempotent by construction), not delta-based.
+
+So the rollups are eventually consistent with the ops table AND idempotent under any number of re-emissions of the same op.
 
 Time-bucketed rollups for hour-/day-grained analytics (per `data-model.md` §Aggregation) are NOT in Chunk 7 — they land in SOW-0007.
 

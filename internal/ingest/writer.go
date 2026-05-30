@@ -516,6 +516,24 @@ ON CONFLICT (session_id, seq) DO NOTHING
 		return fmt.Errorf("writer: synthesize turn for op: %w", err)
 	}
 	opID := canonicalOpID(turnID, ev.Seq)
+	// Read the op's PRIOR persisted catalog identity + terminal totals BEFORE the
+	// upsert so the catalog can (a) count the call ONCE per distinct op (SOW-0004
+	// H1a) and (b) MIGRATE the op's contribution off its old key when this re-emit
+	// CHANGES the catalog identity (codex MCP enrichment re-stamping
+	// tool_namespace/name on the same (turn,seq) — SOW-0004 I1). A re-emitted
+	// OpStarted (late enrichment on the same (turn,seq), as the codex/claude_code
+	// replay-from-0 + enrichment design emits) is an UPDATE, not a new call. ON
+	// CONFLICT DO UPDATE returns RowsAffected=1 for both insert and update under
+	// modernc/sqlite, so reading the row first is the authoritative
+	// insert-vs-update signal: found=false (sql.ErrNoRows) ⇒ genuine new insert.
+	// The OpStarted upsert below touches only identity columns + start_ts/extras —
+	// never the status/tokens/cost/duration columns — so the totals read here are
+	// exactly the contribution onOpFinalized already booked under the old identity.
+	prior, err := w.opPriorIdentity(ctx, tx, opID)
+	if err != nil {
+		return err
+	}
+	opInserted := !prior.found
 	var parentOpID sql.NullString
 	if ev.ParentOpSeq >= 0 {
 		parentOpID = sql.NullString{String: canonicalOpID(turnID, ev.ParentOpSeq), Valid: true}
@@ -587,10 +605,50 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
-	if err := w.catalog.onOpStarted(ctx, tx, ev); err != nil {
+	if err := w.catalog.onOpStarted(ctx, tx, ev, opInserted, prior); err != nil {
 		return err
 	}
 	return nil
+}
+
+// opPriorIdentity reads an op's persisted catalog identity (kind/name/namespace/
+// model/provider/alias) AND its terminal rollup totals as they stand BEFORE the
+// current OpStarted UPSERT, so the catalog can migrate the op's contribution when
+// a re-emit changes its catalog identity (SOW-0004 I1). found=false (sql.ErrNoRows)
+// means the op has no row yet — a genuine new insert with nothing to migrate. The
+// totals share opPriorTotals' semantics (the OpStarted upsert leaves the
+// status/tokens/cost/duration columns untouched, so this is the contribution
+// onOpFinalized already booked under the old identity).
+func (w *writer) opPriorIdentity(ctx context.Context, tx *sql.Tx, opID string) (priorOpIdentity, error) {
+	var (
+		p             priorOpIdentity
+		toolNamespace sql.NullString
+		model         sql.NullString
+		provider      sql.NullString
+		providerAlias sql.NullString
+		dur           sql.NullInt64
+	)
+	err := tx.QueryRowContext(ctx, `
+SELECT kind, name, tool_namespace, model, provider, provider_alias,
+       status, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_us
+  FROM ops WHERE id = ?`, opID).
+		Scan(&p.kind, &p.name, &toolNamespace, &model, &provider, &providerAlias,
+			&p.totals.status, &p.totals.tokensIn, &p.totals.tokensOut,
+			&p.totals.tokensCacheRead, &p.totals.tokensCacheWrite, &p.totals.costUSD, &dur)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return priorOpIdentity{}, nil
+		}
+		return priorOpIdentity{}, fmt.Errorf("writer: read op prior identity %s: %w", opID, err)
+	}
+	p.found = true
+	p.toolNamespace = toolNamespace.String
+	p.model = model.String
+	p.provider = provider.String
+	p.providerAlias = providerAlias.String
+	p.totals.found = true
+	p.totals.durationUS = dur.Int64
+	return p, nil
 }
 
 func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.OpFinalizedEvent) error {
@@ -600,6 +658,15 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	opID := canonicalOpID(turnID, ev.Seq)
+	// Capture the op's persisted terminal contribution BEFORE the UPDATE below
+	// overwrites it, so the catalog can move its rollups by the (new − prior)
+	// delta and stay idempotent under a re-emitted / corrected OpFinalized on the
+	// same (turn,seq) (SOW-0004 H1a). Absent row ⇒ first finalize ⇒ zero prior ⇒
+	// delta equals the full new contribution (unchanged single-emission path).
+	prior, err := w.opPriorTotals(ctx, tx, opID)
+	if err != nil {
+		return err
+	}
 	cost := ev.CostUSD
 	if cost == 0 && w.pricer != nil {
 		// Resolve provider/model/kind and start_ts from the row we know
@@ -682,10 +749,37 @@ WHERE id = ?
 	// every op whose cost was computed.
 	evForCatalog := ev
 	evForCatalog.CostUSD = cost
-	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog); err != nil {
+	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog, prior); err != nil {
 		return err
 	}
 	return nil
+}
+
+// opPriorTotals reads an op's persisted terminal contribution (status + the
+// token/cost/duration columns the catalog rollups sum) as it stands BEFORE the
+// current OpFinalized UPDATE. It is the durable prior state the catalog subtracts
+// to stay idempotent under a re-emitted / corrected finalize (SOW-0004 H1a):
+// reading the persisted row (not the event) means a re-finalize across a daemon
+// restart — where any in-memory per-op tracking would be gone — still computes a
+// correct delta. sql.ErrNoRows ⇒ no row yet (first finalize, or OpStarted not yet
+// landed): found=false and every prior contribution is zero, so the delta equals
+// the full new contribution and the single-emission path is unchanged.
+func (w *writer) opPriorTotals(ctx context.Context, tx *sql.Tx, opID string) (opPriorTotals, error) {
+	var p opPriorTotals
+	var dur sql.NullInt64
+	err := tx.QueryRowContext(ctx, `
+SELECT status, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_us
+  FROM ops WHERE id = ?`, opID).
+		Scan(&p.status, &p.tokensIn, &p.tokensOut, &p.tokensCacheRead, &p.tokensCacheWrite, &p.costUSD, &dur)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return opPriorTotals{}, nil
+		}
+		return opPriorTotals{}, fmt.Errorf("writer: read op prior totals %s: %w", opID, err)
+	}
+	p.found = true
+	p.durationUS = dur.Int64
+	return p, nil
 }
 
 // isPriceableOp reports whether the op identified by (kind, provider,
