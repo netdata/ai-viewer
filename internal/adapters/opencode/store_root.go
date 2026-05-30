@@ -26,7 +26,10 @@ const rootChainCap = 32
 // the last known ancestor (the deepest id it did resolve, i.e. the direct parent
 // for a one-step failure) and surfaces one WARN via onError, never blocking the
 // session. Only the id+parent_id columns are read (the cheapest possible probe).
-func resolveRootID(ctx context.Context, db *sql.DB, id, parentID string, onError func(error)) string {
+// q is any roQuerier: loadAndMapSession passes the SAME read-only transaction that
+// read the session row + tree, so root resolution shares that one consistent
+// snapshot (SOW-0005 round-3 P1-2). Test callers may pass the pool.
+func resolveRootID(ctx context.Context, q roQuerier, id, parentID string, onError func(error)) string {
 	if parentID == "" {
 		return id // already the root
 	}
@@ -40,7 +43,7 @@ func resolveRootID(ctx context.Context, db *sql.DB, id, parentID string, onError
 		seen[cur] = struct{}{}
 
 		var parent sql.NullString
-		err := db.QueryRowContext(ctx, `SELECT parent_id FROM session WHERE id = ?`, cur).Scan(&parent)
+		err := q.QueryRowContext(ctx, `SELECT parent_id FROM session WHERE id = ?`, cur).Scan(&parent)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Ancestor row not present (yet) — cur is the furthest resolvable
 			// ancestor. Fall back to it (the direct parent on a one-step failure).

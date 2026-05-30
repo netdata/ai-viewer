@@ -80,6 +80,29 @@ func subClampWarn(a, b int64, field string, onWarn func(error)) int64 {
 	return nonNeg(d)
 }
 
+// addClampWarn returns a+b clamped to [0, MaxInt64], detecting int64 overflow on
+// the ADDITION (crafted/corrupt cumulative token values) and surfacing a WARN with
+// the field label rather than wrapping to a negative count (SOW-0005 round-3
+// P2-1). Both addends are non-negative token counts in practice; a positive
+// overflow saturates to MaxInt64, and the (defensive) negative-input path clamps
+// to 0. onWarn may be nil (the pure mapper-only path), in which case the clamp is
+// silent but still safe.
+func addClampWarn(a, b int64, field string, onWarn func(error)) int64 {
+	s := a + b
+	// Overflow on a+b iff both addends share a sign AND the sum's sign differs
+	// (standard signed-addition overflow detection).
+	if (a < 0) == (b < 0) && (s < 0) != (a < 0) {
+		if onWarn != nil {
+			onWarn(fmt.Errorf("opencode: %s sum overflow (%d+%d); clamped (P2-1)", field, a, b))
+		}
+		if a > 0 || b > 0 {
+			return math.MaxInt64
+		}
+		return 0
+	}
+	return nonNeg(s)
+}
+
 // jsonTrimBytes returns the raw JSON with surrounding whitespace trimmed,
 // treating a bare null (or empty) as no bytes so an absent input does not
 // contribute a phantom 4-byte ("null") size to bytes_in.

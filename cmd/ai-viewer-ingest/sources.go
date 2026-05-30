@@ -101,6 +101,12 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 		format   string
 		location string
 		probe    string
+		// requireRegular gates the probe on info.Mode().IsRegular() in addition to
+		// existence. opencode's source is a single SQLite FILE, so a *directory*
+		// named opencode.db must NOT register (it cannot be opened as a database).
+		// The four directory-based probes leave this false — os.Stat-exists is the
+		// right check for them (SOW-0005 round-3 P3-2).
+		requireRegular bool
 	}{
 		{
 			format:   "aiagent_v3",
@@ -124,20 +130,30 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 		},
 		{
 			// opencode's source is a single SQLite FILE (not a directory like the
-			// four probes above); os.Stat succeeds on a regular file, so the shared
-			// existence check below works unchanged. The location IS the database
-			// path the adapter opens read-only (deployment.md §"Source
-			// Auto-Discovery").
-			format:   "opencode",
-			location: opencodeDBPath(home),
-			probe:    opencodeDBPath(home),
+			// four probes above). The location IS the database path the adapter
+			// opens read-only (deployment.md §"Source Auto-Discovery"). It requires a
+			// REGULAR file: a directory named opencode.db must not register, because
+			// the adapter would fail to open it as a database (SOW-0005 round-3 P3-2).
+			format:         "opencode",
+			location:       opencodeDBPath(home),
+			probe:          opencodeDBPath(home),
+			requireRegular: true,
 		},
 	}
 
 	var out []configuredSource
 	seen := make(map[string]struct{}, len(probes))
 	for _, p := range probes {
-		if _, err := os.Stat(p.probe); err != nil {
+		info, err := os.Stat(p.probe)
+		if err != nil {
+			continue
+		}
+		if p.requireRegular && !info.Mode().IsRegular() {
+			// A non-regular file at the opencode DB path (e.g. a directory named
+			// opencode.db) is not a usable source; skip it rather than registering a
+			// source the adapter cannot open.
+			logger.Warn("ai-viewer-ingest: skipping opencode source — path is not a regular file",
+				"format", p.format, "location", p.location)
 			continue
 		}
 		key := p.format + ":" + p.location

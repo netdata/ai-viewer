@@ -205,6 +205,9 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan
 // cycle produced a change (so the loop switches to the active cadence).
 func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (bool, error) {
 	now := time.Now()
+	// Capture whether THIS probe is opened by a WAL write (vs the periodic safety
+	// net) BEFORE markProbe overwrites lastProbe — the boundary re-scan keys off it.
+	walDriven := st.lastWALEvent.After(st.lastProbe)
 	changed, probed, err := detectChange(ctx, db, schema, *cur, st, now)
 	if err != nil {
 		return false, err
@@ -212,15 +215,35 @@ func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, so
 	if probed {
 		st.markProbe(now)
 	}
-	if !changed {
-		return false, nil
+	active := false
+	if changed {
+		next, advanced, perr := processChanges(ctx, db, schema, *cur, sourceID, out, logger, onError)
+		*cur = next
+		active = active || advanced
+		if perr != nil {
+			return active, perr
+		}
+		return active, nil
 	}
-	next, advanced, perr := processChanges(ctx, db, schema, *cur, sourceID, out, logger, onError)
-	*cur = next
-	if perr != nil {
-		return advanced, perr
+	// Boundary-millisecond re-scan (SOW-0005 round-3 P1-1): re-emit any session
+	// touched by an in-place UPDATE at exactly the cursor's boundary ms — the case
+	// the cheap MAX(id) path, the gated MAX(time_updated) > gate, and the forward
+	// delta's strict `> :tuid` tie-break all miss. It runs ONLY on the precise
+	// signature of that invisible update: a WAL-DRIVEN probe (a real opencode write
+	// fired the fsnotify hint — walDriven) on which NEITHER detector saw any advance
+	// (changed == false). An INSERT advances MAX(id) → changed == true → this is
+	// skipped and the forward delta above handles it (so a cold-Tail HEAD snapshot,
+	// whose only writes are inserts, never replays its boundary session). A steady
+	// idle DB fires no WAL event → never runs. The cursor is NOT advanced (the
+	// boundary rows are already at the watermark); re-emission is idempotent.
+	if probed && walDriven {
+		emitted, berr := emitBoundarySessions(ctx, db, schema, *cur, sourceID, out, logger, onError)
+		if berr != nil {
+			return active, berr
+		}
+		active = active || emitted
 	}
-	return advanced, nil
+	return active, nil
 }
 
 // detectChange reports whether any tracked table shows new/changed rows since

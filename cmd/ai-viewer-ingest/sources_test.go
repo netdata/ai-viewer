@@ -241,3 +241,35 @@ func TestAutoDiscover_OpencodeProbeErrorStillRegisters(t *testing.T) {
 		t.Errorf("discovery log missing probe_error attr; got:\n%s", buf.String())
 	}
 }
+
+// TestAutoDiscover_OpencodeDirectoryNotRegistered pins SOW-0005 round-3 P3-2: a
+// DIRECTORY named opencode.db at the default discovery path must NOT register as
+// an opencode source — os.Stat succeeds on a directory, so the probe additionally
+// requires info.Mode().IsRegular(). The companion positive case (a regular DB
+// file IS discovered) is TestAutoDiscover_OpencodeProbe above.
+func TestAutoDiscover_OpencodeDirectoryNotRegistered(t *testing.T) {
+	// Not parallel: mutates process-wide env.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	// Create a DIRECTORY exactly where the DB file would live.
+	dirAsDB := filepath.Join(tmp, ".local", "share", "opencode", "opencode.db")
+	if err := os.MkdirAll(dirAsDB, 0o755); err != nil {
+		t.Fatalf("mkdir dir-as-db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	got, err := resolveSources(nil, logger)
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	for _, s := range got {
+		if s.format == "opencode" {
+			t.Fatalf("opencode registered for a DIRECTORY named opencode.db: %+v", got)
+		}
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("not a regular file")) {
+		t.Errorf("expected a WARN that the opencode path is not a regular file; got:\n%s", buf.String())
+	}
+}

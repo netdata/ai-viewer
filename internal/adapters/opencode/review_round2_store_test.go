@@ -2,7 +2,6 @@ package opencode
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -282,69 +281,10 @@ func TestP3C_SingleBatchEmitsOneSourceProgress(t *testing.T) {
 	}
 }
 
-// TestP2B_OldSchemaPartFallbackOneQuery pins the P2-B old-schema fallback
-// (loadPartsByMessageIDs / selectPartsByMessageIDs): when the part table lacks the
-// denormalized session_id, parts are still loaded in ONE query (WHERE message_id
-// IN (...)), grouped per message. It builds a part table WITHOUT session_id (a
-// hypothetical very old schema) and calls loadSessionParts directly, since
-// introspectAll would reject such a schema (session_id is a required column today).
-func TestP2B_OldSchemaPartFallbackOneQuery(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// A part table WITHOUT session_id (old schema). The file is built via a plain
-	// read-write DSN (the only writable handle pattern; production never opens it RW).
-	oldPartDDL := `CREATE TABLE part (
-		id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
-		time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
-		data TEXT NOT NULL)`
-	path := dir + "/oc.db"
-	rw, err := sql.Open(driverName, rwDSNFor(path))
-	if err != nil {
-		t.Fatalf("open rw: %v", err)
-	}
-	if _, err := rw.Exec(oldPartDDL); err != nil {
-		_ = rw.Close()
-		t.Fatalf("create old part table: %v", err)
-	}
-	if _, err := rw.Exec(`INSERT INTO part (id, message_id, time_created, time_updated, data) VALUES
-		('prt_1','msg_a',1,1,'{"type":"text","text":"a"}'),
-		('prt_2','msg_a',2,2,'{"type":"text","text":"b"}'),
-		('prt_3','msg_b',3,3,'{"type":"text","text":"c"}')`); err != nil {
-		_ = rw.Close()
-		t.Fatalf("insert parts: %v", err)
-	}
-	if err := rw.Close(); err != nil {
-		t.Fatalf("close rw: %v", err)
-	}
-
-	db := openRO(t, path)
-	s, err := introspectTable(ctxBG(), db, "part")
-	if err != nil {
-		t.Fatalf("introspectTable(part): %v", err)
-	}
-	if s.has("session_id") {
-		t.Fatal("test setup error: part table unexpectedly has session_id")
-	}
-
-	tx, err := beginRO(ctxBG(), db)
-	if err != nil {
-		t.Fatalf("beginRO: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	msgs := []messageRow{{ID: "msg_a"}, {ID: "msg_b"}}
-	byMsg, err := loadSessionParts(ctxBG(), tx, s, "ses_any", msgs, func(error) {})
-	if err != nil {
-		t.Fatalf("loadSessionParts (old-schema fallback): %v", err)
-	}
-	if len(byMsg["msg_a"]) != 2 {
-		t.Errorf("msg_a parts = %d, want 2 (fallback grouping)", len(byMsg["msg_a"]))
-	}
-	if len(byMsg["msg_b"]) != 1 {
-		t.Errorf("msg_b parts = %d, want 1 (fallback grouping)", len(byMsg["msg_b"]))
-	}
-	// An empty message set returns an empty map without querying.
-	empty, err := loadSessionParts(ctxBG(), tx, s, "ses_any", nil, func(error) {})
-	if err != nil || len(empty) != 0 {
-		t.Fatalf("empty message set: map=%v err=%v, want empty/nil", empty, err)
-	}
-}
+// NOTE (SOW-0005 round-3 P3-1): the former TestP2B_OldSchemaPartFallbackOneQuery
+// was removed along with the loadPartsByMessageIDs / selectPartsByMessageIDs
+// fallback it exercised. session_id is a REQUIRED part column (requiredColumns),
+// so introspectAll makes a part table lacking it FATAL upstream — the fallback was
+// unreachable in production, and the test had to bypass introspection to reach it.
+// The current P2-B test above (TestP2B_PartsLoadedInOneQuery) covers the live
+// single-query path on the real (session_id-present) schema.

@@ -101,6 +101,16 @@ const connMaxLifetime = 30 * time.Minute
 // only by tests that want a throwaway shared cache) is accepted; its query is
 // parsed only to be DISCARDED and rebuilt from the read-only set, so callers
 // may hand either a bare path or a pre-built URI without weakening the guard.
+//
+// CLI CONTRACT (SOW-0005 round-3 P2-4): the ingest CLI's opencode source
+// location is always a FILESYSTEM PATH — both auto-discovery and
+// `--source opencode:<path>` resolve to a real path, which
+// cmd/ai-viewer-ingest's startSource validates with os.Stat BEFORE constructing
+// the adapter. os.Stat fails for the "file:"/":memory:" DSN forms, so those
+// shapes are NOT valid --source locations: they exist purely for this package's
+// programmatic and test callers (throwaway shared-cache DBs). buildReadOnlyDSN
+// still accepts them when called directly; the filesystem-path-only rule is a
+// CLI-layer contract, not a restriction enforced here.
 func buildReadOnlyDSN(dbPath string) (string, error) {
 	if dbPath == "" {
 		return "", fmt.Errorf("opencode: database path must be non-empty")

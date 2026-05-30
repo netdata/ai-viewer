@@ -261,3 +261,79 @@ func TestP2F_MsToMicrosSaturates(t *testing.T) {
 
 // ptr returns a pointer to an int64 literal for the optional completed-ts args.
 func ptr(v int64) *int64 { return &v }
+
+// --- round-3 P2-1: ms→µs clamp now WARNs; ctx_used add saturates + WARNs -------
+
+// TestP2_1_MsToMicrosWarnsOnClamp pins round-3 P2-1: a session whose time_created
+// is a crafted huge ms value clamps to MaxInt64 (as before, P2-F) AND now surfaces
+// a WARN via the wired onWarn (it was a SILENT saturation before P2-1). The pure
+// msToMicros (no warn channel) still saturates silently — covered by
+// TestP2F_MsToMicrosSaturates.
+func TestP2_1_MsToMicrosWarnsOnClamp(t *testing.T) {
+	t.Parallel()
+	s := rootSession("ses_clamp", 0)
+	s.TimeCreatedMs = math.MaxInt64 // *1000 would overflow → clamp + WARN
+
+	var warns []error
+	evs, err := mapSession(testSourceID, s, nil, WithOnWarn(func(e error) { warns = append(warns, e) }))
+	if err != nil {
+		t.Fatalf("mapSession: %v", err)
+	}
+	// SessionStarted's Ts must be the saturated MaxInt64, never a wrapped negative.
+	ss, ok := evs[0].(canonical.SessionStartedEvent)
+	if !ok {
+		t.Fatalf("first event = %T, want SessionStartedEvent", evs[0])
+	}
+	if ss.Ts != math.MaxInt64 {
+		t.Errorf("clamped SessionStarted.Ts = %d, want MaxInt64 (saturate, no wrap)", ss.Ts)
+	}
+	foundTs := false
+	for _, w := range warns {
+		if strings.Contains(w.Error(), "session.time_created") && strings.Contains(w.Error(), "overflow") {
+			foundTs = true
+		}
+	}
+	if !foundTs {
+		t.Errorf("clamped timestamp did not surface a WARN naming the field; warns=%v", warns)
+	}
+
+	// A NON-overflowing timestamp emits NO clamp WARN (no false positives).
+	var clean []error
+	_, _ = mapSession(testSourceID, rootSession("ses_ok", 0), nil, WithOnWarn(func(e error) { clean = append(clean, e) }))
+	for _, w := range clean {
+		if strings.Contains(w.Error(), "overflow") {
+			t.Errorf("a normal session timestamp wrongly warned of overflow: %v", w)
+		}
+	}
+}
+
+// TestP2_1_CtxUsedAddSaturatesAndWarns pins round-3 P2-1's second half: the
+// ctx_used = tokens.input + tokens.cache.read ADDITION saturates at MaxInt64 with
+// a WARN on a crafted overflowing pair, instead of wrapping to a negative
+// ctx_used. addClampWarn is the arithmetic; this asserts both the clamp and the
+// WARN, plus that a normal pair adds cleanly with no WARN.
+func TestP2_1_CtxUsedAddSaturatesAndWarns(t *testing.T) {
+	t.Parallel()
+	var warns []error
+	onWarn := func(e error) { warns = append(warns, e) }
+
+	// MaxInt64 + 1 overflows positive → clamp to MaxInt64 + WARN.
+	if got := addClampWarn(math.MaxInt64, 1, "ctx_used", onWarn); got != math.MaxInt64 {
+		t.Errorf("addClampWarn(MaxInt64,1) = %d, want MaxInt64 (saturate, no wrap)", got)
+	}
+	if len(warns) == 0 {
+		t.Fatal("overflowing ctx_used add did not surface a WARN (P2-1)")
+	}
+	if !strings.Contains(warns[0].Error(), "ctx_used") || !strings.Contains(warns[0].Error(), "overflow") {
+		t.Errorf("WARN = %q, want one naming ctx_used overflow", warns[0].Error())
+	}
+
+	// A normal pair adds cleanly with no WARN.
+	var clean []error
+	if got := addClampWarn(100, 250, "ctx_used", func(e error) { clean = append(clean, e) }); got != 350 {
+		t.Errorf("addClampWarn(100,250) = %d, want 350", got)
+	}
+	if len(clean) != 0 {
+		t.Errorf("normal ctx_used add wrongly warned: %v", clean)
+	}
+}

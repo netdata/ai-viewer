@@ -266,7 +266,34 @@ glm and minimax: no P1/P2 (only doc/style P3 + design-tradeoff observations). co
 - **P2.3** → `SOW-0023` — `sessions.provider`/`provider_alias` need a `SessionStartedEvent` field + writer mapping (`internal/canonical` + `internal/ingest`).
 - **P2.2** → `SOW-0024` — per-source row counts in `/api/health` (generalized source metadata; presenter+ingester+schema).
 
-All fixes verified at golden + gate level (golangci 0, gosec 0, race, coverage 92.3%, fuzz clean). Round 2 (same scope + these fix notes) pending.
+All fixes verified at golden + gate level (golangci 0, gosec 0, race, coverage 92.3%, fuzz clean).
+
+### Round 2 — 2026-05-30 (codex decisive; full opencode surface)
+
+Committed in `9630dc0`. codex confirmed round-1 fixes held and found a further set; each adjudicated against code:
+- **P1-A (idle-scan re-arm) — FIXED.** A single `MaxID` conflated the monotonic insert-detect id with the `(time_updated, id)` paging position; an in-place UPDATE of an OLD row regressed `MaxID` so the cheap `MAX(id)` check fired every idle poll → the expensive `(time_updated)` scan ran forever. Fix: split the watermark into `MaxIDSeen` (monotonic, never regresses) + `MaxTimeUpdatedMs/ID` (paging position); cursor bumped to v2. Pinned by `cursor_regression_test.go` + the counting-driver `TestP1A_OldRowUpdateDoesNotReArmIdleScan`.
+- **P1-B (sticky failed) — FIXED.** Session-failed was a sticky OR across turns; now it is the LAST assistant turn's state (cleared when a later turn recovers).
+- **P1-C / P2-A (tool/turn error class) — FIXED.** Tool error → canonical `failed` + `ErrorClass`/`ErrorMessage`; error PRESENCE (not a non-empty name) is the terminal predicate; empty name → `defaultErrorClass`.
+- **P2-B (N+1 parts) — FIXED.** One `WHERE session_id = ?` part query per session, partitioned in memory.
+- **P2-D (blanked ops.name) — FIXED.** The patch-enrichment re-emit now carries the full op identity (the writer updates `ops.name` unconditionally).
+- **P2-E (compaction) — FIXED.** A non-NULL `time_compacting` session is skipped that cycle.
+- **P2-F (overflow) — FIXED (PARTIAL — see round-3 P2-1).** `subClampWarn` clamps the token-delta subtraction + WARNs; `msToMicros` saturated but SILENTLY, and the `ctx_used` add was still unguarded.
+- **P3-B/P3-C — FIXED.** No `journal_mode` in the read-only DSN; one `SourceProgress` checkpoint layer.
+
+### Round 3 — 2026-05-31 (codex decisive; full opencode surface)
+
+codex confirmed round-1/2 hold and the read-safety/checkpoint/goldens are good, then found 2 live-concurrency P1 + 4 P2 + 2 P3. CTO adjudicated each; all implemented inside the adapter + the ingest CLI source/discovery files (no shared-surface edits):
+
+- **P1-1 (same-ms in-place update lost forever) — FIXED.** An already-seen LOW-id row updated in place at exactly the cursor's boundary ms moves neither `MAX(id)` nor `MAX(time_updated)`, and the forward delta's strict `(=T AND id > highID)` excludes it → skipped permanently when it is the session's only change. Fix: a dedicated bounded boundary-bucket re-scan (`tailer_boundary.go`) that, on a WAL-driven probe where no detector advanced (`probed && walDriven && !changed`), selects the FULL `time_updated = T` bucket per table, derives the owning sessions, and re-emits them idempotently WITHOUT advancing the cursor. Gating on `walDriven && !changed` keeps the cheap idle path untouched (AC#6) and stops a cold-Tail HEAD snapshot from replaying its boundary session (its writes are inserts → `changed`). Pinned by `TestP1_1_BoundaryUpdateReEmitted` (+ skip/empty/error/cross-table cases); the round-2 idle-scan tests stay green.
+- **P1-2 (compaction TOCTOU / cross-snapshot) — FIXED.** `loadAndMapSession` now reads the session row, checks `time_compacting`, resolves the parent-chain root, AND loads messages+parts within ONE `BeginTx{ReadOnly:true}` snapshot (was: row+check in no-tx queries, tree in a SEPARATE tx). `loadSessionTree`/`loadSession`/`resolveRootID` take a `roQuerier` so the same code runs against the shared tx. Pinned by `TestP1_2_CompactingSkippedAtomically` + `TestP1_2_TreeLoadRunsInCallerTx`.
+- **P2-1 (overflow fix completion) — FIXED.** `msToMicros` clamp now surfaces via `onWarn` at the mapper's method emission sites (`msToMicrosWarn`, used by `sessionStarted`/`sessionFinalized`); `ctx_used = tokens.input + tokens.cache.read` uses a new warning-capable saturating `addClampWarn`. Pinned by `TestP2_1_MsToMicrosWarnsOnClamp` + `TestP2_1_CtxUsedAddSaturatesAndWarns`.
+- **P2-2 (malformed JSON invisible to /api/health) — FIXED.** The malformed-message and malformed-part branches now route through `mwarn` → the adapter's `onError` → `SourceErrorEvent` → `sources.parse_errors` (health), IN ADDITION to the session `LogEntry`. Pinned by `TestP2_2_MalformedDataRoutesToOnError` + `TestP2_2_MalformedPartRoutesToOnError`.
+- **P2-3 (unbounded full-tree load) — FIXED.** Defensive `maxSessionMessagesWarn`/`maxSessionPartsWarn` (100k) bounds: a session over either emits ONE WARN via `onError` and is still processed in full (the whole ordered tree is required for token-delta synthesis — documented as an intentional design constraint). Pinned by `TestP2_3_OversizedSessionWarns`.
+- **P2-4 (file:/:memory: DSN vs CLI os.Stat) — DOCUMENTED.** The CLI source location is a filesystem path; the `file:`/`:memory:` DSN forms are adapter programmatic/test use only. Doc comment at `buildReadOnlyDSN` + notes in `deployment.md`/`adapter-opencode.md`. No CLI code change (correct: documenting the contract is the fix).
+- **P3-1 (dead old-schema part fallback) — REMOVED.** Found: `requiredColumns["part"]` includes `session_id` (store.go), so `introspectAll` makes a part table lacking it FATAL upstream → the round-2 `loadPartsByMessageIDs`/`selectPartsByMessageIDs` fallback was unreachable. Removed it + its introspection-bypassing test (`TestP2B_OldSchemaPartFallbackOneQuery`); the live single-query path keeps `TestP2B_PartsLoadedInOneQuery`. (The delta-path `resolvePartSession` is a separate function, out of scope, kept.)
+- **P3-2 (directory named opencode.db registers) — FIXED.** The opencode auto-discovery probe now requires `info.Mode().IsRegular()` (other adapters' directory probes unchanged). Pinned by `TestAutoDiscover_OpencodeDirectoryNotRegistered`.
+
+Gates: `go build ./...` 0; `go vet` 0; golangci-lint "0 issues"; gosec medium+ 0; `go test -race -cover` opencode 92.4%; both `FuzzDecode*` 20s clean; whole-module `go test -race` all pass; all changed files ≤400 lines; scan-secrets PASS; 7 committed goldens byte-identical (`-update-golden` wrote zero diffs). External re-review (same scope + these fix notes) pending.
 
 ## Outcome
 

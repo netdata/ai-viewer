@@ -151,8 +151,10 @@ func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []
 		// CtxUsed = input + cache.read at this step-finish (the most-recent step's
 		// cumulative input is the live context occupancy — adapter-opencode.md
 		// "ctx_used" row). Uses the CUMULATIVE value (data.Tokens), not the delta:
-		// context occupancy is a level, not a per-step increment.
-		CtxUsed: data.Tokens.Input + data.Tokens.Cache.Read,
+		// context occupancy is a level, not a per-step increment. Saturating add with
+		// a WARN on overflow so a crafted/corrupt pair cannot wrap to a negative
+		// ctx_used (SOW-0005 round-3 P2-1).
+		CtxUsed: addClampWarn(data.Tokens.Input, data.Tokens.Cache.Read, "ctx_used (tokens.input+tokens.cache.read)", m.mwarn),
 	})
 	// The LLM op is now closed; subsequent reasoning/tool parts (until the next
 	// step-start) have no parent step. They still attach to the just-closed op's

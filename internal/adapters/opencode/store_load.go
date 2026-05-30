@@ -25,6 +25,41 @@ import (
 // continues with the remaining sessions (adapter-opencode.md §"Read Strategy").
 var errSessionGone = errors.New("opencode: session row not found")
 
+// maxSessionMessagesWarn / maxSessionPartsWarn are DEFENSIVE upper bounds on a
+// single session's in-memory tree (SOW-0005 round-3 P2-3). The full ordered tree
+// MUST be loaded at once — the mapper synthesizes per-turn token deltas by
+// subtracting successive cumulative snapshots, so there is no correct streaming
+// decomposition. These caps do NOT truncate; they only mark the threshold above
+// which the loader emits ONE structured WARN via onWarn so a pathological or
+// corrupt session surfaces (in the logs and, via the adapter's onError →
+// SourceError, in /api/health) instead of silently spiking memory. Set
+// generously: real opencode sessions are far below 100k of either.
+const (
+	maxSessionMessagesWarn = 100_000
+	maxSessionPartsWarn    = 100_000
+)
+
+// warnIfSessionTooLarge emits ONE structured WARN via onWarn when a session's
+// loaded message or part count exceeds its defensive bound (SOW-0005 round-3
+// P2-3). It NEVER truncates — the caller still processes the whole tree — it only
+// SURFACES the anomaly. onWarn may be nil (the pure no-DB path), in which case the
+// check is a no-op. The part count is summed across the per-message map.
+func warnIfSessionTooLarge(sessionID string, msgs []messageRow, partsByMessage map[string][]partRow, onWarn func(error)) {
+	if onWarn == nil {
+		return
+	}
+	if len(msgs) > maxSessionMessagesWarn {
+		onWarn(fmt.Errorf("opencode: session %s has %d messages (> %d); processing in full — possible pathological/corrupt session (P2-3)", sessionID, len(msgs), maxSessionMessagesWarn))
+	}
+	parts := 0
+	for _, ps := range partsByMessage {
+		parts += len(ps)
+	}
+	if parts > maxSessionPartsWarn {
+		onWarn(fmt.Errorf("opencode: session %s has %d parts (> %d); processing in full — possible pathological/corrupt session (P2-3)", sessionID, parts, maxSessionPartsWarn))
+	}
+}
+
 // columnIndex maps a present-column name to its position in a dynamic SELECT, so
 // a per-table scan reads each typed field from the right scan destination
 // regardless of which optional columns the live schema omits. Built once per
@@ -142,16 +177,26 @@ func (d *scanDest) bytes(idx columnIndex, col string) []byte {
 // tree root, SOW-0005 P2.4) lives in store_root.go (split to keep this file ≤400
 // lines).
 
+// roQuerier is the read-only query surface both *sql.DB and *sql.Tx satisfy. The
+// tree-load helpers take it so the SAME code path runs either against the pool
+// directly (test entrypoints) or inside ONE shared read-only transaction
+// (loadAndMapSession's single consistent snapshot — SOW-0005 round-3 P1-2).
+type roQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // loadSession loads one session row by id via the present-column SELECT. The
 // bool is false (with no error) when the row does not exist (the affected
 // session was deleted between the delta and the load); the caller skips it.
-// onWarn surfaces a corrupt numeric cell (SOW-0005 P2.6); it may be nil.
-func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string, onWarn func(error)) (sessionRow, bool, error) {
+// onWarn surfaces a corrupt numeric cell (SOW-0005 P2.6); it may be nil. q is any
+// roQuerier (the pool or the shared snapshot tx — P1-2).
+func loadSession(ctx context.Context, q roQuerier, schema schemaSet, id string, onWarn func(error)) (sessionRow, bool, error) {
 	s := schema["session"]
 	idx := newColumnIndex(s)
-	q := selectByIDList(s)
+	query := selectByIDList(s)
 	d := newScanDest(len(s.Present)).withWarn("session", onWarn)
-	err := db.QueryRowContext(ctx, q, id).Scan(d.ptrs...)
+	err := q.QueryRowContext(ctx, query, id).Scan(d.ptrs...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sessionRow{}, false, nil
 	}
@@ -184,40 +229,41 @@ func loadSession(ctx context.Context, db *sql.DB, schema schemaSet, id string, o
 // loadSessionTree loads a session's full ordered message+part tree as
 // []messageWithParts: messages ordered by (time_created, id), each with its
 // parts ordered by (id). The whole tree is required so the mapper's per-turn
-// token deltas are correct (adapter-opencode.md §"Read Strategy"). It runs in a
-// single read-only transaction so messages and parts share one consistent
-// snapshot (a concurrent opencode write mid-load cannot split a message from its
-// parts).
+// token deltas are correct (adapter-opencode.md §"Read Strategy").
+//
+// q is any roQuerier. The PRODUCTION path (loadAndMapSession) passes the SAME
+// read-only transaction that already read the session row and checked
+// time_compacting, so the session metadata, the compaction check, and the tree
+// share ONE consistent snapshot (SOW-0005 round-3 P1-2: no compaction-race
+// TOCTOU). Test entrypoints may pass the pool directly. The tree-load itself does
+// NOT begin/commit a transaction — its caller owns the snapshot lifecycle.
 //
 // Parts are loaded with ONE query for the whole session (SOW-0005 round-2 P2-B),
-// NOT one query per message: the former per-message loop ran N queries for an
-// N-message session, holding the read tx longer and allocating heavily. The part
-// table denormalizes session_id, so a single WHERE session_id = ? ORDER BY
-// (message_id, id) returns every part already grouped by message; the rows are
-// then partitioned in memory and attached to each message in its (time_created,
-// id) order. The per-message order is preserved because the query orders by id
-// within each message_id, matching loadParts' old ORDER BY id.
-func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionID string, onWarn func(error)) ([]messageWithParts, error) {
-	tx, err := beginRO(ctx, db)
+// NOT one query per message: the part table denormalizes session_id, so a single
+// WHERE session_id = ? ORDER BY (message_id, id) returns every part already
+// grouped by message; the rows are then partitioned in memory and attached to
+// each message in its (time_created, id) order. session_id is a REQUIRED part
+// column (introspectAll), so there is no old-schema message_id-IN fallback
+// (SOW-0005 round-3 P3-1 removed the unreachable one).
+//
+// As a defensive safety signal, the loaded message and part counts are bounded by
+// maxSessionMessagesWarn / maxSessionPartsWarn: a session exceeding either emits
+// ONE structured WARN via onWarn and is STILL processed in full — the whole
+// ordered tree is mandatory for the token-delta synthesis, so truncating would
+// corrupt the deltas (SOW-0005 round-3 P2-3).
+func loadSessionTree(ctx context.Context, q roQuerier, schema schemaSet, sessionID string, onWarn func(error)) ([]messageWithParts, error) {
+	msgs, err := loadMessages(ctx, q, schema["message"], sessionID, onWarn)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	msgs, err := loadMessages(ctx, tx, schema["message"], sessionID, onWarn)
+	partsByMessage, err := loadSessionParts(ctx, q, schema["part"], sessionID, onWarn)
 	if err != nil {
 		return nil, err
 	}
-	partsByMessage, err := loadSessionParts(ctx, tx, schema["part"], sessionID, msgs, onWarn)
-	if err != nil {
-		return nil, err
-	}
+	warnIfSessionTooLarge(sessionID, msgs, partsByMessage, onWarn)
 	out := make([]messageWithParts, 0, len(msgs))
 	for i := range msgs {
 		out = append(out, messageWithParts{Message: msgs[i], Parts: partsByMessage[msgs[i].ID]})
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("opencode: commit tree tx: %w", err)
 	}
 	return out, nil
 }
@@ -225,11 +271,12 @@ func loadSessionTree(ctx context.Context, db *sql.DB, schema schemaSet, sessionI
 // loadMessages reads a session's messages ordered by (time_created, id). The
 // order column names come from the live schema; they are required columns
 // (introspectAll guarantees session_id/time_updated/data present), and
-// time_created is in wantedColumns for message on every schema.
-func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string, onWarn func(error)) ([]messageRow, error) {
+// time_created is in wantedColumns for message on every schema. q is any
+// roQuerier (the shared snapshot tx in production).
+func loadMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID string, onWarn func(error)) ([]messageRow, error) {
 	idx := newColumnIndex(s)
 	q := selectByColumn(s, "session_id", messageOrderBy(s))
-	rows, err := tx.QueryContext(ctx, q, sessionID)
+	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: load messages for %s: %w", sessionID, err)
 	}
@@ -258,51 +305,22 @@ func loadMessages(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID stri
 	return out, nil
 }
 
-// loadSessionParts reads ALL of a session's parts in ONE query and groups them by
-// message_id (SOW-0005 round-2 P2-B — replaces the per-message N+1 loop). The part
-// table denormalizes session_id, so the fast path is a single
-// WHERE session_id = ? ORDER BY (message_id, id). On a hypothetical OLD schema
-// where part lacks session_id (it is a required column today, so this is
-// defence-in-depth), it falls back to a single WHERE message_id IN (...) over the
-// session's message ids — still ONE query, never N. Returns a map keyed by
-// message_id; a message with no parts is simply absent (nil slice on lookup).
-func loadSessionParts(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string, msgs []messageRow, onWarn func(error)) (map[string][]partRow, error) {
-	if s.has("session_id") {
-		return loadPartsBySession(ctx, tx, s, sessionID, onWarn)
-	}
-	return loadPartsByMessageIDs(ctx, tx, s, msgs, onWarn)
-}
-
-// loadPartsBySession is the fast path: ONE indexed query over the denormalized
-// session_id, ordered (message_id, id) so each message's parts arrive contiguous
-// and in creation order. scanPartRows partitions them by message_id.
-func loadPartsBySession(ctx context.Context, tx *sql.Tx, s tableSchema, sessionID string, onWarn func(error)) (map[string][]partRow, error) {
+// loadSessionParts reads ALL of a session's parts in ONE indexed query over the
+// denormalized session_id (SOW-0005 round-2 P2-B — replaces the per-message N+1
+// loop), ordered (message_id, id) so each message's parts arrive contiguous and in
+// creation order. scanPartRows partitions them by message_id. session_id is a
+// REQUIRED part column (introspectAll fails fast without it), so a part table that
+// reaches this function ALWAYS has it — the round-2 P2-B old-schema
+// message_id-IN fallback was unreachable and was removed (SOW-0005 round-3 P3-1).
+// Returns a map keyed by message_id; a message with no parts is simply absent
+// (nil slice on lookup). q is any roQuerier (the shared snapshot tx in production).
+func loadSessionParts(ctx context.Context, qr roQuerier, s tableSchema, sessionID string, onWarn func(error)) (map[string][]partRow, error) {
 	q := selectByColumn(s, "session_id", quoteIdent("message_id")+", "+quoteIdent("id"))
-	rows, err := tx.QueryContext(ctx, q, sessionID)
+	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: load parts for session %s: %w", sessionID, err)
 	}
 	return scanPartRows(ctx, rows, s, onWarn, "session "+sessionID)
-}
-
-// loadPartsByMessageIDs is the old-schema fallback (part lacks session_id): ONE
-// query with a WHERE message_id IN (?,?,...) over the session's message ids,
-// ordered (message_id, id). Still one query, not N. An empty message set returns
-// an empty map without querying.
-func loadPartsByMessageIDs(ctx context.Context, tx *sql.Tx, s tableSchema, msgs []messageRow, onWarn func(error)) (map[string][]partRow, error) {
-	if len(msgs) == 0 {
-		return map[string][]partRow{}, nil
-	}
-	ids := make([]any, len(msgs))
-	for i := range msgs {
-		ids[i] = msgs[i].ID
-	}
-	q := selectPartsByMessageIDs(s, len(ids))
-	rows, err := tx.QueryContext(ctx, q, ids...)
-	if err != nil {
-		return nil, fmt.Errorf("opencode: load parts by message ids: %w", err)
-	}
-	return scanPartRows(ctx, rows, s, onWarn, "message-id set")
 }
 
 // scanPartRows scans a part result set and partitions the rows into a map keyed by

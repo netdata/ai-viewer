@@ -201,7 +201,20 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 // SOW-0005 P2.4) and injects it so a nested sub-agent's RootNativeID is the whole
 // tree's root rather than its direct parent.
 func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, sourceID, sessionID string, logger *slog.Logger, onError func(error)) (evs []canonical.Event, skipped bool, err error) {
-	s, ok, err := loadSession(ctx, db, schema, sessionID, onError)
+	// ONE read-only transaction for the WHOLE per-session read (SOW-0005 round-3
+	// P1-2): the session row, the time_compacting check, the parent-chain root
+	// resolution, and the message+part tree all share a single consistent snapshot.
+	// Opening a second tx for the tree after checking time_compacting in a first one
+	// was a compaction-race TOCTOU — opencode could begin compaction between the two
+	// reads and the adapter would emit a partial/mutating tree despite the Edge #8
+	// skip rule, and the metadata would come from a different snapshot than the tree.
+	tx, err := beginRO(ctx, db)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	s, ok, err := loadSession(ctx, tx, schema, sessionID, onError)
 	if err != nil {
 		return nil, false, err
 	}
@@ -211,16 +224,23 @@ func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, source
 	if s.TimeCompactingMs > 0 {
 		// Pause: compaction is reshaping this session's message/part rows, so reading
 		// now would emit partial/stale content. Skip emitting this cycle; the session
-		// re-appears in a later delta when time_compacting clears (P2-E).
+		// re-appears in a later delta when time_compacting clears (P2-E). The check and
+		// the (skipped) tree read are now atomic on this one snapshot (P1-2).
 		orDefaultLogger(logger).Info("opencode: session compaction in progress; skipping tree emit this cycle (re-emits when time_compacting clears)",
 			"session_id", sessionID)
 		return nil, true, nil
 	}
-	tree, err := loadSessionTree(ctx, db, schema, sessionID, onError)
+	tree, err := loadSessionTree(ctx, tx, schema, sessionID, onError)
 	if err != nil {
 		return nil, false, err
 	}
-	root := resolveRootID(ctx, db, s.ID, s.ParentID, onError)
+	root := resolveRootID(ctx, tx, s.ID, s.ParentID, onError)
+	// Commit the read-only snapshot before mapping (mapping is pure CPU work; holding
+	// the snapshot across it would pin the WAL needlessly). A commit failure on a
+	// read-only tx is surfaced rather than silently dropped.
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("opencode: commit session-read tx for %s: %w", sessionID, err)
+	}
 	evs, err = mapSession(sourceID, s, tree, WithRootNativeID(root), WithOnWarn(onError))
 	return evs, false, err
 }

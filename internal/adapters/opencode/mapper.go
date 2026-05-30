@@ -242,7 +242,7 @@ func (m *sessionMapper) sessionStarted() canonical.SessionStartedEvent {
 	}
 	mr := m.sessionModel()
 	ev := canonical.SessionStartedEvent{
-		EventBase:      m.nextBase(msToMicros(m.session.TimeCreatedMs)),
+		EventBase:      m.nextBase(m.msToMicrosWarn(m.session.TimeCreatedMs, "session.time_created")),
 		NativeID:       m.session.ID,
 		RootNativeID:   m.rootNativeID(),
 		ParentNativeID: m.session.ParentID,
@@ -309,11 +309,12 @@ func (m *sessionMapper) sessionExtras(mr modelRef) map[string]any {
 // errored. Returns nil when the session stays running.
 func (m *sessionMapper) sessionFinalized() canonical.Event {
 	if m.session.TimeArchivedMs > 0 {
+		archUs := m.msToMicrosWarn(m.session.TimeArchivedMs, "session.time_archived")
 		ev := canonical.SessionFinalizedEvent{
-			EventBase: m.nextBase(msToMicros(m.session.TimeArchivedMs)),
+			EventBase: m.nextBase(archUs),
 			NativeID:  m.session.ID,
 			Status:    canonical.StatusCompleted,
-			EndTs:     msToMicros(m.session.TimeArchivedMs),
+			EndTs:     archUs,
 		}
 		return ev
 	}
@@ -330,24 +331,46 @@ func (m *sessionMapper) sessionFinalized() canonical.Event {
 	return nil
 }
 
-// msToMicros converts opencode's native milliseconds to canonical microseconds.
-// A non-positive input (absent timestamp) maps to 0 so an unset column never
-// fabricates a 1970-adjacent time (adapter-opencode.md §"Edge Cases" #6 — the
-// single ms→µs conversion point). It SATURATES at math.MaxInt64 rather than
-// WRAPPING on a crafted/corrupt huge ms value (SOW-0005 round-2 P2-F): a wrapped
-// timestamp would become negative and reorder events nonsensically. A clamped
-// timestamp is a safe degradation (the event sorts at the far future, visibly
-// anomalous) and this conversion has no error channel, so the clamp is silent;
-// the load-bearing token accounting that DOES carry a warn surfaces its own
-// overflow WARN (computeStepDeltas / finalizeTurn via mwarn).
-func msToMicros(ms int64) int64 {
+// clampMsToMicros converts opencode's native milliseconds to canonical
+// microseconds, reporting whether it had to CLAMP. A non-positive input (absent
+// timestamp) maps to (0, false) so an unset column never fabricates a
+// 1970-adjacent time (adapter-opencode.md §"Edge Cases" #6 — the single ms→µs
+// conversion point). A crafted/corrupt huge ms whose *1000 would overflow int64
+// SATURATES at math.MaxInt64 and returns clamped=true (SOW-0005 round-2 P2-F): a
+// wrapped timestamp would become negative and reorder events nonsensically; the
+// far-future clamp is the safe degradation. This is the pure core; callers with a
+// warn channel surface the clamp via msToMicrosWarn (SOW-0005 round-3 P2-1).
+func clampMsToMicros(ms int64) (us int64, clamped bool) {
 	if ms <= 0 {
-		return 0
+		return 0, false
 	}
 	if ms > math.MaxInt64/1000 {
-		return math.MaxInt64
+		return math.MaxInt64, true
 	}
-	return ms * 1000
+	return ms * 1000, false
+}
+
+// msToMicros is the non-warning ms→µs conversion used by the pure free-function
+// helpers (toolStartUs / turnEndUs / cancelOpenLLMOp) that have NO warn channel.
+// It saturates silently; the mapper-method emission sites use msToMicrosWarn so a
+// clamp is surfaced (SOW-0005 round-3 P2-1).
+func msToMicros(ms int64) int64 {
+	us, _ := clampMsToMicros(ms)
+	return us
+}
+
+// msToMicrosWarn is the warning-capable ms→µs conversion the mapper's method sites
+// use: it saturates exactly like msToMicros but, on a clamp, surfaces a structured
+// WARN via mwarn with the field label so a crafted/corrupt timestamp is no longer
+// a silent saturation (SOW-0005 round-3 P2-1). The pure mapper-only path (no warn
+// wired) still degrades silently. field names the source column/path for context
+// (e.g. "session.time_created").
+func (m *sessionMapper) msToMicrosWarn(ms int64, field string) int64 {
+	us, clamped := clampMsToMicros(ms)
+	if clamped {
+		m.mwarn(fmt.Errorf("opencode: timestamp ms→µs overflow (field=%s ms=%d); clamped to MaxInt64 (P2-1)", field, ms))
+	}
+	return us
 }
 
 // putStr inserts k=v into the extras map only when v is non-empty, so an

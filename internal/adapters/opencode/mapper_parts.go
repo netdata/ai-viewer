@@ -82,8 +82,11 @@ type turnContext struct {
 func (m *sessionMapper) mapMessage(mwp messageWithParts) ([]canonical.Event, error) {
 	data, err := decodeMessageData(mwp.Message.Data)
 	if err != nil {
-		// One structured WRN; skip the row rather than abort the session
-		// (adapter-opencode.md §"Edge Cases" #1).
+		// One structured WRN session LogEntry (detail view) AND route through onError
+		// so /api/health degrades: message.data is NOT-NULL, so an undecodable blob is
+		// a corruption signal, not benign forward-compat drift (SOW-0005 round-3 P2-2).
+		// The row is skipped, not aborted (adapter-opencode.md §"Edge Cases" #1).
+		m.mwarn(fmt.Errorf("opencode: undecodable message.data (table=message id=%s); row skipped: %w", mwp.Message.ID, err))
 		base := m.nextBase(msToMicros(mwp.Message.TimeCreatedMs))
 		return []canonical.Event{m.logEntry(base, "WRN", 0, 0,
 			"message data undecodable: "+err.Error(),
@@ -178,6 +181,10 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 func (m *sessionMapper) mapPart(tc *turnContext, msg *messageData, p partRow) ([]canonical.Event, error) {
 	data, err := decodePartData(p.Data)
 	if err != nil {
+		// Session LogEntry (detail view) AND onError (health): part.data is NOT-NULL,
+		// so an undecodable blob is corruption that must degrade /api/health, not just
+		// a per-session WRN (SOW-0005 round-3 P2-2). The part is skipped, not aborted.
+		m.mwarn(fmt.Errorf("opencode: undecodable part.data (table=part id=%s); part skipped: %w", p.ID, err))
 		base := m.nextBase(0)
 		return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq,
 			"part data undecodable: "+err.Error(),
