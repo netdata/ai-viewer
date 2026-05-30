@@ -108,12 +108,22 @@ type openOp struct {
 // faithfully (the writer's ON CONFLICT UPDATE keeps the original start_ts via
 // MIN and grafts the resolver stash, so re-emitting with the op's known
 // identity only adds the enrichment Extras).
+//
+// status/errClass record the TERMINAL status the op was finalized with, so an
+// output-first enrichment (exec_command_end / patch_apply_end arriving AFTER the
+// *_output already finalized the op) emits a CORRECTING OpFinalized ONLY when its
+// authoritative status actually DIFFERS from this recorded one (H1b). Without
+// this, an exec exit 0 on an already-`completed` op would re-emit a redundant
+// OpFinalized(completed) that the catalog (which contributes a finalize's
+// failure/token/duration totals) would double-count.
 type finalizedOp struct {
 	turnSeq   int
 	opSeq     int
 	kind      canonical.OpKind
 	name      string
 	namespace string
+	status    string
+	errClass  string
 }
 
 // openWebSearchRef records one open web_search op for POSITIONAL pairing with

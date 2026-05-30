@@ -859,3 +859,53 @@ func TestMapper_OutputFirstExecFailedCorrects(t *testing.T) {
 		t.Errorf("output-first failed exec did not re-emit exec_exit_code/exec_duration_ms Extras (G1/G3)")
 	}
 }
+
+// TestMapper_OutputFirstExecOKNoSpuriousRefinalize covers H1b: an output-first
+// exec_command_end(exit 0) on an op its function_call_output already finalized
+// COMPLETED must re-emit the exec Extras (so they reach ops.extras_json) but must
+// NOT emit a correcting OpFinalized — the status is unchanged, so a re-finalize
+// would be spurious and would double-count the op in the (finalize-contributing)
+// catalog rollups. Exactly ONE OpFinalized on the shell op's (turn,seq), plus the
+// Extras-carrying OpStarted re-emit.
+func TestMapper_OutputFirstExecOKNoSpuriousRefinalize(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"m"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}`,
+		// Output-first: provisional completed off a benign output string.
+		`{"timestamp":"` + tsEvent + `","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}`,
+		// Late exec_command_end with exit 0 → SAME terminal status (completed); the
+		// correcting OpFinalized must be SUPPRESSED (H1b).
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"exec_command_end","call_id":"c1","exit_code":0,"aggregated_output":"ok","duration":{"secs":0,"nanos":500000000}}}`,
+	}
+	events := runLines(t, m, lines)
+
+	// Exactly one OpFinalized on the shell op (Seq 1) — the original output finalize.
+	// No correcting re-finalize, because exit 0 did not change the status.
+	seq1Finals := 0
+	for _, f := range opFinals(events) {
+		if f.Seq == 1 {
+			seq1Finals++
+			if f.Status != "completed" {
+				t.Errorf("output-first exit-0: Seq1 finalize status = %q, want completed", f.Status)
+			}
+		}
+	}
+	if seq1Finals != 1 {
+		t.Errorf("output-first exit-0: Seq1 OpFinalized count = %d, want exactly 1 (no spurious re-finalize, H1b)", seq1Finals)
+	}
+
+	// The exec Extras still reach the op via an OpStarted re-emit (enrichment is not
+	// lost just because the status correction is suppressed).
+	reemit := false
+	for _, st := range opStarts(events) {
+		if st.Name == "shell" && st.Extras != nil && st.Extras["exec_exit_code"] == int64(0) {
+			reemit = true
+		}
+	}
+	if !reemit {
+		t.Errorf("output-first exit-0: exec Extras did not reach the op via an OpStarted re-emit (F4 must still hold)")
+	}
+}

@@ -53,6 +53,17 @@ type FileCursor struct {
 	// LastTsUs is the timestamp of the last record consumed, in microseconds
 	// since the UNIX epoch. Observability only.
 	LastTsUs int64 `json:"last_ts_us,omitempty"`
+	// EOFFinalizedSize is the file size at which an EOF-finalize already fired
+	// (the mapper made a terminal decision at full-read EOF: an OLD-format turn
+	// closed completed, a stale NEW-format turn closed failed/incomplete, or a
+	// clean session with no open turn). It is the DURABLE marker that prevents
+	// finalizeAtEOF from re-firing the same TurnFinalized / SessionFinalized on
+	// every unchanged rescan or daemon restart (H2): the mapper's own
+	// eofFinalized guard is per-instance and a replay-from-0 rebuilds a fresh
+	// mapper each scan, so the marker must live in the cursor. A genuine append
+	// grows Size past this value, so the equality check fails and the new EOF is
+	// finalized normally. 0 means no EOF-finalize has fired yet for this file.
+	EOFFinalizedSize int64 `json:"eof_finalized_size,omitempty"`
 }
 
 // LegacyFile is the per-legacy-file suppression record. Ingested is a misnomer

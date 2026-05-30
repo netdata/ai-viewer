@@ -219,6 +219,25 @@ Adjudicated on ground truth (spec lines + a read-only investigation of the real 
 
 **Round-3 fix plan:** (G1) exec exit_code authoritative for op status in both orders — exec-first applies at finalize, output-first emits a corrected `OpFinalized(failed,command_failed)` via the finalizedOps lookup; (G2) patch_apply_end uses the same finalizedOps path + merges success/status; (G3) emit `exec_duration_ms` (normalize the duration value to ms); (G4) FIFO queue of open web_search ops per turn + decode/emit `action`; (G5) set NativeID from `payload.id` (filename only as fallback). Add fixtures: failed-exec (output-first, corrected status), patch_apply_end, multi-web-search, and regenerate f_exec_truncated with `exec_duration_ms`.
 
+### Round 3 (2026-05-30) — same scope + fix notes
+
+- **glm**: SAFE TO MERGE, P1:0 P2:0 P3:0 — all G1–G6 "correctly and completely resolved".
+- **minimax**: SAFE, all G1–G6 correct, zero regressions, ready to merge.
+- **codex**: NOT SAFE. Confirmed G1–G6 resolved, but the round-2/3 op re-emission collides with a non-idempotent catalog:
+
+| # | Sev | Finding | Ground-truth verdict |
+|---|---|---|---|
+| H1 | P1 | Late-enrichment op re-emission double-counts catalog rollups (re-emit `OpStarted` → `call_count+1` again; correcting `OpFinalized` → failure/tokens/duration added again); also fires even when status is unchanged (exit 0) | CONFIRMED. catalog.go:108/143 ADD unconditionally (not idempotent). |
+| H2 | P2 | `finalizeAtEOF` re-fires the EOF `TurnFinalized` on every unchanged rescan/restart (`eofFinalized` is per-mapper-instance; the cursor has no EOF-finalized marker) | CONFIRMED. scanner.go:230 + mapper.go:153 + cursor.go:43. |
+
+**Root-cause decision (CTO).** The double-count is the **catalog-idempotency-under-re-emission** gap already tracked as **SOW-0020**. It is **pre-existing and structural** (catalog.go ADDs on every event; merged `claude_code` also re-emits Op events at ops.go:75/138/505) and currently **latent** (no shipped API/presenter reads `catalog_*`; only the future stats UI / SOW-0007 will). The codex adapter cannot be simultaneously status-correct (G1) and catalog-non-corrupting (H1) without idempotent catalog aggregation, so SOW-0020 is a genuine prerequisite. Decision: absorb the SOW-0020 catalog-idempotency fix into this convergence (a justified, in-scope-by-necessity ingest change — see Pre-Implementation Gate Addendum below), plus the codex-scoped hygiene fixes.
+
+**Round-4 fix plan:** (H1a, ingest) make the catalog idempotent under op re-emission — `onOpStarted` counts a call once per op (only on a genuine insert), and `onOpFinalized` contributes failure/tokens/duration once / by delta so a corrected re-finalize updates rather than double-adds; (H1b, codex) store the prior terminal status in `finalizedOp` and emit the correcting `OpFinalized` ONLY when the status actually changes (no spurious re-finalize for exit 0); (H2, codex) persist an EOF-finalized marker in the cursor so `finalizeAtEOF` does not re-fire on an unchanged rescan/restart. Add ingest tests pinning catalog idempotency under a re-emitted op, and a restart test pinning no duplicate EOF finalize.
+
+### Pre-Implementation Gate Addendum (2026-05-30) — ingest scope expansion
+
+The original gate scoped this SOW to `internal/adapters/codex/` + the additive `sources.go` probe, with "no canonical/ingest/store change". Round-3 review (codex H1) proved the codex adapter cannot be correct without idempotent catalog aggregation under op re-emission (a pre-existing `internal/ingest/catalog.go` gap, SOW-0020, that the codex replay-from-0 + enrichment + EOF-finalize design is the first to heavily exercise). Scope is therefore expanded to include the catalog-idempotency fix in `internal/ingest/catalog.go` (and a minimal `writer.go` insert-vs-update signal if needed). Blast radius: the change makes catalog rollups idempotent for ALL adapters (benefits aiagent_v2/v3 + claude_code, which also re-emit); it is additive-correctness (aggregates become correct under re-emission, unchanged for single-emission). SOW-0020 is superseded by this work and will be closed referencing this SOW.
+
 ## Outcome
 
 Pending.

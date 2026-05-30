@@ -80,7 +80,14 @@ func (m *fileMapper) enrichFinalizedOp(callID string, advance func(int64) canoni
 	// output-first ordering: the *_output already finalized it (often completed off a
 	// benign-looking output), but a non-zero exit_code is authoritative (G1, spec
 	// rule #5/#14). The writer upserts on (turn,seq), so this overwrites the status.
-	if status != "" {
+	//
+	// Emit the correcting OpFinalized ONLY when the enrichment-derived status differs
+	// from the one the op was already finalized with (H1b). An exec exit 0 on an
+	// already-`completed` op carries no correction, so re-emitting OpFinalized(completed)
+	// would be spurious — and the catalog rollups (which contribute each finalize's
+	// failure/token/duration totals) would double-count it. A genuine change
+	// (completed → failed on a non-zero exit) still corrects exactly once.
+	if status != "" && (status != fop.status || errClass != fop.errClass) {
 		out = append(out, m.correctFinalizedOp(fop, advance, tsUs, status, errClass))
 	}
 	if len(out) == 0 {
@@ -159,8 +166,11 @@ func (m *fileMapper) reemitOpStarted(fop finalizedOp, advance func(int64) canoni
 
 // recordFinalizedOp records a now-finalized op so a LATE enrichment event can
 // merge Extras onto it via reemitOpStarted (F4). The op's kind/name/namespace are
-// preserved so the re-emit restates the op faithfully.
-func (m *fileMapper) recordFinalizedOp(callID string, op *openOp) {
+// preserved so the re-emit restates the op faithfully. status/errClass are the
+// TERMINAL status the op was finalized with, so an output-first enrichment only
+// emits a correcting OpFinalized when its authoritative status actually differs
+// from this one (H1b — no spurious re-finalize on an unchanged status).
+func (m *fileMapper) recordFinalizedOp(callID string, op *openOp, status, errClass string) {
 	if callID == "" {
 		return
 	}
@@ -170,6 +180,8 @@ func (m *fileMapper) recordFinalizedOp(callID string, op *openOp) {
 		kind:      op.kind,
 		name:      op.name,
 		namespace: op.namespace,
+		status:    status,
+		errClass:  errClass,
 	}
 }
 
@@ -200,7 +212,7 @@ func (m *fileMapper) enrichWebSearch(rec record, advance func(int64) canonical.E
 	op.finalized = true
 	mergeExtras(op, extras)
 	delete(m.openOps, ws.syntheticCallID)
-	m.recordFinalizedOp(ws.syntheticCallID, op)
+	m.recordFinalizedOp(ws.syntheticCallID, op, "completed", "")
 	return m.finalizeWithExtras(op, advance, tsUs, "completed", "")
 }
 
@@ -278,7 +290,7 @@ func (m *fileMapper) enrichMcp(rec record, advance func(int64) canonical.EventBa
 		},
 	}
 	delete(m.openOps, p.CallID)
-	m.recordFinalizedOp(p.CallID, op)
+	m.recordFinalizedOp(p.CallID, op, status, errClass)
 	return out
 }
 
@@ -304,7 +316,7 @@ func (m *fileMapper) enrichPatchApply(rec record, advance func(int64) canonical.
 	op.finalized = true
 	mergeExtras(op, extras)
 	delete(m.openOps, p.CallID)
-	m.recordFinalizedOp(p.CallID, op)
+	m.recordFinalizedOp(p.CallID, op, status, errClass)
 	// finalizeWithExtras emits the OpStarted (carrying patch_success/patch_status)
 	// followed by the OpFinalized with the success-derived status.
 	return m.finalizeWithExtras(op, advance, tsUs, status, errClass)

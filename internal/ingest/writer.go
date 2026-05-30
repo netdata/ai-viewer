@@ -516,6 +516,20 @@ ON CONFLICT (session_id, seq) DO NOTHING
 		return fmt.Errorf("writer: synthesize turn for op: %w", err)
 	}
 	opID := canonicalOpID(turnID, ev.Seq)
+	// Probe whether this op already has a row BEFORE the upsert so the catalog can
+	// count the call ONCE per distinct op (SOW-0004 H1a). A re-emitted OpStarted —
+	// late enrichment carrying corrected status/extras on the same (turn,seq), as
+	// the codex/claude_code replay-from-0 + enrichment design emits — is an UPDATE,
+	// not a new call. ON CONFLICT DO UPDATE returns RowsAffected=1 for both insert
+	// and update under modernc/sqlite, so an explicit existence check is the
+	// authoritative insert-vs-update signal. sql.ErrNoRows ⇒ genuine new insert.
+	opInserted := false
+	switch existsErr := w.requireOpExists(ctx, tx, opID); {
+	case errors.Is(existsErr, sql.ErrNoRows):
+		opInserted = true
+	case existsErr != nil:
+		return existsErr
+	}
 	var parentOpID sql.NullString
 	if ev.ParentOpSeq >= 0 {
 		parentOpID = sql.NullString{String: canonicalOpID(turnID, ev.ParentOpSeq), Valid: true}
@@ -587,7 +601,7 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
-	if err := w.catalog.onOpStarted(ctx, tx, ev); err != nil {
+	if err := w.catalog.onOpStarted(ctx, tx, ev, opInserted); err != nil {
 		return err
 	}
 	return nil
@@ -600,6 +614,15 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	opID := canonicalOpID(turnID, ev.Seq)
+	// Capture the op's persisted terminal contribution BEFORE the UPDATE below
+	// overwrites it, so the catalog can move its rollups by the (new − prior)
+	// delta and stay idempotent under a re-emitted / corrected OpFinalized on the
+	// same (turn,seq) (SOW-0004 H1a). Absent row ⇒ first finalize ⇒ zero prior ⇒
+	// delta equals the full new contribution (unchanged single-emission path).
+	prior, err := w.opPriorTotals(ctx, tx, opID)
+	if err != nil {
+		return err
+	}
 	cost := ev.CostUSD
 	if cost == 0 && w.pricer != nil {
 		// Resolve provider/model/kind and start_ts from the row we know
@@ -682,10 +705,37 @@ WHERE id = ?
 	// every op whose cost was computed.
 	evForCatalog := ev
 	evForCatalog.CostUSD = cost
-	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog); err != nil {
+	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog, prior); err != nil {
 		return err
 	}
 	return nil
+}
+
+// opPriorTotals reads an op's persisted terminal contribution (status + the
+// token/cost/duration columns the catalog rollups sum) as it stands BEFORE the
+// current OpFinalized UPDATE. It is the durable prior state the catalog subtracts
+// to stay idempotent under a re-emitted / corrected finalize (SOW-0004 H1a):
+// reading the persisted row (not the event) means a re-finalize across a daemon
+// restart — where any in-memory per-op tracking would be gone — still computes a
+// correct delta. sql.ErrNoRows ⇒ no row yet (first finalize, or OpStarted not yet
+// landed): found=false and every prior contribution is zero, so the delta equals
+// the full new contribution and the single-emission path is unchanged.
+func (w *writer) opPriorTotals(ctx context.Context, tx *sql.Tx, opID string) (opPriorTotals, error) {
+	var p opPriorTotals
+	var dur sql.NullInt64
+	err := tx.QueryRowContext(ctx, `
+SELECT status, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_us
+  FROM ops WHERE id = ?`, opID).
+		Scan(&p.status, &p.tokensIn, &p.tokensOut, &p.tokensCacheRead, &p.tokensCacheWrite, &p.costUSD, &dur)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return opPriorTotals{}, nil
+		}
+		return opPriorTotals{}, fmt.Errorf("writer: read op prior totals %s: %w", opID, err)
+	}
+	p.found = true
+	p.durationUS = dur.Int64
+	return p, nil
 }
 
 // isPriceableOp reports whether the op identified by (kind, provider,

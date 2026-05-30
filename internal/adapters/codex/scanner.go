@@ -226,8 +226,16 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 	// This is called UNCONDITIONALLY at full-read EOF (not only when stale) and
 	// passed the stale bool, so the OLD-format completed-close fires on fresh files
 	// too (F1). The synthetic end timestamp is the file mtime in micros.
+	//
+	// H2: the EOF-finalize is suppressed when this exact size was already finalized
+	// on a prior pass (cur.EOFFinalizedSize == size). The mapper's eofFinalized
+	// guard is per-instance and the replay-from-0 rebuilds a fresh mapper each scan,
+	// so without a DURABLE cursor marker an unchanged rescan/restart would re-fire
+	// the EOF TurnFinalized (and the stale SessionFinalized) every time. A genuine
+	// append grows size past the marker, so the new EOF is finalized normally.
 	fullyRead := res.advanced >= size
-	if fullyRead {
+	alreadyFinalized := cur.EOFFinalizedSize > 0 && cur.EOFFinalizedSize == size
+	if fullyRead && !alreadyFinalized {
 		stale := time.Since(info.ModTime()) >= staleAfter
 		for _, ev := range mapper.finalizeAtEOF(stale, mtimeUs) {
 			select {
@@ -236,6 +244,13 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 			case out <- ev:
 				res.emitted++
 			}
+		}
+		// Persist the marker only when the mapper made a terminal decision (it set
+		// its eofFinalized guard). A FRESH new-format file with a still-running turn
+		// emits nothing and leaves the guard false, so a later stale sweep can still
+		// finalize it; the marker stays unset until then.
+		if mapper.eofFinalized {
+			cur.EOFFinalizedSize = size
 		}
 	}
 	return cur, res.emitted, nil

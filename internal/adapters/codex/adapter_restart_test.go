@@ -200,6 +200,143 @@ func TestRestart_TruncationReScansWithSourceError(t *testing.T) {
 	}
 }
 
+// TestRestart_EOFFinalizeNotReFiredOnUnchangedRescan pins H2: an EOF-finalize
+// (the OLD-format completed close, or the stale NEW-format failed/incomplete close
+// + SessionFinalized) must fire EXACTLY ONCE for a given file size. The mapper's
+// own eofFinalized guard is per-instance and the scanner replays from offset 0 on
+// every scan (rebuilding a fresh mapper), so without a DURABLE cursor marker an
+// unchanged rescan/restart re-fires the synthetic finalize. The marker
+// (FileCursor.EOFFinalizedSize) is round-tripped through Cursor.String/ParseCursor
+// exactly as the ingester persists it, so the resume sees ZERO duplicate
+// TurnFinalized / SessionFinalized.
+func TestRestart_EOFFinalizeNotReFiredOnUnchangedRescan(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		body        func(id string) []byte
+		age         time.Duration
+		wantTurnFin int  // TurnFinalized expected on the FIRST scan
+		wantSessFin int  // SessionFinalized expected on the FIRST scan
+		oldFormat   bool // documents which EOF path fires
+	}{
+		{
+			// OLD-format (turn_context only, no task_started): closes COMPLETED at
+			// EOF regardless of staleness (spec edge #3) — the 38%-of-corpus case.
+			name:        "old_format_clean_close",
+			body:        oldFormatOpenTurnSession,
+			age:         time.Minute, // fresh: old-format still closes at EOF
+			wantTurnFin: 1,
+			wantSessFin: 0, // codex has no per-session terminal signal (SOW C#3)
+			oldFormat:   true,
+		},
+		{
+			// NEW-format hanging turn aged stale ≥ 1 h: closes failed/incomplete AND
+			// emits SessionFinalized(failed,incomplete) — the only SessionFinalized
+			// codex emits (rule #23). This is the case the P2 explicitly flagged for
+			// a duplicate SessionFinalized on rescan.
+			name:        "new_format_stale_crash",
+			body:        hangingSession,
+			age:         2 * time.Hour, // stale ≥ 1 h
+			wantTurnFin: 1,
+			wantSessFin: 1,
+			oldFormat:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			id := uuid7(40 + len(tc.name))
+			root := t.TempDir()
+			path := shardPath(root, id)
+			writeFileBytes(t, path, tc.body(id))
+			setMtime(t, path, tc.age)
+
+			a, err := New(root, canonical.AdapterOptions{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			// First scan: the EOF-finalize fires exactly once.
+			out1 := make(chan canonical.Event, 512)
+			if err := a.Scan(context.Background(), nil, out1); err != nil {
+				t.Fatalf("Scan #1: %v", err)
+			}
+			first := drainBuffered(out1)
+			if got := countKind(first, canonical.EvTurnFinalized); got != tc.wantTurnFin {
+				t.Fatalf("first scan TurnFinalized = %d, want %d", got, tc.wantTurnFin)
+			}
+			if got := countKind(first, canonical.EvSessionFinalized); got != tc.wantSessFin {
+				t.Fatalf("first scan SessionFinalized = %d, want %d", got, tc.wantSessFin)
+			}
+
+			// Persist + reload the cursor exactly as the ingester does (JSON
+			// round-trip through the public ParseCursor). The EOFFinalizedSize marker
+			// must survive this round-trip.
+			cursorJSON := lastCursor(t, first)
+			parsed, err := a.ParseCursor(cursorJSON)
+			if err != nil {
+				t.Fatalf("ParseCursor: %v", err)
+			}
+
+			// Rescan with NO new bytes (same size, same mtime). The durable marker
+			// must suppress the EOF-finalize entirely.
+			out2 := make(chan canonical.Event, 512)
+			if err := a.Scan(context.Background(), parsed, out2); err != nil {
+				t.Fatalf("Scan #2 (unchanged rescan): %v", err)
+			}
+			second := drainBuffered(out2)
+			if got := countKind(second, canonical.EvTurnFinalized); got != 0 {
+				t.Errorf("unchanged rescan re-fired TurnFinalized %d times, want 0 (H2)", got)
+			}
+			if got := countKind(second, canonical.EvSessionFinalized); got != 0 {
+				t.Errorf("unchanged rescan re-fired SessionFinalized %d times, want 0 (H2)", got)
+			}
+
+			// A genuine append (size grows) re-opens normally: appending a fresh turn
+			// and closing it must produce a new TurnFinalized (the marker no longer
+			// matches the grown size). This guards against the marker over-suppressing.
+			appendFileBytes(t, path, []byte(appendedClosedTurn()))
+			setMtime(t, path, time.Minute)
+			out3 := make(chan canonical.Event, 512)
+			if err := a.Scan(context.Background(), parsed, out3); err != nil {
+				t.Fatalf("Scan #3 (after append): %v", err)
+			}
+			third := drainBuffered(out3)
+			if got := countKind(third, canonical.EvTurnFinalized); got < 1 {
+				t.Errorf("append after EOF-finalize produced %d TurnFinalized, want >=1 (marker must not over-suppress a real append)", got)
+			}
+		})
+	}
+}
+
+// oldFormatOpenTurnSession returns a modern rollout with an OLD-format turn
+// (turn_context only — no task_started, no task_complete) that stays open until
+// EOF. finalizeAtEOF closes it COMPLETED regardless of staleness (spec edge #3).
+func oldFormatOpenTurnSession(id string) []byte {
+	lines := []string{
+		metaLine(id, `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.1-codex-max"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}`,
+		`{"timestamp":"` + tsDone + `","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`,
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// appendedClosedTurn returns a NEW-format turn (task_started + task_complete) to
+// append after an EOF-finalize, proving a genuine append re-opens the file and
+// produces its own TurnFinalized rather than being suppressed by the EOF marker.
+func appendedClosedTurn() string {
+	lines := []string{
+		`{"timestamp":"2025-11-20T17:10:00.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-5.5"}}`,
+		`{"timestamp":"2025-11-20T17:10:00.100Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2","started_at":1763658600}}`,
+		`{"timestamp":"2025-11-20T17:10:05.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","completed_at":1763658605,"duration_ms":5000}}`,
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // scanFullSession runs the public Scan once over a freshly-written rollout and
 // returns the event stream (a one-shot reference run for the resume comparison).
 func scanFullSession(t *testing.T, id string, lines []string) []canonical.Event {

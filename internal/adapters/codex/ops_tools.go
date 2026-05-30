@@ -107,9 +107,11 @@ func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) c
 		out = append(out, m.payloadRef(advance(tsUs), op.turnSeq, op.opSeq, "tool_response", "json", bodyBytes))
 	}
 	delete(m.openOps, p.CallID)
-	// Record the finalized op so a LATER exec_command_end (output-first ~15-32%
-	// ordering) can still merge its Extras via an OpStarted re-emit (F4).
-	m.recordFinalizedOp(p.CallID, op)
+	// Record the finalized op (with the status it was finalized with) so a LATER
+	// exec_command_end (output-first ~15-32% ordering) can merge its Extras via an
+	// OpStarted re-emit (F4) AND only emit a correcting OpFinalized when its
+	// authoritative status differs from this one (H1b — no spurious re-finalize).
+	m.recordFinalizedOp(p.CallID, op, status, errClass)
 	return out
 }
 

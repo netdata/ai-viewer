@@ -344,7 +344,7 @@ func (m *fileMapper) finalizeDanglingOps(turnID string, base func() canonical.Ev
 			EndTs:           endUs,
 		})
 		delete(m.openOps, p.callID)
-		m.recordFinalizedOp(p.callID, p.op)
+		m.recordFinalizedOp(p.callID, p.op, opStatus, opErrClass)
 	}
 	m.pruneWebSearchQueue(turnID)
 	return out

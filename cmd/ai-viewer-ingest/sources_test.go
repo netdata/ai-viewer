@@ -44,8 +44,10 @@ func plantCodexLayout(t *testing.T, root string, modern, legacy int) {
 			t.Fatalf("write legacy rollout: %v", err)
 		}
 	}
-	// Decoys: an archived shard rollout (pruned), a non-rollout .jsonl, and a
-	// non-rollout file at the root. None of these must be counted.
+	// Decoys: an archived shard rollout (pruned), a non-rollout .jsonl, a
+	// non-rollout file at the root, AND a rollout-*.jsonl at the WRONG depth
+	// (directly under the sessions root, not in a YYYY/MM/DD shard — F8). None of
+	// these must be counted.
 	arch := filepath.Join(root, "archived_sessions", "2025", "11", "20")
 	if err := os.MkdirAll(arch, 0o755); err != nil {
 		t.Fatalf("mkdir archive: %v", err)
@@ -58,6 +60,11 @@ func plantCodexLayout(t *testing.T, root string, modern, legacy int) {
 	}
 	if err := os.WriteFile(filepath.Join(root, "history.jsonl"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write decoy root file: %v", err)
+	}
+	// A rollout-*.jsonl placed directly under the sessions root (wrong shard
+	// depth) must NOT be counted as a modern rollout (F8).
+	if err := os.WriteFile(filepath.Join(root, "rollout-2025-11-20T10-00-09-strayroot.jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stray-root rollout: %v", err)
 	}
 }
 
@@ -176,14 +183,15 @@ func TestAutoDiscover_CodexProbeLogsBothCountsSeparately(t *testing.T) {
 }
 
 // TestCountRolloutFiles verifies the modern-rollout counter mirrors discovery.go's
-// match: rollout-*.jsonl under shards, archived_sessions pruned, non-rollout
-// .jsonl and root non-rollout files ignored.
+// match: rollout-*.jsonl under YYYY/MM/DD shards, archived_sessions pruned,
+// non-rollout .jsonl, root non-rollout files, AND a rollout-*.jsonl at the wrong
+// shard depth (directly under the root) all ignored (F8).
 func TestCountRolloutFiles(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	plantCodexLayout(t, tmp, 4, 2)
 	if n := countRolloutFiles(tmp); n != 4 {
-		t.Fatalf("countRolloutFiles = %d, want 4 (archived + decoys excluded)", n)
+		t.Fatalf("countRolloutFiles = %d, want 4 (archived + decoys + wrong-depth stray excluded)", n)
 	}
 	if n := countRolloutFiles(filepath.Join(tmp, "missing")); n != 0 {
 		t.Fatalf("countRolloutFiles(missing) = %d, want 0", n)
