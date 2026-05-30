@@ -498,51 +498,119 @@ func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty,
 
 // flushChangedMetas hashes every dirty `.meta.json`, records the new hash in the
 // cursor for those whose content changed, and repairs the affected child
-// subagent's `AgentName` by emitting a catalog-safe `SessionUpdatedEvent` (spec
-// §8.1, P1.6). It does NOT re-read any transcript: a from-0 re-emit would re-emit
-// SessionStarted/OpStarted/OpFinalized and double-count the accumulating catalog_*
-// rollups. The op→child link is repaired separately by the resolver's toolUseId
-// match. Each meta read is containment-checked (RESOLVED path, no TOCTOU), size-
-// capped (P2.6b), and surfaces a SourceError on a present-but-broken/oversized
-// sidecar (P2.4b/P2.5a). A no-op touch (unchanged hash) emits nothing.
+// subagent's `AgentName`/`toolUseId` stash by emitting a catalog-safe
+// `SessionUpdatedEvent` through the SHARED repairChangedMetas (spec §8.1, P1.6/P1.8).
+// The repair body is shared verbatim with the Scan path so the two can never diverge
+// (the recurring scan/tail asymmetry). It does NOT re-read any transcript: a from-0
+// re-emit would re-emit SessionStarted/OpStarted/OpFinalized and double-count the
+// accumulating catalog_* rollups. The op→child link is repaired separately by the
+// resolver's toolUseId match. Each meta read is containment-checked (RESOLVED path,
+// no TOCTOU), size-capped (P2.6b), and surfaces a SourceError on a present-but-
+// broken/oversized sidecar (P2.4b/P2.5a). A no-op touch (unchanged hash) emits
+// nothing.
 func flushChangedMetas(ctx context.Context, resolvedRoot, root, sourceID string, metaDirty map[string]struct{}, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
 	rels := make([]string, 0, len(metaDirty))
 	for rel := range metaDirty {
 		rels = append(rels, rel)
 	}
 	sort.Strings(rels) // deterministic emission order
+
+	// Hash each dirty meta once (containment-checked, bounded, errors surfaced); the
+	// resulting map is the `currentHashes` the shared repair compares against the
+	// STARTING metaSeen (the cursor's current state, before this flush records any
+	// new hash). A read failure excludes that rel from currentHashes (so the shared
+	// repair never re-reads / re-errors a meta that could not be hashed).
+	startMetaSeen := cur.MetaSeen
+	currentHashes := make(map[string]string, len(rels))
 	for _, rel := range rels {
-		abs := filepath.Join(root, filepath.FromSlash(rel))
-		// Containment guard returning the RESOLVED path so the read opens it, not
-		// the original (P1.3/P2.5a, no TOCTOU). resolvedRoot is pre-resolved so this
-		// does not re-run EvalSymlinks on the root per meta.
-		resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, abs)
-		if cerr != nil {
-			onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", rel, cerr))
-			continue
-		}
+		raw, ok := readMetaForRepair(rel, root, resolvedRoot, onError)
 		if !ok {
-			onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", rel))
 			continue
 		}
-		raw, rerr := readMetaCapped(resolvedAbs)
-		if rerr != nil {
-			// A present-but-unreadable or oversized meta silently failing the
-			// rewrite-detection would mask a broken sidecar whose rewrite should
-			// drive the AgentName repair; surface it (P2.5a read / P2.6b size).
-			onError(fmt.Errorf("claude_code: read meta %s: %w", rel, rerr))
+		currentHashes[rel] = hashBytes(raw)
+	}
+
+	// Emit the repair BEFORE recording the new hashes (mirrors Scan: once a hash is
+	// in metaSeen the repair would be suppressed as a bare touch). Shared with Scan.
+	if err := repairChangedMetas(ctx, sourceID, root, resolvedRoot, startMetaSeen, currentHashes, out, onError); err != nil {
+		return err
+	}
+
+	// Record the new/changed hashes so a later bare touch (unchanged content) emits
+	// nothing and a restart sees the observed sidecar state.
+	for _, rel := range rels {
+		h, ok := currentHashes[rel]
+		if !ok || cur.metaSeen(rel) == h {
 			continue
-		}
-		h := hashBytes(raw)
-		if cur.metaSeen(rel) == h {
-			continue // unchanged content; a bare touch must not re-emit.
 		}
 		*cur = cur.withMetaSeen(rel, h)
+	}
+	return nil
+}
 
-		// Repair the child's AgentName via a catalog-safe SessionUpdatedEvent
-		// (applySessionUpdated makes no catalog call) — never a transcript re-read.
+// readMetaForRepair reads a dirty `.meta.json` for hashing/parsing on the repair
+// path. It applies the uniform containment guard (RESOLVED path, no TOCTOU; spec
+// §6.1) and the size cap (P2.6b), surfacing a SourceError on a present-but-broken or
+// oversized sidecar (P2.4b/P2.5a). resolvedRoot is pre-resolved so this does not
+// re-run EvalSymlinks on the root per meta. Returns (raw, false) when the meta could
+// not be read so the caller skips it.
+func readMetaForRepair(rel, root, resolvedRoot string, onError func(error)) ([]byte, bool) {
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, abs)
+	if cerr != nil {
+		onError(fmt.Errorf("claude_code: cannot resolve meta %s for containment; skipping: %w", rel, cerr))
+		return nil, false
+	}
+	if !ok {
+		onError(fmt.Errorf("claude_code: meta %s resolves outside the projects root; skipping (symlink escape)", rel))
+		return nil, false
+	}
+	raw, rerr := readMetaCapped(resolvedAbs)
+	if rerr != nil {
+		// A present-but-unreadable or oversized meta silently failing the
+		// rewrite-detection would mask a broken sidecar whose rewrite should drive
+		// the AgentName repair; surface it (P2.5a read / P2.6b size).
+		onError(fmt.Errorf("claude_code: read meta %s: %w", rel, rerr))
+		return nil, false
+	}
+	return raw, true
+}
+
+// repairChangedMetas is the SINGLE meta-repair body shared by Scan (scanAll) and
+// Tail (flushChangedMetas), so the two paths can never diverge — the recurring
+// failure mode where the late-meta repair was Tail-only while Scan silently recorded
+// the meta hash (SOW-0003 P1.8). For every subagent `.meta.json` in currentHashes
+// whose hash is NEW or CHANGED vs startMetaSeen, it parses the meta and emits a
+// catalog-safe `SessionUpdatedEvent{NativeID:<child native>, AgentName:<agentType>,
+// Extras.aiViewer.toolUseId:<toolUseId>}` repairing the child session's AgentName and
+// re-stashing its `toolUseId` join key. The repair NEVER re-emits a catalog-counted
+// event (SessionStarted/OpStarted/OpFinalized) — applySessionUpdated makes no catalog
+// call (spec §8.1) — so it is catalog-safe regardless of how often a sidecar is
+// rewritten or re-observed.
+//
+// startMetaSeen is the caller's STARTING persisted metaSeen (Scan: the cursor handed
+// to the scan BEFORE it records the freshly-walked hashes; Tail: the cursor's current
+// metaSeen before this flush records any new hash). currentHashes maps each candidate
+// meta's rel → content hash (Scan reuses metaHashes; Tail hashes its dirty set). The
+// caller records the new hashes into the cursor AFTER this returns, so a bare touch
+// (unchanged content) is correctly suppressed on the next pass.
+func repairChangedMetas(ctx context.Context, sourceID, root, resolvedRoot string, startMetaSeen, currentHashes map[string]string, out chan<- canonical.Event, onError func(error)) error {
+	rels := make([]string, 0, len(currentHashes))
+	for rel := range currentHashes {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels) // deterministic emission order
+	for _, rel := range rels {
+		if currentHashes[rel] == startMetaSeen[rel] {
+			continue // unchanged content; a bare touch must not re-emit.
+		}
+		// Only subagent sidecars carry the AgentName/toolUseId linkage to repair.
 		childNative, isSubagent := subagentMetaNative(rel)
 		if !isSubagent {
+			continue
+		}
+		raw, ok := readMetaForRepair(rel, root, resolvedRoot, onError)
+		if !ok {
 			continue
 		}
 		meta, perr := parseMeta(raw)

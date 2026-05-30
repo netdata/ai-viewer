@@ -854,8 +854,21 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 		return cur, perr
 	}
 
-	// Refresh meta hashes so the cursor records the sidecar state observed.
+	// Refresh meta hashes so the cursor records the sidecar state observed, and
+	// repair any subagent whose `.meta.json` is NEW/CHANGED vs the STARTING persisted
+	// metaSeen — via the SAME shared function Tail uses (SOW-0003 P1.8). A `.meta.json`
+	// that first appears while the daemon is stopped (its transcripts already consumed
+	// in a prior run, so no transcript re-read happens here) — or that is first
+	// observed during this scan — is repaired here; otherwise Scan would record its
+	// hash and the subsequent Tail would skip it as a bare touch, permanently leaving
+	// the child without its AgentName / toolUseId join key. The repair is emitted
+	// BEFORE withMetaSeen records the new hashes (after recording it would be
+	// suppressed as unchanged). `start.MetaSeen` is the persisted starting state (cur
+	// may have been reset to a fresh cursor above, so use start, not cur).
 	if hashes, herr := metaHashes(root, resolvedRoot, onError); herr == nil {
+		if rerr := repairChangedMetas(ctx, sourceID, root, resolvedRoot, start.MetaSeen, hashes, out, onError); rerr != nil {
+			return cur, rerr
+		}
 		for rel, h := range hashes {
 			cur = cur.withMetaSeen(rel, h)
 		}

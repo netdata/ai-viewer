@@ -150,7 +150,15 @@ or a re-scan of a changed file) at the SQL layer:
     key the re-emit carries; the ONLY key preserved across a stash-free re-emit is
     `$.aiViewer` (`childNativeId` / `toolUseId`), the join key the resolver needs.
     A wholesale replace WITHOUT the graft would let a stash-free re-emit erase that
-    join key and permanently orphan the op→child edge.
+    join key and permanently orphan the op→child edge. **When the re-emit carries NO
+    extras at all (`excluded.extras_json IS NULL`)** the result is NOT the whole old
+    blob — that would stale-preserve every non-`aiViewer` key (e.g. an `aiagent_v3`
+    op's copied `attr.*` attributes) the re-emit deliberately dropped, contradicting
+    "excluded wins wholesale". Instead the graft yields ONLY the present
+    `$.aiViewer.<stashKey>` values from the existing row (built with `json_set` onto an
+    empty object), or SQL `NULL` when the existing row has no such stash — so the
+    stash survives a no-extras re-emit while every other stale key is correctly
+    dropped.
   - **The graft uses `json_set`, NOT `json_patch`.** `json_patch` (RFC 7386
     merge-patch) treats a JSON `null` VALUE as a DELETE directive, and adapters copy
     arbitrary source attributes into op extras (e.g. `aiagent_v3` emits

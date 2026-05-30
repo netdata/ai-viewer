@@ -126,6 +126,166 @@ func TestApplyOpStarted_StashSurvivesReEmitWithoutStash(t *testing.T) {
 	}
 }
 
+// TestApplyOpStarted_NullExcludedKeepsOnlyStash pins P2.8 (SOW-0003 Round 8): when an
+// op re-emit carries NO extras at all (excluded.extras_json IS NULL), the graft must
+// keep ONLY the existing row's `$.aiViewer` stash (the resolver join keys) — NOT the
+// whole old blob. Before the fix the NULL-excluded branch returned the existing extras
+// WHOLESALE, so a stale non-aiViewer attribute (e.g. an aiagent_v3 op's copied attr.*)
+// survived a re-emit that deliberately dropped it, contradicting "excluded wins
+// wholesale, only $.aiViewer grafted" (ingester.md §145).
+//
+// Without the fix the stale `attr.x` key survives, so the assertion FAILS.
+func TestApplyOpStarted_NullExcludedKeepsOnlyStash(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+	const childNative = "parent:agent:abc111def222ccc"
+	const toolUseID = "toolu_agent_xyz"
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "aiagent_v3", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "aiagent_v3", "/tmp", NopPricer{})
+
+	apply := func(tx *sql.Tx, ev canonical.Event) {
+		if err := w.apply(ctx, tx, ev); err != nil {
+			t.Fatalf("apply %T: %v", ev, err)
+		}
+	}
+
+	// Phase 1: parent session + turn + op carrying BOTH a non-aiViewer attribute
+	// (the stale key a re-emit must drop) AND the aiViewer stash (the join key a
+	// re-emit must preserve).
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	apply(tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:  "parent", RootNativeID: "parent", Kind: canonical.KindRoot,
+	})
+	apply(tx, canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1000},
+		SessionNativeID: "parent", Seq: 1,
+	})
+	apply(tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		SessionNativeID: "parent", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpSession, Name: "explore",
+		Extras: map[string]any{
+			"attr.x":   "stale",
+			"aiViewer": map[string]any{"toolUseId": toolUseID, "childNativeId": childNative},
+		},
+	})
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit phase 1: %v", err)
+	}
+
+	opID := canonicalOpID(canonicalTurnID(canonicalSessionID(src, "parent"), 1), 1)
+
+	// Phase 2: re-emit the SAME op with NO extras at all (NULL excluded.extras_json).
+	tx2, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx phase 2: %v", err)
+	}
+	apply(tx2, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		SessionNativeID: "parent", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpSession, Name: "explore",
+		// No Extras → excluded.extras_json IS NULL.
+	})
+	if err := tx2.Commit(); err != nil {
+		t.Fatalf("Commit phase 2: %v", err)
+	}
+
+	// The aiViewer stash survives.
+	if got := scanString(t, db,
+		`SELECT IFNULL(json_extract(extras_json,'$.aiViewer.toolUseId'),'') FROM ops WHERE id=?`, opID); got != toolUseID {
+		t.Errorf("toolUseId stash dropped by NULL-excluded re-emit: got %q, want %q", got, toolUseID)
+	}
+	if got := scanString(t, db,
+		`SELECT IFNULL(json_extract(extras_json,'$.aiViewer.childNativeId'),'') FROM ops WHERE id=?`, opID); got != childNative {
+		t.Errorf("childNativeId stash dropped by NULL-excluded re-emit: got %q, want %q", got, childNative)
+	}
+	// The stale non-aiViewer attribute is DROPPED (the whole old blob must NOT survive).
+	if got := scanString(t, db,
+		`SELECT IFNULL(json_extract(extras_json,'$.attr\.x'),'__absent__') FROM ops WHERE id=?`, opID); got != "__absent__" {
+		t.Errorf("stale non-aiViewer attr survived NULL-excluded re-emit: got %q, want absent (only the aiViewer stash may survive)", got)
+	}
+	// Only the aiViewer object remains at the top level.
+	if got := scanString(t, db,
+		`SELECT IFNULL(group_concat(key,','),'') FROM ops, json_each(ops.extras_json) WHERE ops.id=?`, opID); got != "aiViewer" {
+		t.Errorf("NULL-excluded re-emit kept top-level keys %q, want only \"aiViewer\"", got)
+	}
+}
+
+// TestApplyOpStarted_NullExcludedNoStashYieldsNull pins the P2.8 second case: a
+// NULL-excluded re-emit of an op whose existing row has NO aiViewer stash must yield a
+// SQL NULL extras_json (nothing to preserve), not an empty `{}` object and not the
+// stale old blob.
+func TestApplyOpStarted_NullExcludedNoStashYieldsNull(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "aiagent_v3", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "aiagent_v3", "/tmp", NopPricer{})
+
+	apply := func(tx *sql.Tx, ev canonical.Event) {
+		if err := w.apply(ctx, tx, ev); err != nil {
+			t.Fatalf("apply %T: %v", ev, err)
+		}
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	apply(tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:  "parent", RootNativeID: "parent", Kind: canonical.KindRoot,
+	})
+	apply(tx, canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1000},
+		SessionNativeID: "parent", Seq: 1,
+	})
+	// Op with a non-aiViewer attribute and NO aiViewer stash.
+	apply(tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		SessionNativeID: "parent", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "gen",
+		Extras: map[string]any{"attr.x": "stale"},
+	})
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit phase 1: %v", err)
+	}
+
+	opID := canonicalOpID(canonicalTurnID(canonicalSessionID(src, "parent"), 1), 1)
+
+	// Re-emit with NO extras → nothing to preserve → extras_json must become NULL.
+	tx2, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx phase 2: %v", err)
+	}
+	apply(tx2, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		SessionNativeID: "parent", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "gen",
+	})
+	if err := tx2.Commit(); err != nil {
+		t.Fatalf("Commit phase 2: %v", err)
+	}
+
+	if got := scanInt(t, db, `SELECT extras_json IS NULL FROM ops WHERE id=?`, opID); got != 1 {
+		blob := scanString(t, db, `SELECT IFNULL(extras_json,'<null>') FROM ops WHERE id=?`, opID)
+		t.Errorf("NULL-excluded re-emit with no stash left extras_json non-NULL: %q (want SQL NULL)", blob)
+	}
+}
+
 func TestWriter_SessionStartedInsertsRow(t *testing.T) {
 	t.Parallel()
 	db := withWriter(t, "aiagent_v3:/tmp", func(ctx context.Context, tx *sql.Tx, w *writer) {

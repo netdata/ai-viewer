@@ -617,7 +617,7 @@ On `CREATE` of a new directory at depth 2 (a new session subdir under a project)
 
 - `CREATE` on `*.jsonl` → backfill from offset 0, then watch.
 - `WRITE` (or Linux `MODIFY`) on a watched `*.jsonl` → read from last-known offset to EOF, parse line by line, advance offset.
-- `WRITE` on `*.meta.json` (subagent sidecar) → re-read the small (size-capped) JSON file. On a content change the adapter repairs the child session's `AgentName` AND its `aiViewer.toolUseId` stash by emitting a catalog-safe `SessionUpdatedEvent{AgentName=agentType, Extras.aiViewer.toolUseId=toolUseId}` (NOT a transcript re-read; §8.1). The `toolUseId` is what lets the resolver's `linkOpChildrenByToolUse` pass link a child read before its own meta (§8.1 P1.7a); the op→child link is then resolved at the DB layer with no meta or transcript re-read.
+- `WRITE` on `*.meta.json` (subagent sidecar) → re-read the small (size-capped) JSON file. On a content change the adapter repairs the child session's `AgentName` AND its `aiViewer.toolUseId` stash by emitting a catalog-safe `SessionUpdatedEvent{AgentName=agentType, Extras.aiViewer.toolUseId=toolUseId}` (NOT a transcript re-read; §8.1). The `toolUseId` is what lets the resolver's `linkOpChildrenByToolUse` pass link a child read before its own meta (§8.1 P1.7a); the op→child link is then resolved at the DB layer with no meta or transcript re-read. This Tail-side repair shares ONE function (`repairChangedMetas`) with the Scan-side repair so the two paths cannot diverge: a `.meta.json` first observed during Scan (or that first appeared while the daemon was stopped, after its transcripts were consumed) is repaired by Scan — emitting the `SessionUpdatedEvent` BEFORE Scan records the meta hash into the cursor's `metaSeen`, because once the hash is recorded the subsequent Tail treats the sidecar as an unchanged bare touch and emits nothing (§8.1 item 3).
 - `RENAME` / `MOVED_FROM` / `MOVED_TO` — not used by claude-code in normal operation (it appends in place). The adapter logs these but does not act on them in Phase 2.
 - `DELETE` — operator deleted a project directory or jsonl. The adapter logs and stops watching the missing file. Existing rows in SQLite remain (read-only viewer; data is never deleted).
 
@@ -903,11 +903,25 @@ land independently:
    The finalize's `EndTs` is the child's terminal assistant-text record's
    timestamp (its implicit completion time).
 
-3. **Late `.meta.json` is repaired WITHOUT any transcript re-read (catalog-safe).**
-   The parent transcript and the sidecar `.meta.json` land independently, so Tail
-   may read the parent's `Agent` block in flush N before the `.meta.json` arrives
-   in flush N+1, and a child sidechain read before its `.meta.json` emitted its
-   `SessionStarted` with an empty `AgentName`. An earlier design re-read the parent
+3. **Late `.meta.json` is repaired WITHOUT any transcript re-read (catalog-safe),
+   from BOTH Scan and Tail via one shared function.** The parent transcript and the
+   sidecar `.meta.json` land independently, so Tail may read the parent's `Agent`
+   block in flush N before the `.meta.json` arrives in flush N+1, and a child
+   sidechain read before its `.meta.json` emitted its `SessionStarted` with an empty
+   `AgentName`. The SAME hazard exists across a daemon stop/start: a `.meta.json`
+   that first appears while the daemon is stopped (its parent + child transcripts
+   already consumed in a prior run, so the cursor sits past them and no transcript
+   re-read occurs) — or that is simply first observed during Scan — must be repaired
+   by Scan, because once Scan records the meta hash into the cursor's `metaSeen`, the
+   subsequent Tail skips it (a meta whose hash equals `metaSeen` is treated as a bare
+   touch and emits nothing). The repair is therefore factored into ONE shared
+   function (`repairChangedMetas`) invoked from BOTH Scan and Tail against each
+   side's STARTING `metaSeen` (Scan: the persisted cursor handed to the scan, BEFORE
+   the scan records the freshly-walked hashes; Tail: the cursor's current `metaSeen`),
+   so the two paths can never diverge — for any meta whose content hash is NEW or
+   CHANGED vs that starting `metaSeen`, exactly one catalog-safe `SessionUpdatedEvent`
+   is emitted (and Scan emits it BEFORE it records the new hash via `metaSeen`, so the
+   record-then-skip race cannot suppress it). An earlier design re-read the parent
    AND child transcripts from offset 0 WITH EMISSION on a meta change to repair
    both. That re-emitted `SessionStarted` / `OpStarted` / `OpFinalized` — events the
    `catalog_*` rollups COUNT on conflict (`session_count + 1`, `call_count + 1`,
@@ -923,8 +937,9 @@ land independently:
      `toolUseId`, the resolver links them at the DB layer. No transcript is re-read.
 
    - **Child `AgentName` AND the child's `toolUseId` stash** are repaired by emitting
-     a **`SessionUpdatedEvent`** when a Tail flush observes the child's `.meta.json`
-     content change. The event carries `{NativeID: <child native id>, AgentName:
+     a **`SessionUpdatedEvent`** when Scan or a Tail flush observes the child's
+     `.meta.json` content as new/changed vs the starting `metaSeen` (the shared
+     `repairChangedMetas`). The event carries `{NativeID: <child native id>, AgentName:
      <agentType>, Extras: {aiViewer: {toolUseId: <meta.toolUseId>}}}`.
      `applySessionUpdated` makes NO catalog call (only `applySessionStarted` touches
      `catalog_agents` / `catalog_cwds`), so this repair is catalog-safe by

@@ -154,7 +154,7 @@ var aiViewerStashKeys = []string{"toolUseId", "childNativeId"}
 // Shape (one graftOne layer per stash key, nested over `excluded.extras_json`):
 //
 //	CASE
-//	  WHEN excluded.extras_json IS NULL THEN <existing>   -- re-emit carried none; stash survives
+//	  WHEN excluded.extras_json IS NULL THEN <stashOnly>   -- re-emit carried none; keep ONLY the stash
 //	  WHEN <existing> IS NULL           THEN excluded.extras_json  -- nothing to preserve
 //	  ELSE graftKey(graftKey(excluded.extras_json, toolUseId), childNativeId)
 //	END
@@ -162,16 +162,40 @@ var aiViewerStashKeys = []string{"toolUseId", "childNativeId"}
 // where graftKey(base, K) = CASE WHEN <existing>.$.aiViewer.K NOT NULL AND
 // base.$.aiViewer.K IS NULL THEN json_set(base, '$.aiViewer.K', <existing>.$.aiViewer.K)
 // ELSE base END (json_set auto-creates `$.aiViewer` when base lacks it, e.g. ops).
+//
+// The NULL-excluded branch (SOW-0003 P2.8) does NOT return the whole existing blob —
+// that would stale-preserve every non-`aiViewer` key the re-emit deliberately dropped
+// (e.g. an aiagent_v3 op's copied `attr.*`), contradicting "excluded wins wholesale".
+// Instead <stashOnly> = graftKeyOnto(graftKeyOnto(json_object(), toolUseId),
+// childNativeId) builds a fresh object holding ONLY the present `$.aiViewer.<key>`
+// values from the existing row, collapsed to SQL NULL when none were grafted (so a
+// no-stash op re-emit with NULL extras yields NULL, not an empty `{}`).
 func graftAiViewerExtras(existingCol string) string {
 	base := "excluded.extras_json"
 	for _, key := range aiViewerStashKeys {
 		base = graftAiViewerKey(base, existingCol, key)
 	}
+	stashOnly := "json_object()"
+	for _, key := range aiViewerStashKeys {
+		stashOnly = graftAiViewerKeyOnto(stashOnly, existingCol, key)
+	}
 	return fmt.Sprintf(`CASE
-    WHEN excluded.extras_json IS NULL THEN %[1]s
+    WHEN excluded.extras_json IS NULL THEN (CASE WHEN json_extract((%[3]s), '$.aiViewer') IS NULL THEN NULL ELSE (%[3]s) END)
     WHEN %[1]s IS NULL THEN excluded.extras_json
     ELSE (%[2]s)
-END`, existingCol, base)
+END`, existingCol, base, stashOnly)
+}
+
+// graftAiViewerKeyOnto returns an expression that grafts the existing row's
+// `$.aiViewer.<key>` onto base whenever the existing row has it (base is the fresh
+// stash-only accumulator, so there is no "base already has it" guard — unlike
+// graftAiViewerKey). json_set auto-creates `$.aiViewer` on the empty json_object().
+// Used only by the NULL-excluded branch of graftAiViewerExtras (SOW-0003 P2.8).
+func graftAiViewerKeyOnto(base, existingCol, key string) string {
+	path := "'$.aiViewer." + key + "'"
+	return fmt.Sprintf(`CASE WHEN json_extract(%[1]s, %[3]s) IS NOT NULL
+        THEN json_set(%[2]s, %[3]s, json_extract(%[1]s, %[3]s))
+        ELSE %[2]s END`, existingCol, base, path)
 }
 
 // graftAiViewerKey returns an expression that grafts the existing row's

@@ -845,6 +845,45 @@ entirely) to the operator.
 
 Not merged. Fixes delegated; re-review same scope + these notes (Round 8) before merge.
 
+### Round 8 (2026-05-30) — codex + glm + minimax (full scope + Round-7 fix notes)
+
+minimax → inconclusive (harness limit, stopped mid-review). **codex → NOT safe: 1 P1 + 1 P2**
+(count dropping: R6 1P1+4P2 → R7 2P1+2P2 → R8 1P1+1P2; codex now confirms the resolver
+parent-constraint, the symlink cursor keys, containment, and bounded reads are all OK —
+converging). Both findings are the SAME recurring asymmetry (fixed Tail, missed Scan):
+
+- **[P1.8] late-meta repair is Tail-only; Scan records the meta hash without repairing.**
+  `scanAll` refreshes meta hashes into the cursor (`scanner.go:857-862` `withMetaSeen`) but
+  emits NO repair `SessionUpdated`; Tail's `flushChangedMetas` skips metas already in
+  `metaSeen` (`tailer.go:537`). So if parent+child transcripts are already consumed and the
+  `.meta.json` appears while the daemon is stopped (or is first seen during scan), scan marks
+  it seen → tail skips → the child never gets `aiViewer.toolUseId`/AgentName. Spec already
+  PROMISES scan-side repair (`adapter-claude-code.md:691`) — so this is also spec/code drift.
+  **Fix:** factor the meta-repair into ONE shared function (parse meta → catalog-safe
+  `SessionUpdated{AgentName, aiViewer.toolUseId}`) and call it from BOTH scan (for metas
+  new/changed vs the STARTING persisted `MetaSeen`, BEFORE recording them seen) AND tail.
+  Unifying the path kills the scan/tail asymmetry STRUCTURALLY (the recurring failure mode
+  across rounds). Pin: meta appears with parent+child already consumed → scan emits the
+  repair → child linked.
+- **[P2.8] graft keeps the WHOLE old extras when the new upsert's extras are NULL.**
+  `graftAiViewerExtras` returns `existingCol` wholesale on `excluded.extras_json IS NULL`
+  (`writer.go:170`), so a re-emit of an op with no extras keeps ALL stale old extras (e.g.
+  aiagent_v3 op attrs) instead of just the `aiViewer` stash — contradicts the spec
+  (`ingester.md:145`: excluded wins wholesale, only `$.aiViewer.*` grafted). **Fix:** on
+  NULL excluded, return ONLY the preserved `aiViewer` stash keys (or NULL if none), not the
+  whole old blob.
+
+DECISION (assistant/CTO, NOT escalated): the Round-7 note said "if a linkage bug recurs,
+escalate the drop-live-linkage tradeoff to the operator." On reflection that was about to
+repeat a just-corrected mistake — how robust the late-meta linkage is is a TECHNICAL call I
+OWN (see memory `feedback-cto-owns-technical-decisions`), not a product decision. The common
+case (meta present at transcript-read time — the norm, since claude-code writes the meta at
+subagent spawn) works perfectly; the remaining gaps are small completions, not a fundamental
+impossibility. So I KEEP the feature and complete it (unify the repair path; fix the graft),
+rather than drop it or ask the operator.
+
+Not merged. Fixes delegated; re-review same scope + these notes (Round 9) before merge.
+
 ## Outcome
 
 Pending.
