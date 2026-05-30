@@ -213,6 +213,10 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 	if mapper.lastTsUs > 0 {
 		cur.LastTsUs = mapper.lastTsUs
 	}
+	// emittedContent records whether THIS pass surfaced any new canonical event from
+	// records at/after the resume offset, captured before the EOF-finalize block adds
+	// its own events to res.emitted (I2 metadata-append suppression below).
+	emittedContent := res.emitted > 0
 
 	// EOF-finalize (rule #23, spec edge #3, F1): when the file is FULLY read, ask
 	// the mapper to finalize a hanging open turn. The mapper owns the open-turn
@@ -231,11 +235,29 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 	// on a prior pass (cur.EOFFinalizedSize == size). The mapper's eofFinalized
 	// guard is per-instance and the replay-from-0 rebuilds a fresh mapper each scan,
 	// so without a DURABLE cursor marker an unchanged rescan/restart would re-fire
-	// the EOF TurnFinalized (and the stale SessionFinalized) every time. A genuine
-	// append grows size past the marker, so the new EOF is finalized normally.
+	// the EOF TurnFinalized (and the stale SessionFinalized) every time.
+	//
+	// I2: a metadata-only append (codex appends a bare session_meta per
+	// recorder.rs:1615) GROWS the file past the marker yet carries NO new turn
+	// content, so the size-equality check alone (H2) would let finalizeAtEOF re-fire
+	// the OLD-format turn's TurnFinalized (and re-date its close — see lastContentTsUs).
+	// We therefore ALSO suppress when the file grew past the marker but this pass
+	// emitted no new content (emittedContent == false). A genuine append (a new
+	// turn_context / task_started — always emitting at least a TurnStarted) sets
+	// emittedContent and re-finalizes normally.
 	fullyRead := res.advanced >= size
+	grewWithoutContent := cur.EOFFinalizedSize > 0 && size > cur.EOFFinalizedSize && !emittedContent
 	alreadyFinalized := cur.EOFFinalizedSize > 0 && cur.EOFFinalizedSize == size
-	if fullyRead && !alreadyFinalized {
+	switch {
+	case fullyRead && (alreadyFinalized || grewWithoutContent):
+		// Already EOF-finalized at this-or-a-prior size. Advance the marker to the
+		// current size so a metadata-only growth that we just suppressed does not look
+		// "grown" again on the next rescan (the marker tracks the latest fully-read,
+		// content-free size). A same-size rescan leaves the marker unchanged.
+		if grewWithoutContent {
+			cur.EOFFinalizedSize = size
+		}
+	case fullyRead:
 		stale := time.Since(info.ModTime()) >= staleAfter
 		for _, ev := range mapper.finalizeAtEOF(stale, mtimeUs) {
 			select {

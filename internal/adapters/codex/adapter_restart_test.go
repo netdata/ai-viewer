@@ -312,6 +312,95 @@ func TestRestart_EOFFinalizeNotReFiredOnUnchangedRescan(t *testing.T) {
 	}
 }
 
+// TestRestart_MetadataAppendDoesNotReFinalizeOldFormatEOF pins SOW-0004 I2: after
+// an OLD-format turn is closed COMPLETED at EOF (the 38%-of-corpus case), codex may
+// append a bare metadata-only session_meta record (real: recorder.rs:1615). That
+// append GROWS the file past the EOF-finalize marker but carries NO new turn
+// content. The adapter must NOT re-fire the turn's TurnFinalized, and the original
+// close-ts (the turn's last CONTENT-activity ts, not the metadata append's later
+// ts) must stay unchanged. A genuine new turn would re-open and close normally; a
+// metadata append must be inert.
+func TestRestart_MetadataAppendDoesNotReFinalizeOldFormatEOF(t *testing.T) {
+	t.Parallel()
+
+	id := uuid7(7)
+	root := t.TempDir()
+	path := shardPath(root, id)
+	writeFileBytes(t, path, oldFormatOpenTurnSession(id))
+	setMtime(t, path, time.Minute) // fresh: old-format still closes COMPLETED at EOF
+
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// First scan: the OLD-format turn closes COMPLETED exactly once at EOF.
+	out1 := make(chan canonical.Event, 512)
+	if err := a.Scan(context.Background(), nil, out1); err != nil {
+		t.Fatalf("Scan #1: %v", err)
+	}
+	first := drainBuffered(out1)
+	tf1 := turnFinals(first)
+	if len(tf1) != 1 {
+		t.Fatalf("first scan TurnFinalized count = %d, want 1", len(tf1))
+	}
+	// The close-ts is the turn's last CONTENT-activity ts (tsDone, the assistant
+	// message), NOT the file mtime / wall-clock (G6) and — after the append below —
+	// NOT the later metadata ts (I2).
+	wantEndTs, perr := parseTsToMicros(tsDone)
+	if perr != nil {
+		t.Fatalf("parse tsDone: %v", perr)
+	}
+	if tf1[0].EndTs != wantEndTs {
+		t.Fatalf("first scan TurnFinalized EndTs = %d, want %d (last content ts, tsDone)", tf1[0].EndTs, wantEndTs)
+	}
+
+	// Persist + reload the cursor through the exact ingester round-trip. The
+	// EOFFinalizedSize marker must survive.
+	cursorJSON := lastCursor(t, first)
+	parsed, err := a.ParseCursor(cursorJSON)
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+
+	// Append ONLY a metadata-only session_meta with a LATER timestamp. This grows the
+	// file past the marker but carries no turn content; a naive size-only suppression
+	// would re-fire the close and re-date it to this later ts.
+	metaAppend := `{"timestamp":"2025-11-20T18:30:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"<ROOT>","originator":"codex_exec","cli_version":"0.125.0","source":"exec"}}`
+	appendFileBytes(t, path, []byte(metaAppend+"\n"))
+	setMtime(t, path, time.Minute)
+
+	out2 := make(chan canonical.Event, 512)
+	if err := a.Scan(context.Background(), parsed, out2); err != nil {
+		t.Fatalf("Scan #2 (metadata append): %v", err)
+	}
+	second := drainBuffered(out2)
+
+	if got := countKind(second, canonical.EvTurnFinalized); got != 0 {
+		t.Errorf("metadata-only append re-fired TurnFinalized %d times, want 0 (I2)", got)
+	}
+	if got := countKind(second, canonical.EvSessionFinalized); got != 0 {
+		t.Errorf("metadata-only append emitted SessionFinalized %d times, want 0 (I2)", got)
+	}
+
+	// Belt-and-braces: a THIRD unchanged rescan after the suppressed append (no new
+	// bytes) must also be inert — the marker advanced to the post-append size, so the
+	// file no longer looks "grown".
+	cursorJSON2 := lastCursor(t, second)
+	parsed2, err := a.ParseCursor(cursorJSON2)
+	if err != nil {
+		t.Fatalf("ParseCursor #2: %v", err)
+	}
+	out3 := make(chan canonical.Event, 512)
+	if err := a.Scan(context.Background(), parsed2, out3); err != nil {
+		t.Fatalf("Scan #3 (unchanged after append): %v", err)
+	}
+	third := drainBuffered(out3)
+	if got := countKind(third, canonical.EvTurnFinalized); got != 0 {
+		t.Errorf("unchanged rescan after metadata append re-fired TurnFinalized %d times, want 0 (I2 marker advance)", got)
+	}
+}
+
 // oldFormatOpenTurnSession returns a modern rollout with an OLD-format turn
 // (turn_context only — no task_started, no task_complete) that stays open until
 // EOF. finalizeAtEOF closes it COMPLETED regardless of staleness (spec edge #3).

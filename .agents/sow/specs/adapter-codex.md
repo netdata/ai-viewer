@@ -260,7 +260,8 @@ Per-file byte offset plus discovery hints. JSON shape:
       "offset": 2917322,
       "size": 2917322,
       "mtime_us": 1763664584000000,
-      "last_ts_us": 1763664584000000
+      "last_ts_us": 1763664584000000,
+      "eof_finalized_size": 2917322
     }
   },
   "legacy_json": {
@@ -273,9 +274,15 @@ Per-file byte offset plus discovery hints. JSON shape:
 
 Path keys are RELATIVE to the configured `--codex-home` (default `~/.codex`) — the cursor survives a home-directory move.
 
+Per-file fields:
+- `offset` — byte offset of the next unread byte; always at a line start (trailing partial lines held back).
+- `size` — file size when `offset` was recorded; drives truncation detection.
+- `mtime_us` / `last_ts_us` — observability + the staleness heuristic (rule #23).
+- `eof_finalized_size` — DURABLE marker of the file size at which an EOF-finalize already fired (the synthetic close of a hanging turn at full-read EOF: an OLD-format turn closed `completed`, or a stale NEW-format turn closed `failed/incomplete` + its `SessionFinalized`). The mapper's own in-memory guard is rebuilt on every replay-from-0, so the marker must persist in the cursor: without it, an unchanged rescan/restart would re-fire the synthetic `TurnFinalized`/`SessionFinalized`. A metadata-only `session_meta` append (recorder.rs:1615) GROWS `size` past this marker but carries no new turn content, so the scanner ALSO suppresses the re-fire when a grown rescan emitted no new content, then advances the marker to the new size. A genuine new-turn append (always emitting at least a `TurnStarted`) re-opens and closes normally. `0`/absent ⇒ no EOF-finalize has fired yet.
+
 Restart logic:
 - For each tracked file: if `current_size >= cursor.offset`, resume from `cursor.offset`.
-- If `current_size < cursor.offset`: file was truncated (codex never truncates, so this means manual operator deletion + recreation) — emit `SourceError`, reset to 0, full re-scan.
+- If `current_size < cursor.offset`: file was truncated (codex never truncates, so this means manual operator deletion + recreation) — emit `SourceError`, reset to 0, full re-scan (also clears `eof_finalized_size`).
 - For new files (not in cursor): start at 0, full scan.
 - For files no longer present on disk: leave cursor entry; never re-emit. Optional GC after N days.
 

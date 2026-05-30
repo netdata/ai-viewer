@@ -238,6 +238,20 @@ Adjudicated on ground truth (spec lines + a read-only investigation of the real 
 
 The original gate scoped this SOW to `internal/adapters/codex/` + the additive `sources.go` probe, with "no canonical/ingest/store change". Round-3 review (codex H1) proved the codex adapter cannot be correct without idempotent catalog aggregation under op re-emission (a pre-existing `internal/ingest/catalog.go` gap, SOW-0020, that the codex replay-from-0 + enrichment + EOF-finalize design is the first to heavily exercise). Scope is therefore expanded to include the catalog-idempotency fix in `internal/ingest/catalog.go` (and a minimal `writer.go` insert-vs-update signal if needed). Blast radius: the change makes catalog rollups idempotent for ALL adapters (benefits aiagent_v2/v3 + claude_code, which also re-emit); it is additive-correctness (aggregates become correct under re-emission, unchanged for single-emission). SOW-0020 is superseded by this work and will be closed referencing this SOW.
 
+### Round 4 (2026-05-30) — same scope + H1/H2 fix notes
+
+- **minimax**: SAFE — all H-fixes correct, zero regressions.
+- **glm**: SAFE — H1/H1b/H2 architecturally sound; 2 P3 (spec drift: `ingester.md` catalog semantics + cursor JSON missing `eof_finalized_size`; a theoretical same-tx SELECT "race" that is not a bug).
+- **codex**: NOT SAFE — confirmed same-identity catalog idempotency, status-correction delta-once, exit-0 no-spurious-refinalize, unchanged-rescan suppression, and truncation-clears-marker are all CORRECT; found 2 narrower edges + 1 spec drift:
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| I1 | P1 | Catalog call_count still double-counts when an `OpStarted` re-emit CHANGES the catalog identity (MCP enrichment corrects `custom`→`mcp:server` for the same op → a new catalog_tools row inserts at count 1 while the placeholder key already counted it); finalize deltas also strand on the old key | CONFIRMED. catalog.go:123 inserts a fresh count for the corrected key; my H1a only handled SAME-identity re-emit. |
+| I2 | P2 | EOF marker keys on file SIZE, so a metadata-only `session_meta` append (real: `openai/codex recorder.rs:1615`) grows size → `finalizeAtEOF` re-fires an old-format turn's `TurnFinalized` and moves its end-ts to the metadata append (lastTsUs updates on every record) | CONFIRMED. scanner.go:236 + mapper.go:225/251 + mapper_finalize.go:44. |
+| I3 | P3 | `ingester.md` (+ adapter-codex.md cursor JSON) still document the pre-H1a catalog semantics + omit `eof_finalized_size` | CONFIRMED spec drift (also glm). |
+
+**Round-5 fix plan:** (I1, ingest) on an `OpStarted` re-emit whose catalog identity changed, MOVE the contribution (call_count + any finalize totals) from the old key to the new key instead of inserting a second count — capture the op's prior persisted (kind,name,tool_namespace,model,provider,alias) before the upsert and, when it differs, decrement the old catalog row and increment the new; test `function_call`→MCP-enrichment keeps total call_count = 1. (I2, codex) track turn-local last-activity separately from file `lastTsUs` for the old-format EOF close-ts, and suppress a second EOF close when a size-growing append carried no new TURN content (e.g. mark the turn EOF-finalized, not just the file size); test: EOF-close an old-format turn, append only `session_meta`, rescan → no new `TurnFinalized`, stable end-ts. (I3, spec) update `ingester.md` catalog semantics (OpStarted counts on insert; OpFinalized applies a delta) + add `eof_finalized_size` to the adapter-codex.md cursor JSON.
+
 ## Outcome
 
 Pending.

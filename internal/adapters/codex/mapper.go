@@ -169,10 +169,21 @@ type fileMapper struct {
 	compactedSeen      bool
 	compactedRecordIdx uint64
 
-	// lastTsUs is the timestamp (micros) of the most recent record carrying one.
+	// lastTsUs is the timestamp (micros) of the most recent record carrying one,
+	// across ALL record types (including a metadata-only session_meta append).
 	// Observability only (cursor LastTsUs). Stays 0 for a file whose records all
 	// lack timestamps.
 	lastTsUs int64
+
+	// lastContentTsUs is the timestamp (micros) of the most recent CONTENT-bearing
+	// record — every record the mapper acts on EXCEPT a no-op session_meta (the
+	// once-per-file bootstrap line, and any later metadata-only session_meta append
+	// codex writes per recorder.rs:1615). It is the deterministic close-ts for an
+	// OLD-format turn finalized at EOF (I2/G6): a metadata append grows the file and
+	// advances lastTsUs, but the OLD-format turn ended when its LAST real record was
+	// written — using lastContentTsUs keeps that close-ts stable across a
+	// metadata-only append. Stays 0 until the first content record carrying a ts.
+	lastContentTsUs int64
 }
 
 // The per-file inference STATE TYPES (turnState, openOp, finalizedOp,
@@ -246,6 +257,17 @@ func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 	if !m.sessionStarted {
 		out = append(out, m.sessionStarted0(rec, advance))
 		m.sessionStarted = true
+	}
+
+	// A session_meta is the once-per-file bootstrap line, or a later metadata-only
+	// append (recorder.rs:1615); it carries no turn content, so it must NOT advance
+	// the OLD-format EOF close-ts (lastContentTsUs). Every other record type is
+	// turn content and advances it (I2). recordTs returns 0 for a record with no
+	// timestamp, which never moves the max.
+	if rec.Type() != recSessionMeta {
+		if ts := m.recordTs(rec); ts > m.lastContentTsUs {
+			m.lastContentTsUs = ts
+		}
 	}
 
 	switch rec.Type() {

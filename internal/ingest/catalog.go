@@ -59,6 +59,11 @@ ON CONFLICT (source_format, cwd) DO UPDATE SET
 	return nil
 }
 
+// The priorOpIdentity type + the catalog identity-MIGRATION helpers
+// (catalogIdentityChanged, normalizeToolNamespace, removeOpContribution,
+// addMigratedTotals) live in catalog_migrate.go (SOW-0004 I1), keeping this file
+// focused on the straight-line per-event upserts.
+
 // onOpStarted populates catalog_providers, catalog_models, and
 // catalog_tools depending on op kind.
 //
@@ -71,16 +76,39 @@ ON CONFLICT (source_format, cwd) DO UPDATE SET
 // per-(provider,model)/(namespace,name) call totals. The first_seen/last_seen
 // floor/ceiling and the ctx_max seed stay idempotent (MIN/MAX/COALESCE) and run
 // on every call so a re-emit still refreshes them. (SOW-0020 / SOW-0004 H1a.)
-func (c *catalogWriter) onOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent, inserted bool) error {
-	// callInc is added to call_count only on the ON CONFLICT (existing-row)
-	// branch. On a genuine INSERT the VALUES(...,1) sets the count and the branch
-	// is not taken, so callInc is irrelevant there; on a re-emit (existing row)
-	// callInc=0 keeps the count, eliminating the double-count. We still run the
-	// upsert (not a bare UPDATE) so the row is created when applyOpStarted's probe
-	// raced an absent row — the existence probe and this write share one tx, so
-	// inserted is authoritative and callInc=1 only ever lands via VALUES.
+//
+// prior carries the op's persisted catalog identity + terminal totals as they
+// stood before this OpStarted's row upsert (empty when inserted=true). When the
+// op already existed AND its catalog identity CHANGED (codex MCP enrichment
+// re-stamping tool_namespace/name on the same (turn,seq) — SOW-0004 I1), the op's
+// whole contribution (call_count + any already-booked failure/tokens/cost/
+// duration totals) is MOVED off the old key before it is added to the new one, so
+// the physical op is counted under exactly ONE catalog row.
+func (c *catalogWriter) onOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent, inserted bool, prior priorOpIdentity) error {
+	// identityChanged is true only for a re-emit of an EXISTING op whose catalog
+	// identity was corrected (codex MCP enrichment — SOW-0004 I1). Computed once and
+	// reused below for the migrate-out, the call_count bump, and the migrate-in.
+	identityChanged := !inserted && prior.found && c.catalogIdentityChanged(ev, prior)
+	// Identity migration (I1): an existing op whose catalog identity changed has
+	// already contributed (call_count, and any finalize totals) to its OLD key. Move
+	// that whole contribution off the old key here, BEFORE the add below re-books it
+	// under the new key. A re-emit with the SAME identity skips this (nothing to
+	// move) and falls through to the idempotent callInc=0 path (H1a).
+	if identityChanged {
+		if err := c.removeOpContribution(ctx, tx, prior); err != nil {
+			return err
+		}
+	}
+	// callInc is added to call_count on the ON CONFLICT (existing-row) branch. On a
+	// genuine INSERT the VALUES(...,1) sets the count and the branch is not taken; on
+	// a same-identity re-emit (existing row) callInc=0 keeps the count, eliminating
+	// the double-count (H1a). On an identity-CHANGED re-emit we just removed the old
+	// key's count, so this op must register +1 under its new key even though the ops
+	// row already existed — hence callInc=1 here too (I1). We still run the upsert
+	// (not a bare UPDATE) so the row is created when applyOpStarted's probe raced an
+	// absent row.
 	callInc := 0
-	if inserted {
+	if inserted || identityChanged {
 		callInc = 1
 	}
 	switch ev.Kind {
@@ -130,6 +158,18 @@ ON CONFLICT (namespace, name) DO UPDATE SET
 `, ns, ev.Name, ev.Ts, ev.Ts, callInc); err != nil {
 				return fmt.Errorf("catalog_tools upsert: %w", err)
 			}
+		}
+	}
+	// I1: on an identity-changed re-emit, the upsert above re-booked call_count under
+	// the NEW key but not the op's already-finalized totals (those live on the OLD key
+	// we just decremented). Move those totals onto the new key now. A subsequent
+	// OpFinalized re-emit applies a (now − prior) delta on top of this migrated base,
+	// so the new key converges to the op's current finalize contribution exactly once
+	// (migrated prior + (now − prior) = now); when no re-finalize follows, the new key
+	// simply holds the op's last-known contribution.
+	if identityChanged {
+		if err := c.addMigratedTotals(ctx, tx, ev, prior.totals); err != nil {
+			return err
 		}
 	}
 	return nil

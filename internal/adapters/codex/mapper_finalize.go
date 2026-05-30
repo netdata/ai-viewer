@@ -43,13 +43,14 @@ func (m *fileMapper) finalizeAtEOF(stale bool, nowUs int64) []canonical.Event {
 	}
 	if !ts.sawTaskStarted {
 		// OLD-format: close COMPLETED at EOF regardless of staleness (spec edge #3).
-		// EndTs MUST be the turn's LAST-ACTIVITY timestamp (m.lastTsUs, the max
-		// record ts in the file — which, for the most-recent open turn, IS that
-		// turn's last activity), NOT the file mtime / wall-clock (G6). A clean
-		// old-format turn ended when its last record was written; using the live
-		// mtime made the golden non-deterministic (CI-flaky) and semantically wrong.
-		// Fall back to nowUs only when no record carried a timestamp (lastTsUs == 0).
-		endUs := m.lastTsUs
+		// EndTs MUST be the turn's LAST-CONTENT-ACTIVITY timestamp (m.lastContentTsUs,
+		// the max ts over content records — which, for the most-recent open turn, IS
+		// that turn's last activity), NOT the file mtime / wall-clock (G6) and NOT
+		// m.lastTsUs (which a metadata-only session_meta append would advance,
+		// re-dating the close — I2). A clean old-format turn ended when its last real
+		// record was written. Fall back to nowUs only when no content record carried a
+		// timestamp (lastContentTsUs == 0).
+		endUs := m.lastContentTsUs
 		if endUs == 0 {
 			endUs = nowUs
 		}
