@@ -1,0 +1,7 @@
+{"timestamp":"2025-11-20T16:59:09.857Z","type":"session_meta","payload":{"id":"019aa234-0000-7000-8000-00000000000b","timestamp":"2025-11-20T16:59:09.857Z","cwd":"<ROOT>/legacy-project","originator":"codex_cli_rs","cli_version":"0.61.0","source":"cli","git":{"commit_hash":"1111111111111111111111111111111111111111","branch":"main","repository_url":"git@github.com:example/example.git"}}}
+{"timestamp":"2025-11-20T16:59:09.858Z","type":"turn_context","payload":{"cwd":"<ROOT>/legacy-project","model":"gpt-5.1-codex-max","effort":"medium","approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"summary":"auto"}}
+{"timestamp":"2025-11-20T16:59:10.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list the files"}]}}
+{"timestamp":"2025-11-20T16:59:12.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"decide to list"}],"encrypted_content":null}}
+{"timestamp":"2025-11-20T16:59:13.000Z","type":"response_item","payload":{"type":"function_call","name":"list_dir","call_id":"call_b1","arguments":"{\"path\":\".\"}"}}
+{"timestamp":"2025-11-20T16:59:13.500Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_b1","output":"build.sh\nREADME.md"}}
+{"timestamp":"2025-11-20T16:59:15.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"there are two files"}]}}
