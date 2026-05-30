@@ -579,6 +579,69 @@ func TestCollectMetaPaths_AbsentDirNoError(t *testing.T) {
 	}
 }
 
+// TestScan_DiscoveryFailsSoftOnBrokenSubtree pins P2.10 (SOW-0003 Round 10): a
+// single unreadable subagent subtree must NOT abort discovery of the whole
+// project/source. Discovery must (a) surface a SourceError for the broken entry
+// (no-silent-failures contract → /api/health + Sources panel) AND (b) still
+// discover the healthy main session and healthy subagent in the SAME project.
+//
+// Before the fix, discoverSessionSubagents returned the WalkDir error up,
+// discoverProject did `return nil, serr`, and discoverTranscripts did
+// `return nil, derr` — so ONE chmod-0o000 subagent dir zeroed out the entire
+// scan (no sessions at all). Mirrors the Round-9 walk-error chmod seam
+// (TestCollectMetaPaths_WalkErrorSurfaced) at the discovery level.
+func TestScan_DiscoveryFailsSoftOnBrokenSubtree(t *testing.T) {
+	t.Parallel()
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission restrictions")
+	}
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-src-demo")
+
+	// A healthy main session transcript.
+	writeFileBytes(t, filepath.Join(proj, "sess-ok.jsonl"),
+		[]byte(`{"type":"user","uuid":"u1","sessionId":"sess-ok","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+	// A healthy subagent sidechain under that session.
+	okSub := filepath.Join(proj, "sess-ok", "subagents")
+	writeFileBytes(t, filepath.Join(okSub, "agent-aaa111bbb222ccc.jsonl"),
+		[]byte(`{"type":"user","uuid":"su1","isSidechain":true,"agentId":"aaa111bbb222ccc","sessionId":"sess-ok","message":{"role":"user","content":"task"},"timestamp":"2026-05-26T10:00:05.000Z"}`+"\n"))
+
+	// A SECOND session whose subagents/ subtree is unreadable: a nested dir
+	// chmod 0o000 so WalkDir cannot descend into it. The bad subtree is in a
+	// DIFFERENT session dir, proving one broken entry does not poison the
+	// healthy sibling's discovery.
+	badSub := filepath.Join(proj, "sess-broken", "subagents", "nested")
+	writeFileBytes(t, filepath.Join(badSub, "agent-hidden00000.jsonl"),
+		[]byte(`{"type":"user","uuid":"hu1","isSidechain":true,"agentId":"hidden00000","sessionId":"sess-broken","message":{"role":"user","content":"x"},"timestamp":"2026-05-26T10:00:09.000Z"}`+"\n"))
+	if err := os.Chmod(badSub, 0o000); err != nil {
+		t.Skipf("chmod unsupported: %v", err)
+	}
+	defer func() { _ = os.Chmod(badSub, 0o755) }() // restore so TempDir cleanup works
+
+	events, errs := collectErrors(t, root)
+
+	// Some filesystems still allow descending a 0o000 dir; only assert the
+	// fail-soft error path when the unreadable subtree truly blocked the walk.
+	sawWalkErr := false
+	for _, e := range errs {
+		if strings.Contains(e, "walk subagents under") {
+			sawWalkErr = true
+		}
+	}
+	if !sawWalkErr {
+		t.Skip("filesystem allowed descending an unreadable dir; discovery walk-error seam not exercised")
+	}
+
+	// (b) Discovery must NOT have aborted: the healthy main session AND the
+	// healthy subagent are still ingested despite the broken sibling subtree.
+	if _, ok := sessionStartedByNative(events, "sess-ok"); !ok {
+		t.Fatal("healthy main session was lost — one broken subagent subtree aborted the whole scan (P2.10 breach)")
+	}
+	if _, ok := sessionStartedByNative(events, "sess-ok:agent:aaa111bbb222ccc"); !ok {
+		t.Fatal("healthy subagent was lost — one broken subagent subtree aborted discovery (P2.10 breach)")
+	}
+}
+
 // TestScan_EmptyRootNoEvents verifies a missing projects root is tolerated.
 func TestScan_EmptyRootNoEvents(t *testing.T) {
 	t.Parallel()

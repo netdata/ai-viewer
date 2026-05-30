@@ -21,12 +21,12 @@ From the operator's 2026-05-26 milestone list (recorded in conversation while pl
 Facts:
 
 - The operator's workstation has 3,614 root-level `*.jsonl` transcripts across 70 project directories under `~/.claude/projects/` plus subagent sidechains under `<sessionId>/subagents/agent-<agentId>.jsonl` (observed 2026-05-26, recorded in `adapter-claude-code.md` §2.3, §12).
-- The encoded-cwd directory naming is `cwd.replace(/[^a-zA-Z0-9]/g, '-')` truncated at 200 chars with a hash suffix when over (`adapter-claude-code.md` §2.2; `jarmuine/claude-code @ <commit> :: src/utils/sessionStoragePortable.ts:311-319`). Bun and Node hash differently, producing distinct dir names for the same long cwd.
+- The encoded-cwd directory naming is `cwd.replace(/[^a-zA-Z0-9]/g, '-')` truncated at 200 chars with a hash suffix when over (`adapter-claude-code.md` §2.2; `jarmuine/claude-code @ 4b9d30f79532 :: src/utils/sessionStoragePortable.ts:311-319`). Bun and Node hash differently, producing distinct dir names for the same long cwd.
 - Sub-agent linkage is **structural**: subagent jsonl lives at `<parent-jsonl-dir>/<parent-sessionId>/subagents/agent-<agentId>.jsonl` with sidecar `agent-<agentId>.meta.json` carrying `toolUseId` that joins back to the parent's `assistant.tool_use` block (`adapter-claude-code.md` §4, §8). Subagent records carry the same `sessionId` as the parent; the adapter synthesizes `NativeID = <parentSessionId>:agent:<agentId>` to avoid collision (§5.1, §5.2).
 - Compaction is explicit: `system.subtype="compact_boundary"` records carry `compactMetadata{trigger, preTokens, postTokens, durationMs, preservedSegment, preservedMessages}` (§3.3, §9). Canonical mapping is a synthetic op `OpKind='compaction'` (per `canonical-events.md`).
 - No cost data anywhere in claude-code transcripts (`adapter-claude-code.md` §3.2, §5.6); cost is computed via `internal/pricing/` static catalog using `(provider="anthropic", model)` keys.
 - No native session-end signal (§11.11); claude-code sessions remain `status='running'` indefinitely (resumable). The adapter never emits `SessionFinalizedEvent` for claude-code.
-- Files are append-only with `appendFileSync` (`jarmuine/claude-code @ <commit> :: src/utils/sessionStorage.ts:2572-2584`); no atomic rename. Byte-offset tail is correct.
+- Files are append-only with `appendFileSync` (`jarmuine/claude-code @ 4b9d30f79532 :: src/utils/sessionStorage.ts:2572-2584`); no atomic rename. Byte-offset tail is correct.
 - Phase 1 Foundation (SOW-0001) delivers `internal/canonical/`, `internal/ingest/`, `internal/store/`, `internal/adapters/registry.go`, the `canonical.Adapter` interface, pricing catalog, fixture sanitization tooling, and CI gates that this SOW reuses unchanged.
 
 Inferences:
@@ -62,7 +62,7 @@ Sources checked:
 - `.agents/sow/done/SOW-0002-20260526-cross-format-data-model-analysis.md` — analysis context confirming claude-code's structural quirks.
 - `.agents/sow/current/SOW-0001-phase-1-foundation.md` — infrastructure the adapter plugs into.
 - Real evidence on the operator's workstation: `~/.claude/projects/` (3,614 root jsonls across 70 project dirs as of 2026-05-26).
-- Upstream reverse-engineered TypeScript at `jarmuine/claude-code @ <commit>` (frozen mirror) — `src/utils/sessionStoragePortable.ts`, `src/utils/sessionStorage.ts`, `src/types/logs.ts` per `adapter-claude-code.md` §12.
+- Upstream reverse-engineered TypeScript at `jarmuine/claude-code @ 4b9d30f79532` (frozen mirror) — `src/utils/sessionStoragePortable.ts`, `src/utils/sessionStorage.ts`, `src/types/logs.ts` per `adapter-claude-code.md` §12.
 
 Current state:
 

@@ -104,9 +104,14 @@ func discoverTranscripts(root string, onError func(error)) ([]transcript, error)
 			continue
 		}
 		projDir := filepath.Join(root, projEntry.Name())
+		// Fail-soft per project (P2.10): one unreadable project subdir surfaces a
+		// SourceError (visible in /api/health + Sources panel) and is skipped, so
+		// discovery continues with the remaining projects rather than zeroing out
+		// ingestion. Only the configured ROOT itself is fatal (handled above).
 		ts, derr := discoverProject(root, resolvedRoot, projDir, onError)
 		if derr != nil {
-			return nil, derr
+			onError(fmt.Errorf("claude_code: discover project %s: %w; skipping", projDir, derr))
+			continue
 		}
 		out = append(out, ts...)
 	}
@@ -139,23 +144,32 @@ func withinSourceRoot(resolvedRoot, abs string, onError func(error)) bool {
 // <root>/<sanitized-cwd>/ project directory. resolvedRoot is the
 // symlink-resolved projects root used for the per-path containment guard
 // (P2e); root is the unresolved root used for cursor-key relativisation.
+//
+// Per-entry errors are fail-soft (P2.10, uniform with the Round-9 walk fixes):
+// an unreadable session subdir, a broken subagent subtree, or a relPath failure
+// on one file surfaces a SourceError via onError and is skipped so discovery
+// continues with the remaining entries. discoverProject never aborts the
+// enclosing source scan on one bad entry; only os.IsNotExist on the project dir
+// (a race where it was removed mid-scan) returns benign-empty.
 func discoverProject(root, resolvedRoot, projDir string, onError func(error)) ([]transcript, error) {
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read project dir %s: %w", projDir, err)
+		// An unreadable project dir surfaces a SourceError and yields no
+		// transcripts for THIS project; the caller continues with other projects.
+		onError(fmt.Errorf("claude_code: read project dir %s: %w; skipping", projDir, err))
+		return nil, nil
 	}
 	var out []transcript
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() {
-			// A <sessionId>/ session dir: scan its subagents/.
-			sub, serr := discoverSessionSubagents(root, resolvedRoot, projDir, name, onError)
-			if serr != nil {
-				return nil, serr
-			}
+			// A <sessionId>/ session dir: scan its subagents/. A broken subtree is
+			// surfaced and skipped inside discoverSessionSubagents (fail-soft); it
+			// never returns a transient error here.
+			sub := discoverSessionSubagents(root, resolvedRoot, projDir, name, onError)
 			out = append(out, sub...)
 			continue
 		}
@@ -169,7 +183,10 @@ func discoverProject(root, resolvedRoot, projDir string, onError func(error)) ([
 		sessionID := strings.TrimSuffix(name, transcriptExt)
 		rel, rerr := relPath(root, abs)
 		if rerr != nil {
-			return nil, rerr
+			// A relPath failure on one main transcript surfaces a SourceError and
+			// skips just that file; the rest of the project is still discovered.
+			onError(fmt.Errorf("claude_code: relpath main transcript %s: %w; skipping", abs, rerr))
+			continue
 		}
 		out = append(out, transcript{
 			rel:      rel,
@@ -190,15 +207,31 @@ func discoverProject(root, resolvedRoot, projDir string, onError func(error)) ([
 // <projDir>/<sessionId>/subagents/ (recursively, to cover workflow
 // subdirs). parentSessionID is the enclosing <sessionId> dir name. Each
 // discovered sidechain path is containment-checked (P2e) before it is added.
-func discoverSessionSubagents(root, resolvedRoot, projDir, sessionID string, onError func(error)) ([]transcript, error) {
+//
+// Discovery is fail-soft per entry (P2.10, uniform with collectMetaPaths /
+// markExistingDirty / addWatchTree): a non-IsNotExist walk error over ONE
+// unreadable subtree, or a relPath failure on ONE sidechain, is surfaced via
+// onError (visible in /api/health + the Sources panel) and skipped — the walk
+// continues and the sidechains it CAN read are still returned. A single broken
+// subagent file/dir never aborts the enclosing project or source scan. An
+// absent subagents/ dir (os.IsNotExist) is benign (skipped, no error). There is
+// thus no transient error to return: the function returns only the transcripts.
+func discoverSessionSubagents(root, resolvedRoot, projDir, sessionID string, onError func(error)) []transcript {
 	subDir := filepath.Join(projDir, sessionID, subagentsDir)
 	var out []transcript
-	walkErr := filepath.WalkDir(subDir, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(subDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return filepath.SkipDir
 			}
-			return err
+			// Surface the unreadable entry and continue past it: SkipDir on a
+			// directory prunes just that subtree; a file error is reported and the
+			// walk resumes with the next sibling.
+			onError(fmt.Errorf("claude_code: walk subagents under %s: %w; skipping", path, err))
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -216,7 +249,10 @@ func discoverSessionSubagents(root, resolvedRoot, projDir, sessionID string, onE
 		agentID := strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), transcriptExt)
 		rel, rerr := relPath(root, path)
 		if rerr != nil {
-			return rerr
+			// A relPath failure on one sidechain surfaces a SourceError and skips
+			// just that entry; the rest of the subtree is still walked.
+			onError(fmt.Errorf("claude_code: relpath subagent %s: %w; skipping", path, rerr))
+			return nil
 		}
 		out = append(out, transcript{
 			rel:            rel,
@@ -228,10 +264,7 @@ func discoverSessionSubagents(root, resolvedRoot, projDir, sessionID string, onE
 		})
 		return nil
 	})
-	if walkErr != nil && !os.IsNotExist(walkErr) {
-		return out, fmt.Errorf("walk subagents %s: %w", subDir, walkErr)
-	}
-	return out, nil
+	return out
 }
 
 // relPath returns abs relative to root with forward slashes, the canonical

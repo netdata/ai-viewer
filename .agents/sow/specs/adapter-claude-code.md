@@ -14,7 +14,7 @@ This spec is grounded in:
 
 - Direct inspection of 70 project directories and 3,614 root-level `*.jsonl` transcripts plus their `subagents/*.jsonl` sidechains under `~/.claude/projects/` on the operator's workstation (2026-05-26).
 - Multi-file inspection across diverse session versions (`2.1.76`, `2.1.126`, `2.1.146`, `2.1.148`, `2.1.150`).
-- TypeScript source from the `jarmuine/claude-code` mirror, citation form `jarmuine/claude-code @ <commit>`:
+- TypeScript source from the `jarmuine/claude-code` mirror, citation form `jarmuine/claude-code @ 4b9d30f79532`:
   - `src/utils/sessionStoragePortable.ts` — path sanitization, project-dir discovery.
   - `src/utils/sessionStorage.ts` — append writer, subagent and remote-agent transcript layout.
   - `src/types/logs.ts` — exhaustive `Entry` union and per-record-type fields.
@@ -330,7 +330,7 @@ Observed `subtype` values:
 - `mcp_instructions_delta` — diff to the MCP-server instructions context.
 - `diagnostics` — IDE diagnostics (linter errors, etc.).
 - `date_change` — the calendar day changed mid-session.
-- `compact_file_reference` — **reality (verified `jarmuine/claude-code @ <commit> :: src/utils/attachments.ts:307-312, 3136`)**: the record carries `{type, filename, displayPath}` where `filename` is the **original project file** the model read (a CWD-relative or absolute path under the operator's project, e.g. `/home/user/src/x.go`), NOT a spill file under `<sessionDir>/tool-results/`. `displayPath` is the CWD-relative form for display. The earlier draft of this spec assumed a `tool-results/<id>.txt` spill path; that is the layout for Bash/PowerShell oversized-output spills (`BashTool.tsx:292`, `toolResultStorage.ts:27`), referenced by `persistedOutputPath`, not by `compact_file_reference`. Because the referenced file lives **outside the configured projects root**, the adapter does NOT emit a servable `PayloadRefEvent` for it (a read-only viewer serves only files under its source root; pointing a payload at an arbitrary project path would fail the §6.1 containment guard). The adapter records the `displayPath` in the attachment `LogEntry`'s extras so the reference is still visible in the UI, and leaves payload-on-demand for these to a future SOW if the operator wants project-file serving.
+- `compact_file_reference` — **reality (verified `jarmuine/claude-code @ 4b9d30f79532 :: src/utils/attachments.ts:307-312, 3136`)**: the record carries `{type, filename, displayPath}` where `filename` is the **original project file** the model read (a CWD-relative or absolute path under the operator's project, e.g. `/home/user/src/x.go`), NOT a spill file under `<sessionDir>/tool-results/`. `displayPath` is the CWD-relative form for display. The earlier draft of this spec assumed a `tool-results/<id>.txt` spill path; that is the layout for Bash/PowerShell oversized-output spills (`BashTool.tsx:292`, `toolResultStorage.ts:27`), referenced by `persistedOutputPath`, not by `compact_file_reference`. Because the referenced file lives **outside the configured projects root**, the adapter does NOT emit a servable `PayloadRefEvent` for it (a read-only viewer serves only files under its source root; pointing a payload at an arbitrary project path would fail the §6.1 containment guard). The adapter records the `displayPath` in the attachment `LogEntry`'s extras so the reference is still visible in the UI, and leaves payload-on-demand for these to a future SOW if the operator wants project-file serving.
 - `nested_memory` — memory directive injected from a nested `CLAUDE.md`.
 - `command_permissions` — permission-prompt history.
 - `ultrathink_effort` — extended-thinking effort indicator.
@@ -968,27 +968,36 @@ land independently:
    so no `catalog_*` aggregate changes on a meta rewrite. The from-0 re-read
    machinery (`forceFromZero`, `metaParentRels`, `metaChildRels`) is gone.
 
-   - **Known limitation — late-meta parent-op finalize (format-unreachable).** The
-     catalog-safe late-meta repair (the `SessionUpdatedEvent` above) repairs the
-     child's `AgentName` and re-stashes its `toolUseId`, so the resolver's
-     `linkOpChildrenByToolUse` pass links the parent op→child edge once the meta
-     lands. It does NOT, however, rebuild the in-memory parent-op finalize deferral:
-     the repair is meta-only and re-reads no transcript, so it cannot re-park a
-     completed child against its parent op. There is therefore one pathological
-     ordering the repair does not finalize: Scan consumes a parent transcript AND a
-     COMPLETED child sidechain BEFORE the child's `.meta.json` exists, and the
-     `.meta.json` then appears during a live Tail. In that case the op→child link is
-     repaired but the parent `Agent` op gets no `OpFinalizedEvent` from this path.
-     This is UNREACHABLE on real claude-code data: the `.meta.json` is written at
-     subagent SPAWN, so it predates the child's completion — confirmed on real
-     workstation data, meta mtime ≤ child-transcript mtime in 15/15 sampled subagent
-     pairs. Whenever Scan observes a *completed* child, its `.meta.json` therefore
-     already exists, and the normal finalize path (§8.1 item 2) has the deferral. The
-     residual (a meta delayed past its child's completion, which the format does not
-     produce) is a benign lag, not a correctness loss: the parent Agent op's status
-     stays `running` only until the next full Scan, which re-reads the parent with
-     the meta present and finalizes it normally. No finalize-via-resolver machinery
-     is added for a case the format cannot produce (fit-for-purpose).
+   - **Known limitation — late-meta parent-op finalize STATUS lag (accepted; cosmetic,
+     self-healing).** The parent Agent op's finalize deferral is registered only when
+     the adapter has already observed the child's `.meta.json` (the `toolUseId→agentId`
+     mapping) AT THE MOMENT it maps the parent `assistant.tool_use(Agent)` record
+     (`ops.go`). The catalog-safe late-meta repair (the `SessionUpdatedEvent` above)
+     repairs the child's `AgentName` and re-stashes its `toolUseId` so the resolver's
+     `linkOpChildrenByToolUse` pass links the parent op→child edge — but it re-reads no
+     transcript and so does NOT re-register that in-memory finalize deferral. The
+     consequence depends on read ORDER, not just on-disk presence:
+       - **Scan / backfill: always finalizes correctly.** Scan loads each session's
+         metas before reading its transcript, and the `.meta.json` is written at
+         subagent SPAWN so it is on disk before the child completes (verified on real
+         workstation data: meta mtime ≤ child-transcript mtime in 15/15 sampled subagent
+         pairs). So whenever Scan maps a parent `Agent` record, the meta is present and
+         the deferral is registered.
+       - **Live Tail spawn-race: parent op status can lag.** If the parent's `Agent`
+         tool_use record is written and tailed in a flush BEFORE its sibling
+         `.meta.json` lands (a sub-second spawn-time race), the parent op is mapped
+         without the deferral. The op→child link and the child `AgentName` are still
+         repaired when the meta arrives (resolver + `SessionUpdated`), but the parent
+         `Agent` op's STATUS stays `running` until the next full Scan re-reads the parent
+         with the meta present and finalizes it.
+     This residual is an ACCEPTED limitation: it is cosmetic (only the parent op's
+     completed-vs-running indicator, in a narrow live race), self-healing on the next
+     Scan, and loses no data — the op→child topology and the child session's own events
+     and status are correct throughout. Rebuilding the finalize deferral on late-meta
+     was deliberately NOT done: it is cosmetic for a localhost read-only viewer and
+     would re-introduce the transcript re-read / re-emit machinery the re-emit-free
+     design removed (and risk catalog double-counting). Fit-for-purpose; reviewed and
+     accepted across the SOW-0003 review rounds.
 
 ## 9. Compaction Handling
 

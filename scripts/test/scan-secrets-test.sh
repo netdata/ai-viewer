@@ -72,9 +72,9 @@ SYNTH_EMAIL="sentinel@scan-test.example"   # synthetic git user.email (Rule 1: e
 # Local-part of the synthetic email -> the home-path stem the scanner derives.
 SYNTH_LOCALPART="${SYNTH_EMAIL%%@*}"
 SYNTH_HOME="/home/${SYNTH_LOCALPART}"      # synthetic operator home path (Rule 1: home)
-# A single name word the scanner bans word-bounded (first token of SYNTH_NAME).
+# A single name word the scanner bans token-bounded ('_' = delimiter) (first token of SYNTH_NAME).
 SYNTH_NAME_WORD="${SYNTH_NAME%% *}"
-# A near-miss token sharing the name-word's prefix but NOT word-bounded-equal,
+# A near-miss token sharing the name-word's prefix but NOT token-bounded ('_' = delimiter)-equal,
 # proving the \b boundary (the scanner must NOT flag this).
 SYNTH_NAME_NEARMISS="${SYNTH_NAME_WORD}ner"   # e.g. "Scanner" vs banned "Scan"
 # Mixed-/upper-case synthetic email (Rule 1, case-insensitive): an upper-cased
@@ -230,7 +230,7 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 3. Operator (synthetic) name word (word-bounded) -> flagged; an unrelated
+# 3. Operator (synthetic) name word (token-bounded ('_' = delimiter)) -> flagged; an unrelated
 #    token sharing the prefix (SYNTH_NAME_WORD + "ner", e.g. "Scanner") must
 #    NOT, proving the \b boundary.
 case_detect_operator_name_word_bounded() {
