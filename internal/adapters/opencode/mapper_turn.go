@@ -1,6 +1,8 @@
 package opencode
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -185,6 +187,34 @@ func errorClass(err *assistantError) string {
 		return err.Name
 	}
 	return defaultErrorClass
+}
+
+// errorMessage extracts the human-readable detail for an assistant error from
+// its tagged `data` body (SOW-0005 round-5 P3-1). opencode's AssistantError union
+// serializes (NamedError.toObject, anomalyco/opencode core/util/error.ts) as
+// {"name":<ErrorName>,"data":<DataSchema>}; every shipping variant EXCEPT
+// MessageOutputLengthError carries a `message` string in `data`
+// (MessageAbortedError/UnknownError/APIError/ContextOverflowError/
+// StructuredOutputError/ProviderAuthError — confirmed against the reference DB:
+// MessageAbortedError/UnknownError/APIError all populate data.message). It
+// becomes the canonical SessionFinalizedEvent.ErrorMessage, mirroring how the
+// tool-op path surfaces state.error verbatim (mapper_tools.go toolTerminal); the
+// canonical TurnFinalizedEvent carries only ErrorClass (no ErrorMessage field),
+// so this enriches the SESSION terminal only. Decode is best-effort: an absent
+// data, a non-object body, or a missing/non-string `message` yields "" — the
+// session is still finalized failed with its ErrorClass (degrade, never abort).
+// err must be non-nil.
+func errorMessage(err *assistantError) string {
+	if len(bytes.TrimSpace(err.Data)) == 0 {
+		return ""
+	}
+	var d struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(err.Data, &d) != nil {
+		return ""
+	}
+	return d.Message
 }
 
 // turnStatus derives a turn's terminal status (adapter-opencode.md §"Per-table

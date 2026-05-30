@@ -28,7 +28,7 @@ func scanMessagesFrom(t *testing.T, db *sql.DB, schema schemaSet, from TableWate
 		}
 		got = append(got, *row)
 		return k, nil
-	})
+	}, &warnSink{}, nil)
 	if err != nil {
 		t.Fatalf("scanTableDelta(message): %v", err)
 	}
@@ -218,8 +218,9 @@ func collectDeltasOnly(t *testing.T, db *sql.DB, schema schemaSet, cur Cursor) (
 	for _, table := range trackedTables {
 		s := schema[table]
 		from := cur.Tables[table]
-		onRow := deltaRowHandler(ctxBG(), db, table, s, affected, msgSession, func(error) {})
-		delta, err := scanTableDelta(ctxBG(), db, s, from, onRow)
+		sink := &warnSink{}
+		onRow := deltaRowHandler(ctxBG(), db, table, s, affected, msgSession, sink.collect)
+		delta, err := scanTableDelta(ctxBG(), db, s, from, onRow, sink, func(error) {})
 		if err != nil {
 			return affected.ids(), advanced, err
 		}
@@ -284,8 +285,9 @@ func TestSessionMessage_UnknownTypeWarns(t *testing.T) {
 	var ce collectErrs
 	affected := newAffectedSet()
 	s := schema["session_message"]
-	onRow := deltaRowHandler(ctxBG(), db, "session_message", s, affected, map[string]string{}, ce.onError)
-	if _, err := scanTableDelta(ctxBG(), db, s, TableWatermark{}, onRow); err != nil {
+	sink := &warnSink{}
+	onRow := deltaRowHandler(ctxBG(), db, "session_message", s, affected, map[string]string{}, sink.collect)
+	if _, err := scanTableDelta(ctxBG(), db, s, TableWatermark{}, onRow, sink, ce.onError); err != nil {
 		t.Fatalf("scanTableDelta(session_message): %v", err)
 	}
 

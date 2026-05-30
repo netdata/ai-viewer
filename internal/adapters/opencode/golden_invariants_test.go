@@ -371,3 +371,41 @@ func turnFinalForSeq(t *testing.T, events []canonical.Event, seq int) canonical.
 	t.Fatalf("no turn_finalized for seq %d", seq)
 	return canonical.TurnFinalizedEvent{}
 }
+
+// TestGoldenInvariant_IFailedAssistant pins SOW-0005 round-5 P3-1: a session whose
+// LAST assistant message carries data.error finalizes as SessionFinalized
+// Status=failed with BOTH ErrorClass (data.error.name) AND ErrorMessage
+// (data.error.data.message). The failed turn carries ErrorClass too
+// (TurnFinalizedEvent has no ErrorMessage field, so the message rides only on the
+// session terminal). Keyed on canonical-event fields so a regression that dropped
+// ErrorMessage fails HERE even after a -update-golden refresh.
+func TestGoldenInvariant_IFailedAssistant(t *testing.T) {
+	t.Parallel()
+	ev := scenarioEvents(t, "i_failed_assistant")
+
+	if got := countKind(ev, canonical.EvSessionFinalized); got != 1 {
+		t.Fatalf("SessionFinalized = %d, want 1 (failed assistant message)", got)
+	}
+	fin := sessionFinal(ev)
+	if fin == nil {
+		t.Fatal("no SessionFinalizedEvent emitted for a failed assistant message")
+	}
+	if fin.Status != canonical.StatusFailed {
+		t.Errorf("Status = %q, want failed", fin.Status)
+	}
+	if fin.ErrorClass != "MessageAbortedError" {
+		t.Errorf("ErrorClass = %q, want MessageAbortedError (data.error.name)", fin.ErrorClass)
+	}
+	if fin.ErrorMessage != "request was aborted by the user" {
+		t.Errorf("ErrorMessage = %q, want the data.error.data.message string (P3-1)", fin.ErrorMessage)
+	}
+	// The failed turn carries the same ErrorClass (the canonical TurnFinalizedEvent
+	// has no ErrorMessage field — the detail enriches the session terminal only).
+	tf := turnFinalForSeq(t, ev, 1)
+	if tf.Status != "failed" {
+		t.Errorf("turn1 Status = %q, want failed", tf.Status)
+	}
+	if tf.ErrorClass != "MessageAbortedError" {
+		t.Errorf("turn1 ErrorClass = %q, want MessageAbortedError", tf.ErrorClass)
+	}
+}

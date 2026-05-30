@@ -24,7 +24,7 @@ func pageSession(t *testing.T, db *sql.DB, schema schemaSet, from TableWatermark
 	scan, _ := scanSessionRow(idx, len(s.Present), nil)
 	delta, err := scanTableDelta(ctxBG(), db, s, from, func(rows *sql.Rows) (rowKey, error) {
 		return scan(rows)
-	})
+	}, &warnSink{}, nil)
 	if err != nil {
 		t.Fatalf("scanTableDelta(session): %v", err)
 	}

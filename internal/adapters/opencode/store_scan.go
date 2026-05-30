@@ -63,7 +63,10 @@ func scanSessionRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows)
 	return fn, &out
 }
 
-// scanMessageRow reads one message delta row into a messageRow.
+// scanMessageRow reads one message delta row into a messageRow. session_id is a
+// REQUIRED owning-id column (round-5 P2-2): an empty/corrupt value ERRORS the page
+// rather than deriving an empty affected session (which affectedSet.add silently
+// drops while the row "succeeds", advancing the cursor past an un-emitted change).
 func scanMessageRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows) (rowKey, error), *messageRow) {
 	var out messageRow
 	fn := func(rows *sql.Rows) (rowKey, error) {
@@ -75,9 +78,13 @@ func scanMessageRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows)
 		if err != nil {
 			return rowKey{}, err
 		}
+		sid, err := requiredOwner(d, idx, "session_id")
+		if err != nil {
+			return rowKey{}, err
+		}
 		out = messageRow{
 			ID:            id,
-			SessionID:     d.str(idx, "session_id"),
+			SessionID:     sid,
 			TimeCreatedMs: d.i64(idx, "time_created"),
 			TimeUpdatedMs: tuid,
 			Data:          d.bytes(idx, "data"),
@@ -87,7 +94,13 @@ func scanMessageRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows)
 	return fn, &out
 }
 
-// scanPartRow reads one part delta row into a partRow.
+// scanPartRow reads one part delta row into a partRow. message_id AND session_id
+// are REQUIRED owning-id columns (round-5 P2-2): a part's affected session is
+// derived from its denormalized session_id (resolvePartSession), so an empty/
+// corrupt session_id would silently drop the change (affectedSet.add("")) while
+// the row "succeeds" → cursor gap. message_id is the other owning id (the
+// old-schema fallback resolver and msgSession key), so it is required too. Either
+// being empty/corrupt ERRORS the page so the cursor never advances past the row.
 func scanPartRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows) (rowKey, error), *partRow) {
 	var out partRow
 	fn := func(rows *sql.Rows) (rowKey, error) {
@@ -99,10 +112,18 @@ func scanPartRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows) (r
 		if err != nil {
 			return rowKey{}, err
 		}
+		mid, err := requiredOwner(d, idx, "message_id")
+		if err != nil {
+			return rowKey{}, err
+		}
+		sid, err := requiredOwner(d, idx, "session_id")
+		if err != nil {
+			return rowKey{}, err
+		}
 		out = partRow{
 			ID:            id,
-			MessageID:     d.str(idx, "message_id"),
-			SessionID:     d.str(idx, "session_id"),
+			MessageID:     mid,
+			SessionID:     sid,
 			TimeCreatedMs: d.i64(idx, "time_created"),
 			TimeUpdatedMs: tuid,
 			Data:          d.bytes(idx, "data"),
@@ -113,7 +134,11 @@ func scanPartRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows) (r
 }
 
 // scanSessionMessageRow reads one session_message delta row into a
-// sessionMessageRow.
+// sessionMessageRow. session_id is a REQUIRED owning-id column (round-5 P2-2): an
+// empty/corrupt value ERRORS the page rather than deriving an empty affected
+// session. `type` is NOT an owning id — it stays an optional d.str read; a missing
+// type keeps its existing unknown-type WARN behaviour (deltaRowHandler), never a
+// fatal error (only the owning IDs are fatal-on-corrupt).
 func scanSessionMessageRow(idx columnIndex, n int, onWarn func(error)) (func(*sql.Rows) (rowKey, error), *sessionMessageRow) {
 	var out sessionMessageRow
 	fn := func(rows *sql.Rows) (rowKey, error) {
@@ -125,9 +150,13 @@ func scanSessionMessageRow(idx columnIndex, n int, onWarn func(error)) (func(*sq
 		if err != nil {
 			return rowKey{}, err
 		}
+		sid, err := requiredOwner(d, idx, "session_id")
+		if err != nil {
+			return rowKey{}, err
+		}
 		out = sessionMessageRow{
 			ID:            id,
-			SessionID:     d.str(idx, "session_id"),
+			SessionID:     sid,
 			Type:          d.str(idx, "type"),
 			TimeCreatedMs: d.i64(idx, "time_created"),
 			TimeUpdatedMs: tuid,
@@ -153,4 +182,20 @@ func requiredWatermark(d *scanDest, idx columnIndex) (id string, timeUpdatedMs i
 		return "", 0, err
 	}
 	return id, timeUpdatedMs, nil
+}
+
+// requiredOwner reads a REQUIRED OWNING-ID column (message.session_id,
+// part.message_id, part.session_id, session_message.session_id) for a delta row,
+// returning an error rather than the empty string when the cell is absent/NULL/
+// empty (SOW-0005 round-5 P2-2). The owning id derives the AFFECTED session that
+// the tailer reloads; an empty value would be silently swallowed by
+// affectedSet.add("") while the row handler SUCCEEDED, so the cursor would advance
+// PAST a change that emitted no content — a permanent, health-invisible gap.
+// Erroring aborts the page (via the scanner closure → scanOnePage), so the cursor
+// stays at the last good watermark and the transient error is surfaced (non-fatal)
+// via the poll loop. The column is in requiredColumns, so it is always PRESENT
+// (introspectAll makes its absence fatal upstream); the only failure mode reaching
+// here is a corrupt/empty cell value. strRequired carries the table/column context.
+func requiredOwner(d *scanDest, idx columnIndex, col string) (string, error) {
+	return d.strRequired(idx, col)
 }

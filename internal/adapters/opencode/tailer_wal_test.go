@@ -117,7 +117,7 @@ func TestQueryLayer_ClosedDBErrors(t *testing.T) {
 		t.Error("maxTimeUpdated on a closed DB: want error")
 	}
 	scan, _ := scanSessionRow(newColumnIndex(schema["session"]), len(schema["session"].Present), nil)
-	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, scan); err == nil {
+	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, scan, &warnSink{}, nil); err == nil {
 		t.Error("scanTableDelta on a closed DB: want error")
 	}
 	if _, _, err := loadSession(ctxBG(), db, schema, "ses_a", func(error) {}); err == nil {

@@ -79,8 +79,11 @@ func TestP2_1_CorruptOptionalCellWarnsDegradesToZero(t *testing.T) {
 
 	var warns []error
 	affected := newAffectedSet()
-	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, func(e error) { warns = append(warns, e) })
-	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, onRow); err != nil {
+	// The WARN is buffered in sink during the page tx and flushed via the
+	// scanTableDelta onError AFTER the tx closes (round-5 P2-1).
+	sink := &warnSink{}
+	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, sink.collect)
+	if _, err := scanTableDelta(ctxBG(), db, schema["session"], TableWatermark{}, onRow, sink, func(e error) { warns = append(warns, e) }); err != nil {
 		t.Fatalf("scanTableDelta: corrupt OPTIONAL cell must NOT abort the page, got %v", err)
 	}
 	// Session still derived (row processed, cost degraded to 0).
@@ -115,9 +118,10 @@ func TestP2_1_CorruptRequiredCellErrorsNoCursorAdvance(t *testing.T) {
 	db, schema := introspect(t, path)
 
 	affected := newAffectedSet()
-	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, func(error) {})
+	sink := &warnSink{}
+	onRow := deltaRowHandler(ctxBG(), db, "session", schema["session"], affected, map[string]string{}, sink.collect)
 	from := TableWatermark{MaxTimeUpdatedMs: 50, MaxTimeUpdatedID: "aaa", MaxIDSeen: "aaa"}
-	delta, err := scanTableDelta(ctxBG(), db, schema["session"], from, onRow)
+	delta, err := scanTableDelta(ctxBG(), db, schema["session"], from, onRow, sink, func(error) {})
 	if err == nil {
 		t.Fatal("corrupt REQUIRED time_updated cell must ERROR the page (no poisoned-0 watermark)")
 	}

@@ -104,14 +104,15 @@ type sessionMapper struct {
 	// turn's cumulative). havePrevTurn distinguishes "no prior turn" (turn 1,
 	// whose delta is its own cumulative) from a genuine zero prior.
 	//
-	// IMPLEMENTER-VERIFY-ON-LIVE-DB (SOW decision #4 / spec adapter-opencode.md
-	// "turn.tokens_in/out/cost" row): the STEP-LEVEL cumulative pattern is
-	// verified (AC#3); this MESSAGE-LEVEL cumulative pattern is the analogous
-	// one level up and is NOT yet independently confirmed against the live DB.
-	// Before pinning a committed golden in chunk E, confirm message.data.tokens
-	// is cumulative-across-the-session and not already per-turn; if it turns out
-	// per-turn, drop the delta here and emit the value verbatim. The arithmetic
-	// is isolated here so that flip is a one-line change.
+	// The message-level cumulative→delta behavior is PINNED by tests
+	// (TestMapSession_TurnNumberingAndTokenDeltas) and the e_cumulative_tokens
+	// golden (TestGoldenInvariant_ECumulativeTokens: turn rollup = the
+	// message-level cumulative). It is the analogue, one level up, of the
+	// step-level cumulative pattern (AC#3, TestComputeStepDeltas_AC3): opencode's
+	// assistant message.data.tokens is the session-running total at the turn's
+	// completion, so the per-turn delta is this cumulative minus the previous
+	// turn's. The arithmetic is isolated here behind subClampWarn so a future
+	// upstream change is a one-spot edit.
 	prevTurnTokens tokenCounts
 	havePrevTurn   bool
 
@@ -298,9 +299,10 @@ func (m *sessionMapper) sessionExtras(mr modelRef) map[string]any {
 //   - time_archived set  → SessionFinalized(completed, EndTs = archived ms→µs).
 //     Archival is the only clean terminal signal opencode records.
 //   - else the LAST assistant turn carries data.error → SessionFinalized(failed,
-//     ErrorClass = error.name or defaultErrorClass when empty, EndTs = that
-//     message's completed-or-created ts). A session whose last turn recovered is
-//     NOT failed even if an earlier turn errored (SOW-0005 round-2 P1-B).
+//     ErrorClass = error.name or defaultErrorClass when empty, ErrorMessage =
+//     error.data.message when present (round-5 P3-1), EndTs = that message's
+//     completed-or-created ts). A session whose last turn recovered is NOT failed
+//     even if an earlier turn errored (SOW-0005 round-2 P1-B).
 //   - else running: NO SessionFinalized (opencode never finalizes a session, it
 //     only archives — like claude-code/codex which have no per-session terminal).
 //
@@ -320,11 +322,12 @@ func (m *sessionMapper) sessionFinalized() canonical.Event {
 	}
 	if m.failError != nil {
 		ev := canonical.SessionFinalizedEvent{
-			EventBase:  m.nextBase(m.failEndUs),
-			NativeID:   m.session.ID,
-			Status:     canonical.StatusFailed,
-			ErrorClass: errorClass(m.failError), // defaultErrorClass when name empty (P2-A)
-			EndTs:      m.failEndUs,
+			EventBase:    m.nextBase(m.failEndUs),
+			NativeID:     m.session.ID,
+			Status:       canonical.StatusFailed,
+			ErrorClass:   errorClass(m.failError),   // defaultErrorClass when name empty (P2-A)
+			ErrorMessage: errorMessage(m.failError), // data.message when present (round-5 P3-1)
+			EndTs:        m.failEndUs,
 		}
 		return ev
 	}

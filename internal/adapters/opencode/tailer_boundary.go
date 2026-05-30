@@ -77,34 +77,58 @@ func boundaryAffectedSessions(ctx context.Context, db *sql.DB, schema schemaSet,
 // delta pages) and feeds every row through the table's deltaRowHandler so the
 // owning session id lands in `affected`. The watermark the handler reports is
 // discarded — the cursor is not advanced by a boundary re-scan.
+//
+// No warning/error EMISSION happens while the boundary tx is open (SOW-0005
+// round-5 P2-1): onRow buffers any per-row WARN into sink, the tx is committed/
+// rolled back FIRST (explicitly), and the buffered warnings are flushed through
+// onError only after the snapshot is released. A fatal row error (a corrupt
+// REQUIRED watermark/owning-id cell) is likewise surfaced after the tx closes.
 func scanBoundaryBucket(ctx context.Context, db *sql.DB, table string, s tableSchema, ms int64, affected *affectedSet, msgSession map[string]string, onError func(error)) error {
 	tx, err := beginRO(ctx, db)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
 
-	onRow := deltaRowHandler(ctx, db, table, s, affected, msgSession, onError)
+	sink := &warnSink{}
+	onRow := deltaRowHandler(ctx, db, table, s, affected, msgSession, sink.collect)
 	rows, err := tx.QueryContext(ctx, boundarySelect(s), ms)
 	if err != nil {
+		_ = tx.Rollback()
+		sink.flush(onError)
 		return fmt.Errorf("opencode: boundary re-scan %s: %w", table, err)
 	}
+	scanErr := iterBoundaryRows(ctx, rows, onRow)
+	_ = rows.Close()
+	if scanErr == nil {
+		scanErr = rows.Err()
+	}
+	// Close the tx (release the WAL snapshot) BEFORE flushing warnings or surfacing
+	// a fatal row error, so a backpressured onError can never block with the
+	// snapshot held (P2-1).
+	if scanErr != nil {
+		_ = tx.Rollback()
+		sink.flush(onError)
+		return fmt.Errorf("opencode: boundary rows %s: %w", table, scanErr)
+	}
+	commitErr := tx.Commit()
+	sink.flush(onError)
+	if commitErr != nil {
+		return fmt.Errorf("opencode: commit boundary tx %s: %w", table, commitErr)
+	}
+	return nil
+}
+
+// iterBoundaryRows feeds every boundary-bucket row through onRow, stopping on the
+// first row error or ctx cancellation. It does NOT close rows (the caller owns the
+// rows + tx lifecycle so it can close the tx before flushing warnings — P2-1).
+func iterBoundaryRows(ctx context.Context, rows *sql.Rows, onRow func(rows *sql.Rows) (rowKey, error)) error {
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		if _, err := onRow(rows); err != nil {
-			_ = rows.Close()
 			return err
 		}
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("opencode: iterate boundary rows %s: %w", table, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("opencode: commit boundary tx %s: %w", table, err)
 	}
 	return nil
 }

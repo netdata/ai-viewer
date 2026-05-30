@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -192,6 +191,16 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 	return nil
 }
 
+// rollbackFlush closes the per-session read tx (rolling back the read-only
+// snapshot) and THEN flushes the buffered warnings through onError (SOW-0005
+// round-5 P2-1) — the early-return chokepoint for loadAndMapSession so no warning
+// is emitted with the snapshot held. Rollback-after-an-eventual-commit is a no-op
+// (database/sql), and the deferred rollback in the caller is harmless after this.
+func rollbackFlush(tx *sql.Tx, sink *warnSink, onError func(error)) {
+	_ = tx.Rollback()
+	sink.flush(onError)
+}
+
 // loadAndMapSession loads one session's row + full ordered tree and maps it,
 // returning (events, skipped, error). skipped=true means the session is paused
 // mid-compaction (time_compacting non-NULL) and must NOT be emitted this cycle
@@ -216,13 +225,25 @@ func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, source
 	if err != nil {
 		return nil, false, err
 	}
+	// No warning EMISSION while this snapshot is open (SOW-0005 round-5 P2-1): the
+	// loaders (loadSession/loadSessionTree corrupt-cell + oversized-session WARNs)
+	// and resolveRootID (parent-chain WARNs) write into sink — a non-blocking slice
+	// append — instead of the live onError, which would send on the (possibly
+	// backpressured) out channel and pin the WAL snapshot. The tx is closed FIRST
+	// (explicit rollback/commit), THEN sink is flushed through onError, THEN the
+	// pure mapper runs and the caller emits the content events — so NEITHER a
+	// warning NOR a content event is emitted with the snapshot held. The deferred
+	// rollback is a panic-safety net only (a no-op after the explicit close).
 	defer func() { _ = tx.Rollback() }()
+	sink := &warnSink{}
 
-	s, ok, err := loadSession(ctx, tx, schema, sessionID, onError)
+	s, ok, err := loadSession(ctx, tx, schema, sessionID, sink.collect)
 	if err != nil {
+		rollbackFlush(tx, sink, onError)
 		return nil, false, err
 	}
 	if !ok {
+		rollbackFlush(tx, sink, onError)
 		return nil, false, nil
 	}
 	if s.TimeCompactingMs > 0 {
@@ -230,21 +251,31 @@ func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, source
 		// now would emit partial/stale content. Skip emitting this cycle; the session
 		// re-appears in a later delta when time_compacting clears (P2-E). The check and
 		// the (skipped) tree read are now atomic on this one snapshot (P1-2).
+		rollbackFlush(tx, sink, onError)
 		orDefaultLogger(logger).Info("opencode: session compaction in progress; skipping tree emit this cycle (re-emits when time_compacting clears)",
 			"session_id", sessionID)
 		return nil, true, nil
 	}
-	tree, err := loadSessionTree(ctx, tx, schema, sessionID, onError)
+	tree, err := loadSessionTree(ctx, tx, schema, sessionID, sink.collect)
 	if err != nil {
+		rollbackFlush(tx, sink, onError)
 		return nil, false, err
 	}
-	root := resolveRootID(ctx, tx, s.ID, s.ParentID, onError)
+	root := resolveRootID(ctx, tx, s.ID, s.ParentID, sink.collect)
 	// Commit the read-only snapshot before mapping (mapping is pure CPU work; holding
 	// the snapshot across it would pin the WAL needlessly). A commit failure on a
 	// read-only tx is surfaced rather than silently dropped.
-	if err := tx.Commit(); err != nil {
-		return nil, false, fmt.Errorf("opencode: commit session-read tx for %s: %w", sessionID, err)
+	commitErr := tx.Commit()
+	// Flush the buffered loader/root warnings now that the snapshot is released
+	// (P2-1) — before mapping/emitting, so the ordering is: tx closed → warnings →
+	// content events (the caller emits evs).
+	sink.flush(onError)
+	if commitErr != nil {
+		return nil, false, fmt.Errorf("opencode: commit session-read tx for %s: %w", sessionID, commitErr)
 	}
+	// The mapper runs AFTER the tx is closed, so its own WARNs (mwarn) may go
+	// straight to the live onError — any channel send now blocks without the
+	// snapshot held.
 	evs, err = mapSession(sourceID, s, tree, WithRootNativeID(root), WithOnWarn(onError))
 	return evs, false, err
 }
@@ -261,119 +292,4 @@ func watermarkAdvanced(a, b TableWatermark) bool {
 // reload loop returns it rather than swallowing it via onError).
 func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
-
-// --- poll-loop cadence state machine ------------------------------------------
-
-// pollState threads the realtime poll loop's cadence inputs: whether the last
-// cycle was active (produced a change), the last WAL fsnotify event time, and
-// the last MAX(time_updated) probe time. It is consulted by the gating predicate
-// and the next-interval computation. Not safe for concurrent use; the tail loop
-// owns one and mutates it single-threaded.
-type pollState struct {
-	active       bool
-	lastWALEvent time.Time
-	lastProbe    time.Time
-	walFloorTill time.Time
-	// priorProbe records that at least one MAX(time_updated) probe has already
-	// completed in this tailer's life. It gates the safety-net boundary re-scan
-	// (SOW-0005 round-4 P1): the very FIRST probe of a cold Tail is a HEAD-snapshot
-	// reconciliation, and replaying its boundary bucket there would re-emit the
-	// snapshot's boundary session for no reason; once a real cycle has probed, a
-	// subsequent SAFETY-NET probe (no WAL hint) is allowed to run the boundary
-	// re-scan so a same-ms in-place update that arrived with a DROPPED/absent WAL
-	// event is still eventually surfaced. Set by markProbe.
-	priorProbe bool
-}
-
-// newPollState returns the initial state: idle, no WAL event yet, a zero
-// lastProbe so the FIRST poll's gate is open (the safety net is immediately due,
-// guaranteeing the initial cycle reconciles in-place mutations that arrived
-// before tailing started), and priorProbe=false so that first probe does NOT run
-// the safety-net boundary re-scan (cold-Tail replay guard, round-4 P1).
-func newPollState() pollState {
-	return pollState{}
-}
-
-// markWALEvent records a WAL fsnotify event at t, opening the 250 ms floor window
-// for walFloorWindow and the probe gate (lastWALEvent advances past lastProbe).
-func (s *pollState) markWALEvent(t time.Time) {
-	s.lastWALEvent = t
-	s.walFloorTill = t.Add(walFloorWindow)
-}
-
-// markProbe records that a MAX(time_updated) probe ran at t and marks that a
-// probe has now completed (priorProbe) so a later safety-net probe may run the
-// boundary re-scan (round-4 P1; the very first probe still does not, by the
-// captured-before-markProbe read in pollOnce).
-func (s *pollState) markProbe(t time.Time) {
-	s.lastProbe = t
-	s.priorProbe = true
-}
-
-// markCycle records the outcome of a poll cycle at t: active when it produced a
-// change (switches to the 500 ms cadence), idle otherwise (2 s).
-func (s *pollState) markCycle(advanced bool, _ time.Time) { s.active = advanced }
-
-// nextInterval returns the wait before the next poll: the active/idle base
-// interval, floored to walFloorInterval while the WAL-event window is open.
-func (s *pollState) nextInterval(now time.Time) time.Duration {
-	base := idlePollInterval
-	if s.active {
-		base = activePollInterval
-	}
-	if now.Before(s.walFloorTill) && base > walFloorInterval {
-		return walFloorInterval
-	}
-	return base
-}
-
-// --- cursor shaping -----------------------------------------------------------
-
-// coerceScanCursor normalises a cursor for use: a nil/zero Tables map is
-// initialised and the version is set. The watermarks are NOT reset (column drift
-// is handled per-column; only a depended-on column vanishing forces a re-ingest).
-// The schema hash is recorded SEPARATELY by the poll loops via withSchemaHash
-// after reading __drizzle_migrations (recordSchemaHash) — it is the REAL
-// migration-name digest (schemaHash in migrations.go), replacing chunk C's
-// interim present-column-shape fingerprint. Keeping the hash out of this function
-// keeps it a pure cursor-shaping helper. Returns a ready-to-page cursor.
-func coerceScanCursor(c Cursor) Cursor {
-	if c.Tables == nil {
-		c = newCursor()
-	}
-	if c.Version == 0 {
-		c.Version = cursorVersion
-	}
-	return c
-}
-
-// recordSchemaHash reads __drizzle_migrations once and stamps the REAL
-// migration-name schema hash (schemaHash) onto the cursor (adapter-opencode.md
-// §"Cursor"). Called by scanLoop and tailLoop right after introspectAll, while
-// the read-only DB is open.
-//
-// Mismatch behaviour (spec adapter-opencode.md §"Cursor"): when the incoming
-// cursor already carries a different hash (opencode applied a migration between
-// runs), the change is logged as a structured WARN via onError, the hash is
-// re-read, and the loop CONTINUES without resetting watermarks — column drift is
-// handled per-column by the dynamic SELECT, so a benign migration (a new column
-// the adapter does not read, a data migration) never forces a re-ingest. A
-// genuine read error (corrupt journal) is non-fatal here: the prior hash is kept
-// and onError is notified, so the backfill/poll still proceeds.
-func recordSchemaHash(ctx context.Context, db *sql.DB, c Cursor, onError func(error)) Cursor {
-	hash, err := readSchemaHash(ctx, db)
-	if err != nil {
-		onError(fmt.Errorf("opencode: read schema hash (keeping prior, continuing): %w", err))
-		return c
-	}
-	if hash == "" {
-		// No __drizzle_migrations (foreign/old DB): leave any prior hash as-is;
-		// there is nothing authoritative to record.
-		return c
-	}
-	if c.SchemaHash != "" && c.SchemaHash != hash {
-		onError(fmt.Errorf("opencode: schema hash changed (migration applied); re-reading, watermarks preserved: %.12s… → %.12s…", c.SchemaHash, hash))
-	}
-	return c.withSchemaHash(hash)
 }

@@ -91,7 +91,12 @@ func maxTimeUpdated(ctx context.Context, db *sql.DB, table string) (int64, error
 // (introspectAll enforces it), so there is no id-only fallback; ordering is the
 // cursor's composite (time_updated, id) key so a resume never skips/duplicates a
 // row at a tie.
-func scanTableDelta(ctx context.Context, db *sql.DB, s tableSchema, from TableWatermark, onRow func(rows *sql.Rows) (rowKey, error)) (tableDelta, error) {
+//
+// sink buffers any per-row WARN raised inside a page tx; scanOnePage flushes it
+// through onError AFTER each page's tx closes (SOW-0005 round-5 P2-1), so no
+// warning/error is emitted while a read tx is open. onRow MUST write its warnings
+// into the SAME sink (callers build it via deltaRowHandler(..., sink.collect)).
+func scanTableDelta(ctx context.Context, db *sql.DB, s tableSchema, from TableWatermark, onRow func(rows *sql.Rows) (rowKey, error), sink *warnSink, onError func(error)) (tableDelta, error) {
 	query := s.buildSelect()
 
 	wm := from
@@ -100,7 +105,7 @@ func scanTableDelta(ctx context.Context, db *sql.DB, s tableSchema, from TableWa
 		if err := ctx.Err(); err != nil {
 			return tableDelta{watermark: wm, rowCount: total}, err
 		}
-		page, err := scanOnePage(ctx, db, query, wm, onRow)
+		page, err := scanOnePage(ctx, db, query, wm, onRow, sink, onError)
 		if err != nil {
 			return tableDelta{watermark: wm, rowCount: total}, err
 		}
@@ -129,31 +134,49 @@ type pageResult struct {
 // bind is always the 3-param (time_updated, time_updated, id) form — time_updated
 // is a required column on every tracked table (introspectAll), so there is no
 // id-only variant.
-func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWatermark, onRow func(rows *sql.Rows) (rowKey, error)) (pageResult, error) {
+//
+// No warning/error EMISSION happens while the tx is open (SOW-0005 round-5 P2-1):
+// onRow writes any corrupt-cell / unknown-type WARN into sink (a non-blocking
+// slice append), the tx is committed/rolled back FIRST (explicitly, not via the
+// deferred rollback — so the snapshot is provably released), and only THEN are the
+// buffered warnings flushed through the live onError. A FATAL row error (a corrupt
+// REQUIRED watermark/owning-id cell — round-4 P2-1 / round-5 P2-2) is RETURNED, not
+// emitted inside; the tx is rolled back and the sink flushed before it propagates,
+// so neither the warnings NOR the fatal error reach the (possibly backpressured)
+// out channel with the WAL snapshot still pinned. sink is reset by flush, ready
+// for the next page.
+func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWatermark, onRow func(rows *sql.Rows) (rowKey, error), sink *warnSink, onError func(error)) (pageResult, error) {
 	tx, err := beginRO(ctx, db)
 	if err != nil {
 		return pageResult{}, err
 	}
-	// Roll back on every exit path; a successful Commit makes the deferred
-	// Rollback a no-op (database/sql ignores rollback after commit).
-	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, query, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedMs, from.MaxTimeUpdatedID)
 	if err != nil {
+		_ = tx.Rollback() // close the tx before any (post-tx) error surfacing
+		sink.flush(onError)
 		return pageResult{}, fmt.Errorf("opencode: delta query: %w", err)
 	}
 
 	res := pageResult{watermark: from}
 	scanErr := iterDeltaPage(ctx, rows, &res, onRow)
 	_ = rows.Close()
+	if scanErr == nil {
+		scanErr = rows.Err()
+	}
+	// Close the tx (releasing the WAL snapshot) BEFORE flushing buffered warnings
+	// or surfacing a fatal row error — so a backpressured onError can never block
+	// with the snapshot held (P2-1). On a scan/iterate error we roll back; on a
+	// clean page we commit.
 	if scanErr != nil {
-		return res, scanErr
+		_ = tx.Rollback()
+		sink.flush(onError)
+		return res, fmt.Errorf("opencode: delta page: %w", scanErr)
 	}
-	if err := rows.Err(); err != nil {
-		return res, fmt.Errorf("opencode: iterate delta rows: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return res, fmt.Errorf("opencode: commit ro tx: %w", err)
+	commitErr := tx.Commit()
+	sink.flush(onError)
+	if commitErr != nil {
+		return res, fmt.Errorf("opencode: commit ro tx: %w", commitErr)
 	}
 	return res, nil
 }

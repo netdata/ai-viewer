@@ -113,13 +113,17 @@ func (bp *batchProcessor) collectBatch(ctx context.Context) (batchResult, error)
 			continue
 		}
 		s := bp.schema[table]
-		onRow := deltaRowHandler(ctx, bp.db, table, s, affected, bp.msgSession, bp.onError)
+		// Warnings raised inside a page tx (corrupt-cell / unknown-type WARN) are
+		// buffered in sink and flushed by scanOnePage AFTER each page's tx closes
+		// (SOW-0005 round-5 P2-1) — never emitted with the WAL snapshot pinned.
+		sink := &warnSink{}
+		onRow := deltaRowHandler(ctx, bp.db, table, s, affected, bp.msgSession, sink.collect)
 		query := s.buildSelect()
 		for total < progressEveryRows {
 			if err := ctx.Err(); err != nil {
 				return batchResult{affected: affected.ids(), rowCount: total}, err
 			}
-			page, err := scanOnePage(ctx, bp.db, query, bp.scanned[table], onRow)
+			page, err := scanOnePage(ctx, bp.db, query, bp.scanned[table], onRow, sink, bp.onError)
 			if err != nil {
 				return batchResult{affected: affected.ids(), rowCount: total}, err
 			}
