@@ -402,8 +402,8 @@ For each `part` row of the assistant message, walking in `id` order:
 |---|---|
 | `step-start` | open a new LLM Op (record state in adapter memory; emit `OpStartedEvent` with kind=`llm`, name=`<modelID>`, provider=`<providerID>` from the parent message) |
 | `step-finish` | close the current LLM Op (emit `OpFinalizedEvent` with the step's `tokens`/`cost`; `Status="completed"`) |
-| `reasoning` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`reasoning`, ParentOpSeq=current LLM Op) using `data.time.start`/`data.time.end`; on missing `end`, `Status="running"` and end ts is null |
-| `text` | NOT an op; surface as the assistant's final text. Skip canonical-event emission; the presenter retrieves text via a payload-style read. |
+| `reasoning` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`reasoning`, ParentOpSeq=current LLM Op) using `data.time.start`/`data.time.end`; on missing `end`, `Status="running"` and end ts is null. **ReasoningKind** (canonical-events.md:202 — `summary` \| `raw`): opencode reasoning parts carry no native summary-vs-raw discriminator, so the adapter emits `raw` (the part is the model's raw chain-of-thought text), unless `data.metadata.summary` is truthy, in which case it emits `summary`. The reasoning body (`data.text`) is referenced as a PayloadRef (kind `llm_reasoning`, field `text`), never inlined. |
+| `text` | NOT an op; surface as the assistant's final text. The adapter does NOT emit an op for a `text` part, but DOES emit a `PayloadRef` (kind `llm_response`, field `text`) scoped to the turn's most-recent LLM op so the presenter can retrieve the assistant's text on demand without ai-viewer copying it. When no LLM op is open yet (a `text` part before any `step-start`), the ref is dropped (it has no op to attach to; `payload_refs.op_id` is NOT NULL). |
 | `tool` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`tool`, ParentOpSeq=current LLM Op, name=`tool`, ToolNamespace=derived from `tool` (e.g. `github_get_file_contents` → namespace `github`, name `get_file_contents`)) using `state.time.start`/`state.time.end`; `Status` derived from `state.status` |
 | `tool` where `tool='task'` AND `state.metadata.sessionId` set | emit BOTH the tool Op AND an `OpStartedEvent` of kind=`session` with `ChildSessionNativeID = state.metadata.sessionId` (SOW-0005 decision: emit both; the `session` op is the topology parent so the sub-agent attaches in the topology view) |
 | `patch` | NOT an op; record in extras of the surrounding LLM op for the "Files changed" UI tab |
@@ -424,6 +424,15 @@ LocationURI = "opencode-sqlite://opencode.db?part_id=<prt_...>&field=state.outpu
 ```
 
 The presenter resolves this scheme by re-querying SQLite for the named field. This keeps payloads out of ai-viewer's own database (they may be hundreds of MB total) and respects the read-only contract.
+
+**Mapper/URI seam (SOW-0005 chunk split).** The row→event mapper (chunk B) is pure and DB-agnostic: it knows the owning `part.id` and the `field` path (`state.output`, `state.input`, `text`, …) but NOT how to build the final `opencode-sqlite://` URI (the database basename + escaping live with the connection/discovery layer). It therefore emits each `PayloadRefEvent` carrying the `part_id` and `field` in `LocationURI` via a single injected builder function (default for mapper-only tests: a deterministic relative `opencode-sqlite://?part_id=<id>&field=<field>` form with no db basename). Chunk D supplies the production builder that prefixes the resolved database basename. This mirrors codex, whose mapper defers `file://` construction to a `payloadURI` helper. The PayloadRef field map per part type:
+
+| part type | PayloadKind | field |
+|---|---|---|
+| `text` | `llm_response` | `text` |
+| `reasoning` | `llm_reasoning` | `text` |
+| `tool` (completed/error) | `tool_response` | `state.output` |
+| `file` | `user_attachment` | (verbatim `data.url`, not a SQLite field) |
 
 ### Sub-Agent Linkage
 
