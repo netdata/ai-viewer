@@ -11,6 +11,7 @@ import (
 	_ "github.com/netdata/ai-viewer/internal/adapters/aiagent_v2"
 	_ "github.com/netdata/ai-viewer/internal/adapters/aiagent_v3"
 	_ "github.com/netdata/ai-viewer/internal/adapters/claude_code"
+	_ "github.com/netdata/ai-viewer/internal/adapters/codex"
 )
 
 // TestRegistry_BothAdaptersRegisteredAtInit verifies the init-time
@@ -25,7 +26,7 @@ import (
 // reorder tests across files; the resets in registry_test.go restore
 // state via t.Cleanup before this test runs.
 func TestRegistry_BothAdaptersRegisteredAtInit(t *testing.T) {
-	for _, format := range []string{"aiagent_v2", "aiagent_v3", "claude-code"} {
+	for _, format := range []string{"aiagent_v2", "aiagent_v3", "claude-code", "codex"} {
 		f, ok := adapters.Get(format)
 		if !ok {
 			t.Errorf("Get(%q): not registered", format)
@@ -41,7 +42,7 @@ func TestRegistry_BothAdaptersRegisteredAtInit(t *testing.T) {
 // every init-time registration sorted lexicographically.
 func TestRegistry_FormatsContainsBothAdapters(t *testing.T) {
 	got := adapters.Formats()
-	var sawV2, sawV3, sawCC bool
+	var sawV2, sawV3, sawCC, sawCodex bool
 	for _, name := range got {
 		switch name {
 		case "aiagent_v2":
@@ -50,6 +51,8 @@ func TestRegistry_FormatsContainsBothAdapters(t *testing.T) {
 			sawV3 = true
 		case "claude-code":
 			sawCC = true
+		case "codex":
+			sawCodex = true
 		}
 	}
 	if !sawV2 {
@@ -60,5 +63,8 @@ func TestRegistry_FormatsContainsBothAdapters(t *testing.T) {
 	}
 	if !sawCC {
 		t.Errorf("Formats() missing claude-code; got %v", got)
+	}
+	if !sawCodex {
+		t.Errorf("Formats() missing codex; got %v", got)
 	}
 }

@@ -21,6 +21,12 @@ import (
 	"sync"
 
 	"github.com/netdata/ai-viewer/internal/adapters"
+	// Side-effect import: the codex adapter registers its factory with
+	// internal/adapters via init() so the auto-discovery probe added below can
+	// construct it. main.go blank-imports the other adapters in the same way;
+	// codex is registered from here to keep this chunk's change additive and
+	// co-located with its probe.
+	_ "github.com/netdata/ai-viewer/internal/adapters/codex"
 	"github.com/netdata/ai-viewer/internal/canonical"
 	"github.com/netdata/ai-viewer/internal/ingest"
 )
@@ -105,6 +111,11 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 			location: claudeProjectsDir(home),
 			probe:    claudeProjectsDir(home),
 		},
+		{
+			format:   "codex",
+			location: codexSessionsDir(home),
+			probe:    codexSessionsDir(home),
+		},
 	}
 
 	var out []configuredSource
@@ -120,11 +131,21 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 		seen[key] = struct{}{}
 		out = append(out, configuredSource{id: key, format: p.format, location: p.location})
 		attrs := []any{"format", p.format, "location", p.location}
-		if p.format == "claude-code" {
+		switch p.format {
+		case "claude-code":
 			// Surface the project-dir count so the operator sees the source
 			// is non-empty (acceptance #8). The count is the number of
 			// immediate subdirectories under the projects root.
 			attrs = append(attrs, "project_dirs", countProjectDirs(p.location))
+		case "codex":
+			// Surface modern + legacy counts SEPARATELY (SOW-0004 acceptance
+			// #8): modern sharded rollouts are ingested, legacy flat .json are
+			// only logged (one SourceError each, not ingested in v1). Reporting
+			// them apart lets the operator see how many sessions the source will
+			// actually surface vs how many remain on the deferred legacy path.
+			attrs = append(attrs,
+				"modern_rollouts", countRolloutFiles(p.location),
+				"legacy_json", countLegacyJSON(p.location))
 		}
 		logger.Info("ai-viewer-ingest: auto-discovered source", attrs...)
 	}
@@ -152,6 +173,82 @@ func countProjectDirs(root string) int {
 	n := 0
 	for _, e := range entries {
 		if e.IsDir() {
+			n++
+		}
+	}
+	return n
+}
+
+// codexSessionsDir returns the codex sessions root, honoring $CODEX_HOME
+// (SOW-0004 C#3). When the env var is set, the root is "$CODEX_HOME/sessions";
+// otherwise "~/.codex/sessions". This is the directory the adapter walks and
+// tails; the probe checks it for existence.
+func codexSessionsDir(home string) string {
+	if ch := os.Getenv("CODEX_HOME"); ch != "" {
+		return filepath.Join(ch, "sessions")
+	}
+	return filepath.Join(home, ".codex", "sessions")
+}
+
+// codexRolloutPrefix is the shared filename prefix for both modern and legacy
+// codex rollouts (openai/codex codex-rs/rollout/src/list.rs filters on
+// starts_with("rollout-")). Duplicated here as a lightweight observability
+// predicate; the adapter's discovery.go holds the authoritative anchored
+// regexes used for actual ingest.
+const codexRolloutPrefix = "rollout-"
+
+// codexArchivedDir is the codex session archive, pruned from both ingest and
+// these observability counts (spec adapter-codex.md §"Filesystem Layout").
+const codexArchivedDir = "archived_sessions"
+
+// countRolloutFiles returns the number of modern sharded codex rollouts
+// ("rollout-*.jsonl") under the sessions root, walking the YYYY/MM/DD shards at
+// any depth and pruning archived_sessions/. Returns 0 on any walk error — the
+// count is observability for acceptance #8, not a gate, so it is read
+// best-effort and never blocks discovery. Mirrors discovery.go's modern match
+// (^rollout-.*\.jsonl$) without importing the adapter package.
+func countRolloutFiles(root string) int {
+	n := 0
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == codexArchivedDir && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if strings.HasPrefix(name, codexRolloutPrefix) && strings.HasSuffix(name, ".jsonl") {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
+// countLegacyJSON returns the number of legacy flat codex rollouts
+// ("rollout-*.json") directly under the sessions root (NOT in shards). These are
+// recognized but NOT ingested in v1 (one informational SourceError per file);
+// the count is surfaced separately so the operator sees the deferred-legacy
+// volume (acceptance #8). Returns 0 on any read error. Mirrors discovery.go's
+// legacy match (^rollout-.*\.json$, root-only).
+func countLegacyJSON(root string) int {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, codexRolloutPrefix) && strings.HasSuffix(name, ".json") {
 			n++
 		}
 	}

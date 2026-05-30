@@ -71,6 +71,13 @@ type fileMapper struct {
 	// compaction summaries) and for log attribution. Empty in mapper-only unit
 	// tests; the URI then carries the line anchor without an absolute prefix.
 	absPath string
+	// root is the symlink-resolved sessions root (absolute), used to enforce
+	// symlink containment when building a PayloadRef LocationURI (security.md
+	// §6, spec edge #7). Empty in mapper-only unit tests; payloadURI then skips
+	// the containment resolve and emits the cleaned absolute path so URIs are
+	// still anchored. The scanner sets it to the already-resolved root it opened
+	// the file under (mirrors claude_code/mapper.go's root field).
+	root string
 
 	// lineNo is the 1-based file line number of the record currently being
 	// mapped. The scanner (Chunk C) sets it via setLineNo before each mapRecord
@@ -218,6 +225,9 @@ type mapperConfig struct {
 	parentNativeID string
 	kind           canonical.SessionKind
 	agentName      string
+	// root is the symlink-resolved sessions root for PayloadRef containment
+	// (security.md §6). Empty in mapper-only tests (no containment resolve).
+	root string
 }
 
 // newFileMapper constructs a mapper for one rollout file.
@@ -225,6 +235,7 @@ func newFileMapper(cfg mapperConfig) *fileMapper {
 	return &fileMapper{
 		sourceID:       cfg.sourceID,
 		absPath:        cfg.absPath,
+		root:           cfg.root,
 		nativeID:       cfg.nativeID,
 		parentNativeID: cfg.parentNativeID,
 		kind:           cfg.kind,
@@ -388,16 +399,25 @@ func (m *fileMapper) activeTurnSeq() int {
 
 // payloadURI builds the PayloadRef LocationURI for a body inline in this
 // rollout file at the given 1-based line number (spec rule #6/#7/#8, edge #7).
-// The form is "file://<clean-abs>#L<line>" so the presenter reads the exact
-// record on demand without ai-viewer ever copying the body into SQLite.
+// The form is "file://<symlink-resolved-abs>#L<line>" so the presenter reads the
+// exact record on demand without ai-viewer ever copying the body into SQLite.
 //
-// NOTE (Chunk B↔D seam): this mapper-side builder is the minimal contract
-// Chunk B needs to compile and be tested in isolation — it cleans the path and
-// appends the line anchor but does NOT do symlink containment. Chunk D replaces
-// it with the claude_code-verbatim containment version (payloads.go:
-// resolveWithinRoot + EvalSymlinks), keeping the SAME "#L<line>" anchor so the
-// emitted event stream is unchanged. When absPath is empty (mapper-only tests)
-// the URI is just the line anchor.
+// Containment (Chunk D, security.md §6): the absolute path is resolved through
+// symlinks and verified to stay inside the configured sessions root via
+// payloadLocationURI (payloads.go). The "#L<line>" anchor is appended AFTER the
+// file:// path is built so the anchor is identical to Chunk B's contract
+// (TestMapper_PayloadRefLineAnchor). When m.root is empty (mapper-only tests)
+// the containment resolve is skipped and the cleaned absolute path is used; when
+// m.absPath is empty the URI is just the line anchor.
+//
+// The scanner is the authoritative containment gate: readRollout (scanner.go)
+// refuses any file that resolves outside the root BEFORE a single line is
+// streamed, so by the time the mapper builds a ref the owning file is already
+// known to be contained. A resolve failure or apparent escape here (e.g. the
+// file removed between the scanner's open and this build — impossible while the
+// scanner holds the fd, but handled defensively) therefore falls back to the
+// cleaned absolute path rather than dropping the anchor, keeping the ref usable
+// and the op→payload linkage (payload_refs.op_id NOT NULL) intact.
 func (m *fileMapper) payloadURI(lineNo int) string {
 	anchor := ""
 	if lineNo > 0 {
@@ -406,8 +426,14 @@ func (m *fileMapper) payloadURI(lineNo int) string {
 	if m.absPath == "" {
 		return anchor
 	}
-	cleaned := filepath.ToSlash(filepath.Clean(m.absPath))
-	return "file://" + cleaned + anchor
+	uri, err := payloadLocationURI(m.root, m.absPath)
+	if err != nil {
+		// Containment resolve failed (escape or unresolvable). The scanner
+		// already vetted the file before streaming, so fall back to the cleaned
+		// absolute path rather than emit a lossy ref.
+		uri = "file://" + filepath.ToSlash(filepath.Clean(m.absPath))
+	}
+	return uri + anchor
 }
 
 // payloadRef builds a PayloadRefEvent for a body inline in this rollout at the

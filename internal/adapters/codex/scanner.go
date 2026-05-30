@@ -179,6 +179,11 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 	mapper := newFileMapper(mapperConfig{
 		sourceID: sourceID,
 		absPath:  r.abs,
+		// root is the already-symlink-resolved sessions root this file was
+		// opened under (containment-checked above); the mapper uses it to build
+		// containment-verified PayloadRef file:// URIs without re-resolving the
+		// root per ref (security.md §6).
+		root:     resolvedRoot,
 		nativeID: nativeIDForRollout(r),
 	})
 	dedup := newUnknownDedup()
