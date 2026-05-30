@@ -252,6 +252,18 @@ The original gate scoped this SOW to `internal/adapters/codex/` + the additive `
 
 **Round-5 fix plan:** (I1, ingest) on an `OpStarted` re-emit whose catalog identity changed, MOVE the contribution (call_count + any finalize totals) from the old key to the new key instead of inserting a second count — capture the op's prior persisted (kind,name,tool_namespace,model,provider,alias) before the upsert and, when it differs, decrement the old catalog row and increment the new; test `function_call`→MCP-enrichment keeps total call_count = 1. (I2, codex) track turn-local last-activity separately from file `lastTsUs` for the old-format EOF close-ts, and suppress a second EOF close when a size-growing append carried no new TURN content (e.g. mark the turn EOF-finalized, not just the file size); test: EOF-close an old-format turn, append only `session_meta`, rescan → no new `TurnFinalized`, stable end-ts. (I3, spec) update `ingester.md` catalog semantics (OpStarted counts on insert; OpFinalized applies a delta) + add `eof_finalized_size` to the adapter-codex.md cursor JSON.
 
+### Round 5 (2026-05-30) — same scope + I1/I2/I3 fix notes
+
+- **glm**: SAFE TO MERGE — ran a deep catalog-migration audit (negative call_count, SQL injection, sibling regressions); found nothing.
+- **minimax**: SAFE — I1/I2/I3 correct + complete, no regressions.
+- **codex**: NOT SAFE — confirmed I2 (EOF suppression), I3 (spec), and I1's full-identity/finalized-prior/pre-finalize/same-identity/kind-change paths all CORRECT; found ONE P2 (no P1, no other issues):
+
+| # | Sev | Finding | Verdict |
+|---|---|---|---|
+| J1 | P2 | Catalog migration compares the RAW event identity, but the ops UPSERT preserves omitted fields via `COALESCE(NULLIF(excluded.x,''), ops.x)` (writer.go:588-591). A PARTIAL re-emit (empty provider/model/namespace) → migration wrongly sees "changed" → drains the old key + skips/mis-books the new → drained aggregate | CONFIRMED. catalog_migrate.go compared `ev.*` not the effective post-upsert identity. Latent (catalog unread). |
+
+**Round 6 (2026-05-30) — J1 fix.** `effectiveOpIdentity(ev, prior)` (catalog_migrate.go) applies the same empty→prior rule as the SQL upsert; `onOpStarted` computes it ONCE and threads it through the identity-change compare, the call-count booking key, and the migrated-totals destination. A partial/empty-omitted re-emit now resolves to the prior identity → seen as UNCHANGED → no drain. Regression tests `TestCatalog_LLMReEmitEmptyProviderModelNoDrain` + `TestCatalog_ToolReEmitEmptyNamespaceNoMigrate` (both fail pre-fix, pass post-fix); all prior migration + idempotency tests still pass. Ingest-only; gates green (golangci 0, gosec 0, race all pass, ingest coverage 88.5%, goldens byte-identical).
+
 ## Outcome
 
 Pending.

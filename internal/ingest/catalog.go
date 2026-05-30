@@ -85,10 +85,17 @@ ON CONFLICT (source_format, cwd) DO UPDATE SET
 // duration totals) is MOVED off the old key before it is added to the new one, so
 // the physical op is counted under exactly ONE catalog row.
 func (c *catalogWriter) onOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent, inserted bool, prior priorOpIdentity) error {
+	// eff is the catalog identity the ops row will ACTUALLY carry after applyOpStarted's
+	// upsert: the upsert COALESCEs omitted tool_namespace/model/provider/provider_alias
+	// back to the prior persisted value (writer.go), so booking + migration must use
+	// this effective identity, not the raw event — otherwise an empty-but-unchanged
+	// re-emit drains its real catalog key without re-booking (SOW-0004 I1 shared-ingest
+	// edge). On a genuine insert (prior absent) eff equals the event identity.
+	eff := effectiveOpIdentity(ev, prior)
 	// identityChanged is true only for a re-emit of an EXISTING op whose catalog
 	// identity was corrected (codex MCP enrichment — SOW-0004 I1). Computed once and
 	// reused below for the migrate-out, the call_count bump, and the migrate-in.
-	identityChanged := !inserted && prior.found && c.catalogIdentityChanged(ev, prior)
+	identityChanged := !inserted && prior.found && c.catalogIdentityChanged(eff, prior)
 	// Identity migration (I1): an existing op whose catalog identity changed has
 	// already contributed (call_count, and any finalize totals) to its OLD key. Move
 	// that whole contribution off the old key here, BEFORE the add below re-books it
@@ -111,14 +118,18 @@ func (c *catalogWriter) onOpStarted(ctx context.Context, tx *sql.Tx, ev canonica
 	if inserted || identityChanged {
 		callInc = 1
 	}
-	switch ev.Kind {
-	case canonical.OpLLM:
-		if ev.Provider != "" {
-			if err := upsertProvider(ctx, tx, ev.Provider, ev.ProviderAlias, ev.Ts, callInc); err != nil {
+	// Booking keys use the EFFECTIVE post-upsert identity (eff), not the raw event:
+	// they must match the ops row the upsert produces and the key the migrate-in/out
+	// touch, so an empty-field re-emit books under the prior-preserved key rather than
+	// an empty one (SOW-0004 I1 shared-ingest edge).
+	switch eff.kind {
+	case string(canonical.OpLLM):
+		if eff.provider != "" {
+			if err := upsertProvider(ctx, tx, eff.provider, eff.providerAlias, ev.Ts, callInc); err != nil {
 				return err
 			}
 		}
-		if ev.Provider != "" && ev.Model != "" {
+		if eff.provider != "" && eff.model != "" {
 			// Iter-8 fix iter8-4: seed ctx_max from the pricing table
 			// when the pricer carries metadata. The COALESCE on
 			// ON CONFLICT keeps an existing non-null ctx_max (set by a
@@ -126,7 +137,7 @@ func (c *catalogWriter) onOpStarted(ctx context.Context, tx *sql.Tx, ev canonica
 			// untouched — the table seeds, the op refines.
 			ctxMaxSeed := sql.NullInt64{}
 			if mp, ok := c.pricer.(MetadataPricer); ok && mp != nil {
-				if cm, hit := mp.CtxMax(ev.Provider, ev.Model); hit && cm > 0 {
+				if cm, hit := mp.CtxMax(eff.provider, eff.model); hit && cm > 0 {
 					ctxMaxSeed = sql.NullInt64{Int64: cm, Valid: true}
 				}
 			}
@@ -138,16 +149,13 @@ ON CONFLICT (provider, name) DO UPDATE SET
     last_seen  = MAX(catalog_models.last_seen, excluded.last_seen),
     ctx_max    = COALESCE(catalog_models.ctx_max, excluded.ctx_max),
     call_count = catalog_models.call_count + ?
-`, ev.Provider, ev.Model, ctxMaxSeed, ev.Ts, ev.Ts, callInc); err != nil {
+`, eff.provider, eff.model, ctxMaxSeed, ev.Ts, ev.Ts, callInc); err != nil {
 				return fmt.Errorf("catalog_models upsert: %w", err)
 			}
 		}
-	case canonical.OpTool:
-		if ev.Name != "" {
-			ns := ev.ToolNamespace
-			if ns == "" {
-				ns = "builtin"
-			}
+	case string(canonical.OpTool):
+		if eff.name != "" {
+			ns := normalizeToolNamespace(eff.toolNamespace)
 			if _, err := tx.ExecContext(ctx, `
 INSERT INTO catalog_tools (namespace, name, first_seen, last_seen, call_count)
 VALUES (?, ?, ?, ?, 1)
@@ -155,7 +163,7 @@ ON CONFLICT (namespace, name) DO UPDATE SET
     first_seen = MIN(catalog_tools.first_seen, excluded.first_seen),
     last_seen  = MAX(catalog_tools.last_seen, excluded.last_seen),
     call_count = catalog_tools.call_count + ?
-`, ns, ev.Name, ev.Ts, ev.Ts, callInc); err != nil {
+`, ns, eff.name, ev.Ts, ev.Ts, callInc); err != nil {
 				return fmt.Errorf("catalog_tools upsert: %w", err)
 			}
 		}
@@ -168,7 +176,7 @@ ON CONFLICT (namespace, name) DO UPDATE SET
 	// (migrated prior + (now − prior) = now); when no re-finalize follows, the new key
 	// simply holds the op's last-known contribution.
 	if identityChanged {
-		if err := c.addMigratedTotals(ctx, tx, ev, prior.totals); err != nil {
+		if err := c.addMigratedTotals(ctx, tx, eff, prior.totals); err != nil {
 			return err
 		}
 	}

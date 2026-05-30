@@ -449,6 +449,165 @@ func TestCatalog_IdentityChangeBeforeFinalize(t *testing.T) {
 	}
 }
 
+// TestCatalog_LLMReEmitEmptyProviderModelNoDrain pins SOW-0004 I1's shared-ingest
+// edge for LLM ops: the ops-table upsert PRESERVES omitted identity fields via a
+// COALESCE/NULLIF empty-as-prior rule (writer.go), so a re-emitted OpStarted
+// carrying EMPTY provider/model keeps the prior persisted (openai, gpt-5.5) on the
+// ops row. The catalog identity-change check must therefore compare the EFFECTIVE
+// post-upsert identity (empty→prior), NOT the raw event — otherwise it sees
+// ""≠openai, "drains" the catalog_providers/catalog_models rows, and never re-books
+// (effective provider is empty in the raw-event view) → a permanently drained
+// aggregate. This drives that exact re-emit and asserts the rows are UNCHANGED and
+// no empty-key row was created.
+func TestCatalog_LLMReEmitEmptyProviderModelNoDrain(t *testing.T) {
+	t.Parallel()
+	const src = "codex:/tmp"
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "codex", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "codex", "/tmp", NopPricer{})
+	apply := func(tx *sql.Tx, ev canonical.Event) {
+		if aErr := w.apply(ctx, tx, ev); aErr != nil {
+			t.Fatalf("apply %T: %v", ev, aErr)
+		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	apply(tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	apply(tx, canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1000},
+		SessionNativeID: "s", Seq: 1,
+	})
+	// 1) Finalized LLM op under (openai, gpt-5.5) with a failure + tokens/duration so
+	//    a stranded/drained total would be visible.
+	apply(tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5",
+	})
+	apply(tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "model_error",
+		EndTs: 1500, TokensIn: 30, TokensOut: 8, TokensCacheRead: 2, TokensCacheWrite: 1,
+	})
+	// 2) Re-emit OpStarted for the SAME (turn,seq) with EMPTY provider/model — the ops
+	//    upsert COALESCEs these back to (openai, gpt-5.5). The catalog must see this as
+	//    UNCHANGED (effective identity == prior), NOT drain-without-rebook.
+	apply(tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 5, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpLLM, Name: "message", Provider: "", Model: "",
+	})
+	if cErr := tx.Commit(); cErr != nil {
+		t.Fatalf("Commit: %v", cErr)
+	}
+
+	// The (openai, gpt-5.5) rows must be intact: call_count 1, totals unchanged.
+	if got := scanInt(t, db, `SELECT call_count FROM catalog_models WHERE provider='openai' AND name='gpt-5.5'`); got != 1 {
+		t.Errorf("model call_count = %d, want 1 (empty-field re-emit must not drain, I1 shared-ingest edge)", got)
+	}
+	if got := scanInt(t, db, `SELECT total_tokens_in FROM catalog_models WHERE provider='openai' AND name='gpt-5.5'`); got != 30 {
+		t.Errorf("model total_tokens_in = %d, want 30 (must not drain on empty-field re-emit)", got)
+	}
+	if got := scanInt(t, db, `SELECT failure_count FROM catalog_models WHERE provider='openai' AND name='gpt-5.5'`); got != 1 {
+		t.Errorf("model failure_count = %d, want 1 (must not drain on empty-field re-emit)", got)
+	}
+	if got := scanInt(t, db, `SELECT call_count FROM catalog_providers WHERE name='openai'`); got != 1 {
+		t.Errorf("provider call_count = %d, want 1 (must not drain on empty-field re-emit)", got)
+	}
+	if got := scanInt(t, db, `SELECT total_tokens_in FROM catalog_providers WHERE name='openai'`); got != 30 {
+		t.Errorf("provider total_tokens_in = %d, want 30 (must not drain on empty-field re-emit)", got)
+	}
+	// No empty-key catalog rows must have been created by the raw-event view.
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM catalog_models WHERE provider='' OR name=''`); got != 0 {
+		t.Errorf("empty-key catalog_models rows = %d, want 0", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM catalog_providers WHERE name=''`); got != 0 {
+		t.Errorf("empty-key catalog_providers rows = %d, want 0", got)
+	}
+}
+
+// TestCatalog_ToolReEmitEmptyNamespaceNoMigrate pins SOW-0004 I1's shared-ingest
+// edge for tool ops: a tool op counted under namespace "shell", then a re-emitted
+// OpStarted OMITS ToolNamespace. The ops upsert COALESCEs the namespace back to
+// "shell", but normalizeToolNamespace("")="builtin" — so a raw-event identity check
+// would "migrate" the contribution from "shell" to "builtin" while the ops row still
+// says "shell", siphoning the count onto a phantom (builtin, name) row and draining
+// the real "shell" row. The effective-identity check (empty→prior) must detect this
+// as UNCHANGED.
+func TestCatalog_ToolReEmitEmptyNamespaceNoMigrate(t *testing.T) {
+	t.Parallel()
+	const src = "codex:/tmp"
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "codex", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "codex", "/tmp", NopPricer{})
+	apply := func(tx *sql.Tx, ev canonical.Event) {
+		if aErr := w.apply(ctx, tx, ev); aErr != nil {
+			t.Fatalf("apply %T: %v", ev, aErr)
+		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	apply(tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	})
+	apply(tx, canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1000},
+		SessionNativeID: "s", Seq: 1,
+	})
+	// 1) Tool op under namespace "shell", finalized with tokens so a drained total
+	//    would be visible.
+	apply(tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpTool, Name: "shell", ToolNamespace: "shell",
+	})
+	apply(tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: 1200, TokensIn: 7,
+	})
+	// 2) Re-emit OpStarted OMITTING ToolNamespace (empty). The ops upsert COALESCEs it
+	//    back to "shell"; the catalog must NOT migrate "shell"→"builtin".
+	apply(tx, canonical.OpStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 5, Ts: 1100},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, ParentOpSeq: -1,
+		Kind: canonical.OpTool, Name: "shell", ToolNamespace: "",
+	})
+	if cErr := tx.Commit(); cErr != nil {
+		t.Fatalf("Commit: %v", cErr)
+	}
+
+	// The (shell, shell) row stays at call_count 1 with its tokens; no (builtin, shell)
+	// row siphoned it.
+	if got := scanInt(t, db, `SELECT call_count FROM catalog_tools WHERE namespace='shell' AND name='shell'`); got != 1 {
+		t.Errorf("shell tool call_count = %d, want 1 (omitted-namespace re-emit must not migrate, I1 shared-ingest edge)", got)
+	}
+	if got := scanInt(t, db, `SELECT total_tokens_in FROM catalog_tools WHERE namespace='shell' AND name='shell'`); got != 7 {
+		t.Errorf("shell tool total_tokens_in = %d, want 7 (must not drain on omitted-namespace re-emit)", got)
+	}
+	// COALESCE(SUM(...),0) always returns one row (0 when no phantom row exists), so
+	// it both proves "no siphoned count" and tolerates the absent-row case.
+	if got := scanInt(t, db, `SELECT COALESCE(SUM(call_count),0) FROM catalog_tools WHERE namespace='builtin' AND name='shell'`); got != 0 {
+		t.Errorf("builtin tool call_count = %d, want 0 (no phantom builtin row may siphon the shell contribution)", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM catalog_tools WHERE namespace='builtin' AND name='shell'`); got != 0 {
+		t.Errorf("phantom (builtin, shell) row count = %d, want 0", got)
+	}
+}
+
 // TestCatalog_KindChangeMigratesAcrossTables pins the SOW-0004 I1 migration when a
 // re-emitted OpStarted changes the op KIND (tool → llm) on the same (turn,seq) — a
 // defensive edge: the op's contribution must move OFF the tool catalog row and ONTO

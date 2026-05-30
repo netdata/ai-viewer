@@ -46,25 +46,71 @@ type priorOpIdentity struct {
 	totals        opPriorTotals
 }
 
+// effectiveCatalogIdentity is the catalog identity an OpStarted's row will ACTUALLY
+// carry AFTER applyOpStarted's upsert — which is NOT the raw event for the optional
+// identity columns. The upsert (writer.go) preserves omitted fields via a
+// COALESCE/NULLIF empty-as-prior rule, so a re-emit that carries an EMPTY
+// tool_namespace/model/provider/provider_alias keeps the PRIOR persisted value;
+// kind and name are overwritten with the event's values directly. Migration MUST be
+// driven off this effective identity, otherwise an empty-but-unchanged re-emit looks
+// "changed" against the raw event and the contribution is drained off its real key
+// without being re-booked (the raw-event key is empty) — a permanent drain
+// (SOW-0004 I1 shared-ingest edge).
+type effectiveCatalogIdentity struct {
+	kind          string
+	name          string
+	toolNamespace string
+	model         string
+	provider      string
+	providerAlias string
+}
+
+// effectiveOpIdentity computes the post-upsert catalog identity from the event and
+// the op's prior persisted identity, mirroring applyOpStarted's upsert rules: kind
+// and name come from the event (overwritten directly); tool_namespace/model/
+// provider/provider_alias use the event value when non-empty, else fall back to the
+// prior persisted value (the COALESCE/NULLIF empty-as-prior rule). When the op is a
+// genuine new insert (prior absent) the prior fields are empty, so the fallback is a
+// no-op and the effective identity equals the event identity.
+func effectiveOpIdentity(ev canonical.OpStartedEvent, prior priorOpIdentity) effectiveCatalogIdentity {
+	coalesce := func(evVal, priorVal string) string {
+		if evVal != "" {
+			return evVal
+		}
+		return priorVal
+	}
+	return effectiveCatalogIdentity{
+		kind:          string(ev.Kind),
+		name:          ev.Name,
+		toolNamespace: coalesce(ev.ToolNamespace, prior.toolNamespace),
+		model:         coalesce(ev.Model, prior.model),
+		provider:      coalesce(ev.Provider, prior.provider),
+		providerAlias: coalesce(ev.ProviderAlias, prior.providerAlias),
+	}
+}
+
 // catalogIdentityChanged reports whether a re-emitted OpStarted lands on a
 // DIFFERENT catalog row than the op's prior persisted identity, so onOpStarted
 // migrates the op's contribution instead of double-counting it (SOW-0004 I1). The
 // comparison mirrors the catalog keying exactly: LLM ops key on
 // (provider, alias, model); tool ops key on (namespace-normalized-to-builtin,
-// name); a changed KIND always counts as changed. The event's identity is
-// compared against the persisted columns the prior op contributed under.
-func (c *catalogWriter) catalogIdentityChanged(ev canonical.OpStartedEvent, prior priorOpIdentity) bool {
-	if string(ev.Kind) != prior.kind {
+// name); a changed KIND always counts as changed. The EFFECTIVE post-upsert
+// identity (empty event fields fall back to the prior persisted value) is compared
+// against the columns the prior op contributed under — so an empty-but-unchanged
+// re-emit, which the ops upsert COALESCEs back to the prior value, is correctly
+// detected as UNCHANGED and triggers no migration (SOW-0004 I1 shared-ingest edge).
+func (c *catalogWriter) catalogIdentityChanged(eff effectiveCatalogIdentity, prior priorOpIdentity) bool {
+	if eff.kind != prior.kind {
 		return true
 	}
-	switch ev.Kind {
-	case canonical.OpLLM:
-		return ev.Provider != prior.provider ||
-			ev.ProviderAlias != prior.providerAlias ||
-			ev.Model != prior.model
-	case canonical.OpTool:
-		return normalizeToolNamespace(ev.ToolNamespace) != normalizeToolNamespace(prior.toolNamespace) ||
-			ev.Name != prior.name
+	switch eff.kind {
+	case string(canonical.OpLLM):
+		return eff.provider != prior.provider ||
+			eff.providerAlias != prior.providerAlias ||
+			eff.model != prior.model
+	case string(canonical.OpTool):
+		return normalizeToolNamespace(eff.toolNamespace) != normalizeToolNamespace(prior.toolNamespace) ||
+			eff.name != prior.name
 	default:
 		// session/system/reasoning/compaction ops touch no catalog rollup row, so
 		// there is never a contribution to migrate.
@@ -156,18 +202,19 @@ WHERE namespace = ? AND name = ?
 // key starts from the op's prior contribution and any subsequent OpFinalized
 // re-emit then applies its (now − prior) delta on top. The column sets mirror
 // onOpFinalized exactly. last_seen is left to the OpStarted upsert / a later
-// OpFinalized (this UPDATE only moves accumulating totals).
-func (c *catalogWriter) addMigratedTotals(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent, t opPriorTotals) error {
+// OpFinalized (this UPDATE only moves accumulating totals). The destination key is
+// the EFFECTIVE post-upsert identity so it always matches the ops row and the key
+// the call_count upsert booked under (SOW-0004 I1 shared-ingest edge).
+func (c *catalogWriter) addMigratedTotals(ctx context.Context, tx *sql.Tx, eff effectiveCatalogIdentity, t opPriorTotals) error {
 	// t is the prior PERSISTED contribution; the caller only reaches here when the
 	// op row already existed (prior.found), so t.found is always true. An op started
 	// but never finalized has status="running" (failureInc 0) and zero tokens/cost/
 	// duration, so the adds below move nothing meaningful — only the call_count the
 	// OpStarted upsert already re-booked under the new key matters in that case.
 	failure := failureInc(t.status)
-	switch ev.Kind {
-	case canonical.OpLLM:
-		if ev.Provider != "" {
-			alias := ev.ProviderAlias
+	switch eff.kind {
+	case string(canonical.OpLLM):
+		if eff.provider != "" {
 			if _, err := tx.ExecContext(ctx, `
 UPDATE catalog_providers SET
     failure_count            = failure_count + ?,
@@ -178,11 +225,11 @@ UPDATE catalog_providers SET
     total_cost_usd           = total_cost_usd + ?
 WHERE name = ? AND alias = ?
 `, failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD,
-				ev.Provider, alias); err != nil {
+				eff.provider, eff.providerAlias); err != nil {
 				return fmt.Errorf("catalog_providers migrate-in: %w", err)
 			}
 		}
-		if ev.Provider != "" && ev.Model != "" {
+		if eff.provider != "" && eff.model != "" {
 			if _, err := tx.ExecContext(ctx, `
 UPDATE catalog_models SET
     failure_count            = failure_count + ?,
@@ -194,12 +241,12 @@ UPDATE catalog_models SET
     total_duration_us        = total_duration_us + ?
 WHERE provider = ? AND name = ?
 `, failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD, t.durationUS,
-				ev.Provider, ev.Model); err != nil {
+				eff.provider, eff.model); err != nil {
 				return fmt.Errorf("catalog_models migrate-in: %w", err)
 			}
 		}
-	case canonical.OpTool:
-		if ev.Name != "" {
+	case string(canonical.OpTool):
+		if eff.name != "" {
 			if _, err := tx.ExecContext(ctx, `
 UPDATE catalog_tools SET
     failure_count     = failure_count + ?,
@@ -209,7 +256,7 @@ UPDATE catalog_tools SET
     total_duration_us = total_duration_us + ?
 WHERE namespace = ? AND name = ?
 `, failure, t.tokensIn, t.tokensOut, t.costUSD, t.durationUS,
-				normalizeToolNamespace(ev.ToolNamespace), ev.Name); err != nil {
+				normalizeToolNamespace(eff.toolNamespace), eff.name); err != nil {
 				return fmt.Errorf("catalog_tools migrate-in: %w", err)
 			}
 		}
