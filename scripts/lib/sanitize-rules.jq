@@ -55,6 +55,102 @@ def walk_leaves(rewrite):
 def remap_uuids_deep:
   walk_leaves(remap_uuids_in_string);
 
+# --- claude-code sanitization ------------------------------------------------
+#
+# Per spec adapter-claude-code.md, a claude-code transcript is JSONL: one
+# record per line with a `type` discriminator. Operator data lives in:
+#   user.message.content              (string prompt, OR array of tool_result/
+#                                       text/image blocks)
+#   assistant.message.content[]       (text / thinking / tool_use.input blocks)
+#   toolUseResult                     (structured tool echo, varies by tool)
+#   system.content                    (hook/error/command free text)
+#   attachment.attachment.*           (injected file/dir/skill content)
+#   queue-operation.content           (queued prompt)
+#   last-prompt.lastPrompt            (last user prompt snapshot)
+#   ai-title.aiTitle / custom-title.customTitle  (titles, may leak)
+#   compactMetadata (preserved* uuids only — structural, kept)
+# id-bearing fields (UUID-shaped, remapped to preserve linkage):
+#   uuid, parentUuid, logicalParentUuid, sessionId, and any UUID inside
+#   slug / preservedSegment / preservedMessages.
+# NOT remapped (not UUID-shaped, not sensitive): agentId (15-hex), requestId,
+#   tool_use ids (toolu_*), message ids (msg_*), promptId.
+# Sensitive flags redacted per spec §3.8: permissionMode == "bypassPermissions"
+#   is rewritten to "default" so a committed fixture never advertises that the
+#   operator authorized YOLO mode.
+
+# Redact a content value that is either a string (prompt) or an array of
+# Anthropic content blocks. Strings become a placeholder; arrays have each
+# block's free-text redacted while preserving block type + join ids.
+def redact_content:
+  if type == "string" then "[REDACTED_USER_MESSAGE]"
+  elif type == "array" then
+    map(
+      if type == "object" then
+        (if .type == "text" then .text = "[REDACTED_TEXT]" else . end)
+        | (if .type == "thinking" then
+             (.thinking = "[REDACTED_REASONING]")
+             | (if has("signature") then .signature = "[REDACTED_SIGNATURE]" else . end)
+           else . end)
+        | (if .type == "tool_use" and has("input") then .input = {} else . end)
+        | (if .type == "tool_result" and has("content") then
+             .content = "[REDACTED_TOOL_OUTPUT]"
+           else . end)
+        | (if .type == "image" then
+             (if has("source") then .source = {"type": "redacted"} else . end)
+           else . end)
+      else . end
+    )
+  else . end;
+
+def sanitize_claude_code_record:
+  # 1) Remap all UUID-shaped strings anywhere (envelope ids + embedded ids).
+  remap_uuids_deep
+
+  # 2) Redact message bodies for user / assistant records.
+  | (if (.type == "user" or .type == "assistant")
+        and (.message | type) == "object"
+        and (.message | has("content"))
+     then .message.content |= redact_content
+     else . end)
+
+  # 3) Redact the structured tool echo.
+  | (if has("toolUseResult") and (.toolUseResult != null)
+     then .toolUseResult = "[REDACTED_TOOL_OUTPUT]"
+     else . end)
+
+  # 4) Redact system free-text content (keep subtype + structural metadata).
+  | (if .type == "system" and (.content | type) == "string"
+     then .content = "[REDACTED_LOG_LINE]"
+     else . end)
+
+  # 5) Redact attachment payloads (keep the attachment.type discriminator).
+  | (if .type == "attachment" and (.attachment | type) == "object"
+     then .attachment = {"type": (.attachment.type // "redacted")}
+     else . end)
+
+  # 6) Redact queued-prompt content.
+  | (if .type == "queue-operation" and (.content | type) == "string"
+     then .content = "[REDACTED_USER_MESSAGE]"
+     else . end)
+
+  # 7) Redact metadata-snapshot free text.
+  | (if .type == "last-prompt" and has("lastPrompt") then .lastPrompt = "[REDACTED_USER_MESSAGE]" else . end)
+  | (if .type == "ai-title" and has("aiTitle") then .aiTitle = "[REDACTED_TITLE]" else . end)
+  | (if .type == "custom-title" and has("customTitle") then .customTitle = "[REDACTED_TITLE]" else . end)
+
+  # 8) Sensitive permission mode (§3.8): never advertise bypassPermissions.
+  | (if .type == "permission-mode" and .permissionMode == "bypassPermissions"
+     then .permissionMode = "default"
+     else . end)
+
+  # 9) pr-link carries a real repo + URL; redact identifying fields but keep
+  #    the record shape (prNumber is harmless).
+  | (if .type == "pr-link" then
+       (if has("prUrl") then .prUrl = "https://example.invalid/pr" else . end)
+       | (if has("prRepository") then .prRepository = "owner/repo" else . end)
+     else . end)
+;
+
 # --- v3 sanitization ---------------------------------------------------------
 #
 # Per spec adapter-aiagent-v3.md the relevant id-bearing fields are:

@@ -112,6 +112,12 @@ func (r *resolver) linkOrphans(ctx context.Context) error {
 	if err := r.linkRoots(ctx, tx, affected); err != nil {
 		return err
 	}
+	if err := r.linkOpChildren(ctx, tx, affected); err != nil {
+		return err
+	}
+	if err := r.linkOpChildrenByToolUse(ctx, tx, affected); err != nil {
+		return err
+	}
 	if err := r.emitResolverNotify(ctx, tx, affected); err != nil {
 		return err
 	}
@@ -190,6 +196,121 @@ RETURNING id, root_session_id
 	}
 	if r.logger != nil && len(affected) > before {
 		r.logger.Debug("resolver: linked orphan roots", "affected", len(affected)-before)
+	}
+	return nil
+}
+
+// linkOpChildren re-links ops.child_session_id from the child native id stashed
+// in ops.extras_json.aiViewer.childNativeId once the referenced child session
+// lands (P1a). The parent Agent op is written before its child sidechain
+// session exists, so child_session_id starts NULL and the native id is stashed;
+// without this pass the parent op would permanently show no child (the
+// session-only linkParents/linkRoots passes never touch ops). It records the
+// op's OWNING session id — the PARENT session — into affected so an open
+// parent-detail view refetches and renders the now-linked child op
+// (sse-protocol.md §session_changed). The child session is matched on
+// (source_id, native_id); source_id is resolved by joining through the op's
+// session row since ops carry no source_id column. modernc.org/sqlite supports
+// UPDATE … FROM and UPDATE … RETURNING.
+func (r *resolver) linkOpChildren(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	before := len(affected)
+	rows, err := tx.QueryContext(ctx, `
+UPDATE ops SET child_session_id = (
+    SELECT c.id FROM sessions c
+     JOIN sessions parent ON parent.id = ops.session_id
+     WHERE c.source_id = parent.source_id
+       AND c.native_id = json_extract(ops.extras_json, '$.aiViewer.childNativeId')
+)
+WHERE ops.child_session_id IS NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.childNativeId') IS NOT NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.childNativeId') <> ''
+  AND EXISTS (
+      SELECT 1 FROM sessions c
+       JOIN sessions parent ON parent.id = ops.session_id
+       WHERE c.source_id = parent.source_id
+         AND c.native_id = json_extract(ops.extras_json, '$.aiViewer.childNativeId')
+  )
+RETURNING session_id
+`)
+	if err != nil {
+		return fmt.Errorf("resolver UPDATE op child: %w", err)
+	}
+	if err := scanLinkedRows(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE op child: %w", err)
+	}
+	if r.logger != nil && len(affected) > before {
+		r.logger.Debug("resolver: linked orphan op children", "affected", len(affected)-before)
+	}
+	return nil
+}
+
+// linkOpChildrenByToolUse re-links ops.child_session_id by matching the parent op's
+// stashed toolUseId (ops.extras_json.aiViewer.toolUseId) to a child session's stashed
+// toolUseId (sessions.extras_json.aiViewer.toolUseId) in the SAME source. This is the
+// additive, meta-independent bridge the claude-code adapter relies on (SOW-0003 P1.6):
+// a parent `Agent` op tailed BEFORE its sidecar `.meta.json` carries no
+// ChildSessionNativeID (so the childNativeId pass above cannot link it), but it does
+// carry the toolUseId from its own assistant.tool_use block, and the child session —
+// once read with its sidecar — carries the same toolUseId. Linking them at the DB
+// layer needs no transcript re-read (a re-read would double-count the accumulating
+// catalog_* rollups). It records the op's OWNING (parent) session id into affected so
+// an open parent-detail view refetches (sse-protocol.md §session_changed).
+//
+// The pass is purely additive: an op with no aiViewer.toolUseId stash matches nothing,
+// so adapters that do not stash it (ai-agent v2/v3) are unaffected. source_id is
+// resolved by joining through the op's session row (ops carry no source_id). The
+// child is matched on (same source, matching toolUseId) and must NOT be the op's own
+// session (c.id <> ops.session_id) — defence against a degenerate self-match.
+//
+// The match is ADDITIONALLY constrained to the op's STRUCTURAL child (SOW-0003 P2.7e):
+// the matched child must descend from the op's owning (parent) session — either its
+// resolved foreign key already points at the parent (c.parent_session_id = parent.id)
+// or its stashed parent native id names the parent (c.extras_json.$.aiViewer.parentNativeId
+// = parent.native_id, the pre-resolution stash). Without this, two sessions in ONE
+// source sharing (or forging) the same toolUseId let the scalar subquery pick an
+// arbitrary same-source child; the structural constraint forces each parent op to link
+// to ITS OWN child. The constraint stays additive: claude-code sub-agents always carry
+// parentNativeId (and the parent FK resolves shortly after), so genuine links still
+// match; an op without a toolUseId stash still matches zero rows (aiagent unaffected).
+// modernc.org/sqlite supports UPDATE … FROM and UPDATE … RETURNING.
+func (r *resolver) linkOpChildrenByToolUse(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
+	before := len(affected)
+	rows, err := tx.QueryContext(ctx, `
+UPDATE ops SET child_session_id = (
+    SELECT c.id FROM sessions c
+     JOIN sessions parent ON parent.id = ops.session_id
+     WHERE c.source_id = parent.source_id
+       AND c.id <> ops.session_id
+       AND json_extract(c.extras_json, '$.aiViewer.toolUseId') = json_extract(ops.extras_json, '$.aiViewer.toolUseId')
+       AND (
+            c.parent_session_id = parent.id
+            OR json_extract(c.extras_json, '$.aiViewer.parentNativeId') = parent.native_id
+       )
+)
+WHERE ops.child_session_id IS NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.toolUseId') IS NOT NULL
+  AND json_extract(ops.extras_json, '$.aiViewer.toolUseId') <> ''
+  AND EXISTS (
+      SELECT 1 FROM sessions c
+       JOIN sessions parent ON parent.id = ops.session_id
+       WHERE c.source_id = parent.source_id
+         AND c.id <> ops.session_id
+         AND json_extract(c.extras_json, '$.aiViewer.toolUseId') = json_extract(ops.extras_json, '$.aiViewer.toolUseId')
+         AND (
+              c.parent_session_id = parent.id
+              OR json_extract(c.extras_json, '$.aiViewer.parentNativeId') = parent.native_id
+         )
+  )
+RETURNING session_id
+`)
+	if err != nil {
+		return fmt.Errorf("resolver UPDATE op child by toolUseId: %w", err)
+	}
+	if err := scanLinkedRows(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE op child by toolUseId: %w", err)
+	}
+	if r.logger != nil && len(affected) > before {
+		r.logger.Debug("resolver: linked orphan op children by toolUseId", "affected", len(affected)-before)
 	}
 	return nil
 }

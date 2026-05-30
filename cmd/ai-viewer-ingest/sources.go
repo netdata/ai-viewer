@@ -75,8 +75,9 @@ func parseSourceFlag(raw string) (format, location string, err error) {
 
 // autoDiscoverSources probes the default locations from deployment.md
 // §"Source Auto-Discovery". Each existing location becomes a source;
-// missing locations are silently skipped. Chunk 11 ships only the
-// aiagent_v3 and aiagent_v2 adapters; the rest land in Phase 2 SOWs.
+// missing locations are silently skipped. The claude-code probe honors
+// $CLAUDE_CONFIG_DIR (spec adapter-claude-code.md §2.1) and falls back to
+// ~/.claude; both resolve to a <root>/projects directory.
 func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -99,6 +100,11 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 			location: filepath.Join(home, ".ai-agent", "sessions"),
 			probe:    filepath.Join(home, ".ai-agent", "sessions"),
 		},
+		{
+			format:   "claude-code",
+			location: claudeProjectsDir(home),
+			probe:    claudeProjectsDir(home),
+		},
 	}
 
 	var out []configuredSource
@@ -113,10 +119,43 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 		}
 		seen[key] = struct{}{}
 		out = append(out, configuredSource{id: key, format: p.format, location: p.location})
-		logger.Info("ai-viewer-ingest: auto-discovered source",
-			"format", p.format, "location", p.location)
+		attrs := []any{"format", p.format, "location", p.location}
+		if p.format == "claude-code" {
+			// Surface the project-dir count so the operator sees the source
+			// is non-empty (acceptance #8). The count is the number of
+			// immediate subdirectories under the projects root.
+			attrs = append(attrs, "project_dirs", countProjectDirs(p.location))
+		}
+		logger.Info("ai-viewer-ingest: auto-discovered source", attrs...)
 	}
 	return out
+}
+
+// claudeProjectsDir returns the claude-code projects root, honoring
+// $CLAUDE_CONFIG_DIR (spec adapter-claude-code.md §2.1). When the env var is
+// set, the root is "$CLAUDE_CONFIG_DIR/projects"; otherwise "~/.claude/projects".
+func claudeProjectsDir(home string) string {
+	if cfg := os.Getenv("CLAUDE_CONFIG_DIR"); cfg != "" {
+		return filepath.Join(cfg, "projects")
+	}
+	return filepath.Join(home, ".claude", "projects")
+}
+
+// countProjectDirs returns the number of immediate subdirectories under the
+// claude-code projects root (each is one sanitized-cwd project). Returns 0
+// on any read error — the count is observability, not a gate.
+func countProjectDirs(root string) int {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			n++
+		}
+	}
+	return n
 }
 
 // cursorLookup is the minimal contract startSource needs to resume from

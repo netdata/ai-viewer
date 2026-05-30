@@ -72,9 +72,9 @@ SYNTH_EMAIL="sentinel@scan-test.example"   # synthetic git user.email (Rule 1: e
 # Local-part of the synthetic email -> the home-path stem the scanner derives.
 SYNTH_LOCALPART="${SYNTH_EMAIL%%@*}"
 SYNTH_HOME="/home/${SYNTH_LOCALPART}"      # synthetic operator home path (Rule 1: home)
-# A single name word the scanner bans word-bounded (first token of SYNTH_NAME).
+# A single name word the scanner bans token-bounded ('_' = delimiter) (first token of SYNTH_NAME).
 SYNTH_NAME_WORD="${SYNTH_NAME%% *}"
-# A near-miss token sharing the name-word's prefix but NOT word-bounded-equal,
+# A near-miss token sharing the name-word's prefix but NOT token-bounded ('_' = delimiter)-equal,
 # proving the \b boundary (the scanner must NOT flag this).
 SYNTH_NAME_NEARMISS="${SYNTH_NAME_WORD}ner"   # e.g. "Scanner" vs banned "Scan"
 # Mixed-/upper-case synthetic email (Rule 1, case-insensitive): an upper-cased
@@ -230,7 +230,7 @@ $OUT"; return
   pass_case "$name"
 }
 
-# 3. Operator (synthetic) name word (word-bounded) -> flagged; an unrelated
+# 3. Operator (synthetic) name word (token-bounded ('_' = delimiter)) -> flagged; an unrelated
 #    token sharing the prefix (SYNTH_NAME_WORD + "ner", e.g. "Scanner") must
 #    NOT, proving the \b boundary.
 case_detect_operator_name_word_bounded() {
@@ -242,15 +242,25 @@ case_detect_operator_name_word_bounded() {
     fail_case "$name" "scanner passed but should have flagged the synthetic operator name word"; return
   fi
   # Now a clean repo whose only token shares the banned word's prefix but is a
-  # different word (e.g. "Scanner" vs banned "Scan") plus a snake_case near-miss.
+  # longer DIFFERENT word (e.g. "Scanner" vs banned "Scan"): the TRAILING token
+  # boundary must still reject it (an alphanumeric follows the name, so it is not
+  # a standalone token).
   local clean; clean="$(new_repo "${name//[^A-Za-z0-9]/_}_clean")"
-  printf '{"tool":"%s","%s_count":3}\n' \
-    "$SYNTH_NAME_NEARMISS" "$(printf '%s' "$SYNTH_NAME_WORD" | tr '[:upper:]' '[:lower:]')" \
-    | track "$clean" "metrics.json"
+  printf '{"tool":"%s"}\n' "$SYNTH_NAME_NEARMISS" | track "$clean" "metrics.json"
   run_scanner "$clean"
   if [ "$RC" -ne 0 ]; then
     fail_case "$name" "scanner falsely flagged a prefix near-miss (boundary broken):
 $OUT"; return
+  fi
+  # And an UNDERSCORE-embedded name (the real "playwright_<name>" leak class the
+  # old \b gate MISSED) MUST be flagged: '_' is a delimiter, so "<sep><name>" is
+  # the operator identity appearing as a token.
+  local embed; embed="$(new_repo "${name//[^A-Za-z0-9]/_}_embed")"
+  printf '{"mcp":"server_%s"}\n' "$(printf '%s' "$SYNTH_NAME_WORD" | tr '[:upper:]' '[:lower:]')" \
+    | track "$embed" "config.json"
+  run_scanner "$embed"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "scanner MISSED an underscore-embedded operator name (server_<name>) — the \\b gap that leaked playwright_<name>"; return
   fi
   pass_case "$name"
 }

@@ -39,6 +39,7 @@ import (
 	// the registry would be empty at runtime.
 	_ "github.com/netdata/ai-viewer/internal/adapters/aiagent_v2"
 	_ "github.com/netdata/ai-viewer/internal/adapters/aiagent_v3"
+	_ "github.com/netdata/ai-viewer/internal/adapters/claude_code"
 	"github.com/netdata/ai-viewer/internal/ingest"
 	"github.com/netdata/ai-viewer/internal/pricing"
 	"github.com/netdata/ai-viewer/internal/store"

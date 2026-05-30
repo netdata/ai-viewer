@@ -120,6 +120,94 @@ type pricingMissKey struct {
 	kind     string
 }
 
+// aiViewerStashKeys are the resolver-owned join keys under `$.aiViewer` that must
+// survive a stash-free re-emit (SOW-0003 P2.6d/P1.7b/P2.7c). `toolUseId` is the
+// claude-code meta-independent op→child join key; `childNativeId` is the
+// ChildSessionNativeID stash used by every adapter that knows the child native id
+// at op-write time. Both are grafted back PER-KEY (not as a whole `$.aiViewer`
+// object) because the sessions writer ALWAYS rewrites `$.aiViewer` with
+// `parentNativeId`/`rootNativeId`, so the re-emit's `$.aiViewer` is present-but-
+// incomplete — a whole-object graft would never fire for sessions.
+var aiViewerStashKeys = []string{"toolUseId", "childNativeId"}
+
+// graftAiViewerExtras returns the ON CONFLICT extras_json expression shared by the
+// sessions and ops UPSERT paths (applySessionStarted, applyOpStarted). Both are
+// full re-emits of the same natural-identity row, so the new (`excluded`) extras
+// REPLACE the existing extras WHOLESALE — EXCEPT each resolver join key under
+// `$.aiViewer` (aiViewerStashKeys), which is grafted back from the existing row
+// whenever the re-emit omits it.
+//
+// Why a per-key graft and NOT json_patch (SOW-0003 P2.7c, RFC 7386): SQLite's
+// json_patch treats a JSON `null` VALUE as a DELETE directive, and adapters copy
+// arbitrary source attributes into op extras (aiagent_v3 ops.go: `extras["attr."+k]
+// = v`). A replay whose extras legitimately carry `{"attr.x":null}` would, under
+// json_patch, DELETE key `attr.x` — a shared-ingester data-loss regression. Taking
+// `excluded` wholesale and json_set-ing only the named stash keys never deletes a
+// key for a null value (json_set with a NULL value would CREATE a null-valued key,
+// which is why the graft is GUARDED to fire only when the existing row actually has
+// the key and the re-emit lacks it — it never introduces a spurious null).
+//
+// existingCol is the existing-row extras_json column reference (e.g.
+// "ops.extras_json" or "sessions.extras_json"); the new value is always
+// `excluded.extras_json`.
+//
+// Shape (one graftOne layer per stash key, nested over `excluded.extras_json`):
+//
+//	CASE
+//	  WHEN excluded.extras_json IS NULL THEN <stashOnly>   -- re-emit carried none; keep ONLY the stash
+//	  WHEN <existing> IS NULL           THEN excluded.extras_json  -- nothing to preserve
+//	  ELSE graftKey(graftKey(excluded.extras_json, toolUseId), childNativeId)
+//	END
+//
+// where graftKey(base, K) = CASE WHEN <existing>.$.aiViewer.K NOT NULL AND
+// base.$.aiViewer.K IS NULL THEN json_set(base, '$.aiViewer.K', <existing>.$.aiViewer.K)
+// ELSE base END (json_set auto-creates `$.aiViewer` when base lacks it, e.g. ops).
+//
+// The NULL-excluded branch (SOW-0003 P2.8) does NOT return the whole existing blob —
+// that would stale-preserve every non-`aiViewer` key the re-emit deliberately dropped
+// (e.g. an aiagent_v3 op's copied `attr.*`), contradicting "excluded wins wholesale".
+// Instead <stashOnly> = graftKeyOnto(graftKeyOnto(json_object(), toolUseId),
+// childNativeId) builds a fresh object holding ONLY the present `$.aiViewer.<key>`
+// values from the existing row, collapsed to SQL NULL when none were grafted (so a
+// no-stash op re-emit with NULL extras yields NULL, not an empty `{}`).
+func graftAiViewerExtras(existingCol string) string {
+	base := "excluded.extras_json"
+	for _, key := range aiViewerStashKeys {
+		base = graftAiViewerKey(base, existingCol, key)
+	}
+	stashOnly := "json_object()"
+	for _, key := range aiViewerStashKeys {
+		stashOnly = graftAiViewerKeyOnto(stashOnly, existingCol, key)
+	}
+	return fmt.Sprintf(`CASE
+    WHEN excluded.extras_json IS NULL THEN (CASE WHEN json_extract((%[3]s), '$.aiViewer') IS NULL THEN NULL ELSE (%[3]s) END)
+    WHEN %[1]s IS NULL THEN excluded.extras_json
+    ELSE (%[2]s)
+END`, existingCol, base, stashOnly)
+}
+
+// graftAiViewerKeyOnto returns an expression that grafts the existing row's
+// `$.aiViewer.<key>` onto base whenever the existing row has it (base is the fresh
+// stash-only accumulator, so there is no "base already has it" guard — unlike
+// graftAiViewerKey). json_set auto-creates `$.aiViewer` on the empty json_object().
+// Used only by the NULL-excluded branch of graftAiViewerExtras (SOW-0003 P2.8).
+func graftAiViewerKeyOnto(base, existingCol, key string) string {
+	path := "'$.aiViewer." + key + "'"
+	return fmt.Sprintf(`CASE WHEN json_extract(%[1]s, %[3]s) IS NOT NULL
+        THEN json_set(%[2]s, %[3]s, json_extract(%[1]s, %[3]s))
+        ELSE %[2]s END`, existingCol, base, path)
+}
+
+// graftAiViewerKey returns an expression that grafts the existing row's
+// `$.aiViewer.<key>` onto base ONLY when the existing row has it and base lacks it,
+// otherwise base unchanged. See graftAiViewerExtras.
+func graftAiViewerKey(base, existingCol, key string) string {
+	path := "'$.aiViewer." + key + "'"
+	return fmt.Sprintf(`CASE WHEN json_extract(%[1]s, %[3]s) IS NOT NULL AND json_extract(%[2]s, %[3]s) IS NULL
+        THEN json_set(%[2]s, %[3]s, json_extract(%[1]s, %[3]s))
+        ELSE %[2]s END`, existingCol, base, path)
+}
+
 func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 	return &writer{
 		sourceID:           sourceID,
@@ -267,6 +355,17 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	if kind == "" {
 		kind = string(canonical.KindRoot)
 	}
+	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
+	// `aiViewer` stash sub-object, which is grafted back when a stash-free
+	// re-emit omits it (SOW-0003 P1.7b). The claude-code sub-agent SessionStarted
+	// stashes the child's `toolUseId` in `aiViewer`; a later stash-free session
+	// re-emit (e.g. a parent-map re-read) that wholesale-replaced extras would
+	// erase that join key and permanently orphan the op→child edge. The graft
+	// (json_set, NOT json_patch) preserves the stash without the json_patch
+	// null-as-delete hazard (see graftAiViewerExtras).
+	// #nosec G202 -- the only interpolated value is graftAiViewerExtras's output,
+	// built solely from the compile-time-constant column literal "sessions.extras_json"
+	// and the package-const aiViewerStashKeys; no caller/source input reaches the SQL.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
@@ -283,7 +382,7 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
     call_path         = COALESCE(NULLIF(excluded.call_path, ''), sessions.call_path),
     start_ts          = MIN(sessions.start_ts, excluded.start_ts),
     last_activity_ts  = MAX(sessions.last_activity_ts, excluded.last_activity_ts),
-    extras_json       = excluded.extras_json
+    extras_json       = `+graftAiViewerExtras("sessions.extras_json")+`
 `,
 		id, w.sourceID, ev.NativeID, parentID, rootID,
 		kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model), nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
@@ -422,22 +521,43 @@ ON CONFLICT (session_id, seq) DO NOTHING
 		parentOpID = sql.NullString{String: canonicalOpID(turnID, ev.ParentOpSeq), Valid: true}
 	}
 	var childSessionID sql.NullString
+	opExtras := ev.Extras
 	if ev.ChildSessionNativeID != "" {
 		// Only point child_session_id at another session when that row
-		// is already in the store; otherwise the FK fires. The child
-		// session will eventually arrive; for now leave the link NULL
-		// and stash the child native id in extras for a future
-		// resolver pass (extension beyond Chunk 7 scope).
+		// is already in the store; otherwise the FK fires. When the child
+		// has not landed yet (the parent transcript is read before, or in a
+		// different batch than, the child sidechain), leave the link NULL and
+		// stash the child native id in ops.extras_json.aiViewer.childNativeId.
+		// The resolver re-links child_session_id from that stash once the
+		// child session lands (P1a) — mirroring the session
+		// extras_json.aiViewer.parentNativeId stash + resolver pass.
 		if cid, err := w.lookupSessionID(ctx, tx, ev.ChildSessionNativeID); err == nil {
 			childSessionID = sql.NullString{String: cid, Valid: true}
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		} else if errors.Is(err, sql.ErrNoRows) {
+			opExtras = mergeExtras(ev.Extras, map[string]any{
+				"aiViewer": map[string]any{"childNativeId": ev.ChildSessionNativeID},
+			})
+		} else {
 			return err
 		}
 	}
-	extras, err := marshalExtras(ev.Extras)
+	extras, err := marshalExtras(opExtras)
 	if err != nil {
 		return fmt.Errorf("writer: marshal op extras: %w", err)
 	}
+	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
+	// `aiViewer` stash sub-object, which is grafted back when a stash-free re-emit
+	// omits it (SOW-0003 P2.6d/P2.7c). A re-emit of the same op whose extras lack
+	// the resolver stash (childNativeId / toolUseId) must not erase a join key the
+	// resolver still needs — a wholesale replace would permanently orphan the
+	// op→child edge. The graft uses json_set (NOT json_patch): json_patch would
+	// interpret a JSON `null` VALUE as a DELETE (RFC 7386), and adapters copy
+	// arbitrary source attributes into op extras (aiagent_v3 `extras["attr."+k]`),
+	// so a replay carrying `{"attr.x":null}` would silently drop key `attr.x`.
+	// See graftAiViewerExtras.
+	// #nosec G202 -- the only interpolated value is graftAiViewerExtras's output,
+	// built solely from the compile-time-constant column literal "ops.extras_json"
+	// and the package-const aiViewerStashKeys; no caller/source input reaches the SQL.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq,
@@ -456,7 +576,7 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
     start_ts       = MIN(ops.start_ts, excluded.start_ts),
     parent_op_id   = COALESCE(ops.parent_op_id, excluded.parent_op_id),
     child_session_id = COALESCE(ops.child_session_id, excluded.child_session_id),
-    extras_json    = excluded.extras_json
+    extras_json    = `+graftAiViewerExtras("ops.extras_json")+`
 `,
 		opID, turnID, sessionID, parentOpID, ev.Seq,
 		string(ev.Kind), ev.Name, nullIfEmpty(ev.ToolNamespace), nullIfEmpty(ev.Model), nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),
@@ -704,6 +824,23 @@ func (w *writer) applyPayloadRef(ctx context.Context, tx *sql.Tx, ev canonical.P
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	opID := canonicalOpID(turnID, ev.OpSeq)
+	// Defense-in-depth: payload_refs.op_id is NOT NULL REFERENCES ops(id)
+	// (migration 0001), so an INSERT naming an op that has no row raises a
+	// foreign-key error that rolls back the ENTIRE batch — one stray
+	// PayloadRefEvent would kill ingestion for the whole source. Adapters
+	// are expected to emit op-scoped refs only (and to order OpStarted
+	// before its children), but a future adapter bug must never be able to
+	// abort a batch here. So verify the parent op exists first; if it does
+	// not, surface the condition through the same Sources-panel error
+	// mechanism applySourceError uses and skip the insert — never a silent
+	// drop (project "no silent failures" contract). See ingester.md
+	// §Layer 3 — payload_ref orphan guard.
+	if err := w.requireOpExists(ctx, tx, opID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return w.reportOrphanPayloadRef(ctx, tx, ev, opID)
+		}
+		return err
+	}
 	// ON CONFLICT DO NOTHING on the natural identity
 	// (op_id, kind, location_uri) makes the write idempotent: re-emitting
 	// the same payload (Tail re-read, file re-scan) never duplicates the
@@ -720,6 +857,54 @@ ON CONFLICT (op_id, kind, location_uri) DO NOTHING
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
+	return nil
+}
+
+// requireOpExists returns nil when an ops row with id exists, sql.ErrNoRows
+// when it does not, and a wrapped error on any other query failure. Used by
+// applyPayloadRef to guard the NOT NULL FK on payload_refs.op_id before the
+// insert, so a missing parent op is handled gracefully instead of aborting
+// the batch.
+func (w *writer) requireOpExists(ctx context.Context, tx *sql.Tx, opID string) error {
+	var one int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM ops WHERE id = ?`, opID).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return fmt.Errorf("writer: lookup payload_ref op: %w", err)
+	}
+	return nil
+}
+
+// reportOrphanPayloadRef surfaces a PayloadRefEvent whose parent op row does
+// not exist. It mirrors applySourceError exactly — bump the shared
+// Sources-panel error counter (so /api/health and the source-status panel
+// reflect the problem) and write a source-scoped ERR log_entries row — then
+// returns nil so the rest of the batch still commits. The orphaned ref is
+// NOT inserted (its FK target is missing) and the turn/session are NOT marked
+// dirty, since nothing was persisted for them here.
+func (w *writer) reportOrphanPayloadRef(ctx context.Context, tx *sql.Tx, ev canonical.PayloadRefEvent, opID string) error {
+	if err := w.bumpSourceErrorCounter(ctx, tx, ev.Ts); err != nil {
+		return err
+	}
+	extras, err := json.Marshal(map[string]any{
+		"op_id":        opID,
+		"turn_seq":     ev.TurnSeq,
+		"op_seq":       ev.OpSeq,
+		"payload_kind": ev.PayloadKind,
+		"location_uri": ev.LocationURI,
+	})
+	if err != nil {
+		return fmt.Errorf("writer: marshal orphan payload_ref extras: %w", err)
+	}
+	msg := fmt.Sprintf("payload_ref references unknown op %s; dropped to protect the batch", opID)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
+VALUES (NULL, ?, NULL, NULL, ?, 'ERR', ?, ?, ?)
+`+logEntryOnConflict, w.sourceID, ev.Ts, w.sourceFormat, msg, string(extras)); err != nil {
+		return fmt.Errorf("writer: insert orphan payload_ref log: %w", err)
+	}
 	return nil
 }
 
