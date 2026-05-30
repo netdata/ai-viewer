@@ -307,8 +307,7 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
    - Stash `model_context_window` → applied at TurnFinalized.
 
 4. **`event_msg` payload `task_complete`:**
-   - Emit `TurnFinalizedEvent(turn_seq, Status="completed", EndTs=completed_at_us, TokensIn/Out=0 placeholder)`.
-   - Token totals are derived from the most recent prior `token_count.info.total_token_usage` minus the turn-start snapshot (delta-from-start; see "Token accounting" below).
+   - Emit `TurnFinalizedEvent(turn_seq, Status="completed", EndTs=completed_at_us)` with `TokensIn`/`TokensOut` set from the turn's token rollup (see rule #17 and "Token accounting nuance" below): the **sum of the per-call `last_token_usage`** over the `token_count` events attributed to this turn — **not** a delta of the cumulative `total_token_usage`. (`last_token_usage` is the per-call field; the cumulative `total_token_usage` feeds `OpFinalized.CtxUsed` only, never per-turn `TokensIn/Out`.)
    - Emit `OpFinalizedEvent` for each held-open op tied to this turn (function_call without matching output, etc.) with Status="completed" inferred or "unknown" if no output ever arrived.
 
 5. **`event_msg` payload `turn_aborted`:**
@@ -413,8 +412,8 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 | `event_msg.user_message` | dedup with response_item.message(user); use as canonical user op |
 | `event_msg.agent_message` | dedup with response_item.message(assistant); populate TurnFinalized.LastAgentMessage |
 | `compacted` line / `response_item.context_compaction` / `event_msg.context_compacted` | one Op Kind=internal Name=compaction |
-| EOF without task_complete + file stale | synthetic `TurnFinalizedEvent(failed,incomplete)` + `SessionFinalizedEvent(failed,incomplete)` |
-| EOF clean (most recent event is task_complete) | `SessionFinalizedEvent(completed)` |
+| EOF without task_complete + file mtime-stale ≥ 1 h | synthetic `TurnFinalizedEvent(failed,incomplete)` + `SessionFinalizedEvent(failed,incomplete)` |
+| EOF clean (most recent event is task_complete) | **no `SessionFinalizedEvent`** — session stays `running` (codex has no per-session terminal signal; rollouts are resumable and metadata-appendable per `recorder.rs:1610`). UI uses `last_activity_ts` for staleness, identical to claude-code. |
 | unknown `type` or unknown `payload.type` | `SourceError` (once per variant) + `LogEntry` |
 
 ### Cost calculation

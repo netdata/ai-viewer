@@ -89,7 +89,7 @@ CREATE INDEX idx_sessions_activity ON sessions(last_activity_ts DESC);
 
 Notes:
 
-- `status` is an explicit 5-value enum. `running` covers in-flight AND sessions from sources without a terminal signal (claude-code). The UI uses `last_activity_ts` to render "stale running" sessions distinctly from active ones.
+- `status` is an explicit 5-value enum. `running` covers in-flight AND sessions from sources without a per-session terminal signal (claude-code, codex). The UI uses `last_activity_ts` to render "stale running" sessions distinctly from active ones.
 - `cwd`, `provider_alias`, and `call_path` are promoted to first-class columns because at least one adapter populates them today AND they drive a filter or grouping path in the UI. Extras_json holds the long tail (finalReport, pluginMetas, claude-code title, codex sandbox policy, etc.).
 
 ### turns

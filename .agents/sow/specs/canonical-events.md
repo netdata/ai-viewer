@@ -105,7 +105,7 @@ Notes on terminal signal availability per source:
 - **ai-agent v3** — has explicit `session_summary` (→ completed) and `session_error` (→ failed). Orphans (session_start only) → `abandoned`. Mid-turn deaths (no `turn_end`) → `interrupted`.
 - **ai-agent v2** — `opTree.success`/`opTree.error` carry terminal state; the `'final'` snapshot marks completed/failed. Pre-final snapshots → `running`.
 - **claude-code** — has **no native terminal signal** (sessions are resumable indefinitely). Adapter never emits `SessionFinalizedEvent` for claude-code; sessions stay `running`. UI filters via `last_activity_ts` for staleness display.
-- **codex** — emits `task_complete` per turn but no per-session terminal. Adapter applies a session-end heuristic (e.g. no new lines for 24h on a session in a terminal turn state). Sessions can remain `running`.
+- **codex** — emits `task_complete` per turn but has **no per-session terminal signal** (a clean rollout simply stops being appended; `recorder.rs:1610` may even append metadata after a turn ends). Like claude-code, the adapter does **not** emit `SessionFinalizedEvent(completed)` for a cleanly-ended session — it stays `running` and the UI uses `last_activity_ts` for staleness. The *only* `SessionFinalizedEvent` codex emits is the synthetic `failed/incomplete` for a session whose most-recent turn was left hanging (no `task_complete`/`turn_aborted`) and whose file is mtime-stale ≥ 1 h (a crash); see `adapter-codex.md` state-machine rule #23.
 - **opencode** — no explicit session-end column. Adapter infers terminal status from the last assistant message's `data.error` and `data.completedAt`.
 
 ### TurnStartedEvent / TurnFinalizedEvent

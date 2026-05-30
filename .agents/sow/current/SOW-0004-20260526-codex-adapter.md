@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: awaits operator approval before moving to current/. Prerequisite: SOW-0001 Phase 1 Foundation completed (canonical event types + ingest pipeline + store) — this SOW reuses that infrastructure.
+Sub-state: active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisite met: SOW-0001 Phase 1 Foundation is in `done/` (canonical event types + ingest pipeline + store + adapter registry + pricing + CI gates) — this SOW reuses that infrastructure unchanged. Pre-Implementation Gate filled 2026-05-30 (see below).
 
 ## Requirements
 
@@ -81,7 +81,82 @@ Risks:
 
 ## Pre-Implementation Gate
 
-(To be filled by the assistant picking this SOW up. Required before moving to `current/`.)
+Filled 2026-05-30. Evidence verified against ground truth (a readiness-briefing subagent's claims were re-checked file-by-file; two of its claims were corrected — see "Open Decisions" C#3 and "Spec deltas").
+
+### Problem / model
+
+Not a bug — an additive feature. Deliver a new `codex` adapter that projects OpenAI Codex CLI rollout JSONL (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-…UUIDv7.jsonl`, default `~/.codex`) onto the canonical event model. The adapter is a pure, deterministic projection from persisted `RolloutItem` variants → canonical events, structurally mirroring the just-merged `claude_code` adapter (byte-offset JSONL tailing, fail-soft discovery, symlink containment, fuzz + golden tests). The genuinely codex-specific logic is concentrated in the per-file state machine (turn-boundary dual-format, reasoning split, tool-namespace heuristic, token rollup, sub-agent/fork linkage, compaction).
+
+### Evidence reviewed
+
+- `.agents/sow/specs/adapter-codex.md` (full, 552 lines) — primary contract; state-machine rules #1–24, edge cases #1–18, tabular summary.
+- `internal/adapters/claude_code/*.go` (non-test) — the structural template; `adapter.go:19` (`const Format`), `adapter.go:193` (`init()→Register`).
+- `internal/adapters/registry.go` — `Register`/`Get`/`Formats` self-registration contract (panics on dup/empty/nil; init-time only).
+- `.agents/sow/specs/{adapter-contract.md,canonical-events.md,data-model.md}` — codex target fields (`reasoning_kind`, `Kind=fork|sub_agent`, `OpCompaction`, `Status=truncated`, `extras_json.sandbox`, `turns.extras_json.codex_turn_id|ttft_ms`) all pre-exist (SOW-0002).
+- `cmd/ai-viewer-ingest/sources.go` — `autoDiscoverSources` probe table (`:88`), `claudeProjectsDir`/`countProjectDirs` pattern to mirror.
+- SOW-0004 Requirements / Acceptance #1–8 / Risks R1–R5.
+- Real data: `~/.codex/sessions/` — 2,566 modern `.jsonl` (sharded) + 19 legacy `.json` (root).
+
+### Affected contracts & surfaces
+
+- **NEW** package `internal/adapters/codex/` (file-for-file mirror of `claude_code`; see "Patterns to reuse").
+- **ADDITIVE** `cmd/ai-viewer-ingest/sources.go`: a 4th probe (`$CODEX_HOME/sessions`, default `~/.codex/sessions`) + `countRolloutFiles`/`countLegacyJSON` helpers mirroring `countProjectDirs` (acceptance #8). The binary already blank-imports the adapters package set for side-effect registration; codex registers via its own `init()`.
+- **ADDITIVE** `testdata/codex/<scenario>/` fixtures + golden files.
+- **NO** change to `internal/canonical/`, `internal/ingest/` (writer/resolver/catalog), `internal/store/` schema (no migration), or sibling adapters. Every canonical field codex needs already exists.
+
+### Spec deltas (LANDED before any test or code — committed with this gate)
+
+1. `adapter-codex.md` rule #4 (token accounting): replaced the contradictory "delta-from-start of cumulative `total_token_usage`" with the **sum-of-per-call-`last_token_usage`** rollup (consistent with rule #17 + the "Token accounting nuance" para). Resolves the C#1 contradiction.
+2. `adapter-codex.md` tabular summary (clean-EOF row): **removed** "clean EOF → `SessionFinalizedEvent(completed)`"; clean codex sessions now stay `running` (no per-session terminal signal). Stale-row threshold made explicit (`≥ 1 h`). Resolves C#3.
+3. `canonical-events.md` codex bullet (status mapping): rewritten to the claude-code model — no clean finalize; only the synthetic `failed/incomplete` at ≥ 1 h stale. Removed the stray "24h" example (it had no basis in `adapter-codex.md`).
+4. `data-model.md` status note: added `codex` to the "sources without a per-session terminal signal (claude-code, codex)" parenthetical.
+
+### Patterns to reuse (verified claude_code → codex map)
+
+- `doc.go` → rewrite for codex layout; `adapter.go` → `Format="codex"`, `init()→Register`, same `Scan→Tail` `scanCursor` handoff (load-bearing — keep verbatim).
+- `cursor.go` → keep `Files` byte-offset map + `After` + truncation-defense **verbatim**; **drop** claude_code's sub-agent-deferral fields (`MetaSeen`/`Parked`/`Finalized`); **add** a `LegacyJSON` per-file `{ingested bool}` map.
+- `parser.go` → keep the `unknownTypeError`/`errors.Is` dedup mechanism (codex needs it for BOTH unknown top-level `type` AND unknown nested `payload.type`); replace claude-code enum with codex `{timestamp,type,payload json.RawMessage}` envelope + discriminated payload sub-decode.
+- `mapper.go`/`ops.go` → heaviest divergence (codex state machine, rules #1–24); keep `packSeq`, ts parsing, `firstUnknownType` dedup, the `advance(ts)` closure pattern.
+- `scanner.go`/`tailer.go` → reuse `streamLines`/`readOneLine`/`drainToNewline`/oversized-line/byte-offset/truncation **verbatim**; replace projects-tree walk with a `YYYY/MM/DD` shard walker (`^rollout-.*\.jsonl$`); add new-date-shard-dir handling to the tailer; **drop** all meta/deferral machinery.
+- `payloads.go` → reuse symlink-containment + `file://<abs>#L<line>` URI **verbatim**.
+
+### Risk & blast radius
+
+Purely additive; the only shared-surface touch is the additive `sources.go` probe. Premature-finalize risk (the bug class codex-review caught in claude_code) is **eliminated** by the C#3 decision (no clean-EOF finalize). Carries SOW Risks R1 (legacy `.json` deferral — 1 SourceError/file), R2 (CLI version drift 0.61→0.125 — `serde(other)`-equivalent tolerance, 1 SourceError per unknown variant per session), R3 (turn-boundary ambiguity — explicit fixtures), R4 (sandbox metadata → `extras_json`), R5 (fixture sensitive data — see below).
+
+### Sensitive-data plan
+
+Every committed fixture under `testdata/codex/` runs through `scripts/sanitize-fixture.sh`. Strip/pseudonymize: operator name in `base_instructions.text`; `git.repository_url` `git@github.com:netdata/…` → `git@github.com:example/example.git`; free-form `user_message`/prompt bodies; identity-revealing `cwd`; truncate `encrypted_content` (keep shape). Keep intact: schema shape, timestamps, token counts, `turn_id`/`call_id` correlation, `cli_version`, sandbox modes. Golden `expected.jsonl` rewrites the absolute root → `<ROOT>` placeholder (mirror claude_code `golden_test.go`). `scripts/gates.sh` secret-scan is the net, not the primary control.
+
+### Implementation plan (chunked; each chunk = spec → failing tests → subagent impl → gates → integrate)
+
+- **Chunk A** — types + `parser.go` (envelope + payload dispatch + unknown-variant tolerance) + `cursor.go` (byte-offset + `LegacyJSON`). Unit + fuzz seed.
+- **Chunk B** — `mapper.go` + `ops.go` state machine (turn dual-format; reasoning split; tool-namespace heuristic; token rollup per C#1; dangling-op finalize at turn end; sub_agent/fork linkage; compaction). Heaviest; most unit tests.
+- **Chunk C** — `scanner.go` + `tailer.go` (shard walker, byte-offset reuse, truncation defense, new-date-dir watch).
+- **Chunk D** — `payloads.go` + `adapter.go` wiring + `init()` registration + `sources.go` auto-discovery probe + count helpers.
+- **Chunk E** — fixtures (8 golden scenarios a–h) + `golden_test.go` + `parser_fuzz_test.go` + `adapter_restart_test.go` + cmd probe test.
+
+### Validation plan (named test files → behaviors; mirrors claude_code test set)
+
+- Acc #1 → `internal/adapters/registry_test.go` asserts `"codex"` enumerable + compile-time `var _ canonical.Adapter`.
+- Acc #2 → `golden_test.go` (8 scenarios) + `scanner_test.go: TestScan_UnknownTypeTolerance`, `TestScan_UnknownPayloadTypeDedup` (≥10 synthetic unknowns, top-level AND nested; 1 SourceError per variant per session).
+- Acc #3 → golden scenarios `b_old_turncontext` (cli 0.61) and `a_happy_new` (cli≥0.93) assert identical turn semantics; `mapper_test.go: TestMapper_TurnBoundaryOldVsNew`, `TestMapper_AbsentTurnIDFallback`.
+- Acc #4 → `mapper_test.go: TestMapper_ReasoningKindSummary|_Raw|_EventReasoningIsLogOnlyNoDupOp`; golden with both forms in one file.
+- Acc #5 → `golden_test.go` auto-discovers `testdata/codex/<scenario>/INPUT/`, diffs `expected.jsonl` (`-update-golden` regenerates). Scenarios: `a_happy_new`, `b_old_turncontext`, `c_subagent_threadspawn`, `d_fork`, `e_compaction`, `f_exec_truncated`, `g_turn_aborted`, `h_crash_stale`.
+- Acc #6 → `adapter_restart_test.go: TestRestart_NoDupNoGap`, `TestScanThenTail_NoLossInWindow`; `scanner_test.go: TestScan_TruncationRescans`; `cursor_test.go` round-trip + `After`.
+- Acc #7 → `parser_fuzz_test.go: FuzzParseLine`, `FuzzParseCursor` (30s budget; seed from sanitized real lines).
+- Acc #8 → `cmd/ai-viewer-ingest/sources_test.go` (extend): tmpdir with modern shards + root legacy `.json`; assert source registered, modern + legacy counts separate; probe honors `$CODEX_HOME`.
+
+### Artifact impact plan
+
+Producer of codex canonical rows: the new adapter's `Scan` (backfill) + `Tail` (fsnotify). Refresh event: file append → fsnotify → byte-offset read. Repair path: cursor corruption or file truncation → full re-scan from offset 0 + `SourceError` (reuse claude_code truncation defense). Served by: existing presenter/REST (`/api/sessions`, `/api/ops`, `/api/health`, `/api/sources`) with **no new route** — codex rows flow through the same canonical schema. Discovery surface: `/api/sources` reports the codex source + modern/legacy counts (acceptance #8). No DB migration (schema unchanged).
+
+### Open decisions — DECIDED by CTO (recorded; not escalated)
+
+1. **Token accounting (C#1):** sum of per-call `last_token_usage` over the turn's attributed `token_count` events (session-level events with no `turn_id` attributed to the most-recently-active turn); cumulative `total_token_usage` → `CtxUsed` only. Spec rule #4 aligned. **Decided.**
+2. **Session finalize (C#3):** codex follows the claude-code model — **no** `SessionFinalized(completed)` on clean EOF (sessions stay `running`, UI uses `last_activity_ts`); the only `SessionFinalized` is the synthetic `failed/incomplete` for a hanging-turn file mtime-stale ≥ 1 h (rule #23 / acceptance #5h kept). Eliminates premature-finalize risk; no acceptance criterion required clean-EOF→completed. **Decided.**
+3. **Format string + source location:** `Format = "codex"`; source-flag form `codex:<sessions-dir>` where location = `$CODEX_HOME/sessions` (default `~/.codex/sessions`) — the directory walked, mirroring claude-code's location=walked-dir; cursor keys are `YYYY/MM/DD/rollout-*.jsonl` (and root legacy `*.json`) relative to it, stable across a `$CODEX_HOME` move. **Decided.**
+4. **Legacy `.json` (R1):** `legacy_json_format=false` default; v1 emits exactly 1 informational `SourceError` per legacy file (cursor-suppressed thereafter), ingests none; a Phase-2.5 follow-up SOW is filed at close. **Decided.**
 
 ## Implementation
 
