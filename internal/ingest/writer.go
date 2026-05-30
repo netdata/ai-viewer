@@ -363,6 +363,9 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	// erase that join key and permanently orphan the op→child edge. The graft
 	// (json_set, NOT json_patch) preserves the stash without the json_patch
 	// null-as-delete hazard (see graftAiViewerExtras).
+	// #nosec G202 -- the only interpolated value is graftAiViewerExtras's output,
+	// built solely from the compile-time-constant column literal "sessions.extras_json"
+	// and the package-const aiViewerStashKeys; no caller/source input reaches the SQL.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
@@ -552,6 +555,9 @@ ON CONFLICT (session_id, seq) DO NOTHING
 	// arbitrary source attributes into op extras (aiagent_v3 `extras["attr."+k]`),
 	// so a replay carrying `{"attr.x":null}` would silently drop key `attr.x`.
 	// See graftAiViewerExtras.
+	// #nosec G202 -- the only interpolated value is graftAiViewerExtras's output,
+	// built solely from the compile-time-constant column literal "ops.extras_json"
+	// and the package-const aiViewerStashKeys; no caller/source input reaches the SQL.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq,
