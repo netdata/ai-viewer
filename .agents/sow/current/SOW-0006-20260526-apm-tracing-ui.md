@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: drafted 2026-05-26 for later operator approval. Prerequisite: SOW-0001 must be in `done/` (canonical schema, REST surface, SSE hub, base frontend exist) AND at least one of SOW-0003 (claude-code adapter), SOW-0004 (codex adapter), or SOW-0005 (opencode adapter) must be in `done/`, so the topology and lineage views render meaningful cross-format multi-session data and not a degenerate single-adapter tree.
+Sub-state: activated 2026-05-31. Approved under the operator's blanket Phase-2 backlog sign-off; prerequisites MET (SOW-0001 in `done/`; SOW-0003/0004/0005 adapters all in `done/` and merged — 5 source formats render cross-format topology/lineage). Operator UX decisions captured below ("Implications And Decisions") before any code, per the decisions-before-work rule. Scope corrected to FULL-STACK (the `/topology` + `/timeline` endpoints are spec'd but unbuilt). Moved to `current/`.
 
 ## Requirements
 
@@ -84,7 +84,7 @@ Risks:
 
 ## Pre-Implementation Gate
 
-Status: blocked (pending operator sign-off + prerequisite SOWs in `done/`)
+Status: SATISFIED (2026-05-31) — prerequisites met (SOW-0001 + the 5 adapters in `done/`), operator UX decisions captured ("Implications And Decisions"), full-stack scope correction recorded. Cleared to implement.
 
 Problem / root-cause model:
 
@@ -99,7 +99,7 @@ Evidence reviewed:
 Affected contracts and surfaces:
 
 - Frontend: three new `pages/SessionDetail/*Tab/` components; one new `pages/Topology/` page; expansion of `viz/` with `topology.ts`, `timeline.ts`, `flame.ts`, `color.ts`.
-- REST: no new endpoints (existing `/api/sessions/:id/topology` and `/timeline` cover it); response shapes may need additive fields (drawer payload preview, compaction extras pass-through).
+- REST: **CORRECTION (2026-05-31, verified against `internal/presenter/`):** the `/api/sessions/:id/topology` and `/api/sessions/:id/timeline` routes are **spec'd but NOT implemented** — they currently fall through to `notImplemented` (404), pinned by `coverage_test.go`. SOW-0006 is therefore **full-stack**: it must build these two Go handlers + presenter queries (per `rest-api.md` shapes) BEFORE the frontend tabs can consume them. `GET /api/sessions/:id` (handler `presenter.go:235 handleSessionDetail`) is already live. Response shapes may also need additive fields (drawer payload preview, compaction extras pass-through).
 - Specs: `ui-pages.md` (Trace/Topology/Timeline details), `rest-api.md` (any field additions), possibly `frontend-architecture.md` (Web Worker pattern documented for future viz work).
 - Build: D3 + its tree-shake config added to `vite.config.ts`; bundle budget (≤ 500 KB gzipped main chunk per quality gates) re-validated.
 
@@ -160,11 +160,21 @@ Open-source reference evidence:
 
 Open decisions:
 
-- None blocking. The "sub-agent inline vs navigate" question is resolved by R5 (navigate). If the operator overrules this preference after seeing it live, an addendum captures the change.
+- Resolved by the operator 2026-05-31 (recorded in "Implications And Decisions" below). The "sub-agent inline vs navigate" question stays navigate (R5). Two low-stakes points taken as CTO defaults (operator may override after seeing them live): op-kind/status colors = existing theme tokens; Timeline zoom = shift+wheel (per `ui-pages.md`).
 
 ## Implications And Decisions
 
-(Filled if operator surfaces design decisions during review.)
+Operator UX decisions, captured 2026-05-31 BEFORE any code (the operator owns visual judgment; recorded here per the decisions-before-work rule). The operator's framing was "try something, we change it later" — so these are starting points, built to be cheap to iterate:
+
+1. **Trace tab — operator chose a Chrome-DevTools-Network-style view, not only a flame-graph.** Deliver a horizontal **waterfall** (one row per op/agent/tool, positioned + sized by `start_ts`/`duration_us`, like the Network tab's request timeline) that makes the SEQUENCE and DURATION of agents/tools obvious, PAIRED with a scrollable **list of everything that happened** (the full op/turn log, click-to-detail). A **flame-graph** view is also wanted ("would be nice too") — offer it as an alternate view of the same data. The operator explicitly does NOT mind a LARGE flame-graph "as long as it remains fast to work with it" → **performance is the hard constraint** (Canvas + viewport culling where span counts are high; the 200ms render budget holds). So Chunk 4 becomes: waterfall + event-list + flame-graph (toggle between views), all performance-first. Supersedes the Gate's narrower "per-turn flame-graph SVG."
+2. **Topology tab — build ALL THREE layouts behind a toggle.** The operator: "probably all of them. If I don't see it, I cannot understand which would be more useful." So the Topology renderer exposes a layout selector: (a) seeded force + freeze-layout button, (b) plain force, (c) hierarchical tree — the operator compares them live and we settle on a default later. Chunks 6/7 deliver the multi-layout toggle, not a single force layout.
+3. **Span/op detail — side drawer with inline payload preview** (the recommended option). Confirmed as Gate Chunk 5.
+
+CTO defaults (operator may override on sight):
+4. **Colors** = existing theme tokens (`--success`/`--warning`/`--error` for status; fixed per-kind palette) for consistency with the Overview status badges.
+5. **Timeline zoom** = shift+wheel zooms time / plain wheel pans (per `ui-pages.md`).
+
+These reshape the chunk plan (Chunk 4 = waterfall+list+flame; Chunks 6-7 = multi-layout topology) and confirm the full-stack scope (build the two backend endpoints first). The chunk plan above is the guide; per-chunk adjustments are logged in the Execution Log as they land.
 
 ## Plan
 
