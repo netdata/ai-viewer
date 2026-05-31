@@ -20,12 +20,15 @@ test.describe('routes', () => {
     await expect(page.getByText('No sessions match the current filters.')).toHaveCount(0);
   });
 
-  // Every scaffolded Phase-2/3 route renders the shared ComingSoon placeholder
-  // (components/ComingSoon.tsx: <h1 id="coming-soon-title">{title}</h1>). The
-  // path→title map mirrors the route table in src/App.tsx and the title each
+  // Every still-scaffolded Phase-2/3 route renders the shared ComingSoon
+  // placeholder (components/ComingSoon.tsx: <h1 id="coming-soon-title">{title}</h1>).
+  // The path→title map mirrors the route table in src/App.tsx and the title each
   // page passes (src/pages/<Name>/<Name>.tsx). One test per route.
+  //
+  // NOTE: /topology is NO LONGER a placeholder — SOW-0006 (chunk 6b) shipped the
+  // real cross-session Topology page (App.tsx → <Topology/>), so it is covered by
+  // tests/viz-topology.spec.ts instead and is intentionally absent here.
   const comingSoonRoutes: Array<{ path: string; title: string }> = [
-    { path: '/topology', title: 'Topology' },
     { path: '/tools', title: 'Tools' },
     { path: '/models', title: 'Models' },
     { path: '/agents', title: 'Agents' },
