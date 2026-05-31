@@ -53,6 +53,16 @@ func TestPollOnce_ProductiveCycle(t *testing.T) {
 
 	// A SECOND pollOnce over the now-current cursor is a no-op (advanced=false,
 	// nothing emitted) — proves the cheap MAX(id) gate closes after catch-up.
+	//
+	// Close the probe gate first (a recent probe, no WAL event) so this poll is a
+	// GENUINELY idle cycle: changed==false (cheap MAX(id) silent) AND the gate is
+	// closed, so neither the forward delta nor the round-7 boundary re-scan fires.
+	// (The first poll advanced via the cheap MAX(id) path, which short-circuits before
+	// the gated probe, so markProbe never ran and lastProbe is still zero — leaving the
+	// safety-net gate immediately due. Without closing it here, the boundary re-scan
+	// would idempotently re-emit ses_a's boundary bucket on the gate-open path, which is
+	// correct behaviour but not what THIS test pins — see TestP1_R7_* for that path.)
+	st.markProbe(time.Now())
 	out2 := make(chan canonical.Event, 16)
 	adv2, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out2, silentLogger(), func(error) {})
 	if err != nil {
@@ -94,15 +104,17 @@ func TestScanLoop_IntrospectFatal(t *testing.T) {
 	}
 }
 
-// TestReloadAndEmit_GenericErrorViaOnError asserts a non-context load error for
-// one session is surfaced via onError and the loop continues (not returned).
-// Triggered by closing the DB AFTER a successful session load is impossible to
-// time deterministically, so instead we drive loadAndMapSession's tree path with
-// a session whose tree load fails: we delete the session row's table mid-way is
-// also racy. Simplest deterministic trigger: an affected id that loads its
-// session row but whose part table query errors — emulated by a closed DB, which
-// makes loadSession itself error (generic, non-context) → onError, continue.
-func TestReloadAndEmit_GenericErrorViaOnError(t *testing.T) {
+// TestReloadAndEmit_GenericErrorPropagates pins the SOW-0005 round-7 P1-2 fix: a
+// non-context, non-session-gone load error for one affected session PROPAGATES
+// (returns) rather than being swallowed (logged + continue). The earlier code
+// called onError(err); continue, which let commitBatch advance the cursor PAST
+// rows whose content was never emitted — a permanent, health-invisible loss.
+// Propagating the error keeps the checkpoint-after-emit invariant: the cursor is
+// promoted only after every affected session's content is emitted.
+//
+// A closed DB makes loadSession itself error (generic, non-context), so
+// reloadAndEmit must return that error.
+func TestReloadAndEmit_GenericErrorPropagates(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path, rw := newEmptyDB(t, dir, "opencode.db")
@@ -118,11 +130,8 @@ func TestReloadAndEmit_GenericErrorViaOnError(t *testing.T) {
 	out := make(chan canonical.Event, 16)
 	var ce collectErrs
 	err := reloadAndEmit(ctxBG(), db, schema, "opencode:test", []string{"ses_a"}, out, silentLogger(), ce.onError)
-	if err != nil {
-		t.Fatalf("reloadAndEmit should surface the load error via onError, not return it: %v", err)
-	}
-	if ce.count() == 0 {
-		t.Error("expected a generic load error via onError")
+	if err == nil {
+		t.Fatal("reloadAndEmit must PROPAGATE a generic load error (round-7 P1-2), not swallow it; got nil")
 	}
 }
 

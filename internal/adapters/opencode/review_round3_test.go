@@ -25,13 +25,14 @@ import (
 // MAX(time_updated) > gate is silent (boundary ms unchanged), and the forward
 // delta's strict tie-break (time_updated = T AND id > highID) excludes the low-id
 // row — so without the fix the row's session is lost forever. The boundary re-scan
-// re-emits that session on a gate-open probe under EITHER trigger:
-//   - a WAL-driven probe (walDriven), OR
-//   - a SAFETY-NET probe once at least one prior probe has run (priorProbe, round-4
-//     P1) — covering a DROPPED/absent WAL hint.
+// re-emits that session on a WARM/resumed boundary (boundaryReal==true) when the
+// gate is open under EITHER trigger:
+//   - a WAL-driven probe (a WAL event since the last probe), OR
+//   - a SAFETY-NET probe (the 60 s net is due, NO WAL event) — covering a
+//     DROPPED/absent WAL hint (round-4 P1).
 //
-// The cold-Tail FIRST probe (priorProbe==false, no WAL) must NOT re-emit (the
-// HEAD-snapshot replay guard).
+// The cold-Tail snapshot (boundaryReal==false, round-7 P2-1's single cold guard)
+// must NOT re-emit on ANY path — the HEAD-snapshot replay guard.
 func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -61,27 +62,30 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 		return c
 	}
 
-	// (a) Cold-Tail FIRST probe: a brand-new pollState (priorProbe==false) with NO
-	// WAL event. The gate opens via the immediately-due safety net, but the boundary
-	// re-scan must NOT fire — this is the HEAD-snapshot reconciliation, and replaying
-	// the snapshot's boundary session there would be spurious (round-4 P1 cold guard).
+	// (a) Cold-Tail snapshot: a brand-new pollState (boundaryReal==false) with NO WAL
+	// event. The gate opens via the immediately-due safety net, but the boundary re-scan
+	// must NOT fire — this is the HEAD-snapshot reconciliation, and replaying the
+	// snapshot's boundary session there would be spurious (round-7 P2-1: boundaryReal is
+	// the single cold guard, gating BOTH the changed and gate-open paths).
 	cur := freshCursor()
-	stCold := newPollState(false) // lastProbe zero ⇒ net immediately due; priorProbe false
+	stCold := newPollState(false) // boundaryReal=false; lastProbe zero ⇒ net immediately due
 	out0 := make(chan canonical.Event, 64)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stCold, out0, silentLogger(), func(error) {}); err != nil {
 		t.Fatalf("pollOnce (cold first probe): %v", err)
 	}
 	if got := drainAll(out0); hasSession(got, "ses_b") {
-		t.Fatalf("boundary session re-emitted on the COLD first probe (priorProbe must guard it); got %d events", len(got))
+		t.Fatalf("boundary session re-emitted on the COLD snapshot (boundaryReal must guard it on all paths); got %d events", len(got))
 	}
 
-	// (b) SAFETY-NET probe after a prior cycle: priorProbe is set (a probe already
-	// ran) and the net is due, with NO WAL event. Round-4 P1: the boundary re-scan
-	// NOW fires so a same-ms in-place update that arrived with a missed WAL hint is
-	// still surfaced.
+	// (b) SAFETY-NET probe after a prior cycle: the net is due with NO WAL event. The
+	// cursor at (T, highID) is a WARM/resumed boundary (a real prior paged position →
+	// boundaryReal=true), so round-4 P1's safety-net boundary re-scan fires and a
+	// same-ms in-place update that arrived with a missed WAL hint is still surfaced.
+	// (Round-7 P2-1: boundaryReal is now the single cold guard; a warm boundary like
+	// this one sets it true, where the old code relied on the removed priorProbe flag.)
 	cur = freshCursor()
-	stNet := newPollState(false)
-	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
+	stNet := newPollState(true)
+	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // net due; no WAL
 	outNet := make(chan canonical.Event, 256)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stNet, outNet, silentLogger(), func(error) {}); err != nil {
 		t.Fatalf("pollOnce (safety-net probe): %v", err)
@@ -91,12 +95,15 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	}
 
 	// (c) WAL-driven probe with no detector advance: the boundary re-scan fires and
-	// re-emits ses_b's tree (the round-3 immediate path).
+	// re-emits ses_b's tree (the round-3 immediate path). The cursor at (T, highID) is
+	// a WARM/resumed boundary (boundaryReal=true); round-7 P2-1 gates this gate-open
+	// path on boundaryReal too, so a warm boundary is required for the WAL-driven
+	// re-emit (a cold Tail's first WAL-driven probe must NOT replay — see the cold case).
 	cur = freshCursor()
-	st2 := newPollState(false)
+	st2 := newPollState(true)
 	now := time.Now()
 	st2.markProbe(now.Add(-2 * timeUpdatedSafetyNet))
-	st2.markWALEvent(now) // lastWALEvent.After(lastProbe) → walDriven
+	st2.markWALEvent(now) // lastWALEvent.After(lastProbe) → gate open via WAL
 	out := make(chan canonical.Event, 256)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st2, out, silentLogger(), func(error) {}); err != nil {
 		t.Fatalf("pollOnce (WAL-driven): %v", err)
@@ -146,8 +153,12 @@ func TestP1_1_CompactingClearsAtBoundaryReSurfacesOnSafetyNet(t *testing.T) {
 		cur = cur.withTable(table, TableWatermark{MaxIDSeen: "zzz_high", MaxTimeUpdatedMs: 100, MaxTimeUpdatedID: "zzz_high"})
 	}
 
-	st := newPollState(false)
-	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
+	// WARM/resumed boundary (cursor at a real paged position → boundaryReal=true); the
+	// net is due with NO WAL event, so the safety-net boundary re-scan fires (round-4 P1).
+	// Round-7 P2-1: boundaryReal is the single cold guard, so a warm boundary is what
+	// arms this safety-net re-emit (the old code keyed it off the now-removed priorProbe).
+	st := newPollState(true)
+	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // net due; no WAL
 	out := make(chan canonical.Event, 256)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); err != nil {
 		t.Fatalf("pollOnce (safety-net, compaction cleared at boundary): %v", err)

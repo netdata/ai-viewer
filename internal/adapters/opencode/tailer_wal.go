@@ -3,6 +3,7 @@ package opencode
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -40,7 +41,10 @@ func watchWAL(dbPath string, onError func(error)) (<-chan struct{}, func()) {
 
 	hint := make(chan struct{}, 1)
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer close(hint)
 		for {
 			select {
@@ -72,9 +76,24 @@ func watchWAL(dbPath string, onError func(error)) (<-chan struct{}, func()) {
 		}
 	}()
 
+	// closeWatch stops the goroutine and WAITS for it to exit before returning
+	// (SOW-0005 round-7 P2-2). The watcher goroutine may call onError (a watcher
+	// error) — i.e. a send on the adapter's out channel; if closeWatch returned
+	// before the goroutine exited, the source goroutine could then close(events)
+	// while this goroutine was still sending on it → a send-on-closed-channel
+	// panic. signalling `done` AND closing the watcher unblocks the select; the
+	// WaitGroup makes the goroutine's exit a happens-before of closeWatch's return
+	// (Tail's `defer closeWatch()` therefore guarantees the watcher goroutine is
+	// dead before Tail returns and the source closes events). It is idempotent:
+	// `close(done)` is guarded by sync.Once so a double call (e.g. an explicit call
+	// plus the deferred one) does not panic.
+	var once sync.Once
 	closeWatch := func() {
-		close(done)
-		_ = watcher.Close()
+		once.Do(func() {
+			close(done)
+			_ = watcher.Close()
+		})
+		wg.Wait()
 	}
 	return hint, closeWatch
 }

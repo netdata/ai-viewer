@@ -83,11 +83,11 @@ func TestP1_R6_CoOccurringForwardChangeDoesNotStrandBoundaryUpdate(t *testing.T)
 	// cursor / a Tail that has paged), so the boundary bucket was already emitted and
 	// boundaryReal starts true — the codex stranding case is a warm cursor. (A cold
 	// HEAD-snapshot Tail is the separate TestP1_R6_ColdFirstProbe… case below.)
-	// Gate open via the SAFETY NET with a prior probe (no WAL event needed): priorProbe
-	// is set and the 60 s net is due. This is the harder trigger (no WAL hint); the
-	// round-6 reorder must fire the boundary re-scan here too.
+	// Gate open via the SAFETY NET (no WAL event needed): the 60 s net is due. This is
+	// the harder trigger (no WAL hint); the unified trigger must fire the boundary
+	// re-scan here too (boundaryReal=true is the single cold guard — round-7 P2-1).
 	st := newPollState(true)
-	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // priorProbe=true; net due; no WAL
+	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // net due; no WAL event
 
 	out := make(chan canonical.Event, 512)
 	active, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
@@ -116,13 +116,12 @@ func TestP1_R6_CoOccurringForwardChangeDoesNotStrandBoundaryUpdate(t *testing.T)
 }
 
 // TestP1_R6_ColdFirstProbeStillGuardsBoundaryReplay re-pins the cold-Tail replay
-// guard under the round-6 reorder: the boundary re-scan now runs before the forward
-// delta, but the VERY FIRST probe of a fresh Tail (priorProbe==false, no WAL event)
-// must STILL NOT replay the boundary bucket (it is a HEAD-snapshot reconciliation,
-// not a real in-place update). A forward INSERT after a cold snapshot advances
-// MAX(id) → the cheap path fires (changed=true, probed=false) → the boundary gate
-// stays closed and only the forward delta runs. This guards against the reorder
-// accidentally widening the cold-replay window.
+// guard under the unified trigger: the boundary re-scan runs before the forward
+// delta, but a fresh COLD Tail (boundaryReal==false, no preceding Scan) must STILL
+// NOT replay the boundary bucket (it is a HEAD-snapshot reconciliation, not a real
+// in-place update). boundaryReal is the single cold guard (round-7 P2-1): it gates
+// the re-scan on EVERY path, so even with the gate open the cold snapshot boundary
+// is not replayed until the cursor first advances.
 func TestP1_R6_ColdFirstProbeStillGuardsBoundaryReplay(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -146,9 +145,10 @@ func TestP1_R6_ColdFirstProbeStillGuardsBoundaryReplay(t *testing.T) {
 		})
 	}
 
-	// Cold first probe: fresh pollState (priorProbe==false), no WAL event. The net is
-	// immediately due so the gate's PROBE runs, but the boundary re-scan must not (the
-	// HEAD-snapshot replay guard — round-4 P1, preserved by round-6).
+	// Cold Tail: fresh pollState (boundaryReal==false), no WAL event. The net is
+	// immediately due so the gate is open (and the cheap MAX(id) path is silent here),
+	// but the boundary re-scan must not run — boundaryReal==false suppresses it on the
+	// gate-open path (the HEAD-snapshot replay guard; round-7 P2-1 single cold guard).
 	st := newPollState(false)
 	out := make(chan canonical.Event, 256)
 	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); err != nil {

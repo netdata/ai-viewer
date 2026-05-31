@@ -155,10 +155,21 @@ func warnUnknownSessionMessageType(id, typ string, onError func(error)) {
 }
 
 // reloadAndEmit loads each affected session's full tree, maps it via the pure
-// mapper, and emits the events. A session whose row cannot be loaded (deleted
-// between the delta and the load, or an orphaned part/message) is skipped with
-// one structured error and the cycle continues with the rest
-// (adapter-opencode.md §"Read Strategy"). ctx cancellation stops promptly.
+// mapper, and emits the events. ctx cancellation stops promptly.
+//
+// Error policy (SOW-0005 round-7 P1-2): only TWO outcomes are non-fatal
+// skip-and-continue — (1) the `time_compacting` pause (`skipped == true`), which
+// re-surfaces in a later delta when the column clears (Edge Cases #8); and (2) a
+// session whose row is GONE (`loadAndMapSession` returns nil events with no error
+// — deleted between the delta page and the load, or an orphaned part/message),
+// surfaced once as `errSessionGone`. ANY OTHER error (a transient tree-load/read
+// error, a commit failure, a corrupt-tree decode error) PROPAGATES so the caller
+// (commitBatch) does NOT promote the cursor: the same rows are retried next cycle.
+// The earlier code swallowed every non-context error (logged + continued) and let
+// commitBatch advance the cursor anyway, persisting a watermark beyond rows whose
+// content was never emitted — a permanent, health-invisible content loss. Letting
+// the error propagate keeps the checkpoint-after-emit invariant: a cursor is
+// promoted only after every affected session's content was successfully emitted.
 func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID string, affected []string, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) error {
 	for _, sid := range affected {
 		if err := ctx.Err(); err != nil {
@@ -166,11 +177,11 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 		}
 		evs, skipped, err := loadAndMapSession(ctx, db, schema, sourceID, sid, logger, onError)
 		if err != nil {
-			if isContextErr(err) {
-				return err
-			}
-			onError(err)
-			continue
+			// Every load/map/commit error (context or not) propagates: a context error
+			// stops the run, and any other transient error must NOT let the cursor
+			// advance past rows whose content was not emitted (round-7 P1-2). It is
+			// surfaced via onError at the propagation boundary (commitBatch's caller).
+			return err
 		}
 		if skipped {
 			// Session paused mid-compaction (time_compacting non-NULL). It is NOT
@@ -179,7 +190,9 @@ func reloadAndEmit(ctx context.Context, db *sql.DB, schema schemaSet, sourceID s
 			continue
 		}
 		if evs == nil {
-			// Session row gone — skipped with one structured error.
+			// Session row legitimately gone — the only load failure treated as
+			// skip-and-continue. Surfaced once as a structured error; the cursor may
+			// advance past it (the row is not coming back).
 			onError(fmt.Errorf("opencode: affected session %s: %w", sid, errSessionGone))
 			continue
 		}

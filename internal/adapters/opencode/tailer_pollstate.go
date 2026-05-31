@@ -25,39 +25,34 @@ type pollState struct {
 	lastWALEvent time.Time
 	lastProbe    time.Time
 	walFloorTill time.Time
-	// priorProbe records that at least one MAX(time_updated) probe has already
-	// completed in this tailer's life. It gates the safety-net boundary re-scan
-	// (SOW-0005 round-4 P1): the very FIRST probe of a cold Tail is a HEAD-snapshot
-	// reconciliation, and replaying its boundary bucket there would re-emit the
-	// snapshot's boundary session for no reason; once a real cycle has probed, a
-	// subsequent SAFETY-NET probe (no WAL hint) is allowed to run the boundary
-	// re-scan so a same-ms in-place update that arrived with a DROPPED/absent WAL
-	// event is still eventually surfaced. Set by markProbe.
-	priorProbe bool
 	// boundaryReal reports whether the cursor's current boundary ms is a position
-	// whose bucket was ALREADY emitted — so the round-6 P1 "re-scan before the
-	// forward delta when changed==true" path may run without replaying a never-emitted
-	// cold-Tail HEAD snapshot. It starts true for a WARM Tail (resumed from a Scan
-	// cursor: Scan already emitted the boundary) and false for a COLD Tail (HEAD
-	// snapshot: follow-from-now, boundary never emitted); pollOnce flips it true once
-	// the cursor first advances (the new boundary is the just-emitted forward
-	// position). It does NOT gate the `!changed` boundary path, which the round-4
-	// priorProbe cold guard already protects.
+	// whose bucket was ALREADY emitted — so the round-7 P1-1 unified boundary re-scan
+	// (which runs before the forward delta whenever changed==true on ANY path OR the
+	// probe gate is open) may run without replaying a never-emitted cold-Tail HEAD
+	// snapshot. It is the SINGLE cold-`Tail` guard (round-7 P2-1): it gates the WHOLE
+	// trigger — both the changed path and the gate-open path — replacing the old,
+	// partial `priorProbe` flag that guarded only the changed==false path (and could
+	// be defeated by a cold Tail's first WAL-driven or safety-net probe). It starts
+	// true for a WARM Tail (resumed from a Scan cursor: Scan already emitted the
+	// boundary) and false for a COLD Tail (HEAD snapshot: follow-from-now, boundary
+	// never emitted); pollOnce flips it true once the cursor first advances (the new
+	// boundary is the just-emitted forward position, so re-scanning it is idempotent).
 	boundaryReal bool
 }
 
-// newPollState returns the initial state: idle, no WAL event yet, a zero
+// newPollState returns the initial state: idle, no WAL event yet, and a zero
 // lastProbe so the FIRST poll's gate is open (the safety net is immediately due,
 // guaranteeing the initial cycle reconciles in-place mutations that arrived
-// before tailing started), and priorProbe=false so that first probe does NOT run
-// the safety-net boundary re-scan (cold-Tail replay guard, round-4 P1).
+// before tailing started).
 //
-// warmStart seeds boundaryReal (SOW-0005 round-6 P1): a WARM Tail resumed from a
-// Scan cursor inherits a boundary whose bucket Scan already emitted, so the
-// changed==true boundary re-scan may run from the first poll; a COLD Tail (HEAD
-// snapshot, follow-from-now) starts boundaryReal=false so it does not replay the
-// never-emitted snapshot boundary on the first post-snapshot forward change
-// (pollOnce flips boundaryReal true once the cursor first advances).
+// warmStart seeds boundaryReal (SOW-0005 round-6 P1; round-7 P2-1 makes it the
+// single cold-Tail guard): a WARM Tail resumed from a Scan cursor inherits a
+// boundary whose bucket Scan already emitted, so the boundary re-scan may run from
+// the first poll; a COLD Tail (HEAD snapshot, follow-from-now) starts
+// boundaryReal=false so it does NOT replay the never-emitted snapshot boundary on
+// ANY path (the changed path, the gated-probe path, or the WAL-driven/safety-net
+// gate-open path) until the cursor first advances — pollOnce flips boundaryReal
+// true at that point.
 func newPollState(warmStart bool) pollState {
 	return pollState{boundaryReal: warmStart}
 }
@@ -69,13 +64,10 @@ func (s *pollState) markWALEvent(t time.Time) {
 	s.walFloorTill = t.Add(walFloorWindow)
 }
 
-// markProbe records that a MAX(time_updated) probe ran at t and marks that a
-// probe has now completed (priorProbe) so a later safety-net probe may run the
-// boundary re-scan (round-4 P1; the very first probe still does not, by the
-// captured-before-markProbe read in pollOnce).
+// markProbe records that a MAX(time_updated) probe ran at t (advancing lastProbe
+// re-closes the gate until the next WAL event or the next 60 s net tick).
 func (s *pollState) markProbe(t time.Time) {
 	s.lastProbe = t
-	s.priorProbe = true
 }
 
 // markCycle records the outcome of a poll cycle at t: active when it produced a

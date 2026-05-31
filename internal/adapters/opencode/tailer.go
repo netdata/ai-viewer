@@ -208,11 +208,13 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStar
 // cycle produced a change (so the loop switches to the active cadence).
 func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (bool, error) {
 	now := time.Now()
-	// Capture, BEFORE markProbe mutates the state, whether THIS probe is opened by
-	// a WAL write (vs the periodic safety net) AND whether any probe has already
-	// completed (priorProbe) — the boundary re-scan keys off both (round-4 P1).
-	walDriven := st.lastWALEvent.After(st.lastProbe)
-	priorProbe := st.priorProbe
+	// Capture, BEFORE markProbe mutates lastProbe, whether THIS cycle's probe gate is
+	// open (a WAL write since the last probe, OR the 60 s safety net elapsed). This is
+	// the SAME predicate detectChange uses to decide whether to issue the expensive
+	// MAX(time_updated) probe — read it here so the boundary re-scan can fire on the
+	// gate-open path even when detectChange short-circuits on the cheap MAX(id) path
+	// (round-7 P1-1: the re-scan must NOT key off detectChange's `probed` output).
+	probeGateOpen := shouldProbeTimeUpdated(now, st.lastWALEvent, st.lastProbe, timeUpdatedSafetyNet)
 	changed, probed, err := detectChange(ctx, db, schema, *cur, st, now)
 	if err != nil {
 		return false, err
@@ -221,49 +223,46 @@ func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, so
 		st.markProbe(now)
 	}
 	active := false
-	// Boundary-millisecond re-scan (SOW-0005 round-3 P1-1; round-4 P1; round-6 P1):
-	// re-emit any session touched by an in-place UPDATE at exactly the cursor's
-	// boundary ms T — the case the cheap MAX(id) path, the gated MAX(time_updated) >
-	// gate, and the forward delta's strict `> :tuid` tie-break all miss. It runs on a
-	// gate-open probe (probed) under EITHER trigger:
-	//   - walDriven: a real opencode write fired the WAL fsnotify hint since the last
-	//     probe — the immediate, round-3 path.
-	//   - priorProbe: the SAFETY-NET path (round-4 P1). When the WAL hint is missed
-	//     (dropped fsnotify event, watcher setup failed, timer-only polling), the 60 s
-	//     net still opens the gate; once at least one probe has already run (priorProbe,
-	//     captured BEFORE markProbe), a same-ms in-place update is no longer stranded.
-	gateOpen := probed && (walDriven || priorProbe)
-	// ROUND-6 P1 (definitive): run the re-scan BEFORE processChanges, against the
-	// PRE-ADVANCE cursor (*cur is still the pre-advance watermark here — processChanges
-	// below advances it), so a CO-OCCURRING forward change can never strand a same-ms
-	// in-place update. The round-3/4 code ran it only on the `!changed` branch; that
-	// stranded a low-id in-place update at boundary ms T (row A, excluded by the strict
-	// `id > MaxTimeUpdatedID` tie-break) whenever a NORMAL forward change (row B) in the
-	// same table advanced MAX(time_updated) to T2 > T in the SAME poll: row B made
-	// changed==true, processChanges advanced the cursor PAST T, and row A fell
-	// permanently below the new watermark, never seen.
+	// Boundary-millisecond re-scan (SOW-0005 round-3 P1-1 → round-7 P1-1): re-emit any
+	// session touched by an in-place UPDATE at exactly the cursor's boundary ms T — the
+	// case the cheap MAX(id) path, the gated MAX(time_updated) > gate, and the forward
+	// delta's strict `> :tuid` tie-break all miss.
 	//
-	// boundaryReal gates the changed==true case so the round-4 cold-`Tail` HEAD-snapshot
-	// contract survives the reorder. On a PRISTINE cold snapshot (follow-from-now), the
-	// cursor's boundary T is the snapshot HEAD and its bucket was NEVER emitted; running
-	// the re-scan there on the first post-snapshot forward change (e.g. an INSERT whose id
-	// sorts BELOW the snapshot MAX(id), which trips the time_updated probe → changed=true,
-	// probed=true rather than the cheap MAX(id) path) would REPLAY a pre-existing session
-	// the cold Tail must not emit. boundaryReal is true only when the boundary T is a
-	// position whose bucket was already emitted — a WARM Tail (resumed from a Scan cursor)
-	// or after this Tail's cursor has advanced at least once (the new boundary is the
-	// just-emitted forward position, so re-scanning it is idempotent, not a cold replay).
-	// When `!changed` the re-scan is always safe (no forward advance can strand it; the
-	// round-4 priorProbe cold guard already prevents a pristine cold first probe — which
-	// is not walDriven and has priorProbe==false — from replaying), so boundaryReal does
-	// not gate that path.
+	// UNIFIED TRIGGER (round-7 P1-1, closes the same-ms class): run BEFORE processChanges,
+	// against the PRE-ADVANCE cursor (*cur is still the pre-advance watermark here —
+	// processChanges below advances it), whenever — for a warm/real boundary — EITHER
+	//   (a) detectChange reported changed==true on ANY path (the cheap MAX(id) INSERT path
+	//       OR the gated MAX(time_updated) probe), OR
+	//   (b) the probe gate is open this cycle (probeGateOpen: a WAL event since the last
+	//       probe, or the 60 s net elapsed).
+	// The re-scan deliberately does NOT key off detectChange's `probed` output: the cheap
+	// MAX(id) path returns changed==true, probed==false and SHORT-CIRCUITS before the gated
+	// probe, so a true INSERT (MaxIDSeen advances) co-occurring with a same-ms in-place
+	// UPDATE of a low-id row (row A, excluded from the forward delta by the strict
+	// `id > MaxTimeUpdatedID` tie-break) would otherwise be stranded: the old `probed`-gated
+	// trigger skipped the re-scan, processChanges advanced the cursor PAST T for the INSERT,
+	// and row A fell permanently below the new watermark, never seen. Arming on changed==true
+	// regardless of path re-emits row A's session FIRST, against the pre-advance T; the
+	// forward delta then emits the INSERT and advances the cursor.
 	//
-	// AC#6 idle property is preserved: within the 60 s window an idle DB with no WAL event
-	// has probed==false, so gateOpen is false and this never runs on an idle poll. The
-	// cursor is NOT advanced by the re-scan; re-emission is idempotent, and a session
-	// caught by BOTH this and the forward delta below is re-emitted once per path with no
-	// churn beyond the idempotent boundary bucket.
-	if gateOpen && (!changed || st.boundaryReal) {
+	// boundaryReal is the SINGLE cold-`Tail` guard (round-7 P2-1), applied to the WHOLE
+	// trigger — both the changed and gate-open paths. On a PRISTINE cold snapshot
+	// (follow-from-now) the cursor's boundary T is the snapshot HEAD and its bucket was
+	// NEVER emitted; re-scanning it would REPLAY a pre-existing session the cold Tail must
+	// not emit. boundaryReal is true only when the boundary T is a position whose bucket was
+	// already emitted — a WARM Tail (resumed from a Scan cursor) or after this Tail's cursor
+	// has advanced at least once (the new boundary is the just-emitted forward position, so
+	// re-scanning it is idempotent). Gating the gate-open path too (not just the changed
+	// path) closes the round-7 P2-1 hole where a cold Tail's first WAL-driven or safety-net
+	// probe (changed==false but gate open) replayed the snapshot boundary bucket. It also
+	// lets the old, partial `priorProbe` cold guard be removed entirely.
+	//
+	// AC#6 idle property is preserved: a steady-state idle DB within the 60 s net with no
+	// WAL event has changed==false AND probeGateOpen==false, so this never runs on an idle
+	// poll. The cursor is NOT advanced by the re-scan; re-emission is idempotent, and a
+	// session caught by BOTH this and the forward delta below is re-emitted once per path
+	// with no churn beyond the idempotent boundary bucket.
+	if st.boundaryReal && (changed || probeGateOpen) {
 		emitted, berr := emitBoundarySessions(ctx, db, schema, *cur, sourceID, out, logger, onError)
 		if berr != nil {
 			return active, berr

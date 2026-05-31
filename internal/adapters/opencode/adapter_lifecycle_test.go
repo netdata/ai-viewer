@@ -61,12 +61,27 @@ func TestAdapter_ScanRecordsCursorAndCancelReturnsNil(t *testing.T) {
 
 // TestAdapter_ScanThenTailHandoff is the load-bearing Scan→Tail hand-off: Scan
 // records the watermark on the instance, and a following Tail resumes from it
-// (not from HEAD). A session inserted AFTER Scan is emitted by Tail, and the
-// already-scanned sessions are NOT re-emitted before it.
+// (NOT from HEAD — no full-history replay). A session inserted AFTER Scan is
+// emitted by Tail, and an OLD session sitting BELOW the resumed boundary ms is
+// never re-emitted.
+//
+// Note (SOW-0005 round-7 P1-1): the warm Tail's first gate-open poll runs the
+// bounded boundary-bucket re-scan against the resume watermark's ms `T` — that is
+// the fix's contract (a same-ms in-place update of an already-emitted row must be
+// re-checked). A session whose rows sit AT `T` is therefore idempotently re-emitted
+// (harmless — the writer's upserts absorb it; pinned by TestP1_R6_/TestP1_R7_*).
+// The hand-off property that matters is the one this test pins: Tail does NOT
+// replay the FULL history — a session at an EARLIER ms than the boundary is never
+// re-emitted. The fixture puts ses_old well below the boundary to prove that.
 func TestAdapter_ScanThenTailHandoff(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path, rw := newEmptyDB(t, dir, "opencode.db")
+	// ses_old sits far below the eventual resume boundary (ms 10) — Scan emits it,
+	// and the resumed Tail must NEVER replay it (it is not in the boundary bucket).
+	insertSession(t, rw, "ses_old", "", 10, 10, 0)
+	insertAssistantMessage(t, rw, "msg_old", "ses_old", 10, 10, 3, 1)
+	// ses_a is the last-scanned session; its tree sits at the resume boundary ms.
 	insertSession(t, rw, "ses_a", "", 100, 100, 0)
 	insertAssistantMessage(t, rw, "msg_a", "ses_a", 110, 110, 5, 2)
 	if err := rw.Close(); err != nil {
@@ -84,15 +99,15 @@ func TestAdapter_ScanThenTailHandoff(t *testing.T) {
 		t.Fatalf("Scan: %v", err)
 	}
 	scanEvents := drainAll(scanOut)
-	if !hasSession(scanEvents, "ses_a") {
-		t.Fatal("Scan did not emit ses_a")
+	if !hasSession(scanEvents, "ses_a") || !hasSession(scanEvents, "ses_old") {
+		t.Fatal("Scan did not emit the seeded sessions")
 	}
 	if a.scanCursor == nil {
 		t.Fatal("Scan did not record scanCursor")
 	}
 
 	// Insert a NEW session after Scan, then run Tail. Tail must resume from the
-	// recorded watermark and emit only the new session.
+	// recorded watermark and emit the new session.
 	rw2, err := openRWAgain(t, path)
 	if err != nil {
 		t.Fatalf("reopen rw: %v", err)
@@ -115,9 +130,13 @@ func TestAdapter_ScanThenTailHandoff(t *testing.T) {
 	if !ok {
 		t.Fatal("Tail did not emit the session inserted after Scan")
 	}
-	// The resumed Tail must NOT replay the already-scanned ses_a before ses_b.
-	if hasSession(got, "ses_a") {
-		t.Error("resumed Tail re-emitted the already-scanned session ses_a (cursor hand-off broken)")
+	// The resumed Tail must NOT replay full history: ses_old (far below the resume
+	// boundary ms) is never re-emitted. (ses_a sits AT the boundary ms and may be
+	// idempotently re-emitted by the bounded boundary re-scan — round-7 P1-1 — which
+	// is NOT a hand-off break; the watermark resume is intact, only the single
+	// boundary ms is re-checked.)
+	if hasSession(got, "ses_old") {
+		t.Error("resumed Tail replayed ses_old from below the boundary (full-history replay — cursor hand-off broken)")
 	}
 }
 
