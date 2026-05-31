@@ -58,8 +58,8 @@ mkdir -p "$emptysrc"
 # the expected schema_meta.version (CheckSchema at startup). The ingester runs
 # all migrations synchronously inside OpenWriter and logs each "migration
 # applied" before it does anything else; the last migration
-# (0005_op_duration_backfill.sql) sets the version this binary expects (every
-# migration now bumps the version in lockstep). Poll for that line — it is
+# (0005_op_duration_backfill.sql) sets the version this binary expects (the
+# latest serve-relevant migration sets it; 0005 is the latest). Poll for that line — it is
 # emitted on a fresh DB regardless of source discovery, so we never kill the
 # process mid-migration (a bare file-exists check is race-prone: OpenWriter
 # creates the file before migrations finish), and proceeding only after the

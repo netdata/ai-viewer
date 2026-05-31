@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: gate ready; on branch `sow-0026-op-duration` (off master). Spec deltas landed; delegating test/fix/migration. Discovered 2026-05-31 during SOW-0006 (APM tracing UI) Trace-tab visual review: every op's stored `ops.duration_us` is `0` while `end_ts - start_ts` is non-zero. Root-caused to the ingest writer. This is a prerequisite for SOW-0006 (the Trace event-list Duration column and the Topology `metric=duration` node sizing both read this column) and for SOW-0007 analytics (the `catalog_*.total_duration_us` rollups accumulate it).
+Sub-state: delivered; 4 external-review rounds converged (codex+glm+minimax); merged via PR #31. Discovered 2026-05-31 during SOW-0006 (APM tracing UI) Trace-tab visual review: every op's stored `ops.duration_us` is `0` while `end_ts - start_ts` is non-zero. Root-caused to the ingest writer. This is a prerequisite for SOW-0006 (the Trace event-list Duration column and the Topology `metric=duration` node sizing both read this column) and for SOW-0007 analytics (the `catalog_*.total_duration_us` rollups accumulate it).
 
 ## Requirements
 
@@ -173,7 +173,52 @@ Open decisions:
 
 ## Validation
 
-Pending (completed at close: AC evidence + final gate run + round-2 review convergence).
+Acceptance criteria evidence:
+
+- AC1 (duration = end_ts − start_ts, all adapters): `internal/ingest/op_duration_test.go::TestApplyOpFinalized_DurationFromPersistedStart` (RED on old code, GREEN now).
+- AC2 (orphan finalize → no fabricated duration): `...OrphanFinalizeNoDuration`.
+- AC3 (migration 0005 backfill + catalog recompute correct): `internal/store/migration_0005_op_duration_internal_test.go` + `internal/ingest/migration_live_parity_test.go` (migration-recompute totals == live-ingest totals for the same events).
+- AC4 (spec-conformant fixtures): all `Finalized.Ts == OpStarted.Ts` masking sites removed (catalog_idempotency_test, catalog_test, pricing_integration_test ×3); grep clean.
+- AC5 (specs reconciled): data-model.md, ingester.md, rest-api.md, observability.md, presenter.md updated; schema_version examples → 5.
+- AC6 (gates + review): below.
+- Round-2 additions: end_ts/duration consistency on zero/skew re-finalize; serve refuses a pre-0005 DB (0005 bumps to v5 + `CheckSchema` `!=`, verified against code).
+
+Tests or equivalent validation:
+
+- `go test -race ./internal/... ./cmd/...` green (14 packages); coverage ingest 88.5% / store 90.9%.
+- gofmt/goimports, `go vet`, golangci-lint (0 issues), gosec (0 findings); secret + AI-attribution scans clean; `scripts/embed-smoke.sh` passes with `schema_meta.version = 5`.
+
+Real-use evidence:
+
+- The bug was found via a live e2e-serve (seeded aiagent_v3) Trace tab showing `0µs` durations; post-fix the duration path is corrected (visual re-confirmation on SOW-0006 resume).
+
+Reviewer findings:
+
+- 4 rounds (codex + glm + minimax, parallel, read-only). codex found every substantive P2 (R1 end_ts clobber; R2 serve-stale-data/version + start_ts-MIN; R3 spec drift); glm/minimax repeatedly called the change merge-ready while a real codex P2 was open. All findings adjudicated against ground truth, fixed or tracked (SOW-0027). Converged round 4 (no P1/P2 from any reviewer).
+
+Same-failure scan:
+
+- `grep "EndTs - .*Ts"` → no other site computes duration from the finalize Ts. Repo-wide `schema_version=4` / `'version','4'` sweep → no stale refs (only historical 0004 migration-history).
+
+Sensitive data gate:
+
+- Synthetic ids/timestamps only in tests/fixtures; secret + AI-attribution scans clean. No PII/secrets in any durable artifact.
+
+Artifact maintenance gate:
+
+- AGENTS.md: no change (no new convention emerged).
+- Runtime project skills: no change.
+- Specs: data-model.md, ingester.md, rest-api.md, observability.md, presenter.md updated in the implementing commits.
+- End-user/operator docs: no change beyond corrected numbers.
+- SOW lifecycle: `Status: completed`; moved to `.agents/sow/done/` in the closing commit; follow-up `SOW-0027` filed in `pending/`.
+
+Specs update: 5 spec files updated (above).
+
+Project skills update: none needed.
+
+End-user/operator docs update: none affected.
+
+Follow-up mapping: SOW-0027 (post-finalize start_ts-change duration recompute) filed in pending/.
 
 ## Reviews
 
@@ -198,15 +243,33 @@ glm + minimax: CLEAN (no P1/P2; round-1 fixes verified). codex (decisive) found 
 - **P3 (codex+glm+minimax) — skew migration test asserted only non-negative.** Fixed: now asserts the exact unchanged value (skew op stays `0`).
 - **P3 (glm) — `nowDurationUS.Valid` unchecked in `catalog.go:273`.** Pre-existing, safe-by-convention (NULL→0; prior is also 0 on first finalize). Not introduced here; no action.
 
-Post-fix (orchestrator, ground truth): whole-suite `go test -race ./internal/... ./cmd/...` green (14 pkgs); golangci-lint 0; embed-smoke pass (`version = 5`). Round-3 re-review pending (same scope + these fix notes).
+Post-fix (orchestrator, ground truth): whole-suite `go test -race ./internal/... ./cmd/...` green (14 pkgs); golangci-lint 0; embed-smoke pass (`version = 5`).
+
+### Round 3 — 2026-05-31 (codex + glm + minimax) on commit `700a207`
+
+glm + minimax: CLEAN. codex (decisive) found 1 P2 + 1 P3, adjudicated against code:
+
+- **P2 (codex) — spec drift from the v5 bump.** `SchemaVersion=5` / `/api/health` now emits 5, but stale `schema_version: 4` examples remained in `rest-api.md`, `observability.md`, and `data-model.md`'s schema_meta example. **Fixed** (all three → 5); a repo-wide sweep confirmed no other stale refs (remaining `4`s are historical 0004 migration-history — correct).
+- **P3 (codex) — "every migration bumps the version" overstated.** `0002_source_progress.sql` is itself version-neutral. **Fixed**: narrowed the rule to "a migration bumps when serve reads/validates its outcome" in `presenter.go`, the 0005 SQL header, the 0004 test comment, and `data-model.md`.
+
+### Round 4 — 2026-05-31 (codex + glm + minimax) on commit `b1c896e` — CONVERGED
+
+**All three CLEAN of P1/P2.** glm + minimax: ready to merge, no actionable findings. codex: no P1/P2; explicitly verified the writer fix, the end_ts/duration validity-gate, the catalog delta, migration 0005 grouping + writer-gate parity, and the v5 bump all correct; confirmed no stale `schema_version=4` refs and the SOW-0027 deferral acceptable. codex's only findings were 2 P3 doc cleanups, both applied:
+- `presenter.md:13` said serve refuses only when `version > supported`; the code (`CheckSchema`, presenter.go:341) rejects ANY mismatch (`!=`) — orchestrator verified against code (P2-1 relies on rejecting the OLDER pre-0005 v4 DB: `4 != 5` → refused). Spec corrected to `!=`.
+- `embed-smoke.sh` comment repeated the "every migration bumps" overstatement → narrowed.
+
+Convergence: logic verified correct by codex across all 4 rounds; every P1/P2 resolved or tracked (SOW-0027); the final round's only findings were doc-accuracy P3s, now fixed. No round 5 — the logic review is exhausted and further P3 doc-nit chasing is diminishing returns.
 
 ## Outcome
 
-Pending.
+Completed. The ingester computes `ops.duration_us = end_ts − start_ts` from the persisted start_ts (not the finalize event Ts); end_ts and duration stay consistent under zero/skew re-finalize; migration 0005 backfills historical rows + catalog `total_duration_us` rollups and bumps `schema_meta.version` to 5 so serve refuses an un-migrated DB; test fixtures are spec-conformant. Merged via PR #31. Unblocks SOW-0006 (Trace event-list duration + Topology `metric=duration`) and SOW-0007 analytics. Follow-up SOW-0027 tracks the post-finalize start_ts-change recompute.
 
 ## Lessons Extracted
 
-Pending. (Provisional: a test fixture that mis-sets an event field can mask a production bug indefinitely; fixtures must be spec-conformant — `Finalized.Ts` is the finalize time, not the start.)
+- A test fixture that mis-sets an event field (`OpFinalizedEvent.Ts == OpStarted.Ts`) can mask a production bug indefinitely: `EndTs − Ts` coincidentally equalled the real duration only because Ts was set wrong. Fixtures must be spec-conformant — `Finalized.Ts` is the finalize time (≈ end), not the start.
+- A "version-neutral" data migration is wrong when serve READS the data it repairs. Serve gates only on `schema_meta.version`, so a data migration that corrects served values must bump the version (else serve hands out stale data). Rule: bump when serve depends on the migration's outcome; ingester-only migrations serve never reads (e.g. 0002 source_progress) stay version-neutral.
+- codex remains the decisive reviewer: it found a real P2 in EACH of rounds 1-3 that glm + minimax missed while calling the change "ready to merge". Never merge on reviewer convergence; adjudicate every codex finding against code (here: verified `CheckSchema` is `!=`, confirming the v5 bump actually rejects the older pre-0005 DB).
+- Bumping a schema version is a cross-cutting spec change: sweep ALL examples (rest-api.md / observability.md / data-model.md health + schema_meta samples) and comments, not just the migration-history entry.
 
 ## Followup
 
