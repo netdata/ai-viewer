@@ -132,11 +132,14 @@ func (p *Presenter) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // statsTotals aggregates the session-level rollup columns over the
-// filtered set. duration_us sums (end_ts - start_ts) for sessions whose
-// end_ts is known. where is the parameterized filter fragment from
-// sessionFilter.whereClause: static SQL + ?-placeholders, values bound
-// via args (no interpolation). gosec G201 cannot trace that; same
-// rationale and suppression style as internal/ingest/aggregates.go.
+// filtered set. The DurationUS total is the summed SESSION wall-clock span
+// (each session's end_ts − start_ts, counted only when end_ts is known) — a
+// session-level measure, distinct from and NOT a sum of ops.duration_us (the
+// per-op end_ts − start_ts the catalog rollups use). where is the
+// parameterized filter fragment from sessionFilter.whereClause: static SQL +
+// ?-placeholders, values bound via args (no interpolation). gosec G201 cannot
+// trace that; same rationale and suppression style as
+// internal/ingest/aggregates.go.
 func (p *Presenter) statsTotals(ctx context.Context, where string, args []any, out *statsTotals) error {
 	q := `
 SELECT

@@ -57,20 +57,23 @@ mkdir -p "$emptysrc"
 # Seed a schema'd DB: ai-viewer-serve refuses to start unless the store carries
 # the expected schema_meta.version (CheckSchema at startup). The ingester runs
 # all migrations synchronously inside OpenWriter and logs each "migration
-# applied" before it does anything else; the last migration (0004_notify.sql)
-# sets the version this binary expects. Poll for that line — it is emitted on a
-# fresh DB regardless of source discovery, so we never kill the process
-# mid-migration (a bare file-exists check is race-prone: OpenWriter creates the
-# file before migrations finish). An explicit --source on an empty dir bypasses
-# auto-discovery, so the seed never scans a developer's real ~/.ai-agent on a
-# local run. Info level so the migration lines are emitted.
+# applied" before it does anything else; the last migration
+# (0005_op_duration_backfill.sql) sets the version this binary expects (the
+# latest serve-relevant migration sets it; 0005 is the latest). Poll for that line — it is
+# emitted on a fresh DB regardless of source discovery, so we never kill the
+# process mid-migration (a bare file-exists check is race-prone: OpenWriter
+# creates the file before migrations finish), and proceeding only after the
+# last migration guarantees serve's version gate is satisfied. An explicit
+# --source on an empty dir bypasses auto-discovery, so the seed never scans a
+# developer's real ~/.ai-agent on a local run. Info level so the migration
+# lines are emitted.
 echo -e "${GRAY}seeding schema'd DB at${NC} $db" >&2
 "$INGEST_BIN" --db "$db" --state-dir "$tmp" --log-level info \
   --source "aiagent_v3:$emptysrc" > "$tmp/ingest.log" 2>&1 &
 ing_pid=$!
 seeded=0
 for _ in $(seq 1 100); do
-  if grep -q '0004_notify.sql' "$tmp/ingest.log"; then
+  if grep -q '0005_op_duration_backfill.sql' "$tmp/ingest.log"; then
     seeded=1; break
   fi
   # Bail early if the ingester died before migrations completed.

@@ -150,7 +150,9 @@ func TestCatalog_MetaRewriteNoDoubleCount(t *testing.T) {
 		Kind: canonical.OpLLM, Name: "claude-opus-4", Provider: "anthropic", Model: "claude-opus-4",
 	})
 	apply(canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		// Finalized.Ts == EndTs (the op END): spec-conformant, a finalize sorts
+		// after its OpStarted (Ts 1100) so its own Ts is the end, not the start.
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1200},
 		SessionNativeID: "c", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: 1200,
 		TokensIn: 30, TokensOut: 8, CostUSD: 0.5,
 	})
