@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: drafted 2026-05-26 for later operator approval. Prerequisite: SOW-0001 must be in `done/` (canonical schema + REST + catalog tables) AND at least one adapter that produces cost/token data is shipping into the store (any of v3/v2/claude-code/codex/opencode is sufficient — v3 and v2 from SOW-0001 cover this baseline). Cross-format coverage strengthens but is not gating.
+Sub-state: activated 2026-06-01 on branch `sow-0007-statistics-and-analytics`. Prerequisites met — SOW-0001 + the five adapters are in `done/` (canonical schema + REST + catalog tables; v3/v2/claude-code/codex/opencode all ship cost/token data into the store), and SOW-0006 (the viz surface that consumes analytics) is merged. Operator sign-off granted (blanket Phase-2 backlog mandate + explicit "proceed", 2026-06-01). Implementing per the 13-chunk plan in the Pre-Implementation Gate; Chunk 1 (spec deltas) lands first.
 
 ## Requirements
 
@@ -88,7 +88,7 @@ Risks:
 
 ## Pre-Implementation Gate
 
-Status: blocked (pending operator sign-off + SOW-0001 in `done/`)
+Status: SATISFIED (2026-06-01) — SOW-0001 in `done/`; operator sign-off granted (blanket Phase-2 backlog mandate + explicit "proceed"). No blocking open decisions (Stats page = own `/stats` route, per Open Decisions). Cleared to implement; Chunk 1 (spec deltas) lands first.
 
 Problem / root-cause model:
 
