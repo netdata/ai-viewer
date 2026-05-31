@@ -10,10 +10,11 @@ import { Agents } from './pages/Agents';
 import { NotFound } from './pages/NotFound';
 
 // Route table. Every route nests under Layout (header + global FilterBar +
-// content outlet). Phase-1 routes (/, /sessions/:id, /sources) are real; the
-// Phase-2/3 routes (/topology, /tools, /models, /agents) render placeholders.
-// The router PROVIDER lives in main.tsx so this <Routes> tree can be mounted
-// under a MemoryRouter in tests.
+// content outlet). Real routes: /, /sessions/:id, /sources, and /topology (the
+// shipped cross-session topology page). The remaining Phase-3 analytics routes
+// (/tools, /models, /agents) still render ComingSoon placeholders. The router
+// PROVIDER lives in main.tsx so this <Routes> tree can be mounted under a
+// MemoryRouter in tests.
 export function App() {
   return (
     <Routes>

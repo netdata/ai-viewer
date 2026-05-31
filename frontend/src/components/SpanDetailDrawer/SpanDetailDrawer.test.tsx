@@ -189,6 +189,40 @@ describe('SpanDetailDrawer', () => {
     expect(within(dialog).queryByText('0')).not.toBeInTheDocument();
   });
 
+  it('shows an em dash (never "0µs") for a point-event span (duration_us null) and a real duration for a closed one', () => {
+    // A point event (end_ts === start_ts) carries a null derived duration: the
+    // drawer must render "—", never a fabricated "0µs"/"0".
+    const { rerender } = render(
+      <SpanDetailDrawer
+        detail={spanDetail({ id: 'pt', name: 'instant', start_ts: 500, end_ts: 500, duration_us: null })}
+        onClose={vi.fn()}
+      />,
+    );
+    let dialog = screen.getByRole('dialog');
+    expect(within(dialog).queryByText('0µs')).not.toBeInTheDocument();
+    const durationField = within(dialog).getByText('Duration').closest('div');
+    expect(durationField).not.toBeNull();
+    expect(within(durationField as HTMLElement).getByText('—')).toBeInTheDocument();
+
+    // A strictly-closed span still shows its real formatted duration.
+    rerender(<SpanDetailDrawer detail={spanDetail()} onClose={vi.fn()} />);
+    dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('250ms')).toBeInTheDocument();
+  });
+
+  it('shows an em dash (never "0µs") for a point-event op (duration_us null) in the op variant', () => {
+    // A point-event op in the Trace tab has duration_us === null. The op drawer
+    // must render the Duration field as "—", never a fabricated "0µs".
+    render(
+      <SpanDetailDrawer detail={opDetail({ duration_us: null, end_ts: null })} onClose={vi.fn()} />,
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).queryByText('0µs')).not.toBeInTheDocument();
+    const durationField = within(dialog).getByText('Duration').closest('div');
+    expect(durationField).not.toBeNull();
+    expect(within(durationField as HTMLElement).getByText('—')).toBeInTheDocument();
+  });
+
   it('shows a derived duration for a closed span and an em dash for a running one', () => {
     const { rerender } = render(<SpanDetailDrawer detail={spanDetail()} onClose={vi.fn()} />);
     expect(within(screen.getByRole('dialog')).getByText('250ms')).toBeInTheDocument();

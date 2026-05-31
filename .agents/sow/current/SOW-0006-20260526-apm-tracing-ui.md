@@ -295,6 +295,26 @@ Verdict: NOT mergeable on the 2 P2 + the 2 no-silent-failure items; fix in-line,
 - **Gates (orchestrator-run, combined final state):** tsc 0, eslint 0, vitest **531 pass (41 files)**, build main chunk **132.02 KB gzipped** (≤500), `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
 - Next: re-review (Round 5, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
 
+### Round 5 — 2026-06-01 (codex + glm + minimax) on `9e289ff`
+
+glm + minimax = "ready to merge" (no new findings; SOW-0033/0034 deferrals reasonable). codex (decisive) CONFIRMED all R4 fixes correct + complete (drawer source-aware, Canvas lane identity + labels + fallback, compaction full-height hit-test, `buildOpTree` cycle hoist, `forceWorker` fallback) AND all prior rounds still holding, but found 1 P2 + 2 P3 — all verified real:
+
+- **P2 (codex): the drawer still fabricated a `0µs` MEASURED duration for a point event.** `TimelineTab.spanDurationUs` used `end_ts >= start_ts`, so a point event (`end_ts == start_ts`) returned `0` (not `null`) → the drawer rendered `formatDuration(0)` = "0µs", implying a measured zero-duration the source never recorded (violates the source-aware rule, decision #7). **VERIFIED.**
+- **P3 (codex): doc/spec drift** — `docs/runbook.md`, `frontend-architecture.md`, `README.md`, `ui-pages.md:187`, `presenter.md`, `App.tsx`, `types.ts` still described Trace/Topology/Timeline (and the `/api/sessions/:id/{topology,timeline}` endpoints) as Phase-2 placeholders / "ComingSoon" / "not yet implemented" — contradicting the shipped UI. SOW-0006 cannot honestly close with that drift. **VERIFIED.**
+- **P3 (codex): `types.ts` topology-metric comment** conflated an ABSENT `?metric=` (defaults to `duration`) with an UNKNOWN value (rejected `BAD_REQUEST`). **VERIFIED.**
+- **CI gosec blocker (orchestrator-found, not a reviewer):** CI installs `gosec@latest`; gosec v2.26.1 added the **G701** taint rule + re-attributed **G202** to the cross-session query concat (`topology_cross.go:173-183`); the existing `#nosec G201 G202` covered neither → the `lint` CI job failed. The query is injection-safe (enum `crossSizeExpr` + static `whereClause` + `?`-bound `args`) — a conservative false positive.
+
+Verdict: NOT mergeable on the P2 + the CI gosec block; fix both + the 2 P3.
+
+### Round-5 fix cycle — 2026-06-01
+
+- **P2 (point-event `0µs`):** `spanDurationUs` now uses `> start_ts` (a point event → `null`, no duration); `formatDuration(null)` already renders "—", so the drawer (both `SpanBody` and `OpBody`) shows "—", never "0µs". +3 tests.
+- **P3 doc/spec drift:** swept `docs/` + `.agents/sow/specs/` + `README.md` + `App.tsx` + `types.ts` — every stale "Phase-2 placeholder / ComingSoon / not-yet-implemented" reference to the shipped Trace/Topology/Timeline tabs, the cross-session `/topology` page, and the `/api/sessions/:id/{topology,timeline}` endpoints updated to reflect reality. (Legit unrelated placeholders kept: SQL `?` placeholders, PII tokens, the sessions-list-fade Phase-2, opencode Phase-2, the still-future `/tools|/models|/agents` ComingSoon tabs.)
+- **P3 metric comment:** `types.ts` now distinguishes absent (→ `duration`) vs unknown (→ `BAD_REQUEST`).
+- **CI gosec:** `topology_cross.go` `#nosec` now covers `G202` (the concat statement) + `G201 G202 G701` (the `QueryContext` sink) with a justification — `gosec -severity medium -confidence medium` reports **0 issues** (presenter + whole-repo); query logic unchanged. **CI hardening:** pinned `gosec@latest` → `gosec@v2.26.1` in `.github/workflows/ci.yml` so a future gosec release cannot silently break CI (Dependabot can bump it via a reviewed PR).
+- **Gates:** tsc 0, eslint 0, vitest **534 pass (41 files)**, build main chunk ≤500 KB gz, `go vet` + `go build` + `gosec` (0) + `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
+- Next: re-review (Round 6, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
+
 ## Outcome
 
 Pending.

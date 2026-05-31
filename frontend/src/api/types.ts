@@ -206,8 +206,10 @@ export interface SessionDetailResponse {
 
 /**
  * The ?metric= selector for the topology node size (presenter
- * session_topology.go topologyMetric; default `duration`). Closed set on the
- * server; an absent/unknown value defaults to duration server-side.
+ * session_topology.go parseTopologyMetric; default `duration`). Closed set on
+ * the server: an ABSENT or empty value defaults to `duration`; an
+ * UNKNOWN/invalid value is rejected with BAD_REQUEST (rest-api.md §GET
+ * /api/sessions/:id/topology) — it does NOT silently fall back to duration.
  */
 export type TopologyMetric = 'cost' | 'tokens' | 'duration' | 'calls' | 'ctx_pct';
 

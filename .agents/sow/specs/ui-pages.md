@@ -184,7 +184,8 @@ read this to know the current contract without re-reading the code.
   severity set is local tab state; selecting none = all severities (an empty
   `severity` set omits the param, per the present-but-empty rule in
   `rest-api.md`). Distinct loading / error / empty states.
-- **Trace / Topology / Timeline tabs**: `ComingSoon` (Phase 2).
+- **Trace / Topology / Timeline tabs**: shipped (SOW-0006) — see the tab
+  contract above (items 2-4) and the shared span-detail drawer.
 - Live: `useLiveUpdates({ session_id: id })` invalidates `['session', id]` on
   `session_changed`, so the open session refreshes in place.
 

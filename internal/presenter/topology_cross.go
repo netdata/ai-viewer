@@ -176,11 +176,11 @@ SELECT s.id, IFNULL(s.parent_session_id, ''), IFNULL(s.agent_name, ''), s.kind, 
        CASE WHEN s.op_count > 0 THEN CAST(s.failure_count AS REAL) / s.op_count ELSE 0 END AS failure_ratio
 FROM sessions s WHERE ` + where + `
 ORDER BY size_metric DESC, s.id ASC
-LIMIT ?`
+LIMIT ?` // #nosec G202 -- sizeExpr is a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
 	limit := maxTopologyNodes
 	args = append(args, limit+1)
 
-	rows, err := p.db.QueryContext(ctx, query, args...) // #nosec G201 G202 -- query is static SQL + crossSizeExpr (fixed enum switch) + ?-placeholders; values bound via args
+	rows, err := p.db.QueryContext(ctx, query, args...) // #nosec G201 G202 G701 -- sizeExpr is a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
 	if err != nil {
 		return nil, false, err
 	}

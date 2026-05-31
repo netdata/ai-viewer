@@ -57,24 +57,27 @@ frontend/
 │   │   ├── Tabs/
 │   │   ├── LogRow/
 │   │   ├── LoadMore/
-│   │   ├── ComingSoon/          # Phase-2 placeholder panel
+│   │   ├── ComingSoon/          # placeholder panel — now only backs the
+│   │   │                        #   still-future /tools, /models, /agents
 │   │   └── ThemeToggle/
 │   ├── pages/
 │   │   ├── SessionsList/
-│   │   ├── SessionDetail/       # OverviewTab/ + LogsTab/ (Trace/Topology/
-│   │   │   ├── OverviewTab/     #   Timeline tabs are Phase 2, rendered inline
-│   │   │   └── LogsTab/         #   as ComingSoon placeholders)
+│   │   ├── SessionDetail/       # OverviewTab/ + TraceTab/ + TopologyTab/ +
+│   │   │   ├── OverviewTab/     #   TimelineTab/ + LogsTab/ — Trace/Topology/
+│   │   │   └── LogsTab/         #   Timeline tabs SHIPPED (SOW-0006)
 │   │   ├── Sources/
 │   │   ├── NotFound.tsx
-│   │   ├── Topology/            # cross-session — Phase 2 (ComingSoon)
-│   │   ├── Tools/               # Phase 2 (ComingSoon)
-│   │   ├── Models/              # Phase 2 (ComingSoon)
-│   │   └── Agents/              # Phase 2 (ComingSoon)
+│   │   ├── Topology/            # cross-session actor graph — SHIPPED (SOW-0006)
+│   │   ├── Tools/               # Phase 3 (ComingSoon)
+│   │   ├── Models/              # Phase 3 (ComingSoon)
+│   │   └── Agents/              # Phase 3 (ComingSoon)
 │   ├── lib/
 │   │   ├── format.ts            # ts/duration/bytes/cost formatters
 │   │   └── tree.ts              # session tree helpers
 │   ├── test/                    # vitest setup (setup.ts, matchMedia.ts)
-│   └── viz/                     # D3 renderers — Phase 2 (empty in Phase 1)
+│   └── viz/                     # D3 renderers — populated (SOW-0006): trace/
+│       │                        #   topology/timeline/color/spanFade/
+│       │                        #   zoomInteraction/forceWorker
 ├── public/                      # static assets (favicon)
 └── tests/                       # Playwright E2E specs
 ```

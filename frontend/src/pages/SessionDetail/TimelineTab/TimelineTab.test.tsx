@@ -133,6 +133,51 @@ describe('TimelineTab', () => {
     expect(dialog).toHaveAccessibleName(/Bash/i);
   });
 
+  it('shows an em dash (never "0µs") for a point-event span (end_ts === start_ts) and a real duration for a closed one', async () => {
+    // A point event (end_ts === start_ts) has NO measured duration (ui-pages.md
+    // §Trace/Timeline): the derived duration must be null, so the drawer renders
+    // "—", never a fabricated "0µs". A strictly-closed span (end_ts > start_ts)
+    // still shows its real formatted duration.
+    const user = userEvent.setup();
+    timelineSpy.mockReturnValue(
+      result({
+        data: {
+          lanes: [
+            {
+              key: 'session:root',
+              label: 'root',
+              spans: [
+                // Point event: no duration. Must render "—" in the drawer.
+                { id: 'point-1', kind: 'llm', name: 'instant', start_ts: 500, end_ts: 500, status: 'completed' },
+                // Closed span (400µs wide): a real duration.
+                { id: 'closed-1', kind: 'tool', name: 'measured', start_ts: 100, end_ts: 500, status: 'completed' },
+              ],
+            },
+          ],
+          t_start: 100,
+          t_end: 500,
+        },
+      }),
+    );
+    render(<TimelineTab sessionId="s1" />);
+    const track = screen.getByRole('group', { name: /session timeline/i });
+
+    // Point event → "—", never "0µs".
+    await user.click(within(track).getByRole('button', { name: /instant/i }));
+    let dialog = screen.getByRole('dialog');
+    expect(within(dialog).queryByText('0µs')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('0')).not.toBeInTheDocument();
+    const pointDuration = within(dialog).getByText('Duration').closest('div');
+    expect(pointDuration).not.toBeNull();
+    expect(within(pointDuration as HTMLElement).getByText('—')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+
+    // Closed span → its real duration (400µs).
+    await user.click(within(track).getByRole('button', { name: /measured/i }));
+    dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('400µs')).toBeInTheDocument();
+  });
+
   it('passes the span variant: the drawer shows lane/span fields only and never fabricates op metrics as zero', async () => {
     // A timeline span carries no op metrics, so the drawer must NOT print
     // $0.00 / 0 tokens / "No payloads" (ui-pages.md §Span detail drawer); it

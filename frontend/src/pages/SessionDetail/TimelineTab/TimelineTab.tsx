@@ -28,11 +28,14 @@ const AXIS_HEIGHT = 22; // mirrors TimelineRenderer's reserved axis band.
 const MIN_TRACK_HEIGHT = 220;
 
 /**
- * spanDurationUs derives a closed span's real duration from its own start/end;
- * a running/point span (null end, or end < start under skew) has no duration.
+ * spanDurationUs derives a closed span's real duration from its own start/end.
+ * Only a STRICTLY-closed span (end_ts > start_ts) has a measured duration; a
+ * running span (null end), a point event (end_ts === start_ts), or a skewed one
+ * (end_ts < start_ts) has none — so the drawer renders "—", never a fabricated
+ * "0µs" (ui-pages.md §Trace/Timeline: a point event must not imply a duration).
  */
 function spanDurationUs(span: PositionedSpan['span']): number | null {
-  return span.end_ts !== null && span.end_ts >= span.start_ts ? span.end_ts - span.start_ts : null;
+  return span.end_ts !== null && span.end_ts > span.start_ts ? span.end_ts - span.start_ts : null;
 }
 
 export function TimelineTab({ sessionId }: { sessionId: string }) {
