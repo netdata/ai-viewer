@@ -417,15 +417,19 @@ Migration history:
   notify channel; see §notify) and bumps `schema_meta.version` to `'4'`.
   `presenter.SchemaVersion` moves to `4` in the same change so serve refuses
   to start against an older DB.
-- `0005_op_duration_backfill.sql` — DATA-ONLY (no table/column/index change):
-  backfills `ops.duration_us = end_ts - start_ts` for historical rows and
-  recomputes `catalog_models` / `catalog_tools.total_duration_us` from the
-  corrected per-op values (SOW-0026 — fixing the bug where duration was computed
-  from the finalize event's `Ts` and persisted as `0`). It intentionally does
-  NOT bump `schema_meta.version` (stays `'4'`): the runner tracks applied files
-  in `_schema_migrations` by filename, so a data-only migration leaves the
-  operator-facing schema-shape version — and `presenter.SchemaVersion` — at `4`.
-  Only schema-SHAPE migrations move the version marker in lockstep with the binary.
+- `0005_op_duration_backfill.sql` — backfills `ops.duration_us = end_ts - start_ts`
+  for historical rows and recomputes `catalog_models` / `catalog_tools.total_duration_us`
+  from the corrected per-op values (SOW-0026 — fixing the bug where duration was
+  computed from the finalize event's `Ts` and persisted as `0`), and bumps
+  `schema_meta.version` to `'5'` in lockstep with `presenter.SchemaVersion`. It
+  changes only row DATA (no table/column/index change), but it bumps the version
+  anyway: `ai-viewer-serve` runs no migrations and gates startup solely on
+  `schema_meta.version` (`CheckSchema`, exact-equality), so a v5 serve binary
+  refuses to start against a pre-0005 store still reading `'4'` — it therefore
+  never serves the stale `duration_us = 0` rows this migration repairs. (The runner
+  still tracks applied files in `_schema_migrations` by filename, so 0005 runs once;
+  the version bump is the serve-side compatibility gate.) Every migration bumps the
+  version with the binary — there is no version-neutral / data-only special case.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB

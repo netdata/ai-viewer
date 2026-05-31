@@ -16,11 +16,12 @@ import (
 // can fetch the REAL embedded 0005 SQL via loadMigrations() and execute that
 // exact statement — not a copy — against a seeded pre-fix DB.
 //
-// Migration 0005 is deliberately schema-version-NEUTRAL: it changes only row
-// data, not the schema shape, so it must NOT bump schema_meta.version (the
-// serve binary's presenter.SchemaVersion is still 4 and CheckSchema is an
-// exact-equality gate — a bump would refuse to start a v4 binary). The
-// version-stays-4 assertion below pins that contract.
+// Migration 0005 bumps schema_meta.version to '5' in lockstep with
+// presenter.SchemaVersion. ai-viewer-serve runs no migrations and gates startup
+// solely on schema_meta.version (CheckSchema, exact-equality), so the bump is
+// what makes a v5 serve binary refuse a pre-0005 store rather than serve its
+// stale duration_us=0 rows. The version-is-5 assertion below pins that
+// contract.
 
 const migration0005Name = "0005_op_duration_backfill.sql"
 
@@ -160,10 +161,11 @@ func TestMigration0005_BackfillsOpDurationAndCatalogTotals(t *testing.T) {
 	}
 }
 
-// TestMigration0005_LeavesSchemaVersionAt4 pins the schema-version-neutral
-// contract: 0005 is a data backfill, so schema_meta.version stays '4'. A bump
-// would make a v4-built serve binary refuse to start (CheckSchema exact match).
-func TestMigration0005_LeavesSchemaVersionAt4(t *testing.T) {
+// TestMigration0005_BumpsSchemaVersionTo5 pins the lockstep contract: after
+// 0005 runs, schema_meta.version is '5' (matching presenter.SchemaVersion). The
+// bump is what makes a v5 serve binary refuse a pre-0005 store (CheckSchema
+// exact match) rather than serve its stale duration_us=0 rows.
+func TestMigration0005_BumpsSchemaVersionTo5(t *testing.T) {
 	t.Parallel()
 	db := openMigratedSQLite(t)
 	var version string
@@ -171,8 +173,8 @@ func TestMigration0005_LeavesSchemaVersionAt4(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "4" {
-		t.Fatalf("schema_meta.version = %q, want %q (0005 is data-only, must not bump)", version, "4")
+	if version != "5" {
+		t.Fatalf("schema_meta.version = %q, want %q (0005 bumps the version in lockstep)", version, "5")
 	}
 }
 
@@ -206,8 +208,11 @@ VALUES ('op-skew','turn','sess',2,'llm','message',5000,4000,0,'completed')`); er
 	if got := scanNullInt64Internal(t, db, `SELECT duration_us FROM ops WHERE id='op-null-end'`); got.Valid {
 		t.Errorf("null-end op duration_us = %d, want NULL (no end_ts ⇒ no duration)", got.Int64)
 	}
-	if got := scanNullInt64Internal(t, db, `SELECT duration_us FROM ops WHERE id='op-skew'`); got.Valid && got.Int64 < 0 {
-		t.Errorf("skew op duration_us = %d, want untouched (no negative duration)", got.Int64)
+	// The skew op was seeded with duration_us=0 and end_ts < start_ts, so the
+	// WHERE guard (end_ts >= start_ts) excludes it: it must remain EXACTLY 0,
+	// not merely non-negative — assert the exact untouched value.
+	if got := scanNullInt64Internal(t, db, `SELECT duration_us FROM ops WHERE id='op-skew'`); !got.Valid || got.Int64 != 0 {
+		t.Errorf("skew op duration_us = %+v, want valid 0 (untouched; end_ts<start_ts excluded by guard)", got)
 	}
 }
 

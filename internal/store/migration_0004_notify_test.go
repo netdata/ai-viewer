@@ -7,10 +7,12 @@ import (
 )
 
 // TestMigration0004_AppliesAndBumpsVersion asserts migration 0004 lands
-// the notify change-log table and bumps schema_meta.version to '4' on a
-// fresh DB. The version marker moves in lockstep with
-// presenter.SchemaVersion (the serve binary refuses to start on
-// mismatch). Source of truth: .agents/sow/specs/data-model.md §notify.
+// the notify change-log table (asserted by the shape/autoincrement tests
+// below) and that the schema marker advances with the migration chain.
+// openInMemory runs the FULL chain through 0005, so the on-disk
+// schema_meta.version is '5' (every migration bumps it in lockstep with
+// presenter.SchemaVersion; the serve binary refuses to start on mismatch).
+// Source of truth: .agents/sow/specs/data-model.md §notify.
 func TestMigration0004_AppliesAndBumpsVersion(t *testing.T) {
 	t.Parallel()
 
@@ -21,8 +23,8 @@ func TestMigration0004_AppliesAndBumpsVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "4" {
-		t.Fatalf("schema_meta.version: want %q, got %q", "4", version)
+	if version != "5" {
+		t.Fatalf("schema_meta.version: want %q, got %q", "5", version)
 	}
 }
 

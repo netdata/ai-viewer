@@ -1,4 +1,4 @@
--- ai-viewer schema migration 0005: op-duration backfill (data-only).
+-- ai-viewer schema migration 0005: op-duration backfill.
 -- Source of truth: .agents/sow/specs/data-model.md §ops.duration_us and
 -- §catalog_models / §catalog_tools (total_duration_us).
 --
@@ -12,22 +12,27 @@
 -- writer fix derives duration from the persisted start_ts (the OpStarted's Ts)
 -- for all NEW finalizes; this migration repairs the historical rows + rollups.
 --
--- SCHEMA-VERSION-NEUTRAL: this migration changes only row DATA — no table,
--- column, or index is added or altered. The serve binary's
--- presenter.SchemaVersion stays 4 and CheckSchema is an exact-equality gate,
--- so bumping schema_meta.version here would make a v4-built serve binary
--- refuse to start against a freshly-migrated store. It is therefore the FIRST
--- migration that intentionally does NOT touch schema_meta.version. The marker
--- moves only when the schema SHAPE changes.
+-- This migration bumps schema_meta.version to '5' in lockstep with
+-- presenter.SchemaVersion. ai-viewer-serve runs NO migrations and gates startup
+-- solely on schema_meta.version (CheckSchema, an exact-equality match), so a
+-- pre-0005 store still reads '4' and a v5 serve binary refuses to start against
+-- it — preventing serve from handing out the stale duration_us = 0 rows this
+-- migration repairs. Every migration bumps the version together with the const;
+-- there is no version-neutral / data-only special case.
 
 -- 1) Backfill the per-op duration from the authoritative start/end timestamps.
--- Guards: only rows with both timestamps present and end_ts >= start_ts are
--- touched, so still-running ops (end_ts NULL) keep NULL and clock-skewed rows
--- (end_ts < start_ts) are left as-is rather than written negative.
+-- Guards mirror the writer's finalize gate (writer.go:
+-- ev.EndTs > 0 && startTs.Int64 > 0 && ev.EndTs >= startTs.Int64) exactly: only
+-- rows with both timestamps present, both strictly positive, and end_ts >=
+-- start_ts are touched. Still-running ops (end_ts NULL) keep NULL, sentinel/zero
+-- timestamps are skipped, and clock-skewed rows (end_ts < start_ts) are left
+-- as-is rather than written negative.
 UPDATE ops
 SET duration_us = end_ts - start_ts
 WHERE start_ts IS NOT NULL
   AND end_ts IS NOT NULL
+  AND start_ts > 0
+  AND end_ts > 0
   AND end_ts >= start_ts;
 
 -- 2) Recompute catalog_models.total_duration_us as the SUM of the corrected
@@ -69,3 +74,7 @@ SET total_duration_us = COALESCE((
       AND o.name = catalog_tools.name
       AND o.duration_us IS NOT NULL
 ), 0);
+
+-- 4) Bump the operator-facing schema marker in lockstep with
+-- presenter.SchemaVersion (the server refuses to start on mismatch).
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '5');
