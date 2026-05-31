@@ -10,12 +10,13 @@ Sub-state: proposed follow-up (P2, pre-existing). Discovered 2026-05-31 during S
 
 ### Purpose
 
-Make `ctx_used` mean the same thing across adapters. The canonical contract (`canonical-events.md`, SOW-0029) defines `CtxUsed` as the TOTAL context occupancy = `TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`. claude-code and codex now compute it fully, but two adapters compute a narrower value:
+Make `ctx_used` mean the same thing across adapters. The canonical contract (`canonical-events.md`, SOW-0029) defines `CtxUsed` as the TOTAL context occupancy = `TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`. claude-code and codex now compute it fully, but three adapters compute a narrower value:
 
 - `internal/adapters/aiagent_v3/ops.go:119` — `CtxUsed = acc.TokensIn + acc.TokensCacheRead` (omits cache_write + output).
 - `internal/adapters/opencode/mapper_ops.go` — `CtxUsed = tokens.input + tokens.cache.read` (omits cache_write + output; documented at `adapter-opencode.md:605`).
+- `internal/adapters/aiagent_v2/mapper.go:383` — `CtxUsed = acc.Tokens.InputTokens + ev.TokensCacheRead + acc.Tokens.OutputTokens` (omits cache_write). CONFIRMED outlier (SOW-0029 R3, codex).
 
-So `ctx_used / ctx_max` (the UI's context-window-% metric) is not comparable across sources. This SOW aligns aiagent_v3 + opencode (and audits aiagent_v2) to the canonical 4-term formula, with tests.
+So `ctx_used / ctx_max` (the UI's context-window-% metric) is not comparable across sources. This SOW aligns aiagent_v3 + opencode + aiagent_v2 to the canonical 4-term formula, with tests.
 
 ### User Request
 
@@ -39,7 +40,7 @@ Unknowns:
 
 ### Acceptance Criteria
 
-1. aiagent_v3, opencode (and aiagent_v2 if it diverges) compute `ctx_used = tokens_in + cache_read + cache_write + tokens_out`. **Verification**: per-adapter unit/golden test asserting the 4-term value.
+1. aiagent_v3, opencode, AND aiagent_v2 compute `ctx_used = tokens_in + cache_read + cache_write + tokens_out`. **Verification**: per-adapter unit/golden test asserting the 4-term value.
 2. Overflow-safe where the adapter already clamps (opencode `addClampWarn`). **Verification**: the existing clamp test extended.
 3. Specs reconciled: `adapter-aiagent-v3.md`, `adapter-opencode.md:605`, and the `canonical-events.md` ctx_used note updated to drop the "tracked gap" once aligned. **Verification**: spec-drift sweep.
 

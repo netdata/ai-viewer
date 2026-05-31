@@ -17,7 +17,7 @@ Make the claude-code adapter robust against the shapes real Claude Code transcri
 
 ### User Request
 
-Implied by the project mission ("read source-system snapshots … production-quality, no silent failures") and Costa's standing principle: test against real production artifacts; our code must handle what real systems emit. Surfaced live during the SOW-0006 real-data review.
+Implied by the project mission ("read source-system snapshots … production-quality, no silent failures") and the operator's standing principle: test against real production artifacts; our code must handle what real systems emit. Surfaced live during the SOW-0006 real-data review.
 
 ### Assistant Understanding
 
