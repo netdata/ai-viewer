@@ -571,9 +571,9 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 
 - `Provider` is always `'anthropic'` for `kind='llm'` ops (Claude Code only calls Anthropic).
 - `Model` is taken verbatim from `assistant.message.model` (e.g. `"claude-opus-4-7"`). The `pricing.go` catalog must include this id.
-- `TokensIn` = `usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens` (effective input including cache). The adapter additionally records `extras_json.cacheCreation`, `extras_json.cacheRead`, `extras_json.uncachedInput` so the UI can decompose cost properly.
+- `TokensIn` = `usage.input_tokens` — the FRESH/uncached input ONLY, per the canonical token contract (`canonical-events.md`, SOW-0029). The cache portions are recorded SEPARATELY: `TokensCacheRead` = `cache_read_input_tokens`, `TokensCacheWrite` = `cache_creation_input_tokens`; `extras_json.cacheCreation/cacheRead/uncachedInput` keep the raw decomposition. (Pre-SOW-0029 this folded cache into `TokensIn`, inflating it and double-charging cache in the pricer.)
 - `TokensOut` = `usage.output_tokens`.
-- `CtxUsed` = `TokensIn + TokensOut` (closest available proxy for context window utilization on the LAST turn; per-turn input only loosely tracks the running context).
+- `CtxUsed` = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens` — the TOTAL context occupancy (full input the model held, incl. cache, plus output), per the canonical `CtxUsed` definition (SOW-0029).
 - `CtxMax` = looked up via `catalog_models.ctx_max` (1M for `claude-opus-4-7[1m]`, 200K otherwise per Anthropic docs at time of writing).
 - `CostUSD` = computed from `pricing.go` per `(provider, model, cache tier)`; ai-viewer's pricing table tracks separate $/Mtok for input, output, cache-creation (ephemeral_1h, ephemeral_5m), cache-read.
 

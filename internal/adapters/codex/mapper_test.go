@@ -453,6 +453,56 @@ func TestMapper_TokenRollupCacheIsFresh(t *testing.T) {
 	}
 }
 
+// TestMapper_TokenRollupCacheClamp asserts the fresh-input subtraction matches
+// upstream codex non_cached_input() exactly: cached_input_tokens is clamped to
+// ≥0 BEFORE it is subtracted from input_tokens, and the CLAMPED cached value is
+// what lands in TokensCacheRead. So neither TokensIn nor TokensCacheRead can ever
+// go negative from a malformed token_count (codex-rs/protocol/src/protocol.rs).
+//   - cached<0  → cached treated as 0: TokensIn = input, TokensCacheRead = 0.
+//   - cached>input → fresh clamped to 0: TokensIn = 0, TokensCacheRead = cached.
+func TestMapper_TokenRollupCacheClamp(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name              string
+		input, cached     int
+		wantIn, wantCache int64
+	}{
+		// A negative cached_input_tokens must NOT inflate fresh input via a
+		// double-negative subtraction (100 − (−20) = 120); cached clamps to 0
+		// first, so fresh = input and cache_read = 0.
+		{name: "cached_negative", input: 100, cached: -20, wantIn: 100, wantCache: 0},
+		// cached greater than input drives fresh negative; fresh clamps to 0 and
+		// the (positive) cached is still recorded as cache_read.
+		{name: "cached_exceeds_input", input: 30, cached: 70, wantIn: 0, wantCache: 70},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestMapper("sid")
+			lines := []string{
+				metaLine("sid", `"exec"`),
+				`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}`,
+				`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","started_at":1763664000}}`,
+				`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"token_count","turn_id":"t1","info":{"total_token_usage":{"total_tokens":105},"last_token_usage":{"input_tokens":` + itoa(tc.input) + `,"cached_input_tokens":` + itoa(tc.cached) + `,"output_tokens":5}},"model_context_window":200000}}`,
+				`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","completed_at":"` + tsDone + `"}}`,
+			}
+			tf := turnFinals(runLines(t, m, lines))
+			if len(tf) != 1 {
+				t.Fatalf("turn finalize count = %d, want 1", len(tf))
+			}
+			if tf[0].TokensIn != tc.wantIn {
+				t.Errorf("TokensIn = %d, want %d (max(0, input %d − max(0, cached %d)))", tf[0].TokensIn, tc.wantIn, tc.input, tc.cached)
+			}
+			if tf[0].TokensCacheRead != tc.wantCache {
+				t.Errorf("TokensCacheRead = %d, want %d (max(0, cached %d), never negative)", tf[0].TokensCacheRead, tc.wantCache, tc.cached)
+			}
+			if tf[0].TokensCacheRead < 0 {
+				t.Errorf("TokensCacheRead = %d, must never be negative", tf[0].TokensCacheRead)
+			}
+		})
+	}
+}
+
 // TestMapper_SessionLevelTokenCountAttributedToActiveTurn asserts a token_count
 // with NO turn_id attributes to the most-recently-active turn (spec rule #17,
 // "Token accounting nuance").

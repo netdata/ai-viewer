@@ -132,7 +132,12 @@ type TurnFinalizedEvent struct {
 }
 ```
 
-**Token accounting contract (canonical, SOW-0029).** `TokensIn` is the FRESH/uncached input only; `TokensCacheRead` and `TokensCacheWrite` are the cache portions, counted SEPARATELY. This holds on both `TurnFinalizedEvent` and `OpFinalizedEvent`, and identically across every adapter — ai-agent v2/v3, codex, opencode, and claude-code all map the source's fresh-input field to `TokensIn` and the cache fields to `TokensCacheRead/Write`. The op-level `CtxUsed` is the TOTAL context occupancy (`TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`), not `TokensIn + TokensOut`. The pricer (`internal/pricing`) prices each component at its own rate; folding cache into `TokensIn` would double-charge it, so adapters must not.
+**Token accounting contract (canonical, SOW-0029).** `TokensIn` is the FRESH/uncached input only; `TokensCacheRead` and `TokensCacheWrite` are the cache portions, counted SEPARATELY; total input the model processed = `TokensIn + TokensCacheRead + TokensCacheWrite`. This SEMANTIC definition is uniform across adapters — ai-agent v2/v3, codex, opencode, claude-code all map the source's fresh-input field (not the total) to `TokensIn`, and the cache fields to `TokensCacheRead/Write` — so the pricer (`internal/pricing`, which prices each component at its own rate) never double-charges cache and `tokens_in` is comparable across sources.
+
+Two known, tracked gaps (NOT yet uniform):
+
+- **`CtxUsed` completeness.** `CtxUsed` is INTENDED as the total context occupancy (`TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`). claude-code and codex compute it fully; aiagent_v3 and opencode currently omit components (cache_write / output) — a pre-existing inconsistency tracked for alignment (**SOW-0031**).
+- **Token persistence is OP-rollup.** The ingester rolls turn/session token totals from OP rows (`internal/ingest/aggregates.go` SUMs `ops.tokens_in`), so an adapter's token data only reaches stored totals + pricing if it sets tokens on its `OpFinalizedEvent`s. claude-code does. codex currently sets them only on `TurnFinalizedEvent`, so codex token/cost totals do not yet persist — tracked (**SOW-0030**).
 
 **Turn `running` status**: emitted by adapters that observe a mid-turn checkpoint (e.g. ai-agent v3 can write a `turn_end` record with `status='running'` before the turn truly ends — rare; not observed in committed real data but supported by the producer). The ingester transitions `running` → terminal (`'completed' | 'failed' | 'aborted'`) when the final `turn_end` (or equivalent) arrives. UIs should treat `running` as "in progress" rather than terminal.
 

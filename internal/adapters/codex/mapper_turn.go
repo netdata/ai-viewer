@@ -379,15 +379,22 @@ func (ts *turnState) addTokenUsage(info tokenCountInfo) {
 	// prompt (cached + uncached) — non_cached_input() = input_tokens −
 	// cached_input_tokens (codex-rs protocol.rs). Subtract the cached portion so
 	// TokensIn is fresh and the pricer (which charges cache_read separately) does
-	// not double-charge the cached tokens. Clamp at 0 defensively in case a
-	// malformed event reports cached > input.
-	fresh := info.last.InputTokens - info.last.CachedInputTokens
+	// not double-charge the cached tokens. Mirror non_cached_input() exactly:
+	// clamp cached to ≥0 BEFORE subtracting (so a malformed negative cached cannot
+	// inflate fresh via a double-negative), then clamp fresh to ≥0 (cached > input).
+	// The CLAMPED cached value is what feeds TokensCacheRead, so neither field can
+	// go negative.
+	cached := info.last.CachedInputTokens
+	if cached < 0 {
+		cached = 0
+	}
+	fresh := info.last.InputTokens - cached
 	if fresh < 0 {
 		fresh = 0
 	}
 	ts.tokensIn += fresh
 	ts.tokensOut += info.last.OutputTokens
-	ts.tokensCacheRead += info.last.CachedInputTokens
+	ts.tokensCacheRead += cached
 	ts.tokensCacheWrite += info.last.CacheCreationInputTokens
 	if info.total.TotalTokens > 0 {
 		ts.lastLLMCtxUsed = info.total.TotalTokens

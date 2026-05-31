@@ -109,7 +109,17 @@ Pending.
 
 ## Reviews
 
-Pending.
+### Round 1 — 2026-05-31 (codex + glm + minimax) on commit `249ce2a`
+
+No P1 in the core change; claude-code fix confirmed correct + EFFECTIVE; pricer no longer double-counts; cache UI + hit-rate correct; goldens intended-only. Findings, each adjudicated against code:
+
+- **P1 (codex, decisive — glm/minimax missed it): codex token/cost totals don't persist.** codex sets tokens only on `TurnFinalizedEvent` (`mapper_turn.go:252`); the ingester rolls turn/session tokens from OP rows (`aggregates.go:43`), and codex ops carry no tokens → codex sessions show 0 tokens/cost. Verified by code. **PRE-EXISTING** (predates SOW-0029); my codex `tokens_in`=fresh fix is correct-but-moot until persistence lands (it broke nothing — codex was already 0 — and future-proofs the semantics). It is an ingester/adapter persistence-architecture decision, NOT token-semantics → **out of SOW-0029 scope; filed SOW-0030.** SOW-0029's codex claim is hereby narrowed: codex's *mapping* is now fresh-correct; codex *persistence* is tracked separately.
+- **P2 (codex clamp order):** clamp `cached` ≥0 BEFORE subtracting (match upstream `non_cached_input()`); accumulate the clamped cached. **Fixed** (`mapper_turn.go` + test `TestMapper_TokenRollupCacheClamp`, RED→GREEN).
+- **P2 (ctx_used over-claim — all three):** my new canonical text claimed all adapters compute the 4-term `ctx_used`; aiagent_v3/opencode omit cache_write+output (pre-existing). **Narrowed** the `canonical-events.md` contract (ctx_used = intended total, tracked gap); **filed SOW-0031** for alignment.
+- **P2 (stale specs):** `adapter-claude-code.md:574/576` still stated the old `tokens_in`/`ctx_used`; `rest-api.md` stats example lacked cache fields. **Fixed** both.
+- **P3 (SessionsList label):** "Tokens in" → "Tokens in (fresh)". **Fixed.**
+
+Post-fix (orchestrator, ground truth): codex pkg `go test -race` green; golangci-lint 0; frontend lint/tsc/vitest green. Round-2 re-review pending (same scope + fix notes).
 
 ## Outcome
 
