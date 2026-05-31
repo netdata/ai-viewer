@@ -315,6 +315,24 @@ Verdict: NOT mergeable on the P2 + the CI gosec block; fix both + the 2 P3.
 - **Gates:** tsc 0, eslint 0, vitest **534 pass (41 files)**, build main chunk ≤500 KB gz, `go vet` + `go build` + `gosec` (0) + `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
 - Next: re-review (Round 6, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
 
+### Round 6 — 2026-06-01 (codex + glm + minimax) on `f6f4e3d`
+
+glm + minimax = "ready to merge" (no NEW findings; glm re-confirmed only the already-filed SOW-0034 item). codex (decisive) CONFIRMED the R5 gosec + metric-comment fixes correct and all prior rounds holding, but found the R5 point-event fix was INCOMPLETE + 2 P3 — all verified real on ground truth:
+
+- **P2 (codex): the R5 `0µs` fix was Timeline-span-only; the TRACE op path still fabricated `0µs`.** Point-event ops are PERSISTED with `duration_us = 0` (NOT null): the ingest writer computes `end_ts - start_ts = 0` when `end_ts == start_ts` (`writer.go:721`). So the Trace drawer OpBody (`SpanDetailDrawer.tsx:240`), the Waterfall aria-label (`:233`), and the FlameGraph label (`:55`) formatted raw `op.duration_us` → "0µs". (EventList already guarded with `isInstantOp`.) The R5 tests used `duration_us: null` — the WRONG shape for a point event — so they missed it. **VERIFIED REAL** (untested-≡-broken: the R5 test exercised a data shape that does not occur in production; lesson recorded — tests must use the real persisted shape).
+- **P3 (codex): `presenter.md` prose** still listed topology/timeline as "still-missing routes" (R5 fixed the route TABLE but not the surrounding prose). **VERIFIED.**
+- **P3 (codex): timeline `end_ts` wire-shape drift** — `session_timeline.go` + `rest-api.md` + `types.ts` comments said a point event emits `end_ts: null`, but the server emits `end_ts == start_ts` for a point event (only a still-running op is null). **VERIFIED.**
+
+Verdict: NOT mergeable on the residual P2; fix it comprehensively + the 2 P3.
+
+### Round-6 fix cycle — 2026-06-01
+
+- **P2 (Trace op `0µs`) — fixed COMPREHENSIVELY (not per-site whack-a-mole):** every per-op duration DISPLAY site now guards with `isInstantOp(op)` — the drawer OpBody Duration → "—"; the Waterfall + FlameGraph labels → "instant" (EventList already did "—"). A full audit of `formatDuration(...)` across TraceTab + the drawer confirmed no other per-op site is unguarded (axis-tick VALUES, the by-turn AGGREGATE rollup, the topology-node metric, and the already-null Timeline `span.duration_us` are correctly left). +3 tests using the REAL persisted point-event shape (`end_ts == start_ts`, `duration_us: 0`), proven red→green.
+- **P3 presenter prose:** updated to record SOW-0006 shipped the per-session topology/timeline + the cross-session `/api/topology`; the still-missing list is now just `catalog`/`payloads`.
+- **P3 timeline wire-shape:** `session_timeline.go` + `rest-api.md` + `types.ts` comments corrected — a still-running op emits `end_ts: null`; a point event emits `end_ts == start_ts`; the client treats `null` OR `<= start_ts` as an instant marker.
+- **Gates:** tsc 0, eslint 0, vitest **537 pass (41 files)**, build main chunk ≤500 KB gz, `go vet` + `go build` + `gosec` (0, presenter + whole-repo) + `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
+- Next: re-review (Round 7, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
+
 ## Outcome
 
 Pending.

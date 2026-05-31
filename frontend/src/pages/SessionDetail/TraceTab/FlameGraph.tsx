@@ -52,7 +52,11 @@ export function FlameGraph({ roots, onSelect, selectedId, useCanvas }: FlameGrap
           const { op } = cell.node;
           const failed = op.error_class !== null;
           const fill = colorForOpKind(op.kind);
-          const label = `${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`;
+          // Source-aware (P2): a point-event/running op (cell.instant) recorded no
+          // measured duration — its label segment reads "instant", never a
+          // fabricated "0µs" (a point op is persisted as duration_us==0).
+          const durLabel = cell.instant ? 'instant' : formatDuration(op.duration_us);
+          const label = `${op.name || op.id} — ${op.kind} — ${durLabel} — ${op.status}`;
           const cls = op.id === selectedId ? styles.barSelected : styles.bar;
           const activate = () => {
             onSelect(cell.node);

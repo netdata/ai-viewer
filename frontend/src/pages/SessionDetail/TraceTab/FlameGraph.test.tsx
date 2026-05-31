@@ -121,6 +121,23 @@ describe('FlameGraph (SVG path)', () => {
     expect(screen.getByRole('button', { name: /point/i }).tagName.toLowerCase()).toBe('line');
   });
 
+  it('does NOT put a fabricated "0µs" in a point-event cell label (REAL shape: end_ts==start_ts, duration_us 0); a measured cell keeps its duration', () => {
+    // GROUND TRUTH: a point-event op is persisted with end_ts === start_ts AND
+    // duration_us === 0 (NOT null — null is the still-running shape). isInstantOp
+    // is true for it, so its accessible name must use "instant", never a
+    // fabricated "0µs"; a measured cell keeps its formatted duration.
+    const { roots: r3, flat: f3 } = treeFrom([
+      op({ id: 'root', kind: 'session', name: 'root-frame', start_ts: 1000, end_ts: 1400, duration_us: 400, parent_op_id: null }),
+      op({ id: 'pt', kind: 'llm', name: 'point', start_ts: 1100, end_ts: 1100, duration_us: 0, parent_op_id: 'root' }),
+    ]);
+    render(<FlameGraph nodes={f3} roots={r3} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const point = screen.getByRole('button', { name: /point/i });
+    expect(point).toHaveAccessibleName(/instant/i);
+    expect(point).not.toHaveAccessibleName(/0µs/);
+    // The measured root cell keeps its real duration in the label.
+    expect(screen.getByRole('button', { name: /root-frame/i })).toHaveAccessibleName(/400µs/);
+  });
+
   it('marks the selected cell with the selected style', () => {
     render(
       <FlameGraph nodes={flat} roots={roots} onSelect={vi.fn()} selectedId="tool" useCanvas={false} />,

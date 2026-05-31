@@ -9,6 +9,7 @@ import {
   formatPct,
   formatTimestamp,
 } from '../../lib/format';
+import { isInstantOp } from '../../viz/trace';
 import styles from './SpanDetailDrawer.module.css';
 
 // Shared right-side span detail drawer (ui-pages.md §Span detail drawer). NOT a
@@ -237,7 +238,14 @@ function OpBody({ op, titleId }: { op: OpDetail; titleId: string }) {
         {op.provider ? <Field label="Provider" value={op.provider} /> : null}
         <Field label="Start" value={formatTimestamp(op.start_ts)} mono />
         <Field label="End" value={formatTimestamp(op.end_ts)} mono />
-        <Field label="Duration" value={formatDuration(op.duration_us)} mono />
+        {/* Source-aware (P2): a point-event op is persisted with end_ts==start_ts
+            AND duration_us==0; isInstantOp is true for it. It recorded NO measured
+            duration, so show "—" (mirrors EventList), never a fabricated "0µs". */}
+        <Field
+          label="Duration"
+          value={isInstantOp(op) ? '—' : formatDuration(op.duration_us)}
+          mono
+        />
         <Field label="Cost" value={formatCost(op.cost_usd)} mono />
         <Field label="Tokens in" value={formatNumber(op.tokens_in)} mono />
         <Field label="Tokens out" value={formatNumber(op.tokens_out)} mono />

@@ -259,9 +259,12 @@ export interface TopologyResponse {
 
 /**
  * One span on a Timeline lane (presenter timelineSpan, session_timeline.go).
- * `end_ts` is NULLABLE: null for a still-running op or a point event (the client
- * draws it as an instant marker, not a bar). `kind==='compaction'` is emitted as
- * an ordinary span; the client keys on the kind to draw a full-height breakpoint.
+ * `end_ts` is NULLABLE, but only a STILL-RUNNING op emits null: the server emits
+ * end_ts whenever the DB has it, so a POINT EVENT emits end_ts == start_ts (NOT
+ * null). The client treats `end_ts === null || end_ts <= start_ts` as an instant
+ * marker (drawn as a tick, not a bar) — covering both shapes. `kind==='compaction'`
+ * is emitted as an ordinary span; the client keys on the kind to draw a
+ * full-height breakpoint.
  */
 export interface TimelineSpan {
   id: string;

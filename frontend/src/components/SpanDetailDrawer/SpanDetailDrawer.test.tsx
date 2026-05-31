@@ -223,6 +223,36 @@ describe('SpanDetailDrawer', () => {
     expect(within(durationField as HTMLElement).getByText('—')).toBeInTheDocument();
   });
 
+  it('shows an em dash (never "0µs") for the REAL persisted point-event op shape (end_ts==start_ts, duration_us 0) in the op variant', () => {
+    // GROUND TRUTH: a point-event op is persisted with end_ts === start_ts AND
+    // duration_us === 0 (the ingest writer computes end_ts - start_ts = 0; it is
+    // NOT null — null is the still-running shape). isInstantOp is true for it
+    // (end_ts <= start_ts), so the op drawer must render Duration as "—", never a
+    // fabricated "0µs". A measured op (end_ts > start_ts, duration_us > 0) still
+    // shows its formatted duration.
+    const { rerender } = render(
+      <SpanDetailDrawer
+        detail={opDetail({ start_ts: 1000, end_ts: 1000, duration_us: 0 })}
+        onClose={vi.fn()}
+      />,
+    );
+    let dialog = screen.getByRole('dialog');
+    expect(within(dialog).queryByText('0µs')).not.toBeInTheDocument();
+    const durationField = within(dialog).getByText('Duration').closest('div');
+    expect(durationField).not.toBeNull();
+    expect(within(durationField as HTMLElement).getByText('—')).toBeInTheDocument();
+
+    // A measured op still shows its real formatted duration (regression guard).
+    rerender(
+      <SpanDetailDrawer
+        detail={opDetail({ start_ts: 1000, end_ts: 1400, duration_us: 400 })}
+        onClose={vi.fn()}
+      />,
+    );
+    dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('400µs')).toBeInTheDocument();
+  });
+
   it('shows a derived duration for a closed span and an em dash for a running one', () => {
     const { rerender } = render(<SpanDetailDrawer detail={spanDetail()} onClose={vi.fn()} />);
     expect(within(screen.getByRole('dialog')).getByText('250ms')).toBeInTheDocument();

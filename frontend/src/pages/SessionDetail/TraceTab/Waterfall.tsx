@@ -230,7 +230,11 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId, boundaries }: InnerPr
                   .filter(Boolean)
                   .join(' ');
                 const fill = colorForOpKind(op.kind);
-                const label = `${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`;
+                // Source-aware (P2): a point-event/running op (row.instant) recorded
+                // no measured duration — its label segment reads "instant", never a
+                // fabricated "0µs" (a point op is persisted as duration_us==0).
+                const durLabel = row.instant ? 'instant' : formatDuration(op.duration_us);
+                const label = `${op.name || op.id} — ${op.kind} — ${durLabel} — ${op.status}`;
                 const activate = () => {
                   onSelect(row.node);
                 };

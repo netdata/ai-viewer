@@ -315,11 +315,13 @@ stacked" model (`ui-pages.md`).
   Each span carries `id` (op id), `kind`, `name`, `start_ts`, `end_ts`, `status`.
   **Compaction is not a separate array**: `kind='compaction'` ops are emitted as
   ordinary spans with `kind:"compaction"`, and the frontend keys on `kind` to draw
-  the full-height vertical breakpoint (`ui-pages.md`). A still-running op or a
-  point event (no `end_ts`) emits `"end_ts": null`; the client draws a null (or a
-  `<= start_ts`) end as an **instant marker** — a point/tick at `start_ts`, NOT a
-  bar stretched to the viewport edge — matching the source-aware Trace/Timeline
-  rule (`ui-pages.md`: a source that records no duration must not imply one). The
+  the full-height vertical breakpoint (`ui-pages.md`). A still-running op (no
+  `end_ts`) emits `"end_ts": null`; a **point event** emits `"end_ts"` equal to
+  its `start_ts` (the server returns the stored `end_ts` as-is — it does not
+  null a recorded point). The client draws a null OR a `<= start_ts` end as an
+  **instant marker** — a point/tick at `start_ts`, NOT a bar stretched to the
+  viewport edge — matching the source-aware Trace/Timeline rule (`ui-pages.md`: a
+  source that records no duration must not imply one). The
   server does not synthesize an end, so the raw fact "not finished / point event"
   is preserved.
 - **`t_start` / `t_end`.** Minimum `start_ts` and maximum `end_ts` across all spans

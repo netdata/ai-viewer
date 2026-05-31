@@ -7,10 +7,11 @@ import (
 	"net/http"
 )
 
-// timelineSpan is one op rendered as a span on a lane. end_ts is null for
-// a still-running op or a point event; the client draws a null (or a
-// <= start_ts) end as an instant marker at start_ts — source-aware, NOT a
-// viewport-edge bar (rest-api.md, ui-pages.md). kind 'compaction' is emitted
+// timelineSpan is one op rendered as a span on a lane. end_ts is null ONLY
+// for a still-running op; a POINT EVENT emits end_ts == start_ts (the server
+// returns the stored end_ts as-is, never null-ing a recorded point). The client
+// draws a null OR a <= start_ts end as an instant marker at start_ts —
+// source-aware, NOT a viewport-edge bar (rest-api.md, ui-pages.md). kind 'compaction' is emitted
 // as an ordinary span; the frontend keys on kind to draw the full-height
 // breakpoint (rest-api.md, ui-pages.md).
 type timelineSpan struct {

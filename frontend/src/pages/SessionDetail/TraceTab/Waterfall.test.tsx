@@ -146,6 +146,23 @@ describe('Waterfall (SVG path)', () => {
     expect(point.tagName.toLowerCase()).toBe('line');
   });
 
+  it('does NOT put a fabricated "0µs" in a point-event bar label (REAL shape: end_ts==start_ts, duration_us 0); a measured op keeps its duration', () => {
+    // GROUND TRUTH: a point-event op is persisted with end_ts === start_ts AND
+    // duration_us === 0 (NOT null — null is the still-running shape). isInstantOp
+    // is true for it, so the bar's accessible name must use "instant", never a
+    // fabricated "0µs"; a measured op keeps its formatted duration.
+    const mixed = nodesFrom([
+      op({ id: 'm', name: 'measured', start_ts: 1000, end_ts: 1400, duration_us: 400 }),
+      op({ id: 'p', name: 'point', kind: 'llm', start_ts: 1000, end_ts: 1000, duration_us: 0 }),
+    ]);
+    render(<Waterfall nodes={mixed} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const point = screen.getByRole('button', { name: /point/i });
+    expect(point).toHaveAccessibleName(/instant/i);
+    expect(point).not.toHaveAccessibleName(/0µs/);
+    // The measured op keeps its real duration in the label.
+    expect(screen.getByRole('button', { name: /measured/i })).toHaveAccessibleName(/400µs/);
+  });
+
   it('does NOT fade any bar on the first render (initial load is not an append)', () => {
     installMatchMedia(false); // motion allowed
     render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
