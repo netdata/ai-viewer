@@ -30,16 +30,19 @@ type topoEdge struct {
 	TotalUS int64  `json:"total_us"`
 }
 
-// topologyResponse is the JSON envelope of GET /api/sessions/:id/topology.
-// Nodes and edges are always non-nil slices so the body serialises as []
-// rather than null on an empty graph. max_size_metric is the maximum
-// size_metric across all nodes (0 when there are no nodes); the client
-// normalizes node radii against it (raw values are returned, not a
-// server-side 0..1 scale — rest-api.md).
+// topologyResponse is the JSON envelope shared by GET /api/sessions/:id/topology
+// and GET /api/topology. Nodes and edges are always non-nil slices so the body
+// serialises as [] rather than null on an empty graph. max_size_metric is the
+// maximum size_metric across all nodes (0 when there are no nodes); the client
+// normalizes node radii against it (raw values are returned, not a server-side
+// 0..1 scale — rest-api.md). Truncated is set ONLY by the cross-session
+// /api/topology route when its node cap drops sessions (omitempty so the
+// per-session route, which never truncates, keeps emitting the unchanged shape).
 type topologyResponse struct {
 	Nodes         []topoNode `json:"nodes"`
 	Edges         []topoEdge `json:"edges"`
 	MaxSizeMetric float64    `json:"max_size_metric"`
+	Truncated     bool       `json:"truncated,omitempty"`
 }
 
 // topologyMetric is the validated ?metric= selector. duration is the

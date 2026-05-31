@@ -217,6 +217,54 @@ A session in the tree with no ops still appears as an agent node (`size_metric` 
 the tree's sessions, one over the tree's ops) are bounded by the tree size and use
 `idx_sessions_root_start` / `idx_ops_session_start`.
 
+### GET /api/topology
+
+Implemented by SOW-0006 (chunk 6b). The **cross-session** topology: the same
+node/edge model as `/api/sessions/:id/topology`, but the scope is the active
+filter rather than one session tree. Drives the `/topology` page. GET (+ HEAD with
+empty body) only; any other method is 405 `METHOD_NOT_ALLOWED`. An unknown
+`?metric=` value is `BAD_REQUEST`. Response shape is identical to the per-session
+topology (`nodes` / `edges` / `max_size_metric`).
+
+**Scope = the active filter.** Accepts the same filter query params as
+`GET /api/sessions` (time range `from`/`to`, `agent`, `model`, `cwd`, `source`,
+`status`, etc. — whatever that endpoint already validates). The node set is the
+sessions matching the filter.
+
+- **Nodes.** One `agent` node per matching session (`id` = `agent:<session.id>`;
+  `label` = `agent_name` falling back to `kind`, with `" (root)"` appended when the
+  session is its own root). **No `tool` nodes** in the cross-session view — a
+  filtered set can span thousands of sessions and their tools would explode the
+  graph; tools live in the per-session view. (SOW-0006 AC#2: "cross-session view:
+  sessions".)
+- **Edges.** Session lineage among the matched nodes, aggregated: a session with
+  `parent_session_id` set → `agent:<parent>` → `agent:<child>`. This single pass
+  covers BOTH sub-agent spawns (`kind='sub_agent'`) AND forks (`kind='fork'`):
+  there is no separate `forked_from_id` canonical column — the codex adapter
+  resolves a source `forked_from_id` into `parent_session_id` + `kind='fork'` at
+  ingest (`internal/adapters/codex/mapper_turn.go`), so one `parent_session_id`
+  pass captures both. An edge whose other endpoint is NOT in the matched set is
+  dropped defensively (lineage to a filtered-out session is not drawn). Lineage
+  edges are structural, so `calls` = 1 and `total_us` = 0 (no call duration; the
+  shape is reused for renderer parity).
+- **`?metric=`** selects `size_metric` on each agent node, computed from the
+  session's own stored aggregates (NOT a per-op rescan, to stay bounded over a
+  large filtered set): `cost` = `cost_usd`; `tokens` = `tokens_in + tokens_out`;
+  `duration` = `end_ts - start_ts` (**default**, 0 when either is unknown);
+  `calls` = `op_count`. `ctx_pct` is best-effort: 0 unless a session-level context
+  ratio is available (cross-session ctx_pct over ops is out of scope for 6b —
+  documented, not silently wrong). `max_size_metric` is the max across nodes (0
+  when empty), same client-normalization contract as the per-session route.
+- **`failure_ratio`** = `failure_count / op_count` per session node (0 when the
+  session has no ops).
+- **Bound.** A filter can match very many sessions; the force graph and the perf
+  budget cannot. The endpoint caps the node set at **`maxTopologyNodes` (default
+  500)** — the top-N sessions by the selected `size_metric` — and sets a top-level
+  **`"truncated": true`** when the cap was hit (lineage edges are then restricted to
+  the retained nodes). The cap is NOT silent: the client surfaces a "showing top N
+  of M" notice. (Aligns with `frontend-architecture.md`'s 500-node Canvas/Worker
+  threshold.)
+
 ### GET /api/sessions/:id/timeline
 
 Implemented by SOW-0006. Returns the per-lane span set for the Timeline view.

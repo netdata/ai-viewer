@@ -232,6 +232,13 @@ export async function connectSse(
     onSessionChanged: (e) => {
       void queryClient.invalidateQueries({ queryKey: ['session', e.session_id] });
       void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      // The cross-session /topology graph is built from the same filtered
+      // session set as the list, so the same event that refreshes ['sessions']
+      // (a session appearing/disappearing/changing cost) must refresh it too.
+      // Keyed under ['topology', metric, filters]; the ['topology'] prefix
+      // partial-matches every metric/filter sub-key so an open graph
+      // live-refreshes regardless of the selected metric.
+      void queryClient.invalidateQueries({ queryKey: ['topology'] });
       // Logs belong to the session (a log write marks the session dirty
       // server-side), so the open Logs tab must refresh too. Logs are cached
       // under ['logs', id, severities]; the ['logs', id] prefix partial-matches

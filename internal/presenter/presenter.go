@@ -201,6 +201,7 @@ func (p *Presenter) now() time.Time { return p.nowFn() }
 //   - GET /api/sessions/{id}/logs severity-filtered, paginated log entries
 //   - GET /api/sessions/{id}/topology  actor graph (agents+tools) for the session tree
 //   - GET /api/sessions/{id}/timeline  per-session lanes + spans for the timeline view
+//   - GET /api/topology           cross-session actor graph (agents only) over the filtered set
 //   - GET /api/stats              cross-session aggregates over the filtered set
 //
 // Every other route declared in presenter.md returns NOT_FOUND until
@@ -241,6 +242,7 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions/{id}/logs", p.handleSessionLogs)
 	mux.HandleFunc("/api/sessions/{id}/topology", p.handleSessionTopology)
 	mux.HandleFunc("/api/sessions/{id}/timeline", p.handleSessionTimeline)
+	mux.HandleFunc("/api/topology", p.handleCrossTopology)
 	mux.HandleFunc("/api/stats", p.handleStats)
 	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
 	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)

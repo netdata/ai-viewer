@@ -233,15 +233,19 @@ export interface TopologyEdge {
 }
 
 /**
- * GET /api/sessions/:id/topology envelope (presenter topologyResponse). Nodes
- * and edges are always present arrays (never null). `max_size_metric` is the
- * maximum `size_metric` across nodes (0 when there are no nodes); the client
- * normalizes node radii against it.
+ * Topology envelope shared by GET /api/sessions/:id/topology and GET
+ * /api/topology (presenter topologyResponse). Nodes and edges are always
+ * present arrays (never null). `max_size_metric` is the maximum `size_metric`
+ * across nodes (0 when there are no nodes); the client normalizes node radii
+ * against it. `truncated` is emitted ONLY by the cross-session /api/topology
+ * route when its node cap dropped sessions (Go `omitempty` → optional key); the
+ * per-session route never truncates so the key is absent there.
  */
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
   max_size_metric: number;
+  truncated?: boolean;
 }
 
 // ── GET /api/sessions/:id/logs ──────────────────────────────────────────────
