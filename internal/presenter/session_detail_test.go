@@ -10,16 +10,20 @@ import (
 // sessionDetailBody mirrors GET /api/sessions/:id.
 type sessionDetailBody struct {
 	Session struct {
-		ID            string  `json:"id"`
-		RootSessionID string  `json:"root_session_id"`
-		Kind          string  `json:"kind"`
-		AgentName     string  `json:"agent_name"`
-		Model         string  `json:"model"`
-		Status        string  `json:"status"`
-		StartTS       int64   `json:"start_ts"`
-		CostUSD       float64 `json:"cost_usd"`
-		TurnCount     int64   `json:"turn_count"`
-		OpCount       int64   `json:"op_count"`
+		ID               string  `json:"id"`
+		RootSessionID    string  `json:"root_session_id"`
+		Kind             string  `json:"kind"`
+		AgentName        string  `json:"agent_name"`
+		Model            string  `json:"model"`
+		Status           string  `json:"status"`
+		StartTS          int64   `json:"start_ts"`
+		TokensIn         int64   `json:"tokens_in"`
+		TokensOut        int64   `json:"tokens_out"`
+		TokensCacheRead  int64   `json:"tokens_cache_read"`
+		TokensCacheWrite int64   `json:"tokens_cache_write"`
+		CostUSD          float64 `json:"cost_usd"`
+		TurnCount        int64   `json:"turn_count"`
+		OpCount          int64   `json:"op_count"`
 	} `json:"session"`
 	Turns []struct {
 		ID       string  `json:"id"`
@@ -129,6 +133,33 @@ func TestSessionDetail_HappyPath(t *testing.T) {
 	// child_sessions lists both children.
 	if len(body.ChildSessions) != 2 {
 		t.Fatalf("child_sessions = %d, want 2", len(body.ChildSessions))
+	}
+}
+
+// TestSessionDetail_ExposesCacheTokens asserts the session row carries the
+// separate cache-token counters (tokens_cache_read / tokens_cache_write) so the
+// Overview can render the cache breakdown + hit-rate (SOW-0029). tokens_in is
+// the FRESH input only; cache is reported separately.
+func TestSessionDetail_ExposesCacheTokens(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedGraph(t, db, base)
+
+	code, body, _ := getSessionDetail(t, p, "rootA")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	s := body.Session
+	if s.TokensIn != 1000 || s.TokensOut != 2000 {
+		t.Fatalf("tokens in/out = %d/%d, want 1000/2000 (fresh)", s.TokensIn, s.TokensOut)
+	}
+	if s.TokensCacheRead != 3000 {
+		t.Errorf("tokens_cache_read = %d, want 3000", s.TokensCacheRead)
+	}
+	if s.TokensCacheWrite != 500 {
+		t.Errorf("tokens_cache_write = %d, want 500", s.TokensCacheWrite)
 	}
 }
 

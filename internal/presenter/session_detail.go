@@ -29,6 +29,8 @@ type sessionDetail struct {
 	EndTS             *int64  `json:"end_ts"`
 	TokensIn          int64   `json:"tokens_in"`
 	TokensOut         int64   `json:"tokens_out"`
+	TokensCacheRead   int64   `json:"tokens_cache_read"`
+	TokensCacheWrite  int64   `json:"tokens_cache_write"`
 	CostUSD           float64 `json:"cost_usd"`
 	TurnCount         int64   `json:"turn_count"`
 	OpCount           int64   `json:"op_count"`
@@ -178,13 +180,15 @@ func (p *Presenter) loadSession(ctx context.Context, id string) (sessionDetail, 
 SELECT
     id, native_id, root_session_id, parent_session_id, source_id, kind,
     IFNULL(agent_name, ''), IFNULL(model, ''), IFNULL(provider, ''),
-    status, error_class, start_ts, end_ts, tokens_in, tokens_out, cost_usd,
+    status, error_class, start_ts, end_ts, tokens_in, tokens_out,
+    tokens_cache_read, tokens_cache_write, cost_usd,
     turn_count, op_count, failure_count,
     (SELECT COUNT(*) FROM sessions c WHERE c.parent_session_id = sessions.id)
 FROM sessions WHERE id = ?`, id).Scan(
 		&s.ID, &s.NativeID, &s.RootSessionID, &parent, &s.SourceID, &s.Kind,
 		&s.AgentName, &s.Model, &s.Provider, &s.Status, &errClass,
-		&s.StartTS, &endTS, &s.TokensIn, &s.TokensOut, &s.CostUSD,
+		&s.StartTS, &endTS, &s.TokensIn, &s.TokensOut,
+		&s.TokensCacheRead, &s.TokensCacheWrite, &s.CostUSD,
 		&s.TurnCount, &s.OpCount, &s.FailureCount, &s.ChildSessionCount,
 	)
 	if err != nil {

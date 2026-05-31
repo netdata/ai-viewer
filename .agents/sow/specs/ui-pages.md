@@ -36,7 +36,8 @@ The global filter bar is always visible and applies to every page; routes interp
 Tab layout:
 
 1. **Overview** — header with agent/model/status; session-level statistics
-   (tokens in/out, cost, turn/op/failure counts) read from the session-detail
+   (tokens in — labeled "fresh"/uncached — tokens out, cache read, cache write,
+   cache hit rate, cost, turn/op/failure counts) read from the session-detail
    response `GET /api/sessions/:id` (the session row already carries these
    aggregates) plus a tools-used summary derivable from its ops. NOTE:
    `/api/stats` does NOT support a `session_id` filter (it is the cross-session
@@ -164,8 +165,11 @@ read this to know the current contract without re-reading the code.
 - **404**: when the detail query fails with `ApiError.status === 404` (unknown
   id), the page renders a clean "session not found" state instead of the tabs.
 - **Overview tab**: header (agent / model / status badge) plus per-session
-  aggregate `StatCard`s (tokens in, tokens out, cost, turns, ops, failures)
-  read from the **detail response** `session` row — NOT `/api/stats`
+  aggregate `StatCard`s in order: "Tokens in (fresh)" (hint "uncached input"),
+  "Tokens out", "Cache read", "Cache write", "Cache hit rate" (hint "cache
+  read / total input"; `data-testid="cache-hit-rate"`; "—" when there is no
+  input), "Cost", "Turns", "Ops", "Failures" — all read from the **detail
+  response** `session` row — NOT `/api/stats`
   (cross-session only; see `rest-api.md` §GET /api/stats). Plus a tools-used
   summary derived from the response's ops (`kind === 'tool'`), aggregated by
   op `name` with call + failure counts. Plus a **child-sessions** section

@@ -249,12 +249,17 @@ func (m *fileMapper) buildLLMFinalized(msg *assistantMessage, base canonical.Eve
 		EndTs:           endUs,
 	}
 	if u := msg.Usage; u != nil {
-		// Effective input includes cache tokens (spec §5.6).
-		ev.TokensIn = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+		// Canonical token contract (canonical-events.md, SOW-0029): TokensIn is
+		// the FRESH/uncached input ONLY; the cache portions are separate
+		// counters. Folding cache into TokensIn would inflate the token total
+		// and double-charge cache in the pricer (which prices each component at
+		// its own rate). CtxUsed is the TOTAL context occupancy
+		// (fresh + cacheCreate + cacheRead + output), not fresh + output.
+		ev.TokensIn = u.InputTokens
 		ev.TokensOut = u.OutputTokens
 		ev.TokensCacheRead = u.CacheReadInputTokens
 		ev.TokensCacheWrite = u.CacheCreationInputTokens
-		ev.CtxUsed = ev.TokensIn + ev.TokensOut
+		ev.CtxUsed = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens + u.OutputTokens
 	}
 	return ev
 }

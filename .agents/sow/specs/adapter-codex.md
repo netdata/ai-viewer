@@ -370,7 +370,7 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 
 17. **`event_msg` payload `token_count`:**
     - Stream of token accounting snapshots. Each carries cumulative `total_token_usage` and the per-call `last_token_usage`, plus optional `model_context_window`.
-    - Per-turn rollup: at TurnFinalized, set `TokensIn = sum(last_token_usage.input_tokens)` over `token_count` events between this turn's `task_started` and `task_complete`. Same for `TokensOut`. (Last-token-usage already represents the most recent LLM call's tokens; summing across the turn yields a robust total.)
+    - Per-turn rollup: at TurnFinalized, set `TokensIn = sum(last_token_usage.input_tokens − last_token_usage.cached_input_tokens)` (clamped ≥0) over `token_count` events between this turn's `task_started` and `task_complete`. codex's `input_tokens` is the TOTAL prompt (cached + uncached) — upstream `non_cached_input() = input_tokens − cached_input_tokens` (`codex-rs/protocol/src/protocol.rs`) — so the cached portion is subtracted to keep `TokensIn` FRESH per the canonical token contract (`canonical-events.md`), and the cached portion is recorded in `TokensCacheRead`. `TokensOut = sum(last_token_usage.output_tokens)`. (SOW-0029 fix: previously this summed `input_tokens` directly, folding cache into `TokensIn` and double-charging it in the pricer.)
     - Also derive `OpFinalized.CtxUsed = total_token_usage.total_tokens` and `OpFinalized.CtxMax = model_context_window` on the LLM op that immediately precedes the `token_count` line.
     - When `model_context_window` is present, update `catalog_models.ctx_max` via Extras propagation.
 

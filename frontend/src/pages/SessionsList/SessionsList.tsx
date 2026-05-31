@@ -78,7 +78,7 @@ export function SessionsList() {
                   <th>Status</th>
                   <th className={styles.numCol}>Turns</th>
                   <th className={styles.numCol}>Ops</th>
-                  <th className={styles.numCol}>Tokens in</th>
+                  <th className={styles.numCol}>Tokens in (fresh)</th>
                   <th className={styles.numCol}>Tokens out</th>
                   <th className={styles.numCol}>Cost</th>
                   <th className={styles.numCol}>Failures</th>

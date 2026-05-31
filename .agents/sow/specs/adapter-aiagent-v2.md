@@ -185,7 +185,7 @@ Two values for `type`:
 - `type: "llm"`: carries `provider`, `model`, `tokens: { inputTokens, outputTokens, cacheReadInputTokens?, cacheWriteInputTokens?, cachedTokens?, totalTokens? }`, `costUsd`, `stopReason`, `latency`, `status`.
 - `type: "tool"`: carries `mcpServer`, `command`, `charactersIn`, `charactersOut`, `latency`, `status`, optional `error`.
 
-`tokens` has both Anthropic (`cacheReadInputTokens`, `cacheWriteInputTokens`) and OpenAI (`cachedTokens`) cache-token naming in the same data. The adapter normalizes to canonical `tokens_in`/`tokens_out`, summing cache reads/writes into `tokens_in` per existing model accounting conventions (see `ai-agent.git/.agents/sow/specs/accounting.md`).
+`tokens` has both Anthropic (`cacheReadInputTokens`, `cacheWriteInputTokens`) and OpenAI (`cachedTokens`) cache-token naming in the same data. The adapter normalizes to canonical `tokens_in` (FRESH/uncached input only) plus the separate canonical fields `tokens_cache_read` (= `cacheReadInputTokens + cachedTokens`) and `tokens_cache_write` (= `cacheWriteInputTokens`) — see `mapper.go:378-381`. Per the SOW-0029 token contract, cache is NEVER folded into `tokens_in`.
 
 #### reasoning shape
 
@@ -211,7 +211,7 @@ Payload may be raw object, base64-encoded blob, or — in newer v2-era snapshots
 
 #### childSession shape (the embedded sub-agent pattern)
 
-`op.childSession` is a full nested `SessionNode` with its own `traceId`, `agentId`, `callPath`, `startedAt`, `endedAt`, `success`, `totals`, `turns[]`, `steps[]`. Verified empirically: across 31 child sessions inside one parent file (`00ce0ef4-2166-4792-8a92-403a0db5b7e0.json.gz`), **none** of the child `traceId`s exist as their own `<traceId>.json.gz` file at the root. **In v2, sub-agent sessions are NOT independently persisted.** They live exclusively inside the parent's snapshot. The adapter MUST recursively walk `childSession` to extract all sub-agent events; it cannot rely on a separate file for the child.
+`op.childSession` is a full nested `SessionNode` with its own `traceId`, `agentId`, `callPath`, `startedAt`, `endedAt`, `success`, `totals`, `turns[]`, `steps[]`. Verified empirically: across 31 child sessions inside one parent file (`<parent-traceId>.json.gz`), **none** of the child `traceId`s exist as their own `<traceId>.json.gz` file at the root. **In v2, sub-agent sessions are NOT independently persisted.** They live exclusively inside the parent's snapshot. The adapter MUST recursively walk `childSession` to extract all sub-agent events; it cannot rely on a separate file for the child.
 
 `childSessionRef` / `childSessionSummary`: these post-v3-migration compaction artifacts appear in newer snapshots when the producer was already on the v3 evidence path but still wrote a legacy snapshot for compatibility. Observed in **0** of 50 random samples on the operator's disk, indicating they are rare in this particular dataset (most data predates the v3 migration). When present, the ref's `sessionId` should be looked up either in the v3 ledger (out of scope for this adapter) or in another v2 file (also rare). The adapter emits `OpStartedEvent(kind=session, ChildSessionNativeID=ref.sessionId)` and `OpFinalizedEvent` populated from `childSessionSummary`; no recursive descent.
 

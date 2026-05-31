@@ -48,17 +48,18 @@ func seedSource(t *testing.T, db *sql.DB, id, format, location string, createdAt
 // the fields the Chunk 12 endpoints read are exposed; the rest take
 // schema defaults.
 type sessionRow struct {
-	id, sourceID, nativeID string
-	parentID               string // "" => NULL
-	rootID                 string
-	kind, agent, model     string
-	provider               string
-	status                 string
-	startTS, endTS         int64
-	tokensIn, tokensOut    int64
-	costUSD                float64
-	turnCount, opCount     int64
-	failureCount           int64
+	id, sourceID, nativeID            string
+	parentID                          string // "" => NULL
+	rootID                            string
+	kind, agent, model                string
+	provider                          string
+	status                            string
+	startTS, endTS                    int64
+	tokensIn, tokensOut               int64
+	tokensCacheRead, tokensCacheWrite int64
+	costUSD                           float64
+	turnCount, opCount                int64
+	failureCount                      int64
 }
 
 // seedSession inserts one sessions row from a sessionRow.
@@ -76,11 +77,13 @@ func seedSession(t *testing.T, db *sql.DB, s sessionRow) {
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id, kind,
     agent_name, model, provider, status, start_ts, end_ts, last_activity_ts,
-    tokens_in, tokens_out, cost_usd, turn_count, op_count, failure_count
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,
+    cost_usd, turn_count, op_count, failure_count
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.id, s.sourceID, s.nativeID, parent, s.rootID, s.kind,
 		s.agent, s.model, s.provider, s.status, s.startTS, endTS, s.startTS,
-		s.tokensIn, s.tokensOut, s.costUSD, s.turnCount, s.opCount, s.failureCount,
+		s.tokensIn, s.tokensOut, s.tokensCacheRead, s.tokensCacheWrite,
+		s.costUSD, s.turnCount, s.opCount, s.failureCount,
 	); err != nil {
 		t.Fatalf("seed session %s: %v", s.id, err)
 	}
@@ -240,7 +243,7 @@ func seedGraph(t *testing.T, db *sql.DB, base int64) {
 		id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA",
 		kind: "root", agent: "nedi", model: "claude-opus-4-7", provider: "anthropic",
 		status: "completed", startTS: base + 1_000, endTS: base + 9_000,
-		tokensIn: 1000, tokensOut: 2000, costUSD: 0.30,
+		tokensIn: 1000, tokensOut: 2000, tokensCacheRead: 3000, tokensCacheWrite: 500, costUSD: 0.30,
 		turnCount: 2, opCount: 4, failureCount: 1,
 	})
 	seedSession(t, db, sessionRow{

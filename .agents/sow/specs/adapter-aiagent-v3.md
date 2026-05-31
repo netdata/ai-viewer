@@ -269,7 +269,7 @@ Schema: `types.ts:78-84`. Producer: `session-recorder.ts:92-124`.
 | `tokensCacheWrite` | yes | int | sum of `tokens.cacheWriteInputTokens ?? 0` |
 | `costUsd` | optional | float | sum of `entry.costUsd`. **Producer-side detail (`session-recorder.ts:115`): `costUsd` is omitted entirely when it sums to exactly zero**; therefore `costUsd` absent ≠ unknown, it means $0.00. Adapter SHOULD treat absent `costUsd` as 0 when other token counts are present. |
 
-Note: ai-agent v3 currently emits four token-count fields (`tokensIn`, `tokensOut`, `tokensCacheRead`, `tokensCacheWrite`); canonical events have only `tokens_in` and `tokens_out` (see §10 gap).
+Note: ai-agent v3 emits four token-count fields (`tokensIn`, `tokensOut`, `tokensCacheRead`, `tokensCacheWrite`); all four are first-class canonical fields (`OpFinalizedEvent`/`TurnFinalizedEvent`, SOW-0029 token contract) and the adapter maps each (`ops.go:113-114`, `mapper.go:173-174`).
 
 #### 3.4.3 `childSessions[]` items (`EvidenceChildSessionRef`)
 
@@ -497,7 +497,7 @@ For each `ops[i]` (i starting at 0; canonical `Seq` = `i+1` = `opIndex`):
 - Emit `OpFinalizedEvent` with: `Status=ops[i].status`, `ErrorClass=""` (v3 op summary has no error-class taxonomy), `ErrorMessage=ops[i].error ?? ""` (zero observations), `EndTs=ops[i].endedAt`, `TokensIn=accounting.tokensIn`, `TokensOut=accounting.tokensOut`, `CostUSD=accounting.costUsd ?? 0`, `BytesIn=sum(payloadRefs[k].originalBytes for kind in {llm_request,sdk_request,tool_request})`, `BytesOut=sum(payloadRefs[k].originalBytes for kind in {llm_response,sdk_response,reasoning_stream,tool_response})`, `CtxUsed=accounting.tokensIn + accounting.tokensCacheRead` (best-effort context-window-in estimate; see §10 gap), `CtxMax=0` (unknown from ledger; populated downstream from `catalog_models.ctx_max`).
 - For each `payloadRefs[k]`: emit one `PayloadRefEvent` (see §4.3).
 
-Cache-token counters (`tokensCacheRead`, `tokensCacheWrite`) carry useful signal for prompt-caching cost analysis but are NOT in the canonical `OpFinalizedEvent`. The adapter stores them in canonical `extras_json` for now.
+Cache-token counters (`tokensCacheRead`, `tokensCacheWrite`) are first-class canonical fields (`OpFinalizedEvent.TokensCacheRead/TokensCacheWrite`, SOW-0029); the adapter sets them on the event (`ops.go:113-114`; turn-level `mapper.go:173-174`) and ALSO mirrors them into `extras_json` (`ops.go:75-76`) for raw round-trip access.
 
 ### 5.4 SourceSeq Assignment
 
@@ -669,7 +669,7 @@ Both adapters target the same `<sessions-dir>` root simultaneously. Each adapter
 
 These v3 fields/concepts do not map cleanly into `canonical-events.md` as it stands. The adapter records them in `extras_json` or summary log entries today; a future SOW should decide whether to lift them into first-class canonical columns.
 
-1. **Cache-token counts** (`tokensCacheRead`, `tokensCacheWrite` on `EvidenceAccountingSummary`). Critical for prompt-caching cost analysis. Canonical `OpFinalizedEvent` and `ops` table have only `tokens_in`/`tokens_out`. **Recommendation:** add `tokens_cache_read` and `tokens_cache_write` to `OpFinalizedEvent` and `ops`.
+1. **Cache-token counts** (`tokensCacheRead`, `tokensCacheWrite` on `EvidenceAccountingSummary`). **RESOLVED:** `OpFinalizedEvent`/`TurnFinalizedEvent` and the `ops`/`turns`/`sessions` tables now carry `tokens_cache_read`/`tokens_cache_write` as first-class fields (SOW-0029 token contract); the adapter maps them (`ops.go:113-114`). Residual gap: `ctx_used` here is a 2-term best-effort (`tokensIn + tokensCacheRead`), omitting `cache_write` + `output` — alignment tracked in SOW-0031.
 
 2. **`session_status='abandoned'`** for orphan sessions (§9.3) and **`session_status='interrupted'`** for mid-turn-killed sessions (§9.4). The canonical `Status` enum in `canonical-events.md` is `'completed'|'failed'`, plus implicitly `'running'`. **Recommendation:** add `'abandoned'` (no work ever did) and `'interrupted'` (work started, never finalized) so the UI can distinguish them from in-progress sessions.
 

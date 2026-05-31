@@ -18,14 +18,16 @@ type statsResponse struct {
 }
 
 type statsTotals struct {
-	SessionCount int64   `json:"session_count"`
-	TurnCount    int64   `json:"turn_count"`
-	OpCount      int64   `json:"op_count"`
-	TokensIn     int64   `json:"tokens_in"`
-	TokensOut    int64   `json:"tokens_out"`
-	CostUSD      float64 `json:"cost_usd"`
-	Failures     int64   `json:"failures"`
-	DurationUS   int64   `json:"duration_us"`
+	SessionCount     int64   `json:"session_count"`
+	TurnCount        int64   `json:"turn_count"`
+	OpCount          int64   `json:"op_count"`
+	TokensIn         int64   `json:"tokens_in"`
+	TokensOut        int64   `json:"tokens_out"`
+	TokensCacheRead  int64   `json:"tokens_cache_read"`
+	TokensCacheWrite int64   `json:"tokens_cache_write"`
+	CostUSD          float64 `json:"cost_usd"`
+	Failures         int64   `json:"failures"`
+	DurationUS       int64   `json:"duration_us"`
 }
 
 type statModelRow struct {
@@ -148,12 +150,15 @@ SELECT
     IFNULL(SUM(s.op_count), 0),
     IFNULL(SUM(s.tokens_in), 0),
     IFNULL(SUM(s.tokens_out), 0),
+    IFNULL(SUM(s.tokens_cache_read), 0),
+    IFNULL(SUM(s.tokens_cache_write), 0),
     IFNULL(SUM(s.cost_usd), 0),
     IFNULL(SUM(s.failure_count), 0),
     IFNULL(SUM(CASE WHEN s.end_ts IS NOT NULL THEN s.end_ts - s.start_ts ELSE 0 END), 0)
 FROM sessions s WHERE ` + where // #nosec G201 G202 -- where is static SQL + ?-placeholders; values bound via args
 	return p.db.QueryRowContext(ctx, q, args...).Scan( // #nosec G201 G701 -- query is static SQL + ?-placeholders; values bound via args
 		&out.SessionCount, &out.TurnCount, &out.OpCount,
-		&out.TokensIn, &out.TokensOut, &out.CostUSD, &out.Failures, &out.DurationUS,
+		&out.TokensIn, &out.TokensOut, &out.TokensCacheRead, &out.TokensCacheWrite,
+		&out.CostUSD, &out.Failures, &out.DurationUS,
 	)
 }
