@@ -10,10 +10,12 @@ import { scaleLinear, type ScaleLinear } from 'd3-scale';
 //   - lane index → y (stacked by laneHeight);
 //   - span start/end → x via a shared [tStart,tEnd] → [0,width] time scale,
 //     width = duration;
-//   - a NULLABLE end_ts (a running op, or a point event) renders as an INSTANT
-//     marker at start_ts — a point, NOT a zero-width or viewport-extended bar
-//     (source-aware, matching the Trace tab's null-end handling). An end_ts at
-//     or before start_ts is likewise an instant (never a negative-width bar);
+//   - a NULL end_ts is a still-RUNNING op (no recorded end yet); a POINT EVENT is
+//     persisted with end_ts == start_ts (the server returns the stored end_ts
+//     as-is). Both render as an INSTANT marker at start_ts — a point, NOT a
+//     zero-width or viewport-extended bar (source-aware, matching the Trace tab's
+//     null-end handling). The renderer treats null OR end_ts <= start_ts as an
+//     instant (an end before start is defensive — never a negative-width bar);
 //   - compaction spans (kind==='compaction') are FLAGGED so the renderer draws
 //     a full-height vertical breakpoint instead of a lane-height bar.
 //
@@ -23,7 +25,8 @@ import { scaleLinear, type ScaleLinear } from 'd3-scale';
 // below VISIBLE_SPAN_CEILING draws every span as a DOM node).
 
 /** One span on a lane — mirrors the wire timelineSpan (presenter
- *  session_timeline.go). end_ts is nullable (running / point op). */
+ *  session_timeline.go). end_ts is null for a still-RUNNING op (no recorded end);
+ *  a POINT EVENT carries end_ts == start_ts. */
 export interface TimelineSpan {
   id: string;
   kind: string;
@@ -75,7 +78,8 @@ export interface PositionedSpan {
   /** Lane vertical position. */
   y: number;
   height: number;
-  /** True when end_ts is null/≤start_ts: a point event, drawn as a marker. */
+  /** True when end_ts is null (running) OR ≤ start_ts (a point event has
+   *  end_ts == start_ts): no measured forward window, drawn as an instant marker. */
   instant: boolean;
   /** True when kind==='compaction': drawn as a full-height vertical breakpoint. */
   compaction: boolean;

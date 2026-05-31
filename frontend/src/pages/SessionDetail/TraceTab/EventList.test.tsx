@@ -95,10 +95,11 @@ describe('EventList', () => {
 
   it('shows an em-dash (not 0µs) for a point-event op with no measured duration (P2#3)', () => {
     const nodes = nodesFrom([
-      // A measured tool op (real duration) and a claude-code-style point-event
-      // LLM op (end_ts == start_ts, duration_us null) recorded at one timestamp.
+      // A measured tool op (real duration) and a claude-code-style POINT-EVENT LLM
+      // op recorded at one timestamp. The real persisted point shape is
+      // end_ts == start_ts AND duration_us === 0 (null is the still-RUNNING shape).
       op({ id: 'tool', name: 'Bash', start_ts: 0, end_ts: 400, duration_us: 400 }),
-      op({ id: 'llm', kind: 'llm', name: 'gen', start_ts: 500, end_ts: 500, duration_us: null }),
+      op({ id: 'llm', kind: 'llm', name: 'gen', start_ts: 500, end_ts: 500, duration_us: 0 }),
     ]);
     render(<EventList nodes={nodes} onSelect={vi.fn()} selectedId={null} />);
     const table = screen.getByRole('table', { name: /event list/i });

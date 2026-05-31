@@ -210,9 +210,12 @@ describe('SpanDetailDrawer', () => {
     expect(within(dialog).getByText('250ms')).toBeInTheDocument();
   });
 
-  it('shows an em dash (never "0µs") for a point-event op (duration_us null) in the op variant', () => {
-    // A point-event op in the Trace tab has duration_us === null. The op drawer
-    // must render the Duration field as "—", never a fabricated "0µs".
+  it('shows an em dash (never "0µs") for a still-RUNNING op (end_ts null, duration_us null) in the op variant', () => {
+    // GROUND TRUTH: a null end_ts with a null duration_us is a still-RUNNING op
+    // (no recorded end yet) — NOT a point event (a point event is persisted with
+    // end_ts == start_ts AND duration_us === 0; see the next test). isInstantOp is
+    // true for a running op, so the op drawer must render Duration as "—", never a
+    // fabricated "0µs".
     render(
       <SpanDetailDrawer detail={opDetail({ duration_us: null, end_ts: null })} onClose={vi.fn()} />,
     );

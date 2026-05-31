@@ -134,8 +134,9 @@ describe('Waterfall (SVG path)', () => {
   it('draws a point-event op as a tick (line) and a measured op as a bar (rect) — source-aware (P2#3)', () => {
     const mixed = nodesFrom([
       op({ id: 'm', name: 'measured', start_ts: 0, end_ts: 400, duration_us: 400 }),
-      // claude-code-style point event: end_ts == start_ts, no duration.
-      op({ id: 'p', name: 'point', kind: 'llm', start_ts: 500, end_ts: 500, duration_us: null }),
+      // claude-code-style POINT EVENT: the real persisted shape is end_ts ==
+      // start_ts AND duration_us === 0 (null is the still-RUNNING shape).
+      op({ id: 'p', name: 'point', kind: 'llm', start_ts: 500, end_ts: 500, duration_us: 0 }),
     ]);
     render(<Waterfall nodes={mixed} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
     const measured = screen.getByRole('button', { name: /measured/i });

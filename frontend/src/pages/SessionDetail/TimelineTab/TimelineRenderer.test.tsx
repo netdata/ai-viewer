@@ -428,6 +428,55 @@ describe('TimelineRenderer (Canvas path)', () => {
     expect(within(fallback).queryByRole('button', { name: /op5/i })).toBeNull();
   });
 
+  it('bounds the canvas backing store to the viewport (not the full content height) and culls off-screen lanes — P2', () => {
+    // P2 (SOW-0006 AC#3 / R3): the Timeline Canvas must viewport-cull lanes in Y
+    // and keep a BOUNDED backing store. With ~900 lanes the full content height is
+    // ~36000px → at DPR ≥ 1 a full-content canvas would EXCEED the browser canvas
+    // max (~32767px) and silently render blank, and a full-height cull window would
+    // be a NO-OP (every lane painted every frame). Mirroring WaterfallCanvas, the
+    // backing store is the bounded viewport and only the on-screen lane band paints.
+    const manyLanes: TimelineLaneInput[] = Array.from({ length: 900 }, (_, i) => ({
+      key: `session:lane${i}`,
+      label: `lane${i}`,
+      spans: [{ id: `op${i}`, kind: 'tool', name: `op${i}`, start_ts: 100, end_ts: 300, status: 'completed' }],
+    }));
+    const layout = layoutTimeline(manyLanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+    // The FULL content height the tab passes (axis + every lane) — ~36022px.
+    const fullContentHeight = 22 + layout.lanes.length * 40;
+    expect(fullContentHeight).toBeGreaterThan(32767); // would overflow a single canvas
+    render(
+      <TimelineRenderer
+        lanes={layout.lanes}
+        spans={layout.spans}
+        width={WIDTH}
+        height={fullContentHeight}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={true}
+      />,
+    );
+    const canvas = screen
+      .getByRole('group', { name: /session timeline/i })
+      .querySelector('canvas') as HTMLCanvasElement;
+    // (a) Backing store is bounded — far below the full content height and below
+    //     the browser canvas max, so it never silently fails / renders blank.
+    expect(canvas.height).toBeGreaterThan(0);
+    expect(canvas.height).toBeLessThan(2000); // ~viewport*dpr, not ~36000*dpr
+    expect(canvas.height).toBeLessThan(fullContentHeight);
+    // (b) Culling is effective: the keyboard-fallback list mirrors only the
+    //     on-screen lane band's spans, not one <button> per lane.
+    const fallback = screen.getByRole('list', { name: /timeline spans/i });
+    const buttons = within(fallback).getAllByRole('button');
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.length).toBeLessThan(layout.spans.length); // ≪ 900
+    expect(buttons.length).toBeLessThan(50); // a small viewport-sized band
+    // The first lane's span is in view; a far-off-screen lane's span is not.
+    expect(within(fallback).queryByRole('button', { name: /\bop0\b/i })).not.toBeNull();
+    expect(within(fallback).queryByRole('button', { name: /\bop800\b/i })).toBeNull();
+  });
+
   it('hit-tests a click against the span under the cursor', () => {
     const onSpanClick = vi.fn();
     render(

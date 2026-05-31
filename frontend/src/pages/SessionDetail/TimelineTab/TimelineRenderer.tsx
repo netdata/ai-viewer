@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent, MouseEvent } from 'react';
+import type { KeyboardEvent, MouseEvent, UIEvent } from 'react';
 import { colorForOpKind } from '../../../viz/color';
 import {
   cullSpans,
@@ -32,6 +32,14 @@ import styles from './TimelineTab.module.css';
 const AXIS_HEIGHT = 22; // px reserved at the top for the time axis.
 const LANE_LABEL_PAD = 6; // px inset for the lane label text.
 const AXIS_TARGET_TICKS = 8;
+// Bounded vertical viewport for the Canvas path — the canvas backing store is
+// sized to THIS (clamped to the content height), never the full lane stack. A
+// thousand-lane timeline is ~40000px tall, which exceeds the browser's single
+// canvas max (~32767px) and would silently render blank; bounding the canvas and
+// scrolling lanes natively (a tall spacer + a sticky canvas) keeps it fast and
+// correct. Mirrors the Detailed Waterfall's CANVAS_VIEWPORT (TraceTab/Waterfall).
+const CANVAS_VIEWPORT = 460;
+const CULL_OVERSCAN = 1; // lane bands rendered on each side of the viewport.
 // Zebra-band token + alpha mirror the SVG .laneBandAlt rule (fill var(--bg-tertiary);
 // opacity 0.4). Even lanes are transparent (SVG .laneBand) so only odd lanes paint.
 const LANE_BAND_TOKEN = '--bg-tertiary';
@@ -85,7 +93,14 @@ export function TimelineRenderer({
   onSpanClick,
   useCanvas,
 }: TimelineRendererProps) {
-  const canvas = useCanvas ?? spans.length > VISIBLE_SPAN_CEILING;
+  // Route to the bounded Canvas when EITHER the span count exceeds the SVG ceiling
+  // OR the lane stack is taller than the bounded viewport. The second trigger
+  // matters because a many-lane / few-span timeline (e.g. 800 sessions, one span
+  // each) would otherwise render as an inline ~40000px-tall SVG (or canvas) — far
+  // past the browser canvas max — even though it is under the span ceiling. Either
+  // way the Canvas path bounds the backing store and scrolls lanes natively.
+  const canvas =
+    useCanvas ?? (spans.length > VISIBLE_SPAN_CEILING || height > CANVAS_VIEWPORT);
   if (canvas) {
     return (
       <TimelineCanvas
@@ -125,23 +140,28 @@ function axisTicks(tStart: number, tEnd: number, width: number): { value: number
 }
 
 /**
- * cullWindowFor inverts the X-only zoom transform into the visible track-space
- * window (the same window the Canvas paints): X is scaled by k (so divide), Y is
- * only translated since lane height does not scale with zoom. Pure
- * so the paint loop and the keyboard-fallback list cull to the IDENTICAL set.
+ * cullWindowFor computes the visible track-space window the Canvas paints (and the
+ * keyboard-fallback list mirrors). X comes from inverting the X-only zoom (X is
+ * scaled by k, so divide). Y is the NATIVE vertical scroller, so the visible lane
+ * band is derived from scrollTop + the BOUNDED viewport (NOT the full content
+ * height) — this is what makes the cull effective on a tall lane stack instead of
+ * a no-op. overscan widens the band by a lane on each side so a partially-scrolled
+ * row never pops. Pure, so the paint loop and the fallback list cull identically.
  */
 function cullWindowFor(
-  transform: { k: number; x: number; y: number },
+  transform: { k: number; x: number },
   width: number,
-  height: number,
+  scrollTop: number,
+  viewport: number,
   laneHeight: number,
+  overscan: number,
 ): CullWindow {
   const xMin = -transform.x / transform.k;
   const xMax = (width - transform.x) / transform.k;
-  const visTop = -transform.y;
-  const visBottom = height - transform.y;
-  const laneMin = Math.floor((visTop - AXIS_HEIGHT) / laneHeight) - 1;
-  const laneMax = Math.ceil((visBottom - AXIS_HEIGHT) / laneHeight) + 1;
+  // The viewport sees content rows [scrollTop, scrollTop+viewport]; lane y is
+  // measured from AXIS_HEIGHT, so subtract it before mapping to a lane index.
+  const laneMin = Math.floor((scrollTop - AXIS_HEIGHT) / laneHeight) - overscan;
+  const laneMax = Math.ceil((scrollTop + viewport - AXIS_HEIGHT) / laneHeight) + overscan;
   return { xMin, xMax, laneMin, laneMax };
 }
 
@@ -372,23 +392,43 @@ function TimelineCanvas({
   onSpanClick,
 }: Omit<TimelineRendererProps, 'useCanvas'>) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Zoom/pan transform applied to the canvas paint and inverted for hit-testing.
-  const [transform, setTransform] = useState({ k: 1, x: 0, y: 0 });
+  // Native vertical scroll position (the Y axis is the scroller, not the zoom —
+  // mirrors WaterfallCanvas). Drives the lane cull + the paint Y offset.
+  const [scrollTop, setScrollTop] = useState(0);
+  // X-only time zoom/pan transform (Y stays the native scroller). k = X scale,
+  // x = X translate; ty from d3-zoom is ignored.
+  const [transform, setTransform] = useState({ k: 1, x: 0 });
   const ticks = axisTicks(tStart, tEnd, width);
 
+  const laneHeight = lanes[0]?.height ?? 1;
+  // The full lane stack height the SPACER establishes (axis + every lane). `height`
+  // is the full content height the tab computes; clamp the bounded viewport to it
+  // so a SHORT timeline does not reserve more than its content needs.
+  const contentHeight = height;
+  const viewport = Math.min(CANVAS_VIEWPORT, contentHeight);
+
   // The spans currently inside the viewport — the EXACT set the Canvas paints AND
-  // the set the keyboard-fallback list mirrors. Culling the fallback to the
-  // viewport keeps it bounded (no DOM node per span at scale); a
-  // keyboard user reaches the on-screen spans and pans/zooms to reach the rest.
+  // the set the keyboard-fallback list mirrors. Deriving the lane band from
+  // scrollTop + the bounded viewport (not the full height) is what makes the cull
+  // effective at scale: a keyboard user reaches the on-screen spans and
+  // scrolls/zooms to reach the rest, and the DOM never holds a node per lane.
   const visible = useMemo(
-    () => cullSpans(spans, cullWindowFor(transform, width, height, lanes[0]?.height ?? 1)),
-    [spans, transform, width, height, lanes],
+    () =>
+      cullSpans(
+        spans,
+        cullWindowFor(transform, width, scrollTop, viewport, laneHeight, CULL_OVERSCAN),
+      ),
+    [spans, transform, width, scrollTop, viewport, laneHeight],
   );
 
   // laneKey → label, so the keyboard-fallback button text names the span's session
   // lane (the lanes ARE the point in the Canvas path too — see laneLabelForSpan).
   const laneLabels = useMemo(() => new Map(lanes.map((l) => [l.key, l.label])), [lanes]);
 
+  // Attach the shared X-only zoom to the <canvas>. plainWheelPan:false so a PLAIN
+  // wheel reaches the native vertical scroller (lanes scroll) while SHIFT+wheel
+  // zooms and drag pans the time axis — exactly the Detailed Waterfall convention.
+  // Re-attached only on geometry change.
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) {
@@ -398,12 +438,12 @@ function TimelineCanvas({
       c,
       (event) => {
         const tr = event.transform;
-        setTransform({ k: tr.k, x: tr.x, y: tr.y });
+        setTransform({ k: tr.k, x: tr.x });
       },
-      { plainWheelPan: true },
+      { plainWheelPan: false },
     );
     return dispose;
-  }, [width, height]);
+  }, [width]);
 
   useEffect(() => {
     const c = canvasRef.current;
@@ -415,63 +455,69 @@ function TimelineCanvas({
       return;
     }
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    // Backing store is the BOUNDED viewport — never the full lane stack (a tall
+    // stack would exceed the browser canvas max and render blank).
     c.width = width * dpr;
-    c.height = height * dpr;
+    c.height = viewport * dpr;
     ctx.save();
     ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, width, height);
-    // Zoom the TIME axis only: scale X by k, keep Y at scale 1 (lane height
-    // constant), translate both axes. ctx.transform(a,b,c,d,e,f) post-multiplies
-    // the dpr scale already on the matrix. `visible` is the
+    ctx.clearRect(0, 0, width, viewport);
+    // Zoom the TIME axis only: scale X by k, keep Y at scale 1, translate X only.
+    // The Y axis is the native scroller, so we paint each row at (its y - scrollTop)
+    // rather than carrying a Y translate on the matrix. ctx.transform(a,b,c,d,e,f)
+    // post-multiplies the dpr scale already on the matrix. `visible` is the
     // viewport-culled set (memoized above) — only on-screen spans are painted.
-    ctx.transform(transform.k, 0, 0, 1, transform.x, transform.y);
+    ctx.transform(transform.k, 0, 0, 1, transform.x, 0);
 
-    // Lane zebra bands + labels (UNDER the axis ticks and spans). Mirrors the SVG
-    // path's .laneBand/.laneBandAlt rects + .laneLabel text so the >500-span Canvas
-    // path keeps lane identity (which session a span belongs to — the lanes ARE the
-    // point). The transform scales X by k and translates by transform.x, so a band
-    // that must cover the full [0,width] viewport in screen px starts at the
-    // inverted-X left edge with the inverted-X width; the lane label is pinned to
-    // the left edge the same way. Y is only translated (lane height constant), so
-    // lane.y is used directly. Math mirrors cullWindowFor's X inversion.
+    // Lane zebra bands + labels (UNDER the axis ticks and spans), offset by the
+    // native scrollTop. Mirrors the SVG path's .laneBand/.laneBandAlt rects +
+    // .laneLabel text so the Canvas path keeps lane identity (which session a span
+    // belongs to — the lanes ARE the point). The X transform scales by k and
+    // translates by transform.x, so a band that must cover the full [0,width]
+    // viewport in screen px starts at the inverted-X left edge with the inverted-X
+    // width; the lane label is pinned to the left edge the same way. Only the
+    // viewport-culled lanes are painted. Math mirrors cullWindowFor's X inversion.
     const bandLeft = -transform.x / transform.k;
     const bandWidth = width / transform.k;
     const bandColor = readThemeVar(LANE_BAND_TOKEN, LANE_BAND_FALLBACK);
     const labelX = (LANE_LABEL_PAD - transform.x) / transform.k;
-    for (const lane of lanes) {
-      // Only odd lanes paint (even lanes are transparent — SVG .laneBand).
+    for (const lane of visibleLanes(lanes, scrollTop, viewport, laneHeight, CULL_OVERSCAN)) {
+      const bandTop = AXIS_HEIGHT + lane.y - scrollTop;
+      // Only odd lanes paint a band (even lanes are transparent — SVG .laneBand).
       if (lane.laneIndex % 2 === 1) {
         ctx.save();
         ctx.globalAlpha = LANE_BAND_ALPHA;
         ctx.fillStyle = bandColor;
-        ctx.fillRect(bandLeft, AXIS_HEIGHT + lane.y, bandWidth, lane.height);
+        ctx.fillRect(bandLeft, bandTop, bandWidth, lane.height);
         ctx.restore();
       }
       ctx.fillStyle = LANE_LABEL_PAINT;
       ctx.font = LANE_LABEL_FONT;
-      ctx.fillText(lane.label, labelX, AXIS_HEIGHT + lane.y + 13);
+      ctx.fillText(lane.label, labelX, bandTop + 13);
     }
 
-    // Axis ticks (under the spans).
+    // Axis ticks span the whole viewport (the axis is pinned to the top — no
+    // scrollTop offset). Drawn under the spans.
     ctx.strokeStyle = 'rgba(128,128,128,0.4)';
     ctx.lineWidth = 1;
     for (const t of ticks) {
       ctx.beginPath();
       ctx.moveTo(t.x, AXIS_HEIGHT);
-      ctx.lineTo(t.x, height);
+      ctx.lineTo(t.x, viewport);
       ctx.stroke();
     }
 
     for (const s of visible) {
-      const yTop = AXIS_HEIGHT + s.y + 6;
+      const yTop = AXIS_HEIGHT + s.y - scrollTop + 6;
       const barHeight = s.height - 12;
       if (s.compaction) {
+        // A compaction breakpoint is a full-height rule across the visible band.
         ctx.strokeStyle = colorForOpKind('compaction');
         ctx.lineWidth = 2;
         ctx.setLineDash([4, 3]);
         ctx.beginPath();
         ctx.moveTo(s.x, AXIS_HEIGHT);
-        ctx.lineTo(s.x, height);
+        ctx.lineTo(s.x, viewport);
         ctx.stroke();
         ctx.setLineDash([]);
         continue;
@@ -495,24 +541,31 @@ function TimelineCanvas({
       }
     }
     ctx.restore();
-  }, [visible, lanes, ticks, width, height, selectedId, transform]);
+  }, [visible, lanes, ticks, width, viewport, scrollTop, laneHeight, selectedId, transform]);
 
-  // Hit-test a click: invert the zoom transform, then find the span whose pixel
-  // box contains the point (last match wins → topmost painted).
-  const onClick = (e: MouseEvent<HTMLCanvasElement>): void => {
-    const bounds = e.currentTarget.getBoundingClientRect();
-    // Invert the X-only zoom: X is scaled by k (divide), Y is only translated
-    // (no /k) since lane height does not scale with zoom.
+  const onScroll = (e: UIEvent<HTMLDivElement>): void => {
+    setScrollTop(e.currentTarget.scrollTop);
+  };
+
+  // Hit-test a click: invert the X-only zoom for X; for Y, add scrollTop to map the
+  // viewport-relative click into content space (the native scroller offsets Y, the
+  // zoom does not). Last match wins → topmost painted.
+  const onClick = (e: MouseEvent<HTMLDivElement>): void => {
+    const target = e.currentTarget.querySelector('canvas');
+    if (!target) {
+      return;
+    }
+    const bounds = target.getBoundingClientRect();
     const px = (e.clientX - bounds.left - transform.x) / transform.k;
-    const py = e.clientY - bounds.top - transform.y;
+    const py = e.clientY - bounds.top + scrollTop;
     let hit: PositionedSpan | null = null;
     for (const s of spans) {
-      // A compaction breakpoint paints as a FULL-HEIGHT vertical rule
-      // (AXIS_HEIGHT→height), so its hit region is the whole track height (not its
-      // own lane band) — mirroring the SVG path's full-height transparent target.
+      // A compaction breakpoint paints as a FULL-HEIGHT vertical rule, so its hit
+      // region is every lane in content space (AXIS_HEIGHT→contentHeight), not its
+      // own lane band — mirroring the SVG path's full-height transparent target.
       // Every other span keeps its lane-band Y test.
       if (s.compaction) {
-        if (py >= AXIS_HEIGHT && py <= height && px >= s.x - 4 && px <= s.x + 4) {
+        if (py >= AXIS_HEIGHT && py <= contentHeight && px >= s.x - 4 && px <= s.x + 4) {
           hit = s;
         }
         continue;
@@ -534,21 +587,32 @@ function TimelineCanvas({
   };
 
   return (
-    <div className={styles.vizScroller} role="group" aria-label="Session timeline">
-      <canvas
-        ref={canvasRef}
-        className={styles.vizCanvas}
-        style={{ width, height }}
-        onClick={onClick}
-      />
+    <div
+      className={styles.vizScroller}
+      role="group"
+      aria-label="Session timeline"
+      style={{ maxHeight: viewport, overflowY: 'auto' }}
+      onScroll={onScroll}
+      onClick={onClick}
+    >
+      {/* Tall spacer establishes the scrollable full content height; the canvas is
+          sticky to the viewport top and repainted with the viewport-culled lanes
+          on scroll (mirrors WaterfallCanvas). */}
+      <div style={{ height: contentHeight, position: 'relative', width }}>
+        <canvas
+          ref={canvasRef}
+          className={styles.vizCanvas}
+          style={{ position: 'sticky', top: 0, width, height: viewport }}
+        />
+      </div>
       {/* Keyboard / screen-reader path for the Canvas render (SOW-0006 AC#5): the
           <canvas> is one non-focusable image, so without this every span would be
           unreachable by keyboard. Each VISIBLE span (the same viewport-culled set
           the Canvas paints) gets a real focusable button with the SVG bars'
           accessible name; visually hidden (the canvas IS the visual) but operable.
           Culling to the viewport bounds the list so a thousands-span timeline does
-          not emit a DOM node per span — panning/zooming brings other
-          spans into reach. */}
+          not emit a DOM node per span — scrolling/zooming brings other spans into
+          reach. */}
       <ul className={styles.canvasFallbackList} aria-label="Timeline spans">
         {visible.map((s) => (
           <li key={`${s.laneKey}:${s.span.id}`}>
@@ -566,4 +630,25 @@ function TimelineCanvas({
       </ul>
     </div>
   );
+}
+
+/**
+ * visibleLanes returns the lane rows whose band overlaps the bounded viewport
+ * (scrollTop..scrollTop+viewport) plus overscan, so the Canvas paint loop only
+ * touches on-screen lanes — the lane-band equivalent of cullSpans' lane filter,
+ * kept in sync with cullWindowFor's band math. Pure.
+ */
+function visibleLanes(
+  lanes: PositionedLane[],
+  scrollTop: number,
+  viewport: number,
+  laneHeight: number,
+  overscan: number,
+): PositionedLane[] {
+  if (lanes.length === 0 || laneHeight <= 0) {
+    return lanes;
+  }
+  const laneMin = Math.floor((scrollTop - AXIS_HEIGHT) / laneHeight) - overscan;
+  const laneMax = Math.ceil((scrollTop + viewport - AXIS_HEIGHT) / laneHeight) + overscan;
+  return lanes.filter((l) => l.laneIndex >= laneMin && l.laneIndex <= laneMax);
 }

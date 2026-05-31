@@ -333,6 +333,24 @@ Verdict: NOT mergeable on the residual P2; fix it comprehensively + the 2 P3.
 - **Gates:** tsc 0, eslint 0, vitest **537 pass (41 files)**, build main chunk ≤500 KB gz, `go vet` + `go build` + `gosec` (0, presenter + whole-repo) + `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
 - Next: re-review (Round 7, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
 
+### Round 7 — 2026-06-01 (codex + glm + minimax) on `9dc6704`
+
+glm + minimax = "ready to merge". codex (decisive) CONFIRMED all R6 fixes correct+complete and all prior rounds holding, but found 1 P2 + 2 P3 — all verified real:
+
+- **P2 (codex): the Timeline Canvas viewport-cull was a NO-OP in production AND the canvas backing store was unbounded.** `TimelineTab` passed the FULL content height (`AXIS_HEIGHT + lanes.length * LANE_HEIGHT`) as the renderer's `height`, so `cullWindowFor`'s visible lane band = ALL lanes (no Y-cull) AND `TimelineCanvas` allocated the canvas backing store at full height (~1K lanes → ~40000px → at DPR 2, ~80000px → EXCEEDS the browser ~32767px canvas limit → blank/broken). This violates **AC#3** ("zooming … across 1K sessions renders < 300 ms") and **R3** (the documented mitigation: "only render spans whose lane is in the visible viewport in Y"). The `TimelineRenderer` tests passed an artificial SHORT `height`, masking the production full-height path (same "wrong test shape" class as R6). **VERIFIED REAL.**
+- **P3 (codex): `viz/timeline.ts` comments + `timeline.test.ts`** still called a nullable `end_ts` a "point event" (a point event emits `end_ts == start_ts`; only a still-running op is null). **VERIFIED.**
+- **P3 (codex): stale `duration_us: null` "point-event" fixtures** in `EventList`/`Waterfall`/`FlameGraph`/`SpanDetailDrawer` tests (the null shape is a RUNNING op; a point event is `end == start` / `duration_us = 0`) — these contributed to the earlier `0µs` miss. **VERIFIED.**
+
+Verdict: NOT mergeable on the P2 (violates the SOW's own AC#3/R3 perf contract + risks a blank canvas for the high-density case it was designed for); fix it + the 2 P3.
+
+### Round-7 fix cycle — 2026-06-01
+
+- **P2 (Timeline Canvas Y-virtualization):** `TimelineCanvas` rewritten to MIRROR the proven `WaterfallCanvas` — the canvas backing store is bounded to `min(CANVAS_VIEWPORT=460, contentHeight)` (NEVER the full lane stack), a tall spacer + sticky canvas + native vertical `scrollTop`, and `cullWindowFor` is computed from `scrollTop` + the bounded viewport so off-screen lanes are actually culled; X stays d3-zoom (time), Y is native scroll (`plainWheelPan:false`, the Waterfall convention). The Canvas path now also triggers when the lane stack exceeds the viewport (`spans > VISIBLE_SPAN_CEILING || height > CANVAS_VIEWPORT`), so a many-lane / few-span timeline never renders a 40000px SVG or canvas. +test: 900 lanes (full content 36022px) → the canvas backing store is bounded (< 2000px, not 36022px) and only the visible lane band is painted/listed (red→green; the existing short-height tests still pass).
+- **P3 timeline running-vs-point-event:** `viz/timeline.ts` + `timeline.test.ts` comments/fixtures corrected (null `end_ts` = still-running; a point event has `end_ts == start_ts`).
+- **P3 stale Trace fixtures:** the `EventList`/`Waterfall`/`FlameGraph` point-event fixtures converted to the REAL persisted shape (`end_ts == start_ts`, `duration_us: 0`); the `SpanDetailDrawer` null-end fixture relabeled "still-running op".
+- **Gates:** tsc 0, eslint 0, vitest **539 pass (41 files)**, build main chunk ≤500 KB gz, `scan-secrets` + `scan-ai-attribution` PASS (no Go change this round; backend gates unchanged since `9dc6704`).
+- Next: re-review (Round 8, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
+
 ## Outcome
 
 Pending.

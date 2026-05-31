@@ -16,8 +16,9 @@ import {
 // like viz/trace.ts and viz/topology.ts. Given the server's lane/span model
 // (one lane per session, GET /api/sessions/:id/timeline) it computes positioned
 // rows: lane index → y, span start/end → x via a shared time scale, width =
-// duration. A NULLABLE end_ts renders as an INSTANT marker at start_ts (a point
-// event, not a zero-width bar) — source-aware, like the Trace tab. Compaction
+// duration. A NULL end_ts is a still-RUNNING op and a POINT EVENT carries
+// end_ts == start_ts; both render as an INSTANT marker at start_ts (a point, not
+// a zero-width bar) — source-aware, like the Trace tab. Compaction
 // spans (kind==='compaction') are flagged so the renderer draws a full-height
 // vertical breakpoint. A viewport-cull helper keeps only spans overlapping the
 // visible X window AND visible lanes (the Canvas path's culling). These tests pin
@@ -74,12 +75,12 @@ describe('timelineScale', () => {
 });
 
 describe('isInstant / isCompaction', () => {
-  it('treats a null end_ts as an instant (point) event', () => {
+  it('treats a null end_ts as an instant — a still-RUNNING op (no recorded end yet)', () => {
     expect(isInstant({ id: 'a', kind: 'tool', name: '', start_ts: 1, end_ts: null, status: 'running' })).toBe(true);
     expect(isInstant({ id: 'b', kind: 'tool', name: '', start_ts: 1, end_ts: 2, status: 'completed' })).toBe(false);
   });
 
-  it('treats an end_ts equal to start_ts as an instant (zero-duration point)', () => {
+  it('treats an end_ts equal to start_ts as an instant — the real POINT-EVENT shape (zero-duration)', () => {
     expect(isInstant({ id: 'c', kind: 'tool', name: '', start_ts: 5, end_ts: 5, status: 'completed' })).toBe(true);
   });
 
@@ -163,14 +164,35 @@ describe('layoutTimeline — span x / width from the time scale', () => {
 describe('layoutTimeline — nullable end_ts → instant marker (not a bar)', () => {
   const out = layoutTimeline(fixtureLanes(), OPTS);
 
-  it('marks a null-end span as an instant placed at its start_ts, not a zero/extended bar', () => {
-    // live [800,null] → instant at x=(800-100)*1.25=875, flagged instant, no real width.
+  it('marks a null-end span (a still-RUNNING op) as an instant placed at its start_ts, not a zero/extended bar', () => {
+    // live [800,null] is a still-running op → instant at x=(800-100)*1.25=875,
+    // flagged instant, no real width.
     const live = out.spans.find((s) => s.span.id === 'live');
     expect(live?.instant).toBe(true);
     expect(live?.x).toBeCloseTo(875, 4);
     // A closed bar is NOT an instant.
     const llm = out.spans.find((s) => s.span.id === 'llm');
     expect(llm?.instant).toBe(false);
+  });
+
+  it('marks a POINT EVENT (end_ts == start_ts) as an instant at start_ts, distinct from a running op', () => {
+    // The real persisted point-event shape is end_ts == start_ts (NOT null — null
+    // is the running shape). It is flagged instant and placed at start_ts with no
+    // real width, exactly like a running op.
+    const lanes = [
+      lane({
+        key: 'session:root',
+        label: 'root',
+        spans: [
+          { id: 'point', kind: 'llm', name: 'gen', start_ts: 500, end_ts: 500, status: 'completed' },
+        ],
+      }),
+    ];
+    const out2 = layoutTimeline(lanes, OPTS);
+    const point = out2.spans.find((s) => s.span.id === 'point');
+    expect(point?.instant).toBe(true);
+    // x=(500-100)*1.25=500; no measured forward window.
+    expect(point?.x).toBeCloseTo(500, 4);
   });
 });
 
