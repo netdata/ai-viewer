@@ -92,7 +92,7 @@ func TestNewDefaultsLoggerStartedAtVersion(t *testing.T) {
 
 // TestHandlerRegistersRoutes asserts the basic routing surface:
 // /api/health, /api/sources, /api/sessions, and /api/stats answer 200;
-// a still-deferred sub-route (topology) returns 404 NOT_FOUND; a method
+// a still-deferred sub-route (catalog) returns 404 NOT_FOUND; a method
 // other than GET on /api/health returns 405.
 func TestHandlerRegistersRoutes(t *testing.T) {
 	t.Parallel()
@@ -114,7 +114,7 @@ func TestHandlerRegistersRoutes(t *testing.T) {
 		{"sources ok", http.MethodGet, "/api/sources", http.StatusOK},
 		{"sessions ok", http.MethodGet, "/api/sessions", http.StatusOK},
 		{"stats ok", http.MethodGet, "/api/stats", http.StatusOK},
-		{"topology deferred", http.MethodGet, "/api/sessions/abc/topology", http.StatusNotFound},
+		{"catalog deferred", http.MethodGet, "/api/catalog/tools", http.StatusNotFound},
 		{"unknown api", http.MethodGet, "/api/does-not-exist", http.StatusNotFound},
 		{"post health forbidden", http.MethodPost, "/api/health", http.StatusMethodNotAllowed},
 	}

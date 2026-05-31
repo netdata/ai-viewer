@@ -117,9 +117,10 @@ func TestNotImplementedReportsChunk(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
-	// /api/sessions/{id}/topology is still deferred (Chunk 14); it falls
-	// through the live session routes to the notImplemented catch-all.
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/abc/topology", nil)
+	// /api/catalog/* is still deferred; it matches the /api/ catch-all and
+	// falls through to the notImplemented handler. (topology/timeline are
+	// now live — SOW-0006 — so they no longer exercise this path.)
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog/tools", nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	var env errorEnvelope
@@ -139,13 +140,13 @@ func TestNotImplementedReportsChunk(t *testing.T) {
 // to a still-deferred route returns 404 with the JSON Content-Type
 // header set but an empty response body. Without this guard, HEAD to
 // error paths leaked the JSON envelope,
-// violating presenter.md §"Routing". As of Chunk 12 the deferred route
-// used here is the topology sub-route (Chunk 14).
+// violating presenter.md §"Routing". The deferred route used here is the
+// catalog sub-route (topology/timeline are now live — SOW-0006).
 func TestHEAD_DeferredRouteReturns404WithEmptyBody(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
-	req := httptest.NewRequest(http.MethodHead, "/api/sessions/abc/topology", nil)
+	req := httptest.NewRequest(http.MethodHead, "/api/catalog/tools", nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {

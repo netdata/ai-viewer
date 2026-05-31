@@ -196,6 +196,8 @@ func (p *Presenter) now() time.Time { return p.nowFn() }
 //   - GET /api/sessions           filtered, keyset-paginated session list
 //   - GET /api/sessions/{id}      session detail (turns, ops, payloads, children)
 //   - GET /api/sessions/{id}/logs severity-filtered, paginated log entries
+//   - GET /api/sessions/{id}/topology  actor graph (agents+tools) for the session tree
+//   - GET /api/sessions/{id}/timeline  per-session lanes + spans for the timeline view
 //   - GET /api/stats              cross-session aggregates over the filtered set
 //
 // Every other route declared in presenter.md returns NOT_FOUND until
@@ -227,13 +229,15 @@ func (p *Presenter) Handler() http.Handler {
 	// r.PathValue; the patterns carry no method verb so every handler
 	// keeps the same in-handler gating style (one routing style across
 	// the surface). More-specific patterns take precedence over the
-	// `/api/` catch-all, so unimplemented sub-routes (topology, timeline)
-	// still fall through to notImplemented.
+	// `/api/` catch-all, so still-unimplemented sub-routes (catalog,
+	// payloads) fall through to notImplemented.
 	mux.HandleFunc("/api/health", p.handleHealth)
 	mux.HandleFunc("/api/sources", p.handleSources)
 	mux.HandleFunc("/api/sessions", p.handleSessionsList)
 	mux.HandleFunc("/api/sessions/{id}", p.handleSessionDetail)
 	mux.HandleFunc("/api/sessions/{id}/logs", p.handleSessionLogs)
+	mux.HandleFunc("/api/sessions/{id}/topology", p.handleSessionTopology)
+	mux.HandleFunc("/api/sessions/{id}/timeline", p.handleSessionTimeline)
 	mux.HandleFunc("/api/stats", p.handleStats)
 	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
 	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)
@@ -303,9 +307,9 @@ func (p *Presenter) rootHandler(w http.ResponseWriter, r *http.Request) {
 // route. The handler intentionally does NOT use
 // http.StatusNotImplemented because that maps to "the server does not
 // support this method at all", whereas these routes are scheduled to
-// land in later chunks. As of Chunk 13 the still-pending routes are
-// topology/timeline (Chunk 14) and catalog/payloads; the SSE
-// subscription surface (subscriptions/events) is now live.
+// land in later chunks. The topology/timeline session sub-routes are now
+// live (SOW-0006); the still-pending routes are catalog/payloads. The SSE
+// subscription surface (subscriptions/events) is live.
 func (p *Presenter) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, r, p.logger, http.StatusNotFound,
 		CodeNotFound, "endpoint not yet implemented in this chunk",

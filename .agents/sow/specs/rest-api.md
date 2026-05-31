@@ -146,25 +146,122 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
 
 ### GET /api/sessions/:id/topology
 
-**Phase 2 — not implemented in Phase 1.** Not registered; a request falls through
-to the `/api/` catch-all and returns a structured `NOT_FOUND`. The shape below is
-the planned contract.
+Implemented by SOW-0006. Returns the layout-agnostic actor graph (nodes + edges)
+for the D3 topology view; the client picks the layout (force / hierarchical), so
+the server returns no coordinates. 404 `NOT_FOUND` for an unknown `:id`; a control
+byte in `:id` is a `BAD_REQUEST` (same rule as `/api/sessions/:id`). HEAD returns
+the status + JSON Content-Type with an empty body; a non-GET/HEAD method is
+405 `METHOD_NOT_ALLOWED`.
 
-Returns nodes and edges for the D3 force-directed view.
+**Scope = the whole session tree** (the session at `:id` resolved to its
+`root_session_id`, plus every session sharing that root — root + all descendants).
+This makes the per-session topology answer "which sub-agent burned the most cost",
+not just "what did this one session do". The cross-session `/topology` page (no
+`:id`) reuses the same node/edge model over the filtered set (Phase 3+).
 
 ```json
 {
   "nodes": [
-    { "id":"agent:nedi","kind":"agent","label":"nedi","size_metric":1.0,"failure_ratio":0.0 },
-    { "id":"tool:mcp__slack__send_message","kind":"tool","label":"slack.send_message","size_metric":0.4 }
+    { "id":"agent:<session_id>","kind":"agent","label":"nedi (root)","size_metric":3400000,"failure_ratio":0.0 },
+    { "id":"tool:shell.Bash","kind":"tool","label":"shell.Bash","size_metric":300000,"failure_ratio":0.0 }
   ],
   "edges": [
-    { "source":"agent:nedi","target":"tool:mcp__slack__send_message","calls":12,"total_us":3400000 }
-  ]
+    { "source":"agent:<session_id>","target":"tool:shell.Bash","calls":12,"total_us":3400000 }
+  ],
+  "max_size_metric": 3400000
 }
 ```
 
-Size metric selection: `?metric=cost|tokens|duration|calls|ctx_pct` (default `duration`).
+- **Nodes.** One `agent` node per distinct session in the tree (`id` =
+  `agent:<session.id>`; `label` = the session's `agent_name`, falling back to its
+  `kind`, with `" (root)"` appended for the root session). One `tool` node per
+  distinct `(tool_namespace, name)` among the tree's `kind='tool'` ops (`id` =
+  `tool:<namespace>.<name>`, or `tool:<name>` when `tool_namespace` is NULL;
+  `label` = the same dotted string). Agent-node identity is the **session id**, not
+  the agent name, because two sub-agents can share an `agent_name` ("worker") yet
+  be distinct actors with distinct cost — collapsing them on name would hide the
+  per-sub-agent breakdown the view exists to show.
+- **Edges.** Caller→callee with `calls` (op count) and `total_us`
+  (`SUM(duration_us)`, NULL durations counted as 0). Two edge sources: (a) every
+  `kind='tool'` op contributes an `agent:<its session_id>` → `tool:<ns>.<name>`
+  edge; (b) every `kind='session'` op with `child_session_id` set contributes an
+  `agent:<parent session_id>` → `agent:<child_session_id>` edge (the sub-agent
+  spawn). Edges are aggregated, so repeated calls collapse to one edge with summed
+  counts. An edge whose target session is outside the tree (should not happen given
+  the shared root) is dropped defensively.
+- **`?metric=`** selects what `size_metric` carries on **agent** nodes:
+  `cost` (`SUM(cost_usd)`), `tokens` (`SUM(tokens_in+tokens_out)`), `duration`
+  (`SUM(duration_us)` — **default**), `calls` (op count), `ctx_pct`
+  (`MAX(ctx_used/ctx_max)` across the session's LLM ops where both are > 0, in
+  `0..1`; `0` when never known). The metric is computed over the ops owned by that
+  session (`ops.session_id`). **Tool** nodes always carry the tool's own
+  `SUM(duration_us)` as `size_metric` regardless of `?metric=` (a tool has no
+  tokens/ctx of its own; duration is the one metric every tool node can express
+  consistently) — except under `?metric=calls`, where a tool node carries its op
+  count, and `?metric=cost`/`tokens`, where it carries the tool ops' summed
+  cost / tokens. An unknown `?metric=` value is a `BAD_REQUEST`.
+- **`size_metric` is raw, not normalized.** The server returns the raw aggregate
+  per node plus a top-level **`max_size_metric`** (the maximum `size_metric` across
+  all nodes, `0` when there are no nodes). The client normalizes to its preferred
+  radius range using `max_size_metric`. Returning raw + max (rather than a
+  server-side 0..1 scale) keeps the contract honest for tooltips ("$0.42",
+  "3.4 s") and lets the client choose linear/sqrt/log sizing without a second
+  round-trip. (The earlier draft's `1.0`/`0.4` example implied normalization; this
+  is the resolved contract — SOW-0006.)
+- **`failure_ratio`** is `failed_ops / total_ops` for that node in `0..1`
+  (`0` when the node has no ops). For an agent node it is over the session's ops;
+  for a tool node it is over that tool's ops across the tree.
+
+A session in the tree with no ops still appears as an agent node (`size_metric` 0,
+`failure_ratio` 0) so the lineage stays visible. The two driving queries (one over
+the tree's sessions, one over the tree's ops) are bounded by the tree size and use
+`idx_sessions_root_start` / `idx_ops_session_start`.
+
+### GET /api/sessions/:id/timeline
+
+Implemented by SOW-0006. Returns the per-lane span set for the Timeline view.
+404 `NOT_FOUND` for an unknown `:id`; control-byte `:id` → `BAD_REQUEST`; HEAD and
+405 behave exactly as the topology route above.
+
+**Scope = the whole session tree** (root + all sessions sharing its
+`root_session_id`), one lane per session, matching the Timeline's "root + children
+stacked" model (`ui-pages.md`).
+
+```json
+{
+  "lanes": [
+    {
+      "key":"session:<id>",
+      "label":"nedi (root)",
+      "spans":[
+        { "id":"<op_id>","kind":"llm","name":"claude-opus-4-7","start_ts":<us>,"end_ts":<us>,"status":"completed" },
+        { "id":"<op_id>","kind":"compaction","name":"auto","start_ts":<us>,"end_ts":<us>,"status":"completed" }
+      ]
+    }
+  ],
+  "t_start": <us>, "t_end": <us>
+}
+```
+
+- **Lanes.** One per session in the tree. `key` = `session:<session.id>`; `label`
+  = the session's `agent_name` (falling back to `kind`), with `" (root)"` appended
+  for the root session. Lanes are ordered by the session's `start_ts` (then `id`),
+  so the root sorts first when it starts first. A session with no ops still emits a
+  lane with an empty `spans` array (the lineage stays visible).
+- **Spans.** Every op of that session, ordered by `start_ts` then `seq` then `id`.
+  Each span carries `id` (op id), `kind`, `name`, `start_ts`, `end_ts`, `status`.
+  **Compaction is not a separate array**: `kind='compaction'` ops are emitted as
+  ordinary spans with `kind:"compaction"`, and the frontend keys on `kind` to draw
+  the full-height vertical breakpoint (`ui-pages.md`). A still-running op (no
+  `end_ts`) emits `"end_ts": null`; the client treats a null end as "ongoing" and
+  draws it to the current viewport edge (the server does not synthesize an end so
+  the raw fact "not finished" is preserved).
+- **`t_start` / `t_end`.** Minimum `start_ts` and maximum `end_ts` across all spans
+  in all lanes. A span with a null `end_ts` contributes its `start_ts` to the
+  `t_end` computation (so the window always covers every span's known extent).
+  When the tree has no ops at all, both are `0`.
+
+The single op query is bounded by the tree size and uses `idx_ops_session_start`.
 
 ### GET /api/sessions/:id/timeline
 
