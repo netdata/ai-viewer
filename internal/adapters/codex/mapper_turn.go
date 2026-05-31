@@ -374,7 +374,18 @@ func (m *fileMapper) pruneWebSearchQueue(turnID string) {
 // cumulative total NEVER feeds per-turn tokens — only CtxUsed on the turn's last
 // LLM op.
 func (ts *turnState) addTokenUsage(info tokenCountInfo) {
-	ts.tokensIn += info.last.InputTokens
+	// Canonical token contract (canonical-events.md, SOW-0029): TokensIn is the
+	// FRESH/uncached input ONLY. Upstream codex reports input_tokens as the TOTAL
+	// prompt (cached + uncached) — non_cached_input() = input_tokens −
+	// cached_input_tokens (codex-rs protocol.rs). Subtract the cached portion so
+	// TokensIn is fresh and the pricer (which charges cache_read separately) does
+	// not double-charge the cached tokens. Clamp at 0 defensively in case a
+	// malformed event reports cached > input.
+	fresh := info.last.InputTokens - info.last.CachedInputTokens
+	if fresh < 0 {
+		fresh = 0
+	}
+	ts.tokensIn += fresh
 	ts.tokensOut += info.last.OutputTokens
 	ts.tokensCacheRead += info.last.CachedInputTokens
 	ts.tokensCacheWrite += info.last.CacheCreationInputTokens

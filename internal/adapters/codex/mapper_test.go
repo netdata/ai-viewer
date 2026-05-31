@@ -415,6 +415,44 @@ func TestMapper_TokenRollup(t *testing.T) {
 	}
 }
 
+// TestMapper_TokenRollupCacheIsFresh pins the canonical token contract
+// (canonical-events.md, SOW-0029) for codex: the upstream TokenUsage.input_tokens
+// is the TOTAL prompt (cached + uncached) — non_cached_input() = input_tokens -
+// cached_input_tokens (codex-rs protocol.rs). The rollup must therefore expose
+// TokensIn as the FRESH input only (input − cached) and the cached portion as
+// TokensCacheRead, so cache is never folded into TokensIn (which would
+// double-charge it in the pricer). One token_count with input_tokens=100,
+// cached_input_tokens=70, cache_creation_input_tokens=10, output=5 → fresh
+// TokensIn=30, TokensCacheRead=70, TokensCacheWrite=10.
+func TestMapper_TokenRollupCacheIsFresh(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","started_at":1763664000}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"a"}]}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"token_count","turn_id":"t1","info":{"total_token_usage":{"total_tokens":105},"last_token_usage":{"input_tokens":100,"cached_input_tokens":70,"cache_creation_input_tokens":10,"output_tokens":5}},"model_context_window":200000}}`,
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","completed_at":"` + tsDone + `"}}`,
+	}
+	tf := turnFinals(runLines(t, m, lines))
+	if len(tf) != 1 {
+		t.Fatalf("turn finalize count = %d, want 1", len(tf))
+	}
+	if tf[0].TokensIn != 30 {
+		t.Errorf("TokensIn = %d, want 30 (fresh = input_tokens 100 − cached 70; cache excluded)", tf[0].TokensIn)
+	}
+	if tf[0].TokensCacheRead != 70 {
+		t.Errorf("TokensCacheRead = %d, want 70", tf[0].TokensCacheRead)
+	}
+	if tf[0].TokensCacheWrite != 10 {
+		t.Errorf("TokensCacheWrite = %d, want 10", tf[0].TokensCacheWrite)
+	}
+	if tf[0].TokensOut != 5 {
+		t.Errorf("TokensOut = %d, want 5", tf[0].TokensOut)
+	}
+}
+
 // TestMapper_SessionLevelTokenCountAttributedToActiveTurn asserts a token_count
 // with NO turn_id attributes to the most-recently-active turn (spec rule #17,
 // "Token accounting nuance").

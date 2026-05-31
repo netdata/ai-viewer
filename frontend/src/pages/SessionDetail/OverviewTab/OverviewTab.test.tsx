@@ -88,6 +88,8 @@ function detail(turns: TurnDetail[], children: ChildSummary[] = []): SessionDeta
       end_ts: 2,
       tokens_in: 1234,
       tokens_out: 5678,
+      tokens_cache_read: 3000,
+      tokens_cache_write: 500,
       cost_usd: 0.42,
       turn_count: 2,
       op_count: 9,
@@ -97,6 +99,19 @@ function detail(turns: TurnDetail[], children: ChildSummary[] = []): SessionDeta
     turns,
     child_sessions: children,
   };
+}
+
+/** detailNoCache builds a session whose token + cache counts are all zero. */
+function detailNoCache(): SessionDetailResponse {
+  const d = detail([]);
+  d.session = {
+    ...d.session,
+    tokens_in: 0,
+    tokens_out: 0,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
+  };
+  return d;
 }
 
 function renderTab(d: SessionDetailResponse) {
@@ -149,6 +164,28 @@ describe('OverviewTab', () => {
     expect(screen.getByText('1,234')).toBeInTheDocument();
     expect(screen.getByText('5,678')).toBeInTheDocument();
     expect(screen.getByText('$0.42')).toBeInTheDocument();
+  });
+
+  it('labels tokens_in as FRESH/uncached input (not total)', () => {
+    renderTab(detail([]));
+    // The input number must be labeled so it is not confused with total input.
+    expect(screen.getByText(/fresh/i)).toBeInTheDocument();
+  });
+
+  it('renders the cache breakdown (read + write) and the cache-hit-rate', () => {
+    renderTab(detail([]));
+    // cache_read = 3000, cache_write = 500.
+    expect(screen.getByText('3,000')).toBeInTheDocument();
+    expect(screen.getByText('500')).toBeInTheDocument();
+    // hit-rate = 3000 / (1234 + 3000 + 500) = 3000/4734 = 63.4%.
+    expect(screen.getByText('63.4%')).toBeInTheDocument();
+    expect(screen.getByText(/cache hit/i)).toBeInTheDocument();
+  });
+
+  it('shows an em dash for cache-hit-rate when all token counts are zero', () => {
+    renderTab(detailNoCache());
+    const hit = screen.getByTestId('cache-hit-rate');
+    expect(hit).toHaveTextContent('—');
   });
 
   it('renders a tools-used table derived from the ops', () => {

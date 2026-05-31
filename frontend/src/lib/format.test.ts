@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cacheHitRate,
   formatBytes,
   formatCost,
   formatDuration,
@@ -96,5 +97,18 @@ describe('formatPct', () => {
   });
   it('handles null', () => {
     expect(formatPct(null)).toBe('—');
+  });
+});
+
+describe('cacheHitRate', () => {
+  it('computes cache_read / (fresh + cache_read + cache_write)', () => {
+    // 3000 read / (1000 fresh + 3000 read + 500 write) = 3000 / 4500 = 0.6667
+    expect(cacheHitRate(1000, 3000, 500)).toBeCloseTo(3000 / 4500, 10);
+  });
+  it('returns null when the denominator is zero (no input at all)', () => {
+    expect(cacheHitRate(0, 0, 0)).toBeNull();
+  });
+  it('is 0 when there is fresh input but no cache reads', () => {
+    expect(cacheHitRate(1000, 0, 0)).toBe(0);
   });
 });

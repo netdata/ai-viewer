@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { StatCard } from '../../../components/StatCard';
 import { StatusBadge } from '../../../components/SessionRow';
-import { formatCost, formatNumber } from '../../../lib/format';
+import { cacheHitRate, formatCost, formatNumber, formatPct } from '../../../lib/format';
 import type { SessionDetailResponse, TurnDetail } from '../../../api/types';
 import styles from './OverviewTab.module.css';
 
@@ -39,6 +39,10 @@ export function toolsUsed(turns: TurnDetail[]): ToolUsage[] {
 export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
   const s = detail.session;
   const tools = toolsUsed(detail.turns);
+  // tokens_in is the FRESH/uncached input (canonical token contract); the cache
+  // portions are separate. Hit-rate = cache_read / total input (em dash when
+  // there is no input at all — cacheHitRate returns null, formatPct → "—").
+  const hitRate = cacheHitRate(s.tokens_in, s.tokens_cache_read, s.tokens_cache_write);
 
   return (
     <div className={styles.wrap}>
@@ -49,8 +53,15 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
       </header>
 
       <div className={styles.cards}>
-        <StatCard label="Tokens in" value={formatNumber(s.tokens_in)} />
+        <StatCard label="Tokens in (fresh)" value={formatNumber(s.tokens_in)} hint="uncached input" />
         <StatCard label="Tokens out" value={formatNumber(s.tokens_out)} />
+        <StatCard label="Cache read" value={formatNumber(s.tokens_cache_read)} />
+        <StatCard label="Cache write" value={formatNumber(s.tokens_cache_write)} />
+        <StatCard
+          label="Cache hit rate"
+          value={<span data-testid="cache-hit-rate">{formatPct(hitRate)}</span>}
+          hint="cache read / total input"
+        />
         <StatCard label="Cost" value={formatCost(s.cost_usd)} />
         <StatCard label="Turns" value={formatNumber(s.turn_count)} />
         <StatCard label="Ops" value={formatNumber(s.op_count)} />
