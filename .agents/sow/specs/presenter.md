@@ -10,7 +10,7 @@ HTTP server. Serves the embedded frontend at `/`, exposes REST endpoints under `
 main()
   ├─ load config (db path, bind addr, state dir)
   ├─ open SQLite (read-only mode for safety; WAL allows concurrent writer)
-  ├─ run migration check (refuse to start if schema_meta.version > supported)
+  ├─ run migration check (refuse to start if schema_meta.version != supported — any mismatch, older or newer; CheckSchema)
   ├─ start SSE hub goroutine
   ├─ start notify-table poller goroutine (read-only; cursor starts at MAX(seq))
   ├─ register HTTP routes

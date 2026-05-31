@@ -137,7 +137,7 @@ CREATE TABLE ops (
     reasoning_kind  TEXT,                                   -- kind='reasoning': 'summary' | 'raw'
     start_ts        INTEGER NOT NULL,
     end_ts          INTEGER,
-    duration_us     INTEGER,                                -- end_ts - start_ts when both known
+    duration_us     INTEGER,                                -- end_ts - start_ts, computed at OpFinalized from the PERSISTED start_ts (OpStarted.Ts), NOT the finalize event's Ts; NULL when start/end unknown. See ingester.md §Catalog Tables.
     status          TEXT NOT NULL,                          -- 'running'|'completed'|'failed'|'cancelled'|'truncated'
     error_class     TEXT,
     error_message   TEXT,
@@ -399,7 +399,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='4', key='created_at' value=...
+-- key='version' value='5', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
@@ -417,6 +417,22 @@ Migration history:
   notify channel; see §notify) and bumps `schema_meta.version` to `'4'`.
   `presenter.SchemaVersion` moves to `4` in the same change so serve refuses
   to start against an older DB.
+- `0005_op_duration_backfill.sql` — backfills `ops.duration_us = end_ts - start_ts`
+  for historical rows and recomputes `catalog_models` / `catalog_tools.total_duration_us`
+  from the corrected per-op values (SOW-0026 — fixing the bug where duration was
+  computed from the finalize event's `Ts` and persisted as `0`), and bumps
+  `schema_meta.version` to `'5'` in lockstep with `presenter.SchemaVersion`. It
+  changes only row DATA (no table/column/index change), but it bumps the version
+  anyway: `ai-viewer-serve` runs no migrations and gates startup solely on
+  `schema_meta.version` (`CheckSchema`, exact-equality), so a v5 serve binary
+  refuses to start against a pre-0005 store still reading `'4'` — it therefore
+  never serves the stale `duration_us = 0` rows this migration repairs. (The runner
+  still tracks applied files in `_schema_migrations` by filename, so 0005 runs once;
+  the version bump is the serve-side compatibility gate.) A migration bumps the
+  version (with `presenter.SchemaVersion`) when serve reads or validates its
+  outcome — a schema-shape change, or served data like these durations; an
+  ingester-only migration that serve never reads (e.g. `0002_source_progress.sql`)
+  stays version-neutral.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB

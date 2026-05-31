@@ -23,7 +23,7 @@ JSON over HTTP. All implemented endpoints return `application/json` except `/api
 {
   "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
-  "schema_version": 4,
+  "schema_version": 5,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,

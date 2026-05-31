@@ -179,7 +179,9 @@ func TestCatalogModelsCtxMaxObservedExceedsSeed(t *testing.T) {
 	// Seed was applied on OpStartedEvent. Observe a larger CtxMax on
 	// OpFinalized — the catalog row must climb to that value.
 	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1100},
+		// Finalized.Ts == EndTs (the op END), spec-conformant: a finalize sorts
+		// after its OpStarted (Ts 1100), so its own Ts is the end, not the start.
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
 		EndTs: 1200, Status: "completed",
 		CtxMax: 300000,
@@ -223,7 +225,9 @@ func TestCatalogModelsCtxMaxObservedBelowSeedKeepsSeed(t *testing.T) {
 		Provider: "anthropic", Model: "claude-opus-4-7",
 	})
 	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: "anthropic:/tmp", SourceSeq: 3, Ts: 1100},
+		// Finalized.Ts == EndTs (the op END), spec-conformant: a finalize sorts
+		// after its OpStarted (Ts 1100), so its own Ts is the end, not the start.
+		EventBase:       canonical.EventBase{SourceID: "anthropic:/tmp", SourceSeq: 3, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
 		EndTs: 1200, Status: "completed",
 		CtxMax: 200000,
@@ -267,7 +271,9 @@ func TestCatalogModelsCtxMaxObservedZeroKeepsSeed(t *testing.T) {
 	// CtxMax: 0 == "adapter did not observe a ctx_max for this op"
 	// per writer.go:472 NULLIF semantics.
 	_ = w.apply(ctx, tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1100},
+		// Finalized.Ts == EndTs (the op END), spec-conformant: a finalize sorts
+		// after its OpStarted (Ts 1100), so its own Ts is the end, not the start.
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
 		EndTs: 1200, Status: "completed",
 		CtxMax: 0,

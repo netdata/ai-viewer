@@ -83,7 +83,11 @@ func applyCatalogOps(t *testing.T, ctx context.Context, db *sql.DB, w *writer, s
 		Kind: canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5",
 	})
 	apply(canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		// Finalized.Ts == EndTs (the op END) is spec-conformant: a finalize
+		// sorts after its OpStarted, so its Ts is the end, not the start. The
+		// fixed writer derives duration from the persisted start_ts and ignores
+		// this Ts, so all duration/catalog assertions below stay green (SOW-0026).
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1300},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: llmStatus, EndTs: 1300,
 		TokensIn: 100, TokensOut: 20, TokensCacheRead: 5, TokensCacheWrite: 3,
 	})
@@ -94,7 +98,7 @@ func applyCatalogOps(t *testing.T, ctx context.Context, db *sql.DB, w *writer, s
 		Kind: canonical.OpTool, Name: "shell", ToolNamespace: "shell",
 	})
 	apply(canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 6, Ts: 1400},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 6, Ts: 1500},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 2, Status: toolStatus, EndTs: 1500,
 		TokensIn: 7,
 	})
@@ -173,7 +177,7 @@ func TestCatalog_ReFinalizeStatusCorrectionDeltaOnce(t *testing.T) {
 		Kind: canonical.OpTool, Name: "shell", ToolNamespace: "shell",
 	})
 	apply(tx1, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: 1200, TokensIn: 9,
 	})
 	if err := tx1.Commit(); err != nil {
@@ -187,7 +191,7 @@ func TestCatalog_ReFinalizeStatusCorrectionDeltaOnce(t *testing.T) {
 	// path). Tokens unchanged. The failure total must become exactly 1.
 	tx2, _ := db.BeginTx(ctx, nil)
 	apply(tx2, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "command_failed", EndTs: 1200, TokensIn: 9,
 	})
 	if err := tx2.Commit(); err != nil {
@@ -254,7 +258,7 @@ func TestCatalog_IdentityChangeMigratesContribution(t *testing.T) {
 	// 2) function_call_output → finalizes the placeholder op (with a token cost so
 	//    a stranded total would be visible on the old key).
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "tool_error",
 		EndTs: 1200, TokensIn: 11, TokensOut: 4,
 	})
@@ -267,7 +271,7 @@ func TestCatalog_IdentityChangeMigratesContribution(t *testing.T) {
 	})
 	// 4) the enrichment's correcting OpFinalized (same terminal status here).
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 6, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 6, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "tool_error",
 		EndTs: 1200, TokensIn: 11, TokensOut: 4,
 	})
@@ -347,7 +351,7 @@ func TestCatalog_LLMIdentityChangeMigratesContribution(t *testing.T) {
 		Kind: canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5",
 	})
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1500},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "model_error",
 		EndTs: 1500, TokensIn: 30, TokensOut: 8, TokensCacheRead: 2, TokensCacheWrite: 1,
 	})
@@ -358,7 +362,7 @@ func TestCatalog_LLMIdentityChangeMigratesContribution(t *testing.T) {
 		Kind: canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5-codex",
 	})
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 6, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 6, Ts: 1500},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "model_error",
 		EndTs: 1500, TokensIn: 30, TokensOut: 8, TokensCacheRead: 2, TokensCacheWrite: 1,
 	})
@@ -383,7 +387,7 @@ func TestCatalog_LLMIdentityChangeMigratesContribution(t *testing.T) {
 		t.Errorf("corrected model total_tokens_in = %d, want 30", got)
 	}
 	if got := scanInt(t, db, `SELECT total_duration_us FROM catalog_models WHERE provider='openai' AND name='gpt-5.5-codex'`); got != 400 {
-		t.Errorf("corrected model total_duration_us = %d, want 400 (1500-1100)", got)
+		t.Errorf("corrected model total_duration_us = %d, want 400 (real op duration: EndTs 1500 − start_ts 1100)", got)
 	}
 	if got := scanInt(t, db, `SELECT COALESCE(total_tokens_in,0) FROM catalog_models WHERE provider='openai' AND name='gpt-5.5'`); got != 0 {
 		t.Errorf("old model total_tokens_in = %d, want 0 (no stranded tokens, I1)", got)
@@ -493,7 +497,7 @@ func TestCatalog_LLMReEmitEmptyProviderModelNoDrain(t *testing.T) {
 		Kind: canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5",
 	})
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1500},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "failed", ErrorClass: "model_error",
 		EndTs: 1500, TokensIn: 30, TokensOut: 8, TokensCacheRead: 2, TokensCacheWrite: 1,
 	})
@@ -576,7 +580,7 @@ func TestCatalog_ToolReEmitEmptyNamespaceNoMigrate(t *testing.T) {
 		Kind: canonical.OpTool, Name: "shell", ToolNamespace: "shell",
 	})
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: 1200, TokensIn: 7,
 	})
 	// 2) Re-emit OpStarted OMITTING ToolNamespace (empty). The ops upsert COALESCEs it
@@ -638,7 +642,7 @@ func TestCatalog_KindChangeMigratesAcrossTables(t *testing.T) {
 		Kind: canonical.OpTool, Name: "shell", ToolNamespace: "shell",
 	})
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: 1200, TokensIn: 5,
 	})
 	// Re-emit as an LLM op (kind change) on the same (turn,seq).
@@ -648,7 +652,7 @@ func TestCatalog_KindChangeMigratesAcrossTables(t *testing.T) {
 		Kind: canonical.OpLLM, Name: "message", Provider: "openai", Model: "gpt-5.5",
 	})
 	apply(tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 5, Ts: 1100},
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 5, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: 1200, TokensIn: 5,
 	})
 	if err := tx.Commit(); err != nil {
