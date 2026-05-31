@@ -1,172 +1,177 @@
-// Tests for the codex auto-discovery probe and its observability counters
-// (SOW-0004 acceptance #8). They pin:
+// Tests for the opencode auto-discovery probe and its observability counters
+// (SOW-0005 acceptance #8). The shared discovery counters and the codex probe
+// tests live in discovery_test.go (split for the 400-line budget). These pin:
 //
-//   - the probe registers a source at $CODEX_HOME/sessions (default
-//     ~/.codex/sessions) when the directory exists, with location = the
-//     walked sessions dir;
-//   - $CODEX_HOME overrides the default location;
-//   - an absent sessions dir registers no codex source;
-//   - countRolloutFiles / countLegacyJSON report the modern (sharded .jsonl)
-//     and legacy (root .json) volumes SEPARATELY;
-//   - the discovery log line carries both counts as distinct keys.
+//   - a synthetic opencode DB at the default path is auto-discovered as an
+//     "opencode" source whose location is the database FILE (not a directory),
+//     and the registered factory can construct it;
+//   - the discovery log line carries session/message/part counts + the latest
+//     migration as distinct keys;
+//   - an absent DB registers no opencode source;
+//   - a probe error (a file that is not a valid opencode DB) still registers the
+//     source and logs a probe_error attr (counting must not block discovery).
 package main
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/adapters"
+	"github.com/netdata/ai-viewer/internal/adapters/opencode"
 	"github.com/netdata/ai-viewer/internal/canonical"
+
+	// The opencode probe test builds a synthetic SQLite database with the
+	// modernc driver (same CGO-free driver the adapter uses), then opens it via
+	// the registered adapter read-only. Synthetic, schema-shaped, never the
+	// operator's data (SOW-0005 R5).
+	_ "modernc.org/sqlite"
 )
 
-// plantCodexLayout writes a sessions tree under root with `modern` sharded
-// rollout-*.jsonl files (in a YYYY/MM/DD shard), `legacy` root rollout-*.json
-// files, and a couple of decoys that must NOT be counted (an archived_sessions
-// shard, a non-rollout file, a .jsonl outside the rollout prefix).
-func plantCodexLayout(t *testing.T, root string, modern, legacy int) {
+// plantOpencodeDB builds a synthetic opencode SQLite database at the default
+// discovery path under home (~/.local/share/opencode/opencode.db) with the four
+// tracked tables, a populated __drizzle_migrations table, and the given number of
+// sessions/messages/parts. It is built via a throwaway read-write connection
+// (the adapter NEVER opens opencode.db read-write; the probe reopens it
+// read-only) and the handle is closed so the WAL is flushed before the probe
+// runs. Content is synthetic, never the operator's data.
+func plantOpencodeDB(t *testing.T, home string, sessions, messages, parts int, latestMigration string) string {
 	t.Helper()
-	shard := filepath.Join(root, "2025", "11", "20")
-	if err := os.MkdirAll(shard, 0o755); err != nil {
-		t.Fatalf("mkdir shard: %v", err)
+	dbPath := filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir opencode data dir: %v", err)
 	}
-	for i := 0; i < modern; i++ {
-		name := filepath.Join(shard, "rollout-2025-11-20T10-00-0"+itoa(i)+"-uuid.jsonl")
-		if err := os.WriteFile(name, []byte(`{"type":"session_meta"}`+"\n"), 0o644); err != nil {
-			t.Fatalf("write modern rollout: %v", err)
+	rw, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open rw: %v", err)
+	}
+	defer func() { _ = rw.Close() }()
+
+	ddl := []string{
+		`CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+			slug TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL,
+			agent TEXT, model TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER)`,
+		`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
+		`CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
+		`CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
+		`CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT NOT NULL,
+			created_at NUMERIC, name TEXT, applied_at TEXT)`,
+	}
+	for _, stmt := range ddl {
+		if _, err := rw.Exec(stmt); err != nil {
+			t.Fatalf("create schema: %v\nstmt: %s", err, stmt)
 		}
 	}
-	for i := 0; i < legacy; i++ {
-		name := filepath.Join(root, "rollout-2025-06-0"+itoa(i)+"-uuid.json")
-		if err := os.WriteFile(name, []byte(`{}`), 0o644); err != nil {
-			t.Fatalf("write legacy rollout: %v", err)
+	for i := 0; i < sessions; i++ {
+		if _, err := rw.Exec(
+			`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			itoaWide("ses", i), "prj_1", "slug", "/work", "Title", "9.9.9", 100+i, 100+i); err != nil {
+			t.Fatalf("insert session: %v", err)
 		}
 	}
-	// Decoys: an archived shard rollout (pruned), a non-rollout .jsonl, a
-	// non-rollout file at the root, AND a rollout-*.jsonl at the WRONG depth
-	// (directly under the sessions root, not in a YYYY/MM/DD shard — F8). None of
-	// these must be counted.
-	arch := filepath.Join(root, "archived_sessions", "2025", "11", "20")
-	if err := os.MkdirAll(arch, 0o755); err != nil {
-		t.Fatalf("mkdir archive: %v", err)
+	for i := 0; i < messages; i++ {
+		if _, err := rw.Exec(
+			`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)`,
+			itoaWide("msg", i), itoaWide("ses", 0), 200+i, 200+i, `{"role":"assistant"}`); err != nil {
+			t.Fatalf("insert message: %v", err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(arch, "rollout-archived-uuid.jsonl"), []byte("{}"), 0o644); err != nil {
-		t.Fatalf("write archived: %v", err)
+	for i := 0; i < parts; i++ {
+		if _, err := rw.Exec(
+			`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)`,
+			itoaWide("prt", i), itoaWide("msg", 0), itoaWide("ses", 0), 300+i, 300+i, `{"type":"text","text":"x"}`); err != nil {
+			t.Fatalf("insert part: %v", err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(shard, "not-a-rollout.jsonl"), []byte("{}"), 0o644); err != nil {
-		t.Fatalf("write decoy jsonl: %v", err)
+	// Two migrations; the second (latest) is the one the probe must report.
+	if _, err := rw.Exec(`INSERT INTO __drizzle_migrations (hash, name) VALUES (?,?)`, "h0", "20260127222353_first"); err != nil {
+		t.Fatalf("insert migration: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "history.jsonl"), []byte("{}"), 0o644); err != nil {
-		t.Fatalf("write decoy root file: %v", err)
+	if _, err := rw.Exec(`INSERT INTO __drizzle_migrations (hash, name) VALUES (?,?)`, "h1", latestMigration); err != nil {
+		t.Fatalf("insert migration: %v", err)
 	}
-	// A rollout-*.jsonl placed directly under the sessions root (wrong shard
-	// depth) must NOT be counted as a modern rollout (F8).
-	if err := os.WriteFile(filepath.Join(root, "rollout-2025-11-20T10-00-09-strayroot.jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write stray-root rollout: %v", err)
-	}
+	return dbPath
 }
 
-// itoa is a tiny single-digit int→string helper so plantCodexLayout stays free
-// of strconv for the small counts the tests use.
-func itoa(i int) string { return string(rune('0' + i)) }
+// itoaWide zero-pads a small index into a 12-wide lexicographically-sortable id
+// suffix so synthetic ids sort in creation order like real Sonyflake ids.
+func itoaWide(prefix string, n int) string {
+	digits := []byte("000000000000")
+	i := len(digits) - 1
+	for n > 0 && i >= 0 {
+		digits[i] = byte('0' + n%10)
+		n /= 10
+		i--
+	}
+	return prefix + "_" + string(digits)
+}
 
-// TestAutoDiscover_CodexProbe verifies acceptance #8: a tmpdir
-// ~/.codex/sessions tree with modern sharded rollouts is auto-discovered as a
-// codex source whose location is the sessions root, and the registered factory
-// can construct it.
-func TestAutoDiscover_CodexProbe(t *testing.T) {
-	// Not parallel: t.Setenv mutates process-wide HOME / CODEX_HOME.
+// clearOtherAdapterEnv unsets the env overrides for the codex/claude probes so an
+// opencode probe test sees only the HOME-rooted opencode DB (the other probes
+// look under HOME too, but their directories will not exist). It also clears the
+// opencode resolution overrides ($OPENCODE_DB, $XDG_DATA_HOME) so the probe falls
+// through to the ~/.local/share default these tests plant under HOME.
+func clearOtherAdapterEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_DB", "")
+	t.Setenv("XDG_DATA_HOME", "")
+}
+
+// TestAutoDiscover_OpencodeProbe verifies acceptance #8: a synthetic opencode DB
+// at the default path is auto-discovered as an "opencode" source whose location
+// is the database file, and the registered factory can construct it.
+func TestAutoDiscover_OpencodeProbe(t *testing.T) {
+	// Not parallel: t.Setenv mutates process-wide HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CODEX_HOME", "")
-	sessions := filepath.Join(tmp, ".codex", "sessions")
-	plantCodexLayout(t, sessions, 2, 3)
+	clearOtherAdapterEnv(t)
+	dbPath := plantOpencodeDB(t, tmp, 2, 3, 4, "20260510033149_latest")
 
 	got, err := resolveSources(nil, silentLogger())
 	if err != nil {
 		t.Fatalf("resolveSources: %v", err)
 	}
-	var cdx *configuredSource
+	var oc *configuredSource
 	for i := range got {
-		if got[i].format == "codex" {
-			cdx = &got[i]
+		if got[i].format == "opencode" {
+			oc = &got[i]
 		}
 	}
-	if cdx == nil {
-		t.Fatalf("codex source not auto-discovered; got %+v", got)
+	if oc == nil {
+		t.Fatalf("opencode source not auto-discovered; got %+v", got)
 	}
-	if cdx.location != sessions {
-		t.Fatalf("codex location = %q, want %q", cdx.location, sessions)
+	if oc.location != dbPath {
+		t.Fatalf("opencode location = %q, want %q (the DB file)", oc.location, dbPath)
 	}
-	// The discovered source must be constructable via the registry, proving the
-	// adapter's init() ran (acceptance #1).
-	factory, ok := adapters.Get("codex")
+	factory, ok := adapters.Get("opencode")
 	if !ok {
-		t.Fatal("codex factory not registered")
+		t.Fatal("opencode factory not registered")
 	}
-	if _, err := factory(cdx.location, canonical.AdapterOptions{Logger: silentLogger()}); err != nil {
-		t.Fatalf("codex factory(%q): %v", cdx.location, err)
-	}
-}
-
-// TestAutoDiscover_CodexHomeOverride verifies the probe honors $CODEX_HOME
-// (SOW-0004 C#3): the sessions root is "$CODEX_HOME/sessions", not ~/.codex.
-func TestAutoDiscover_CodexHomeOverride(t *testing.T) {
-	// Not parallel: mutates process-wide env.
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp) // no ~/.codex here
-	codexHome := filepath.Join(tmp, "custom-codex")
-	t.Setenv("CODEX_HOME", codexHome)
-	sessions := filepath.Join(codexHome, "sessions")
-	plantCodexLayout(t, sessions, 1, 0)
-
-	got, err := resolveSources(nil, silentLogger())
-	if err != nil {
-		t.Fatalf("resolveSources: %v", err)
-	}
-	var loc string
-	for _, s := range got {
-		if s.format == "codex" {
-			loc = s.location
-		}
-	}
-	if loc != sessions {
-		t.Fatalf("codex location = %q, want %q (CODEX_HOME honored)", loc, sessions)
+	if _, err := factory(oc.location, canonical.AdapterOptions{Logger: silentLogger()}); err != nil {
+		t.Fatalf("opencode factory(%q): %v", oc.location, err)
 	}
 }
 
-// TestAutoDiscover_NoCodexWhenAbsent verifies a workstation without
-// ~/.codex/sessions does not register a codex source.
-func TestAutoDiscover_NoCodexWhenAbsent(t *testing.T) {
+// TestAutoDiscover_OpencodeProbeLogsCountsAndMigration verifies the discovery log
+// line carries the session/message/part counts and the latest migration as
+// distinct keys (acceptance #8: the structured log is the operator-facing surface
+// at discovery time).
+func TestAutoDiscover_OpencodeProbeLogsCountsAndMigration(t *testing.T) {
 	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CODEX_HOME", "")
-
-	got, err := resolveSources(nil, silentLogger())
-	if err != nil {
-		t.Fatalf("resolveSources: %v", err)
-	}
-	for _, s := range got {
-		if s.format == "codex" {
-			t.Fatalf("codex registered with no sessions dir present: %+v", got)
-		}
-	}
-}
-
-// TestAutoDiscover_CodexProbeLogsBothCountsSeparately verifies the probe's
-// discovery log line carries the modern and legacy volumes as DISTINCT keys
-// (acceptance #8: "/api/sources reports both counts separately" — the structured
-// log is the operator-facing surface at discovery time).
-func TestAutoDiscover_CodexProbeLogsBothCountsSeparately(t *testing.T) {
-	// Not parallel: mutates process-wide env.
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	t.Setenv("CODEX_HOME", "")
-	sessions := filepath.Join(tmp, ".codex", "sessions")
-	plantCodexLayout(t, sessions, 2, 3)
+	clearOtherAdapterEnv(t)
+	plantOpencodeDB(t, tmp, 2, 3, 4, "20260510033149_latest")
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -174,41 +179,138 @@ func TestAutoDiscover_CodexProbeLogsBothCountsSeparately(t *testing.T) {
 		t.Fatalf("resolveSources: %v", err)
 	}
 	out := buf.String()
-	if !bytes.Contains(buf.Bytes(), []byte("modern_rollouts=2")) {
-		t.Errorf("discovery log missing modern_rollouts=2; got:\n%s", out)
-	}
-	if !bytes.Contains(buf.Bytes(), []byte("legacy_json=3")) {
-		t.Errorf("discovery log missing legacy_json=3; got:\n%s", out)
-	}
-}
-
-// TestCountRolloutFiles verifies the modern-rollout counter mirrors discovery.go's
-// match: rollout-*.jsonl under YYYY/MM/DD shards, archived_sessions pruned,
-// non-rollout .jsonl, root non-rollout files, AND a rollout-*.jsonl at the wrong
-// shard depth (directly under the root) all ignored (F8).
-func TestCountRolloutFiles(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	plantCodexLayout(t, tmp, 4, 2)
-	if n := countRolloutFiles(tmp); n != 4 {
-		t.Fatalf("countRolloutFiles = %d, want 4 (archived + decoys + wrong-depth stray excluded)", n)
-	}
-	if n := countRolloutFiles(filepath.Join(tmp, "missing")); n != 0 {
-		t.Fatalf("countRolloutFiles(missing) = %d, want 0", n)
+	for _, want := range []string{"sessions=2", "messages=3", "parts=4", "latest_migration=20260510033149_latest"} {
+		if !bytes.Contains(buf.Bytes(), []byte(want)) {
+			t.Errorf("discovery log missing %q; got:\n%s", want, out)
+		}
 	}
 }
 
-// TestCountLegacyJSON verifies the legacy counter mirrors discovery.go's match:
-// rollout-*.json directly under the root only (not in shards), non-rollout root
-// files ignored.
-func TestCountLegacyJSON(t *testing.T) {
-	t.Parallel()
+// TestAutoDiscover_NoOpencodeWhenAbsent verifies a workstation without the
+// opencode DB does not register an opencode source.
+func TestAutoDiscover_NoOpencodeWhenAbsent(t *testing.T) {
+	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
-	plantCodexLayout(t, tmp, 4, 2)
-	if n := countLegacyJSON(tmp); n != 2 {
-		t.Fatalf("countLegacyJSON = %d, want 2", n)
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+
+	got, err := resolveSources(nil, silentLogger())
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
 	}
-	if n := countLegacyJSON(filepath.Join(tmp, "missing")); n != 0 {
-		t.Fatalf("countLegacyJSON(missing) = %d, want 0", n)
+	for _, s := range got {
+		if s.format == "opencode" {
+			t.Fatalf("opencode registered with no DB present: %+v", got)
+		}
+	}
+}
+
+// TestAutoDiscover_OpencodeProbeErrorStillRegisters verifies that when the file
+// at the probe path exists but is NOT a valid opencode database (no tables),
+// ProbeStatus errors yet the source is STILL registered (counting must not block
+// discovery) and the log carries a probe_error attr.
+func TestAutoDiscover_OpencodeProbeErrorStillRegisters(t *testing.T) {
+	// Not parallel: mutates process-wide env.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	dbPath := filepath.Join(tmp, ".local", "share", "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A non-SQLite regular file at the probe path: os.Stat succeeds (so it is
+	// discovered) but ProbeStatus fails (the count queries hit no tables).
+	if err := os.WriteFile(dbPath, []byte("not a database"), 0o644); err != nil {
+		t.Fatalf("write bogus db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	got, err := resolveSources(nil, logger)
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	var registered bool
+	for _, s := range got {
+		if s.format == "opencode" && s.location == dbPath {
+			registered = true
+		}
+	}
+	if !registered {
+		t.Fatalf("opencode source NOT registered despite a probe error; got %+v", got)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("probe_error=")) {
+		t.Errorf("discovery log missing probe_error attr; got:\n%s", buf.String())
+	}
+}
+
+// TestAutoDiscover_OpencodeDirectoryNotRegistered pins SOW-0005 round-3 P3-2: a
+// DIRECTORY named opencode.db at the default discovery path must NOT register as
+// an opencode source — os.Stat succeeds on a directory, so the probe additionally
+// requires info.Mode().IsRegular(). The companion positive case (a regular DB
+// file IS discovered) is TestAutoDiscover_OpencodeProbe above.
+func TestAutoDiscover_OpencodeDirectoryNotRegistered(t *testing.T) {
+	// Not parallel: mutates process-wide env.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	// Create a DIRECTORY exactly where the DB file would live.
+	dirAsDB := filepath.Join(tmp, ".local", "share", "opencode", "opencode.db")
+	if err := os.MkdirAll(dirAsDB, 0o755); err != nil {
+		t.Fatalf("mkdir dir-as-db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	got, err := resolveSources(nil, logger)
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	for _, s := range got {
+		if s.format == "opencode" {
+			t.Fatalf("opencode registered for a DIRECTORY named opencode.db: %+v", got)
+		}
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("not a regular file")) {
+		t.Errorf("expected a WARN that the opencode path is not a regular file; got:\n%s", buf.String())
+	}
+}
+
+// TestOpencodeProbeRespectsCancelledContext pins SOW-0005 round-4 P3-1: the startup
+// ProbeStatus is now passed a bounded/cancellable context (autoDiscoverSources uses
+// context.WithTimeout(opencodeProbeTimeout)) instead of context.Background(), so a
+// cancelled context aborts the probe promptly with an error rather than running the
+// COUNT(*) queries to completion. A normal context still returns the counts. The
+// probe is best-effort: discovery surfaces the error and still registers the source
+// (covered by TestAutoDiscover_OpencodeProbeErrorStillRegisters), but the
+// cancellation must be HONORED rather than ignored.
+func TestOpencodeProbeRespectsCancelledContext(t *testing.T) {
+	// Not parallel: t.Setenv mutates process-wide HOME.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	dbPath := plantOpencodeDB(t, tmp, 2, 3, 4, "20260510033149_init")
+
+	// An already-cancelled context: ProbeStatus must return an error (it does not
+	// silently run to completion ignoring cancellation).
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, _, _, err := opencode.ProbeStatus(cancelled, dbPath); err == nil {
+		t.Error("ProbeStatus with a cancelled context returned nil error; the probe must honor cancellation (round-4 P3-1)")
+	}
+
+	// A normal (bounded) context still succeeds and returns the planted counts —
+	// proving the timeout/cancellable wiring did not break the happy path.
+	ctx, cancel2 := context.WithTimeout(context.Background(), opencodeProbeTimeout)
+	defer cancel2()
+	sessions, messages, parts, latest, err := opencode.ProbeStatus(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("ProbeStatus(valid ctx): %v", err)
+	}
+	if sessions != 2 || messages != 3 || parts != 4 {
+		t.Errorf("ProbeStatus counts = (%d,%d,%d), want (2,3,4)", sessions, messages, parts)
+	}
+	if latest != "20260510033149_init" {
+		t.Errorf("ProbeStatus latest migration = %q, want the planted one", latest)
 	}
 }

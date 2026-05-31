@@ -1,0 +1,185 @@
+package opencode
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/netdata/ai-viewer/internal/canonical"
+)
+
+// This file covers the integrated poll-cycle path (pollOnce → detectChange →
+// processChanges → emitProgress) and the scanLoop introspect-fatal branch,
+// driving real DBs rather than the loop goroutine so the assertions are
+// deterministic (no timers).
+
+// TestPollOnce_ProductiveCycle drives pollOnce directly against a DB with a new
+// session past the cursor and asserts it emits the session's events + a
+// SourceProgress and reports advanced=true.
+func TestPollOnce_ProductiveCycle(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_a", "", 100, 100, 0)
+	insertAssistantMessage(t, rw, "msg_a", "ses_a", 110, 110, 5, 2)
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, schema := introspect(t, path)
+
+	out := make(chan canonical.Event, 256)
+	cur := newCursor()
+	st := newPollState(false)
+	advanced, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
+	if err != nil {
+		t.Fatalf("pollOnce: %v", err)
+	}
+	if !advanced {
+		t.Fatal("pollOnce over a DB with new rows reported advanced=false")
+	}
+	got := drainAll(out)
+	if n := countKind(got, canonical.EvSessionStarted); n != 1 {
+		t.Errorf("SessionStarted count = %d, want 1", n)
+	}
+	if n := countKind(got, canonical.EvSourceProgress); n < 1 {
+		t.Errorf("productive pollOnce emitted %d SourceProgress, want >= 1", n)
+	}
+	// The cursor must have advanced past the inserted rows: the monotonic
+	// high-water (which gates the second no-op poll's cheap MAX(id) check) reaches
+	// the inserted session id (SOW-0005 round-2 P1-A).
+	if cur.Tables["session"].MaxIDSeen != "ses_a" {
+		t.Errorf("cursor session MaxIDSeen = %q, want ses_a", cur.Tables["session"].MaxIDSeen)
+	}
+
+	// A SECOND pollOnce over the now-current cursor is a no-op (advanced=false,
+	// nothing emitted) — proves the cheap MAX(id) gate closes after catch-up.
+	//
+	// Close the probe gate first (a recent probe, no WAL event) so this poll is a
+	// GENUINELY idle cycle: changed==false (cheap MAX(id) silent) AND the gate is
+	// closed, so neither the forward delta nor the round-7 boundary re-scan fires.
+	// (The first poll advanced via the cheap MAX(id) path, which short-circuits before
+	// the gated probe, so markProbe never ran and lastProbe is still zero — leaving the
+	// safety-net gate immediately due. Without closing it here, the boundary re-scan
+	// would idempotently re-emit ses_a's boundary bucket on the gate-open path, which is
+	// correct behaviour but not what THIS test pins — see TestP1_R7_* for that path.)
+	st.markProbe(time.Now())
+	out2 := make(chan canonical.Event, 16)
+	adv2, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out2, silentLogger(), func(error) {})
+	if err != nil {
+		t.Fatalf("pollOnce (second): %v", err)
+	}
+	if adv2 {
+		t.Error("second pollOnce over an up-to-date cursor reported advanced=true")
+	}
+	if got := drainAll(out2); len(got) != 0 {
+		t.Errorf("second pollOnce emitted %d events, want 0", len(got))
+	}
+}
+
+// TestScanLoop_IntrospectFatal asserts scanLoop returns a fatal error (not a
+// benign skip) when a tracked table is missing a required column — an
+// incompatible schema must surface, not silently emit nothing.
+func TestScanLoop_IntrospectFatal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	// Drop the message.data column dependency by replacing the message table with
+	// one lacking the required `data` column.
+	if _, err := rw.Exec(`DROP TABLE message`); err != nil {
+		t.Fatalf("drop message: %v", err)
+	}
+	if _, err := rw.Exec(`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+		time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("recreate message: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+
+	out := make(chan canonical.Event, 16)
+	var ce collectErrs
+	_, err := scanLoop(ctxBG(), path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
+	if err == nil {
+		t.Fatal("scanLoop over a schema missing a required column: want fatal error")
+	}
+}
+
+// TestReloadAndEmit_GenericErrorPropagates pins the SOW-0005 round-7 P1-2 fix: a
+// non-context, non-session-gone load error for one affected session PROPAGATES
+// (returns) rather than being swallowed (logged + continue). The earlier code
+// called onError(err); continue, which let commitBatch advance the cursor PAST
+// rows whose content was never emitted — a permanent, health-invisible loss.
+// Propagating the error keeps the checkpoint-after-emit invariant: the cursor is
+// promoted only after every affected session's content is emitted.
+//
+// A closed DB makes loadSession itself error (generic, non-context), so
+// reloadAndEmit must return that error.
+func TestReloadAndEmit_GenericErrorPropagates(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_a", "", 1, 1, 0)
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, schema := introspect(t, path)
+	if err := db.Close(); err != nil { // closed → loadSession errors (generic)
+		t.Fatalf("close ro db: %v", err)
+	}
+
+	out := make(chan canonical.Event, 16)
+	var ce collectErrs
+	err := reloadAndEmit(ctxBG(), db, schema, "opencode:test", []string{"ses_a"}, out, silentLogger(), ce.onError)
+	if err == nil {
+		t.Fatal("reloadAndEmit must PROPAGATE a generic load error (round-7 P1-2), not swallow it; got nil")
+	}
+}
+
+// TestOrDefaultLogger covers the nil-guard scanLoop/tailLoop apply to the logger
+// param so a direct test caller passing nil does not panic: nil yields a non-nil
+// logger (slog.Default()), and a supplied logger is returned unchanged.
+func TestOrDefaultLogger(t *testing.T) {
+	t.Parallel()
+	if got := orDefaultLogger(nil); got == nil {
+		t.Fatal("orDefaultLogger(nil) = nil, want a non-nil default logger")
+	}
+	custom := silentLogger()
+	if got := orDefaultLogger(custom); got != custom {
+		t.Errorf("orDefaultLogger(custom) returned a different logger, want the same instance")
+	}
+}
+
+// TestTailLoop_WALHintWakesCycle exercises the tailLoop WAL-hint branch end to
+// end: with a live WAL companion, a write to it (plus a new row) wakes a cycle
+// faster than the idle cadence and the new session surfaces.
+func TestTailLoop_WALHintWakesCycle(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_seed", "", 1, 1, 0)
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	// Reopen WAL-mode so a -wal companion exists for the watch.
+	rw2, err := openRWAgain(t, path)
+	if err != nil {
+		t.Fatalf("reopen rw (wal): %v", err)
+	}
+	defer func() { _ = rw2.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan canonical.Event, 4096)
+	var ce collectErrs
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
+	}()
+	defer func() { cancel(); <-done }()
+
+	// Insert a new session; the WAL write fires the fsnotify hint.
+	insertSession(t, rw2, "ses_wal", "", 100, 100, 0)
+	if _, ok := waitForSession(out, "ses_wal", 8*time.Second); !ok {
+		t.Fatal("tailLoop did not surface a new session with a live WAL companion")
+	}
+}

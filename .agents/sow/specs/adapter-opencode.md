@@ -248,28 +248,39 @@ Observed on the operator's DB: **0 rows** in both tables. This is an opencode-in
 | `name` TEXT NULL | migration directory name |
 | `applied_at` TEXT NULL | |
 
-Observed: 20 migrations applied (range `20260127222353_familiar_lady_ursula` … `20260511000411_data_migration_state`). The adapter queries this table at startup to determine which optional columns are present (see Edge Cases).
+Observed: 20 migrations applied (range `20260127222353_familiar_lady_ursula` … `20260511000411_data_migration_state`). opencode applies migrations from a journal of `{sql, timestamp, name}` entries ordered by the migration directory name, which embeds a `YYYYMMDDHHMMSS` timestamp prefix (anomalyco/opencode `packages/opencode/src/storage/db.ts`); Drizzle's standard `__drizzle_migrations` row carries an auto-increment `id` that increases in application order. The adapter reads the `name` column ordered by `id ASC` (application order) at scan/tail start.
+
+That ordered name list serves two purposes (chunk D):
+
+- **Schema hash.** `schema_hash` in the cursor (see Cursor) is `sha256(strings.Join(names, "\n"))` over the ordered names — a stable digest that changes only when opencode applies a new migration. It supersedes chunk C's interim present-column-shape fingerprint (which hashed the readable column shape as a placeholder before this table was read). The watermark semantics are unchanged: a hash mismatch logs a structured WARN, re-reads, and continues WITHOUT resetting watermarks (column drift is handled per-column by the dynamic SELECT; a depended-on column vanishing is the only re-ingest trigger).
+- **Latest migration / counts (AC#8).** `latest_migration` is the name with the highest `id` (last applied). The auto-discovery probe (`ProbeStatus`) reads it alongside `COUNT(*)` of `session`/`message`/`part` so `/api/health` and the discovery log surface what the source will yield. A missing `__drizzle_migrations` table (a very old or foreign SQLite file) is non-fatal: the probe returns empty names + a soft sentinel, the schema hash is left empty, and no migration is reported — the adapter degrades rather than crashing.
+
+`ProbeStatus` opens the database read-only via the same `openReadOnly` helper. The three `COUNT(*)` queries are full counts; on a multi-GB database that costs a few hundred ms ONCE at startup, which is acceptable for a one-time discovery probe (the steady-state tailer never runs them). A table that does not exist makes its count 0 and is noted as a soft error rather than failing the probe, so a foreign SQLite file the probe stumbles on degrades gracefully.
 
 ## Read Strategy
 
 The defining constraint: opencode's writer holds the database open and may commit transactions at any time. ai-viewer is a strict read-only consumer. The adapter MUST:
 
-1. Open with `mode=ro&_journal_mode=WAL&_busy_timeout=5000&_txlock=deferred`.
+1. Open with `mode=ro&_txlock=deferred` plus the fixed read-only PRAGMA set below.
 2. Use `modernc.org/sqlite` (CGO-free, per AGENTS.md tech stack).
-3. Open a **fresh connection per poll cycle** or keep a pool with `SetMaxOpenConns(1)` for the read path. Opening read-only against a WAL-mode database is non-blocking for the writer — multiple readers and a single writer can proceed concurrently (SQLite WAL guarantee). Concrete DSN:
+3. Open a **fresh connection per poll cycle** or keep a pool with `SetMaxOpenConns(1)` for the read path. Opening read-only against a WAL-mode database is non-blocking for the writer — multiple readers and a single writer can proceed concurrently (SQLite WAL guarantee). Concrete DSN (the one `buildReadOnlyDSN` rebuilds, `conn.go`):
 
 ```
-file:%2Fhome%2Foperator%2F.local%2Fshare%2Fopencode%2Fopencode.db?mode=ro&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=query_only(true)&_pragma=foreign_keys(off)&_txlock=deferred
+file:%2Fhome%2Foperator%2F.local%2Fshare%2Fopencode%2Fopencode.db?mode=ro&_txlock=deferred&_pragma=query_only(true)&_pragma=busy_timeout(5000)
 ```
 
 Key choices:
 
 - `mode=ro` — refuse any write at the OS level. The OS opens the file `O_RDONLY`; SQLite cannot upgrade the connection.
 - `_pragma=query_only(true)` — defense-in-depth; rejects any UPDATE/INSERT/DELETE at the SQL layer.
-- `_pragma=journal_mode(WAL)` — does NOT change the file (the writer already set it); confirms our connection enters WAL reader mode so we read a consistent snapshot from the WAL checkpoint and never block the writer.
 - `_pragma=busy_timeout(5000)` — wait up to 5 s when an exclusive lock is held (which should be rare in WAL mode but happens during `PRAGMA wal_checkpoint(TRUNCATE)`).
-- `_pragma=foreign_keys(off)` — readers don't need FK enforcement; cheaper.
 - `_txlock=deferred` — defer BEGIN until first statement; for reads this just means "snapshot taken on first SELECT".
+
+**No `journal_mode` in the DSN (SOW-0005 round-2 P3-B).** `conn.go`'s `readOnlyPragmas` allowlist deliberately OMITS `journal_mode(WAL)`: the journal mode is a WRITER concern recorded in the database header by whoever created/opened it read-write (opencode), and a read-only connection inherits the database's existing mode — it cannot (and must not try to) change it. Setting `journal_mode` on a `mode=ro` connection is a no-op at best and an attempted write at worst; either way it earns nothing, so the reader simply does not send it. The reader still gets WAL-reader snapshot semantics automatically because the database file is already in WAL mode. Likewise `foreign_keys(off)` is not sent — FK enforcement only matters for writes, and the reader issues none.
+
+**DSN is an ALLOWLIST, not a denylist (SOW-0005 P1.2).** `buildReadOnlyDSN` parses the caller-supplied query string only to VALIDATE it, then DISCARDS it and rebuilds the query from scratch with exactly: `mode=ro`, `_txlock=deferred`, and the fixed `readOnlyPragmas` set (`query_only(true)`, `busy_timeout(5000)`). Therefore NO caller-supplied `_pragma` survives — neither one that name-collides with the read-only set NOR a non-colliding write-path pragma (`wal_checkpoint(TRUNCATE)`, `optimize`, `foreign_keys(on)`, …) — and a caller `_txlock=exclusive` is replaced with `deferred`. A maliciously-constructed path string therefore cannot reach a write-path pragma or an exclusive (write-lock) BEGIN. The earlier denylist that stripped only colliding `_pragma` names is replaced by this allowlist.
+
+**`buildReadOnlyDSN` input is a filesystem path on the CLI; `file:`/`:memory:` are programmatic-only (SOW-0005 round-3 P2-4).** `buildReadOnlyDSN` accepts three shapes: a bare filesystem path (normalised to an absolute `file:` URI), an already-built `file:` URI, and the in-memory `:memory:` form. The CLI's opencode source location (auto-discovery + `--source opencode:<path>`) is ALWAYS a filesystem path — `cmd/ai-viewer-ingest`'s `startSource` calls `os.Stat(location)` before constructing the adapter, which fails for a `file:`/`:memory:` DSN string. The `file:`/`:memory:` shapes exist for the adapter's own programmatic and test callers (throwaway shared-cache DBs); they are NOT supported `--source` locations and are not a CLI feature. This is a documented contract, not a code restriction: the adapter still accepts those shapes when called directly.
 
 **Never** call `PRAGMA wal_checkpoint`, `PRAGMA optimize`, `VACUUM`, `BEGIN EXCLUSIVE`, or `ATTACH … AS … 'rwc'`. The connection MUST remain a pure reader.
 
@@ -280,6 +291,57 @@ Connection pool settings:
 - `SetMaxIdleConns(1)`.
 
 Read transactions: every query batch wraps in `BEGIN DEFERRED ... COMMIT` so the adapter sees a consistent snapshot across multi-statement cursors. Long transactions on a WAL DB pin the WAL and stop checkpointing, so each cycle keeps its transaction shorter than 1 s of wall time. If a backfill must read more than a few thousand rows, it does so in **paged transactions** (close the transaction every N rows, then start a new one), accepting that the snapshot advances between pages.
+
+### Delta query, affected-session derivation, and tree load (Chunk C)
+
+The delta-query layer is the bridge between the watermark cursor and the pure mapper. It runs three steps per change cycle, each in its own short read transaction:
+
+1. **Paged delta query per tracked table.** Each `session`/`message`/`part`/`session_message` table is paged from its `TableWatermark` with the composite-key SELECT (`buildSelect`, naming only live columns — never `SELECT *`):
+
+   ```sql
+   SELECT <present cols> FROM <table>
+   WHERE time_updated > :u OR (time_updated = :u AND id > :id)
+   ORDER BY time_updated, id LIMIT 1000
+   ```
+
+   Each page runs inside a `BEGIN DEFERRED` read transaction opened via `database/sql`'s `BeginTx{ReadOnly:true}` and committed promptly, keeping the WAL unpinned. Paging continues until a short page (`< 1000` rows) returns. The new max `(time_updated, id)` seen across all pages becomes the table's advanced watermark.
+
+   **No id-only fallback (SOW-0005 P3.1).** `time_updated` is a REQUIRED column for every tracked table (`requiredColumns`); `introspectAll` fails fast when it is absent, so a table that reaches a delta query ALWAYS has `time_updated`. The composite-key SELECT above is therefore the ONLY delta query. The earlier pre-`Timestamps`-mixin id-only fallback (`buildSelectByID`) was unreachable dead code — `introspectAll`'s required-column gate makes a `time_updated`-less table fatal upstream, never a delta-query input — and it was removed along with its introspection-bypassing isolation test.
+
+   **Corrupt delta-row cells (SOW-0005 round-4 P2-1, extended round-5 P2-2).** The per-table delta scanners carry the same `onWarn` hook the non-delta `loadSession` path uses, so a corrupt OPTIONAL numeric cell (a non-NULL value unparseable as its column's numeric type — e.g. `cost`, `tokens_*`, `time_created`) surfaces a structured WARN with table/column context and degrades to 0 rather than being silently coerced. Two classes of column are treated more strictly and ERROR the row instead (`i64Required`/`strRequired`, which aborts the delta page so the cursor is NEVER advanced past the corrupt row; the error is non-fatal to the loop — it is surfaced via `onError` and the cursor stays at the last good position):
+   - the two REQUIRED **cursor-watermark** columns (`id`, `time_updated`, via `requiredWatermark`) — a `time_updated` coerced to 0 could regress the watermark (round-4 P2-1);
+   - the REQUIRED **owning-id** columns (`message.session_id`, `part.message_id`, `part.session_id`, `session_message.session_id`, via `requiredOwner`) — these derive the AFFECTED session the tailer reloads (Affected-session derivation, below). An empty/corrupt value would be silently swallowed by `affectedSet.add("")` while the row handler SUCCEEDED, so the cursor would advance PAST a change that emitted no content — a permanent, health-invisible loss. For `part`, the owning session is `part.session_id` (denormalized, required); if it is empty the page errors rather than falling through `resolvePartSession` to an empty affected id (round-5 P2-2).
+   `session_message.type` is NOT an owning id — it keeps its existing unknown-type WARN behaviour (a missing/unrecognized type never becomes a fatal error). All these columns are in `requiredColumns`, so the column itself is always PRESENT (`introspectAll` makes its absence fatal); the only failure mode reaching the scanner is a corrupt/empty cell value. The boundary re-scan shares the same scanners and therefore the same guard.
+
+2. **Affected-session derivation.** From the changed rows, the layer computes the SET of session ids whose full tree must be reloaded and re-mapped:
+   - a changed `session` row contributes its own `id`;
+   - a changed `message` row contributes its `session_id`;
+   - a changed `part` row contributes its `session_id` (the `part` table denormalizes `session_id`); on a hypothetical old schema where `part` lacks `session_id`, the owning session is resolved via an indexed `SELECT session_id FROM message WHERE id = :message_id` lookup (with the changed-message delta consulted first to avoid the query). This delta-path resolver (`resolvePartSession`) is distinct from the *tree-load* path below;
+   - a changed `session_message` row contributes its `session_id`.
+
+   The set is de-duplicated: a session touched by several tables in one cycle is reloaded exactly once.
+
+   **No tree-load `message_id IN (...)` fallback (SOW-0005 round-3 P3-1).** `part.session_id` is a REQUIRED column (`requiredColumns["part"]`), so `introspectAll` makes a `part` table lacking it FATAL upstream — it can never be a tree-load input. The round-2 P2-B `loadPartsByMessageIDs` / `selectPartsByMessageIDs` fallback (a `WHERE message_id IN (?,…)` part query for a `part` table without `session_id`) was therefore UNREACHABLE in production and has been removed, along with its introspection-bypassing isolation test. The tree load always reads parts via the single indexed `WHERE session_id = ?` query. (The delta-path `resolvePartSession` above is a separate concern and keeps its message-PK lookup as documented.)
+
+   **Full-tree scanners validate the required ownership/id columns too (SOW-0005 round-7 P2-3).** The DELTA scanners abort the page on a corrupt/empty required ownership column (round-5 P2-2, above). The FULL-TREE load path (`scanPartRows` in `store_load.go`, which partitions a session's parts into a `map[message_id][]partRow` for the mapper) must apply the SAME discipline: a `part` row whose REQUIRED `message_id` (the partition key) or `session_id` is empty is **NOT** silently attached to the `out[""]` bucket — where it would be dropped when the mapper looks up parts by a message's real id — but is **skipped with a surfaced WARN** (table/column context, no raw value). The WARN is buffered in the same post-tx `warnSink` discipline (§"No warning/error/content EMISSION while a source-DB read tx is open"): it is collected during the read tx and flushed through `onWarn` only after the snapshot is released. A corrupt historical `part.message_id`/`session_id` therefore surfaces in the logs and (via the adapter's `onError` → `SourceError`) in `/api/health`, rather than vanishing into `out[""]`. The message loader's own required columns (`id`/`session_id`) are read the same way; an empty owning id is surfaced, not silently zeroed.
+
+3. **Full-session-tree load + map.** For each affected session id the layer loads the whole tree — the `session` row, all its `message` rows ordered by `(time_created, id)`, and each message's `part` rows ordered by `(id)` — under **ONE** bounded read-only transaction (`loadAndMapSession`), assembles `[]messageWithParts`, and calls the pure mapper (`mapSession`) on it. The session row read, the `time_compacting` check (Edge Cases #8), the parent-chain root resolution (`resolveRootID`), AND the message+part load all share **one consistent snapshot** (SOW-0005 round-3 P1-2): opening a second transaction for the tree after checking `time_compacting` in a first one is a TOCTOU — opencode could begin compaction between the two reads and the adapter would emit a partial/mutating tree despite the Edge #8 skip rule, and the session metadata would come from a different snapshot than its tree. A single `BeginTx{ReadOnly:true}` closes both gaps. Full-tree reload is mandatory, not partial: the mapper computes per-turn cumulative-token deltas across the ordered message list, so a partial reload would miscompute deltas. Re-emitting an unchanged session is harmless — the ingester's idempotent upserts + the (post-SOW-0004) idempotent catalog absorb it.
+
+   **Full-tree load is an intentional design constraint, bounded by a defensive safety WARN (SOW-0005 round-3 P2-3).** The whole ordered message list must be in memory at once because per-turn token deltas are synthesized by subtracting successive cumulative snapshots (Edge Cases / AC#3) — there is no correct streaming decomposition. This is bounded in practice by real opencode session size (the largest observed session is well under the cap). As a defensive signal against a pathological or corrupt session, the loader counts the loaded messages and parts and emits ONE structured WARN via `onError` when a session exceeds `maxSessionMessagesWarn` / `maxSessionPartsWarn` (each set generously, 100 000). The session is still processed in full — the WARN surfaces the anomaly (so `/api/health` and the logs show it) without silently truncating, which would corrupt the token-delta chain.
+
+   **True tree root (SOW-0005 P2.4).** Before mapping, the layer resolves the session's TRUE tree root by walking its `parent_id` chain to the topmost ancestor (`resolveRootID`: an indexed `SELECT parent_id FROM session WHERE id=?` walked up, read-only, depth-capped at 32 with a seen-set cycle guard) and injects it into the mapper (`WithRootNativeID`). A nested sub-agent's `RootNativeID` is therefore the whole tree's root, not its direct parent; `ParentNativeID` still points at the direct parent. If the chain cannot be fully resolved (a missing ancestor row, a cycle, or the depth cap), it falls back to the furthest resolvable ancestor (the direct parent on a one-step failure) and surfaces one WARN via `onError`.
+
+   **`reloadAndEmit` error policy — only known non-retryable cases are skip-and-continue (SOW-0005 round-7 P1-2).** When reloading an affected session, `reloadAndEmit` treats exactly two outcomes as non-fatal skip-and-continue: (1) `errSessionGone` — the `session` row could not be loaded (deleted between the delta page and the load, or a part/message orphaned from its session); the session is legitimately gone, so it is skipped with one structured `onError` and the cursor may advance past it. (2) the `time_compacting` pause (`skipped == true`) — the session is mid-compaction and re-surfaces in a later delta when the column clears (Edge Cases #8). ANY OTHER load/map error (a transient tree-load/read error, a commit failure, a corrupt-tree decode error) **propagates up** so `commitBatch` does **NOT** promote the cursor: the same rows are retried on the next cycle. The earlier code swallowed every non-context error (logged + continued) and then let `commitBatch` advance the cursor anyway — a transient read error therefore skipped an affected session's content while persisting a cursor beyond the rows that required that reload, a permanent, health-invisible content loss. Propagating the error keeps the checkpoint-after-emit invariant intact: a cursor is promoted only after every affected session's content was successfully emitted, never after a session was skipped on a retryable error.
+
+**Checkpoint-after-emit invariant (SOW-0005 P1.1, data-loss fix).** A `SourceProgress` checkpoint carrying cursor `W` is emitted ONLY after every session affected by rows ≤ `W` in this run has been reloaded, mapped, and emitted. The pipeline (`processChanges` → `batchProcessor`) runs in BOUNDED BATCHES: each batch pages ≤ `progressEveryRows` delta rows forward ACROSS the tracked tables (one shared row budget, so a session touched by several tables is reloaded once per batch — cross-table dedupe), `reloadAndEmit`s that batch's affected sessions, and ONLY THEN advances the persisted cursor + checkpoints. On ctx-cancel/error mid-batch the LAST fully-committed cursor (the previous batch's) is returned, never the in-progress batch's scanned watermark — so a restart from the persisted cursor can never resume PAST rows whose canonical events were never emitted. The earlier scheme that emitted a `SourceProgress` every `progressEveryRows` rows DURING paging (before the affected sessions were emitted) advanced the watermark ahead of content and is replaced.
+
+**No warning/error/content EMISSION while a source-DB read tx is open (SOW-0005 round-5 P2-1).** Every warning/error the adapter raises ultimately reaches `onError` → a `SourceErrorEvent` send on the adapter's out channel (`adapter.go` `OnError`); a content event is a send on the same channel. A blocking send (a slow/backpressured ingester) must NEVER happen while a source-DB read transaction is open, or it would pin the WAL snapshot on the live multi-GB opencode database and delay opencode's own checkpoint. Therefore:
+   - The delta scanners (`scanOnePage`), the boundary re-scan (`scanBoundaryBucket`), and the full-session-tree load (`loadAndMapSession`) BUFFER every WARN/ERROR raised inside a tx into an in-memory `warnSink` (a non-blocking slice append), instead of calling the live `onError` under the open snapshot.
+   - The tx is committed/rolled back FIRST (explicitly, not via a deferred rollback that would still be open during a flush), and ONLY THEN are the buffered warnings flushed through the real `onError`.
+   - Content events are likewise emitted only after the tx closes: `loadAndMapSession` runs the pure mapper AFTER `tx.Commit()` and returns the events for the caller (`reloadAndEmit`) to emit — so neither a warning nor a content event reaches the channel with the snapshot held.
+   - A FATAL row error (a corrupt REQUIRED watermark/owning-id cell — round-4 P2-1 / round-5 P2-2) is RETURNED (the page is aborted so the cursor does not advance), and its surfacing to `onError` also happens after the tx is closed.
+
+**Per-batch full-tree re-emit is an accepted v1 tradeoff (SOW-0005 round-4 P2-5).** Affected-session dedupe is PER BATCH, not across batches: a session whose rows span multiple batches (a large session being backfilled, or a session that changed across several poll cycles) has its WHOLE tree reloaded and re-emitted once per batch it appears in. This is intentional — it is the simplest scheme that preserves the checkpoint-after-emit crash-safety invariant (a batch's cursor is only committed after that batch's sessions are emitted, so dedupe state cannot outlive a committed checkpoint without risking a resume that skips an un-emitted session). The re-emission is absorbed idempotently by the ingester's upserts + the idempotent catalog, and the cost is bounded by real session size (well under the defensive cap). Cross-batch coalescing (a session-level dedupe cache spanning the whole run) is a deferred optimization, not a v1 requirement — it would add state that complicates the crash-safety reasoning for a saving that only matters for the rare multi-batch session.
 
 ## Watch Strategy
 
@@ -308,6 +370,63 @@ If any value exceeds the cursor's recorded watermark, the adapter performs a del
 Rationale for the floor at 250 ms (not lower): opencode writes can be very chatty (one transaction per part), and we are not a real-time replication layer — 250 ms is well below human perception for the UI's SSE updates.
 
 Rationale for using `time_updated` over `id` (rowid) for the watermark: opencode rewrites in-place to update `tokens`, `cost`, `status` etc. on existing rows (via Drizzle `.$onUpdate`). An `id`-based cursor would miss these mutations. `time_updated` catches both inserts and updates.
+
+### Poll-loop state machine and the `MAX(time_updated)` gate (Chunk C)
+
+The realtime tailer is a timer-driven poll loop with an fsnotify wakeup hint. It is implemented as two free functions Chunk D's `adapter.go` calls (mirroring codex's free-function tailer rather than methods on the `Adapter` struct):
+
+- `scanLoop(ctx, dbPath, sourceID, since, out, logger, onError) (Cursor, error)` — the historical backfill: introspect once, emit one INFO per missing optional column (see Edge Cases #1), record the schema hash into the cursor, page every tracked table from `since`, derive affected sessions, reload + map each, emit, checkpoint `SourceProgress` every ~1000 rows processed and once at the end, return the advanced cursor.
+- `tailLoop(ctx, dbPath, sourceID, cur, out, logger, onError) error` — the realtime follow until `ctx` is cancelled (returns `nil` on cancel); also emits the missing-optional-column INFO set once at its introspection.
+
+The `logger` parameter is `*slog.Logger`, threaded from `Adapter.logger` (non-nil after `New`, which defaults to `slog.Default()`); both loops guard a nil logger defensively (`slog.Default()`) so a direct test caller passing nil does not panic.
+
+**Adapter Scan→Tail cursor hand-off (Chunk D).** `adapter.go` mirrors codex: `Scan` records the final advanced cursor on the `Adapter` instance (`scanCursor`) even on `ctx` cancellation, and a following `Tail` on the SAME instance resumes from it instead of snapshotting current HEAD — closing the data-loss window where rows committed between `Scan` finishing and `Tail` starting would otherwise be skipped. Any re-emission of an already-seen session tree is absorbed by the ingester's idempotent upserts. A **cold `Tail`** (no preceding `Scan`, e.g. a resumed daemon whose `Scan` ran in a previous process) builds a HEAD-snapshot cursor: open read-only, introspect, and set each tracked table's watermark to its current `MAX(id)` + `MAX(time_updated)` (via `maxID`/`maxTimeUpdated`). This is the SQLite analogue of codex stat'ing current file sizes — `Tail` then follows from NOW rather than replaying full history. The HEAD snapshot also records the real `__drizzle_migrations` schema hash into the cursor. A missing/unreadable database during the snapshot surfaces one structured error and `Tail` returns cleanly (the daemon keeps serving other sources).
+
+**Cadence intervals** (decided, SOW-0005 Open Decision #2):
+
+- **Idle** poll interval: 2 s (the previous cycle produced no change).
+- **Active** poll interval: 500 ms (the previous cycle produced a change).
+- **WAL-event floor**: 250 ms for a 5 s window after an `opencode.db-wal` fsnotify Write/Chmod event.
+
+The next interval is the minimum of the active/idle interval and the WAL-event floor when the floor window is open.
+
+**Cheap primary change check.** Every poll first runs the PK-indexed `MAX(id)` per table (a b-tree lookup on the time-prefixed Sonyflake PK, ~µs). When any table's `MAX(id)` exceeds the cursor's `MaxID`, the cycle runs the delta+reload+emit path. On a current schema this catches every INSERT.
+
+**The gated `MAX(time_updated)` probe.** In-place row mutations (token totals, status, archive) do NOT change `MAX(id)`, so they are caught by the unindexed `MAX(time_updated)` probe — which on the 585k-row `part` table is a 400–800 ms full scan and therefore MUST NOT run on every idle poll. It runs only when the gate is open. The gate predicate is a pure function:
+
+```
+shouldProbeTimeUpdated(now, lastWALEvent, lastProbe, safetyNet) =
+    lastWALEvent.After(lastProbe)  ||  now.Sub(lastProbe) >= safetyNet
+```
+
+i.e. the probe is issued only when (a) a WAL-mtime fsnotify event has fired since the last probe, OR (b) the 60 s safety-net interval has elapsed since the last probe. `safetyNet` is **60 s** (decided, matching Performance §"suspect activity gate" and AC#6). During steady-state idle with no WAL events the predicate is false on every poll, so the expensive scan never runs — the property AC#6 pins.
+
+**Boundary-millisecond re-scan (SOW-0005 round-3 P1-1).** An already-seen LOW-id row updated **in place at exactly the cursor's boundary millisecond `T`** is otherwise lost forever: it moves neither `MAX(id)` (no insert → the cheap path stays silent) nor `MAX(time_updated)` (the bucket value is unchanged → the gated `MAX(time_updated) > T` check stays silent), and the forward delta query's strict tie-break `(time_updated = T AND id > highID)` excludes that low-id row. The gap exists only when that boundary-ms in-place update is the session's ONLY change (any other change flags the session and the affected-session reload re-emits its whole tree, picking the row up).
+
+The fix is a dedicated, bounded **boundary-bucket re-scan** (`emitBoundarySessions`/`boundaryAffectedSessions`): for each tracked table whose cursor `MaxTimeUpdatedMs == T > 0`, it runs `SELECT <present-columns> FROM <t> WHERE time_updated = :T ORDER BY time_updated, id` (the FULL boundary bucket, regardless of id — an equality on the boundary ms), collects the owning session ids (reusing the same per-table `deltaRowHandler` derivation, including the part→session resolver), and feeds them into the SAME `reloadAndEmit` path. The cursor is **NOT advanced** by this scan (the boundary rows are already at the watermark; re-emitting their session trees is idempotent). It is bounded to the single boundary millisecond — it never walks earlier buckets and never pages — so its cost is the tiny set of rows sharing `T`. It is deliberately NOT folded into the forward delta query (which both Scan and Tail share): lowering that query's bound to `>=` would risk a non-advancing backfill loop, whereas the separate one-shot bucket scan is self-contained.
+
+**Unified pre-advance trigger (SOW-0005 round-7 P1-1).** The boundary re-scan runs FIRST in `pollOnce` — against the cursor's *current* (pre-advance) `MaxTimeUpdatedMs == T` — and ONLY THEN does `processChanges` page the forward delta (which advances the cursor). It fires whenever, **for a warm/real boundary (`boundaryReal == true`)**, EITHER:
+
+- **`changed == true` on ANY detect path** — the cheap `MAX(id) > MaxIDSeen` insert path OR the gated `MAX(time_updated) > T` probe. The re-scan does **NOT** key off `detectChange`'s `probed` output (round-7 P1-1 closes that gap); a true INSERT detected by the cheap path (`changed == true, probed == false`) still arms the boundary re-scan, OR
+- **the probe gate is open this cycle** — `shouldProbeTimeUpdated(now, lastWALEvent, lastProbe, safetyNet)` is true (a WAL event since the last probe, or the 60 s net elapsed). This is the idle in-place-update path: no INSERT (`changed == false` via the cheap path) but the gate opened, so the bounded bucket re-scan re-checks `T`.
+
+Formally: `runBoundary := boundaryReal && (changed || probeGateOpen)`.
+
+**Why the cheap-path co-occurrence needed closing (the round-7 P1-1 class).** Before round-7 the trigger keyed off `probed` (`gateOpen := probed && …`). But `detectChange` returns EARLY on the cheap `MAX(id) > MaxIDSeen` path with `changed == true, probed == false`, BEFORE the gated `MAX(time_updated)` probe runs. So when a true INSERT (`MAX(id)` advances) **co-occurred in the same poll** with an in-place UPDATE of a LOW-id row re-stamped to the boundary ms `T`, the cheap path short-circuited (`probed == false`) → the boundary re-scan was skipped → `processChanges` advanced the watermark past `T` for the INSERT → the low-id in-place update (excluded from the forward delta by the strict tie-break `id > highID`) fell permanently below the new watermark, never seen (a zero-gaps violation). The round-7 trigger arms on `changed == true` **regardless of which path detected it**, so the co-occurring INSERT case re-emits the same-ms session's tree against the pre-advance `T` before the forward delta moves the cursor. (Round-3 introduced the boundary re-scan, round-4 added the safety-net path, round-6 ran it before the forward delta on the gated path; round-7 closes the cheap-`MAX(id)` co-occurrence — the 4th same-ms case.)
+
+**`boundaryReal` is the single cold-`Tail` guard, applied CONSISTENTLY to every trigger (SOW-0005 round-7 P2-1).** `boundaryReal` gates the WHOLE unified trigger above — both the `changed` path and the gate-open path — so it is impossible for any boundary-re-scan path to replay a never-emitted cold snapshot. It means the cursor's boundary `T` is a position whose bucket was ALREADY emitted, so re-scanning it is idempotent rather than a cold replay. It starts **true for a WARM `Tail`** (resumed from a Scan cursor — Scan already emitted the boundary) and **false for a COLD `Tail`** (HEAD snapshot, follow-from-now: the boundary bucket was never emitted); `pollOnce` flips it true once the cursor first advances (the new boundary is the just-emitted forward position). The earlier `priorProbe` flag — which guarded only the `changed == false` path and was a SEPARATE, partial cold guard — is **removed** (round-7 P2-1): a cold Tail whose first poll happened to be WAL-driven, or whose first safety-net probe ran with `priorProbe` already set, could otherwise replay the HEAD-snapshot boundary bucket on the `changed == false` path. `boundaryReal == false` until the first genuine cursor advance now suppresses the re-scan on ALL paths, closing that hole and collapsing two guards into one.
+
+This precision is what reconciles the fix with the existing contracts:
+- A steady-state IDLE DB **WITHIN the 60 s net** with no WAL event has `changed == false` AND `probeGateOpen == false`, so the boundary re-scan never runs on an idle poll. AC#6's zero-expensive-query idle property is untouched (the cheap `MAX(id)` idle path is unchanged — strict `>` against the monotonic `MaxIDSeen` — and the gated `MAX(time_updated)` probe is still issued only when `shouldProbeTimeUpdated` is true); the round-2 counting-driver / `TestP1A_OldRowUpdateDoesNotReArmIdleScan` tests stay green. The re-scan fires only when something changed OR the gate OPENS — a WAL event or the 60 s net tick — which is exactly the safety net's purpose (a once-per-60 s bounded bucket re-emit on an otherwise-idle DB is the accepted cost of guaranteeing a missed-WAL in-place update is eventually surfaced).
+- A **cold `Tail` HEAD snapshot** never replays its boundary session: `boundaryReal == false` until the cursor first advances suppresses the re-scan on EVERY path (round-7 P2-1) — the cheap-`MAX(id)` change path, the gated `MAX(time_updated)` probe path, the WAL-driven gate-open path, and the safety-net gate-open path. So even a post-snapshot forward change whose new row id sorts *below* the snapshot `MAX(id)` (which trips the `time_updated` probe rather than the cheap `MAX(id)` path) does NOT replay the snapshot boundary; and a cold Tail's first WAL-driven or safety-net probe (the round-7 P2-1 hole) is suppressed too. Once the cursor advances past the snapshot, `boundaryReal` flips true and the boundary is a genuinely-emitted position thereafter. A WARM `Tail` (resumed from a Scan cursor) starts `boundaryReal == true` because Scan already emitted the boundary.
+- A genuine in-place boundary update (opencode re-stamps a row's `time_updated` to the same ms → WAL mtime changes, but no id/max-time advance) is caught on the gate-open path: immediately on the WAL-driven probe, or — if the WAL hint is **missed** (a dropped fsnotify event, a watcher whose `Add` failed, or timer-only polling) — on the next 60 s safety-net probe. It is also caught when it **co-occurs with a true INSERT**: the cheap `MAX(id)` path makes `changed == true`, which arms the re-scan against the pre-advance `T` before the forward delta advances the cursor (round-7 P1-1).
+- A session whose `time_compacting` **clears at the boundary ms** (compaction finished, re-stamped to the same `T`) is the same invisible-in-place-update shape: it re-surfaces via the same boundary re-scan (the cleared session row is in the boundary bucket) and emits its tree (it is no longer skipped by the Edge #8 pause).
+
+A table with no boundary watermark yet (cold start, `MaxTimeUpdatedMs == 0`) or without `time_updated` is skipped by the re-scan, so an empty/old-schema table never spuriously fires.
+
+**WAL fsnotify hint.** The loop sets up an fsnotify watch on the `opencode.db-wal` companion path (`<dbPath>-wal`) as a wakeup hint only. A Write/Chmod event records `lastWALEvent = now` (opening the 250 ms floor window and the probe gate). The hint is best-effort: if the WAL file does not exist, the watch `Add` fails, or the watcher errors, that is **non-fatal** — the loop logs once via `onError` and falls back to pure timer polling (the 60 s safety net still guarantees in-place mutations are eventually seen). A watcher error never terminates the loop.
+
+**Manual reload** (`/api/sources/<id>/reload`) is out of scope for Chunk C (the route does not exist yet); when added it will force one immediate cycle with the probe gate open.
 
 ## Cursor
 
@@ -345,7 +464,7 @@ The 1000-row page LIMIT keeps each read transaction short. The adapter pages unt
 
 `schema_hash` invalidates the cursor when opencode applies a new migration that affects shape we read; on mismatch the adapter logs a structured WARN, re-reads `__drizzle_migrations`, and continues without resetting the cursor (column drift is handled per-column; see Edge Cases). A full re-ingest is only triggered when a column we depend on disappears or its type changes incompatibly.
 
-`SourceProgress` events are emitted every 1000 rows or every 5 s during steady state, whichever comes first.
+`SourceProgress` events are emitted per BATCH, AFTER that batch's affected sessions are emitted (the checkpoint-after-emit invariant — see Read Strategy §"Full-session-tree load + map"). A batch's row budget is `progressEveryRows` (1000) across the tracked tables, so the persisted cursor advances at most one batch ahead of fully-emitted content, never past un-emitted content. The earlier "every 1000 rows or every 5 s" mid-paging cadence is superseded.
 
 ## Mapping to Canonical Events
 
@@ -379,22 +498,26 @@ When a new `session` row appears (delta on `session` table):
 - `Ts = session.time_created * 1000` (convert ms→µs)
 - `SourceSeq = deterministic per-event identifier` (stable across rescans; observability counter, not a dedup gate — see Idempotency)
 
-When `session.time_updated` changes for a row already known:
+When `session.time_updated` changes for a row already known (SOW-0005 round-6 P2-2):
 
-- Emit `SessionUpdatedEvent` with the changed fields (agent/model/cost/tokens).
+- The adapter **re-emits the session's whole tree** — a fresh `SessionStartedEvent` carrying the *current* `agent`/`model`/`cwd`/`Extras` (read live off the re-read `session` row), followed by the re-mapped turns/ops. It does **NOT** emit a `SessionUpdatedEvent`. The ingest writer absorbs the re-emission idempotently: `applySessionStarted` is an `INSERT … ON CONFLICT(source_id, native_id) DO UPDATE` that `COALESCE(NULLIF(excluded.col,''), sessions.col)`s `agent_name`/`model`/`cwd`/`call_path` onto the existing row (`internal/ingest/writer.go` — `applySessionStarted`), so a re-emit applies the changed metadata without inventing a new event type.
+- **Why opencode needs no `SessionUpdatedEvent` (sibling-adapter contrast).** The sibling adapters emit `SessionUpdatedEvent` only to backfill a *single session-level field first learned mid-stream* when no full-row re-read is available: `codex`/`claude-code` emit one to set `sessions.model` the first time a turn reveals it (`!modelSeen` — `internal/adapters/codex/ops.go`, `internal/adapters/claude_code/ops.go`), `aiagent_v3` to attach final-report metadata, and `claude-code` additionally for the late sub-agent `.meta.json` repair (a partial `UPDATE` that makes **no** catalog call — `repairChangedMetas` in `internal/adapters/claude_code/tailer.go`). opencode has **no such mid-stream gap**: every delta re-reads the *whole* `session` row, so the current `model`/`agent`/`cwd` are already on the re-emitted `SessionStartedEvent` — there is nothing left for a separate partial-update event to carry. (opencode's `session.id` is also stable from row insert, so it has no late canonical-identity rewrite either.)
+- **`last_activity_ts`** is advanced by `MAX()` over the re-emitted session/turn/op timestamps — the `applySessionStarted` upsert `MAX(last_activity_ts, excluded.Ts)` plus the aggregates rollup `MAX(last_activity_ts, MAX(op.end_ts))` (`internal/ingest/aggregates.go`). A metadata-only `time_updated` bump that adds no newer turn/op carries no later activity timestamp, so it does not by itself move `last_activity_ts`; the figure tracks real session activity, not a bare `session`-row touch.
 
 When `session.time_archived` becomes non-NULL:
 
 - Emit `SessionFinalizedEvent` with `Status = "completed"`, `EndTs = time_archived * 1000`.
 
-Opencode does not have a `status='failed'` row column. Failed sessions are inferred from the last assistant message carrying `data.error` (any `AssistantError` variant). When the adapter sees an assistant message with non-NULL `data.error`, the session is finalized with `Status = "failed"`, `ErrorClass = data.error.name`.
+Opencode does not have a `status='failed'` row column. Failed sessions are inferred from the last assistant message carrying `data.error` (any `AssistantError` variant). When the adapter sees an assistant message with non-NULL `data.error`, the session is finalized with `Status = "failed"`, `ErrorClass = data.error.name` (or a default class when the name is empty — SOW-0005 round-2 P2-A), and `ErrorMessage = data.error.data.message`.
+
+**`ErrorMessage` from the tagged error `data` (SOW-0005 round-5 P3-1).** opencode's `AssistantError` is a tagged union created via `NamedError.create(name, dataSchema)` (`anomalyco/opencode @ 2b3ddf9 :: packages/core/src/util/error.ts:13-64`), so it serializes as `{"name": <ErrorName>, "data": <DataSchema>}`. Every shipping variant EXCEPT `MessageOutputLengthError` carries a `message` string inside `data`: `MessageAbortedError` (`{message}`), `UnknownError` (`{message, ref?}`), `APIError` (`{message, statusCode?, isRetryable, …}`), `ContextOverflowError` (`{message, responseBody?}`), `StructuredOutputError` (`{message, retries}`), `ProviderAuthError` (`{providerID, message}`) — `message-v2.ts:41-57` + `message-error.ts:4-11`. Confirmed against the reference DB: of 422 messages carrying `data.error`, every `MessageAbortedError`/`UnknownError`/`APIError` row populates `data.error.data.message`. The adapter therefore reads `data.error.data.message` (best-effort: an absent `data`, a non-object body, or a missing/non-string `message` — e.g. the message-less `MessageOutputLengthError` — yields an empty `ErrorMessage`; the session is still finalized failed with its `ErrorClass`). This mirrors how the tool-op path surfaces `state.error` verbatim into `OpFinalizedEvent.ErrorMessage`. The canonical `TurnFinalizedEvent` carries only `ErrorClass` (no `ErrorMessage` field), so the error detail enriches the SESSION terminal only; the failed turn still records its `ErrorClass`.
 
 When a new `message` row appears (role=`assistant`):
 
 - Emit `TurnStartedEvent` with:
   - `SessionNativeID = message.session_id`
   - `Seq = (count of prior assistant messages in same session) + 1`
-- When `data.time.completed` is set (or when the message has at least one `step-finish` part), emit `TurnFinalizedEvent` with the message-level `cost`/`tokens` and `Status` derived from `data.finish` (`stop`→completed, anything else→completed unless `data.error` is set).
+- Emit `TurnFinalizedEvent` ONLY when the turn is TERMINAL (`turnIsTerminal`): `data.time.completed` is set, OR `data.error` is present, OR the message has at least one `step-finish` part. Otherwise the turn is **RUNNING** — `TurnStartedEvent` with NO `TurnFinalizedEvent` (opencode writes the assistant `message` row LIVE while the turn is still in progress; finalizing every live row would wrongly mark an in-flight turn completed). A later poll re-emits the whole tree and finalizes the turn once it actually completes; the re-emit is idempotent. When terminal, `TurnFinalizedEvent` carries the message-level `cost`/per-turn token delta and `Status` derived from `data.finish` (`stop`→completed, anything else→completed unless `data.error` is set → failed).
 
 For each `part` row of the assistant message, walking in `id` order:
 
@@ -402,18 +525,19 @@ For each `part` row of the assistant message, walking in `id` order:
 |---|---|
 | `step-start` | open a new LLM Op (record state in adapter memory; emit `OpStartedEvent` with kind=`llm`, name=`<modelID>`, provider=`<providerID>` from the parent message) |
 | `step-finish` | close the current LLM Op (emit `OpFinalizedEvent` with the step's `tokens`/`cost`; `Status="completed"`) |
-| `reasoning` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`reasoning`, ParentOpSeq=current LLM Op) using `data.time.start`/`data.time.end`; on missing `end`, `Status="running"` and end ts is null |
-| `text` | NOT an op; surface as the assistant's final text. Skip canonical-event emission; the presenter retrieves text via a payload-style read. |
+| `reasoning` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`reasoning`, ParentOpSeq=current LLM Op) using `data.time.start`/`data.time.end`; on missing `end`, `Status="running"` and end ts is null. **ReasoningKind** (canonical-events.md:202 — `summary` \| `raw`): opencode reasoning parts carry no native summary-vs-raw discriminator, so the adapter emits `raw` (the part is the model's raw chain-of-thought text), unless `data.metadata.summary` is truthy, in which case it emits `summary`. The reasoning body (`data.text`) is referenced as a PayloadRef (kind `llm_reasoning`, field `text`), never inlined. |
+| `text` | NOT an op; surface as the assistant's final text. The adapter does NOT emit an op for a `text` part, but DOES emit a `PayloadRef` (kind `llm_response`, field `text`) scoped to the turn's most-recent LLM op so the presenter can retrieve the assistant's text on demand without ai-viewer copying it. When no LLM op is open yet (a `text` part before any `step-start`), the ref is dropped (it has no op to attach to; `payload_refs.op_id` is NOT NULL). |
 | `tool` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`tool`, ParentOpSeq=current LLM Op, name=`tool`, ToolNamespace=derived from `tool` (e.g. `github_get_file_contents` → namespace `github`, name `get_file_contents`)) using `state.time.start`/`state.time.end`; `Status` derived from `state.status` |
 | `tool` where `tool='task'` AND `state.metadata.sessionId` set | emit BOTH the tool Op AND an `OpStartedEvent` of kind=`session` with `ChildSessionNativeID = state.metadata.sessionId` (SOW-0005 decision: emit both; the `session` op is the topology parent so the sub-agent attaches in the topology view) |
 | `patch` | NOT an op; record in extras of the surrounding LLM op for the "Files changed" UI tab |
 | `compaction` | emit `LogEntry` severity=`INF`, source=`opencode`, message=`session compacted (auto=<bool>)` |
 | `retry` | emit `LogEntry` severity=`WRN`, message=`API retry attempt <attempt>: <error.name>` |
-| `file` | recorded as a `PayloadRef` with `kind="user_attachment"`, `format="json"`, `LocationURI = data.url` |
-| `subtask` | emit `OpStartedEvent` of kind=`session` with `Extras.prompt`/`description`/`agent`/`model`; finalize is implicit when the child session finalizes |
-| `agent`, `snapshot` | recorded in extras; no op emission |
+| `file` | emit an INF `LogEntry` message=`file attachment`, source=`opencode`, with `Extras = {filename, url, mime}` (only the present fields), scoped to the turn and the open LLM op when one is open (`OpSeq` may be 0). **NOT** a `PayloadRef` (SOW-0005 round-4 P2-3): the canonical `PayloadRefEvent.PayloadKind` set is exactly `llm_request \| llm_response \| llm_sdk_request \| llm_sdk_response \| llm_reasoning \| tool_request \| tool_response \| log` (internal/canonical/events.go) — none of which is a user file attachment — so the earlier `kind="user_attachment"` ref was a canonical-contract violation. The attachment is surfaced as a `LogEntry` (mirroring compaction/retry) so the observability is preserved without inventing a non-canonical kind. A richer canonical attachment `PayloadKind` (and a resolver for it) is **deferred to a follow-up SOW**; the adapter must not emit a non-canonical kind in the interim. A `file` part with no `url`/`filename`/`mime` at all emits nothing. |
+| `subtask`, `agent`, `snapshot` | **No-op in v1** (SOW-0005 round-4 P2-4). The earlier spec said `subtask` → a `session` op; live counts for all three part types are **ZERO** on the reference DB (the `subtask` part type is planned upstream but not yet populated — cross-referenced in §"Sub-Agent Linkage": the 11 parent-set sessions without a matching task part come from `subtask`/manual fork mechanisms that do not emit a populated `subtask` part). The adapter therefore treats `subtask`/`agent`/`snapshot` as **known, intentionally-ignored** part types (no op, no payload, no WARN — they are recognized, just unused), rather than implementing against zero data. Implementing `subtask` → `session` op is **deferred to a follow-up SOW** if/when these part types appear in a real database. |
 
 **Op `seq` numbering within a turn**: increment a counter per part processed, regardless of part type that gets emitted. `ParentOpSeq` for parts that fall inside a step is the LLM Op's seq (the `step-start`'s seq).
+
+**Malformed `message.data` / `part.data` JSON (SOW-0005 round-3 P2-2).** A `message` or `part` whose `data` blob cannot be JSON-decoded is skipped with a session-scoped `LogEntry` severity=`WRN` (for the per-session detail view) **AND** routed through the adapter's `onError` callback. `data` is NOT-NULL in opencode's schema, so an undecodable blob is a corruption signal, not benign forward-compat drift; routing it through `onError` turns it into a source-scoped `SourceErrorEvent` that increments `sources.parse_errors` so a corrupt opencode DB **degrades `/api/health`** (the session `LogEntry` alone never reaches the health source-status panel). The two surfaces are complementary: the `LogEntry` carries the per-session/turn/op context for the detail view; the `SourceErrorEvent` carries the source-level health signal. (An unknown but well-formed `$.type`/role is different — that is forward-compat data, a `WRN` `LogEntry` only, NOT an `onError` health signal.)
 
 ### Payload references
 
@@ -424,6 +548,24 @@ LocationURI = "opencode-sqlite://opencode.db?part_id=<prt_...>&field=state.outpu
 ```
 
 The presenter resolves this scheme by re-querying SQLite for the named field. This keeps payloads out of ai-viewer's own database (they may be hundreds of MB total) and respects the read-only contract.
+
+**Mapper/URI seam (SOW-0005 chunk split).** The row→event mapper (chunk B) is pure and DB-agnostic: it knows the owning `part.id` and the `field` path (`state.output`, `state.input`, `text`, …) but NOT how to build the final `opencode-sqlite://` URI. The canonical URI grammar lives in ONE place — `payloads.go`'s `buildPayloadURI(partID, field)` (chunk D) — mirroring how codex/claude_code keep URI construction in their `payloads.go`. The grammar is:
+
+- scheme `opencode-sqlite` (no host, no path);
+- query params `part_id=<id>&field=<field>`, with both values URL-encoded via `net/url` so a part id or field path containing a reserved character is safe;
+- producing exactly `opencode-sqlite://?part_id=<id>&field=<field>`.
+
+The mapper's built-in default (`defaultPayloadURI`, used in mapper-only unit tests) delegates to `buildPayloadURI`, so there is a single source of truth and the relative form is byte-identical to chunk B's contract. The future `/api/payloads` resolver (a separate Phase-2 SOW, NOT this chunk) will look up the owning source's database path from the `payload_ref`'s `source_id` and `SELECT part.<field>` for that `part_id` read-only; chunk D builds NO resolver/parser (there is no consumer yet — that would be dead code). This mirrors codex, whose mapper defers `file://` construction to a `payloadURI` helper. The PayloadRef field map per part type:
+
+| part type | PayloadKind | field |
+|---|---|---|
+| `text` | `llm_response` | `text` |
+| `reasoning` | `llm_reasoning` | `text` |
+| `tool` with non-empty `state.output` | `tool_response` | `state.output` |
+
+**`tool_response` is emitted ONLY when `state.output` is non-empty (SOW-0005 round-6 P2-1).** A failed tool (`state.status == "error"`) typically carries only `state.error` and no `state.output`; emitting a `tool_response` PayloadRef pointing at `field=state.output` for such a tool would reference a body that does not exist (the future `/api/payloads` resolver would `SELECT part.state.output` and find nothing). The op's failure detail is carried by `OpFinalizedEvent.ErrorMessage` (= `state.error`) instead, so dropping the empty-output ref loses nothing. A failed tool that *does* produce partial output before failing still emits the ref (the gate is on `state.output != ""`, not on the status).
+
+(A `file` part is **NOT** a `PayloadRef` — SOW-0005 round-4 P2-3 removed the non-canonical `user_attachment` kind; a file part emits an INF `LogEntry` carrying `filename`/`url`/`mime` in extras, see the part-type table above. A canonical attachment `PayloadKind` is deferred to a follow-up SOW.)
 
 ### Sub-Agent Linkage
 
@@ -457,7 +599,7 @@ Op | Source field |
 | `op.kind=llm, model` | parent `message.data.modelID` |
 | `op.kind=llm, provider` | parent `message.data.providerID` |
 | `op.tokens_in/out/cost` | from the step-finish part: `part.data.tokens.input`, `.output`, `.cost`. NOTE: step-finish tokens **appear cumulative across steps within one assistant message** based on observed data (a sequence of input tokens 17438, 23075, 31713, 35407, … all monotonically increasing). The adapter records the **delta** between successive step-finish values within the same message, not the raw value, so per-LLM-op tokens are correct. |
-| `turn.tokens_in/out/cost` | from the assistant `message.data.tokens.input/output/cost`. SOW-0005 decision: per-turn tokens are the **delta from the previous assistant message's cumulative totals** within the session (matching the opencode UI). The implementer MUST confirm the cumulative pattern on the live DB before pinning the golden — the step-finish cumulative pattern (row above / AC#3) is verified; this message-level pattern is the analogous one level up and is not yet independently confirmed. |
+| `turn.tokens_in/out/cost` | from the assistant `message.data.tokens.input/output/cost`. SOW-0005 decision: per-turn tokens are the **delta from the previous assistant message's cumulative totals** within the session (matching the opencode UI). This message-level cumulative→delta behavior is the analogue, one level up, of the verified step-finish cumulative pattern (row above / AC#3) and is **pinned** by `TestMapSession_TurnNumberingAndTokenDeltas` plus the `e_cumulative_tokens` golden (`TestGoldenInvariant_ECumulativeTokens`, whose per-turn rollup is the message-level cumulative). |
 | `session.tokens_in/out/cost` | the rolled-up `session` columns (`tokens_input`, `tokens_output`, `cost`) when present; fall back to summing turns for sessions written before migration `20260510033149` |
 | `ctx_max` | static pricing table per `(providerID, modelID)`; opencode does not store it |
 | `ctx_used` | `tokens.input + tokens.cache.read` at the most recent step-finish for the turn |
@@ -467,7 +609,7 @@ Op | Source field |
 1. **Schema drift across opencode versions.** Sessions span ~30 migrations. Older rows may lack `cost`, `tokens_input`, `tokens_output`, `tokens_reasoning`, `tokens_cache_read`, `tokens_cache_write` (added by `20260510033149`), `workspace_id` (added by `20260227213759`), `path` (added by `20260428004200`), `agent`, `model`, `time_compacting`, `time_archived`. Drizzle adds them with NOT-NULL DEFAULT 0 or NULL where appropriate; all rows in the operator's DB have the columns now, but the column **values** are zero on old rows. The adapter:
    - At startup, queries `PRAGMA table_info(session)`, `PRAGMA table_info(message)`, `PRAGMA table_info(part)`, `PRAGMA table_info(session_message)`.
    - Builds the SELECT list dynamically — naming only known columns; never `SELECT *`.
-   - Tolerates missing columns by emitting empty/zero values in the canonical event and logging a structured INF on first occurrence per (table, column).
+   - Tolerates missing columns by emitting empty/zero values in the canonical event and emitting one structured INFO log per wanted-but-absent OPTIONAL column, at introspection time. The log carries a stable message (`opencode: optional column absent on this database schema; omitted from projection (old opencode version)`) plus structured keys `table` and `column`, emitted in a deterministic order (tables in `trackedTables` order, columns sorted). Required-column loss is fatal upstream (`introspectAll`), so every column that reaches the INFO path is an optional one the dynamic SELECT silently omitted. `Scan` and `Tail` EACH emit this set once on (re)start — they each introspect once, so on the rare old-schema path the missing-column set appears twice per source lifetime; that per-phase duplication is accepted (it is not deduplicated across phases). Production wiring: `tailer.go` `logMissingColumns` is called right after `introspectAll` succeeds in both `scanLoop` and `tailLoop`; the logger is threaded from `Adapter.logger` (`adapter.go` `Scan`/`Tail`).
    - Tolerates unknown tables and unknown `session_message.type`/`part.data.type` by skipping with a structured WARN.
 
 2. **Soft delete.** `session.time_archived` is set when a session is archived in the opencode UI (2 sessions on the operator's DB). The adapter treats archive as `SessionFinalizedEvent` with `Status="completed"`. The data is never physically deleted by opencode under normal operation; the FK ON DELETE CASCADE only fires if a project is deleted, which would cascade to sessions+messages+parts. The adapter should not delete its own canonical rows when an opencode row disappears (deletion is rare and we want history). A follow-up SOW will decide deletion semantics.
@@ -478,17 +620,98 @@ Op | Source field |
 
 5. **`step-start` without matching `step-finish`.** 530 messages on the operator's DB have unbalanced step pairs (117119 starts vs 116589 finishes = 530 orphans). Treat orphan step-start as a running LLM op (no finalize); when a new step-start appears in the same message, force-close the previous one with `Status="cancelled"` and synthetic end_ts = next step-start's start_ts.
 
-6. **Time units.** All opencode timestamps are **milliseconds since epoch**. Canonical events use **microseconds**. The adapter multiplies by 1000 on every emission. Mixing units is the most likely class of bug; a unit test pins this with fixture rows that span boundary values.
+6. **Time units.** All opencode timestamps are **milliseconds since epoch**. Canonical events use **microseconds**. The adapter multiplies by 1000 on every emission. Mixing units is the most likely class of bug; a unit test pins this with fixture rows that span boundary values. A non-positive ms maps to 0 (an absent timestamp never fabricates a 1970-adjacent time). A crafted/corrupt ms whose `*1000` would overflow `int64` **saturates** at `math.MaxInt64` rather than wrapping to a negative time that would reorder events — and, since round-3 P2-1, that clamp is **surfaced via `onWarn`** (with the table/field context) when a warn callback is wired, so a corrupt timestamp is no longer a silent saturation. The pure mapper-only path (no `onWarn`) still degrades silently. The same warning-capable saturating arithmetic guards the `ctx_used = tokens.input + tokens.cache.read` ADDITION at step-finish: a crafted pair whose sum overflows `int64` clamps to `math.MaxInt64` with an `onWarn` rather than wrapping negative.
 
 7. **`event` / `event_sequence` tables empty.** They exist in the schema but are unused on the operator's DB. The adapter ignores them. If opencode starts populating `event` in a future version, the adapter logs an INF and continues; a follow-up SOW will integrate it (it may give us monotonic per-session sequence numbers we currently synthesize).
 
-8. **Compaction reshapes data.** When opencode compacts a session, message and part rows can change (text/tool output get summarized, marker `compaction` parts get inserted). The adapter detects this via `time_updated` and `time_compacting`. Strategy: when `time_compacting` becomes non-NULL the adapter pauses delta reads for that session until `time_compacting` returns to NULL, then re-reads the whole session's messages and parts and emits `SessionUpdatedEvent`+re-emits ops with new content (the ingester absorbs the re-emission via SQL-layer idempotent upserts, not a `SourceSeq` gate). Compaction is rare (432 out of 127k messages = 0.3%).
+8. **Compaction reshapes data.** When opencode compacts a session, message and part rows can change (text/tool output get summarized, marker `compaction` parts get inserted). The adapter detects this via `time_updated` and `time_compacting`. Strategy: when `time_compacting` becomes non-NULL the adapter pauses delta reads for that session until `time_compacting` returns to NULL, then re-reads the whole session's messages and parts and emits `SessionUpdatedEvent`+re-emits ops with new content (the ingester absorbs the re-emission via SQL-layer idempotent upserts, not a `SourceSeq` gate). Compaction is rare (432 out of 127k messages = 0.3%). **The `time_compacting` check and the tree read are ATOMIC (SOW-0005 round-3 P1-2):** `loadAndMapSession` reads the session row, checks `time_compacting`, and loads messages+parts in ONE read-only transaction, so a non-NULL `time_compacting` skips the tree emit on a single consistent snapshot — compaction cannot begin *between* the check and the tree read (a TOCTOU that would have emitted a partial/mutating tree). The skipped session re-surfaces in a later delta when `time_compacting` clears (its `time_updated` bumps).
 
 9. **Cross-process WAL inheritance.** If opencode crashes mid-transaction, the WAL file may contain uncommitted pages. SQLite handles this transparently on the next open: any reader sees only committed pages. We rely on this — never call `wal_checkpoint`.
 
 10. **Database may be `:memory:` or absent.** When opencode is not installed (or run with `OPENCODE_DB=:memory:`), the file path won't exist. The adapter logs an ERR `source not configured` once and disables itself; it does not retry forever.
 
 11. **Sensitive content.** `session.title`, `session.directory`, `message.data.summary.title`, every `text`/`reasoning` part, every tool `state.input`/`state.output`, and every `patch.files` entry contain real operator data. ai-viewer never copies these into its own database except as references (via `payload_refs.location_uri`). The presenter fetches them on demand at request time and is the only component that materializes payload bytes.
+
+## Testing / Golden Fixtures (Chunk E)
+
+The adapter's row→event behaviour is pinned by a committed golden suite plus
+direct per-scenario invariant assertions and a `data`-JSON fuzz target. This is
+the SQLite analogue of the codex golden harness (`codex/golden_test.go`).
+
+**Fixture format — `fixture.sql`, never a binary `.db`.** The repo commits ZERO
+binary database fixtures (opaque to diffs, can't be secret-scanned). Each scenario
+under `testdata/opencode/<scenario>/` ships a human-reviewable `fixture.sql`
+(`CREATE TABLE` + `INSERT`s, the faithful real schema for normal scenarios; the
+reduced pre-`20260510033149` schema for the drift scenario). At run time the
+golden harness (`buildFixtureDB`) builds a throwaway SQLite database in
+`t.TempDir()` from `fixture.sql` via a SEPARATE read-write `database/sql`
+connection (production NEVER opens opencode.db read-write — this is the harness
+constructing the fixture), closes the writer, and the adapter under test reopens
+the path strictly read-only through `New`/`openReadOnly`. All fixture content is
+synthetic and invented (ids like `ses_happy01`/`prt_a01`, providers
+`anthropic`/`openai`, models `claude-x`/`gpt-y`); the operator's real database is
+never read or copied (R5).
+
+**Golden encoding.** `golden_test.go` auto-discovers every `testdata/opencode/*/`
+directory, scans the built DB, filters out `SourceProgressEvent` (a checkpoint,
+not content), and serialises the remaining events one `{kind,payload}` JSONL line
+per event into `expected.jsonl`. The only absolute path embedded in a
+non-SourceProgress event is the `SourceID` (`opencode:<dbPath>`), rewritten to
+`opencode:<ROOT>` for portability and PII hygiene. The `opencode-sqlite://?part_id=&field=`
+PayloadRef URIs are DB-relative (no path, no basename) and need no substitution.
+Run `go test ./internal/adapters/opencode/ -update-golden` to regenerate; the
+generator is deterministic (every non-SourceProgress `Ts` derives from a fixture
+row timestamp ×1000 — no wall-clock leaks), so regeneration is byte-idempotent.
+
+**Goldens are not self-justifying.** A `-update-golden` run pins whatever the code
+emitted, regressions included. `golden_invariants_test.go` therefore re-scans each
+fixture and asserts the load-bearing invariant keyed on canonical-event FIELDS
+(not golden text), so a regression fails there even after a golden refresh.
+
+The five scenarios and what each pins:
+
+| scenario | pins |
+|---|---|
+| `a_happy` | baseline `session→turn→op` tree: root SessionStarted → TurnStarted → LLM op (step-start) → reasoning op (+ `llm_reasoning` PayloadRef) → `llm_response` PayloadRef (text) → tool op (+ `tool_response` PayloadRef) → LLM op_finalized (step-finish) → TurnFinalized; NO SessionFinalized (running). PayloadRef URIs + ms→µs. |
+| `b_subagent_task` | sub-agent linkage BOTH ways (AC#4): the child `session.parent_id` row maps to `Kind=sub_agent`+`ParentNativeID`/`RootNativeID`=parent; the parent's `tool='task'` part (with `state.metadata.sessionId`) emits BOTH a session Op (`Kind=session`, `ChildSessionNativeID`, the topology parent, emitted first) AND a tool Op (`Kind=tool`, `name=task`) in the same turn. |
+| `c_multi_provider` | multi-provider (AC#7): two turns with `providerID` anthropic then openai → each LLM op carries its `ProviderAlias` verbatim + canonical `Provider` (two catalog providers downstream). Also the two-level token model: per-op tokens reset per message (turn2 op = 300/80) while per-turn tokens are the session-level delta (turn2 turn = 200/50). |
+| `d_schema_drift` | graceful degrade on the pre-`20260510033149` schema (AC#5): `introspectAll` ACCEPTS it (required cols present), the dynamic SELECT omits the 9 missing optional `session` columns, SessionStarted carries empty `Model`/`AgentName` and Extras WITHOUT `providerID`/`variant`, while op/turn token+provider values survive (they come from `message.data`, untouched by the column drift). |
+| `e_cumulative_tokens` | cumulative→delta token math (AC#3): four step-finish parts with CUMULATIVE inputs 100/250/410/400 (outputs 20/50/90/80) → per-LLM-op deltas 100/150/160/0 and 20/30/40/0 (the 4th clamps to 0 because the cumulative decreased). The per-turn rollup is the message-level cumulative (400/80). |
+| `g_nested_subagent` | nested-root resolution (SOW-0005 P2.4): a 3-level tree root→child→grandchild. The grandchild's `RootNativeID` is the TRUE tree root (`ses_groot`), NOT its direct parent (`ses_gchild`), while its `ParentNativeID` is the direct parent — proving `resolveRootID` walks the chain to the top. Each session's turn finalizes (completed ts present, P1.3). |
+
+**Resume property (AC#6, scenario-level).** Complementary to chunk C's
+two-stage-insert `TestScanLoop_ResumeZeroDupesZeroGaps`, `golden_resume_test.go`
+pins the durability properties expressible over a STATIC fixture: (a) a re-scan
+from the final cursor (persisted+reparsed) emits ZERO content events (no duplicate
+on restart), (b) two cold scans from the zero cursor emit the identical content
+multiset (no nondeterministic drop/duplicate), and (c) on the two-session
+`b_subagent_task` fixture a re-scan from the final cursor re-emits neither session
+(the watermark advances past every session touched in one cycle). Together:
+resume/re-scan never drops or duplicates a content event.
+
+**`data`-JSON fuzz.** `data_fuzz_test.go` fuzzes `decodeMessageData` (the
+message.data user|assistant union) and `decodePartData` (the part.data 12-variant
+`$.type` union) — the untrusted-bytes boundary where a malformed/truncated blob
+from the live database meets the adapter (opencode's analogue of codex's
+`FuzzParseLine`). Contract: the decoder NEVER panics on any input — it returns a
+struct or a wrapped error; the typed helpers reachable from a decoded value
+(`role`/`kind`/`subAgentSessionID`/`modelID`/`reasoningKind`) must also not panic.
+Seeds cover both message roles, all 12 part variants (incl. the `tool='task'`
+metadata.sessionId edge), unknown `$.type`/role, and malformed/truncated/empty/
+deeply-nested bodies.
+
+**AC#5 INF logging (wired).** The "one INFO log per missing optional column"
+promise (Edge Cases #1) is implemented: `tailer.go` `logMissingColumns` iterates
+each table's `tableSchema.Missing` right after `introspectAll` succeeds in BOTH
+`scanLoop` and `tailLoop`, emitting one `logger.Info(...)` per (table, column)
+with the stable message + `table`/`column` keys. `TestGoldenInvariant_DSchemaDrift_MissingColumnsLoggedINF`
+(`golden_invariants_test.go`) proves it: it `Scan`s the `d_schema_drift` fixture
+through the public adapter with a record-capturing `slog.Handler`
+(`golden_loghandler_test.go` `captureHandler`) and asserts the set of logged
+(table, column) pairs equals the set introspection reports Missing — exactly one
+INFO record per missing column, nothing extra. The `d_schema_drift` golden still
+pins the graceful DEGRADE (accept + omit columns + zero values); the INF set is
+not serialised into `expected.jsonl` (it is a log, not a canonical event).
 
 ## Canonical Model Gaps
 

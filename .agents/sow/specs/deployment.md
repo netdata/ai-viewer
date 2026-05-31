@@ -114,10 +114,9 @@ against. Each existing location becomes a source; missing locations
 are silently skipped.
 
 Phase 1 shipped the `aiagent_v3` and `aiagent_v2` adapters; Phase 2 added
-`claude-code` (SOW-0003) and `codex` (SOW-0004), both now wired into the
-binary. The `opencode` row is reserved for its Phase 2 SOW (SOW-0005); its
-adapter package is not yet compiled in. The `Format` column is the registry
-key the adapter registers under (note `claude-code` is hyphenated).
+`claude-code` (SOW-0003), `codex` (SOW-0004), and `opencode` (SOW-0005), all now
+wired into the binary. The `Format` column is the registry key the adapter
+registers under (note `claude-code` is hyphenated).
 
 | Format | Probe | Status |
 |---|---|---|
@@ -125,7 +124,43 @@ key the adapter registers under (note `claude-code` is hyphenated).
 | aiagent_v2 | `~/.ai-agent/sessions/` exists | live (Chunk 11) |
 | claude-code | `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) exists | live (SOW-0003) |
 | codex | `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`) exists | live (SOW-0004) |
-| opencode | `~/.local/share/opencode/opencode.db` exists | adapter pending (Phase 2 SOW) |
+| opencode | `~/.local/share/opencode/opencode.db` exists (a regular file) | live (SOW-0005) |
+
+The `opencode` probe targets a single regular file (the SQLite database), unlike
+the four directory probes above. Because `os.Stat` succeeds on a directory too, the
+opencode probe additionally requires `info.Mode().IsRegular()` (SOW-0005 round-3
+P3-2) so a *directory* named `opencode.db` does NOT register as a source (it would
+fail to open as a database). The other adapters' probes intentionally accept a
+directory and are unchanged. When a regular file exists the source is registered
+read-only and the discovery log line carries `sessions`, `messages`, `parts` row
+counts and `latest_migration` (the newest `__drizzle_migrations` name), read once
+at startup via `opencode.ProbeStatus`. A `ProbeStatus` error never blocks
+discovery: the source is still registered and the failure is logged as a
+`probe_error` attribute (the adapter's own `Scan`/`Tail` then surface any fatal
+schema problem via `/api/health`).
+
+**The opencode source location is a filesystem path (SOW-0005 round-3 P2-4).** Both
+auto-discovery and `--source opencode:<path>` resolve to a real file path that
+`startSource` validates with `os.Stat` before the adapter opens it. The adapter's
+`buildReadOnlyDSN` (`conn.go`) additionally accepts pre-built `file:` URIs and the
+in-memory `:memory:` form, but those DSN shapes are for the adapter's
+**programmatic/test use only** — they are NOT valid `--source` locations because
+`os.Stat` cannot stat a `file:`/`:memory:` DSN string. Operators always pass a
+filesystem path; the DSN forms never appear on the CLI.
+
+The opencode database path resolution order (`opencodeDBPath`, SOW-0005 P2.4) is:
+
+1. `$OPENCODE_DB`, if non-empty — used **verbatim** as a full path to the database.
+2. else `$XDG_DATA_HOME/opencode/opencode.db`, if `$XDG_DATA_HOME` is non-empty.
+3. else `~/.local/share/opencode/opencode.db` (the XDG default base).
+
+CAVEAT: `$OPENCODE_DB` is honoured as the conventional override name but could
+NOT be confirmed against opencode's upstream source during SOW-0005 (the mirror
+was unavailable), so it is treated as best-effort; the XDG base (`~/.local/share`
+== `$XDG_DATA_HOME`) IS opencode's verified default location. Per-channel
+`opencode-<channel>.db` variants (anomalyco/opencode
+`packages/opencode/src/storage/db.ts`) remain out of scope for auto-discovery —
+point `--source opencode:<path>` at a non-default database explicitly.
 
 The Chunk 11 v2 probe checks for the parent `sessions/` directory
 rather than the glob `*.json.gz` documented earlier: a freshly-bootstrapped
