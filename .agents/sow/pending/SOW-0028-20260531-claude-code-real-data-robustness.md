@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: proposed follow-up, awaiting operator prioritization. Discovered 2026-05-31 by ingesting the operator's REAL claude-code project (`~/.claude/projects/-home-costa-src-ai-viewer-git`, one 61 MB transcript + 139 sub-agents) into the corrected backend during the SOW-0006 Trace-tab real-data review. Not blocking SOW-0006 (frontend); these are claude-code ADAPTER (SOW-0003) data-correctness bugs that only real transcripts expose — the synthetic golden fixtures use clean integer/complete data and never hit them.
+Sub-state: proposed follow-up, awaiting operator prioritization. Discovered 2026-05-31 by ingesting the operator's REAL claude-code project (`~/.claude/projects/<this repo>`, one 61 MB transcript + 139 sub-agents) into the corrected backend during the SOW-0006 Trace-tab real-data review. Not blocking SOW-0006 (frontend); these are claude-code ADAPTER (SOW-0003) data-correctness bugs that only real transcripts expose — the synthetic golden fixtures use clean integer/complete data and never hit them.
 
 ## Requirements
 
@@ -24,8 +24,8 @@ Implied by the project mission ("read source-system snapshots … production-qua
 Facts:
 
 - `internal/adapters/claude_code/*` decodes a `system` record body with `retryInMs int64` (exact field/file to confirm on pickup — error: `decode system: json: cannot unmarshal number 38317.38269012852 into Go struct field systemBody.retryInMs of type int64`).
-- Real transcript `1d8b99cd-3d09-4d73-b7cb-1577baf9cfa0.jsonl` (61 MB) produced several such errors at distinct offsets; health went `degraded` (parse-error path works — no silent failure).
-- The DB after ingest: 1 root (`start_ts=0`, 11,928 ops, 347 turns) + 139 sub_agents (real `start_ts`); the 140 transcripts are correctly ONE session tree (root + its sub-agents), NOT a collapse bug — verified `count(DISTINCT root_session_id)=1` with native_ids `1d8b99cd…:age<N>`.
+- A real ~61 MB claude-code transcript produced several such errors at distinct offsets; health went `degraded` (parse-error path works — no silent failure).
+- The DB after ingest: 1 root (`start_ts=0`, 11,928 ops, 347 turns) + 139 sub_agents (real `start_ts`); the 140 transcripts are correctly ONE session tree (root + its sub-agents), NOT a collapse bug — verified `count(DISTINCT root_session_id)=1` with native_ids `<root-uuid>:age<N>`.
 
 Inferences:
 
@@ -47,7 +47,7 @@ Unknowns:
 
 ## Analysis
 
-Sources checked: live ingest of `~/.claude/projects/-home-costa-src-ai-viewer-git` (read-only copy into a temp tree); `/api/health` (degraded + parse errors); the seeded DB (`sessions`/`ops` row inspection). `internal/adapters/claude_code/*` to be read on pickup.
+Sources checked: live ingest of `~/.claude/projects/<this repo>` (read-only copy into a temp tree); `/api/health` (degraded + parse errors); the seeded DB (`sessions`/`ops` row inspection). `internal/adapters/claude_code/*` to be read on pickup.
 
 Risks:
 

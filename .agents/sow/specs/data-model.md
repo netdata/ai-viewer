@@ -457,8 +457,8 @@ How each canonical column is populated per adapter. `✓` = always when known; `
 | `sessions.status='abandoned'` | ✓ | ~ | n/a | n/a | n/a |
 | `sessions.status='interrupted'` | ✓ | ~ | n/a | ~ | ~ |
 | `sessions.status='running'` indefinite | ~ | n/a | ✓ | ~ | ~ |
-| `turns.tokens_cache_read/write` | ~ | n/a | ✓ | ~ | ✓ |
-| `ops.tokens_cache_read/write` | ~ | n/a | ✓ | ~ | ✓ |
+| `turns.tokens_cache_read/write` | ~ | ~ | ✓ | ~ | ✓ |
+| `ops.tokens_cache_read/write` | ~ | ~ | ✓ | ~ | ✓ |
 | `ops.reasoning_kind='summary'` | n/a | n/a | n/a | ✓ | n/a |
 | `ops.reasoning_kind='raw'` | n/a | n/a | n/a | ✓ | n/a |
 | `ops.cost_usd` (from source) | ~ | ~ | n/a (computed) | n/a (computed) | ✓ |

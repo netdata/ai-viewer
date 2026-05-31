@@ -367,6 +367,16 @@ func (m *fileMapper) pruneWebSearchQueue(turnID string) {
 	m.openWebSearch = kept
 }
 
+// nonNeg floors a token count at zero. Token counts are physically
+// non-negative; a negative value is malformed source data that must not
+// corrupt rollup totals or (via the pricer) cost.
+func nonNeg(n int64) int64 {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // addTokenUsage folds one token_count event into the attributed turn's C#1
 // rollup: TokensIn/Out += this call's last_token_usage; cache split likewise;
 // CtxUsed candidate = cumulative total_token_usage.total_tokens; CtxMax =
@@ -382,20 +392,19 @@ func (ts *turnState) addTokenUsage(info tokenCountInfo) {
 	// not double-charge the cached tokens. Mirror non_cached_input() exactly:
 	// clamp cached to ≥0 BEFORE subtracting (so a malformed negative cached cannot
 	// inflate fresh via a double-negative), then clamp fresh to ≥0 (cached > input).
-	// The CLAMPED cached value is what feeds TokensCacheRead, so neither field can
-	// go negative.
-	cached := info.last.CachedInputTokens
-	if cached < 0 {
-		cached = 0
-	}
-	fresh := info.last.InputTokens - cached
-	if fresh < 0 {
-		fresh = 0
-	}
+	//
+	// All FOUR per-call components are floored at ≥0 via nonNeg: token counts are
+	// physically non-negative, so a malformed negative output_tokens or
+	// cache_creation_input_tokens must not flow raw into the rollup (and via the
+	// pricer, which multiplies each component by a rate, into a NEGATIVE cost
+	// component that silently corrupts session/turn cost totals). The CLAMPED cached
+	// value is what feeds TokensCacheRead, so no field can go negative.
+	cached := nonNeg(info.last.CachedInputTokens)
+	fresh := nonNeg(info.last.InputTokens - cached)
 	ts.tokensIn += fresh
-	ts.tokensOut += info.last.OutputTokens
+	ts.tokensOut += nonNeg(info.last.OutputTokens)
 	ts.tokensCacheRead += cached
-	ts.tokensCacheWrite += info.last.CacheCreationInputTokens
+	ts.tokensCacheWrite += nonNeg(info.last.CacheCreationInputTokens)
 	if info.total.TotalTokens > 0 {
 		ts.lastLLMCtxUsed = info.total.TotalTokens
 	}

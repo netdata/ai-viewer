@@ -503,6 +503,37 @@ func TestMapper_TokenRollupCacheClamp(t *testing.T) {
 	}
 }
 
+// TestMapper_TokenClamp_OutputAndCacheWrite pins that ALL FOUR per-call token
+// components are floored at ≥0, not just the cached/fresh-input pair. A malformed
+// negative output_tokens or cache_creation_input_tokens must not flow raw into the
+// rollup (and via the pricer into a NEGATIVE cost component that silently corrupts
+// totals). One token_count with output_tokens=-5 and cache_creation_input_tokens=-10
+// (valid input_tokens=40) → TokensOut=0, TokensCacheWrite=0, TokensIn unaffected (40).
+func TestMapper_TokenClamp_OutputAndCacheWrite(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","started_at":1763664000}}`,
+		`{"timestamp":"` + tsItem + `","type":"event_msg","payload":{"type":"token_count","turn_id":"t1","info":{"total_token_usage":{"total_tokens":105},"last_token_usage":{"input_tokens":` + itoa(40) + `,"output_tokens":` + itoa(-5) + `,"cache_creation_input_tokens":` + itoa(-10) + `}},"model_context_window":200000}}`,
+		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","completed_at":"` + tsDone + `"}}`,
+	}
+	tf := turnFinals(runLines(t, m, lines))
+	if len(tf) != 1 {
+		t.Fatalf("turn finalize count = %d, want 1", len(tf))
+	}
+	if tf[0].TokensOut != 0 {
+		t.Errorf("TokensOut = %d, want 0 (negative output_tokens floored at ≥0)", tf[0].TokensOut)
+	}
+	if tf[0].TokensCacheWrite != 0 {
+		t.Errorf("TokensCacheWrite = %d, want 0 (negative cache_creation_input_tokens floored at ≥0)", tf[0].TokensCacheWrite)
+	}
+	if tf[0].TokensIn != 40 {
+		t.Errorf("TokensIn = %d, want 40 (fresh input unaffected by negative output/cache_write)", tf[0].TokensIn)
+	}
+}
+
 // TestMapper_SessionLevelTokenCountAttributedToActiveTurn asserts a token_count
 // with NO turn_id attributes to the most-recently-active turn (spec rule #17,
 // "Token accounting nuance").
