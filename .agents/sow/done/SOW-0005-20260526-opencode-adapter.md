@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: active in `current/`. Approved under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). Prerequisites met: SOW-0001 Phase 1 in `done/`; SOW-0004 (codex) merged, which left the catalog idempotent under op re-emission (reused here). Pre-Implementation Gate filled 2026-05-30 (below).
+Sub-state: completed and merged (the 5th/final source adapter). Delivered under the operator's blanket Phase-2 backlog sign-off ("deliver them all, any order"). 5 chunk commits + 7 review-fix commits; 8 external-review rounds converged (codex + glm + minimax merge-ready); PR opened + self-merged per the branch-protection workflow. Moved to `done/`. Prerequisites had been met: SOW-0001 Phase 1 in `done/`; SOW-0004 (codex) merged, which left the catalog idempotent under op re-emission (reused here). Pre-Implementation Gate filled 2026-05-30 (below). Deferred follow-ups filed: SOW-0023/0024/0025.
 
 ## Requirements
 
@@ -310,12 +310,32 @@ codex confirmed round-1/2/3 hold + read-safety/checkpoint/goldens good, found 1 
 
 Gates: build/vet 0; golangci "0 issues"; gosec 0; `go test -race -cover` opencode 92.5%; both `FuzzDecode*` 20s clean; whole-module `go test -race` all pass; production files ≤400 lines; scan-secrets PASS; goldens byte-identical (no file-part scenario, all canonical PayloadKinds).
 
-codex P1 trend across rounds: **4 → 3 → 2 → 1** (converging; findings progressively subtler — idle-scan re-arm, same-ms ties, µs compaction races, missed-WAL safety net). Round 5 (same scope + round-4 fix notes) pending. Deferred follow-ups filed: SOW-0023 (session provider columns), SOW-0024 (per-source /api/health counts), SOW-0025 (canonical attachment PayloadKind).
+### Round 5 — 2026-05-31 (codex decisive; commit `3569b08`)
+
+codex found **0 P1** + 2 P2 + 2 P3 (glm/minimax merge-ready). Fixed: no warn/error/content emission while a source-DB read tx is open (warnSink buffers, flushes post-tx — WAL-pin avoidance); required OWNERSHIP-id columns (message/part/session_message `session_id`, `part.message_id`) error on corrupt in the delta path (no silent `affectedSet.add("")` cursor gap); failed-session `ErrorMessage` from `data.error.data.message` (+ `i_failed_assistant` golden); stale cumulative-token comment fixed. Coverage 92.4%.
+
+### Round 6 — 2026-05-31 (codex decisive; commit `9dd8aaf`)
+
+codex found 1 P1 + 2 P2 + 2 P3. Fixed: same-ms boundary re-scan run pre-advance regardless of `changed` (deeper co-occurring-forward-change case) + `boundaryReal` cold guard; `tool_response` PayloadRef only when `state.output` non-empty (bogus failed-tool ref removed, h_failed_tool golden corrected); retry log includes `error.name`; removed dead `resolvePartSession` fallback; `j_file_attachment` golden; spec-amended (opencode does not emit `SessionUpdatedEvent` — idempotent `SessionStarted` re-emission is the update path). Coverage 92.8%.
+
+### Round 7 — 2026-05-31 (codex decisive; commit `f0c2b8b`)
+
+codex found the same-ms gap a 4th time (cheap-`MAX(id)` path bypassed the `probed` gate) + 4 more. **Closed the same-ms CLASS, not the case:** the boundary re-scan now fires on `boundaryReal && (changed || probeGateOpen)` — every detection path (cheap insert, gated probe, WAL, 60s net) — guarded by a deterministic-seed same-ms STRESS test (random insert/in-place-update interleavings; FAILS against the old trigger, passes `-count=5 -race`). Also: `reloadAndEmit` propagates non-skip errors (cursor not promoted on transient failures); `boundaryReal` guard on the `changed==false` path; `watchWAL` goroutine awaited in `closeWatch` (no send-on-closed-channel race); full-tree scanners validate required ownership ids. Coverage 92.7%.
+
+### Round 8 — 2026-05-31 (codex + glm + minimax; CONVERGED)
+
+**All three reviewers converged on merge.** codex: *"no actionable P1 or P2 in the supported Scan→Tail lifecycle. I would merge this adapter."* glm + minimax: merge-ready. codex's only remaining note is operational scale (full-tree re-emit + boundary-bucket scans) — a deliberate, spec-documented, test-guarded tradeoff, not a correctness issue. Final whole-repo gates on `f0c2b8b`: gofmt clean, `go build` 0, `golangci-lint run ./...` 0 issues, gosec 0, whole-module `go test -race` all pass, scan-secrets + scan-ai-attribution PASS.
+
+**codex P1 trend across the 8 rounds: 4 → 3 → 2 → 1 → 0 → 1 → 2 → 0.** The recurring thread was the same-ms incremental-cursor boundary (rounds 3/4/6/7), finally closed in round 7 by unifying the re-scan trigger across all detection paths + a property/stress test rather than per-case patching. codex was the decisive reviewer every round (glm/minimax never surfaced a substantive P1/P2 and twice rated the adapter merge-ready while a real codex P1 was open). Deferred follow-ups filed: SOW-0023 (session provider columns), SOW-0024 (per-source /api/health counts), SOW-0025 (canonical attachment PayloadKind).
 
 ## Outcome
 
-Pending.
+Delivered. The `opencode` adapter — the 5th and final source adapter — projects OpenCode's live, concurrently-written, multi-GB SQLite store onto the canonical event model, strictly read-only, and is registered + auto-discovered by the ingester. Shipped in 5 chunk commits (`c4e4170` A → `ee5c77d` E) + 7 review-fix commits (`9630dc0` … `f0c2b8b`); 8 external-review rounds converged (codex + glm + minimax all merge-ready). All 8 acceptance criteria met with automated test evidence (see the AC section). Gates green at merge: golangci 0, gosec 0, whole-module `go test -race` pass, opencode coverage 92.7%, `FuzzDecode*` clean, same-ms stress `-count=5 -race` clean, files ≤400 lines, secret + AI-attribution scans PASS. Read-safety (the defining R1 risk): every production open routes through `openReadOnly` (`mode=ro` + `query_only(true)` + `_txlock=deferred` + short `BEGIN DEFERRED` per page; warnings buffered + flushed post-tx); no reachable write-path pragma/`VACUUM`/`ATTACH`/write `Exec`; six write-probes + the allowlist-DSN test pin it. PR opened + self-merged per the branch-protection/merge workflow (SOW sign-off was the only gate).
 
 ## Lessons / Follow-Ups
 
-Pending.
+- **The same-ms incremental-cursor boundary is the hard part of tailing a live mutable SQLite DB.** A `(time_updated, id)` watermark cannot detect an in-place update of an old low-id row whose `time_updated` lands at the current boundary millisecond (neither `MAX(id)` nor `MAX(time_updated)` advances). codex surfaced a distinct case of this across 4 rounds (3/4/6/7); each per-case patch revealed the next. The fix that finally closed it was structural — a single boundary re-scan trigger covering ALL detection paths (`boundaryReal && (changed || probeGateOpen)`) plus a deterministic-seed **property/stress test** over random insert + in-place-update interleavings. Lesson: when a reviewer finds the same bug class N times, stop patching cases and (a) unify the mechanism, (b) write a property test that exercises the interleavings, not a per-case assertion.
+- **codex is the decisive reviewer; glm/minimax are corroborators, not gates.** Across all 8 rounds glm and minimax never surfaced a substantive P1/P2, and twice declared the adapter "merge-ready / production-ready" while a real codex P1 (cursor data-loss; same-ms gap) was still open. Adjudicate on ground truth + codex; never merge on glm/minimax convergence alone. (Also disproved 2 false-positive findings on ground truth — glm's writer-COALESCE P2 and a glm same-ms false alarm.)
+- **Subagent IDE diagnostics during file-splits/signature-changes are stale.** Every review-fix round produced a wave of ✘ DuplicateDecl / WrongArgCount / UndeclaredName captured mid-edit (file extraction, the `warmStart`/`bool` signature ripple). Ground truth was `go build` + `go vet` (which compiles tests) every time — all were stale. Verify, don't trust the diagnostic snapshot OR the subagent's gate claims.
+- **Canonical-surface gaps belong in follow-up SOWs, not adapter hacks.** Three real gaps (session provider columns, per-source `/api/health` counts, a canonical attachment PayloadKind) needed `internal/canonical`/`ingest`/`presenter` changes outside the adapter's additive scope — filed as SOW-0023/0024/0025 rather than smuggled in. The adapter kept the canonical contract clean (no non-canonical op status or PayloadKind reached the DB).
+- **Follow-ups to pick up:** SOW-0021 (turn-extras carrier), SOW-0022 (codex dup rollout-id), SOW-0023 (session provider carrier), SOW-0024 (per-source health counts), SOW-0025 (canonical attachment PayloadKind). Pre-existing test-file budget overages (`mapper_test.go`, `mapper_branch_test.go`, `cmd/ai-viewer-ingest/main_test.go` >400 lines) are a low-priority cleanup candidate.
