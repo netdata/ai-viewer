@@ -10,6 +10,8 @@ import {
   type PositionedLane,
   type PositionedSpan,
 } from '../../../viz/timeline';
+import { fadeClassFor } from '../../../viz/spanFade';
+import { useNewlyAppeared } from '../../../viz/useNewlyAppeared';
 import { formatDuration } from '../../../lib/format';
 import styles from './TimelineTab.module.css';
 
@@ -193,6 +195,10 @@ function TimelineSvg({
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
   const ticks = axisTicks(tStart, tEnd, width);
+  // Spans new since the previous render (a live session_changed refetch grew the
+  // timeline) fade in — SOW-0006 AC#6. Keyed on span id (the same identity the
+  // drawer/selection uses); fadeClassFor withholds the class under reduced motion.
+  const newIds = useNewlyAppeared(spans.map((s) => s.span.id));
 
   // d3-zoom pan/zoom applied to the inner <g> transform; the SVG element is the
   // zoom surface. Re-attached only when the size changes (the listener is stable
@@ -210,7 +216,7 @@ function TimelineSvg({
   }, [width, height]);
 
   return (
-    <div className={styles.vizScroller} role="img" aria-label="Session timeline">
+    <div className={styles.vizScroller} role="group" aria-label="Session timeline">
       <svg
         ref={svgRef}
         width={width}
@@ -262,6 +268,7 @@ function TimelineSvg({
                 axisHeight={AXIS_HEIGHT}
                 trackHeight={height}
                 selected={s.span.id === selectedId}
+                fadeClass={fadeClassFor(s.span.id, newIds, styles.fadeIn)}
                 onClick={() => {
                   onSpanClick(s);
                 }}
@@ -279,12 +286,15 @@ function TimelineSpanShape({
   axisHeight,
   trackHeight,
   selected,
+  fadeClass,
   onClick,
 }: {
   s: PositionedSpan;
   axisHeight: number;
   trackHeight: number;
   selected: boolean;
+  /** The append-fade class for a span new this render, else undefined (AC#6). */
+  fadeClass: string | undefined;
   onClick: () => void;
 }) {
   const onKeyDown = (e: KeyboardEvent<SVGGElement>): void => {
@@ -293,7 +303,7 @@ function TimelineSpanShape({
       onClick();
     }
   };
-  const cls = selected ? styles.spanSelected : styles.span;
+  const cls = [selected ? styles.spanSelected : styles.span, fadeClass].filter(Boolean).join(' ');
 
   // Compaction → full-height dashed vertical breakpoint spanning the whole track.
   if (s.compaction) {
@@ -484,13 +494,33 @@ function TimelineCanvas({
   };
 
   return (
-    <div className={styles.vizScroller} role="img" aria-label="Session timeline">
+    <div className={styles.vizScroller} role="group" aria-label="Session timeline">
       <canvas
         ref={canvasRef}
         className={styles.vizCanvas}
         style={{ width, height }}
         onClick={onClick}
       />
+      {/* Keyboard / screen-reader path for the Canvas render (SOW-0006 AC#5): the
+          <canvas> is one non-focusable image, so without this every span would be
+          unreachable by keyboard. Each span gets a real focusable button carrying
+          the same accessible name the SVG bars use; visually hidden (the canvas IS
+          the visual) but operable. */}
+      <ul className={styles.canvasFallbackList} aria-label="Timeline spans">
+        {spans.map((s) => (
+          <li key={`${s.laneKey}:${s.span.id}`}>
+            <button
+              type="button"
+              className={styles.canvasFallbackButton}
+              onClick={() => {
+                onSpanClick(s);
+              }}
+            >
+              {labelForSpan(s)}
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -138,6 +138,41 @@
   cursor: grab;
 }
 
+/* Keyboard fallback for the Canvas render path (SOW-0006 AC#5). The Canvas
+   <canvas> is a single non-focusable image, so a keyboard / screen-reader user
+   has no way to reach a node. This list mirrors every node as a real <button>
+   in the a11y tree (one accessible name per node, Enter/Space → open the
+   drawer); it is visually hidden (the canvas IS the visual) but stays operable —
+   clip-rect/1px keeps buttons focusable, unlike display:none. The SVG path does
+   not need it (its node shapes are already focusable buttons). */
+.canvasFallbackList {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  list-style: none;
+}
+
+.canvasFallbackButton {
+  /* A keyboard-reachable proxy; visually irrelevant (the parent list is hidden),
+     but focus-visible still draws a ring should a UA reveal it. */
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.canvasFallbackButton:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
 /* ── Graph elements ──────────────────────────────────────────────────────── */
 
 .edges {

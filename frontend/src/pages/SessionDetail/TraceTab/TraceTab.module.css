@@ -101,6 +101,31 @@
   filter: brightness(1.2);
 }
 
+/* SSE span-append fade (SOW-0006 AC#6; ui-pages.md §Realtime UX Rules: "Items
+   entering view fade in over 200ms"). Applied by the renderer ONLY to spans that
+   appeared since the previous render (a live session_changed refetch), so the
+   initial trace load does not animate. Decorative: disabled under reduced motion
+   (the decision layer in viz/spanFade also withholds the class, so this is the
+   belt to that suspenders). */
+@keyframes spanFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.fadeIn {
+  animation: spanFadeIn 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fadeIn {
+    animation: none;
+  }
+}
+
 .axis {
   pointer-events: none;
 }

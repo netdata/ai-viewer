@@ -92,7 +92,7 @@ describe('FlameGraph (SVG path)', () => {
     render(
       <FlameGraph nodes={flat} roots={roots} onSelect={vi.fn()} selectedId={null} useCanvas={false} />,
     );
-    const fg = screen.getByRole('img', { name: /flame/i });
+    const fg = screen.getByRole('group', { name: /flame/i });
     const cells = within(fg).getAllByRole('button');
     expect(cells).toHaveLength(4);
     expect(within(fg).getByRole('button', { name: /root-frame/i })).toBeInTheDocument();
@@ -125,7 +125,7 @@ describe('FlameGraph (Canvas path)', () => {
     render(
       <FlameGraph nodes={flat} roots={roots} onSelect={vi.fn()} selectedId="root" useCanvas={true} />,
     );
-    const fg = screen.getByRole('img', { name: /flame/i });
+    const fg = screen.getByRole('group', { name: /flame/i });
     expect(fg.querySelector('canvas')).not.toBeNull();
     expect(within(fg).queryAllByRole('button')).toHaveLength(0);
     expect(ctxStub.fillRect).toHaveBeenCalled();
@@ -137,7 +137,7 @@ describe('FlameGraph (Canvas path)', () => {
       <FlameGraph nodes={flat} roots={roots} onSelect={onSelect} selectedId={null} useCanvas={true} />,
     );
     const canvas = screen
-      .getByRole('img', { name: /flame/i })
+      .getByRole('group', { name: /flame/i })
       .querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
       top: 0,

@@ -232,6 +232,14 @@ export async function connectSse(
     onSessionChanged: (e) => {
       void queryClient.invalidateQueries({ queryKey: ['session', e.session_id] });
       void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      // The open session's per-session Trace tab reads ['session', id] (above),
+      // but its Timeline and Topology tabs are cached under distinct keys so their
+      // refetch cadence is decoupled from the detail query. The same frame must
+      // refresh them too — otherwise a live append never reaches those views (and
+      // the Timeline span-append fade, SOW-0006 AC#6, never fires). The
+      // ['session-topology', id] prefix partial-matches every size-metric sub-key.
+      void queryClient.invalidateQueries({ queryKey: ['session-timeline', e.session_id] });
+      void queryClient.invalidateQueries({ queryKey: ['session-topology', e.session_id] });
       // The cross-session /topology graph is built from the same filtered
       // session set as the list, so the same event that refreshes ['sessions']
       // (a session appearing/disappearing/changing cost) must refresh it too.

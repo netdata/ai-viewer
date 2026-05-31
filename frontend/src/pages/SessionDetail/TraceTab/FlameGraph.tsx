@@ -41,7 +41,7 @@ export function FlameGraph({ roots, onSelect, selectedId, useCanvas }: FlameGrap
     );
   }
   return (
-    <div className={styles.vizScroller} role="img" aria-label="Trace flame-graph">
+    <div className={styles.vizScroller} role="group" aria-label="Trace flame-graph">
       <svg
         width={FLAME_WIDTH}
         height={height}
@@ -163,7 +163,7 @@ function FlameCanvas({
   return (
     <div
       className={styles.vizScroller}
-      role="img"
+      role="group"
       aria-label="Trace flame-graph"
       style={{ maxHeight: drawHeight, overflowY: 'auto' }}
     >

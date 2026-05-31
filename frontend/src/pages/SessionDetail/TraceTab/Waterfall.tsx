@@ -8,6 +8,8 @@ import {
   traceTimeBounds,
 } from '../../../viz/trace';
 import { colorForOpKind, colorForStatus } from '../../../viz/color';
+import { fadeClassFor } from '../../../viz/spanFade';
+import { useNewlyAppeared } from '../../../viz/useNewlyAppeared';
 import { formatDuration } from '../../../lib/format';
 import styles from './TraceTab.module.css';
 
@@ -69,10 +71,14 @@ interface InnerProps {
 function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
   const height = AXIS_HEIGHT + rows.length * ROW_HEIGHT;
   const totalWidth = LABEL_WIDTH + TRACK_WIDTH;
+  // Spans new since the previous render (a live session_changed refetch grew the
+  // trace) fade in — SOW-0006 AC#6. fadeClassFor withholds the class under
+  // prefers-reduced-motion, and the @keyframes is disabled there too.
+  const newIds = useNewlyAppeared(rows.map((r) => r.node.op.id));
   return (
     <div
       className={styles.vizScroller}
-      role="img"
+      role="group"
       aria-label="Trace waterfall"
     >
       <svg
@@ -98,6 +104,12 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
           const failed = op.error_class !== null;
           const y = AXIS_HEIGHT + row.y;
           const indent = Math.min(row.depth * 10, LABEL_WIDTH - 40);
+          const barClass = [
+            op.id === selectedId ? styles.barSelected : styles.bar,
+            fadeClassFor(op.id, newIds, styles.fadeIn),
+          ]
+            .filter(Boolean)
+            .join(' ');
           return (
             <g key={op.id}>
               {/* Row label (kind/name) in the left gutter, indented by depth. */}
@@ -121,7 +133,7 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
                 fill={colorForOpKind(op.kind)}
                 stroke={failed ? colorForStatus('failed') : 'transparent'}
                 strokeWidth={failed ? 2 : 0}
-                className={op.id === selectedId ? styles.barSelected : styles.bar}
+                className={barClass}
                 onClick={() => {
                   onSelect(row.node);
                 }}
@@ -220,7 +232,7 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId }: InnerProps) {
   return (
     <div
       className={styles.vizScroller}
-      role="img"
+      role="group"
       aria-label="Trace waterfall"
       style={{ maxHeight: CANVAS_VIEWPORT, overflowY: 'auto' }}
       onScroll={onScroll}

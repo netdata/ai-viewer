@@ -52,10 +52,17 @@ beforeEach(() => {
     lineTo: vi.fn(),
     stroke: vi.fn(),
     fill: vi.fn(),
+    fillText: vi.fn(),
     save: vi.fn(),
     restore: vi.fn(),
     scale: vi.fn(),
     translate: vi.fn(),
+    set fillStyle(_v: string) {},
+    set strokeStyle(_v: string) {},
+    set lineWidth(_v: number) {},
+    set font(_v: string) {},
+    set textAlign(_v: string) {},
+    set textBaseline(_v: string) {},
   };
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
     ctxStub as unknown as CanvasRenderingContext2D,
@@ -79,7 +86,7 @@ describe('TopologyRenderer (SVG path)', () => {
         useCanvas={false}
       />,
     );
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     const nodes = within(graph).getAllByRole('button');
     expect(nodes).toHaveLength(2);
     // The agent node draws a <circle>, the tool node draws a <rect>.
@@ -137,8 +144,32 @@ describe('TopologyRenderer (SVG path)', () => {
         useCanvas={false}
       />,
     );
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     expect(graph.querySelectorAll('line')).toHaveLength(1);
+  });
+
+  it('shows the failure percentage IN the node label so failure is not signalled by fill color alone (a11y)', () => {
+    // The tool node fails 50% of its ops; its on-graph label must carry that as
+    // text (e.g. "shell.Bash · 50%"), so a colorblind user reads failure without
+    // relying on the red fill (AGENTS a11y: "color is never the only signal").
+    render(
+      <TopologyRenderer
+        positioned={POSITIONED}
+        edges={EDGES}
+        width={600}
+        height={400}
+        selectedId={null}
+        onNodeClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    const tool = within(graph).getByRole('button', { name: /shell\.Bash/i });
+    // The visible label text includes the failure percentage.
+    expect(tool.textContent ?? '').toMatch(/50\.0%/);
+    // A non-failing node's label carries NO percentage (no noise when healthy).
+    const agent = within(graph).getByRole('button', { name: /nedi \(root\)/i });
+    expect(agent.textContent ?? '').not.toMatch(/%/);
   });
 });
 
@@ -155,12 +186,38 @@ describe('TopologyRenderer (Canvas path)', () => {
         useCanvas={true}
       />,
     );
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     expect(graph.querySelector('canvas')).not.toBeNull();
-    expect(within(graph).queryAllByRole('button')).toHaveLength(0);
     // The agent circle is arc-filled; edges are stroked.
     expect(ctxStub.arc).toHaveBeenCalled();
     expect(ctxStub.stroke).toHaveBeenCalled();
+  });
+
+  it('exposes a keyboard-operable fallback list so a node is reachable without the canvas (a11y)', async () => {
+    const user = userEvent.setup();
+    const onNodeClick = vi.fn();
+    render(
+      <TopologyRenderer
+        positioned={POSITIONED}
+        edges={EDGES}
+        width={600}
+        height={400}
+        selectedId={null}
+        onNodeClick={onNodeClick}
+        useCanvas={true}
+      />,
+    );
+    // The canvas is a single non-focusable image; the fallback list mirrors every
+    // node as a focusable button (same accessible name + failure % the SVG uses).
+    const fallback = screen.getByRole('list', { name: /topology nodes/i });
+    const buttons = within(fallback).getAllByRole('button');
+    expect(buttons).toHaveLength(2);
+    const tool = within(fallback).getByRole('button', { name: /shell\.Bash/i });
+    // Failure is text in the fallback too (color is never the only signal).
+    expect(tool.textContent ?? '').toMatch(/50\.0%/);
+    await user.click(tool);
+    expect(onNodeClick).toHaveBeenCalledTimes(1);
+    expect(onNodeClick.mock.calls[0]?.[0]).toMatchObject({ node: { id: 'tool:Bash' } });
   });
 
   it('hit-tests a click against the node under the cursor', () => {
@@ -177,7 +234,7 @@ describe('TopologyRenderer (Canvas path)', () => {
       />,
     );
     const canvas = screen
-      .getByRole('img', { name: /topology graph/i })
+      .getByRole('group', { name: /topology graph/i })
       .querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
       top: 0,
@@ -211,7 +268,7 @@ describe('TopologyRenderer (Canvas path)', () => {
       />,
     );
     const canvas = screen
-      .getByRole('img', { name: /topology graph/i })
+      .getByRole('group', { name: /topology graph/i })
       .querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
       top: 0,
@@ -242,7 +299,7 @@ describe('TopologyRenderer (auto path selection)', () => {
         onNodeClick={vi.fn()}
       />,
     );
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     // Small graph → SVG nodes, no canvas.
     expect(graph.querySelector('canvas')).toBeNull();
     expect(within(graph).getAllByRole('button')).toHaveLength(2);

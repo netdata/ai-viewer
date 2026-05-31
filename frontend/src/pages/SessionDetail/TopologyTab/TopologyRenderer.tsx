@@ -26,6 +26,12 @@ export const SVG_NODE_CEILING = 100;
 
 const TOOL_SIZE_SCALE = 1.6; // a tool's square half-side ≈ radius × this / 2.
 
+// Neutral gray for Canvas-painted node labels. A literal (not a theme token)
+// matches the convention of the other Canvas renderers (Waterfall/FlameGraph use
+// fixed rgba label colors); it reads acceptably on both the dark and light viz
+// backgrounds. The SVG path uses the themed `.nodeLabel` (var(--text-secondary)).
+const NODE_LABEL_PAINT = 'rgba(160,160,170,0.95)';
+
 /**
  * zoomEventFilter mirrors d3-zoom's default filter (primary button, not
  * ctrl-as-zoom-gesture) but additionally requires a usable `event.view` on
@@ -105,6 +111,16 @@ function ariaLabelFor(p: PositionedNode): string {
   return `${p.node.label} — ${kind} — ${formatPct(p.node.failure_ratio)} failures`;
 }
 
+/**
+ * graphLabelFor builds the ON-GRAPH text label for a node. When the node has
+ * failures it appends the failure percentage so failure is encoded as TEXT, not
+ * by fill color alone (SOW-0006 AC#5 / AGENTS a11y: "color is never the only
+ * signal"). A healthy node shows just its label (no "0%" noise).
+ */
+function graphLabelFor(p: PositionedNode): string {
+  return p.node.failure_ratio > 0 ? `${p.node.label} · ${formatPct(p.node.failure_ratio)}` : p.node.label;
+}
+
 function TopologySvg({
   positioned,
   edges,
@@ -143,7 +159,7 @@ function TopologySvg({
   }, [width, height]);
 
   return (
-    <div className={styles.vizScroller} role="img" aria-label="Session topology graph">
+    <div className={styles.vizScroller} role="group" aria-label="Session topology graph">
       <svg
         ref={svgRef}
         width={width}
@@ -230,7 +246,7 @@ function TopologyNodeShape({
         />
       )}
       <text className={styles.nodeLabel} y={labelDy} textAnchor="middle">
-        {p.node.label}
+        {graphLabelFor(p)}
       </text>
     </g>
   );
@@ -303,20 +319,31 @@ function TopologyCanvas({
       ctx.stroke();
     }
 
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = '11px sans-serif';
     for (const p of positioned) {
       ctx.fillStyle = colorForFailureRatio(p.node.failure_ratio);
       ctx.strokeStyle = colorForActorKind(p.node.kind);
       ctx.lineWidth = p.node.id === selectedId ? 3 : 2;
+      let labelDy: number;
       if (p.node.kind === 'agent') {
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+        labelDy = p.radius + 4;
       } else {
         const half = p.radius * (TOOL_SIZE_SCALE / 2);
         ctx.fillRect(p.x - half, p.y - half, half * 2, half * 2);
         ctx.strokeRect(p.x - half, p.y - half, half * 2, half * 2);
+        labelDy = half + 4;
       }
+      // On-graph text label including the failure % when failing, so the Canvas
+      // surface (like the SVG path) does not signal failure by fill color alone
+      // (SOW-0006 AC#5). Painted in the neutral label color, below the shape.
+      ctx.fillStyle = NODE_LABEL_PAINT;
+      ctx.fillText(graphLabelFor(p), p.x, p.y + labelDy);
     }
     ctx.restore();
   }, [positioned, edges, width, height, selectedId, transform, idx]);
@@ -346,13 +373,33 @@ function TopologyCanvas({
   };
 
   return (
-    <div className={styles.vizScroller} role="img" aria-label="Session topology graph">
+    <div className={styles.vizScroller} role="group" aria-label="Session topology graph">
       <canvas
         ref={canvasRef}
         className={styles.vizCanvas}
         style={{ width, height }}
         onClick={onClick}
       />
+      {/* Keyboard / screen-reader path for the Canvas render (SOW-0006 AC#5): the
+          <canvas> is one non-focusable image, so without this every node would be
+          unreachable by keyboard. Each node gets a real focusable button carrying
+          the same accessible name (incl. failure %) the SVG shapes use; visually
+          hidden but operable. */}
+      <ul className={styles.canvasFallbackList} aria-label="Topology nodes">
+        {positioned.map((p) => (
+          <li key={p.node.id}>
+            <button
+              type="button"
+              className={styles.canvasFallbackButton}
+              onClick={() => {
+                onNodeClick(p);
+              }}
+            >
+              {ariaLabelFor(p)}
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

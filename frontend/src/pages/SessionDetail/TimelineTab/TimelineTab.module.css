@@ -55,6 +55,37 @@
   touch-action: none;
 }
 
+/* Keyboard fallback for the Canvas render path (SOW-0006 AC#5) — mirrors every
+   span as a real focusable <button> so a keyboard / screen-reader user can open
+   the drawer even when the visual layer is a single non-focusable <canvas>. See
+   the matching block in TopologyTab.module.css. The SVG path needs no fallback
+   (its span shapes are already focusable buttons). */
+.canvasFallbackList {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  list-style: none;
+}
+
+.canvasFallbackButton {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.canvasFallbackButton:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
 /* ── Timeline elements ───────────────────────────────────────────────────── */
 
 .laneBand {
@@ -85,6 +116,27 @@
 .spanSelected {
   cursor: pointer;
   filter: brightness(1.2);
+}
+
+/* SSE span-append fade (SOW-0006 AC#6) — see the matching block in
+   TraceTab.module.css. Applied only to spans new since the previous render. */
+@keyframes spanFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.fadeIn {
+  animation: spanFadeIn 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fadeIn {
+    animation: none;
+  }
 }
 
 .span:focus-visible,

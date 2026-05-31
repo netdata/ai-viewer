@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { axe } from 'jest-axe';
 import type { TimelineResponse } from '../../../api/types';
 
 // TimelineTab is the per-session video-editor-style timeline (ui-pages.md
@@ -87,7 +88,7 @@ describe('TimelineTab', () => {
 
   it('renders one accessible row per span across the lanes', () => {
     render(<TimelineTab sessionId="s1" />);
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     const spans = within(track).getAllByRole('button');
     // 3 root-lane spans + 1 child-lane span = 4.
     expect(spans).toHaveLength(4);
@@ -97,14 +98,14 @@ describe('TimelineTab', () => {
 
   it('shows the lane labels (one lane per session, root + children stacked)', () => {
     render(<TimelineTab sessionId="s1" />);
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     expect(within(track).getByText(/nedi \(root\)/i)).toBeInTheDocument();
     expect(within(track).getByText('worker')).toBeInTheDocument();
   });
 
   it('renders a compaction op as a full-height breakpoint (dashed vertical rule)', () => {
     render(<TimelineTab sessionId="s1" />);
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     const breakpoint = within(track).getByRole('button', { name: /compaction/i });
     // The breakpoint draws a <line> (the vertical rule), not a bar <rect> fill.
     expect(breakpoint.querySelector('line')).not.toBeNull();
@@ -112,7 +113,7 @@ describe('TimelineTab', () => {
 
   it('renders a null-end (running) op as an instant marker (a tick line, not a bar)', () => {
     render(<TimelineTab sessionId="s1" />);
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     const instant = within(track).getByRole('button', { name: /run —/i });
     expect(instant.querySelector('line')).not.toBeNull();
     expect(instant.querySelector('rect[fill]:not([fill="transparent"])')).toBeNull();
@@ -126,7 +127,7 @@ describe('TimelineTab', () => {
   it('opens the shared detail drawer when a span is clicked', async () => {
     const user = userEvent.setup();
     render(<TimelineTab sessionId="s1" />);
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     await user.click(within(track).getByRole('button', { name: /Bash/i }));
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveAccessibleName(/Bash/i);
@@ -135,11 +136,28 @@ describe('TimelineTab', () => {
   it('closes the drawer on Escape', async () => {
     const user = userEvent.setup();
     render(<TimelineTab sessionId="s1" />);
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     await user.click(within(track).getByRole('button', { name: /Bash/i }));
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('opens the drawer from a span via the keyboard (Enter on a focused span)', () => {
+    // AC#5 keyboard path: a focusable SVG span opens the drawer with Enter.
+    render(<TimelineTab sessionId="s1" />);
+    const track = screen.getByRole('group', { name: /session timeline/i });
+    const span = within(track).getByRole('button', { name: /Bash/i });
+    span.focus();
+    expect(span).toHaveFocus();
+    fireEvent.keyDown(span, { key: 'Enter' });
+    expect(screen.getByRole('dialog')).toHaveAccessibleName(/Bash/i);
+  });
+
+  it('has no axe violations (component-level a11y for the Timeline tab)', async () => {
+    const { container } = render(<TimelineTab sessionId="s1" />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 
   it('shows the loading state while the query is pending', () => {
@@ -160,6 +178,6 @@ describe('TimelineTab', () => {
     timelineSpy.mockReturnValue(result({ data: { lanes: [], t_start: 0, t_end: 0 } }));
     render(<TimelineTab sessionId="s1" />);
     expect(screen.getByText(/no spans recorded/i)).toBeInTheDocument();
-    expect(screen.queryByRole('img', { name: /session timeline/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /session timeline/i })).not.toBeInTheDocument();
   });
 });

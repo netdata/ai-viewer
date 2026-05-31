@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { layoutTimeline, type TimelineLaneInput } from '../../../viz/timeline';
+import { installMatchMedia } from '../../../test/matchMedia';
 import { TimelineRenderer } from './TimelineRenderer';
 
 // Focused tests for the TimelineRenderer: the SVG path (one clickable row per
@@ -62,7 +63,14 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // installMatchMedia stubs a global; undo it so it never leaks into a later test.
+  vi.unstubAllGlobals();
 });
+
+/** layoutOf lays out a lane set at the fixture's scale (helper for the fade tests). */
+function layoutOf(lanes: TimelineLaneInput[]) {
+  return layoutTimeline(lanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+}
 
 describe('TimelineRenderer (SVG path)', () => {
   it('renders one accessible row per span', () => {
@@ -79,7 +87,7 @@ describe('TimelineRenderer (SVG path)', () => {
         useCanvas={false}
       />,
     );
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     expect(within(track).getAllByRole('button')).toHaveLength(3);
   });
 
@@ -97,7 +105,7 @@ describe('TimelineRenderer (SVG path)', () => {
         useCanvas={false}
       />,
     );
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     const bar = within(track).getByRole('button', { name: /chat/i });
     // The closed span paints a filled bar rect (non-transparent fill).
     expect(bar.querySelector('rect[fill]:not([fill="transparent"])')).not.toBeNull();
@@ -179,7 +187,7 @@ describe('TimelineRenderer (SVG path)', () => {
       />,
     );
     const svg = screen
-      .getByRole('img', { name: /session timeline/i })
+      .getByRole('group', { name: /session timeline/i })
       .querySelector('svg') as SVGSVGElement;
     const g = svg.querySelector('g') as SVGGElement;
 
@@ -211,6 +219,117 @@ describe('TimelineRenderer (SVG path)', () => {
     expect(scaleMatch).not.toBeNull();
     expect(Number(scaleMatch?.[1])).toBeGreaterThan(1);
   });
+
+  it('does NOT fade any span on the first render (initial load is not an append)', () => {
+    installMatchMedia(false); // motion allowed
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const track = screen.getByRole('group', { name: /session timeline/i });
+    for (const span of within(track).getAllByRole('button')) {
+      expect(span.getAttribute('class') ?? '').not.toMatch(/fadeIn/);
+    }
+  });
+
+  it('fades ONLY the newly-appended span when a re-render adds one (SSE append)', () => {
+    installMatchMedia(false); // motion allowed
+    const { rerender } = render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    // A live session_changed refetch adds a new closed span to the root lane.
+    const grown = layoutOf([
+      {
+        key: 'session:root',
+        label: 'root',
+        spans: [
+          { id: 'llm', kind: 'llm', name: 'chat', start_ts: 100, end_ts: 400, status: 'completed' },
+          { id: 'compact', kind: 'compaction', name: 'compaction', start_ts: 500, end_ts: null, status: 'completed' },
+          { id: 'live', kind: 'tool', name: 'run', start_ts: 600, end_ts: null, status: 'running' },
+          { id: 'fresh', kind: 'tool', name: 'append', start_ts: 700, end_ts: 800, status: 'completed' },
+        ],
+      },
+    ]);
+    rerender(
+      <TimelineRenderer
+        lanes={grown.lanes}
+        spans={grown.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const track = screen.getByRole('group', { name: /session timeline/i });
+    expect(within(track).getByRole('button', { name: /append/i }).getAttribute('class') ?? '').toMatch(/fadeIn/);
+    expect(within(track).getByRole('button', { name: /chat/i }).getAttribute('class') ?? '').not.toMatch(/fadeIn/);
+  });
+
+  it('does NOT fade the new span when prefers-reduced-motion is set', () => {
+    installMatchMedia(true); // reduced motion requested
+    const { rerender } = render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const grown = layoutOf([
+      {
+        key: 'session:root',
+        label: 'root',
+        spans: [
+          { id: 'llm', kind: 'llm', name: 'chat', start_ts: 100, end_ts: 400, status: 'completed' },
+          { id: 'compact', kind: 'compaction', name: 'compaction', start_ts: 500, end_ts: null, status: 'completed' },
+          { id: 'live', kind: 'tool', name: 'run', start_ts: 600, end_ts: null, status: 'running' },
+          { id: 'fresh', kind: 'tool', name: 'append', start_ts: 700, end_ts: 800, status: 'completed' },
+        ],
+      },
+    ]);
+    rerender(
+      <TimelineRenderer
+        lanes={grown.lanes}
+        spans={grown.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const track = screen.getByRole('group', { name: /session timeline/i });
+    expect(within(track).getByRole('button', { name: /append/i }).getAttribute('class') ?? '').not.toMatch(/fadeIn/);
+  });
 });
 
 describe('TimelineRenderer (Canvas path)', () => {
@@ -228,12 +347,39 @@ describe('TimelineRenderer (Canvas path)', () => {
         useCanvas={true}
       />,
     );
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     expect(track.querySelector('canvas')).not.toBeNull();
-    expect(within(track).queryAllByRole('button')).toHaveLength(0);
     // The closed span fills a bar; the compaction breakpoint dashes a line.
     expect(ctxStub.fillRect).toHaveBeenCalled();
     expect(ctxStub.setLineDash).toHaveBeenCalled();
+  });
+
+  it('exposes a keyboard-operable fallback list so a span is reachable without the canvas (a11y)', async () => {
+    const user = userEvent.setup();
+    const onSpanClick = vi.fn();
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={onSpanClick}
+        useCanvas={true}
+      />,
+    );
+    // The canvas itself is a single non-focusable image; the fallback list mirrors
+    // every span as a real focusable button (one accessible name per span).
+    const fallback = screen.getByRole('list', { name: /timeline spans/i });
+    const buttons = within(fallback).getAllByRole('button');
+    expect(buttons).toHaveLength(3);
+    // The same span identity/label the SVG bars carry.
+    const chat = within(fallback).getByRole('button', { name: /chat/i });
+    await user.click(chat);
+    expect(onSpanClick).toHaveBeenCalledTimes(1);
+    expect(onSpanClick.mock.calls[0]?.[0]).toMatchObject({ span: { id: 'llm' } });
   });
 
   it('hit-tests a click against the span under the cursor', () => {
@@ -252,7 +398,7 @@ describe('TimelineRenderer (Canvas path)', () => {
       />,
     );
     const canvas = screen
-      .getByRole('img', { name: /session timeline/i })
+      .getByRole('group', { name: /session timeline/i })
       .querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
       top: 0,
@@ -288,7 +434,7 @@ describe('TimelineRenderer (Canvas path)', () => {
       />,
     );
     const canvas = screen
-      .getByRole('img', { name: /session timeline/i })
+      .getByRole('group', { name: /session timeline/i })
       .querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
       top: 0,
@@ -321,7 +467,7 @@ describe('TimelineRenderer (auto path selection)', () => {
         onSpanClick={vi.fn()}
       />,
     );
-    const track = screen.getByRole('img', { name: /session timeline/i });
+    const track = screen.getByRole('group', { name: /session timeline/i });
     expect(track.querySelector('canvas')).toBeNull();
     expect(within(track).getAllByRole('button')).toHaveLength(3);
   });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { axe } from 'jest-axe';
 import type { TopologyResponse } from '../../../api/types';
 
 // TopologyTab is the per-session actor-graph view (ui-pages.md §/sessions/:id #2).
@@ -63,6 +64,7 @@ beforeEach(() => {
       lineTo: vi.fn(),
       stroke: vi.fn(),
       fill: vi.fn(),
+      fillText: vi.fn(),
       save: vi.fn(),
       restore: vi.fn(),
       scale: vi.fn(),
@@ -70,6 +72,9 @@ beforeEach(() => {
       set fillStyle(_v: string) {},
       set strokeStyle(_v: string) {},
       set lineWidth(_v: number) {},
+      set font(_v: string) {},
+      set textAlign(_v: string) {},
+      set textBaseline(_v: string) {},
     } as unknown as CanvasRenderingContext2D,
   );
 });
@@ -94,7 +99,7 @@ describe('TopologyTab', () => {
 
   it('renders one accessible node per actor on the SVG path', () => {
     render(<TopologyTab sessionId="s1" />);
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     const nodes = within(graph).getAllByRole('button');
     expect(nodes).toHaveLength(3);
     expect(within(graph).getByRole('button', { name: /nedi \(root\)/i })).toBeInTheDocument();
@@ -119,13 +124,13 @@ describe('TopologyTab', () => {
     expect(screen.getByRole('radio', { name: /hierarchical/i })).toBeChecked();
     expect(screen.getByRole('radio', { name: /seeded force/i })).not.toBeChecked();
     // The graph is still rendered after the mode switch.
-    expect(screen.getByRole('img', { name: /topology graph/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /topology graph/i })).toBeInTheDocument();
   });
 
   it('opens the shared detail drawer when a node is clicked', async () => {
     const user = userEvent.setup();
     render(<TopologyTab sessionId="s1" />);
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     await user.click(within(graph).getByRole('button', { name: /shell\.Bash/i }));
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveAccessibleName(/shell\.Bash/i);
@@ -134,11 +139,37 @@ describe('TopologyTab', () => {
   it('closes the drawer on Escape', async () => {
     const user = userEvent.setup();
     render(<TopologyTab sessionId="s1" />);
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     await user.click(within(graph).getByRole('button', { name: /shell\.Bash/i }));
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('opens the drawer from a node via the keyboard (Enter on a focused node)', () => {
+    // AC#5 keyboard path: a focusable SVG node opens the drawer with Enter.
+    render(<TopologyTab sessionId="s1" />);
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    const node = within(graph).getByRole('button', { name: /shell\.Bash/i });
+    node.focus();
+    expect(node).toHaveFocus();
+    fireEvent.keyDown(node, { key: 'Enter' });
+    expect(screen.getByRole('dialog')).toHaveAccessibleName(/shell\.Bash/i);
+  });
+
+  it('shows the failure percentage in a failing node label (color is not the only signal)', () => {
+    // AC#5 color-not-sole-signal: the failing tool node carries its failure % as
+    // on-graph text, not just a red fill.
+    render(<TopologyTab sessionId="s1" />);
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    const failing = within(graph).getByRole('button', { name: /fs\.Grep/i });
+    expect(failing.textContent ?? '').toMatch(/50\.0%/);
+  });
+
+  it('has no axe violations (component-level a11y for the Topology tab)', async () => {
+    const { container } = render(<TopologyTab sessionId="s1" />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 
   it('freezes the layout (button toggles its pressed state)', async () => {
@@ -180,6 +211,6 @@ describe('TopologyTab', () => {
     );
     render(<TopologyTab sessionId="s1" />);
     expect(screen.getByText(/no actors recorded/i)).toBeInTheDocument();
-    expect(screen.queryByRole('img', { name: /topology graph/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /topology graph/i })).not.toBeInTheDocument();
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { axe } from 'jest-axe';
 import type { OpDetail, SessionDetailResponse, TurnDetail } from '../../../api/types';
 import { TraceTab } from './TraceTab';
 
@@ -132,7 +133,7 @@ describe('TraceTab', () => {
     // The view toggle defaults to Waterfall.
     expect(screen.getByRole('radio', { name: /waterfall/i })).toBeChecked();
     // The waterfall is an SVG-based figure for a small session.
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     // One interactive span element per op (root, llm-1, tool-1, tool-fail).
     const spans = within(wf).getAllByRole('button');
     expect(spans).toHaveLength(4);
@@ -143,9 +144,9 @@ describe('TraceTab', () => {
     render(<TraceTab detail={SAMPLE} />);
     await user.click(screen.getByRole('radio', { name: /flame/i }));
     expect(screen.getByRole('radio', { name: /flame/i })).toBeChecked();
-    expect(screen.getByRole('img', { name: /flame/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /flame/i })).toBeInTheDocument();
     // Waterfall is no longer rendered.
-    expect(screen.queryByRole('img', { name: /waterfall/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /waterfall/i })).not.toBeInTheDocument();
   });
 
   it('always renders the event list of every op in order', () => {
@@ -162,13 +163,13 @@ describe('TraceTab', () => {
   it('shows the empty state when the session has no ops', () => {
     render(<TraceTab detail={detail([turn(1, [])])} />);
     expect(screen.getByText(/no operations/i)).toBeInTheDocument();
-    expect(screen.queryByRole('img', { name: /waterfall/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /waterfall/i })).not.toBeInTheDocument();
   });
 
   it('opens the drawer with the op fields when a waterfall span is clicked', async () => {
     const user = userEvent.setup();
     render(<TraceTab detail={SAMPLE} />);
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     await user.click(within(wf).getByRole('button', { name: /Bash/i }));
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveAccessibleName(/Bash/i);
@@ -195,6 +196,24 @@ describe('TraceTab', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('opens the drawer from a waterfall span via the keyboard (Enter on a focused bar)', () => {
+    // AC#5 keyboard path: a focusable SVG bar opens the drawer with Enter — a
+    // keyboard / screen-reader user never needs the pointer.
+    render(<TraceTab detail={SAMPLE} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    const bar = within(wf).getByRole('button', { name: /Bash/i });
+    bar.focus();
+    expect(bar).toHaveFocus();
+    fireEvent.keyDown(bar, { key: 'Enter' });
+    expect(screen.getByRole('dialog')).toHaveAccessibleName(/Bash/i);
+  });
+
+  it('has no axe violations (component-level a11y for the Trace tab)', async () => {
+    const { container } = render(<TraceTab detail={SAMPLE} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
   it('renders a large trace via the Canvas path without blowing up', () => {
     // Above the SVG ceiling the renderer must switch to Canvas + culling and
     // stay mounted. We assert the canvas branch renders and the event list
@@ -207,7 +226,7 @@ describe('TraceTab', () => {
     }
     render(<TraceTab detail={detail([turn(1, many)])} />);
     // Canvas branch is used (an accessible image with a canvas inside).
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     expect(wf.querySelector('canvas')).not.toBeNull();
     // The event list is windowed: far fewer than 1200 rows are mounted.
     const list = screen.getByRole('table', { name: /event list/i });

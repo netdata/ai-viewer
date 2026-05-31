@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { axe } from 'jest-axe';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import type { TopologyResponse } from '../../api/types';
 
@@ -84,6 +85,7 @@ beforeEach(() => {
       lineTo: vi.fn(),
       stroke: vi.fn(),
       fill: vi.fn(),
+      fillText: vi.fn(),
       save: vi.fn(),
       restore: vi.fn(),
       scale: vi.fn(),
@@ -91,6 +93,9 @@ beforeEach(() => {
       set fillStyle(_v: string) {},
       set strokeStyle(_v: string) {},
       set lineWidth(_v: number) {},
+      set font(_v: string) {},
+      set textAlign(_v: string) {},
+      set textBaseline(_v: string) {},
     } as unknown as CanvasRenderingContext2D,
   );
 });
@@ -114,7 +119,7 @@ describe('Topology (cross-session)', () => {
 
   it('renders one accessible node per session on the SVG path', () => {
     renderPage();
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     const nodes = within(graph).getAllByRole('button');
     expect(nodes).toHaveLength(2);
     expect(within(graph).getByRole('button', { name: /nedi \(root\)/i })).toBeInTheDocument();
@@ -135,7 +140,7 @@ describe('Topology (cross-session)', () => {
     renderPage();
     await user.click(screen.getByRole('radio', { name: /hierarchical/i }));
     expect(screen.getByRole('radio', { name: /hierarchical/i })).toBeChecked();
-    expect(screen.getByRole('img', { name: /topology graph/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /topology graph/i })).toBeInTheDocument();
   });
 
   it('subscribes to live updates with the active filter', () => {
@@ -148,7 +153,7 @@ describe('Topology (cross-session)', () => {
   it('navigates to the session detail when a cross-session node is clicked', async () => {
     const user = userEvent.setup();
     renderPage();
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     await user.click(within(graph).getByRole('button', { name: /worker/i }));
     // A cross-session node IS a whole session, so it drills into the detail
     // route (NOT the per-session span drawer).
@@ -158,7 +163,7 @@ describe('Topology (cross-session)', () => {
   it('does not render the per-session span drawer on a node click', async () => {
     const user = userEvent.setup();
     renderPage();
-    const graph = screen.getByRole('img', { name: /topology graph/i });
+    const graph = screen.getByRole('group', { name: /topology graph/i });
     await user.click(within(graph).getByRole('button', { name: /worker/i }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
@@ -203,6 +208,21 @@ describe('Topology (cross-session)', () => {
     topologySpy.mockReturnValue(result({ data: { nodes: [], edges: [], max_size_metric: 0 } }));
     renderPage();
     expect(screen.getByText(/no sessions match/i)).toBeInTheDocument();
-    expect(screen.queryByRole('img', { name: /topology graph/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /topology graph/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the failure percentage in a failing session node label (color is not the only signal)', () => {
+    // AC#5 color-not-sole-signal: the failing root session (20%) carries its
+    // failure rate as on-graph text, not only the warning fill.
+    renderPage();
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    const failing = within(graph).getByRole('button', { name: /nedi \(root\)/i });
+    expect(failing.textContent ?? '').toMatch(/20\.0%/);
+  });
+
+  it('has no axe violations (component-level a11y for the cross-session Topology page)', async () => {
+    const { container } = renderPage();
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 });

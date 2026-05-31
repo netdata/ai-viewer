@@ -100,6 +100,11 @@ es.addEventListener('session_changed', (e) => {
   // open Logs tab must refresh too. The key family is ['logs', id, severities];
   // a partial-match on ['logs', session_id] invalidates every severity sub-key.
   queryClient.invalidateQueries({ queryKey: ['logs', session_id] });
+  // The Trace/Timeline/Topology tabs read per-session viz endpoints; invalidate
+  // their keys so the open tab live-refreshes (SOW-0006 AC#6).
+  queryClient.invalidateQueries({ queryKey: ['session-timeline', session_id] });
+  queryClient.invalidateQueries({ queryKey: ['session-topology', session_id] });
+  queryClient.invalidateQueries({ queryKey: ['topology'] }); // cross-session graph
 });
 es.addEventListener('stats_invalidated', () => {
   queryClient.invalidateQueries({ queryKey: ['stats'] });

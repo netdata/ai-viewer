@@ -100,7 +100,7 @@ surfaced to any DOM element. The visible live indicator + entrance/value
 animations are tracked in `.agents/sow/pending/SOW-0018-…live-indicator…` (the
 deferred half of SOW-0001 Chunk-18 D4).
 
-- Items entering view fade in over 200ms (no abrupt jumps). *(Phase-2: not yet implemented.)*
+- Items entering view fade in over 200ms (no abrupt jumps). *(Implemented for new spans in the Trace + Timeline SVG views — SOW-0006 AC#6, honoring `prefers-reduced-motion`; the sessions-list fade-in remains Phase-2.)*
 - Counters and stats animate from old value to new (200ms ease). *(Phase-2: not yet implemented.)*
 - Live indicator (small pulsing dot) in the header when an active SSE subscription is connected. *(Phase-2: not yet implemented — Phase-1 has no visible connection indicator; Chunk-18 E2E asserts SSE liveness at the subscription/EventSource protocol level instead.)*
 - If SSE disconnects: indicator goes amber, with a tooltip "reconnecting…". Auto-reconnect handled by EventSource. *(Phase-2: not yet implemented; EventSource auto-reconnect itself is active.)*

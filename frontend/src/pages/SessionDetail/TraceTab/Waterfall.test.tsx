@@ -3,6 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { OpDetail, TurnDetail } from '../../../api/types';
 import { buildOpTree, flattenTree, type TraceNode } from '../../../viz/trace';
+import { installMatchMedia } from '../../../test/matchMedia';
 import { Waterfall } from './Waterfall';
 
 // Focused tests for the Waterfall renderer: the SVG path (one clickable bar per
@@ -73,6 +74,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // installMatchMedia stubs a global; undo it so the matchMedia stub never leaks
+  // into a later test that expects the default jsdom (absent) matchMedia.
+  vi.unstubAllGlobals();
 });
 
 describe('Waterfall (SVG path)', () => {
@@ -92,7 +96,7 @@ describe('Waterfall (SVG path)', () => {
 
   it('renders one accessible bar per op with kind/duration/status in the label', () => {
     render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     const bars = within(wf).getAllByRole('button');
     expect(bars).toHaveLength(3);
     expect(within(wf).getByRole('button', { name: /alpha/i })).toHaveAccessibleName(/tool/i);
@@ -122,6 +126,50 @@ describe('Waterfall (SVG path)', () => {
     const bar = screen.getByRole('button', { name: /beta/i });
     expect(bar.getAttribute('class') ?? '').toMatch(/barSelected/);
   });
+
+  it('does NOT fade any bar on the first render (initial load is not an append)', () => {
+    installMatchMedia(false); // motion allowed
+    render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    for (const bar of within(wf).getAllByRole('button')) {
+      expect(bar.getAttribute('class') ?? '').not.toMatch(/fadeIn/);
+    }
+  });
+
+  it('fades ONLY the newly-appended bar when a re-render adds an op (SSE append)', () => {
+    installMatchMedia(false); // motion allowed
+    const { rerender } = render(
+      <Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />,
+    );
+    // A live session_changed refetch grows the trace by one op.
+    const grown = nodesFrom([
+      op({ id: 'a', name: 'alpha', start_ts: 0, end_ts: 400, duration_us: 400 }),
+      op({ id: 'b', name: 'beta', kind: 'llm', start_ts: 100, end_ts: 200, duration_us: 100 }),
+      op({ id: 'c', name: 'gamma', start_ts: 500, end_ts: 560, duration_us: 60, status: 'failed', error_class: 'X' }),
+      op({ id: 'd', name: 'delta', start_ts: 600, end_ts: 650, duration_us: 50 }),
+    ]);
+    rerender(<Waterfall nodes={grown} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    // The new op fades; the pre-existing ops do not.
+    expect((within(wf).getByRole('button', { name: /delta/i }).getAttribute('class') ?? '')).toMatch(/fadeIn/);
+    expect((within(wf).getByRole('button', { name: /alpha/i }).getAttribute('class') ?? '')).not.toMatch(/fadeIn/);
+  });
+
+  it('does NOT fade the new bar when prefers-reduced-motion is set', () => {
+    installMatchMedia(true); // reduced motion requested
+    const { rerender } = render(
+      <Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />,
+    );
+    const grown = nodesFrom([
+      op({ id: 'a', name: 'alpha', start_ts: 0, end_ts: 400, duration_us: 400 }),
+      op({ id: 'b', name: 'beta', kind: 'llm', start_ts: 100, end_ts: 200, duration_us: 100 }),
+      op({ id: 'c', name: 'gamma', start_ts: 500, end_ts: 560, duration_us: 60, status: 'failed', error_class: 'X' }),
+      op({ id: 'd', name: 'delta', start_ts: 600, end_ts: 650, duration_us: 50 }),
+    ]);
+    rerender(<Waterfall nodes={grown} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    expect((within(wf).getByRole('button', { name: /delta/i }).getAttribute('class') ?? '')).not.toMatch(/fadeIn/);
+  });
 });
 
 describe('Waterfall (Canvas path)', () => {
@@ -132,7 +180,7 @@ describe('Waterfall (Canvas path)', () => {
 
   it('paints a canvas instead of per-op SVG bars', () => {
     render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={true} />);
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     expect(wf.querySelector('canvas')).not.toBeNull();
     // No SVG button bars in the canvas path.
     expect(within(wf).queryAllByRole('button')).toHaveLength(0);
@@ -142,7 +190,7 @@ describe('Waterfall (Canvas path)', () => {
   it('selects the row under the cursor on a canvas click (Y hit-test)', () => {
     const onSelect = vi.fn();
     render(<Waterfall nodes={nodes} onSelect={onSelect} selectedId={null} useCanvas={true} />);
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     const canvas = wf.querySelector('canvas') as HTMLCanvasElement;
     // Row height is 26; a click at y≈70 maps to row index 2.
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
@@ -163,7 +211,7 @@ describe('Waterfall (Canvas path)', () => {
 
   it('re-renders the canvas on scroll (culling re-runs)', () => {
     render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={true} />);
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     (ctxStub.fillRect as ReturnType<typeof vi.fn>).mockClear();
     fireEvent.scroll(wf, { target: { scrollTop: 200 } });
     expect(ctxStub.fillRect).toHaveBeenCalled();
@@ -190,7 +238,7 @@ describe('Waterfall (Canvas path)', () => {
   it('ignores a canvas click that lands below the last row', () => {
     const onSelect = vi.fn();
     render(<Waterfall nodes={nodes} onSelect={onSelect} selectedId={null} useCanvas={true} />);
-    const wf = screen.getByRole('img', { name: /waterfall/i });
+    const wf = screen.getByRole('group', { name: /waterfall/i });
     const canvas = wf.querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
       top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0,
