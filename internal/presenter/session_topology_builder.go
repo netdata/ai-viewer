@@ -158,6 +158,9 @@ func (b *topoBuilder) addEdge(source, target string, durationUS int64) {
 // (insertion), tools by first appearance, edges by first appearance.
 func (b *topoBuilder) finish() topologyResponse {
 	resp := topologyResponse{Nodes: []topoNode{}, Edges: []topoEdge{}}
+	// nodeIDs collects every materialised node id (agents + tools) so dangling
+	// edges can be dropped defensively below.
+	nodeIDs := make(map[string]struct{}, len(b.agentOrder)+len(b.toolOrder))
 	for _, sid := range b.agentOrder {
 		a := b.agents[sid]
 		size := a.metric
@@ -168,6 +171,7 @@ func (b *topoBuilder) finish() topologyResponse {
 			ID: a.id, Kind: "agent", Label: a.label,
 			SizeMetric: size, FailureRatio: ratio(a.failures, a.ops),
 		})
+		nodeIDs[a.id] = struct{}{}
 		if size > resp.MaxSizeMetric {
 			resp.MaxSizeMetric = size
 		}
@@ -179,12 +183,26 @@ func (b *topoBuilder) finish() topologyResponse {
 			ID: t.id, Kind: "tool", Label: t.label,
 			SizeMetric: size, FailureRatio: ratio(t.failures, t.ops),
 		})
+		nodeIDs[t.id] = struct{}{}
 		if size > resp.MaxSizeMetric {
 			resp.MaxSizeMetric = size
 		}
 	}
+	// Append edges in first-appearance order, but drop any whose endpoint is
+	// not a materialised node. A kind='session' op can carry a child_session_id
+	// outside this tree (no agent node for it); the spec promises such an edge
+	// is dropped defensively (rest-api.md §GET /api/sessions/:id/topology).
+	// Agent→tool and agent→in-tree-child edges are unaffected — their endpoints
+	// are always materialised.
 	for _, key := range b.edgeOrder {
-		resp.Edges = append(resp.Edges, *b.edges[key])
+		e := b.edges[key]
+		if _, ok := nodeIDs[e.Source]; !ok {
+			continue
+		}
+		if _, ok := nodeIDs[e.Target]; !ok {
+			continue
+		}
+		resp.Edges = append(resp.Edges, *e)
 	}
 	return resp
 }

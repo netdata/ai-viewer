@@ -254,6 +254,24 @@ Verdict: SOW-0006 NOT mergeable on the P2 blocker; fix it + the 2 real P3, rejec
 - **Gates (orchestrator-run, all green):** `tsc` 0, `eslint --max-warnings 0` 0, `vitest` **507 pass (41 files)**, `build` main chunk **131.34 KB gzipped** (≤500; d3-zoom already a dep, no new lib), `scan-secrets` PASS, `scan-ai-attribution` PASS (now incl. frontend).
 - Next: re-review (Round 3, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
 
+### Round 3 — 2026-05-31 (codex + glm + minimax) on `fa72b27`
+
+glm + minimax = "ready to merge" — missed everything again (the R1/R2 pattern). codex (decisive) CONFIRMED every R2 fix correct + complete (Waterfall zoom/pan, SSE `['topology']`, color rejection, attribution scrub) AND every R1 fix still holding, but found 3 NEW deeper findings — all verified real on ground truth:
+
+- **P2 (codex): topology worker renders STALE identity via a counts-only cache key.** `graphKey(metric, mode, nodeCount, edgeCount)` (`TopologyTab.tsx:82`, `Topology.tsx:60`) keys on counts only; the render returns `workerResult.positioned` — the worker graph's FULL nodes (ids/labels/session-ids) — whenever that weak key matches (`TopologyTab.tsx:164`, `Topology.tsx:144`). Two different graphs with equal node+edge counts (a filter change / SSE refresh / session navigation) collide on the key → the UI shows the OLD graph's nodes for the NEW data, and a cross-session node click then navigates to the WRONG session, until the fresh worker result lands. **VERIFIED REAL.**
+- **P3 (codex): timeline `end_ts:null` contract drift.** `rest-api.md` + the `session_timeline.go` comment said a null end "draws to the current viewport edge", but the runtime (`timeline.ts isInstant`: null or `<=start` → instant) + the frontend API type draw it as an instant marker (the source-aware rule). A SEPARATE contradiction from the duplicate-section fix. **VERIFIED.**
+- **P3 (codex): per-session topology emits dangling child-session edges.** `session_topology_builder.go:117` adds `agent:<session> → agent:<childSessionID>` unconditionally; `finish()` appended every edge with no endpoint-presence check — violating the spec's "an edge whose target is outside the tree is dropped defensively" (`rest-api.md`). **VERIFIED.**
+
+Verdict: NOT mergeable on the P2; fix the P2 + 2 P3.
+
+### Round-3 fix cycle — 2026-05-31
+
+- **P2 worker stale-identity:** both topology views' worker matched branch now re-joins the worker's POSITIONS onto the CURRENT `nodes` via `reapplyFrozenPositions(nodes, positionsOf(workerResult.positioned), opts)` (the exact helper the freeze path already uses) — node identity is always the live `nodes` (the worker supplies only x,y by id; a new node is id-seeded, a vanished node dropped), so a key collision can no longer render stale nodes or navigate to the wrong session; the layout snaps to the fresh positions when the new worker result lands. +2 tests (same-count, different-identity swap → current identity rendered + cross-session click navigates to the CURRENT session).
+- **P3 timeline drift:** corrected `rest-api.md` (a null / `<=start_ts` end = instant marker at `start_ts`, NOT a viewport-edge bar) and the `session_timeline.go` comment to match the runtime + the source-aware rule.
+- **P3 dangling edges:** `session_topology_builder.go finish()` now drops any edge whose endpoint is not a materialised node (matches the spec); +1 test (`TestTopology_DropsOutOfTreeChildEdge`). Verified the cross-session builder (`topology_cross.go:126`) already drops out-of-set endpoints — no change there.
+- **Gates (orchestrator-run):** tsc 0, eslint 0, vitest **509 pass**, `go vet` + `go test -race ./...` clean, `scan-secrets` + `scan-ai-attribution` PASS.
+- Next: re-review (Round 4, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
+
 ## Outcome
 
 Pending.

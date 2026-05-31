@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'jest-axe';
+import type { ForceWorkerResponse } from '../../../viz/forceWorker';
+import type { PositionedNode } from '../../../viz/topology';
 import type { TopologyResponse } from '../../../api/types';
 
 // TopologyTab is the per-session actor-graph view (ui-pages.md §/sessions/:id #2).
@@ -18,14 +20,34 @@ vi.mock('../../../api/sessions', () => ({
   useSessionTopology: (...args: unknown[]) => topologySpy(...args) as unknown,
 }));
 
-// The ?worker import is a Vite virtual module with no jsdom equivalent; stub it
-// as a no-op Worker class so importing the tab never touches a real worker.
-vi.mock('../../../viz/forceWorker?worker', () => ({
-  default: class {
-    onmessage: ((e: MessageEvent) => void) | null = null;
+// The ?worker import is a Vite virtual module with no jsdom equivalent. Stub it
+// with an instance-capturing class: a no-op for the below-threshold tests (which
+// never construct it), but for the large-force tests it records each instance so
+// a test can drive its onmessage with a settled-positions message — the only way
+// to exercise the worker render path in jsdom. vi.hoisted keeps the shared
+// instances array + class available to the hoisted vi.mock factory below.
+const { workerInstances, MockForceWorker } = vi.hoisted(() => {
+  const instances: {
+    onmessage: ((e: MessageEvent<ForceWorkerResponse>) => void) | null;
+    deliver(positioned: PositionedNode[]): void;
+  }[] = [];
+  class MockWorker {
+    onmessage: ((e: MessageEvent<ForceWorkerResponse>) => void) | null = null;
     postMessage(): void {}
     terminate(): void {}
-  },
+    constructor() {
+      instances.push(this);
+    }
+    /** Deliver a settled-positions message exactly as the real worker would. */
+    deliver(positioned: PositionedNode[]): void {
+      this.onmessage?.({ data: { positioned } } as MessageEvent<ForceWorkerResponse>);
+    }
+  }
+  return { workerInstances: instances, MockForceWorker: MockWorker };
+});
+
+vi.mock('../../../viz/forceWorker?worker', () => ({
+  default: MockForceWorker,
 }));
 
 import { TopologyTab } from './TopologyTab';
@@ -48,7 +70,35 @@ const GRAPH: TopologyResponse = {
   max_size_metric: 100,
 };
 
+// largeGraph builds a force-mode graph with `count` distinct nodes (above the
+// 100-node FORCE_WORKER_THRESHOLD so useWorker is true) whose ids/labels carry a
+// caller-supplied `tag`, plus a chain of edges. Two graphs built with the same
+// count but different tags have identical node+edge COUNTS yet different node
+// IDENTITY — the exact collision the graphKey (counts-only) cannot distinguish.
+function largeGraph(tag: string, count: number): TopologyResponse {
+  const nodes = Array.from({ length: count }, (_, i) => ({
+    id: `agent:${tag}-${i}`,
+    kind: 'agent' as const,
+    label: `${tag} node ${i}`,
+    size_metric: 100 - (i % 100),
+    failure_ratio: 0,
+  }));
+  const edges = Array.from({ length: count - 1 }, (_, i) => ({
+    source: `agent:${tag}-${i}`,
+    target: `agent:${tag}-${i + 1}`,
+    calls: 1,
+    total_us: 1000,
+  }));
+  return { nodes, edges, max_size_metric: 100 };
+}
+
+/** positionedFor synthesizes a worker result for a graph (positions are arbitrary). */
+function positionedFor(graph: TopologyResponse): PositionedNode[] {
+  return graph.nodes.map((node, i) => ({ node, x: 10 + i, y: 20 + i, radius: 6 }));
+}
+
 beforeEach(() => {
+  workerInstances.length = 0;
   topologySpy.mockReset();
   topologySpy.mockReturnValue(result({ data: GRAPH }));
   // Canvas 2D is not implemented in jsdom; stub a no-op context so any Canvas
@@ -231,6 +281,34 @@ describe('TopologyTab', () => {
     // …and the radius grew (fs.Grep is now the max-metric node) — fresh radius applied.
     const rAfter = grepAfter.querySelector('rect')?.getAttribute('width');
     expect(Number(rAfter)).toBeGreaterThan(Number(rBefore));
+  });
+
+  it('renders the CURRENT nodes (not the stale worker result) when a same-count graph swaps in above the worker threshold', () => {
+    // Worker-path regression (counts-only graphKey collision). Graph A and graph B
+    // have the SAME node + edge counts but DIFFERENT identities; the worker result
+    // for A must never be rendered for B just because the key (which keys on counts
+    // only) collides — that would show A's labels for B's data until B's worker
+    // result lands. The fix re-joins worker POSITIONS onto the CURRENT nodes.
+    const COUNT = 120; // > FORCE_WORKER_THRESHOLD (100) so useWorker is true.
+    const A = largeGraph('alpha', COUNT);
+    const B = largeGraph('bravo', COUNT);
+    topologySpy.mockReturnValue(result({ data: A }));
+
+    const { rerender } = render(<TopologyTab sessionId="s1" />);
+    // A's worker spun up; deliver its settled positions → A renders.
+    expect(workerInstances).toHaveLength(1);
+    act(() => {
+      workerInstances[0]?.deliver(positionedFor(A));
+    });
+    expect(screen.getByRole('button', { name: /alpha node 0/i })).toBeInTheDocument();
+
+    // Swap to B (same counts, different identity) BEFORE B's worker result lands.
+    topologySpy.mockReturnValue(result({ data: B }));
+    rerender(<TopologyTab sessionId="s1" />);
+
+    // The rendered identity must be B's, never A's stale nodes.
+    expect(screen.getByRole('button', { name: /bravo node 0/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /alpha node 0/i })).not.toBeInTheDocument();
   });
 
   it('shows the loading state while the query is pending', () => {

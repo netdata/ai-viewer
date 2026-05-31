@@ -155,13 +155,22 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
   // DATA is live: reapplyFrozenPositions keeps each node at its frozen (x,y) while
   // re-applying the fresh label/radius/failure_ratio (a new metric or SSE refetch
   // updates the graph in place; a vanished node drops, a new node is seeded).
-  // Otherwise the worker result (only when it matches the current
-  // input key — a stale result for a prior metric/mode is dropped, showing an
-  // empty graph until the fresh run lands) or the inline result.
+  // Otherwise the worker result (only when it matches the current input key — a
+  // stale result for a prior metric/mode is dropped, showing an empty graph until
+  // the fresh run lands) or the inline result. The worker branch re-joins the
+  // worker POSITIONS onto the CURRENT nodes (same as the frozen path): the
+  // counts-only key can collide across two different graphs with equal node/edge
+  // counts, so taking identity from `nodes` (not from the worker's stale
+  // PositionedNode[]) prevents rendering the prior graph's labels/ids — and, on
+  // the cross-session page, navigating to the wrong session — until the fresh run
+  // lands. Where ids match, the worker's coordinates apply; an unmatched id gets a
+  // deterministic seeded fallback. Same-graph case is unchanged (identical result).
   const positioned: PositionedNode[] = frozen
     ? reapplyFrozenPositions(nodes, frozenLayout ?? new Map(), opts)
     : useWorker
-      ? (workerResult?.key === key ? workerResult.positioned : [])
+      ? (workerResult?.key === key
+          ? reapplyFrozenPositions(nodes, positionsOf(workerResult.positioned), opts)
+          : [])
       : inlinePositions;
 
   // Freeze pins the current node POSITIONS (positionsOf strips to id → {x,y}). For

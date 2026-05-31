@@ -436,6 +436,73 @@ func TestTopology_ToolWithoutNamespace(t *testing.T) {
 	}
 }
 
+// TestTopology_DropsOutOfTreeChildEdge asserts the defensive contract in
+// rest-api.md §GET /api/sessions/:id/topology: "An edge whose target session
+// is outside the tree is dropped defensively." A kind='session' op on the
+// requested tree's root carries a child_session_id pointing at a session that
+// belongs to a DIFFERENT tree (its own root) — so no agent node is
+// materialised for it. The spawn edge to that out-of-tree session must be
+// dropped (a target with no node would be a dangling edge), while every
+// legitimate edge (agent→tool, agent→in-tree-child) survives.
+func TestTopology_DropsOutOfTreeChildEdge(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedTopoTree(t, db, base)
+
+	// A separate session in its OWN tree (root_session_id = itself), so it is
+	// NOT part of rootA's tree and gets no agent node. Real row => satisfies
+	// the child_session_id FK while staying out of tree (the realistic shape
+	// the defensive drop guards against). Then an extra kind='session' op on
+	// rootA spawns it, producing the would-be dangling edge.
+	seedSession(t, db, sessionRow{
+		id: "outsider", sourceID: "src1", nativeID: "nOut", rootID: "outsider",
+		kind: "root", agent: "other", status: "completed",
+		startTS: base + 1_000, endTS: base + 2_000,
+	})
+	seedOp(t, db, opRow{
+		id: "o6", turnID: "t1", sessionID: "rootA", seq: 6, kind: "session", name: "stray",
+		startTS: base + 6_000, endTS: base + 7_000, durationUS: 1_000, status: "completed",
+		childSessionID: "outsider",
+	})
+
+	code, body, _ := getTopology(t, p, "rootA", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+
+	// The out-of-tree session must NOT be a node, and NO edge may target it.
+	for _, n := range body.Nodes {
+		if n.ID == "agent:outsider" {
+			t.Fatalf("out-of-tree session materialised as node: %+v", n)
+		}
+	}
+	for _, e := range body.Edges {
+		if e.Target == "agent:outsider" {
+			t.Fatalf("dangling edge to out-of-tree session not dropped: %+v", e)
+		}
+	}
+
+	// Every legitimate edge still present (endpoints all materialised).
+	if !hasEdge(body, "agent:rootA", "tool:shell.Bash", 1, 300) {
+		t.Fatalf("missing rootA→Bash edge: %+v", body.Edges)
+	}
+	if !hasEdge(body, "agent:rootA", "tool:fs.Read", 1, 100) {
+		t.Fatalf("missing rootA→Read edge: %+v", body.Edges)
+	}
+	if !hasEdge(body, "agent:rootA", "agent:childA1", 1, 2000) {
+		t.Fatalf("missing rootA→childA1 in-tree spawn edge: %+v", body.Edges)
+	}
+	if !hasEdge(body, "agent:childA1", "tool:shell.Bash", 1, 200) {
+		t.Fatalf("missing childA1→Bash edge: %+v", body.Edges)
+	}
+	// Exactly the four legitimate edges; the stray spawn (o6) is dropped.
+	if len(body.Edges) != 4 {
+		t.Fatalf("edges = %d, want 4 (stray out-of-tree edge dropped) (%+v)", len(body.Edges), body.Edges)
+	}
+}
+
 // TestTopology_DBFailureReturns503 asserts a query error (DB closed before
 // the request) surfaces as DB_UNAVAILABLE rather than a partial body —
 // exercises the writeDBError branch in the topology build path.

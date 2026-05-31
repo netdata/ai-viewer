@@ -137,11 +137,21 @@ export function Topology() {
   // When frozen, the simulation is pinned but the DATA is live:
   // reapplyFrozenPositions keeps each node at its frozen (x,y) while re-applying
   // the fresh label/radius/failure_ratio (a new metric or SSE refetch updates the
-  // graph in place; a vanished session drops, a new one is seeded).
+  // graph in place; a vanished session drops, a new one is seeded). The worker
+  // branch re-joins the worker POSITIONS onto the CURRENT nodes the same way: the
+  // counts-only key can collide across two different graphs with equal node/edge
+  // counts, so identity (and the per-node session id used for navigation) must
+  // come from `nodes`, never from the worker's stale PositionedNode[] — otherwise
+  // a filter/SSE swap with matching counts would render the prior graph's sessions
+  // and a click would navigate to the WRONG session until the fresh run lands.
+  // Where ids match, the worker's coordinates apply; an unmatched id gets a
+  // deterministic seeded fallback. Same-graph case is unchanged (identical result).
   const positioned: PositionedNode[] = frozen
     ? reapplyFrozenPositions(nodes, frozenLayout ?? new Map(), opts)
     : useWorker
-      ? (workerResult?.key === key ? workerResult.positioned : [])
+      ? (workerResult?.key === key
+          ? reapplyFrozenPositions(nodes, positionsOf(workerResult.positioned), opts)
+          : [])
       : inlinePositions;
 
   // Freeze pins the current node POSITIONS (positionsOf strips to id → {x,y}).
