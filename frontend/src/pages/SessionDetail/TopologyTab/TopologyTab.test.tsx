@@ -30,6 +30,7 @@ const { workerInstances, MockForceWorker } = vi.hoisted(() => {
   const instances: {
     onmessage: ((e: MessageEvent<ForceWorkerResponse>) => void) | null;
     deliver(positioned: PositionedNode[]): void;
+    deliverError(message: string): void;
   }[] = [];
   class MockWorker {
     onmessage: ((e: MessageEvent<ForceWorkerResponse>) => void) | null = null;
@@ -41,6 +42,10 @@ const { workerInstances, MockForceWorker } = vi.hoisted(() => {
     /** Deliver a settled-positions message exactly as the real worker would. */
     deliver(positioned: PositionedNode[]): void {
       this.onmessage?.({ data: { positioned } } as MessageEvent<ForceWorkerResponse>);
+    }
+    /** Deliver an error message exactly as the worker's catch branch would. */
+    deliverError(message: string): void {
+      this.onmessage?.({ data: { error: message } } as MessageEvent<ForceWorkerResponse>);
     }
   }
   return { workerInstances: instances, MockForceWorker: MockWorker };
@@ -186,6 +191,43 @@ describe('TopologyTab', () => {
     expect(dialog).toHaveAccessibleName(/shell\.Bash/i);
   });
 
+  it('passes the node variant: the drawer shows failure rate + the selected size-metric value, never fabricated op zeros', async () => {
+    // A topology node is an aggregate ACTOR, not an op, so the drawer shows its
+    // failure % + the value of the currently-selected size metric (labeled
+    // honestly) — never $0.00 / 0 tokens / "No payloads" (ui-pages.md §Span detail drawer).
+    const user = userEvent.setup();
+    render(<TopologyTab sessionId="s1" />);
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    // fs.Grep: failure_ratio 0.5, size_metric 20; default metric is "cost".
+    await user.click(within(graph).getByRole('button', { name: /fs\.Grep/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Failure rate')).toBeInTheDocument();
+    expect(within(dialog).getByText('50.0%')).toBeInTheDocument();
+    // The size metric is labeled by the current selection (Cost) and $-formatted.
+    expect(within(dialog).getByText('Cost')).toBeInTheDocument();
+    expect(within(dialog).getByText('$20.00')).toBeInTheDocument();
+    // No fabricated op fields.
+    expect(within(dialog).queryByText(/tokens in/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/no payloads/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/^Payloads$/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/open this op in the Trace tab/i)).not.toBeInTheDocument();
+  });
+
+  it('labels the node size-metric value by the currently-selected metric (honest label)', async () => {
+    // Switching the size metric changes the drawer's metric label + formatting:
+    // selecting "Duration" makes the node value render as a µs duration under a
+    // "Duration" label (the per-session tab owns the metric→label map).
+    const user = userEvent.setup();
+    render(<TopologyTab sessionId="s1" />);
+    await user.selectOptions(screen.getByRole('combobox', { name: /size by/i }), 'duration');
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    await user.click(within(graph).getByRole('button', { name: /shell\.Bash/i }));
+    const dialog = screen.getByRole('dialog');
+    // shell.Bash size_metric is 60 (µs) → "60µs" under the "Duration" label.
+    expect(within(dialog).getByText('Duration')).toBeInTheDocument();
+    expect(within(dialog).getByText('60µs')).toBeInTheDocument();
+  });
+
   it('closes the drawer on Escape', async () => {
     const user = userEvent.setup();
     render(<TopologyTab sessionId="s1" />);
@@ -309,6 +351,30 @@ describe('TopologyTab', () => {
     // The rendered identity must be B's, never A's stale nodes.
     expect(screen.getByRole('button', { name: /bravo node 0/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /alpha node 0/i })).not.toBeInTheDocument();
+  });
+
+  it('falls back to the inline layout (and logs) when the force worker reports an error', () => {
+    // No silent failures (AGENTS.md §6): if the worker simulation throws, it posts
+    // an { error } message; the consumer must log it AND fall back to the inline
+    // layout so the graph still renders rather than staying permanently empty.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const COUNT = 120; // > FORCE_WORKER_THRESHOLD (100) so useWorker is true.
+    const A = largeGraph('alpha', COUNT);
+    topologySpy.mockReturnValue(result({ data: A }));
+
+    render(<TopologyTab sessionId="s1" />);
+    // The worker spun up but, before it delivers, the graph has no worker result
+    // yet (empty). Deliver an error → fall back to inline layout.
+    expect(workerInstances).toHaveLength(1);
+    act(() => {
+      workerInstances[0]?.deliverError('simulation exploded');
+    });
+
+    // The graph renders the CURRENT nodes via the inline layout (not empty).
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    expect(within(graph).getByRole('button', { name: /alpha node 0/i })).toBeInTheDocument();
+    // The failure is surfaced with structured context (no silent failure).
+    expect(errorSpy).toHaveBeenCalledWith('[topology] force worker failed:', 'simulation exploded');
   });
 
   it('shows the loading state while the query is pending', () => {

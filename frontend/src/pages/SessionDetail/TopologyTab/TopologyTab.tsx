@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { OpDetail, TopologyMetric, TopologyNode } from '../../../api/types';
+import type { TopologyMetric, TopologyNode } from '../../../api/types';
 import { useSessionTopology } from '../../../api/sessions';
 import { SpanDetailDrawer } from '../../../components/SpanDetailDrawer';
 import { LoadingState, ErrorState, EmptyState } from '../../../components/StatusViews';
@@ -27,7 +27,10 @@ import styles from './TopologyTab.module.css';
 // re-simulate (the operator can read a stable graph). Above the 100-node
 // threshold the force simulation runs in a Web Worker (frontend-architecture.md);
 // below it the layout runs inline. Clicking a node opens the shared
-// SpanDetailDrawer.
+// SpanDetailDrawer with a source-aware 'node' detail (ui-pages.md §Span detail
+// drawer): a node is an aggregate ACTOR, not an op, so the drawer shows its
+// kind/label, failure %, and the value of the currently-selected size metric —
+// it omits op-only fields rather than fabricating them as zero.
 
 const VIEW_WIDTH = 900;
 const VIEW_HEIGHT = 560;
@@ -46,37 +49,10 @@ const MODES: ReadonlyArray<{ key: TopologyLayoutMode; label: string }> = [
   { key: 'hierarchical', label: 'Hierarchical' },
 ];
 
-/**
- * nodeToOpDetail synthesizes a minimal OpDetail so the shared SpanDetailDrawer
- * (an op-shaped panel) can present a clicked topology node. A topology node is
- * an aggregate actor (agent/tool), not a single op, so the synthesized record
- * carries the node's identity (kind/label) and its failure state; the numeric
- * op fields are zeroed and there are no payloads. This reuses the drawer exactly
- * (SOW-0006 decision: "clicking a node opens the SHARED span detail drawer")
- * without weakening its OpDetail contract. The size metric itself is shown in
- * the on-graph node size + the tab's legend, not duplicated here.
- */
-function nodeToOpDetail(node: TopologyNode): OpDetail {
-  const failed = node.failure_ratio > 0;
-  return {
-    id: node.id,
-    kind: node.kind,
-    name: node.label,
-    model: '',
-    provider: '',
-    start_ts: 0,
-    end_ts: null,
-    duration_us: null,
-    status: failed ? 'failed' : 'completed',
-    error_class: failed ? `${(node.failure_ratio * 100).toFixed(1)}% of ops failed` : null,
-    tokens_in: 0,
-    tokens_out: 0,
-    cost_usd: 0,
-    ctx_used: null,
-    ctx_max: null,
-    child_session_id: null,
-    payload_refs: [],
-  };
+/** metricLabelOf returns the METRICS label for a metric key (the drawer shows the
+ *  size-metric value under this honest label). */
+function metricLabelOf(metric: TopologyMetric): string {
+  return METRICS.find((m) => m.key === metric)?.label ?? metric;
 }
 
 /** graphKey identifies a (metric→graph)+mode layout input for worker-result staleness. */
@@ -142,6 +118,15 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
     }
     const worker = new ForceWorker();
     worker.onmessage = (e: MessageEvent<ForceWorkerResponse>) => {
+      if ('error' in e.data) {
+        // Worker simulation failed — surface it (no silent failures, AGENTS.md §6)
+        // and fall back to the inline layout so the graph still renders rather than
+        // staying permanently empty. The inline positions are joined through the
+        // same key, so the render path below treats them exactly like a worker result.
+        console.error('[topology] force worker failed:', e.data.error);
+        setWorkerResult({ key, positioned: layoutTopology(nodes, edges, opts) });
+        return;
+      }
       setWorkerResult({ key, positioned: e.data.positioned });
     };
     const request: ForceWorkerRequest = { nodes, edges, opts, seeded: mode === 'force-seeded' };
@@ -278,7 +263,16 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
       )}
 
       <SpanDetailDrawer
-        op={selected ? nodeToOpDetail(selected) : null}
+        detail={
+          selected
+            ? {
+                kind: 'node',
+                node: selected,
+                metricLabel: metricLabelOf(metric),
+                metricValue: selected.size_metric,
+              }
+            : null
+        }
         onClose={() => {
           setSelected(null);
         }}

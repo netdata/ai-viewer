@@ -133,6 +133,22 @@ describe('TimelineTab', () => {
     expect(dialog).toHaveAccessibleName(/Bash/i);
   });
 
+  it('passes the span variant: the drawer shows lane/span fields only and never fabricates op metrics as zero', async () => {
+    // A timeline span carries no op metrics, so the drawer must NOT print
+    // $0.00 / 0 tokens / "No payloads" (ui-pages.md §Span detail drawer); it
+    // directs the operator to the Trace tab for that detail instead.
+    const user = userEvent.setup();
+    render(<TimelineTab sessionId="s1" />);
+    const track = screen.getByRole('group', { name: /session timeline/i });
+    await user.click(within(track).getByRole('button', { name: /Bash/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/open this op in the Trace tab/i)).toBeInTheDocument();
+    expect(within(dialog).queryByText('$0.00')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/tokens in/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/no payloads/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/^Payloads$/)).not.toBeInTheDocument();
+  });
+
   it('closes the drawer on Escape', async () => {
     const user = userEvent.setup();
     render(<TimelineTab sessionId="s1" />);

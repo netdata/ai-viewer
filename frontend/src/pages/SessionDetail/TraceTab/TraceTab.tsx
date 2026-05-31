@@ -142,7 +142,7 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
       </section>
 
       <SpanDetailDrawer
-        op={selected?.op ?? null}
+        detail={selected ? { kind: 'op', op: selected.op } : null}
         onClose={() => {
           setSelected(null);
         }}

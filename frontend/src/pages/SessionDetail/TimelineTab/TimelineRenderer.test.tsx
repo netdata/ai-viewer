@@ -44,6 +44,7 @@ beforeEach(() => {
     clearRect: vi.fn(),
     fillRect: vi.fn(),
     strokeRect: vi.fn(),
+    fillText: vi.fn(),
     beginPath: vi.fn(),
     arc: vi.fn(),
     moveTo: vi.fn(),
@@ -461,6 +462,190 @@ describe('TimelineRenderer (Canvas path)', () => {
     fireEvent.click(canvas, { clientX: 100, clientY: 34 });
     expect(onSpanClick).toHaveBeenCalledTimes(1);
     expect(onSpanClick.mock.calls[0]?.[0]).toMatchObject({ span: { id: 'llm' } });
+  });
+
+  it('paints lane zebra bands and lane labels so each session lane is identifiable', () => {
+    // P2: the Canvas path is the >500-span path. Lanes ARE the point (which
+    // session a span belongs to), so the Canvas must mirror the SVG zebra bands +
+    // lane labels — not just paint spans. Two lanes give an even + an odd band.
+    const twoLanes: TimelineLaneInput[] = [
+      {
+        key: 'session:root',
+        label: 'root',
+        spans: [{ id: 'a', kind: 'llm', name: 'chat', start_ts: 100, end_ts: 400, status: 'completed' }],
+      },
+      {
+        key: 'session:child',
+        label: 'child-agent',
+        spans: [{ id: 'b', kind: 'tool', name: 'run', start_ts: 200, end_ts: 500, status: 'completed' }],
+      },
+    ];
+    const layout = layoutTimeline(twoLanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+    const trackHeight = 22 + layout.lanes.length * 40;
+    render(
+      <TimelineRenderer
+        lanes={layout.lanes}
+        spans={layout.spans}
+        width={WIDTH}
+        height={trackHeight}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={true}
+      />,
+    );
+    // A band fill happened (alternating zebra is painted via fillRect, like the
+    // SVG .laneBandAlt rect) AND each lane's label text is drawn (fillText with the
+    // label string at an x,y, mirroring the SVG .laneLabel text).
+    expect(ctxStub.fillRect).toHaveBeenCalled();
+    expect(ctxStub.fillText).toHaveBeenCalledWith('root', expect.any(Number), expect.any(Number));
+    expect(ctxStub.fillText).toHaveBeenCalledWith('child-agent', expect.any(Number), expect.any(Number));
+  });
+
+  it('includes the lane/session label in each keyboard-fallback button (Canvas a11y)', () => {
+    // P2: a keyboard/SR user in the Canvas path must still know which session lane
+    // a span is in — the fallback button text carries the lane label.
+    const twoLanes: TimelineLaneInput[] = [
+      {
+        key: 'session:root',
+        label: 'root',
+        spans: [{ id: 'a', kind: 'llm', name: 'chat', start_ts: 100, end_ts: 400, status: 'completed' }],
+      },
+      {
+        key: 'session:child',
+        label: 'child-agent',
+        spans: [{ id: 'b', kind: 'tool', name: 'run', start_ts: 200, end_ts: 500, status: 'completed' }],
+      },
+    ];
+    const layout = layoutTimeline(twoLanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+    const trackHeight = 22 + layout.lanes.length * 40;
+    render(
+      <TimelineRenderer
+        lanes={layout.lanes}
+        spans={layout.spans}
+        width={WIDTH}
+        height={trackHeight}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={true}
+      />,
+    );
+    const fallback = screen.getByRole('list', { name: /timeline spans/i });
+    // The button names combine the lane label with the span label.
+    expect(within(fallback).getByRole('button', { name: /root —.*chat/i })).toBeInTheDocument();
+    expect(within(fallback).getByRole('button', { name: /child-agent —.*run/i })).toBeInTheDocument();
+  });
+
+  it('hit-tests a compaction breakpoint along its FULL height, not just its own lane band', () => {
+    // P3: the Canvas draws a compaction span as a full-height vertical rule
+    // (AXIS_HEIGHT→height), so a click anywhere on that rule — including a Y in a
+    // DIFFERENT lane's band — must still select it (mirrors the SVG full-height
+    // hit target). Two lanes; the compaction lives on lane 0 but we click at a Y
+    // inside lane 1's band.
+    const onSpanClick = vi.fn();
+    // The compaction sits at a time (850) where NO bar overlaps, so the click x is
+    // unambiguous: only the full-height rule occupies it. Lane 1's bar ends at 400.
+    const twoLanes: TimelineLaneInput[] = [
+      {
+        key: 'session:root',
+        label: 'root',
+        spans: [{ id: 'compact', kind: 'compaction', name: 'compaction', start_ts: 850, end_ts: null, status: 'completed' }],
+      },
+      {
+        key: 'session:child',
+        label: 'child-agent',
+        spans: [{ id: 'b', kind: 'tool', name: 'run', start_ts: 200, end_ts: 400, status: 'completed' }],
+      },
+    ];
+    const layout = layoutTimeline(twoLanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+    const trackHeight = 22 + layout.lanes.length * 40;
+    render(
+      <TimelineRenderer
+        lanes={layout.lanes}
+        spans={layout.spans}
+        width={WIDTH}
+        height={trackHeight}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={onSpanClick}
+        useCanvas={true}
+      />,
+    );
+    const canvas = screen
+      .getByRole('group', { name: /session timeline/i })
+      .querySelector('canvas') as HTMLCanvasElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      top: 0,
+      left: 0,
+      right: WIDTH,
+      bottom: trackHeight,
+      width: WIDTH,
+      height: trackHeight,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    // Click at the compaction rule's x but a Y deep in lane 1's band
+    // (22 + 40 + 20 = 82) — OUTSIDE the compaction's own lane-0 band.
+    const compaction = layout.spans.find((s) => s.compaction);
+    fireEvent.click(canvas, { clientX: compaction?.x ?? 0, clientY: 82 });
+    expect(onSpanClick).toHaveBeenCalledTimes(1);
+    expect(onSpanClick.mock.calls[0]?.[0]).toMatchObject({ span: { id: 'compact' } });
+  });
+
+  it('does NOT select a non-compaction span from a click in a different lane band', () => {
+    // Guard the inverse of the P3 fix: a closed bar keeps its lane-band hit-test
+    // (only compaction is full-height). Click in lane 1's band over lane 0's bar x.
+    const onSpanClick = vi.fn();
+    const twoLanes: TimelineLaneInput[] = [
+      {
+        key: 'session:root',
+        label: 'root',
+        spans: [{ id: 'a', kind: 'llm', name: 'chat', start_ts: 100, end_ts: 400, status: 'completed' }],
+      },
+      {
+        key: 'session:child',
+        label: 'child-agent',
+        spans: [{ id: 'b', kind: 'tool', name: 'run', start_ts: 600, end_ts: 800, status: 'completed' }],
+      },
+    ];
+    const layout = layoutTimeline(twoLanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+    const trackHeight = 22 + layout.lanes.length * 40;
+    render(
+      <TimelineRenderer
+        lanes={layout.lanes}
+        spans={layout.spans}
+        width={WIDTH}
+        height={trackHeight}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={onSpanClick}
+        useCanvas={true}
+      />,
+    );
+    const canvas = screen
+      .getByRole('group', { name: /session timeline/i })
+      .querySelector('canvas') as HTMLCanvasElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      top: 0,
+      left: 0,
+      right: WIDTH,
+      bottom: trackHeight,
+      width: WIDTH,
+      height: trackHeight,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    // lane-0 bar 'a' is at x≈0..375; click at its x but a Y in lane 1's band (82).
+    // No bar occupies lane 1 at x=100, so nothing is selected.
+    fireEvent.click(canvas, { clientX: 100, clientY: 82 });
+    expect(onSpanClick).not.toHaveBeenCalled();
   });
 
   it('ignores a click on empty canvas space', () => {

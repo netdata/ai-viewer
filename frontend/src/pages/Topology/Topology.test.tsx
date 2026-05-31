@@ -36,6 +36,7 @@ const { workerInstances, MockForceWorker } = vi.hoisted(() => {
   const instances: {
     onmessage: ((e: MessageEvent<ForceWorkerResponse>) => void) | null;
     deliver(positioned: PositionedNode[]): void;
+    deliverError(message: string): void;
   }[] = [];
   class MockWorker {
     onmessage: ((e: MessageEvent<ForceWorkerResponse>) => void) | null = null;
@@ -47,6 +48,10 @@ const { workerInstances, MockForceWorker } = vi.hoisted(() => {
     /** Deliver a settled-positions message exactly as the real worker would. */
     deliver(positioned: PositionedNode[]): void {
       this.onmessage?.({ data: { positioned } } as MessageEvent<ForceWorkerResponse>);
+    }
+    /** Deliver an error message exactly as the worker's catch branch would. */
+    deliverError(message: string): void {
+      this.onmessage?.({ data: { error: message } } as MessageEvent<ForceWorkerResponse>);
     }
   }
   return { workerInstances: instances, MockForceWorker: MockWorker };
@@ -359,5 +364,27 @@ describe('Topology (cross-session)', () => {
     await user.click(screen.getByRole('button', { name: /bravo node 0/i }));
     expect(screen.getByTestId('loc')).toHaveTextContent('/sessions/bravo-0');
     expect(screen.getByTestId('loc')).not.toHaveTextContent('/sessions/alpha-0');
+  });
+
+  it('falls back to the inline layout (and logs) when the force worker reports an error', () => {
+    // No silent failures (AGENTS.md §6): if the worker simulation throws, it posts
+    // an { error } message; the page must log it AND fall back to the inline layout
+    // so the cross-session graph still renders rather than staying permanently empty.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const COUNT = 120; // > FORCE_WORKER_THRESHOLD (100) so useWorker is true.
+    const A = largeGraph('alpha', COUNT);
+    topologySpy.mockReturnValue(result({ data: A }));
+
+    renderPage();
+    expect(workerInstances).toHaveLength(1);
+    act(() => {
+      workerInstances[0]?.deliverError('simulation exploded');
+    });
+
+    // The graph renders the CURRENT sessions via the inline layout (not empty).
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    expect(within(graph).getByRole('button', { name: /alpha node 0/i })).toBeInTheDocument();
+    // The failure is surfaced with structured context (no silent failure).
+    expect(errorSpy).toHaveBeenCalledWith('[topology] force worker failed:', 'simulation exploded');
   });
 });

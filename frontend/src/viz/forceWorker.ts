@@ -23,10 +23,11 @@ export interface ForceWorkerRequest {
   seeded: boolean;
 }
 
-/** Outbound message: the settled positions. */
-export interface ForceWorkerResponse {
-  positioned: PositionedNode[];
-}
+// Outbound message: either the settled positions, or an error string when the
+// simulation threw. The error variant exists so a worker failure is SURFACED
+// (AGENTS.md §6 "no silent failures") instead of leaving the consumer's
+// onmessage to never fire — which would strand the graph permanently empty.
+export type ForceWorkerResponse = { positioned: PositionedNode[] } | { error: string };
 
 // The worker global. Typed locally so this module compiles without DOM "lib"
 // pollution; `self` in a module worker is a DedicatedWorkerGlobalScope.
@@ -36,7 +37,14 @@ const ctx = self as unknown as {
 };
 
 ctx.onmessage = (e: MessageEvent<ForceWorkerRequest>): void => {
-  const { nodes, edges, opts, seeded } = e.data;
-  const positioned = runForceLayout(nodes, edges, opts, seeded);
-  ctx.postMessage({ positioned });
+  // Always post a reply: on success the positions, on failure an error string.
+  // If runForceLayout threw and we posted nothing, the consumer's onmessage
+  // would never run and the graph would stay empty with no error surfaced.
+  try {
+    const { nodes, edges, opts, seeded } = e.data;
+    const positioned = runForceLayout(nodes, edges, opts, seeded);
+    ctx.postMessage({ positioned });
+  } catch (err) {
+    ctx.postMessage({ error: String((err as Error)?.message ?? err) });
+  }
 };

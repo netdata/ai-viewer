@@ -189,6 +189,66 @@ describe('buildOpTree', () => {
     expect((roots[0] as TraceNode).depth).toBe(0);
   });
 
+  it('keeps both ops of a 2-node parent_op_id cycle (never silently drops them)', () => {
+    // Adversarial/corrupt data: A.parent==B and B.parent==A form a closed cycle.
+    // The schema has only an FK on parent_op_id, no acyclicity constraint
+    // (data-model.md), so a cycle is reachable. "No silent failures": every input
+    // op must still appear in the tree — the cycle is broken by hoisting a member
+    // to a root, not by dropping the unreachable nodes.
+    const turns = [
+      turn(1, [
+        op({ id: 'A', start_ts: 100, end_ts: 200, duration_us: 100, parent_op_id: 'B' }),
+        op({ id: 'B', start_ts: 200, end_ts: 300, duration_us: 100, parent_op_id: 'A' }),
+      ]),
+    ];
+    const roots = buildOpTree(turns);
+    const flat = flattenTree(roots);
+    expect(flat).toHaveLength(2);
+    expect(flat.map((n) => n.op.id).sort()).toEqual(['A', 'B']);
+  });
+
+  it('keeps all three ops of a 3-node parent_op_id cycle (A→B→C→A)', () => {
+    const turns = [
+      turn(1, [
+        op({ id: 'A', start_ts: 100, end_ts: 200, duration_us: 100, parent_op_id: 'C' }),
+        op({ id: 'B', start_ts: 200, end_ts: 300, duration_us: 100, parent_op_id: 'A' }),
+        op({ id: 'C', start_ts: 300, end_ts: 400, duration_us: 100, parent_op_id: 'B' }),
+      ]),
+    ];
+    const flat = flattenTree(buildOpTree(turns));
+    expect(flat).toHaveLength(3);
+    expect(flat.map((n) => n.op.id).sort()).toEqual(['A', 'B', 'C']);
+  });
+
+  it('keeps a normal subtree intact alongside a separate cycle', () => {
+    // A healthy root+children tree must be untouched; a disjoint 2-node cycle in
+    // the same input must still surface all its members.
+    const turns = [
+      turn(1, [
+        op({ id: 'root', kind: 'session', start_ts: 0, end_ts: 1000, duration_us: 1000, parent_op_id: null }),
+        op({ id: 'child1', start_ts: 100, end_ts: 400, duration_us: 300, parent_op_id: 'root' }),
+        op({ id: 'child2', start_ts: 500, end_ts: 900, duration_us: 400, parent_op_id: 'root' }),
+        op({ id: 'cycA', start_ts: 600, end_ts: 700, duration_us: 100, parent_op_id: 'cycB' }),
+        op({ id: 'cycB', start_ts: 700, end_ts: 800, duration_us: 100, parent_op_id: 'cycA' }),
+      ]),
+    ];
+    const roots = buildOpTree(turns);
+    const flat = flattenTree(roots);
+    // No op is dropped.
+    expect(flat).toHaveLength(5);
+    expect(flat.map((n) => n.op.id).sort()).toEqual(['child1', 'child2', 'cycA', 'cycB', 'root']);
+    // The healthy subtree is unchanged: root keeps both children, ordered by start.
+    const rootNode = flat.find((n) => n.op.id === 'root') as TraceNode;
+    expect(rootNode.depth).toBe(0);
+    expect(rootNode.children.map((c) => c.op.id)).toEqual(['child1', 'child2']);
+    // The cycle is broken by hoisting ONE member to a root deterministically (the
+    // first in stable order, cycA); the other (cycB) survives as its descendant,
+    // so both are present exactly once and neither is dropped.
+    expect(roots.map((r) => r.op.id)).toContain('cycA');
+    const cycARoot = roots.find((r) => r.op.id === 'cycA') as TraceNode;
+    expect(cycARoot.children.map((c) => c.op.id)).toEqual(['cycB']);
+  });
+
   it('returns an empty array for no turns/ops', () => {
     expect(buildOpTree([])).toEqual([]);
     expect(buildOpTree([turn(1, [])])).toEqual([]);

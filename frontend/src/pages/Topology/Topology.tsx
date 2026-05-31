@@ -125,6 +125,15 @@ export function Topology() {
     }
     const worker = new ForceWorker();
     worker.onmessage = (e: MessageEvent<ForceWorkerResponse>) => {
+      if ('error' in e.data) {
+        // Worker simulation failed — surface it (no silent failures, AGENTS.md §6)
+        // and fall back to the inline layout so the graph still renders rather than
+        // staying permanently empty. The inline positions are joined through the
+        // same key, so the render path below treats them exactly like a worker result.
+        console.error('[topology] force worker failed:', e.data.error);
+        setWorkerResult({ key, positioned: layoutTopology(nodes, edges, opts) });
+        return;
+      }
       setWorkerResult({ key, positioned: e.data.positioned });
     };
     const request: ForceWorkerRequest = { nodes, edges, opts, seeded: mode === 'force-seeded' };

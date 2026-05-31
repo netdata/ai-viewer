@@ -58,6 +58,14 @@ function isLeafBoundary(op: OpDetail): boolean {
  * references an unknown id (dangling); a parent_op_id that points at a
  * cross-session boundary op (which is a leaf in this tree). A boundary op never
  * receives children regardless of what points at it.
+ *
+ * Cycles: the schema enforces only an FK on parent_op_id, not acyclicity
+ * (data-model.md), so corrupt/adversarial data can form a parent_op_id cycle
+ * (A→B→A). In a closed cycle no member is a root, so a naive attach pass would
+ * leave every member attached-but-unreachable and silently drop it from the
+ * returned tree. "No silent failures" (AGENTS.md) forbids that: a reachability
+ * pass below hoists every unreachable node to a root, breaking the cycle
+ * deterministically so every input op always appears exactly once.
  */
 export function buildOpTree(turns: TurnDetail[]): TraceNode[] {
   // First pass: materialize a node per op, preserving (turnSeq, order) for a
@@ -93,6 +101,55 @@ export function buildOpTree(turns: TurnDetail[]): TraceNode[] {
       parent.children.push(node);
     } else {
       roots.push(node);
+    }
+  }
+
+  // Cycle break: a closed parent_op_id cycle (A→B→A) has no root, so its members
+  // were attached to each other above and are unreachable from `roots` — they
+  // would silently vanish from the returned tree. Walk down from the current
+  // roots marking every reachable node (single visited-set DFS, O(nodes) since
+  // each node is enqueued once); any node still unvisited is a cycle member (or
+  // sits under one) and is hoisted to a root so it is never dropped. `nodes` is
+  // in stable (turnSeq, order) order, so the first unreachable member of each
+  // cycle is hoisted first — deterministic, no Math.random. The sibling sort
+  // below still orders the hoisted roots by start_ts/turnSeq/order.
+  const reachable = new Set<TraceNode>();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const n = stack.pop() as TraceNode;
+    if (reachable.has(n)) {
+      continue;
+    }
+    reachable.add(n);
+    for (const child of n.children) {
+      stack.push(child);
+    }
+  }
+  for (const node of nodes) {
+    if (!reachable.has(node)) {
+      // Detach from the parent that swallowed it, then promote to a root.
+      const parentId = node.op.parent_op_id;
+      const parent = parentId != null ? byId.get(parentId) : undefined;
+      if (parent) {
+        const idx = parent.children.indexOf(node);
+        if (idx !== -1) {
+          parent.children.splice(idx, 1);
+        }
+      }
+      roots.push(node);
+      // Mark reachable so a downstream cycle member that links to this node is
+      // not hoisted redundantly (it stays a descendant of this new root).
+      reachable.add(node);
+      stack.push(node);
+      while (stack.length > 0) {
+        const n = stack.pop() as TraceNode;
+        for (const child of n.children) {
+          if (!reachable.has(child)) {
+            reachable.add(child);
+            stack.push(child);
+          }
+        }
+      }
     }
   }
 

@@ -32,6 +32,32 @@ import styles from './TimelineTab.module.css';
 const AXIS_HEIGHT = 22; // px reserved at the top for the time axis.
 const LANE_LABEL_PAD = 6; // px inset for the lane label text.
 const AXIS_TARGET_TICKS = 8;
+// Zebra-band token + alpha mirror the SVG .laneBandAlt rule (fill var(--bg-tertiary);
+// opacity 0.4). Even lanes are transparent (SVG .laneBand) so only odd lanes paint.
+const LANE_BAND_TOKEN = '--bg-tertiary';
+const LANE_BAND_ALPHA = 0.4;
+const LANE_BAND_FALLBACK = '#21262d'; // DARK --bg-tertiary (theme/tokens.css) for non-DOM.
+// Canvas-painted lane label: a literal neutral gray, matching the convention of
+// the other Canvas renderers (Topology/Waterfall/FlameGraph use fixed rgba label
+// colors); it reads acceptably on both the dark and light viz backgrounds. The
+// SVG path uses the themed .laneLabel (var(--text-secondary), 11px sans).
+const LANE_LABEL_PAINT = 'rgba(160,160,170,0.95)';
+const LANE_LABEL_FONT = '11px sans-serif';
+
+/**
+ * readThemeVar resolves a CSS custom property off <html>, the same mechanism
+ * viz/color.ts uses (getComputedStyle(documentElement)). The op-kind palette in
+ * color.ts is a closed token set, so the lane-band background token lives here;
+ * keeping the read identical honors the D3-boundary rule (renderers ask for a
+ * concrete color). Falls back to the DARK token value in a non-DOM/empty context.
+ */
+function readThemeVar(name: string, fallback: string): string {
+  if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+    return fallback;
+  }
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value !== '' ? value : fallback;
+}
 
 export interface TimelineRendererProps {
   lanes: PositionedLane[];
@@ -126,6 +152,16 @@ function labelForSpan(s: PositionedSpan): string {
     : formatDuration((s.span.end_ts as number) - s.span.start_ts);
   const kind = s.compaction ? 'compaction' : s.span.kind;
   return `${s.span.name || s.span.id} — ${kind} — ${dur}`;
+}
+
+/**
+ * laneLabelForSpan returns the session-lane label a span belongs to (mapped from
+ * its laneKey via the lane set), so the Canvas keyboard-fallback button names a
+ * keyboard/SR user's lane (the lanes ARE the point — which session a span is in).
+ * Falls back to the laneKey if the lane is somehow absent from the map.
+ */
+function laneLabelForSpan(s: PositionedSpan, laneLabels: Map<string, string>): string {
+  return laneLabels.get(s.laneKey) ?? s.laneKey;
 }
 
 function TimelineSvg({
@@ -349,6 +385,10 @@ function TimelineCanvas({
     [spans, transform, width, height, lanes],
   );
 
+  // laneKey → label, so the keyboard-fallback button text names the span's session
+  // lane (the lanes ARE the point in the Canvas path too — see laneLabelForSpan).
+  const laneLabels = useMemo(() => new Map(lanes.map((l) => [l.key, l.label])), [lanes]);
+
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) {
@@ -385,6 +425,32 @@ function TimelineCanvas({
     // the dpr scale already on the matrix. `visible` is the
     // viewport-culled set (memoized above) — only on-screen spans are painted.
     ctx.transform(transform.k, 0, 0, 1, transform.x, transform.y);
+
+    // Lane zebra bands + labels (UNDER the axis ticks and spans). Mirrors the SVG
+    // path's .laneBand/.laneBandAlt rects + .laneLabel text so the >500-span Canvas
+    // path keeps lane identity (which session a span belongs to — the lanes ARE the
+    // point). The transform scales X by k and translates by transform.x, so a band
+    // that must cover the full [0,width] viewport in screen px starts at the
+    // inverted-X left edge with the inverted-X width; the lane label is pinned to
+    // the left edge the same way. Y is only translated (lane height constant), so
+    // lane.y is used directly. Math mirrors cullWindowFor's X inversion.
+    const bandLeft = -transform.x / transform.k;
+    const bandWidth = width / transform.k;
+    const bandColor = readThemeVar(LANE_BAND_TOKEN, LANE_BAND_FALLBACK);
+    const labelX = (LANE_LABEL_PAD - transform.x) / transform.k;
+    for (const lane of lanes) {
+      // Only odd lanes paint (even lanes are transparent — SVG .laneBand).
+      if (lane.laneIndex % 2 === 1) {
+        ctx.save();
+        ctx.globalAlpha = LANE_BAND_ALPHA;
+        ctx.fillStyle = bandColor;
+        ctx.fillRect(bandLeft, AXIS_HEIGHT + lane.y, bandWidth, lane.height);
+        ctx.restore();
+      }
+      ctx.fillStyle = LANE_LABEL_PAINT;
+      ctx.font = LANE_LABEL_FONT;
+      ctx.fillText(lane.label, labelX, AXIS_HEIGHT + lane.y + 13);
+    }
 
     // Axis ticks (under the spans).
     ctx.strokeStyle = 'rgba(128,128,128,0.4)';
@@ -429,7 +495,7 @@ function TimelineCanvas({
       }
     }
     ctx.restore();
-  }, [visible, ticks, width, height, selectedId, transform]);
+  }, [visible, lanes, ticks, width, height, selectedId, transform]);
 
   // Hit-test a click: invert the zoom transform, then find the span whose pixel
   // box contains the point (last match wins → topmost painted).
@@ -441,13 +507,23 @@ function TimelineCanvas({
     const py = e.clientY - bounds.top - transform.y;
     let hit: PositionedSpan | null = null;
     for (const s of spans) {
+      // A compaction breakpoint paints as a FULL-HEIGHT vertical rule
+      // (AXIS_HEIGHT→height), so its hit region is the whole track height (not its
+      // own lane band) — mirroring the SVG path's full-height transparent target.
+      // Every other span keeps its lane-band Y test.
+      if (s.compaction) {
+        if (py >= AXIS_HEIGHT && py <= height && px >= s.x - 4 && px <= s.x + 4) {
+          hit = s;
+        }
+        continue;
+      }
       const yTop = AXIS_HEIGHT + s.y + 6;
       const barHeight = s.height - 12;
       if (py < yTop || py > yTop + barHeight) {
         continue;
       }
-      const left = s.instant || s.compaction ? s.x - 4 : s.x;
-      const right = s.instant || s.compaction ? s.x + 4 : s.x + s.width;
+      const left = s.instant ? s.x - 4 : s.x;
+      const right = s.instant ? s.x + 4 : s.x + s.width;
       if (px >= left && px <= right) {
         hit = s;
       }
@@ -483,7 +559,7 @@ function TimelineCanvas({
                 onSpanClick(s);
               }}
             >
-              {labelForSpan(s)}
+              {`${laneLabelForSpan(s, laneLabels)} — ${labelForSpan(s)}`}
             </button>
           </li>
         ))}

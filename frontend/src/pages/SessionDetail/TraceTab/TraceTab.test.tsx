@@ -244,6 +244,21 @@ describe('TraceTab', () => {
     expect(dialog).toHaveAccessibleName(/Bash/i);
   });
 
+  it('passes the op variant (Trace tab is the only source with op metrics): the drawer shows the Payloads section', async () => {
+    // The Trace tab opens the drawer with { kind: 'op', op } — the only variant
+    // that renders the op's cost/tokens + a Payloads section. (The Timeline/Topology
+    // tabs pass span/node variants which omit those — ui-pages.md §Span detail drawer.)
+    const user = userEvent.setup();
+    render(<TraceTab detail={SAMPLE} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    await user.click(within(wf).getByRole('button', { name: /Bash/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/^Payloads$/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/no payloads for this op/i)).toBeInTheDocument();
+    // The op variant does NOT show the Timeline-tab "open in Trace tab" note.
+    expect(within(dialog).queryByText(/open this op in the Trace tab/i)).not.toBeInTheDocument();
+  });
+
   it('opens the drawer when an event-list row is clicked', async () => {
     const user = userEvent.setup();
     render(<TraceTab detail={SAMPLE} />);

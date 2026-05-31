@@ -272,6 +272,29 @@ Verdict: NOT mergeable on the P2; fix the P2 + 2 P3.
 - **Gates (orchestrator-run):** tsc 0, eslint 0, vitest **509 pass**, `go vet` + `go test -race ./...` clean, `scan-secrets` + `scan-ai-attribution` PASS.
 - Next: re-review (Round 4, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
 
+### Round 4 — 2026-06-01 (codex + glm + minimax) on `edd1050`
+
+minimax = "ready to merge". glm = "ready" but (digging with Explore subagents) flagged 2 P2 + 4 P3 it judged non-blockers. codex (decisive) CONFIRMED all R3 fixes + R1/R2 still correct, but found 2 NEW P2 + 2 P3 in the DELIVERED viz/drawer surface — all verified real on ground truth:
+
+- **P2 (codex): the shared drawer FABRICATED missing data as real zeroes.** `TimelineTab.spanToOpDetail` + `TopologyTab.nodeToOpDetail` synthesized an `OpDetail` with `cost_usd:0`, `tokens_in/out:0`, `payload_refs:[]`; the drawer renders Cost/Tokens unconditionally + "No payloads" (`SpanDetailDrawer.tsx:152-154,174`). So clicking a Timeline span or a Topology node showed `$0.00 / 0 tokens / No payloads` as FACT — contradicting the same op's real values in the Trace tab. **VERIFIED REAL.**
+- **P2 (codex): the Timeline Canvas path (>500 spans) lost lane identity** — `TimelineCanvas` painted no lane bands / no lane labels (SVG has both) and the keyboard-fallback buttons omitted the lane label → in the large path the operator could not tell which session lane a span belonged to (the lanes ARE the Timeline's purpose). **VERIFIED REAL.**
+- **P3 (codex): Canvas compaction breakpoint hit-test was restricted to the span's lane band** despite the full-height visual (SVG has a full-height target). **VERIFIED.**
+- **P3 (codex) + glm-P2: `buildOpTree` silently DROPPED ops on a `parent_op_id` cycle** (a closed cycle has no root → unreachable from `roots` → omitted from the tree). "No silent failures." **VERIFIED.**
+- **glm-P2: `forceWorker.ts` had no error handling** — a thrown layout = the worker dies silently, the graph stays empty forever with no log/fallback. "No silent failures." **VERIFIED.**
+- glm P3s (`maxTopologyNodes` mutable test var, duplicate tree-sessions query, raw `?metric=` echoed in a validation error) → minor backend code-quality, NOT user-facing, filed as **SOW-0034** (follow-up). glm's "cross-session `ctx_pct` = 0" is an ALREADY-DOCUMENTED limitation (no action).
+
+Verdict: NOT mergeable on the 2 P2 + the 2 no-silent-failure items; fix in-line, defer the 3 minor backend P3s to SOW-0034.
+
+### Round-4 fix cycle — 2026-06-01
+
+- **Drawer honesty (P2):** `SpanDetailDrawer` is now source-aware via a discriminated `detail` prop (`{kind:'op'|'span'|'node'}`): Trace → full op row + payloads (unchanged); Timeline span → kind/name/status/timing + an "open this op in the Trace tab" note (NO fabricated cost/tokens/payloads); per-session Topology node → kind/label/failure-% + the selected metric's REAL value. `spanToOpDetail`/`nodeToOpDetail` deleted. `ui-pages.md` drawer note rewritten (source-aware, never zeroes).
+- **Canvas lane identity (P2):** the Timeline Canvas path now paints lane zebra bands + lane labels (mirroring SVG, under the same zoom transform) and the keyboard-fallback buttons carry the lane/session label.
+- **Canvas compaction hit-test (P3):** a compaction breakpoint now hit-tests full-height in Canvas, matching its full-height draw + the SVG behavior.
+- **`buildOpTree` cycle (P3 / no-silent-failures):** a reachability + hoist pass keeps every op in the tree even under a `parent_op_id` cycle (unreachable cycle members are deterministically hoisted to roots) — none dropped. +cycle tests.
+- **`forceWorker` error handling (no-silent-failures):** the worker wraps the layout in try/catch and posts `{error}`; `ForceWorkerResponse` is now `{positioned} | {error}`; both consumers (TopologyTab + Topology) log with structured context and fall back to the inline layout so the graph never stays permanently empty. +error-path tests.
+- **Gates (orchestrator-run, combined final state):** tsc 0, eslint 0, vitest **531 pass (41 files)**, build main chunk **132.02 KB gzipped** (≤500), `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
+- Next: re-review (Round 5, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
+
 ## Outcome
 
 Pending.

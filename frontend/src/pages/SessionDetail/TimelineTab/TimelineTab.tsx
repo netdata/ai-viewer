@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { OpDetail } from '../../../api/types';
 import { useTimeline } from '../../../api/sessions';
 import { SpanDetailDrawer } from '../../../components/SpanDetailDrawer';
 import { LoadingState, ErrorState, EmptyState } from '../../../components/StatusViews';
@@ -18,8 +17,10 @@ import styles from './TimelineTab.module.css';
 // markers; compaction ops flagged), and renders it through TimelineRenderer.
 // Overlap between lanes is intentional (parallel sub-agents). Pan/zoom is
 // SOW-0006's default — shift+wheel zooms, plain wheel pans. Clicking a span opens
-// the shared SpanDetailDrawer (a timeline span maps to an op, so a minimal
-// OpDetail is synthesized exactly as TopologyTab does for a node).
+// the shared SpanDetailDrawer with a source-aware 'span' detail (ui-pages.md
+// §Span detail drawer): a timeline span carries ONLY the lane/span fields, so the
+// drawer shows status/start/end/derived-duration and points to the Trace tab for
+// token/cost/payload detail — it never fabricates op metrics as zero.
 
 const VIEW_WIDTH = 1000;
 const LANE_HEIGHT = 40;
@@ -27,38 +28,11 @@ const AXIS_HEIGHT = 22; // mirrors TimelineRenderer's reserved axis band.
 const MIN_TRACK_HEIGHT = 220;
 
 /**
- * spanToOpDetail synthesizes a minimal OpDetail so the shared SpanDetailDrawer
- * (an op-shaped panel) can present a clicked timeline span. A timeline span
- * carries only the lane-view fields (id/kind/name/start/end/status); the numeric
- * op fields the drawer also shows are not in the timeline payload, so they are
- * zeroed/nulled and there are no payloads. This reuses the drawer exactly
- * (SOW-0006 decision: "clicking any span/node/row opens the shared drawer")
- * without weakening its OpDetail contract — the duration is derived from the
- * span's own start/end so a closed span still shows its real duration.
+ * spanDurationUs derives a closed span's real duration from its own start/end;
+ * a running/point span (null end, or end < start under skew) has no duration.
  */
-function spanToOpDetail(s: PositionedSpan): OpDetail {
-  const { span } = s;
-  const durationUs =
-    span.end_ts !== null && span.end_ts >= span.start_ts ? span.end_ts - span.start_ts : null;
-  return {
-    id: span.id,
-    kind: span.kind,
-    name: span.name,
-    model: '',
-    provider: '',
-    start_ts: span.start_ts,
-    end_ts: span.end_ts,
-    duration_us: durationUs,
-    status: span.status,
-    error_class: null,
-    tokens_in: 0,
-    tokens_out: 0,
-    cost_usd: 0,
-    ctx_used: null,
-    ctx_max: null,
-    child_session_id: null,
-    payload_refs: [],
-  };
+function spanDurationUs(span: PositionedSpan['span']): number | null {
+  return span.end_ts !== null && span.end_ts >= span.start_ts ? span.end_ts - span.start_ts : null;
 }
 
 export function TimelineTab({ sessionId }: { sessionId: string }) {
@@ -121,7 +95,22 @@ export function TimelineTab({ sessionId }: { sessionId: string }) {
       )}
 
       <SpanDetailDrawer
-        op={selected ? spanToOpDetail(selected) : null}
+        detail={
+          selected
+            ? {
+                kind: 'span',
+                span: {
+                  id: selected.span.id,
+                  kind: selected.span.kind,
+                  name: selected.span.name,
+                  start_ts: selected.span.start_ts,
+                  end_ts: selected.span.end_ts,
+                  status: selected.span.status,
+                  duration_us: spanDurationUs(selected.span),
+                },
+              }
+            : null
+        }
         onClose={() => {
           setSelected(null);
         }}
