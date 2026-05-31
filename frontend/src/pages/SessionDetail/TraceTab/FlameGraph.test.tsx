@@ -110,6 +110,17 @@ describe('FlameGraph (SVG path)', () => {
     expect(onSelect).toHaveBeenCalledTimes(2);
   });
 
+  it('draws a point-event op as a tick (line) and a measured op as a cell (rect) — source-aware (P2#3)', () => {
+    const { roots: r2, flat: f2 } = treeFrom([
+      op({ id: 'root', kind: 'session', name: 'root-frame', start_ts: 0, end_ts: 1000, duration_us: 1000, parent_op_id: null }),
+      // claude-code-style point-event LLM child: end_ts == start_ts, no duration.
+      op({ id: 'pt', kind: 'llm', name: 'point', start_ts: 200, end_ts: 200, duration_us: null, parent_op_id: 'root' }),
+    ]);
+    render(<FlameGraph nodes={f2} roots={r2} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    expect(screen.getByRole('button', { name: /root-frame/i }).tagName.toLowerCase()).toBe('rect');
+    expect(screen.getByRole('button', { name: /point/i }).tagName.toLowerCase()).toBe('line');
+  });
+
   it('marks the selected cell with the selected style', () => {
     render(
       <FlameGraph nodes={flat} roots={roots} onSelect={vi.fn()} selectedId="tool" useCanvas={false} />,

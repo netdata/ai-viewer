@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { MouseEvent, UIEvent } from 'react';
+import type { KeyboardEvent, MouseEvent, UIEvent } from 'react';
 import type { TraceNode, WaterfallRow } from '../../../viz/trace';
 import {
   cullByY,
@@ -34,9 +34,13 @@ export interface WaterfallProps {
   selectedId: string | null;
   /** Force a render path (tests); defaults to op-count vs the SVG ceiling. */
   useCanvas: boolean;
+  /** Op ids that START a new turn (excluding the first): a separator rule is
+   *  drawn above each so inter-turn gaps read as "between turns" (decision #6,
+   *  Detailed view). Omitted when there is nothing to delineate. */
+  turnBoundaryIds?: ReadonlySet<string>;
 }
 
-export function Waterfall({ nodes, onSelect, selectedId, useCanvas }: WaterfallProps) {
+export function Waterfall({ nodes, onSelect, selectedId, useCanvas, turnBoundaryIds }: WaterfallProps) {
   const [t0, t1] = traceTimeBounds(nodes);
   const rows = layoutWaterfall(nodes, {
     width: TRACK_WIDTH,
@@ -45,6 +49,7 @@ export function Waterfall({ nodes, onSelect, selectedId, useCanvas }: WaterfallP
     t1,
   });
   const ticks = timeAxisTicks(t0, t1, TRACK_WIDTH, 6);
+  const boundaries = turnBoundaryIds ?? EMPTY_BOUNDARIES;
 
   if (useCanvas) {
     return (
@@ -53,22 +58,33 @@ export function Waterfall({ nodes, onSelect, selectedId, useCanvas }: WaterfallP
         ticks={ticks}
         onSelect={onSelect}
         selectedId={selectedId}
+        boundaries={boundaries}
       />
     );
   }
   return (
-    <WaterfallSvg rows={rows} ticks={ticks} onSelect={onSelect} selectedId={selectedId} />
+    <WaterfallSvg
+      rows={rows}
+      ticks={ticks}
+      onSelect={onSelect}
+      selectedId={selectedId}
+      boundaries={boundaries}
+    />
   );
 }
+
+/** Stable empty set so an omitted turnBoundaryIds prop is referentially stable. */
+const EMPTY_BOUNDARIES: ReadonlySet<string> = new Set<string>();
 
 interface InnerProps {
   rows: WaterfallRow[];
   ticks: { value: number; x: number }[];
   onSelect: (node: TraceNode) => void;
   selectedId: string | null;
+  boundaries: ReadonlySet<string>;
 }
 
-function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
+function WaterfallSvg({ rows, ticks, onSelect, selectedId, boundaries }: InnerProps) {
   const height = AXIS_HEIGHT + rows.length * ROW_HEIGHT;
   const totalWidth = LABEL_WIDTH + TRACK_WIDTH;
   // Spans new since the previous render (a live session_changed refetch grew the
@@ -99,6 +115,24 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
           ))}
         </g>
 
+        {/* Turn-boundary rules: a horizontal separator above each row that
+            starts a new turn, so inter-turn gaps read as "between turns"
+            (decision #6, Detailed view). */}
+        <g className={styles.axis}>
+          {rows.map((row) =>
+            boundaries.has(row.node.op.id) ? (
+              <line
+                key={`tb-${row.node.op.id}`}
+                x1={0}
+                x2={totalWidth}
+                y1={AXIS_HEIGHT + row.y}
+                y2={AXIS_HEIGHT + row.y}
+                className={styles.turnBoundary}
+              />
+            ) : null,
+          )}
+        </g>
+
         {rows.map((row) => {
           const { op } = row.node;
           const failed = op.error_class !== null;
@@ -110,6 +144,17 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
           ]
             .filter(Boolean)
             .join(' ');
+          const fill = colorForOpKind(op.kind);
+          const label = `${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`;
+          const activate = () => {
+            onSelect(row.node);
+          };
+          const onKeyDown = (e: KeyboardEvent<SVGElement>): void => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onSelect(row.node);
+            }
+          };
           return (
             <g key={op.id}>
               {/* Row label (kind/name) in the left gutter, indented by depth. */}
@@ -120,30 +165,52 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
               >
                 {op.name || op.id}
               </text>
-              {/* The clickable bar on the time track. */}
-              <rect
-                role="button"
-                aria-label={`${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`}
-                tabIndex={0}
-                x={LABEL_WIDTH + row.x}
-                y={y + 4}
-                width={row.width}
-                height={ROW_HEIGHT - 8}
-                rx={3}
-                fill={colorForOpKind(op.kind)}
-                stroke={failed ? colorForStatus('failed') : 'transparent'}
-                strokeWidth={failed ? 2 : 0}
-                className={barClass}
-                onClick={() => {
-                  onSelect(row.node);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    onSelect(row.node);
-                  }
-                }}
-              />
+              {/* Source-aware (P2#3): a point-event/running op (no measured span)
+                  is a vertical tick at start_ts; a measured op is a duration bar.
+                  A wide transparent hit-rect keeps the thin tick easy to click. */}
+              {row.instant ? (
+                <>
+                  <line
+                    role="button"
+                    aria-label={label}
+                    tabIndex={0}
+                    x1={LABEL_WIDTH + row.x}
+                    y1={y + 4}
+                    x2={LABEL_WIDTH + row.x}
+                    y2={y + ROW_HEIGHT - 4}
+                    stroke={failed ? colorForStatus('failed') : fill}
+                    strokeWidth={op.id === selectedId ? 3 : 2}
+                    className={barClass}
+                    onClick={activate}
+                    onKeyDown={onKeyDown}
+                  />
+                  <rect
+                    x={LABEL_WIDTH + row.x - 4}
+                    y={y + 4}
+                    width={8}
+                    height={ROW_HEIGHT - 8}
+                    fill="transparent"
+                    onClick={activate}
+                  />
+                </>
+              ) : (
+                <rect
+                  role="button"
+                  aria-label={label}
+                  tabIndex={0}
+                  x={LABEL_WIDTH + row.x}
+                  y={y + 4}
+                  width={row.width}
+                  height={ROW_HEIGHT - 8}
+                  rx={3}
+                  fill={fill}
+                  stroke={failed ? colorForStatus('failed') : 'transparent'}
+                  strokeWidth={failed ? 2 : 0}
+                  className={barClass}
+                  onClick={activate}
+                  onKeyDown={onKeyDown}
+                />
+              )}
             </g>
           );
         })}
@@ -152,7 +219,7 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId }: InnerProps) {
   );
 }
 
-function WaterfallCanvas({ rows, ticks, onSelect, selectedId }: InnerProps) {
+function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: InnerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const totalHeight = rows.length * ROW_HEIGHT;
@@ -191,24 +258,46 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId }: InnerProps) {
     for (const row of visible) {
       const { op } = row.node;
       const y = row.y - scrollTop;
-      ctx.fillStyle = colorForOpKind(op.kind);
-      ctx.fillRect(LABEL_WIDTH + row.x, y + 4, row.width, ROW_HEIGHT - 8);
-      if (op.error_class !== null) {
-        ctx.strokeStyle = colorForStatus('failed');
-        ctx.lineWidth = 2;
-        ctx.strokeRect(LABEL_WIDTH + row.x, y + 4, row.width, ROW_HEIGHT - 8);
+      const fill = colorForOpKind(op.kind);
+      // Turn-boundary rule above a row that starts a new turn (decision #6).
+      if (boundaries.has(op.id)) {
+        ctx.strokeStyle = 'rgba(128,128,128,0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(totalWidth, y);
+        ctx.stroke();
       }
+      // Source-aware (P2#3): point-event/running ops paint as a vertical tick at
+      // start_ts; measured ops paint as a duration bar.
+      if (row.instant) {
+        ctx.strokeStyle = op.error_class !== null ? colorForStatus('failed') : fill;
+        ctx.lineWidth = op.id === selectedId ? 3 : 2;
+        ctx.beginPath();
+        ctx.moveTo(LABEL_WIDTH + row.x, y + 4);
+        ctx.lineTo(LABEL_WIDTH + row.x, y + ROW_HEIGHT - 4);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = fill;
+        ctx.fillRect(LABEL_WIDTH + row.x, y + 4, row.width, ROW_HEIGHT - 8);
+        if (op.error_class !== null) {
+          ctx.strokeStyle = colorForStatus('failed');
+          ctx.lineWidth = 2;
+          ctx.strokeRect(LABEL_WIDTH + row.x, y + 4, row.width, ROW_HEIGHT - 8);
+        }
+        if (op.id === selectedId) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(LABEL_WIDTH + row.x - 1, y + 3, row.width + 2, ROW_HEIGHT - 6);
+        }
+      }
+      // Row label (selection highlight is drawn per shape above).
       ctx.fillStyle = 'rgba(160,160,170,0.95)';
       const indent = Math.min(row.depth * 10, LABEL_WIDTH - 40);
       ctx.fillText(op.name || op.id, 6 + indent, y + ROW_HEIGHT / 2, LABEL_WIDTH - 12 - indent);
-      if (op.id === selectedId) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(LABEL_WIDTH + row.x - 1, y + 3, row.width + 2, ROW_HEIGHT - 6);
-      }
     }
     ctx.restore();
-  }, [rows, ticks, scrollTop, selectedId, totalWidth]);
+  }, [rows, ticks, scrollTop, selectedId, totalWidth, boundaries]);
 
   const onScroll = (e: UIEvent<HTMLDivElement>): void => {
     setScrollTop(e.currentTarget.scrollTop);

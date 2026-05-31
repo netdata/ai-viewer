@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import type { UIEvent } from 'react';
 import type { TraceNode } from '../../../viz/trace';
-import { windowRange } from '../../../viz/trace';
+import { isInstantOp, windowRange } from '../../../viz/trace';
 import { colorForOpKind } from '../../../viz/color';
 import { formatDuration, formatTimestamp } from '../../../lib/format';
 import styles from './TraceTab.module.css';
@@ -97,7 +97,12 @@ export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
                     {op.name || op.id}
                   </button>
                 </td>
-                <td className={styles.colNum}>{formatDuration(op.duration_us)}</td>
+                {/* Point-event ops (no measured span) show an em-dash, not
+                    "0µs" — the source recorded no call duration (ui-pages.md
+                    §Trace, P2#3). Measured ops keep their real duration. */}
+                <td className={styles.colNum}>
+                  {isInstantOp(op) ? '—' : formatDuration(op.duration_us)}
+                </td>
                 <td className={failed ? styles.statusFailed : styles.colStatus}>{op.status}</td>
               </tr>
             );

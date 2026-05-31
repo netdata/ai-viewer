@@ -10,23 +10,28 @@ import {
 } from '../../../viz/trace';
 import { startThemeColorWatch } from '../../../viz/color';
 import { Waterfall } from './Waterfall';
+import { ByTurnWaterfall } from './ByTurnWaterfall';
 import { FlameGraph } from './FlameGraph';
 import { EventList } from './EventList';
 import styles from './TraceTab.module.css';
 
 // Trace (APM) tab — the centerpiece view (ui-pages.md §/sessions/:id #3). Builds
-// ONE op tree from the session-detail response (turns→ops; nesting derived by
-// temporal containment in viz/trace) and renders it three ways: a waterfall
-// (default), a flame-graph (toggle), and an always-present virtualized event
-// list. A click on any span/row opens the shared span detail drawer. Above the
-// SVG span ceiling the visuals switch to Canvas + culling (viz/trace) so a big
-// trace stays fast. Op-kind/status colors come from theme tokens (viz/color),
-// re-read on a data-theme MutationObserver.
+// ONE op tree from the session-detail response (turns→ops; nesting derived from
+// the authoritative parent_op_id in viz/trace) and renders it as: a waterfall
+// (default) with a Detailed|By-turn sub-view (decision #6), a flame-graph
+// (toggle), and an always-present virtualized event list. Source-aware: a
+// point-event op (end_ts == start_ts) draws as an instant tick, never a
+// zero-width bar (decision #7). A click on any span/row opens the shared span
+// detail drawer. Above the SVG span ceiling the visuals switch to Canvas +
+// culling (viz/trace) so a big trace stays fast. Op-kind/status colors come from
+// theme tokens (viz/color), re-read on a data-theme MutationObserver.
 
 type View = 'waterfall' | 'flame';
+type WaterfallMode = 'detailed' | 'byturn';
 
 export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
   const [view, setView] = useState<View>('waterfall');
+  const [waterfallMode, setWaterfallMode] = useState<WaterfallMode>('detailed');
   const [selected, setSelected] = useState<TraceNode | null>(null);
 
   // Keep the viz palette in sync with theme flips while this tab is mounted.
@@ -34,6 +39,9 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
 
   const roots = useMemo(() => buildOpTree(detail.turns), [detail.turns]);
   const flat = useMemo(() => flattenTree(roots), [roots]);
+  // Op ids that start a new turn (after the first) — for the Detailed view's
+  // turn-boundary rules (decision #6).
+  const turnBoundaryIds = useMemo(() => turnBoundaries(detail), [detail]);
 
   const useCanvas = flat.length > SVG_SPAN_CEILING;
   const selectedId = selected?.op.id ?? null;
@@ -70,24 +78,58 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
             <span>Flame</span>
           </label>
         </fieldset>
+
+        {/* The Detailed|By-turn sub-toggle applies ONLY to the waterfall view
+            (decision #6); it is hidden under flame. */}
+        {view === 'waterfall' ? (
+          <fieldset className={styles.viewToggle}>
+            <legend className={styles.srOnly}>Detail level</legend>
+            <label className={styles.toggleOption}>
+              <input
+                type="radio"
+                name="trace-waterfall-mode"
+                checked={waterfallMode === 'detailed'}
+                onChange={() => {
+                  setWaterfallMode('detailed');
+                }}
+              />
+              <span>Detailed</span>
+            </label>
+            <label className={styles.toggleOption}>
+              <input
+                type="radio"
+                name="trace-waterfall-mode"
+                checked={waterfallMode === 'byturn'}
+                onChange={() => {
+                  setWaterfallMode('byturn');
+                }}
+              />
+              <span>By-turn</span>
+            </label>
+          </fieldset>
+        ) : null}
+
         <span className={styles.opCount}>{flat.length} ops</span>
       </div>
 
       <div className={styles.vizArea}>
-        {view === 'waterfall' ? (
-          <Waterfall
-            nodes={flat}
-            onSelect={setSelected}
-            selectedId={selectedId}
-            useCanvas={useCanvas}
-          />
-        ) : (
+        {view === 'flame' ? (
           <FlameGraph
             nodes={flat}
             roots={roots}
             onSelect={setSelected}
             selectedId={selectedId}
             useCanvas={useCanvas}
+          />
+        ) : waterfallMode === 'byturn' ? (
+          <ByTurnWaterfall turns={detail.turns} onSelect={setSelected} selectedId={selectedId} />
+        ) : (
+          <Waterfall
+            nodes={flat}
+            onSelect={setSelected}
+            selectedId={selectedId}
+            useCanvas={useCanvas}
+            turnBoundaryIds={turnBoundaryIds}
           />
         )}
       </div>
@@ -107,4 +149,31 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
       />
     </div>
   );
+}
+
+/**
+ * turnBoundaries collects the op id that starts each turn AFTER the first — the
+ * earliest-starting op in that turn — so the Detailed waterfall draws a
+ * separator rule above it (decision #6). The first turn gets no rule (nothing
+ * precedes it); turns with no ops are skipped.
+ */
+function turnBoundaries(detail: SessionDetailResponse): ReadonlySet<string> {
+  const ids = new Set<string>();
+  detail.turns.forEach((turn, index) => {
+    if (index === 0 || turn.ops.length === 0) {
+      return;
+    }
+    let firstId = turn.ops[0]?.id;
+    let firstStart = turn.ops[0]?.start_ts ?? 0;
+    for (const op of turn.ops) {
+      if (op.start_ts < firstStart) {
+        firstStart = op.start_ts;
+        firstId = op.id;
+      }
+    }
+    if (firstId !== undefined) {
+      ids.add(firstId);
+    }
+  });
+  return ids;
 }

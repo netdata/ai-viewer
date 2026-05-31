@@ -82,9 +82,9 @@ function detail(turns: TurnDetail[]): SessionDetailResponse {
 
 const SAMPLE = detail([
   turn(1, [
-    op({ id: 'root', kind: 'session', name: 'root-span', start_ts: 0, end_ts: 1000, duration_us: 1000 }),
-    op({ id: 'llm-1', kind: 'llm', name: 'gen', start_ts: 100, end_ts: 400, duration_us: 300 }),
-    op({ id: 'tool-1', kind: 'tool', name: 'Bash', start_ts: 500, end_ts: 900, duration_us: 400 }),
+    op({ id: 'root', kind: 'session', name: 'root-span', start_ts: 0, end_ts: 1000, duration_us: 1000, parent_op_id: null }),
+    op({ id: 'llm-1', kind: 'llm', name: 'gen', start_ts: 100, end_ts: 400, duration_us: 300, parent_op_id: 'root' }),
+    op({ id: 'tool-1', kind: 'tool', name: 'Bash', start_ts: 500, end_ts: 900, duration_us: 400, parent_op_id: 'root' }),
     op({
       id: 'tool-fail',
       kind: 'tool',
@@ -94,7 +94,19 @@ const SAMPLE = detail([
       duration_us: 70,
       status: 'failed',
       error_class: 'ToolError',
+      parent_op_id: 'root',
     }),
+  ]),
+]);
+
+// A two-turn session for the By-turn view: each turn rolls up to ONE bar.
+const TWO_TURNS = detail([
+  turn(1, [
+    op({ id: 't1-a', kind: 'llm', name: 'gen-1', start_ts: 0, end_ts: 300, duration_us: 300, parent_op_id: null }),
+    op({ id: 't1-b', kind: 'tool', name: 'Read', start_ts: 320, end_ts: 600, duration_us: 280, parent_op_id: null }),
+  ]),
+  turn(2, [
+    op({ id: 't2-a', kind: 'tool', name: 'Write', start_ts: 700, end_ts: 1200, duration_us: 500, parent_op_id: null }),
   ]),
 ]);
 
@@ -137,6 +149,59 @@ describe('TraceTab', () => {
     // One interactive span element per op (root, llm-1, tool-1, tool-fail).
     const spans = within(wf).getAllByRole('button');
     expect(spans).toHaveLength(4);
+  });
+
+  it('defaults the waterfall to the Detailed mode and offers a By-turn toggle (decision #6)', () => {
+    render(<TraceTab detail={SAMPLE} />);
+    // Within the waterfall view, a Detailed|By-turn sub-toggle exists, Detailed
+    // selected by default.
+    expect(screen.getByRole('radio', { name: /detailed/i })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /by.?turn/i })).not.toBeChecked();
+    // Detailed shows the per-op waterfall (one bar per op).
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    expect(within(wf).getAllByRole('button')).toHaveLength(4);
+  });
+
+  it('switches the waterfall to By-turn: one aggregated bar per turn (decision #6)', async () => {
+    const user = userEvent.setup();
+    render(<TraceTab detail={TWO_TURNS} />);
+    await user.click(screen.getByRole('radio', { name: /by.?turn/i }));
+    expect(screen.getByRole('radio', { name: /by.?turn/i })).toBeChecked();
+    // The by-turn view rolls each turn up to ONE bar — 2 turns → 2 turn bars.
+    const byTurn = screen.getByRole('group', { name: /by.?turn view/i });
+    const turnBars = within(byTurn).getAllByRole('button');
+    expect(turnBars).toHaveLength(2);
+    expect(turnBars[0]).toHaveAccessibleName(/turn 1 — 2 ops/i);
+    expect(turnBars[1]).toHaveAccessibleName(/turn 2 — 1 op/i);
+  });
+
+  it('expands a turn into its ops when its By-turn bar is clicked (decision #6)', async () => {
+    const user = userEvent.setup();
+    render(<TraceTab detail={TWO_TURNS} />);
+    await user.click(screen.getByRole('radio', { name: /by.?turn/i }));
+    const byTurn = screen.getByRole('group', { name: /by.?turn view/i });
+    // The expanded-turn region (the per-op waterfall) is not present until a
+    // turn is expanded. (The op names appear in the always-on event list, so we
+    // assert on the expand region, not document-wide text.)
+    expect(screen.queryByRole('region', { name: /turn 1 operations/i })).not.toBeInTheDocument();
+    // Click turn 1's bar (the first turn bar).
+    const bars = within(byTurn).getAllByRole('button');
+    await user.click(bars[0] as HTMLElement);
+    // The turn's individual ops are now visible in the expanded region.
+    const region = screen.getByRole('region', { name: /turn 1 operations/i });
+    expect(within(region).getByText('gen-1')).toBeInTheDocument();
+    expect(within(region).getByText('Read')).toBeInTheDocument();
+    // Turn 2's op is NOT in turn 1's expanded region.
+    expect(within(region).queryByText('Write')).not.toBeInTheDocument();
+  });
+
+  it('hides the By-turn sub-toggle when the flame view is active', async () => {
+    const user = userEvent.setup();
+    render(<TraceTab detail={SAMPLE} />);
+    await user.click(screen.getByRole('radio', { name: /flame/i }));
+    // Detailed/By-turn only apply to the waterfall; they are gone under flame.
+    expect(screen.queryByRole('radio', { name: /by.?turn/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /detailed/i })).not.toBeInTheDocument();
   });
 
   it('toggles to the flame-graph view', async () => {

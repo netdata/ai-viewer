@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { MouseEvent } from 'react';
+import type { KeyboardEvent, MouseEvent } from 'react';
 import type { FlameCell, TraceNode } from '../../../viz/trace';
 import { layoutFlame } from '../../../viz/trace';
 import { colorForOpKind, colorForStatus } from '../../../viz/color';
@@ -51,31 +51,55 @@ export function FlameGraph({ roots, onSelect, selectedId, useCanvas }: FlameGrap
         {cells.map((cell) => {
           const { op } = cell.node;
           const failed = op.error_class !== null;
+          const fill = colorForOpKind(op.kind);
+          const label = `${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`;
+          const cls = op.id === selectedId ? styles.barSelected : styles.bar;
+          const activate = () => {
+            onSelect(cell.node);
+          };
+          const onKeyDown = (e: KeyboardEvent<SVGElement>): void => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onSelect(cell.node);
+            }
+          };
           return (
             <g key={op.id}>
-              <rect
-                role="button"
-                aria-label={`${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`}
-                tabIndex={0}
-                x={cell.x}
-                y={cell.y}
-                width={cell.width}
-                height={cell.height - 1}
-                fill={colorForOpKind(op.kind)}
-                stroke={failed ? colorForStatus('failed') : 'transparent'}
-                strokeWidth={failed ? 2 : 0}
-                className={op.id === selectedId ? styles.barSelected : styles.bar}
-                onClick={() => {
-                  onSelect(cell.node);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    onSelect(cell.node);
-                  }
-                }}
-              />
-              {cell.width > 36 ? (
+              {/* Source-aware (P2#3): a point-event/running op is a vertical tick
+                  at its x; a measured op is a duration cell. */}
+              {cell.instant ? (
+                <line
+                  role="button"
+                  aria-label={label}
+                  tabIndex={0}
+                  x1={cell.x}
+                  y1={cell.y}
+                  x2={cell.x}
+                  y2={cell.y + cell.height - 1}
+                  stroke={failed ? colorForStatus('failed') : fill}
+                  strokeWidth={op.id === selectedId ? 3 : 2}
+                  className={cls}
+                  onClick={activate}
+                  onKeyDown={onKeyDown}
+                />
+              ) : (
+                <rect
+                  role="button"
+                  aria-label={label}
+                  tabIndex={0}
+                  x={cell.x}
+                  y={cell.y}
+                  width={cell.width}
+                  height={cell.height - 1}
+                  fill={fill}
+                  stroke={failed ? colorForStatus('failed') : 'transparent'}
+                  strokeWidth={failed ? 2 : 0}
+                  className={cls}
+                  onClick={activate}
+                  onKeyDown={onKeyDown}
+                />
+              )}
+              {!cell.instant && cell.width > 36 ? (
                 <text
                   x={cell.x + 4}
                   y={cell.y + cell.height / 2 + 3}
@@ -126,7 +150,19 @@ function FlameCanvas({
     ctx.textBaseline = 'middle';
     for (const cell of cells) {
       const { op } = cell.node;
-      ctx.fillStyle = colorForOpKind(op.kind);
+      const fill = colorForOpKind(op.kind);
+      // Source-aware (P2#3): point-event/running ops paint as a vertical tick;
+      // measured ops paint as a duration cell with an optional label.
+      if (cell.instant) {
+        ctx.strokeStyle = op.error_class !== null ? colorForStatus('failed') : fill;
+        ctx.lineWidth = op.id === selectedId ? 3 : 2;
+        ctx.beginPath();
+        ctx.moveTo(cell.x, cell.y);
+        ctx.lineTo(cell.x, cell.y + cell.height - 1);
+        ctx.stroke();
+        continue;
+      }
+      ctx.fillStyle = fill;
       ctx.fillRect(cell.x, cell.y, cell.width, cell.height - 1);
       if (op.error_class !== null) {
         ctx.strokeStyle = colorForStatus('failed');
@@ -153,7 +189,11 @@ function FlameCanvas({
     const px = e.clientX - bounds.left;
     const py = e.clientY - bounds.top;
     for (const cell of cells) {
-      if (px >= cell.x && px <= cell.x + cell.width && py >= cell.y && py <= cell.y + cell.height) {
+      // An instant tick is ~0px wide; give it a small click tolerance so it
+      // stays selectable, mirroring the SVG tick's transparent hit target.
+      const left = cell.instant ? cell.x - 4 : cell.x;
+      const right = cell.instant ? cell.x + 4 : cell.x + cell.width;
+      if (px >= left && px <= right && py >= cell.y && py <= cell.y + cell.height) {
         onSelect(cell.node);
         return;
       }

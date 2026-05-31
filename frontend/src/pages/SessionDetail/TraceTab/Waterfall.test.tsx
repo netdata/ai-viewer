@@ -127,6 +127,21 @@ describe('Waterfall (SVG path)', () => {
     expect(bar.getAttribute('class') ?? '').toMatch(/barSelected/);
   });
 
+  it('draws a point-event op as a tick (line) and a measured op as a bar (rect) — source-aware (P2#3)', () => {
+    const mixed = nodesFrom([
+      op({ id: 'm', name: 'measured', start_ts: 0, end_ts: 400, duration_us: 400 }),
+      // claude-code-style point event: end_ts == start_ts, no duration.
+      op({ id: 'p', name: 'point', kind: 'llm', start_ts: 500, end_ts: 500, duration_us: null }),
+    ]);
+    render(<Waterfall nodes={mixed} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const measured = screen.getByRole('button', { name: /measured/i });
+    const point = screen.getByRole('button', { name: /point/i });
+    // The measured op is a rect bar; the point event is a vertical tick (line),
+    // never a zero-width rect.
+    expect(measured.tagName.toLowerCase()).toBe('rect');
+    expect(point.tagName.toLowerCase()).toBe('line');
+  });
+
   it('does NOT fade any bar on the first render (initial load is not an append)', () => {
     installMatchMedia(false); // motion allowed
     render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);

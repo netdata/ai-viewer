@@ -9,13 +9,17 @@ import type { OpDetail, TurnDetail } from '../api/types';
 //    style), nested by parent → children → child-session transitions;
 //  - flame-graph: stacked spans by depth.
 //
-// The wire opDetail carries NO explicit parent_op_id
-// (internal/presenter/session_detail.go), so parent/child nesting is derived
-// from TEMPORAL CONTAINMENT — the canonical derivation for APM waterfalls
-// without explicit span links: op B is a child of the tightest enclosing op A
-// whose closed window [start,end] contains B's start. A child_session_id op is
-// a cross-session boundary and is always a LEAF in this session's tree (the
-// child session's ops are fetched and rendered separately).
+// Nesting is the AUTHORITATIVE parentage the wire opDetail carries in
+// `parent_op_id` (ops.parent_op_id; internal/presenter/session_detail.go always
+// emits the key, value or null). Op B is a child of op A iff
+// B.parent_op_id === A.id; a null/absent/dangling parent_op_id makes B a
+// top-level (root) op within the session. This is the span-link model APM tools
+// use — it does NOT infer nesting from time, so a point event
+// (end_ts == start_ts, e.g. a claude-code LLM/reasoning message) can never
+// become a FALSE ancestor of a later op the way temporal containment did.
+// A child_session_id op is a cross-session boundary and is always a LEAF in this
+// session's tree (the child session's ops are fetched and rendered separately);
+// any op that names a boundary as its parent is hoisted to top-level.
 
 /** TraceNode is one op plus its derived tree position. */
 export interface TraceNode {
@@ -24,16 +28,20 @@ export interface TraceNode {
   children: TraceNode[];
 }
 
-// Internal sortable record carrying tie-break keys (turn seq, original order).
-interface Indexed {
-  op: OpDetail;
-  turnSeq: number;
-  order: number;
+/** end returns an op's closed end, or null when it is still ongoing/instant. */
+function closedEnd(op: OpDetail): number | null {
+  return op.end_ts !== null && op.end_ts > op.start_ts ? op.end_ts : null;
 }
 
-/** end returns an op's closed end, or null when it is still ongoing. */
-function closedEnd(op: OpDetail): number | null {
-  return op.end_ts !== null && op.end_ts >= op.start_ts ? op.end_ts : null;
+/**
+ * isInstantOp is true when an op has no measured forward window — a null end_ts
+ * (running / unrecorded) or a point event (end_ts == start_ts, e.g. a
+ * claude-code LLM/reasoning message recorded at one timestamp). Such ops draw as
+ * an instant tick/marker, never a zero-width bar (ui-pages.md §Trace
+ * source-aware rendering; mirrors viz/timeline.isInstant).
+ */
+export function isInstantOp(op: OpDetail): boolean {
+  return op.end_ts === null || op.end_ts <= op.start_ts;
 }
 
 /** A session-transition op (spawns a child session) is a leaf in this tree. */
@@ -42,51 +50,72 @@ function isLeafBoundary(op: OpDetail): boolean {
 }
 
 /**
- * buildOpTree flattens all turns' ops and nests them by temporal containment.
- * Siblings (and roots) are ordered by start_ts, then turn seq, then original
- * op order — a total, deterministic ordering.
+ * buildOpTree flattens all turns' ops and nests them by the authoritative
+ * `parent_op_id` parentage. Siblings (and roots) are ordered by start_ts, then
+ * turn seq, then original op order — a total, deterministic ordering.
+ *
+ * Edge cases (all → top-level): a null/absent parent_op_id; a parent_op_id that
+ * references an unknown id (dangling); a parent_op_id that points at a
+ * cross-session boundary op (which is a leaf in this tree). A boundary op never
+ * receives children regardless of what points at it.
  */
 export function buildOpTree(turns: TurnDetail[]): TraceNode[] {
-  const items: Indexed[] = [];
+  // First pass: materialize a node per op, preserving (turnSeq, order) for a
+  // deterministic sibling sort, and index by op id for parent resolution.
+  const nodes: TraceNode[] = [];
+  const byId = new Map<string, TraceNode>();
+  const keys = new Map<string, { turnSeq: number; order: number }>();
   let order = 0;
   for (const turn of turns) {
     for (const op of turn.ops) {
-      items.push({ op, turnSeq: turn.seq, order: order++ });
+      const node: TraceNode = { op, depth: 0, children: [] };
+      nodes.push(node);
+      // A duplicate op id should not happen, but if it did the first wins as the
+      // parent target (deterministic) — later ones still render as their own row.
+      if (!byId.has(op.id)) {
+        byId.set(op.id, node);
+      }
+      keys.set(op.id, { turnSeq: turn.seq, order: order++ });
     }
   }
-  if (items.length === 0) {
+  if (nodes.length === 0) {
     return [];
   }
 
-  items.sort(
-    (a, b) =>
-      a.op.start_ts - b.op.start_ts || a.turnSeq - b.turnSeq || a.order - b.order,
-  );
-
+  // Second pass: attach each node to its parent, or collect it as a root. A
+  // parent that is a cross-session boundary cannot own children (it is a leaf),
+  // so such a child is hoisted to top-level.
   const roots: TraceNode[] = [];
-  // Stack of open ancestors (closed windows that may still contain the next op).
-  const stack: { node: TraceNode; end: number }[] = [];
-
-  for (const item of items) {
-    const node: TraceNode = { op: item.op, depth: 0, children: [] };
-    // Pop ancestors whose window ends before this op starts.
-    while (stack.length > 0 && (stack[stack.length - 1] as { end: number }).end < item.op.start_ts) {
-      stack.pop();
-    }
-    const parent = stack[stack.length - 1];
-    if (parent) {
-      node.depth = parent.node.depth + 1;
-      parent.node.children.push(node);
+  for (const node of nodes) {
+    const parentId = node.op.parent_op_id;
+    const parent = parentId != null ? byId.get(parentId) : undefined;
+    if (parent && parent !== node && !isLeafBoundary(parent.op)) {
+      parent.children.push(node);
     } else {
       roots.push(node);
     }
-    // This op can itself contain later ops only if it has a closed window AND
-    // it is not a cross-session boundary (which is always a leaf).
-    const e = closedEnd(item.op);
-    if (e !== null && !isLeafBoundary(item.op)) {
-      stack.push({ node, end: e });
-    }
   }
+
+  // Third pass: order siblings deterministically and assign depth top-down.
+  const sortKey = (n: TraceNode): [number, number, number] => {
+    const k = keys.get(n.op.id) ?? { turnSeq: 0, order: 0 };
+    return [n.op.start_ts, k.turnSeq, k.order];
+  };
+  const cmp = (a: TraceNode, b: TraceNode): number => {
+    const ka = sortKey(a);
+    const kb = sortKey(b);
+    return ka[0] - kb[0] || ka[1] - kb[1] || ka[2] - kb[2];
+  };
+  const assign = (siblings: TraceNode[], depth: number): void => {
+    siblings.sort(cmp);
+    for (const n of siblings) {
+      n.depth = depth;
+      if (n.children.length > 0) {
+        assign(n.children, depth + 1);
+      }
+    }
+  };
+  assign(roots, 0);
 
   return roots;
 }
@@ -164,14 +193,20 @@ export interface WaterfallRow {
   /** Row vertical position. */
   y: number;
   height: number;
+  /** True for a point-event/running op: the renderer draws a tick, not a bar
+   *  (source-aware rendering, ui-pages.md §Trace). */
+  instant: boolean;
 }
 
 /**
  * layoutWaterfall maps each op onto a horizontal bar positioned by start_ts and
  * sized by duration on the shared [t0,t1] → [0,width] scale, and stacks the rows
- * vertically by their pre-order index. A null-end (ongoing) op extends to t1. A
+ * vertically by their pre-order index. A measured op (closed forward window) is a
+ * bar; a point-event/running op is flagged `instant` so the renderer paints a
+ * tick at its start_ts instead of a zero-width bar. A null-end (ongoing) op's bar
+ * geometry extends to t1 (used only if a caller chooses to draw it as a bar). A
  * zero-width window is handled without dividing by zero (every bar collapses to
- * x=0). Bars are clamped to minBarWidth so a zero-duration op stays visible.
+ * x=0). Bars are clamped to minBarWidth so a tiny op stays visible.
  */
 export function layoutWaterfall(nodes: TraceNode[], opts: WaterfallOpts): WaterfallRow[] {
   const { width, rowHeight, t0, t1 } = opts;
@@ -192,6 +227,7 @@ export function layoutWaterfall(nodes: TraceNode[], opts: WaterfallOpts): Waterf
       width: w,
       y: rowIndex * rowHeight,
       height: rowHeight,
+      instant: isInstantOp(node.op),
     };
   });
 }
@@ -214,6 +250,9 @@ export interface FlameCell {
   width: number;
   y: number;
   height: number;
+  /** True for a point-event/running op: the renderer draws a tick, not a cell
+   *  (source-aware rendering, ui-pages.md §Trace). */
+  instant: boolean;
 }
 
 /** span returns an op's duration for flame sizing (closed window or 0). */
@@ -263,7 +302,15 @@ export function layoutFlame(roots: TraceNode[], opts: FlameOpts): FlameCell[] {
     const safeWin = winSpan > 0 ? winSpan : 1;
     const x = boxX + ((start - winStart) / safeWin) * boxW;
     const w = Math.max(minCellWidth, (span / safeWin) * boxW);
-    cells.push({ node, depth, x, width: w, y: depth * rowHeight, height: rowHeight });
+    cells.push({
+      node,
+      depth,
+      x,
+      width: w,
+      y: depth * rowHeight,
+      height: rowHeight,
+      instant: isInstantOp(node.op),
+    });
     const childSpan = span > 0 ? span : safeWin;
     for (const child of node.children) {
       place(child, x, w, start, childSpan, depth + 1);
@@ -274,6 +321,63 @@ export function layoutFlame(roots: TraceNode[], opts: FlameOpts): FlameCell[] {
     place(root, 0, width, traceStart, traceSpan, 0);
   }
   return cells;
+}
+
+// ── By-turn rollup ───────────────────────────────────────────────────────────
+
+/**
+ * TurnRollup is one turn aggregated into a single waterfall bar (ui-pages.md
+ * §Trace "By-turn" view): the bar spans the turn's first op start → last op end,
+ * carries the op count, and keeps the turn's ops (as pre-order TraceNodes) so a
+ * click can expand the turn into its individual ops without re-deriving the tree.
+ */
+export interface TurnRollup {
+  turn: TurnDetail;
+  /** Earliest op start in the turn (µs). */
+  start_ts: number;
+  /** Latest measured op end in the turn (µs), or null when no op closed — drawn
+   *  as ongoing/instant, mirroring a null-end op. */
+  end_ts: number | null;
+  op_count: number;
+  /** The turn's ops in pre-order (the same tree buildOpTree derives, scoped to
+   *  this turn) for expand-on-click. */
+  ops: TraceNode[];
+}
+
+/**
+ * buildTurnRollup aggregates each turn into one TurnRollup. The bounds come from
+ * the turn's OPS (not the turn header) so the bar matches what the Detailed view
+ * draws: start = min op start_ts, end = max op closed end (null if no op closed).
+ * Turns with no ops are skipped (nothing to draw). The per-turn op tree is built
+ * the same way as the whole-session tree, so expand-on-click shows identical
+ * nesting and ordering.
+ */
+export function buildTurnRollup(turns: TurnDetail[]): TurnRollup[] {
+  const out: TurnRollup[] = [];
+  for (const turn of turns) {
+    if (turn.ops.length === 0) {
+      continue;
+    }
+    let lo = Infinity;
+    let hi: number | null = null;
+    for (const op of turn.ops) {
+      if (op.start_ts < lo) {
+        lo = op.start_ts;
+      }
+      const e = closedEnd(op);
+      if (e !== null && (hi === null || e > hi)) {
+        hi = e;
+      }
+    }
+    out.push({
+      turn,
+      start_ts: lo,
+      end_ts: hi,
+      op_count: turn.ops.length,
+      ops: flattenTree(buildOpTree([turn])),
+    });
+  }
+  return out;
 }
 
 // ── Viewport culling / windowing ─────────────────────────────────────────────

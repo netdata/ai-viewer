@@ -93,6 +93,26 @@ describe('EventList', () => {
     expect(within(table).queryByText('name-0')).not.toBeInTheDocument();
   });
 
+  it('shows an em-dash (not 0µs) for a point-event op with no measured duration (P2#3)', () => {
+    const nodes = nodesFrom([
+      // A measured tool op (real duration) and a claude-code-style point-event
+      // LLM op (end_ts == start_ts, duration_us null) recorded at one timestamp.
+      op({ id: 'tool', name: 'Bash', start_ts: 0, end_ts: 400, duration_us: 400 }),
+      op({ id: 'llm', kind: 'llm', name: 'gen', start_ts: 500, end_ts: 500, duration_us: null }),
+    ]);
+    render(<EventList nodes={nodes} onSelect={vi.fn()} selectedId={null} />);
+    const table = screen.getByRole('table', { name: /event list/i });
+    const rows = within(table).getAllByRole('row');
+    // Row order: header, tool (measured), llm (point event).
+    const llmRow = rows[2] as HTMLElement;
+    // The duration cell renders an em-dash, not "0µs"/"0".
+    expect(within(llmRow).getByText('—')).toBeInTheDocument();
+    expect(within(llmRow).queryByText('0µs')).not.toBeInTheDocument();
+    // The measured op still shows its real duration.
+    const toolRow = rows[1] as HTMLElement;
+    expect(within(toolRow).getByText('400µs')).toBeInTheDocument();
+  });
+
   it('highlights the selected row and renders a failed op with the error style', () => {
     const nodes = nodesFrom([
       op({ id: 'ok', name: 'ok-op', start_ts: 0, end_ts: 10, duration_us: 10 }),
