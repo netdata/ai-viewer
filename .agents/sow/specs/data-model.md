@@ -400,7 +400,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='5', key='created_at' value=...
+-- key='version' value='6', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
@@ -434,6 +434,13 @@ Migration history:
   outcome — a schema-shape change, or served data like these durations; an
   ingester-only migration that serve never reads (e.g. `0002_source_progress.sql`)
   stays version-neutral.
+- `0006_rollups_and_fts.sql` — adds the time-bucketed rollup tables
+  (`rollup_hourly`, `rollup_daily`) and the FTS5 search tables (`fts_ops`,
+  `fts_logs`) defined in §Rollup tables (SOW-0007), and bumps
+  `schema_meta.version` to `'6'` in lockstep with `presenter.SchemaVersion`. Serve
+  reads all four tables (`/api/stats/aggregate`, `/api/stats/top`, `/api/search`,
+  and the rollup-backed `/api/stats`), so a v6 serve binary refuses to start
+  against a pre-0006 store.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB
@@ -483,9 +490,81 @@ The ingester's 5-second resolver pass handles out-of-order parent/child arrival 
 
 For statistics views over an arbitrary timeframe:
 
-- **Time-bucketed materialized rollups** (per-hour and per-day) per source, per model, per tool, per agent, per provider, per cwd. Refreshed incrementally by the ingester. Avoids `SUM` over millions of rows on every page load.
-- Schema for rollup tables is defined in SOW-0007 (Statistics & Analytics).
-- Phase 1 uses live aggregates over `ops`; rollups land in Phase 4.
+- **Time-bucketed materialized rollups** (per-hour and per-day), additive across the dimensions model, provider, tool, agent, cwd, source-format, and a `total` row. Refreshed incrementally by the ingester. Avoids `SUM` over millions of rows on every page load.
+- The concrete schema is the `rollup_hourly` / `rollup_daily` tables defined in §Rollup tables (SOW-0007) below; the deep-search index is the `fts_ops` / `fts_logs` FTS5 tables in the same section.
+- Phase 1 uses live aggregates over `ops`; the materialized rollups land in SOW-0007 (Statistics & Analytics). The current (open) hour is never materialized — the query layer `UNION ALL`s a live aggregate over `ops` for the open hour with the closed-hour rollups (see §Rollup tables).
+
+## Rollup tables (SOW-0007)
+
+Time-bucketed, **additive**, long-form rollups that back the statistics dashboard (`/stats`) and the `/api/stats`, `/api/stats/aggregate`, `/api/stats/top` endpoints (`rest-api.md`). Refreshed incrementally by the ingester after each batch commit and rebuildable from scratch by a one-shot backfill (`ingester.md` §Rollup Refresh and FTS5 Maintenance). The schema is **long-form** — one row per dimension value per bucket — deliberately NOT the `model × provider × tool × agent × cwd` cross-product, which would explode row count combinatorially.
+
+```sql
+CREATE TABLE rollup_hourly (
+    bucket_ts          INTEGER NOT NULL,   -- UTC hour start, µs: (start_ts / 3600000000) * 3600000000
+    source_format      TEXT NOT NULL,      -- 'aiagent_v3'|'aiagent_v2'|'claude_code'|'codex'|'opencode'
+    dimension          TEXT NOT NULL,      -- 'total'|'model'|'provider'|'tool'|'agent'|'cwd'
+    dimension_value    TEXT NOT NULL,      -- concrete value; '' for dimension='total'; "<ns>.<name>" (or "<name>" when namespace NULL) for 'tool'
+    op_count           INTEGER NOT NULL DEFAULT 0,
+    tokens_in          INTEGER NOT NULL DEFAULT 0,
+    tokens_out         INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read  INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    cost_usd           REAL NOT NULL DEFAULT 0.0,
+    failures           INTEGER NOT NULL DEFAULT 0,
+    duration_us        INTEGER NOT NULL DEFAULT 0,  -- SUM of CLOSED ops' duration_us; running ops contribute 0
+    session_starts     INTEGER NOT NULL DEFAULT 0,  -- count of sessions whose start_ts is in the bucket; only meaningful for total|agent|cwd (0 for model|provider|tool)
+    PRIMARY KEY (bucket_ts, source_format, dimension, dimension_value)
+);
+
+CREATE TABLE rollup_daily (
+    bucket_ts          INTEGER NOT NULL,   -- UTC day start, µs
+    source_format      TEXT NOT NULL,
+    dimension          TEXT NOT NULL,      -- 'total'|'model'|'provider'|'tool'|'agent'|'cwd'
+    dimension_value    TEXT NOT NULL,
+    op_count           INTEGER NOT NULL DEFAULT 0,
+    tokens_in          INTEGER NOT NULL DEFAULT 0,
+    tokens_out         INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read  INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    cost_usd           REAL NOT NULL DEFAULT 0.0,
+    failures           INTEGER NOT NULL DEFAULT 0,
+    duration_us        INTEGER NOT NULL DEFAULT 0,
+    session_starts     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_ts, source_format, dimension, dimension_value)
+);
+```
+
+**Per-op fan-out.** Each op contributes its metrics, within the op's `source_format` and hour bucket, to:
+
+- its `model` row (only when `kind='llm'`);
+- its `provider` row;
+- its `tool` row (only when `kind='tool'`; `dimension_value` is `"<tool_namespace>.<name>"`, or `"<name>"` when `tool_namespace` is NULL — the same tool-id convention as the topology nodes in `rest-api.md`);
+- its session's `agent` row (the session's `agent_name`);
+- its session's `cwd` row (the session's `cwd`);
+- the `total` row (`dimension_value=''`).
+
+`session_starts` is added to the `total`, `agent`, and `cwd` rows of the **session's** start-hour bucket (it counts session starts, not ops), and stays `0` on the op-level `model`/`provider`/`tool` rows.
+
+**Additivity is the correctness invariant.** Every metric column is SUM-additive: `rollup_daily` for a day equals the Σ of that day's `rollup_hourly` rows, and any arbitrary `[from, to)` aggregate equals the Σ of the buckets it covers. This is what makes the backfill-vs-incremental diff gate well-defined (`quality-gates.md` §Rollup correctness diff) — a full backfill and an incremental refresh of the same input must yield byte-identical tables. It is also why **non-additive distinct counts (e.g. distinct `session_count`) are NOT stored**: distinct counts cannot be summed across buckets. The additive `session_starts` is stored instead (a session whose lifetime spans buckets counts once, in its start bucket).
+
+**Open-hour rule.** The current, still-being-written hour is **never** materialized into `rollup_hourly`. The query layer `UNION ALL`s a live aggregate over `ops` for the open hour with the materialized closed-hour rollups. The same applies to the open day for `rollup_daily`. This keeps the rollups immutable once written and removes any "partial bucket" race between the ingester and serve.
+
+**R1 safety bound (high-cardinality collapse).** A per-`(bucket_ts, source_format, dimension)` row cap, `maxRollupRowsPerBucket` (default `2000`), bounds the table against a high-cardinality dimension (most plausibly `cwd`). When a single dimension within one bucket would exceed the cap, its lowest-metric tail collapses into a single `dimension_value='__other__'` row, so an unbounded set of distinct cwds cannot explode the rollup tables. The collapse preserves additivity (the `__other__` row carries the summed tail metrics).
+
+**Retention.** `rollup_hourly` defaults to 90 days; `rollup_daily` is kept forever (both are small relative to `ops`). Hourly pruning is a maintenance step (a bounded delete in the ingester's write cycle), not an automatic cascade, so an operator can widen the window without losing already-materialized daily history.
+
+### Full-text search (FTS5)
+
+Two FTS5 virtual tables back `GET /api/search` (`rest-api.md`). `modernc.org/sqlite` compiles FTS5 in, so no build flag or external extension is needed. Both rank with **BM25** (FTS5's default ranking since SQLite 3.21) and expose `snippet()` for the matched excerpt.
+
+- **`fts_ops`** — FTS5 over the op's searchable text: `name`, `model`, `provider`, `tool_namespace`, and the op's `error_message` / `error_class`. The table carries a rowid → `ops.id` linkage (external-content or contentless FTS5 with an explicit rowid map) so a match resolves back to its op.
+- **`fts_logs`** — FTS5 over `log_entries.message`, with rowid → `log_entries.id`.
+
+All indexed timestamps remain UTC microseconds; the UI converts for display.
+
+**Per-source config flag `fts5_index_logs` (default `true`).** When `false`, only `fts_ops` is maintained and `fts_logs` is left empty — this keeps the search index well under ~100 MB on log-heavy installs (log bodies dominate the index size). `GET /api/search` reports `"logs_indexed": false` and returns an empty `logs` array when the flag is off (`rest-api.md`).
+
+Migrations are file-based; the rollup + FTS5 schema lands as `internal/store/migrations/0006_*.sql` (the next migration number after `0005`) and bumps `schema_meta.version` / `presenter.SchemaVersion` in lockstep, since serve reads these tables (§Schema versioning).
 
 ## Retention
 

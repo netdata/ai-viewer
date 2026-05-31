@@ -182,7 +182,17 @@ Open decisions:
 
 ## Execution Log
 
-(Filled per chunk during implementation.)
+### 2026-06-01
+
+- **Chunk 1 — spec deltas (spec-first; NO code).** Landed the analytics design across 5 specs:
+  - `data-model.md`: `rollup_hourly`/`rollup_daily` — **ADDITIVE LONG-FORM** (one row per dimension VALUE per bucket; PK `(bucket_ts, source_format, dimension, dimension_value)`; `dimension ∈ total|model|provider|tool|agent|cwd`; additive metric columns + `session_starts`). Chosen over the `model×provider×tool×agent×cwd` CROSS-PRODUCT to defuse R1 (cardinality explosion). **Additivity invariant** stated (daily = Σ hourly; range = Σ buckets) → makes the AC#2 backfill-vs-incremental diff gate well-defined; non-additive distinct counts excluded (the additive `session_starts` is stored instead). Open hour NEVER materialized (query `UNION ALL`s live ops). FTS5 `fts_ops`/`fts_logs` (BM25; per-source `fts5_index_logs` flag). Migration `0006_rollups_and_fts.sql` + `schema_meta.version`→6 documented. R1 `__other__` tail-collapse bound + 90-day hourly retention.
+  - `rest-api.md`: `/api/stats/aggregate`, `/api/stats/top`, `/api/search` — all reuse `parseSessionFilter` + HEAD/405/BAD_REQUEST parity; `q` bound as a parameterized FTS5 MATCH; `logs_indexed:false` when log-FTS off. `/api/stats` now rollup-backed for closed buckets (same shape).
+  - `ui-pages.md`: `/stats` dashboard (line: cost/tokens/sessions/failures; bar: top-N model/provider/tool/agent/cwd; deep-search box; FilterBar; D3 reuse ≤500 KB; a11y; `stats_invalidated` invalidation) + FilterBar "Copy share link".
+  - `ingester.md`: incremental rollup refresh of affected CLOSED hours after batch commit (mirrors `catalog.go`, same tx, crash-safe) + FTS5 maintenance + `rollups-backfill` one-shot + open-hour-live rule.
+  - `quality-gates.md`: rollup-correctness diff gate (backfill vs incremental, byte-for-byte) + aggregate/search perf benches (annotation-logged, SOW-0006 convention) + FTS5 fixture-sanitization note.
+  - **Design decisions (subagent-flagged, orchestrator-confirmed):** `group_by=source_format` groups by the PK column (rollups are already per-source_format) — not a `dimension` row; `/api/stats` open-window = open-DAY for daily requests; `fts_ops` content-mode (external-content vs contentless) deferred to the Chunk-2 migration.
+  - **Verified:** only the 5 specs changed (no code); contracts consistent across specs; `scan-secrets` PASS.
+  - **Next:** Chunk 2 — migration `0006_rollups_and_fts.sql` (the tables) + `presenter.SchemaVersion`→6 (failing migration test first).
 
 ## Validation
 

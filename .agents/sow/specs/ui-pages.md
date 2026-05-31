@@ -22,6 +22,14 @@ Single-page React app. Five primary routes plus a global filter bar that is alwa
 
 The global filter bar is always visible and applies to every page; routes interpret it appropriately. Filters are serialized into the URL query string so views are shareable.
 
+A **"Copy share link"** button in the FilterBar (SOW-0007) serializes the current
+filter state into the URL query string — reusing the existing URL-state mechanism
+(`readFilters`, §`/` SessionsList) — and copies the resulting URL to the clipboard.
+Opening the copied URL restores the exact filtered view. If a deeply-filtered URL
+would exceed ~2 KB, the button falls back to a compressed encoding of the filter
+state (the only case compression is applied); short URLs stay plain and
+human-readable.
+
 ## Routes
 
 ### `/` — Sessions list
@@ -60,6 +68,38 @@ Tab layout:
 ### `/topology` — Cross-session topology
 
 A larger D3 view aggregating all sessions in the active filter. Same node/edge model as the per-session topology, but counts span the full filtered set. Useful for "which tools does my agent actually use, weighted by cost".
+
+### `/stats` — Statistics dashboard (SOW-0007)
+
+The unified statistics-and-analytics dashboard. Its **own route** — `/` stays
+focused on the sessions list. Uses the global FilterBar (timeframe `from`/`to`
+plus the dimensional filters) like every other page; the charts re-fetch on filter
+change.
+
+Layout:
+
+- **Line charts** — per-day cost / tokens / sessions (`session_starts`) / failures
+  over the selected range, from
+  `GET /api/stats/aggregate?bucket=daily&group_by=total` (one metric per chart, or
+  a metric toggle). Sessions are plotted from the additive `session_starts` metric
+  (`data-model.md` §Rollup tables), never a non-additive distinct count.
+- **Horizontal bar charts** — top-N model / provider / tool / agent / cwd, from
+  `GET /api/stats/top` (one chart per dimension, dimension/metric selectable).
+- **Deep-search box** — a text input that posts its query to `GET /api/search`;
+  results list matched ops and logs and link to the relevant session/op
+  (`rest-api.md` — `op_id`/`session_id`/`log_id` linkage). When the matched source
+  has log indexing disabled the results note `logs_indexed: false`
+  (`data-model.md` §Full-text search).
+
+Charts reuse the D3 line + bar primitives from SOW-0006 in `viz/` — **no new chart
+library** — and honor the same rendering conventions: SVG below the per-chart point
+ceiling, Canvas above it (`frontend-architecture.md`), and the ≤500 KB gzipped
+main-chunk budget (`quality-gates.md` §Bundle Size). a11y: color is never the sole
+signal (series are labelled / patterned), every control is keyboard-reachable, and
+the route is axe-clean. Live: the charts are TanStack Query-backed and invalidated
+by the `stats_invalidated` SSE event (already wired — the ingester emits one
+`stats_invalidated` notify row per batch when rollups change, `ingester.md` §Notify
+Channel; `sse-protocol.md`).
 
 ### `/tools` — Tools analytics
 
@@ -122,8 +162,15 @@ More to be added as needs emerge (operator-driven via feedback).
 | 1 | `/`, `/sessions/:id` (Overview + Logs tab), `/sources`, with ai-agent v2 + v3 adapters |
 | 2 | `/sessions/:id` Trace + Topology + Timeline tabs |
 | 3 | `/topology`, `/tools`, `/models`, `/agents` cross-session analytics |
+| 4 (SOW-0007) | `/stats` unified statistics dashboard (line + bar charts + deep search) and the "Copy share link" FilterBar button |
 | 4 | claude-code, codex, opencode adapters |
 | 5 | Polish, advanced filters, keyboard shortcuts modal, deep search |
+
+SOW-0007 delivers the unified `/stats` dashboard (cost/token/session/failure trends,
+top-N breakdowns, and the `/api/search` deep-search box). It does **not** build the
+per-dimension `/tools`, `/models`, `/agents` table pages — those remain the
+Phase-3 `ComingSoon` routes; `/stats` is the single analytics surface SOW-0007
+ships.
 
 ## Phase-1 Implemented Behavior
 

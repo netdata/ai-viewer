@@ -351,6 +351,130 @@ Cross-session aggregates over the filtered set.
 }
 ```
 
+The response shape is unchanged, but as of SOW-0007 the **closed-hour** totals are
+read from the materialized rollups (`rollup_hourly`/`rollup_daily`,
+`data-model.md` §Rollup tables) rather than a full `SUM` over `ops`; only the
+**open hour** is computed live over `ops` and `UNION ALL`'d in. Same numbers,
+faster — the additivity invariant (`data-model.md`) guarantees the rollup sum
+equals the live `SUM` for any closed bucket.
+
+### GET /api/stats/aggregate
+
+A time-series aggregate for the statistics dashboard's line charts. Reads the
+materialized rollups for closed buckets and `UNION ALL`s a live aggregate over
+`ops` for the open bucket (`data-model.md` §Rollup tables — open-hour rule). Reuses
+the **same filter params as `GET /api/sessions`** via `parseSessionFilter` (time
+range `from`/`to` on `start_ts`, plus `agents`, `models`, `tools`, `sources`,
+`status`, `q`), all bound via `?` placeholders. HEAD, 405 `METHOD_NOT_ALLOWED` on a
+non-GET/HEAD method, control-byte rejection on path/query, and `BAD_REQUEST` on an
+unknown enum value behave exactly as the other GET routes.
+
+```
+?from=<us>&to=<us>
+&bucket=daily            'hourly'|'daily' (default 'daily')
+&group_by=total          'model'|'provider'|'tool'|'agent'|'cwd'|'source_format'|'total' (default 'total')
+&metric=cost             'cost'|'tokens_in'|'tokens_out'|'calls'|'failures'|'duration_us' (default 'cost'); 'calls' maps to op_count
+&agents=...&models=...&tools=...&sources=...&status=...&q=...   same as /api/sessions
+```
+
+Response — one entry per time bucket, each carrying the per-`group_by`-value series
+for that bucket:
+
+```json
+{
+  "buckets": [
+    {
+      "bucket_ts": <us>,
+      "series": [
+        { "key": "<dimension_value>", "value": <number> }
+      ]
+    }
+  ],
+  "bucket": "daily",
+  "metric": "cost"
+}
+```
+
+- `bucket_ts` is the UTC bucket start in microseconds (hour or day, per `bucket`).
+- `key` is the `dimension_value` for the row (a model name, provider, `"<ns>.<name>"`
+  tool id, agent name, cwd, or source format). `group_by=total` returns a single
+  series entry keyed `""`.
+- `value` is the selected `metric` summed over that `(bucket, key)`.
+- An unknown `bucket`, `group_by`, or `metric` value is a `BAD_REQUEST`.
+
+### GET /api/stats/top
+
+Top-N ranking for the dashboard's horizontal bar charts: the highest-`metric`
+dimension values over the window. Computed by summing the dimension's rollup rows
+over `[from, to)` (plus the live open hour) and `ORDER BY value DESC LIMIT n`.
+Same filter params and HEAD/405/bad-param behavior as `/api/stats/aggregate`.
+
+```
+?from=<us>&to=<us>
+&dimension=model         'model'|'provider'|'tool'|'agent'|'cwd'
+&metric=cost             same enum as /api/stats/aggregate (default 'cost'; 'calls' → op_count)
+&n=20                    default 20, max 200
+&agents=...&models=...&tools=...&sources=...&status=...&q=...   same as /api/sessions
+```
+
+Response — items ordered by `value` descending, top-N:
+
+```json
+{
+  "dimension": "model",
+  "metric": "cost",
+  "items": [
+    { "key": "<value>", "value": <number> }
+  ]
+}
+```
+
+An unknown `dimension` or `metric` value is a `BAD_REQUEST`; `n` is clamped to the
+`[1, 200]` range.
+
+### GET /api/search
+
+Deep full-text search across ops and logs, backed by the FTS5 tables (`fts_ops`,
+`fts_logs`; `data-model.md` §Full-text search). Drives the `/stats` deep-search box.
+Reuses the standard filter params (`from`/`to`, `agents`, `models`, `tools`,
+`sources`, `status`) via `parseSessionFilter`. HEAD, 405, and control-byte
+rejection behave as the other GET routes.
+
+```
+?q=<text>                required; non-empty after trim; control chars rejected (BAD_REQUEST)
+&from=<us>&to=<us>&agents=...&models=...&tools=...&sources=...&status=...   same as /api/sessions
+&limit=50                default 50, max 200
+&cursor=<opaque>         pagination (offset-style; mirrors /api/sessions/:id/logs)
+```
+
+Response — matched ops and logs, ranked by BM25 with `snippet()` excerpts:
+
+```json
+{
+  "ops": [
+    { "op_id":"...","session_id":"...","kind":"tool","name":"...","model":"...","snippet":"…matched…","rank":<number> }
+  ],
+  "logs": [
+    { "log_id":123,"session_id":"...","op_id":"...","severity":"ERR","ts":<us>,"snippet":"…matched…","rank":<number> }
+  ],
+  "logs_indexed": true
+}
+```
+
+- `q` is passed as the FTS5 `MATCH` argument, **always parameterized** (bound `?`):
+  FTS5 query syntax (`AND`/`OR`/`NEAR`/prefix `*`/phrase `"…"`) is intentionally
+  exposed to the operator, but because the `MATCH` value is a bound parameter there
+  is no SQL-injection surface — the query string never reaches the SQL text.
+- `rank` is the BM25 score; `ops` and `logs` are each ordered by `rank` (best
+  first). `snippet()` returns the matched excerpt for display.
+- `op_id`/`session_id` (and `log_id`/`session_id`/`op_id` for logs) are the linkage
+  the UI uses to navigate to the session/op.
+- **`logs_indexed`** reflects the per-source `fts5_index_logs` flag
+  (`data-model.md`). When log indexing is disabled the `logs` array is empty and
+  `"logs_indexed": false` is set, so the client can distinguish "no log matches"
+  from "logs not indexed on this install".
+- An empty/whitespace-only `q` is a `BAD_REQUEST`.
+
 ### GET /api/catalog/{tools,models,agents}
 
 **Phase 2 — not implemented in Phase 1.** The catalog tables are populated by the

@@ -297,7 +297,21 @@ Inline upserts run per event in Chunk 7:
 
 So the rollups are eventually consistent with the ops table AND idempotent under any number of re-emissions of the same op.
 
-Time-bucketed rollups for hour-/day-grained analytics (per `data-model.md` §Aggregation) are NOT in Chunk 7 — they land in SOW-0007.
+Time-bucketed rollups for hour-/day-grained analytics (per `data-model.md` §Aggregation) were NOT in Chunk 7 — they land in SOW-0007, described in §Rollup Refresh and FTS5 Maintenance below.
+
+## Rollup Refresh and FTS5 Maintenance
+
+SOW-0007 adds the time-bucketed rollup tables (`rollup_hourly`, `rollup_daily`) and the FTS5 search tables (`fts_ops`, `fts_logs`) — schema in `data-model.md` §Rollup tables. The ingester maintains both incrementally, mirroring the catalog-refresh pattern (`catalog.go`'s `onSessionStarted`/`onOpStarted`/`onOpFinalized`).
+
+**Incremental rollup refresh (affected closed hours only).** After each batch's per-event UPSERTs and the catalog refresh, the ingester recomputes the rollups for the **affected closed hours** — the set of `floor(start_ts / hour)` buckets touched by the batch, **excluding the current open hour** (the open hour is never materialized; the query layer `UNION ALL`s a live aggregate for it — `data-model.md` §Rollup tables). For each affected `(bucket_ts, source_format, dimension, dimension_value)` row, the metrics are recomputed from `ops` joined to `sessions` over that hour window, so the refresh is idempotent (recomputing an unchanged window yields the same row) and never double-counts a replayed op. Affected `rollup_daily` rows are then recomputed for the affected days (rolled up from their `rollup_hourly` rows, or recomputed directly — both are equivalent under additivity, `data-model.md`). The R1 high-cardinality collapse (`maxRollupRowsPerBucket`, default 2000) is applied per `(bucket, source_format, dimension)` during the recompute so the tail folds into `dimension_value='__other__'`.
+
+The refresh runs **within / immediately after the same batch transaction** as the per-event writes (like the catalog refresh and the resolver's notify rows), so a crash cannot leave the rollups partially applied relative to the ops they summarize.
+
+**FTS5 maintenance.** In the same batch, the ingester inserts/updates `fts_ops` for new or changed ops and `fts_logs` for new logs. `fts_logs` maintenance is gated on the per-source `fts5_index_logs` flag (default true; `data-model.md`): when false, only `fts_ops` is maintained.
+
+**Notify.** The batch emits exactly one `stats_invalidated` notify row when any rollup or FTS table changed — extending the existing per-batch `stats_invalidated` trigger (today fired on catalog-rollup change; §Notify Channel) to also fire on a rollup/FTS change. Still at most one per batch.
+
+**One-shot backfill.** A `ai-viewer-ingest rollups-backfill` subcommand recomputes **all** closed-hour rollups from `MIN(start_ts)` to the last closed hour and builds the FTS index over all ops/logs from scratch. It is idempotent and re-runnable — recomputing over the same `ops`/`log_entries` data reproduces byte-identical rollup tables (the property the diff gate asserts, `quality-gates.md` §Rollup correctness diff). The backfill respects the open-hour-never-materialized rule and `fts5_index_logs` exactly as the incremental path does. It is the recovery path when `rollup_*`/`fts_*` are missing or stale (the ingest DB is derived/disposable — `data-model.md` §Schema versioning); the query layer always serves the open hour live, so a missing rollup never produces a silently-wrong total, only a slower closed-hour query until the backfill completes.
 
 ## Cost Computation
 
