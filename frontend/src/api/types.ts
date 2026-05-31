@@ -197,6 +197,53 @@ export interface SessionDetailResponse {
   child_sessions: ChildSummary[];
 }
 
+// ── GET /api/sessions/:id/topology ──────────────────────────────────────────
+
+/**
+ * The ?metric= selector for the topology node size (presenter
+ * session_topology.go topologyMetric; default `duration`). Closed set on the
+ * server; an absent/unknown value defaults to duration server-side.
+ */
+export type TopologyMetric = 'cost' | 'tokens' | 'duration' | 'calls' | 'ctx_pct';
+
+/**
+ * One node of GET /api/sessions/:id/topology (presenter topoNode). `kind`
+ * distinguishes an agent (a session in the tree) from a tool. `size_metric`
+ * carries the raw value of the selected ?metric= (the client normalizes the
+ * node radius against `max_size_metric`); `failure_ratio` is failed/total ops
+ * in 0..1 (drives node color).
+ */
+export interface TopologyNode {
+  id: string;
+  kind: OpenEnum<'agent' | 'tool'>;
+  label: string;
+  size_metric: number;
+  failure_ratio: number;
+}
+
+/**
+ * One aggregated caller→callee edge (presenter topoEdge). `calls` is the op
+ * count; `total_us` is the summed duration (NULL durations counted as 0).
+ */
+export interface TopologyEdge {
+  source: string;
+  target: string;
+  calls: number;
+  total_us: number;
+}
+
+/**
+ * GET /api/sessions/:id/topology envelope (presenter topologyResponse). Nodes
+ * and edges are always present arrays (never null). `max_size_metric` is the
+ * maximum `size_metric` across nodes (0 when there are no nodes); the client
+ * normalizes node radii against it.
+ */
+export interface TopologyResponse {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+  max_size_metric: number;
+}
+
 // ── GET /api/sessions/:id/logs ──────────────────────────────────────────────
 
 /** One log entry (presenter logItem). */

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  colorForActorKind,
+  colorForFailureRatio,
   colorForOpKind,
   colorForStatus,
   refreshThemeColors,
@@ -98,6 +100,40 @@ describe('colorForStatus', () => {
     tokens['--success'] = '#1a7f37';
     refreshThemeColors();
     expect(colorForStatus('completed')).toBe('#1a7f37');
+  });
+});
+
+describe('colorForFailureRatio', () => {
+  it('maps a zero failure ratio to the success token (green)', () => {
+    expect(colorForFailureRatio(0)).toBe('#3fb950');
+  });
+
+  it('maps a low (<1/3) failure ratio to the warning token (amber)', () => {
+    expect(colorForFailureRatio(0.2)).toBe('#d29922');
+  });
+
+  it('maps a high (≥1/3) failure ratio to the error token (red)', () => {
+    expect(colorForFailureRatio(0.5)).toBe('#f85149');
+    expect(colorForFailureRatio(1)).toBe('#f85149');
+  });
+
+  it('treats a non-finite or negative ratio as no failures (success)', () => {
+    expect(colorForFailureRatio(Number.NaN)).toBe('#3fb950');
+    expect(colorForFailureRatio(-1)).toBe('#3fb950');
+  });
+});
+
+describe('colorForActorKind', () => {
+  it('gives agent and tool nodes distinct base colors', () => {
+    const agent = colorForActorKind('agent');
+    const tool = colorForActorKind('tool');
+    expect(agent).toMatch(/^#|rgb|hsl/);
+    expect(tool).toMatch(/^#|rgb|hsl/);
+    expect(agent).not.toBe(tool);
+  });
+
+  it('falls back to the neutral token for an unknown actor kind', () => {
+    expect(colorForActorKind('mystery')).toBe('#8b949e');
   });
 });
 

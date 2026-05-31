@@ -187,7 +187,15 @@ These reshape the chunk plan (Chunk 4 = waterfall+list+flame, now + source-aware
 
 ## Execution Log
 
-(Filled per chunk during implementation.)
+### 2026-05-31
+
+- Activated; operator UX decisions captured (see "Implications And Decisions").
+- **Chunk 1** — `ui-pages.md` tab contract for Trace/Topology/Timeline (3-layout toggle, freeze, Web-Worker-above-100, metric selector, shared drawer).
+- **Chunk 2** — `/api/sessions/:id/topology` + `/timeline` session endpoints (Go presenter).
+- **Chunks 3-4** — Trace tab: waterfall + flame-graph + event-list (view toggle), span detail drawer, `viz/color.ts`, source-aware durations + dual big-session views.
+- **Merge master** — brought SOW-0029 (token/cache semantics) + SOW-0026 (op duration) into the branch so the Trace tab shows corrected tokens/cache; fixed one integration defect (TraceTab test fixture gained the new required `tokens_cache_read/write` fields). Branch verified healthy.
+- **Chunk 6a** — per-session **Topology tab** (subagent-built, orchestrator-verified): `viz/topology.ts` (pure layout: force-seeded deterministic / force-plain / hierarchical) + `viz/forceWorker.ts` (Vite `?worker`, >100 nodes) + shared `TopologyRenderer` (SVG ≤100 / Canvas >100, d3-zoom) + `TopologyTab` (metric selector, 3-layout toggle, freeze button, node-click → SpanDetailDrawer). Deps added: d3-force/selection/zoom/hierarchy. Gates (orchestrator-run): tsc 0, eslint 0, vitest 363 pass, build main chunk 126.57 KB gzipped (≤500 budget; forceWorker code-split), scan-secrets PASS.
+- **Remaining:** chunk 6b cross-session `/api/topology` endpoint + `/topology` page; Timeline tab; a11y; SSE span animations; Playwright E2E; external review → PR.
 
 ## Validation
 

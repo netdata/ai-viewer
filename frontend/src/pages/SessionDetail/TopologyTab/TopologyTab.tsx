@@ -1,0 +1,302 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { OpDetail, TopologyMetric, TopologyNode } from '../../../api/types';
+import { useSessionTopology } from '../../../api/sessions';
+import { SpanDetailDrawer } from '../../../components/SpanDetailDrawer';
+import { LoadingState, ErrorState, EmptyState } from '../../../components/StatusViews';
+import {
+  FORCE_WORKER_THRESHOLD,
+  layoutTopology,
+  runForceLayout,
+  type PositionedNode,
+  type TopologyLayoutMode,
+  type TopologyLayoutOpts,
+} from '../../../viz/topology';
+import { startThemeColorWatch } from '../../../viz/color';
+import type { ForceWorkerRequest, ForceWorkerResponse } from '../../../viz/forceWorker';
+import ForceWorker from '../../../viz/forceWorker?worker';
+import { TopologyRenderer } from './TopologyRenderer';
+import styles from './TopologyTab.module.css';
+
+// Topology tab (ui-pages.md §/sessions/:id #2). Fetches the whole session tree's
+// actor graph for the selected size metric, lays it out via viz/topology in one
+// of three operator-selectable modes (seeded force / plain force / hierarchical),
+// and renders it through the shared TopologyRenderer. A "freeze layout" button
+// pins the current positions so re-renders and live SSE refreshes do not
+// re-simulate (the operator can read a stable graph). Above the 100-node
+// threshold the force simulation runs in a Web Worker (frontend-architecture.md);
+// below it the layout runs inline. Clicking a node opens the shared
+// SpanDetailDrawer.
+
+const VIEW_WIDTH = 900;
+const VIEW_HEIGHT = 560;
+
+const METRICS: ReadonlyArray<{ key: TopologyMetric; label: string }> = [
+  { key: 'cost', label: 'Cost' },
+  { key: 'tokens', label: 'Tokens' },
+  { key: 'duration', label: 'Duration' },
+  { key: 'calls', label: 'Calls' },
+  { key: 'ctx_pct', label: 'Context %' },
+];
+
+const MODES: ReadonlyArray<{ key: TopologyLayoutMode; label: string }> = [
+  { key: 'force-seeded', label: 'Seeded force' },
+  { key: 'force-plain', label: 'Plain force' },
+  { key: 'hierarchical', label: 'Hierarchical' },
+];
+
+/**
+ * nodeToOpDetail synthesizes a minimal OpDetail so the shared SpanDetailDrawer
+ * (an op-shaped panel) can present a clicked topology node. A topology node is
+ * an aggregate actor (agent/tool), not a single op, so the synthesized record
+ * carries the node's identity (kind/label) and its failure state; the numeric
+ * op fields are zeroed and there are no payloads. This reuses the drawer exactly
+ * (SOW-0006 decision: "clicking a node opens the SHARED span detail drawer")
+ * without weakening its OpDetail contract. The size metric itself is shown in
+ * the on-graph node size + the tab's legend, not duplicated here.
+ */
+function nodeToOpDetail(node: TopologyNode): OpDetail {
+  const failed = node.failure_ratio > 0;
+  return {
+    id: node.id,
+    kind: node.kind,
+    name: node.label,
+    model: '',
+    provider: '',
+    start_ts: 0,
+    end_ts: null,
+    duration_us: null,
+    status: failed ? 'failed' : 'completed',
+    error_class: failed ? `${(node.failure_ratio * 100).toFixed(1)}% of ops failed` : null,
+    tokens_in: 0,
+    tokens_out: 0,
+    cost_usd: 0,
+    ctx_used: null,
+    ctx_max: null,
+    child_session_id: null,
+    payload_refs: [],
+  };
+}
+
+/** graphKey identifies a (metric→graph)+mode layout input for worker-result staleness. */
+function graphKey(
+  metric: TopologyMetric,
+  mode: TopologyLayoutMode,
+  nodeCount: number,
+  edgeCount: number,
+): string {
+  return `${metric}|${mode}|${nodeCount}|${edgeCount}`;
+}
+
+export function TopologyTab({ sessionId }: { sessionId: string }) {
+  const [metric, setMetric] = useState<TopologyMetric>('cost');
+  const [mode, setMode] = useState<TopologyLayoutMode>('force-seeded');
+  const [selected, setSelected] = useState<TopologyNode | null>(null);
+  // The pinned layout captured when the operator froze; while non-null it is
+  // reused verbatim so no re-simulate happens on re-render / SSE / metric
+  // refetch. State (not a ref) so toggling it re-renders.
+  const [frozenLayout, setFrozenLayout] = useState<PositionedNode[] | null>(null);
+  // Worker-computed positions tagged with the input key they were computed for,
+  // so a stale result from a previous metric/mode is ignored. Set only inside
+  // the worker's onmessage handler (an event callback, never the effect body).
+  const [workerResult, setWorkerResult] = useState<{ key: string; positioned: PositionedNode[] } | null>(
+    null,
+  );
+
+  useEffect(() => startThemeColorWatch(), []);
+
+  const { data, isPending, isError, error } = useSessionTopology(sessionId, metric);
+
+  const nodes = useMemo(() => data?.nodes ?? [], [data]);
+  const edges = useMemo(() => data?.edges ?? [], [data]);
+  const maxSizeMetric = data?.max_size_metric ?? 0;
+  const frozen = frozenLayout !== null;
+  const useWorker = nodes.length > FORCE_WORKER_THRESHOLD && mode !== 'hierarchical';
+  const key = graphKey(metric, mode, nodes.length, edges.length);
+
+  const opts = useMemo<TopologyLayoutOpts>(
+    () => ({ mode, width: VIEW_WIDTH, height: VIEW_HEIGHT, maxSizeMetric }),
+    [mode, maxSizeMetric],
+  );
+
+  // Inline layout: hierarchical always (cheap, exact) and the force modes below
+  // the worker threshold; the large-force case is computed off-thread (worker).
+  const inlinePositions = useMemo<PositionedNode[]>(() => {
+    if (useWorker) {
+      return [];
+    }
+    return layoutTopology(nodes, edges, opts);
+  }, [nodes, edges, opts, useWorker]);
+
+  // Spin up the Web Worker for the large-force case; terminate on cleanup so a
+  // navigated-away tab (or a metric/mode change) never leaks a running worker
+  // (frontend-architecture.md). No setState in the effect body — the result is
+  // delivered through the onmessage event handler, tagged with `key`.
+  useEffect(() => {
+    if (!useWorker || frozen) {
+      return;
+    }
+    const worker = new ForceWorker();
+    worker.onmessage = (e: MessageEvent<ForceWorkerResponse>) => {
+      setWorkerResult({ key, positioned: e.data.positioned });
+    };
+    const request: ForceWorkerRequest = { nodes, edges, opts, seeded: mode === 'force-seeded' };
+    worker.postMessage(request);
+    return () => {
+      worker.terminate();
+    };
+  }, [useWorker, frozen, nodes, edges, opts, mode, key]);
+
+  // Positions actually rendered: the frozen snapshot wins; otherwise the worker
+  // result (only when it matches the current input key — a stale result for a
+  // prior metric/mode is dropped, showing an empty graph until the fresh run
+  // lands) or the inline result.
+  const positioned: PositionedNode[] = frozen
+    ? (frozenLayout ?? [])
+    : useWorker
+      ? (workerResult?.key === key ? workerResult.positioned : [])
+      : inlinePositions;
+
+  // Freeze captures the current layout. For a large-force graph whose worker
+  // result is not back yet, run the simulation once synchronously so the pin is
+  // immediate and deterministic.
+  const onToggleFreeze = (): void => {
+    if (frozen) {
+      setFrozenLayout(null);
+      return;
+    }
+    const snapshot =
+      positioned.length > 0
+        ? positioned
+        : runForceLayout(nodes, edges, opts, mode === 'force-seeded');
+    setFrozenLayout(snapshot);
+  };
+
+  const onSelectMode = (next: TopologyLayoutMode): void => {
+    // Changing layout unfreezes (the pinned layout no longer matches the chosen
+    // engine), so the new engine's layout is shown.
+    setFrozenLayout(null);
+    setMode(next);
+  };
+
+  return (
+    <div className={styles.wrap}>
+      <div className={styles.toolbar}>
+        <label className={styles.control}>
+          <span>Size by</span>
+          <select
+            className={styles.select}
+            value={metric}
+            onChange={(e) => {
+              setMetric(e.target.value as TopologyMetric);
+            }}
+          >
+            {METRICS.map((m) => (
+              <option key={m.key} value={m.key}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <fieldset className={styles.modeToggle}>
+          <legend className={styles.srOnly}>Layout</legend>
+          {MODES.map((m) => (
+            <label key={m.key} className={styles.modeOption}>
+              <input
+                type="radio"
+                name="topology-mode"
+                checked={mode === m.key}
+                onChange={() => {
+                  onSelectMode(m.key);
+                }}
+              />
+              <span>{m.label}</span>
+            </label>
+          ))}
+        </fieldset>
+
+        <button
+          type="button"
+          className={styles.freezeButton}
+          aria-pressed={frozen}
+          disabled={mode === 'hierarchical'}
+          title={
+            mode === 'hierarchical'
+              ? 'The hierarchical layout is already static'
+              : 'Pin the current node positions'
+          }
+          onClick={onToggleFreeze}
+        >
+          {frozen ? 'Unfreeze layout' : 'Freeze layout'}
+        </button>
+
+        <span className={styles.spacer} />
+        <span className={styles.nodeCount}>
+          {nodes.length} node{nodes.length === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      {isPending ? (
+        <LoadingState label="Loading topology…" />
+      ) : isError ? (
+        <ErrorState error={error} title="Failed to load topology" />
+      ) : nodes.length === 0 ? (
+        <EmptyState>No actors recorded for this session.</EmptyState>
+      ) : (
+        <>
+          <div className={styles.vizArea}>
+            <TopologyRenderer
+              positioned={positioned}
+              edges={edges}
+              width={VIEW_WIDTH}
+              height={VIEW_HEIGHT}
+              selectedId={selected?.id ?? null}
+              onNodeClick={(p) => {
+                setSelected(p.node);
+              }}
+            />
+          </div>
+          <Legend />
+        </>
+      )}
+
+      <SpanDetailDrawer
+        op={selected ? nodeToOpDetail(selected) : null}
+        onClose={() => {
+          setSelected(null);
+        }}
+      />
+    </div>
+  );
+}
+
+/** Legend explains the encodings (shape = actor kind, color = failures). */
+function Legend() {
+  return (
+    <div className={styles.legend} aria-label="Topology legend">
+      <span className={styles.legendItem}>
+        <span className={styles.legendSwatch} style={{ background: 'var(--text-secondary)' }} />
+        Agent (circle)
+      </span>
+      <span className={styles.legendItem}>
+        <span
+          className={`${styles.legendSwatch} ${styles.legendSwatchSquare}`}
+          style={{ background: 'var(--text-secondary)' }}
+        />
+        Tool (square)
+      </span>
+      <span className={styles.legendItem}>
+        <span className={styles.legendSwatch} style={{ background: 'var(--success)' }} />
+        No failures
+      </span>
+      <span className={styles.legendItem}>
+        <span className={styles.legendSwatch} style={{ background: 'var(--warning)' }} />
+        Some failures
+      </span>
+      <span className={styles.legendItem}>
+        <span className={styles.legendSwatch} style={{ background: 'var(--error)' }} />
+        Many failures
+      </span>
+    </div>
+  );
+}

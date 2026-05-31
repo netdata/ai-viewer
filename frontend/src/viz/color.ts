@@ -104,6 +104,38 @@ export function colorForStatus(status: SessionStatus): string {
 }
 
 /**
+ * colorForFailureRatio maps a node's failed/total ratio (0..1, the topology
+ * `failure_ratio`) to a theme status color so a topology node's fill encodes how
+ * much it fails (ui-pages.md §Topology: "node color encodes failures"). Three
+ * bands keep the signal categorical (not a misleading continuous gradient):
+ * 0 → success (green), up to a third failing → warning (amber), more → error
+ * (red). The thresholds mirror the StatusBadge families so the Topology view and
+ * the Overview badges read consistently. Color is never the only signal — the
+ * renderer also labels the node and shows the ratio in the drawer.
+ */
+export function colorForFailureRatio(ratio: number): string {
+  if (!Number.isFinite(ratio) || ratio <= 0) {
+    return tokenValue(STATUS_TOKEN.completed ?? NEUTRAL_TOKEN);
+  }
+  if (ratio < 1 / 3) {
+    return tokenValue(STATUS_TOKEN.running ?? NEUTRAL_TOKEN);
+  }
+  return tokenValue(STATUS_TOKEN.failed ?? NEUTRAL_TOKEN);
+}
+
+/**
+ * colorForActorKind returns the base stroke/accent color distinguishing a
+ * topology agent node from a tool node (ui-pages.md §Topology: "node icon
+ * distinguishes agent vs tool"). Agents reuse the session/agent kind hue, tools
+ * the tool hue, so the topology palette tracks the rest of the viz. An unknown
+ * future kind falls back to neutral.
+ */
+export function colorForActorKind(kind: string): string {
+  const token = kind === 'agent' ? KIND_TOKEN.agent : kind === 'tool' ? KIND_TOKEN.tool : NEUTRAL_TOKEN;
+  return tokenValue(token ?? NEUTRAL_TOKEN);
+}
+
+/**
  * startThemeColorWatch observes <html data-theme> and refreshes the cached
  * colors whenever it changes, so a renderer that re-reads on the next paint
  * picks up the new palette. Returns an idempotent disposer; a non-DOM context

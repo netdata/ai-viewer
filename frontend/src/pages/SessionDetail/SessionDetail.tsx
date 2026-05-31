@@ -8,11 +8,13 @@ import { ApiError } from '../../api/client';
 import { OverviewTab } from './OverviewTab';
 import { LogsTab } from './LogsTab';
 import { TraceTab } from './TraceTab';
+import { TopologyTab } from './TopologyTab';
 import styles from './SessionDetail.module.css';
 
-// Session detail page (ui-pages.md §/sessions/:id). Tabs Overview + Trace + Logs
-// are real; Topology/Timeline remain Phase-2 ComingSoon. The active tab lives in
-// the URL (?tab=) so it is shareable; an unknown value falls back to overview.
+// Session detail page (ui-pages.md §/sessions/:id). Tabs Overview + Trace +
+// Topology + Logs are real; Timeline remains Phase-2 ComingSoon. The active tab
+// lives in the URL (?tab=) so it is shareable; an unknown value falls back to
+// overview.
 // An unknown id (404) renders a clean "not found" state instead of the tabs. The
 // open session is live-refreshed over SSE (session_changed → ['session', id]).
 
@@ -81,9 +83,7 @@ export function SessionDetail() {
             {tab === 'overview' && <OverviewTab detail={data} />}
             {tab === 'logs' && <LogsTab sessionId={id} />}
             {tab === 'trace' && <TraceTab detail={data} />}
-            {tab === 'topology' && (
-              <ComingSoon title="Topology" note="Force-directed actor graph — Phase 2." />
-            )}
+            {tab === 'topology' && <TopologyTab sessionId={id} />}
             {tab === 'timeline' && (
               <ComingSoon title="Timeline" note="Time-axis span lanes — Phase 2." />
             )}
