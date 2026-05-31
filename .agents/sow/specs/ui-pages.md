@@ -44,10 +44,16 @@ Tab layout:
    by-model/by-tool) are a Phase-2 enhancement that would require adding
    `session_id` support to `/api/stats`. Phase 1 uses the detail-endpoint
    aggregates only.
-2. **Topology** — D3 force-directed: nodes are agents and tools that participated; node size encodes the user-selected metric (cost/tokens/duration/calls/ctx-pct); node color encodes failures; node icon distinguishes agent vs tool. Tooltip shows high-level stats per actor.
-3. **Trace (APM)** — spans laid out as nested rows (parent op → children → child sessions). One row per op. Color and width encode duration; failures are red. Expanding a row shows its log lines and payload links.
-4. **Timeline** — video-editor style. Horizontal time axis; one lane per session (root + children stacked). Spans drawn as bars; overlap is intentional (parallel sub-agents are visible). Pan + zoom; shift+wheel zooms time.
+2. **Topology** — D3 graph of the agents and tools that participated; node size encodes the user-selected metric (cost/tokens/duration/calls/ctx-pct), node color encodes failures, node icon distinguishes agent vs tool; tooltip shows high-level stats per actor. **Layout is operator-selectable via a toggle (SOW-0006 decision): (a) seeded force-directed + a "freeze layout" button, (b) plain force-directed, (c) hierarchical tree.** All three render the same `/topology` node/edge data; the operator compares them live and a default is chosen later. Force simulation runs in a Web Worker above the 100-node threshold (`frontend-architecture.md`).
+3. **Trace (APM)** — the primary "what happened, in what order, how long" view (SOW-0006 decision). Two complementary, toggleable renderings of the same session op tree, plus a list:
+   - **Waterfall** (default) — a Chrome-DevTools-Network-tab-style horizontal waterfall: one row per op (agent / tool / llm / reasoning / …), positioned + sized on a shared time axis by `start_ts`/`duration_us`, so the sequence and duration of agents and tools is obvious at a glance. Nested under parent op → children → child-session transitions. Color = `op.kind`; failed ops outlined red.
+   - **Flame-graph** — an alternate view of the same tree (stacked spans by depth). A large flame-graph is acceptable as long as it stays fast: Canvas rendering + viewport culling above the SVG span ceiling (`frontend-architecture.md`); the 200 ms render budget holds.
+   - **Event list** — a scrollable, virtualized list of everything that happened (every op/turn in order: ts, kind, name, duration, status), click-to-detail. Always available alongside whichever visual rendering is active.
+   Clicking any span/row opens the shared **span detail drawer** (item below).
+4. **Timeline** — video-editor style. Horizontal time axis; one lane per session (root + children stacked). Spans drawn as bars; overlap is intentional (parallel sub-agents are visible). Compaction ops (`kind='compaction'`) render as full-height vertical breakpoints. Pan + zoom; **shift+wheel zooms time, plain wheel pans** (SOW-0006 default). SVG under the visible-span ceiling, Canvas with viewport-clipped culling above it (`frontend-architecture.md`).
 5. **Logs** — filterable log entries (severity, op, source).
+
+**Span detail drawer (shared across Trace / Topology / Timeline — SOW-0006 decision):** clicking any span/node/row opens a right-side drawer (NOT a modal — the visualization stays visible behind it) showing the full op row + a **payload preview** (first ~4 KB via the payloads route, with a "download full" link). Esc / outside-click closes; focus-trapped for a11y. Op-kind/status colors come from the theme tokens (SOW-0006 default), consistent with the Overview status badges.
 
 ### `/topology` — Cross-session topology
 
