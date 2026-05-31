@@ -110,6 +110,7 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
       "tokens_in":...,"tokens_out":...,"cost_usd":...,"op_count":...,
       "ops": [
         { "id":"...","kind":"llm","name":"...","model":"...","provider":"...",
+          "parent_op_id":null,
           "start_ts":<us>,"end_ts":<us>,"duration_us":...,
           "status":"...","error_class":null,
           "tokens_in":...,"tokens_out":...,"cost_usd":...,
@@ -128,6 +129,11 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
   ]
 }
 ```
+
+Each op row carries `parent_op_id` — the canonical id of the op it nests under
+(`ops.parent_op_id`, set by the ingest writer), or `null` for a top-level op. The
+Trace view rebuilds the authoritative span tree from this parentage; the key is
+always present (nullable), never omitted.
 
 ### GET /api/sessions/:id/logs
 
@@ -226,10 +232,19 @@ empty body) only; any other method is 405 `METHOD_NOT_ALLOWED`. An unknown
 `?metric=` value is `BAD_REQUEST`. Response shape is identical to the per-session
 topology (`nodes` / `edges` / `max_size_metric`).
 
-**Scope = the active filter.** Accepts the same filter query params as
-`GET /api/sessions` (time range `from`/`to`, `agent`, `model`, `cwd`, `source`,
-`status`, etc. — whatever that endpoint already validates). The node set is the
-sessions matching the filter.
+**Scope = ALL sessions matching the filter (roots + sub_agents + forks).** The
+cross-session topology spans every session kind by default — NOT just roots —
+because its purpose is lineage: the parent→child and origin→fork edges need the
+child/fork sessions present as nodes, or the graph collapses to disconnected
+root dots. The endpoint accepts the same filter query params as `GET /api/sessions`
+(time range `from`/`to`, `agents`, `models`, `tools`, `sources`, `status`, `q`,
+etc. — whatever that endpoint already validates), with one deliberate exception:
+the `group` param does NOT apply here. `/api/sessions` defaults `group=root` (the
+list shows roots and expands children inline); the topology FORCES the
+all-sessions scope (`handleCrossTopology` sets it after parsing) so an explicit
+`?group=root` does not strip the child/fork endpoints. The node set is the
+sessions matching all the other filters. (A roots-only topology, if ever wanted,
+would be a separate explicit toggle, not the `/api/sessions` list default.)
 
 - **Nodes.** One `agent` node per matching session (`id` = `agent:<session.id>`;
   `label` = `agent_name` falling back to `kind`, with `" (root)"` appended when the

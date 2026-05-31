@@ -8,6 +8,8 @@ import { LoadingState, ErrorState, EmptyState } from '../../components/StatusVie
 import {
   FORCE_WORKER_THRESHOLD,
   layoutTopology,
+  positionsOf,
+  reapplyFrozenPositions,
   runForceLayout,
   type PositionedNode,
   type TopologyLayoutMode,
@@ -77,9 +79,13 @@ export function Topology() {
   // to cost — they are deliberately different views.
   const [metric, setMetric] = useState<TopologyMetric>('duration');
   const [mode, setMode] = useState<TopologyLayoutMode>('force-seeded');
-  // The pinned layout captured when the operator froze; reused verbatim while
-  // non-null so no re-simulate happens on re-render / SSE / metric refetch.
-  const [frozenLayout, setFrozenLayout] = useState<PositionedNode[] | null>(null);
+  // The pinned node POSITIONS captured when the operator froze (id → {x,y}); while
+  // non-null the simulation never re-runs, but the node DATA stays live — a
+  // metric/SSE refetch re-applies fresh labels/radii/failure-ratios onto these
+  // coordinates (codex P2#5).
+  const [frozenLayout, setFrozenLayout] = useState<ReadonlyMap<string, { x: number; y: number }> | null>(
+    null,
+  );
   // Worker-computed positions tagged with the input key they were computed for.
   const [workerResult, setWorkerResult] = useState<{ key: string; positioned: PositionedNode[] } | null>(
     null,
@@ -128,12 +134,17 @@ export function Topology() {
     };
   }, [useWorker, frozen, nodes, edges, opts, mode, key]);
 
+  // When frozen, the simulation is pinned but the DATA is live:
+  // reapplyFrozenPositions keeps each node at its frozen (x,y) while re-applying
+  // the fresh label/radius/failure_ratio (a new metric or SSE refetch updates the
+  // graph in place; a vanished session drops, a new one is seeded — codex P2#5).
   const positioned: PositionedNode[] = frozen
-    ? (frozenLayout ?? [])
+    ? reapplyFrozenPositions(nodes, frozenLayout ?? new Map(), opts)
     : useWorker
       ? (workerResult?.key === key ? workerResult.positioned : [])
       : inlinePositions;
 
+  // Freeze pins the current node POSITIONS (positionsOf strips to id → {x,y}).
   const onToggleFreeze = (): void => {
     if (frozen) {
       setFrozenLayout(null);
@@ -143,7 +154,7 @@ export function Topology() {
       positioned.length > 0
         ? positioned
         : runForceLayout(nodes, edges, opts, mode === 'force-seeded');
-    setFrozenLayout(snapshot);
+    setFrozenLayout(positionsOf(snapshot));
   };
 
   const onSelectMode = (next: TopologyLayoutMode): void => {

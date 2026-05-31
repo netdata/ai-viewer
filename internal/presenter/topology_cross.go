@@ -10,6 +10,10 @@ import (
 // session_topology.go) but scopes to the active /api/sessions filter rather
 // than one session tree:
 //
+//   - Scope: ALL sessions matching the filter (roots + sub_agents + forks).
+//     handleCrossTopology forces group=all because lineage edges need the
+//     child/fork endpoints in the node set; the /api/sessions roots-only group
+//     default does NOT apply here (rest-api.md §GET /api/topology).
 //   - Nodes: one `agent` node per matching session. NO `tool` nodes — a
 //     filtered set can span thousands of sessions and their tools would
 //     explode the graph; tools live only in the per-session view
@@ -53,6 +57,16 @@ func (p *Presenter) handleCrossTopology(w http.ResponseWriter, r *http.Request) 
 		p.writeBadFilter(w, r, err)
 		return
 	}
+	// The cross-session topology is inherently an ALL-sessions view: its purpose
+	// is lineage, and lineage edges (parent_session_id) need the child/fork
+	// sessions in the node set. /api/sessions defaults group to root-only (the
+	// list shows roots, children are expanded inline); inheriting that here would
+	// strip every child/fork endpoint and drop every lineage edge — a graph of
+	// disconnected root dots. So force groupAll regardless of any ?group= value;
+	// the time/agent/model/cwd/source/status filters still apply. (A roots-only
+	// topology, if ever wanted, would be a separate explicit toggle, not the
+	// /api/sessions list default — rest-api.md §GET /api/topology.)
+	f.group = groupAll
 	metric, err := parseTopologyMetric(r.URL.Query().Get("metric"))
 	if err != nil {
 		p.writeBadFilter(w, r, err)

@@ -208,7 +208,29 @@ These reshape the chunk plan (Chunk 4 = waterfall+list+flame, now + source-aware
 
 ## Reviews
 
-(Filled as external reviewers run. One sub-section per round.)
+### Round 1 — 2026-05-31 (codex + glm + minimax) on commit `02ba377`
+
+glm = "ready to merge, no blockers"; minimax = "ready, minor a11y conditions". BOTH WRONG — codex (decisive) found 2 P1 + 4 P2, all verified by the orchestrator against ground truth. SQL-injection-safety + HEAD/405/metric + bundle + no-regression confirmed by all three. Findings:
+
+- **P1 (codex): cross-session `/api/topology` shows NO lineage by default.** `topology_cross.go:51` uses `parseSessionFilter`, which defaults `group:groupRoot` (`filters.go:78`) → `whereClause` adds `kind='root'` (`filters.go:324`). So the node set is root sessions only; lineage edges (parent→child) have no child endpoints → the cross-session graph is disconnected dots. The frontend doesn't pass `group=all`. **VERIFIED REAL.** Fix: the cross-session endpoint must default to all sessions (include sub_agent/fork) so lineage renders.
+- **P1 (codex): Trace nesting uses a temporal-containment heuristic, not the persisted `parent_op_id`.** The ops table DOES persist `parent_op_id` (`writer.go:539,581` from `ParentOpSeq`), but `opDetail` (`session_detail.go:17-31`) does not expose it, so `trace.ts` derives nesting by temporal containment (`trace.ts:12`), whose stack only pops on `end<start` (`trace.ts:73`) → point events (end==start) become false ancestors. **VERIFIED REAL.** Fix: expose `parent_op_id` in `opDetail`; build the Trace tree from it (temporal only as fallback when null).
+- **P2 (codex): recorded Trace UX decisions (#6 dual detailed-zoom/by-turn views, #7 source-aware point-event ticks + event-list "—") NOT implemented** (the Trace tab was built BEFORE those decisions were recorded). `Waterfall.tsx` always draws `<rect>` bars; `EventList.tsx:100` always formats `duration_us`. **VERIFIED REAL.**
+- **P2 (codex): Timeline Canvas correctness/perf.** zoom transform scales lane HEIGHT too (should be X/time only); `cullSpans` drops full-height compaction breakpoints by lane; Canvas renders one hidden `<button>` per span (defeats the Canvas-above-500 DOM-scaling goal). **VERIFIED plausible (file:line cited); to fix.**
+- **P2 (codex): Topology freeze pins stale DATA, not just positions** — `TopologyTab.tsx:97/153` store `PositionedNode[]`; changing metric/filter/SSE while frozen keeps old labels/radii/failure-ratios. Fix: freeze positions only, re-apply data.
+- **P2 (codex): AC#6 (append→SSE→span appears) + perf ACs are annotation-only, not asserted** — acceptable only once the Canvas defects are fixed + a large fixture or component-level Canvas/worker tests are added.
+- minimax Finding 5 (Trace Canvas keyboard fallback missing): **REJECTED** — `TraceTab.tsx:99` renders the keyboard-operable `EventList` unconditionally, which IS the Trace keyboard path. minimax Findings 1/6/7 (aria-hidden on fallback lists / dead `?? NEUTRAL_TOKEN` / `['topology']` over-fetch): minor, fold into the fix pass. glm P3 (`maxTopologyNodes` mutable test var): negligible.
+
+Verdict: SOW-0006 NOT mergeable; fix the 2 P1 + 4 P2, then re-review. AC#4 byte-preview→SOW-0033 deferral and the security-clean backend stand.
+
+**Operator decision (2026-05-31, AskUserQuestion): "Fix everything now (incl. Trace UX)."** All codex findings — the 2 P1 + all 4 P2, INCLUDING the recorded Trace UX redesign (decision #6 dual detailed-zoom/by-turn views + #7 source-aware point-event ticks) — are fixed inside SOW-0006 (NOT split to a follow-up), then re-reviewed before the PR.
+
+### Round-1 fix cycle — 2026-05-31
+
+- Backend (P1#1 + P1#2): `opDetail` exposes `parent_op_id`; `/api/topology` defaults to all sessions so lineage edges render.
+- Trace (P1#1-fe + P2#3): nesting from `parent_op_id`; dual detailed-zoom/by-turn views; source-aware point-event ticks + event-list "—".
+- Timeline (P2#4): zoom X/time only (not lane height); cull keeps full-height compaction breakpoints; Canvas keyboard fallback bounded so it does not reintroduce per-span DOM.
+- Topology (P2#5): freeze pins POSITIONS only, re-applies node data on metric/filter/SSE.
+- Coverage (P2#6) + minimax minors (aria-hidden fallback, dead `?? NEUTRAL_TOKEN`).
 
 ## Outcome
 

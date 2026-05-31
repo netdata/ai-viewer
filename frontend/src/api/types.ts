@@ -146,6 +146,11 @@ export interface OpDetail {
   name: string;
   model: string;
   provider: string;
+  /** Canonical id of the op this op nests under (ops.parent_op_id); null for a
+   *  top-level op. The server always emits the key (Go `*string`, no omitempty);
+   *  typed optional so existing op literals/fixtures that predate the Trace view
+   *  remain valid — the Trace view rebuilds the span tree from this parentage. */
+  parent_op_id?: string | null;
   start_ts: number;
   end_ts: number | null;
   duration_us: number | null;

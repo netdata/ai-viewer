@@ -185,17 +185,39 @@ export interface CullWindow {
  * marker overlaps when its point x is within [xMin,xMax]. Off-window or
  * off-lane spans are dropped so a large timeline only ever paints what is on
  * screen. Pure + deterministic.
+ *
+ * Compaction breakpoints are the one exception to LANE culling: they render as
+ * full-height vertical rules spanning every lane, so their own lane index is
+ * irrelevant — they are culled by the visible TIME window only (codex P2#4).
+ * They are still time-culled (a breakpoint past the visible X window is dropped).
  */
 export function cullSpans(spans: PositionedSpan[], win: CullWindow): PositionedSpan[] {
   if (spans.length === 0) {
     return [];
   }
   return spans.filter((s) => {
-    if (s.laneIndex < win.laneMin || s.laneIndex > win.laneMax) {
+    // A full-height breakpoint is never lane-culled; every other span must be on
+    // a visible lane.
+    if (!s.compaction && (s.laneIndex < win.laneMin || s.laneIndex > win.laneMax)) {
       return false;
     }
+    // A breakpoint and an instant are point marks (cull by their x); a bar is an
+    // interval ([x, x+width]).
     const left = s.x;
-    const right = s.instant ? s.x : s.x + s.width;
+    const right = s.instant || s.compaction ? s.x : s.x + s.width;
     return right >= win.xMin && left <= win.xMax;
   });
+}
+
+/**
+ * timeXOnlyMatrix turns a d3-zoom transform ({k,x,y}) into an SVG `matrix()` that
+ * applies the zoom to the TIME axis ONLY: X is scaled by k, Y is left at scale 1
+ * so lane height stays constant under zoom, and both axes are still TRANSLATED by
+ * (tx,ty) — a plain-wheel vertical pan across lanes keeps working, only the
+ * zoom-driven Y scale is removed (ui-pages.md §Timeline: "shift+wheel zooms time";
+ * codex P2#4). The Canvas path applies the same a/0/0/1/e/f transform via
+ * ctx.transform. matrix(a,b,c,d,e,f): a=X-scale, d=Y-scale, e/f=translate.
+ */
+export function timeXOnlyMatrix(k: number, tx: number, ty: number): string {
+  return `matrix(${k},0,0,1,${tx},${ty})`;
 }

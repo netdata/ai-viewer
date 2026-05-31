@@ -205,28 +205,68 @@ func TestCrossTopology_NodesAndLineageEdges(t *testing.T) {
 	}
 }
 
-// TestCrossTopology_DefaultGroupRootOnlyRoots asserts the default group=root
-// scope keeps only root sessions; non-root children/forks (and their lineage
-// edges) are absent.
-func TestCrossTopology_DefaultGroupRootOnlyRoots(t *testing.T) {
+// TestCrossTopology_DefaultSpansAllSessions asserts the cross-session topology
+// spans ALL sessions (roots + sub_agents + forks) by DEFAULT — no `group`
+// param needed — because the whole point of this view is lineage. With the
+// /api/sessions roots-only default leaking in, the child/fork endpoints would
+// be absent and every lineage edge would be dropped (disconnected root dots);
+// this test pins that the default now includes the children and renders the
+// lineage edges (SOW-0006).
+func TestCrossTopology_DefaultSpansAllSessions(t *testing.T) {
 	t.Parallel()
 	p, db, cleanup := newTestPresenter(t)
 	defer cleanup()
 	seedCrossTree(t, db, seedBase())
 
+	// No group param: must behave like group=all for this endpoint.
 	code, body, env := getCrossTopology(t, p, "")
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, env=%+v", code, env)
 	}
-	if len(body.Nodes) != 2 {
-		t.Fatalf("nodes = %d, want 2 (rootA+rootB only) (%+v)", len(body.Nodes), body.Nodes)
+	// All four sessions are nodes (roots + child + fork), zero tool nodes.
+	if len(body.Nodes) != 4 {
+		t.Fatalf("nodes = %d, want 4 (all sessions by default) (%+v)", len(body.Nodes), body.Nodes)
 	}
 	_ = crossNode(t, body, "agent:rootA")
+	_ = crossNode(t, body, "agent:childA1")
 	_ = crossNode(t, body, "agent:rootB")
-	// Both lineage edges target non-root children, which are excluded, so no
-	// edges survive.
-	if len(body.Edges) != 0 {
-		t.Fatalf("edges = %d, want 0 (children excluded under group=root) (%+v)", len(body.Edges), body.Edges)
+	_ = crossNode(t, body, "agent:forkB1")
+	// Both lineage edges render by default: rootA→childA1 (sub_agent) and
+	// rootB→forkB1 (fork), each structural (calls=1, total_us=0).
+	if len(body.Edges) != 2 {
+		t.Fatalf("edges = %d, want 2 (lineage by default) (%+v)", len(body.Edges), body.Edges)
+	}
+	if !crossHasEdge(body, "agent:rootA", "agent:childA1", 1, 0) {
+		t.Fatalf("missing rootA→childA1 lineage edge by default: %+v", body.Edges)
+	}
+	if !crossHasEdge(body, "agent:rootB", "agent:forkB1", 1, 0) {
+		t.Fatalf("missing rootB→forkB1 fork lineage edge by default: %+v", body.Edges)
+	}
+}
+
+// TestCrossTopology_GroupRootIsIgnored asserts the cross-session topology
+// ALWAYS spans all sessions: even an explicit `group=root` does not collapse it
+// to roots-only, because lineage requires the child/fork endpoints to be in the
+// node set. (A future roots-only toggle would be a separate param; `group` on
+// /api/sessions controls the LIST, not this lineage graph.)
+func TestCrossTopology_GroupRootIsIgnored(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	seedCrossTree(t, db, seedBase())
+
+	code, body, env := getCrossTopology(t, p, "group=root")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, env=%+v", code, env)
+	}
+	// group=root must NOT restrict this endpoint: all four sessions remain.
+	if len(body.Nodes) != 4 {
+		t.Fatalf("nodes = %d, want 4 (group=root must not restrict cross-session topology) (%+v)", len(body.Nodes), body.Nodes)
+	}
+	_ = crossNode(t, body, "agent:childA1")
+	_ = crossNode(t, body, "agent:forkB1")
+	if len(body.Edges) != 2 {
+		t.Fatalf("edges = %d, want 2 (lineage survives group=root) (%+v)", len(body.Edges), body.Edges)
 	}
 }
 

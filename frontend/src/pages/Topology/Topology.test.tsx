@@ -225,4 +225,42 @@ describe('Topology (cross-session)', () => {
     const results = await axe(container);
     expect(results).toHaveNoViolations();
   });
+
+  it('keeps node DATA live while frozen: a metric change re-applies fresh radius + failure_ratio at the pinned position (codex P2#5)', async () => {
+    const user = userEvent.setup();
+    // Same session ids, but the "cost" metric makes the worker the largest node
+    // and changes failure ratios — the live data a metric switch must re-apply.
+    const COST_GRAPH: TopologyResponse = {
+      nodes: [
+        { id: 'agent:rootA', kind: 'agent', label: 'nedi (root)', size_metric: 10, failure_ratio: 0 },
+        { id: 'agent:childA1', kind: 'agent', label: 'worker', size_metric: 100, failure_ratio: 0.9 },
+      ],
+      edges: GRAPH.edges,
+      max_size_metric: 100,
+    };
+    topologySpy.mockImplementation((_filters: unknown, metric: unknown) =>
+      result({ data: metric === 'cost' ? COST_GRAPH : GRAPH }),
+    );
+    renderPage();
+
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    // The worker session BEFORE the metric change (duration: 0% fail, small).
+    const workerBefore = within(graph).getByRole('button', { name: /worker/i }) as unknown as SVGGElement;
+    const posBefore = workerBefore.getAttribute('transform');
+    const rBefore = workerBefore.querySelector('circle')?.getAttribute('r');
+    expect(within(graph).getByRole('button', { name: /worker/i })).toHaveAccessibleName(/0\.0%/);
+
+    // Freeze, then switch the size metric → data refetches (cost graph).
+    await user.click(screen.getByRole('button', { name: /freeze layout/i }));
+    await user.selectOptions(screen.getByRole('combobox', { name: /size by/i }), 'cost');
+
+    const workerAfter = within(graph).getByRole('button', { name: /worker/i }) as unknown as SVGGElement;
+    // Position PINNED…
+    expect(workerAfter.getAttribute('transform')).toBe(posBefore);
+    // …DATA live: failure ratio now 90%…
+    expect(within(graph).getByRole('button', { name: /worker/i })).toHaveAccessibleName(/90\.0%/);
+    // …and the radius grew (worker is now the max-metric node).
+    const rAfter = workerAfter.querySelector('circle')?.getAttribute('r');
+    expect(Number(rAfter)).toBeGreaterThan(Number(rBefore));
+  });
 });

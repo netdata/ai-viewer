@@ -4,6 +4,8 @@ import {
   FORCE_WORKER_THRESHOLD,
   layoutTopology,
   nodeRadius,
+  positionsOf,
+  reapplyFrozenPositions,
   type PositionedNode,
   type TopologyLayoutMode,
 } from './topology';
@@ -210,6 +212,111 @@ describe('layoutTopology — hierarchical', () => {
       expect(Number.isFinite(p.x)).toBe(true);
       expect(Number.isFinite(p.y)).toBe(true);
     }
+  });
+});
+
+describe('positionsOf — snapshots a layout to id → {x,y} only', () => {
+  it('keeps only x and y per node id (drops label/radius/failure_ratio)', () => {
+    const positioned: PositionedNode[] = [
+      { node: node({ id: 'agent:root' }), x: 11, y: 22, radius: 9 },
+      { node: node({ id: 'tool:t' }), x: 33, y: 44, radius: 5 },
+    ];
+    const m = positionsOf(positioned);
+    expect(m.get('agent:root')).toEqual({ x: 11, y: 22 });
+    expect(m.get('tool:t')).toEqual({ x: 33, y: 44 });
+    expect(m.size).toBe(2);
+  });
+
+  it('round-trips through reapplyFrozenPositions, preserving coordinates', () => {
+    const positioned = layoutTopology(fixtureNodes(), fixtureEdges(), { ...SIZE, mode: 'force-seeded' });
+    const out = byId(reapplyFrozenPositions(fixtureNodes(), positionsOf(positioned), { ...SIZE, mode: 'force-seeded' }));
+    for (const p of positioned) {
+      expect(out.get(p.node.id)?.x).toBeCloseTo(p.x, 9);
+      expect(out.get(p.node.id)?.y).toBeCloseTo(p.y, 9);
+    }
+  });
+});
+
+describe('reapplyFrozenPositions — freeze pins POSITIONS, data stays live', () => {
+  // Freeze stores only node id → {x,y}. On a metric/filter/SSE refetch the FRESH
+  // node data (label, radius from the new size_metric, failure_ratio) is re-applied
+  // onto those pinned positions, matched by id (codex P2#5: "freeze = stop the
+  // simulation moving nodes, NOT stop data updates").
+  const frozen = new Map<string, { x: number; y: number }>([
+    ['agent:root', { x: 111, y: 222 }],
+    ['tool:shell.Bash', { x: 333, y: 444 }],
+  ]);
+
+  it('keeps the frozen x/y but re-applies the fresh radius when the size metric changes', () => {
+    // A new metric makes shell.Bash the largest node (max_size_metric now 60).
+    const freshNodes = [
+      node({ id: 'agent:root', kind: 'agent', label: 'nedi (root)', size_metric: 10 }),
+      node({ id: 'tool:shell.Bash', kind: 'tool', label: 'shell.Bash', size_metric: 60 }),
+    ];
+    const out = reapplyFrozenPositions(freshNodes, frozen, {
+      ...SIZE,
+      mode: 'force-seeded',
+      maxSizeMetric: 60,
+      minRadius: 4,
+      maxRadius: 28,
+    });
+    const m = byId(out);
+    // Positions are pinned to the frozen snapshot…
+    expect(m.get('agent:root')?.x).toBe(111);
+    expect(m.get('agent:root')?.y).toBe(222);
+    expect(m.get('tool:shell.Bash')?.x).toBe(333);
+    expect(m.get('tool:shell.Bash')?.y).toBe(444);
+    // …but the radius reflects the FRESH metric: shell.Bash is now the max → max radius.
+    expect(m.get('tool:shell.Bash')?.radius).toBeCloseTo(28, 6);
+    expect(m.get('agent:root')?.radius ?? 0).toBeLessThan(28);
+  });
+
+  it('re-applies the fresh label and failure_ratio onto the pinned node', () => {
+    const freshNodes = [
+      node({ id: 'agent:root', kind: 'agent', label: 'renamed root', size_metric: 10, failure_ratio: 0.75 }),
+    ];
+    const out = reapplyFrozenPositions(freshNodes, frozen, { ...SIZE, mode: 'force-seeded' });
+    const root = out.find((p) => p.node.id === 'agent:root');
+    expect(root?.node.label).toBe('renamed root');
+    expect(root?.node.failure_ratio).toBe(0.75);
+    expect(root?.x).toBe(111); // still pinned
+  });
+
+  it('gives a newly-appeared node (absent from the frozen snapshot) a finite layout position', () => {
+    const freshNodes = [
+      node({ id: 'agent:root', kind: 'agent', size_metric: 10 }),
+      node({ id: 'agent:new', kind: 'agent', label: 'new', size_metric: 10 }), // not in `frozen`
+    ];
+    const out = reapplyFrozenPositions(freshNodes, frozen, { ...SIZE, mode: 'force-seeded' });
+    const fresh = out.find((p) => p.node.id === 'agent:new');
+    expect(fresh).toBeTruthy();
+    expect(Number.isFinite(fresh?.x ?? NaN)).toBe(true);
+    expect(Number.isFinite(fresh?.y ?? NaN)).toBe(true);
+    // The pinned node still sits at its frozen coordinate.
+    expect(out.find((p) => p.node.id === 'agent:root')?.x).toBe(111);
+  });
+
+  it('drops a vanished node (present in the frozen snapshot but gone from the fresh data)', () => {
+    // Only root remains; shell.Bash vanished from the live data.
+    const freshNodes = [node({ id: 'agent:root', kind: 'agent', size_metric: 10 })];
+    const out = reapplyFrozenPositions(freshNodes, frozen, { ...SIZE, mode: 'force-seeded' });
+    expect(out).toHaveLength(1);
+    expect(out.some((p) => p.node.id === 'tool:shell.Bash')).toBe(false);
+  });
+
+  it('returns [] for empty fresh data even with a non-empty frozen snapshot', () => {
+    expect(reapplyFrozenPositions([], frozen, { ...SIZE, mode: 'force-seeded' })).toEqual([]);
+  });
+
+  it('is order-independent for the newly-appeared seed (same id → same fallback position)', () => {
+    // A new node's fallback position is id-seeded (deterministic), so it does not
+    // depend on array order — the same property the force-seeded layout relies on.
+    const a = [node({ id: 'agent:x', size_metric: 5 }), node({ id: 'agent:y', size_metric: 5 })];
+    const b = [...a].reverse();
+    const ra = byId(reapplyFrozenPositions(a, new Map(), { ...SIZE, mode: 'force-seeded' }));
+    const rb = byId(reapplyFrozenPositions(b, new Map(), { ...SIZE, mode: 'force-seeded' }));
+    expect(rb.get('agent:x')?.x).toBeCloseTo(ra.get('agent:x')?.x ?? NaN, 9);
+    expect(rb.get('agent:x')?.y).toBeCloseTo(ra.get('agent:x')?.y ?? NaN, 9);
   });
 });
 

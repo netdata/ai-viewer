@@ -18,6 +18,13 @@ const STATUS_TOKEN: Record<string, string> = {
   abandoned: '--error',
 };
 
+// Actor-kind tokens, named as concrete (provably non-undefined) strings so
+// colorForActorKind needs no dead `?? NEUTRAL_TOKEN` fallback (minimax Finding 6).
+// They double as the agent/tool entries in KIND_TOKEN — single source of truth so
+// the topology palette and the op-kind palette never diverge.
+const AGENT_TOKEN = '--warning';
+const TOOL_TOKEN = '--success';
+
 // Op-kind palette. Each known kind reads a base theme token so the palette
 // tracks light/dark automatically; kinds without a dedicated semantic token
 // borrow a related one (reasoning↔info, internal/system↔text-secondary). An
@@ -25,10 +32,10 @@ const STATUS_TOKEN: Record<string, string> = {
 // client treats enums as open, api/types.ts).
 const KIND_TOKEN: Record<string, string> = {
   llm: '--accent',
-  tool: '--success',
+  tool: TOOL_TOKEN,
   reasoning: '--info',
   session: '--warning',
-  agent: '--warning',
+  agent: AGENT_TOKEN,
   compaction: '--error',
   retry: '--warning',
   internal: '--text-secondary',
@@ -131,8 +138,8 @@ export function colorForFailureRatio(ratio: number): string {
  * future kind falls back to neutral.
  */
 export function colorForActorKind(kind: string): string {
-  const token = kind === 'agent' ? KIND_TOKEN.agent : kind === 'tool' ? KIND_TOKEN.tool : NEUTRAL_TOKEN;
-  return tokenValue(token ?? NEUTRAL_TOKEN);
+  const token = kind === 'agent' ? AGENT_TOKEN : kind === 'tool' ? TOOL_TOKEN : NEUTRAL_TOKEN;
+  return tokenValue(token);
 }
 
 /**

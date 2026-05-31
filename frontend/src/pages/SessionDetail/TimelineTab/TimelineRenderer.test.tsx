@@ -54,6 +54,7 @@ beforeEach(() => {
     restore: vi.fn(),
     scale: vi.fn(),
     translate: vi.fn(),
+    transform: vi.fn(),
     setLineDash: vi.fn(),
   };
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
@@ -172,7 +173,7 @@ describe('TimelineRenderer (SVG path)', () => {
     expect(screen.getByText('root')).toBeInTheDocument();
   });
 
-  it('pans (translates) on a plain wheel and zooms (scales) on a shift+wheel', () => {
+  it('pans (translates) on a plain wheel and zooms the TIME (X) axis only on a shift+wheel', () => {
     render(
       <TimelineRenderer
         lanes={LAYOUT.lanes}
@@ -191,20 +192,27 @@ describe('TimelineRenderer (SVG path)', () => {
       .querySelector('svg') as SVGSVGElement;
     const g = svg.querySelector('g') as SVGGElement;
 
+    // The <g> transform is an X-only matrix(a,0,0,d,e,f): a=X-scale, d=Y-scale,
+    // e/f=translate. parseMatrix pulls those out so we can assert the time axis (X)
+    // scales while lane height (Y) never does (codex P2#4).
+    const parseMatrix = (): number[] => {
+      const m = /matrix\(([^)]+)\)/.exec(g.getAttribute('transform') ?? '');
+      return (m?.[1] ?? '').split(',').map(Number);
+    };
+
     // A plain wheel is consumed by the pan handler (preventDefault) and applies a
-    // pure TRANSLATION to the <g> (no scale change).
+    // pure TRANSLATION (no scale change on either axis).
     const plain = new WheelEvent('wheel', { deltaX: 40, deltaY: 0, bubbles: true, cancelable: true });
     svg.dispatchEvent(plain);
     expect(plain.defaultPrevented).toBe(true);
-    const afterPan = g.getAttribute('transform') ?? '';
-    // translate(-40,0) — panned left; scale stays 1 (d3's toString always emits
-    // a scale token, so the pan is distinguished by scale(1), not its absence).
-    expect(afterPan).toMatch(/translate\(-40\b/);
-    expect(afterPan).toMatch(/scale\(1\)/);
+    const [aPan, , , dPan, ePan] = parseMatrix();
+    expect(aPan).toBe(1); // X scale 1 (no zoom)
+    expect(dPan).toBe(1); // Y scale 1
+    expect(ePan).toBe(-40); // panned left by 40
 
-    // A shift+wheel is handled by d3-zoom (NOT the pan handler) and applies a
-    // SCALE > 1 to the <g> — the zoom path. Dispatch via the SVG element with a
-    // pointer location so d3-zoom computes a focal point.
+    // A shift+wheel is handled by d3-zoom (NOT the pan handler) and scales the
+    // TIME axis (X) only — Y stays 1 so lane height is constant. Dispatch via the
+    // SVG element with a pointer location so d3-zoom computes a focal point.
     const shifted = new WheelEvent('wheel', {
       deltaY: -40,
       shiftKey: true,
@@ -214,10 +222,9 @@ describe('TimelineRenderer (SVG path)', () => {
       cancelable: true,
     });
     svg.dispatchEvent(shifted);
-    const afterZoom = g.getAttribute('transform') ?? '';
-    const scaleMatch = /scale\(([\d.]+)\)/.exec(afterZoom);
-    expect(scaleMatch).not.toBeNull();
-    expect(Number(scaleMatch?.[1])).toBeGreaterThan(1);
+    const [aZoom, , , dZoom] = parseMatrix();
+    expect(aZoom).toBeGreaterThan(1); // X (time) scaled up
+    expect(dZoom).toBe(1); // Y (lane height) UNCHANGED — the codex P2#4 invariant
   });
 
   it('does NOT fade any span on the first render (initial load is not an append)', () => {
@@ -380,6 +387,44 @@ describe('TimelineRenderer (Canvas path)', () => {
     await user.click(chat);
     expect(onSpanClick).toHaveBeenCalledTimes(1);
     expect(onSpanClick.mock.calls[0]?.[0]).toMatchObject({ span: { id: 'llm' } });
+  });
+
+  it('culls the keyboard-fallback list to the viewport (no DOM node per span at scale)', () => {
+    // P2#4: the Canvas fallback must NOT emit one <button> per total span (a
+    // thousands-span timeline would flood the DOM). It mirrors only the spans the
+    // Canvas paints — the viewport-culled set. Six lanes but a viewport tall enough
+    // for ~one lane: lower lanes are off-screen, so their spans are excluded.
+    const sixLanes: TimelineLaneInput[] = Array.from({ length: 6 }, (_, i) => ({
+      key: `session:lane${i}`,
+      label: `lane${i}`,
+      spans: [
+        { id: `op${i}`, kind: 'tool', name: `op${i}`, start_ts: 100, end_ts: 300, status: 'completed' },
+      ],
+    }));
+    const layout = layoutTimeline(sixLanes, { width: WIDTH, laneHeight: 40, tStart: T_START, tEnd: T_END });
+    const shortHeight = 22 + 40; // axis + ~one lane visible
+    render(
+      <TimelineRenderer
+        lanes={layout.lanes}
+        spans={layout.spans}
+        width={WIDTH}
+        height={shortHeight}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={true}
+      />,
+    );
+    const fallback = screen.getByRole('list', { name: /timeline spans/i });
+    const buttons = within(fallback).getAllByRole('button');
+    // Fewer than the 6 total spans (only the on-screen lanes are listed), and the
+    // top lane's span is among them.
+    expect(buttons.length).toBeLessThan(6);
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(within(fallback).queryByRole('button', { name: /op0/i })).not.toBeNull();
+    // A far-off-screen lane's span is NOT in the DOM fallback.
+    expect(within(fallback).queryByRole('button', { name: /op5/i })).toBeNull();
   });
 
   it('hit-tests a click against the span under the cursor', () => {

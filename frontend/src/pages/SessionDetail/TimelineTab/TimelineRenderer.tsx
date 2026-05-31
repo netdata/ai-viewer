@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';
 import { select } from 'd3-selection';
 import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from 'd3-zoom';
@@ -6,7 +6,9 @@ import { colorForOpKind } from '../../../viz/color';
 import {
   cullSpans,
   timelineScale,
+  timeXOnlyMatrix,
   VISIBLE_SPAN_CEILING,
+  type CullWindow,
   type PositionedLane,
   type PositionedSpan,
 } from '../../../viz/timeline';
@@ -173,6 +175,27 @@ function axisTicks(tStart: number, tEnd: number, width: number): { value: number
   return x.ticks(AXIS_TARGET_TICKS).map((value) => ({ value, x: x(value) }));
 }
 
+/**
+ * cullWindowFor inverts the X-only zoom transform into the visible track-space
+ * window (the same window the Canvas paints): X is scaled by k (so divide), Y is
+ * only translated since lane height does not scale with zoom (codex P2#4). Pure
+ * so the paint loop and the keyboard-fallback list cull to the IDENTICAL set.
+ */
+function cullWindowFor(
+  transform: { k: number; x: number; y: number },
+  width: number,
+  height: number,
+  laneHeight: number,
+): CullWindow {
+  const xMin = -transform.x / transform.k;
+  const xMax = (width - transform.x) / transform.k;
+  const visTop = -transform.y;
+  const visBottom = height - transform.y;
+  const laneMin = Math.floor((visTop - AXIS_HEIGHT) / laneHeight) - 1;
+  const laneMax = Math.ceil((visBottom - AXIS_HEIGHT) / laneHeight) + 1;
+  return { xMin, xMax, laneMin, laneMax };
+}
+
 /** labelForSpan builds the accessible name for a span (kind, name, duration). */
 function labelForSpan(s: PositionedSpan): string {
   const dur = s.instant
@@ -210,7 +233,11 @@ function TimelineSvg({
       return;
     }
     const { dispose } = attachZoom<SVGSVGElement>(svg, (event) => {
-      g.setAttribute('transform', event.transform.toString());
+      // Zoom the TIME axis only: scale X by k, keep Y (lane height) at scale 1.
+      // Both axes still translate so a plain-wheel vertical lane pan keeps working
+      // (ui-pages.md §Timeline; codex P2#4).
+      const t = event.transform;
+      g.setAttribute('transform', timeXOnlyMatrix(t.k, t.x, t.y));
     });
     return dispose;
   }, [width, height]);
@@ -383,6 +410,15 @@ function TimelineCanvas({
   const [transform, setTransform] = useState({ k: 1, x: 0, y: 0 });
   const ticks = axisTicks(tStart, tEnd, width);
 
+  // The spans currently inside the viewport — the EXACT set the Canvas paints AND
+  // the set the keyboard-fallback list mirrors. Culling the fallback to the
+  // viewport keeps it bounded (no DOM node per span at scale — codex P2#4); a
+  // keyboard user reaches the on-screen spans and pans/zooms to reach the rest.
+  const visible = useMemo(
+    () => cullSpans(spans, cullWindowFor(transform, width, height, lanes[0]?.height ?? 1)),
+    [spans, transform, width, height, lanes],
+  );
+
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) {
@@ -410,19 +446,11 @@ function TimelineCanvas({
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, width, height);
-    ctx.translate(transform.x, transform.y);
-    ctx.scale(transform.k, transform.k);
-
-    // Cull to the visible window (inverse-transform the screen rect into track
-    // space), then paint only what survives — the Canvas-path optimization.
-    const xMin = -transform.x / transform.k;
-    const xMax = (width - transform.x) / transform.k;
-    const visTop = -transform.y / transform.k;
-    const visBottom = (height - transform.y) / transform.k;
-    const laneH = lanes[0]?.height ?? 1;
-    const laneMin = Math.floor((visTop - AXIS_HEIGHT) / laneH) - 1;
-    const laneMax = Math.ceil((visBottom - AXIS_HEIGHT) / laneH) + 1;
-    const visible = cullSpans(spans, { xMin, xMax, laneMin, laneMax });
+    // Zoom the TIME axis only: scale X by k, keep Y at scale 1 (lane height
+    // constant), translate both axes. ctx.transform(a,b,c,d,e,f) post-multiplies
+    // the dpr scale already on the matrix (codex P2#4). `visible` is the
+    // viewport-culled set (memoized above) — only on-screen spans are painted.
+    ctx.transform(transform.k, 0, 0, 1, transform.x, transform.y);
 
     // Axis ticks (under the spans).
     ctx.strokeStyle = 'rgba(128,128,128,0.4)';
@@ -467,14 +495,16 @@ function TimelineCanvas({
       }
     }
     ctx.restore();
-  }, [lanes, spans, ticks, width, height, selectedId, transform]);
+  }, [visible, ticks, width, height, selectedId, transform]);
 
   // Hit-test a click: invert the zoom transform, then find the span whose pixel
   // box contains the point (last match wins → topmost painted).
   const onClick = (e: MouseEvent<HTMLCanvasElement>): void => {
     const bounds = e.currentTarget.getBoundingClientRect();
+    // Invert the X-only zoom: X is scaled by k (divide), Y is only translated
+    // (no /k) since lane height does not scale with zoom (codex P2#4).
     const px = (e.clientX - bounds.left - transform.x) / transform.k;
-    const py = (e.clientY - bounds.top - transform.y) / transform.k;
+    const py = e.clientY - bounds.top - transform.y;
     let hit: PositionedSpan | null = null;
     for (const s of spans) {
       const yTop = AXIS_HEIGHT + s.y + 6;
@@ -503,11 +533,14 @@ function TimelineCanvas({
       />
       {/* Keyboard / screen-reader path for the Canvas render (SOW-0006 AC#5): the
           <canvas> is one non-focusable image, so without this every span would be
-          unreachable by keyboard. Each span gets a real focusable button carrying
-          the same accessible name the SVG bars use; visually hidden (the canvas IS
-          the visual) but operable. */}
+          unreachable by keyboard. Each VISIBLE span (the same viewport-culled set
+          the Canvas paints) gets a real focusable button with the SVG bars'
+          accessible name; visually hidden (the canvas IS the visual) but operable.
+          Culling to the viewport bounds the list so a thousands-span timeline does
+          not emit a DOM node per span (codex P2#4) — panning/zooming brings other
+          spans into reach. */}
       <ul className={styles.canvasFallbackList} aria-label="Timeline spans">
-        {spans.map((s) => (
+        {visible.map((s) => (
           <li key={`${s.laneKey}:${s.span.id}`}>
             <button
               type="button"

@@ -189,6 +189,50 @@ describe('TopologyTab', () => {
     expect(screen.getByRole('button', { name: /freeze layout/i })).toBeDisabled();
   });
 
+  it('keeps node DATA live while frozen: a metric change re-applies fresh radius + failure_ratio at the pinned position (codex P2#5)', async () => {
+    const user = userEvent.setup();
+    // Same node ids, but the "tokens" metric makes fs.Grep the largest node and
+    // changes failure ratios — the live data a metric switch must re-apply.
+    const TOKENS_GRAPH: TopologyResponse = {
+      nodes: [
+        { id: 'agent:root', kind: 'agent', label: 'nedi (root)', size_metric: 10, failure_ratio: 0 },
+        { id: 'tool:shell.Bash', kind: 'tool', label: 'shell.Bash', size_metric: 5, failure_ratio: 0 },
+        { id: 'tool:fs.Grep', kind: 'tool', label: 'fs.Grep', size_metric: 100, failure_ratio: 0.9 },
+      ],
+      edges: GRAPH.edges,
+      max_size_metric: 100,
+    };
+    topologySpy.mockImplementation((_id: unknown, metric: unknown) =>
+      result({ data: metric === 'tokens' ? TOKENS_GRAPH : GRAPH }),
+    );
+    render(<TopologyTab sessionId="s1" />);
+
+    const graph = screen.getByRole('group', { name: /topology graph/i });
+    const groupFor = (name: RegExp): SVGGElement => {
+      const btn = within(graph).getByRole('button', { name });
+      // The focusable element IS the positioned <g> (transform="translate(x,y)").
+      return btn as unknown as SVGGElement;
+    };
+    // fs.Grep's pinned position + radius BEFORE the metric change (cost: 50% fail).
+    const grepBefore = groupFor(/fs\.Grep/i);
+    const posBefore = grepBefore.getAttribute('transform');
+    const rBefore = grepBefore.querySelector('rect')?.getAttribute('width');
+    expect(within(graph).getByRole('button', { name: /fs\.Grep/i })).toHaveAccessibleName(/50\.0%/);
+
+    // Freeze, then switch the size metric → data refetches (tokens graph).
+    await user.click(screen.getByRole('button', { name: /freeze layout/i }));
+    await user.selectOptions(screen.getByRole('combobox', { name: /size by/i }), 'tokens');
+
+    const grepAfter = groupFor(/fs\.Grep/i);
+    // Position is PINNED (freeze stopped the simulation moving nodes)…
+    expect(grepAfter.getAttribute('transform')).toBe(posBefore);
+    // …but the DATA is live: failure ratio is now 90% (re-applied)…
+    expect(within(graph).getByRole('button', { name: /fs\.Grep/i })).toHaveAccessibleName(/90\.0%/);
+    // …and the radius grew (fs.Grep is now the max-metric node) — fresh radius applied.
+    const rAfter = grepAfter.querySelector('rect')?.getAttribute('width');
+    expect(Number(rAfter)).toBeGreaterThan(Number(rBefore));
+  });
+
   it('shows the loading state while the query is pending', () => {
     topologySpy.mockReturnValue(result({ data: undefined, isPending: true }));
     render(<TopologyTab sessionId="s1" />);

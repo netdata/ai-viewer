@@ -5,6 +5,7 @@ import {
   cullSpans,
   isInstant,
   isCompaction,
+  timeXOnlyMatrix,
   VISIBLE_SPAN_CEILING,
   type TimelineLaneInput,
 } from './timeline';
@@ -237,6 +238,69 @@ describe('cullSpans — viewport culling (visible X window AND visible lanes)', 
 
   it('returns [] for no spans', () => {
     expect(cullSpans([], { xMin: 0, xMax: 100, laneMin: 0, laneMax: 1 })).toEqual([]);
+  });
+
+  it('keeps a compaction breakpoint inside the time window even when its lane is OFF the visible band', () => {
+    // A compaction op renders as a FULL-HEIGHT vertical breakpoint spanning every
+    // lane, so it must be culled by the visible TIME window only — never dropped
+    // because its own lane index falls outside the visible lane band (codex P2#4).
+    const lanes = [
+      lane({ key: 'session:root', label: 'root', spans: [] }),
+      lane({
+        key: 'session:child',
+        label: 'worker',
+        spans: [
+          { id: 'compact', kind: 'compaction', name: 'compact', start_ts: 500, end_ts: null, status: 'completed' },
+        ],
+      }),
+    ];
+    const out = layoutTimeline(lanes, OPTS); // compact on lane 1, x=(500-100)*1.25=500
+    // Only lane 0 visible, but the breakpoint's x (500) is inside the window.
+    const visible = cullSpans(out.spans, { xMin: 0, xMax: 1000, laneMin: 0, laneMax: 0 });
+    expect(visible.some((s) => s.span.id === 'compact')).toBe(true);
+  });
+
+  it('still time-culls a compaction breakpoint OUTSIDE the visible time window', () => {
+    // Lane-exempt does NOT mean window-exempt: a breakpoint whose x is past the
+    // visible time window is still dropped (it is off-screen in X).
+    const lanes = [
+      lane({
+        key: 'session:root',
+        label: 'root',
+        spans: [
+          { id: 'compact', kind: 'compaction', name: 'compact', start_ts: 800, end_ts: null, status: 'completed' },
+        ],
+      }),
+    ];
+    const out = layoutTimeline(lanes, OPTS); // x=(800-100)*1.25=875
+    const visible = cullSpans(out.spans, { xMin: 0, xMax: 400, laneMin: 0, laneMax: 10 });
+    expect(visible.some((s) => s.span.id === 'compact')).toBe(false);
+  });
+});
+
+describe('timeXOnlyMatrix — zoom scales the time axis (X) only, never lane height (Y)', () => {
+  it('builds an SVG matrix that scales X by k and keeps Y at scale 1', () => {
+    // The d3-zoom transform {k,x,y} must apply to the TIME axis only: X scaled by
+    // k, Y unscaled (lane height constant), translated by (x,y). The SVG matrix
+    // form matrix(a,b,c,d,e,f) scales X by `a`, Y by `d` — so a===k and d===1
+    // (codex P2#4: "shift+wheel zooms TIME — lane height must stay constant").
+    expect(timeXOnlyMatrix(2, 30, 40)).toBe('matrix(2,0,0,1,30,40)');
+  });
+
+  it('keeps the Y-scale at 1 for any zoom factor (lanes never grow vertically)', () => {
+    for (const k of [0.2, 1, 8, 64]) {
+      const m = timeXOnlyMatrix(k, 0, 0);
+      // The 4th matrix component (d, the Y scale) is always 1.
+      const parts = /^matrix\(([^,]+),([^,]+),([^,]+),([^,]+),/.exec(m);
+      expect(parts?.[1]).toBe(String(k)); // X scale === k
+      expect(parts?.[4]).toBe('1'); // Y scale === 1, independent of k
+    }
+  });
+
+  it('preserves the X and Y translation (vertical lane pan still works)', () => {
+    // Y is not SCALED, but it is still TRANSLATED so a plain-wheel vertical pan
+    // across lanes keeps working — only the zoom-driven Y SCALE is removed.
+    expect(timeXOnlyMatrix(1, -40, -120)).toBe('matrix(1,0,0,1,-40,-120)');
   });
 });
 

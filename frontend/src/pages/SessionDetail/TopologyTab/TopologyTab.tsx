@@ -6,6 +6,8 @@ import { LoadingState, ErrorState, EmptyState } from '../../../components/Status
 import {
   FORCE_WORKER_THRESHOLD,
   layoutTopology,
+  positionsOf,
+  reapplyFrozenPositions,
   runForceLayout,
   type PositionedNode,
   type TopologyLayoutMode,
@@ -91,10 +93,13 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
   const [metric, setMetric] = useState<TopologyMetric>('cost');
   const [mode, setMode] = useState<TopologyLayoutMode>('force-seeded');
   const [selected, setSelected] = useState<TopologyNode | null>(null);
-  // The pinned layout captured when the operator froze; while non-null it is
-  // reused verbatim so no re-simulate happens on re-render / SSE / metric
-  // refetch. State (not a ref) so toggling it re-renders.
-  const [frozenLayout, setFrozenLayout] = useState<PositionedNode[] | null>(null);
+  // The pinned node POSITIONS captured when the operator froze (id → {x,y}); while
+  // non-null the simulation never re-runs, but the node DATA stays live — a
+  // metric/SSE refetch re-applies fresh labels/radii/failure-ratios onto these
+  // coordinates (codex P2#5). State (not a ref) so toggling it re-renders.
+  const [frozenLayout, setFrozenLayout] = useState<ReadonlyMap<string, { x: number; y: number }> | null>(
+    null,
+  );
   // Worker-computed positions tagged with the input key they were computed for,
   // so a stale result from a previous metric/mode is ignored. Set only inside
   // the worker's onmessage handler (an event callback, never the effect body).
@@ -146,19 +151,22 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
     };
   }, [useWorker, frozen, nodes, edges, opts, mode, key]);
 
-  // Positions actually rendered: the frozen snapshot wins; otherwise the worker
-  // result (only when it matches the current input key — a stale result for a
-  // prior metric/mode is dropped, showing an empty graph until the fresh run
-  // lands) or the inline result.
+  // Positions actually rendered. When frozen, the simulation is pinned but the
+  // DATA is live: reapplyFrozenPositions keeps each node at its frozen (x,y) while
+  // re-applying the fresh label/radius/failure_ratio (a new metric or SSE refetch
+  // updates the graph in place; a vanished node drops, a new node is seeded —
+  // codex P2#5). Otherwise the worker result (only when it matches the current
+  // input key — a stale result for a prior metric/mode is dropped, showing an
+  // empty graph until the fresh run lands) or the inline result.
   const positioned: PositionedNode[] = frozen
-    ? (frozenLayout ?? [])
+    ? reapplyFrozenPositions(nodes, frozenLayout ?? new Map(), opts)
     : useWorker
       ? (workerResult?.key === key ? workerResult.positioned : [])
       : inlinePositions;
 
-  // Freeze captures the current layout. For a large-force graph whose worker
-  // result is not back yet, run the simulation once synchronously so the pin is
-  // immediate and deterministic.
+  // Freeze pins the current node POSITIONS (positionsOf strips to id → {x,y}). For
+  // a large-force graph whose worker result is not back yet, run the simulation
+  // once synchronously so the pin is immediate and deterministic.
   const onToggleFreeze = (): void => {
     if (frozen) {
       setFrozenLayout(null);
@@ -168,7 +176,7 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
       positioned.length > 0
         ? positioned
         : runForceLayout(nodes, edges, opts, mode === 'force-seeded');
-    setFrozenLayout(snapshot);
+    setFrozenLayout(positionsOf(snapshot));
   };
 
   const onSelectMode = (next: TopologyLayoutMode): void => {

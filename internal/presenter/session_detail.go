@@ -52,13 +52,17 @@ type turnDetail struct {
 	Ops       []opDetail `json:"ops"`
 }
 
-// opDetail is one ops row plus its payload_refs.
+// opDetail is one ops row plus its payload_refs. ParentOpID is the canonical
+// id of the op this op nests under (ops.parent_op_id) — NULL for a top-level
+// op. The Trace view uses it to rebuild the authoritative span tree from the
+// stored parentage the ingest writer records (rest-api.md §GET /api/sessions/:id).
 type opDetail struct {
 	ID             string       `json:"id"`
 	Kind           string       `json:"kind"`
 	Name           string       `json:"name"`
 	Model          string       `json:"model"`
 	Provider       string       `json:"provider"`
+	ParentOpID     *string      `json:"parent_op_id"`
 	StartTS        int64        `json:"start_ts"`
 	EndTS          *int64       `json:"end_ts"`
 	DurationUS     *int64       `json:"duration_us"`

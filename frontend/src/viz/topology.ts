@@ -373,3 +373,51 @@ export function layoutTopology(
       return runForceLayout(nodes, edges, opts, true);
   }
 }
+
+/**
+ * reapplyFrozenPositions re-applies the FRESH node data (label, radius from the
+ * current size_metric, failure_ratio) onto a frozen set of POSITIONS, matched by
+ * node id. This is what "freeze layout" means: the simulation stops moving nodes,
+ * but data keeps updating (codex P2#5). A metric/filter/SSE refetch hands a new
+ * `nodes` array here; each node keeps its pinned (x,y) when its id is in `frozen`,
+ * while its radius is recomputed against the fresh `maxSizeMetric` and its label /
+ * failure_ratio come straight from the fresh node. A node that NEWLY appeared
+ * (absent from the frozen snapshot) gets a deterministic id-seeded fallback
+ * position so it is placed without re-simulating the pinned nodes; a node that
+ * VANISHED (in the snapshot but gone from the fresh data) is dropped by iterating
+ * the fresh nodes. Pure + deterministic (no Math.random, no simulation).
+ */
+export function reapplyFrozenPositions(
+  nodes: TopologyNode[],
+  frozen: ReadonlyMap<string, { x: number; y: number }>,
+  opts: TopologyLayoutOpts,
+): PositionedNode[] {
+  if (nodes.length === 0) {
+    return [];
+  }
+  const { width, height, maxSizeMetric } = opts;
+  const minRadius = opts.minRadius ?? DEFAULT_MIN_RADIUS;
+  const maxRadius = opts.maxRadius ?? DEFAULT_MAX_RADIUS;
+  return nodes.map((node) => {
+    // Pinned position when the node existed at freeze time; otherwise an
+    // id-seeded fallback (the same seed the force layout uses) so a fresh node
+    // lands deterministically without moving the frozen ones.
+    const pinned = frozen.get(node.id) ?? seedPosition(node.id, width, height);
+    return {
+      node,
+      x: pinned.x,
+      y: pinned.y,
+      radius: nodeRadius(node.size_metric, maxSizeMetric, minRadius, maxRadius),
+    };
+  });
+}
+
+/**
+ * positionsOf snapshots a positioned layout down to a node id → {x,y} map — the
+ * minimal state "freeze layout" pins (positions only, never the stale label /
+ * radius / failure_ratio). reapplyFrozenPositions later re-applies fresh data
+ * onto these coordinates (codex P2#5).
+ */
+export function positionsOf(positioned: PositionedNode[]): Map<string, { x: number; y: number }> {
+  return new Map(positioned.map((p) => [p.node.id, { x: p.x, y: p.y }]));
+}
