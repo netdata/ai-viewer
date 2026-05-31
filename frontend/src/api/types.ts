@@ -248,6 +248,46 @@ export interface TopologyResponse {
   truncated?: boolean;
 }
 
+// ── GET /api/sessions/:id/timeline ──────────────────────────────────────────
+
+/**
+ * One span on a Timeline lane (presenter timelineSpan, session_timeline.go).
+ * `end_ts` is NULLABLE: null for a still-running op or a point event (the client
+ * draws it as an instant marker, not a bar). `kind==='compaction'` is emitted as
+ * an ordinary span; the client keys on the kind to draw a full-height breakpoint.
+ */
+export interface TimelineSpan {
+  id: string;
+  kind: OpKind;
+  name: string;
+  start_ts: number;
+  end_ts: number | null;
+  status: string;
+}
+
+/**
+ * One lane = one session's ordered spans (presenter timelineLane). `spans` is
+ * always a non-nil array (an op-less session serializes as []). One lane per
+ * session in the resolved tree (root + children stacked).
+ */
+export interface TimelineLane {
+  key: string;
+  label: string;
+  spans: TimelineSpan[];
+}
+
+/**
+ * GET /api/sessions/:id/timeline envelope (presenter timelineResponse). `lanes`
+ * is always present. `t_start`/`t_end` are the min start / max end across every
+ * span (0/0 when the tree has no ops); a null end_ts contributes its start_ts to
+ * `t_end` server-side, so the window always covers a running op's known extent.
+ */
+export interface TimelineResponse {
+  lanes: TimelineLane[];
+  t_start: number;
+  t_end: number;
+}
+
 // ── GET /api/sessions/:id/logs ──────────────────────────────────────────────
 
 /** One log entry (presenter logItem). */

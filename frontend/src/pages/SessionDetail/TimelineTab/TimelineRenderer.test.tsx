@@ -1,0 +1,328 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { layoutTimeline, type TimelineLaneInput } from '../../../viz/timeline';
+import { TimelineRenderer } from './TimelineRenderer';
+
+// Focused tests for the TimelineRenderer: the SVG path (one clickable row per
+// span, closed-span bars vs instant ticks vs compaction breakpoints, keyboard
+// activation, selected styling) and the Canvas path (canvas painted, click
+// hit-tests the span under the cursor). Layout geometry is covered in
+// viz/timeline.test.ts; this pins the painting + interaction wiring, including
+// that a PLAIN wheel pans (preventDefault) while SHIFT+wheel is left to d3-zoom.
+
+function laneFixture(): TimelineLaneInput[] {
+  return [
+    {
+      key: 'session:root',
+      label: 'root',
+      spans: [
+        { id: 'llm', kind: 'llm', name: 'chat', start_ts: 100, end_ts: 400, status: 'completed' },
+        { id: 'compact', kind: 'compaction', name: 'compaction', start_ts: 500, end_ts: null, status: 'completed' },
+        { id: 'live', kind: 'tool', name: 'run', start_ts: 600, end_ts: null, status: 'running' },
+      ],
+    },
+  ];
+}
+
+const WIDTH = 1000;
+const T_START = 100;
+const T_END = 900;
+const LAYOUT = layoutTimeline(laneFixture(), {
+  width: WIDTH,
+  laneHeight: 40,
+  tStart: T_START,
+  tEnd: T_END,
+});
+const TRACK_HEIGHT = 22 + LAYOUT.lanes.length * 40;
+
+let ctxStub: Record<string, unknown>;
+
+beforeEach(() => {
+  ctxStub = {
+    clearRect: vi.fn(),
+    fillRect: vi.fn(),
+    strokeRect: vi.fn(),
+    beginPath: vi.fn(),
+    arc: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    stroke: vi.fn(),
+    fill: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
+    scale: vi.fn(),
+    translate: vi.fn(),
+    setLineDash: vi.fn(),
+  };
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+    ctxStub as unknown as CanvasRenderingContext2D,
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('TimelineRenderer (SVG path)', () => {
+  it('renders one accessible row per span', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const track = screen.getByRole('img', { name: /session timeline/i });
+    expect(within(track).getAllByRole('button')).toHaveLength(3);
+  });
+
+  it('draws a closed span as a bar <rect>, an instant as a <line>, a compaction as a breakpoint <line>', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const track = screen.getByRole('img', { name: /session timeline/i });
+    const bar = within(track).getByRole('button', { name: /chat/i });
+    // The closed span paints a filled bar rect (non-transparent fill).
+    expect(bar.querySelector('rect[fill]:not([fill="transparent"])')).not.toBeNull();
+    const instant = within(track).getByRole('button', { name: /run —/i });
+    expect(instant.querySelector('line')).not.toBeNull();
+    const breakpoint = within(track).getByRole('button', { name: /compaction/i });
+    expect(breakpoint.querySelector('line')).not.toBeNull();
+  });
+
+  it('calls onSpanClick when a span is clicked or keyboard-activated', async () => {
+    const user = userEvent.setup();
+    const onSpanClick = vi.fn();
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={onSpanClick}
+        useCanvas={false}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /chat/i }));
+    fireEvent.keyDown(screen.getByRole('button', { name: /run —/i }), { key: 'Enter' });
+    expect(onSpanClick).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks the selected span with the selected style', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId="llm"
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    expect(
+      screen.getByRole('button', { name: /chat/i }).getAttribute('class') ?? '',
+    ).toMatch(/spanSelected/);
+  });
+
+  it('renders the lane labels', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    expect(screen.getByText('root')).toBeInTheDocument();
+  });
+
+  it('pans (translates) on a plain wheel and zooms (scales) on a shift+wheel', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={false}
+      />,
+    );
+    const svg = screen
+      .getByRole('img', { name: /session timeline/i })
+      .querySelector('svg') as SVGSVGElement;
+    const g = svg.querySelector('g') as SVGGElement;
+
+    // A plain wheel is consumed by the pan handler (preventDefault) and applies a
+    // pure TRANSLATION to the <g> (no scale change).
+    const plain = new WheelEvent('wheel', { deltaX: 40, deltaY: 0, bubbles: true, cancelable: true });
+    svg.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(true);
+    const afterPan = g.getAttribute('transform') ?? '';
+    // translate(-40,0) — panned left; scale stays 1 (d3's toString always emits
+    // a scale token, so the pan is distinguished by scale(1), not its absence).
+    expect(afterPan).toMatch(/translate\(-40\b/);
+    expect(afterPan).toMatch(/scale\(1\)/);
+
+    // A shift+wheel is handled by d3-zoom (NOT the pan handler) and applies a
+    // SCALE > 1 to the <g> — the zoom path. Dispatch via the SVG element with a
+    // pointer location so d3-zoom computes a focal point.
+    const shifted = new WheelEvent('wheel', {
+      deltaY: -40,
+      shiftKey: true,
+      clientX: 200,
+      clientY: 100,
+      bubbles: true,
+      cancelable: true,
+    });
+    svg.dispatchEvent(shifted);
+    const afterZoom = g.getAttribute('transform') ?? '';
+    const scaleMatch = /scale\(([\d.]+)\)/.exec(afterZoom);
+    expect(scaleMatch).not.toBeNull();
+    expect(Number(scaleMatch?.[1])).toBeGreaterThan(1);
+  });
+});
+
+describe('TimelineRenderer (Canvas path)', () => {
+  it('paints a canvas instead of per-span SVG rows', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+        useCanvas={true}
+      />,
+    );
+    const track = screen.getByRole('img', { name: /session timeline/i });
+    expect(track.querySelector('canvas')).not.toBeNull();
+    expect(within(track).queryAllByRole('button')).toHaveLength(0);
+    // The closed span fills a bar; the compaction breakpoint dashes a line.
+    expect(ctxStub.fillRect).toHaveBeenCalled();
+    expect(ctxStub.setLineDash).toHaveBeenCalled();
+  });
+
+  it('hit-tests a click against the span under the cursor', () => {
+    const onSpanClick = vi.fn();
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={onSpanClick}
+        useCanvas={true}
+      />,
+    );
+    const canvas = screen
+      .getByRole('img', { name: /session timeline/i })
+      .querySelector('canvas') as HTMLCanvasElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      top: 0,
+      left: 0,
+      right: WIDTH,
+      bottom: TRACK_HEIGHT,
+      width: WIDTH,
+      height: TRACK_HEIGHT,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    // The llm bar [x≈0..375] sits on lane 0: y in [22+0+6 .. +28]. A click at
+    // (100, 34) lands on it (identity transform).
+    fireEvent.click(canvas, { clientX: 100, clientY: 34 });
+    expect(onSpanClick).toHaveBeenCalledTimes(1);
+    expect(onSpanClick.mock.calls[0]?.[0]).toMatchObject({ span: { id: 'llm' } });
+  });
+
+  it('ignores a click on empty canvas space', () => {
+    const onSpanClick = vi.fn();
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={onSpanClick}
+        useCanvas={true}
+      />,
+    );
+    const canvas = screen
+      .getByRole('img', { name: /session timeline/i })
+      .querySelector('canvas') as HTMLCanvasElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      top: 0,
+      left: 0,
+      right: WIDTH,
+      bottom: TRACK_HEIGHT,
+      width: WIDTH,
+      height: TRACK_HEIGHT,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    // Below every lane.
+    fireEvent.click(canvas, { clientX: 100, clientY: TRACK_HEIGHT - 1 });
+    expect(onSpanClick).not.toHaveBeenCalled();
+  });
+});
+
+describe('TimelineRenderer (auto path selection)', () => {
+  it('uses the SVG path below the span ceiling by default', () => {
+    render(
+      <TimelineRenderer
+        lanes={LAYOUT.lanes}
+        spans={LAYOUT.spans}
+        width={WIDTH}
+        height={TRACK_HEIGHT}
+        tStart={T_START}
+        tEnd={T_END}
+        selectedId={null}
+        onSpanClick={vi.fn()}
+      />,
+    );
+    const track = screen.getByRole('img', { name: /session timeline/i });
+    expect(track.querySelector('canvas')).toBeNull();
+    expect(within(track).getAllByRole('button')).toHaveLength(3);
+  });
+});

@@ -1,0 +1,166 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.hint {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.spanCount {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.vizArea {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.vizScroller {
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.vizSvg {
+  display: block;
+  font-family: var(--font-sans);
+  cursor: grab;
+  touch-action: none;
+}
+
+.vizSvg:active {
+  cursor: grabbing;
+}
+
+.vizCanvas {
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+/* ── Timeline elements ───────────────────────────────────────────────────── */
+
+.laneBand {
+  fill: transparent;
+}
+
+.laneBandAlt {
+  /* Zebra striping so adjacent lanes read apart without a hard divider. */
+  fill: var(--bg-tertiary);
+  opacity: 0.4;
+}
+
+.laneLabel {
+  fill: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
+
+.span {
+  cursor: pointer;
+}
+
+.span:hover {
+  filter: brightness(1.12);
+}
+
+.spanSelected {
+  cursor: pointer;
+  filter: brightness(1.2);
+}
+
+.span:focus-visible,
+.spanSelected:focus-visible {
+  outline: none;
+}
+
+.span:focus-visible rect,
+.spanSelected:focus-visible rect,
+.span:focus-visible line,
+.spanSelected:focus-visible line {
+  outline: 2px solid var(--accent);
+}
+
+/* A compaction breakpoint: a full-height dashed vertical rule. */
+.breakpoint {
+  stroke: var(--error);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  cursor: pointer;
+}
+
+.breakpoint:hover {
+  stroke-width: 3;
+}
+
+.axis {
+  pointer-events: none;
+}
+
+.axisTick {
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.axisLabel {
+  fill: var(--text-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  pointer-events: none;
+}
+
+/* ── Legend ──────────────────────────────────────────────────────────────── */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.legendSwatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+.legendBreakpoint {
+  display: inline-block;
+  width: 0;
+  height: 14px;
+  border-left: 2px dashed var(--error);
+}
+
+.legendInstant {
+  display: inline-block;
+  width: 0;
+  height: 14px;
+  border-left: 2px solid var(--text-secondary);
+}

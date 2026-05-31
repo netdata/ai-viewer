@@ -1,5 +1,4 @@
 import { useParams, useSearchParams } from 'react-router-dom';
-import { ComingSoon } from '../../components/ComingSoon';
 import { Tabs, type TabSpec } from '../../components/Tabs';
 import { LoadingState, ErrorState, EmptyState } from '../../components/StatusViews';
 import { useSessionDetail } from '../../api/sessions';
@@ -9,12 +8,12 @@ import { OverviewTab } from './OverviewTab';
 import { LogsTab } from './LogsTab';
 import { TraceTab } from './TraceTab';
 import { TopologyTab } from './TopologyTab';
+import { TimelineTab } from './TimelineTab';
 import styles from './SessionDetail.module.css';
 
 // Session detail page (ui-pages.md §/sessions/:id). Tabs Overview + Trace +
-// Topology + Logs are real; Timeline remains Phase-2 ComingSoon. The active tab
-// lives in the URL (?tab=) so it is shareable; an unknown value falls back to
-// overview.
+// Topology + Timeline + Logs are all real. The active tab lives in the URL
+// (?tab=) so it is shareable; an unknown value falls back to overview.
 // An unknown id (404) renders a clean "not found" state instead of the tabs. The
 // open session is live-refreshed over SSE (session_changed → ['session', id]).
 
@@ -84,9 +83,7 @@ export function SessionDetail() {
             {tab === 'logs' && <LogsTab sessionId={id} />}
             {tab === 'trace' && <TraceTab detail={data} />}
             {tab === 'topology' && <TopologyTab sessionId={id} />}
-            {tab === 'timeline' && (
-              <ComingSoon title="Timeline" note="Time-axis span lanes — Phase 2." />
-            )}
+            {tab === 'timeline' && <TimelineTab sessionId={id} />}
           </div>
         </>
       )}

@@ -6,9 +6,9 @@ import { ApiError } from '../../api/client';
 
 // SessionDetail is the tabbed detail shell. useSessionDetail and useLiveUpdates
 // are MOCKED, and the tab bodies are stubbed, so this test drives the shell
-// itself: loading / error / 404 states, tab state synced to the URL ?tab=, and
-// the Phase-2 tabs rendering ComingSoon. OverviewTab and LogsTab have their own
-// dedicated tests.
+// itself: loading / error / 404 states and tab state synced to the URL ?tab=.
+// Every tab body (Overview, Trace, Topology, Timeline, Logs) is real and has its
+// own dedicated test; here they are stubbed.
 
 const detailSpy = vi.fn();
 const liveSpy = vi.fn();
@@ -33,6 +33,11 @@ vi.mock('./TraceTab', () => ({
 vi.mock('./TopologyTab', () => ({
   TopologyTab: ({ sessionId }: { sessionId: string }) => (
     <div data-testid="topology-body">topology for {sessionId}</div>
+  ),
+}));
+vi.mock('./TimelineTab', () => ({
+  TimelineTab: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="timeline-body">timeline for {sessionId}</div>
   ),
 }));
 
@@ -147,12 +152,12 @@ describe('SessionDetail', () => {
     expect(screen.getByTestId('topology-body')).toHaveTextContent('topology for s1');
   });
 
-  it('renders ComingSoon for the remaining Phase-2 tab (Timeline)', async () => {
+  it('renders the Timeline tab body for ?tab=timeline', async () => {
     const user = userEvent.setup();
     detailSpy.mockReturnValue(OK);
     renderAt('/sessions/s1');
     await user.click(screen.getByRole('tab', { name: 'Timeline' }));
-    expect(screen.getByRole('heading', { name: 'Timeline' })).toBeInTheDocument();
+    expect(screen.getByTestId('timeline-body')).toHaveTextContent('timeline for s1');
   });
 
   it('subscribes to live updates scoped to the session id', () => {

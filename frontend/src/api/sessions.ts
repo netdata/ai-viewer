@@ -10,6 +10,7 @@ import type { Filters } from '../state/filters';
 import type {
   SessionDetailResponse,
   SessionListResponse,
+  TimelineResponse,
   TopologyMetric,
   TopologyResponse,
 } from './types';
@@ -160,6 +161,35 @@ export function useSessionTopology(
   return useQuery({
     queryKey: ['session-topology', id, metric] as const,
     queryFn: ({ signal }) => fetchSessionTopology(id, metric, signal),
+    enabled: id.length > 0,
+  });
+}
+
+/**
+ * fetchTimeline GETs the per-session timeline (the whole session tree resolved
+ * server-side: one lane per session, each lane's ordered spans, plus the overall
+ * t_start/t_end window — rest-api.md §GET /api/sessions/:id/timeline). The client
+ * computes the span geometry in viz/timeline.
+ */
+export function fetchTimeline(
+  id: string,
+  signal?: AbortSignal,
+): Promise<TimelineResponse> {
+  return get<TimelineResponse>(
+    `/sessions/${encodeURIComponent(id)}/timeline`,
+    signal,
+  );
+}
+
+/**
+ * useTimeline is the query hook for the per-session Timeline tab. Mirrors
+ * useSessionTopology: a distinct query key (['session-timeline', id]) keeps its
+ * refetch cadence independent of the detail's ['session', id] SSE invalidation.
+ */
+export function useTimeline(id: string): UseQueryResult<TimelineResponse> {
+  return useQuery({
+    queryKey: ['session-timeline', id] as const,
+    queryFn: ({ signal }) => fetchTimeline(id, signal),
     enabled: id.length > 0,
   });
 }
