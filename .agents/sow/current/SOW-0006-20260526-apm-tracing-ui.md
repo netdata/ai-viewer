@@ -174,7 +174,12 @@ CTO defaults (operator may override on sight):
 4. **Colors** = existing theme tokens (`--success`/`--warning`/`--error` for status; fixed per-kind palette) for consistency with the Overview status badges.
 5. **Timeline zoom** = shift+wheel zooms time / plain wheel pans (per `ui-pages.md`).
 
-These reshape the chunk plan (Chunk 4 = waterfall+list+flame; Chunks 6-7 = multi-layout topology) and confirm the full-stack scope (build the two backend endpoints first). The chunk plan above is the guide; per-chunk adjustments are logged in the Execution Log as they land.
+Operator UX decisions captured 2026-05-31 from the REAL-DATA review (serving the operator's own claude-code sessions on the corrected backend surfaced these; recorded before code):
+
+6. **Trace big-session views — build BOTH, user-selectable.** Real sessions are huge (operator's own session: 11,928 ops over ~5 days, which compressed the waterfall to a sliver at t=0). Operator: "zoom+pan AND aggregate by turn, user selectable — so both views." The Trace waterfall offers a view toggle: (a) **Detailed** — zoomable/pannable waterfall (shift+wheel zoom, drag pan, Canvas + viewport culling, turn-boundary delineation so inter-turn gaps read as "between turns"); (b) **By-turn** — one aggregated bar per turn, expand-on-click. Same "build all, choose later" approach as the Topology layouts.
+7. **Trace source-aware durations.** Real data showed claude-code records LLM/reasoning as point events (no call duration → `end_ts == start_ts` → `0µs`); only tool ops (and ai-agent LLM/reasoning, which record `durationMs`) carry measured spans. Operator chose **source-aware** rendering: measured-span ops draw as bars; point-event ops draw as instant ticks/markers (never zero-width bars); the event list shows "—" not "0µs". Keeps the view honest to what each source records.
+
+These reshape the chunk plan (Chunk 4 = waterfall+list+flame, now + source-aware rendering + dual big-session views; Chunks 6-7 = multi-layout topology) and confirm the full-stack scope (build the two backend endpoints first). The chunk plan above is the guide; per-chunk adjustments are logged in the Execution Log as they land. The same real-data review found two claude-code adapter robustness bugs (`retryInMs` float parse error; root `start_ts=0`) — filed as a separate follow-up SOW (out of SOW-0006's frontend scope).
 
 ## Plan
 
