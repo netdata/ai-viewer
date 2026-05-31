@@ -110,6 +110,7 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
       "tokens_in":...,"tokens_out":...,"cost_usd":...,"op_count":...,
       "ops": [
         { "id":"...","kind":"llm","name":"...","model":"...","provider":"...",
+          "parent_op_id":null,
           "start_ts":<us>,"end_ts":<us>,"duration_us":...,
           "status":"...","error_class":null,
           "tokens_in":...,"tokens_out":...,"cost_usd":...,
@@ -129,6 +130,11 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
 }
 ```
 
+Each op row carries `parent_op_id` — the canonical id of the op it nests under
+(`ops.parent_op_id`, set by the ingest writer), or `null` for a top-level op. The
+Trace view rebuilds the authoritative span tree from this parentage; the key is
+always present (nullable), never omitted.
+
 ### GET /api/sessions/:id/logs
 
 ```
@@ -146,32 +152,143 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
 
 ### GET /api/sessions/:id/topology
 
-**Phase 2 — not implemented in Phase 1.** Not registered; a request falls through
-to the `/api/` catch-all and returns a structured `NOT_FOUND`. The shape below is
-the planned contract.
+Implemented by SOW-0006. Returns the layout-agnostic actor graph (nodes + edges)
+for the D3 topology view; the client picks the layout (force / hierarchical), so
+the server returns no coordinates. 404 `NOT_FOUND` for an unknown `:id`; a control
+byte in `:id` is a `BAD_REQUEST` (same rule as `/api/sessions/:id`). HEAD returns
+the status + JSON Content-Type with an empty body; a non-GET/HEAD method is
+405 `METHOD_NOT_ALLOWED`.
 
-Returns nodes and edges for the D3 force-directed view.
+**Scope = the whole session tree** (the session at `:id` resolved to its
+`root_session_id`, plus every session sharing that root — root + all descendants).
+This makes the per-session topology answer "which sub-agent burned the most cost",
+not just "what did this one session do". The cross-session `/topology` page (no
+`:id`) reuses the same node/edge model over the filtered set (Phase 3+).
 
 ```json
 {
   "nodes": [
-    { "id":"agent:nedi","kind":"agent","label":"nedi","size_metric":1.0,"failure_ratio":0.0 },
-    { "id":"tool:mcp__slack__send_message","kind":"tool","label":"slack.send_message","size_metric":0.4 }
+    { "id":"agent:<session_id>","kind":"agent","label":"nedi (root)","size_metric":3400000,"failure_ratio":0.0 },
+    { "id":"tool:shell.Bash","kind":"tool","label":"shell.Bash","size_metric":300000,"failure_ratio":0.0 }
   ],
   "edges": [
-    { "source":"agent:nedi","target":"tool:mcp__slack__send_message","calls":12,"total_us":3400000 }
-  ]
+    { "source":"agent:<session_id>","target":"tool:shell.Bash","calls":12,"total_us":3400000 }
+  ],
+  "max_size_metric": 3400000
 }
 ```
 
-Size metric selection: `?metric=cost|tokens|duration|calls|ctx_pct` (default `duration`).
+- **Nodes.** One `agent` node per distinct session in the tree (`id` =
+  `agent:<session.id>`; `label` = the session's `agent_name`, falling back to its
+  `kind`, with `" (root)"` appended for the root session). One `tool` node per
+  distinct `(tool_namespace, name)` among the tree's `kind='tool'` ops (`id` =
+  `tool:<namespace>.<name>`, or `tool:<name>` when `tool_namespace` is NULL;
+  `label` = the same dotted string). Agent-node identity is the **session id**, not
+  the agent name, because two sub-agents can share an `agent_name` ("worker") yet
+  be distinct actors with distinct cost — collapsing them on name would hide the
+  per-sub-agent breakdown the view exists to show.
+- **Edges.** Caller→callee with `calls` (op count) and `total_us`
+  (`SUM(duration_us)`, NULL durations counted as 0). Two edge sources: (a) every
+  `kind='tool'` op contributes an `agent:<its session_id>` → `tool:<ns>.<name>`
+  edge; (b) every `kind='session'` op with `child_session_id` set contributes an
+  `agent:<parent session_id>` → `agent:<child_session_id>` edge (the sub-agent
+  spawn). Edges are aggregated, so repeated calls collapse to one edge with summed
+  counts. An edge whose target session is outside the tree (should not happen given
+  the shared root) is dropped defensively.
+- **`?metric=`** selects what `size_metric` carries on **agent** nodes:
+  `cost` (`SUM(cost_usd)`), `tokens` (`SUM(tokens_in+tokens_out)`), `duration`
+  (`SUM(duration_us)` — **default**), `calls` (op count), `ctx_pct`
+  (`MAX(ctx_used/ctx_max)` across the session's LLM ops where both are > 0, in
+  `0..1`; `0` when never known). The metric is computed over the ops owned by that
+  session (`ops.session_id`). **Tool** nodes always carry the tool's own
+  `SUM(duration_us)` as `size_metric` regardless of `?metric=` (a tool has no
+  tokens/ctx of its own; duration is the one metric every tool node can express
+  consistently) — except under `?metric=calls`, where a tool node carries its op
+  count, and `?metric=cost`/`tokens`, where it carries the tool ops' summed
+  cost / tokens. An unknown `?metric=` value is a `BAD_REQUEST`.
+- **`size_metric` is raw, not normalized.** The server returns the raw aggregate
+  per node plus a top-level **`max_size_metric`** (the maximum `size_metric` across
+  all nodes, `0` when there are no nodes). The client normalizes to its preferred
+  radius range using `max_size_metric`. Returning raw + max (rather than a
+  server-side 0..1 scale) keeps the contract honest for tooltips ("$0.42",
+  "3.4 s") and lets the client choose linear/sqrt/log sizing without a second
+  round-trip. (The earlier draft's `1.0`/`0.4` example implied normalization; this
+  is the resolved contract — SOW-0006.)
+- **`failure_ratio`** is `failed_ops / total_ops` for that node in `0..1`
+  (`0` when the node has no ops). For an agent node it is over the session's ops;
+  for a tool node it is over that tool's ops across the tree.
+
+A session in the tree with no ops still appears as an agent node (`size_metric` 0,
+`failure_ratio` 0) so the lineage stays visible. The two driving queries (one over
+the tree's sessions, one over the tree's ops) are bounded by the tree size and use
+`idx_sessions_root_start` / `idx_ops_session_start`.
+
+### GET /api/topology
+
+Implemented by SOW-0006 (chunk 6b). The **cross-session** topology: the same
+node/edge model as `/api/sessions/:id/topology`, but the scope is the active
+filter rather than one session tree. Drives the `/topology` page. GET (+ HEAD with
+empty body) only; any other method is 405 `METHOD_NOT_ALLOWED`. An unknown
+`?metric=` value is `BAD_REQUEST`. Response shape is identical to the per-session
+topology (`nodes` / `edges` / `max_size_metric`).
+
+**Scope = ALL sessions matching the filter (roots + sub_agents + forks).** The
+cross-session topology spans every session kind by default — NOT just roots —
+because its purpose is lineage: the parent→child and origin→fork edges need the
+child/fork sessions present as nodes, or the graph collapses to disconnected
+root dots. The endpoint accepts the same filter query params as `GET /api/sessions`
+(time range `from`/`to`, `agents`, `models`, `tools`, `sources`, `status`, `q`,
+etc. — whatever that endpoint already validates), with one deliberate exception:
+the `group` param does NOT apply here. `/api/sessions` defaults `group=root` (the
+list shows roots and expands children inline); the topology FORCES the
+all-sessions scope (`handleCrossTopology` sets it after parsing) so an explicit
+`?group=root` does not strip the child/fork endpoints. The node set is the
+sessions matching all the other filters. (A roots-only topology, if ever wanted,
+would be a separate explicit toggle, not the `/api/sessions` list default.)
+
+- **Nodes.** One `agent` node per matching session (`id` = `agent:<session.id>`;
+  `label` = `agent_name` falling back to `kind`, with `" (root)"` appended when the
+  session is its own root). **No `tool` nodes** in the cross-session view — a
+  filtered set can span thousands of sessions and their tools would explode the
+  graph; tools live in the per-session view. (SOW-0006 AC#2: "cross-session view:
+  sessions".)
+- **Edges.** Session lineage among the matched nodes, aggregated: a session with
+  `parent_session_id` set → `agent:<parent>` → `agent:<child>`. This single pass
+  covers BOTH sub-agent spawns (`kind='sub_agent'`) AND forks (`kind='fork'`):
+  there is no separate `forked_from_id` canonical column — the codex adapter
+  resolves a source `forked_from_id` into `parent_session_id` + `kind='fork'` at
+  ingest (`internal/adapters/codex/mapper_turn.go`), so one `parent_session_id`
+  pass captures both. An edge whose other endpoint is NOT in the matched set is
+  dropped defensively (lineage to a filtered-out session is not drawn). Lineage
+  edges are structural, so `calls` = 1 and `total_us` = 0 (no call duration; the
+  shape is reused for renderer parity).
+- **`?metric=`** selects `size_metric` on each agent node, computed from the
+  session's own stored aggregates (NOT a per-op rescan, to stay bounded over a
+  large filtered set): `cost` = `cost_usd`; `tokens` = `tokens_in + tokens_out`;
+  `duration` = `end_ts - start_ts` (**default**, 0 when either is unknown);
+  `calls` = `op_count`. `ctx_pct` is best-effort: 0 unless a session-level context
+  ratio is available (cross-session ctx_pct over ops is out of scope for 6b —
+  documented, not silently wrong). `max_size_metric` is the max across nodes (0
+  when empty), same client-normalization contract as the per-session route.
+- **`failure_ratio`** = `failure_count / op_count` per session node (0 when the
+  session has no ops).
+- **Bound.** A filter can match very many sessions; the force graph and the perf
+  budget cannot. The endpoint caps the node set at **`maxTopologyNodes` (default
+  500)** — the top-N sessions by the selected `size_metric` — and sets a top-level
+  **`"truncated": true`** when the cap was hit (lineage edges are then restricted to
+  the retained nodes). The cap is NOT silent: the client surfaces a "showing top N
+  of M" notice. (Aligns with `frontend-architecture.md`'s 500-node Canvas/Worker
+  threshold.)
 
 ### GET /api/sessions/:id/timeline
 
-**Phase 2 — not implemented in Phase 1.** Not registered; returns a structured
-`NOT_FOUND` today. The shape below is the planned contract.
+Implemented by SOW-0006. Returns the per-lane span set for the Timeline view.
+404 `NOT_FOUND` for an unknown `:id`; control-byte `:id` → `BAD_REQUEST`; HEAD and
+405 behave exactly as the topology route above.
 
-Returns ordered spans for the timeline view.
+**Scope = the whole session tree** (root + all sessions sharing its
+`root_session_id`), one lane per session, matching the Timeline's "root + children
+stacked" model (`ui-pages.md`).
 
 ```json
 {
@@ -180,7 +297,8 @@ Returns ordered spans for the timeline view.
       "key":"session:<id>",
       "label":"nedi (root)",
       "spans":[
-        { "id":"<op_id>","kind":"llm","name":"claude-opus-4-7","start_ts":<us>,"end_ts":<us>,"status":"completed" }
+        { "id":"<op_id>","kind":"llm","name":"claude-opus-4-7","start_ts":<us>,"end_ts":<us>,"status":"completed" },
+        { "id":"<op_id>","kind":"compaction","name":"auto","start_ts":<us>,"end_ts":<us>,"status":"completed" }
       ]
     }
   ],
@@ -188,7 +306,30 @@ Returns ordered spans for the timeline view.
 }
 ```
 
-One lane per session (root and children).
+- **Lanes.** One per session in the tree. `key` = `session:<session.id>`; `label`
+  = the session's `agent_name` (falling back to `kind`), with `" (root)"` appended
+  for the root session. Lanes are ordered by the session's `start_ts` (then `id`),
+  so the root sorts first when it starts first. A session with no ops still emits a
+  lane with an empty `spans` array (the lineage stays visible).
+- **Spans.** Every op of that session, ordered by `start_ts` then `seq` then `id`.
+  Each span carries `id` (op id), `kind`, `name`, `start_ts`, `end_ts`, `status`.
+  **Compaction is not a separate array**: `kind='compaction'` ops are emitted as
+  ordinary spans with `kind:"compaction"`, and the frontend keys on `kind` to draw
+  the full-height vertical breakpoint (`ui-pages.md`). A still-running op (no
+  `end_ts`) emits `"end_ts": null`; a **point event** emits `"end_ts"` equal to
+  its `start_ts` (the server returns the stored `end_ts` as-is — it does not
+  null a recorded point). The client draws a null OR a `<= start_ts` end as an
+  **instant marker** — a point/tick at `start_ts`, NOT a bar stretched to the
+  viewport edge — matching the source-aware Trace/Timeline rule (`ui-pages.md`: a
+  source that records no duration must not imply one). The
+  server does not synthesize an end, so the raw fact "not finished / point event"
+  is preserved.
+- **`t_start` / `t_end`.** Minimum `start_ts` and maximum `end_ts` across all spans
+  in all lanes. A span with a null `end_ts` contributes its `start_ts` to the
+  `t_end` computation (so the window always covers every span's known extent).
+  When the tree has no ops at all, both are `0`.
+
+The single op query is bounded by the tree size and uses `idx_ops_session_start`.
 
 ### GET /api/stats
 

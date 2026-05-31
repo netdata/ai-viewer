@@ -1,0 +1,185 @@
+/* Right-side span detail drawer. The overlay does NOT dim the whole screen the
+   way a modal does (the visualization stays usable behind it); it is a
+   transparent click-catcher pinned to the viewport, with the opaque panel
+   docked to the right edge. */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  /* Transparent: the viz behind must stay visible (non-modal). */
+  background: transparent;
+  /* Let clicks on the empty area through to the overlay handler only. */
+  pointer-events: auto;
+}
+
+.panel {
+  width: min(420px, 92vw);
+  height: 100%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: var(--space-4);
+  gap: var(--space-4);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.titleWrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.kind {
+  align-self: flex-start;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.close {
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.close:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.close:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(80px, auto) 1fr;
+  gap: var(--space-2) var(--space-3);
+  font-size: var(--font-size-base);
+}
+
+.field {
+  display: contents;
+}
+
+.fieldLabel {
+  color: var(--text-secondary);
+}
+
+.fieldValue {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.error {
+  color: var(--error);
+}
+
+.payloads {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.payloadsTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-base);
+  color: var(--text-primary);
+}
+
+.noPayloads {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.payloadList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.payloadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+}
+
+.payloadMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  min-width: 0;
+}
+
+.payloadKind {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.payloadFormat,
+.payloadCompression {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.payloadBytes {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.payloadPreview {
+  flex: none;
+  font-size: var(--font-size-sm);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  cursor: not-allowed;
+}

@@ -38,6 +38,7 @@ type sessionDetailBody struct {
 			Name           string  `json:"name"`
 			Model          string  `json:"model"`
 			Provider       string  `json:"provider"`
+			ParentOpID     *string `json:"parent_op_id"`
 			DurationUS     *int64  `json:"duration_us"`
 			Status         string  `json:"status"`
 			ErrorClass     *string `json:"error_class"`
@@ -160,6 +161,95 @@ func TestSessionDetail_ExposesCacheTokens(t *testing.T) {
 	}
 	if s.TokensCacheWrite != 500 {
 		t.Errorf("tokens_cache_write = %d, want 500", s.TokensCacheWrite)
+	}
+}
+
+// TestSessionDetail_ExposesParentOpID asserts each op row carries
+// `parent_op_id` so the Trace tab can build the authoritative span tree from
+// the stored ops.parent_op_id column: a child op returns its parent's id, a
+// top-level op returns null (SOW-0006). Without this the frontend cannot
+// reconstruct the parent/child nesting that the ingest writer already records.
+func TestSessionDetail_ExposesParentOpID(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+
+	seedSource(t, db, "srcP", "aiagent_v3", "/tmp/p", base)
+	seedSession(t, db, sessionRow{
+		id: "rootP", sourceID: "srcP", nativeID: "nP", rootID: "rootP",
+		kind: "root", agent: "nedi", model: "claude-opus-4-7", provider: "anthropic",
+		status: "completed", startTS: base + 1_000, endTS: base + 9_000,
+		turnCount: 1, opCount: 2, failureCount: 0,
+	})
+	seedTurn(t, db, turnRow{
+		id: "tp1", sessionID: "rootP", seq: 1, startTS: base + 1_000, endTS: base + 9_000,
+		status: "completed", opCount: 2,
+	})
+	// parentOp is top-level (parentOpID ""); childOp nests under it via
+	// parent_op_id = parentOp.id.
+	seedOp(t, db, opRow{
+		id: "parentOp", turnID: "tp1", sessionID: "rootP", seq: 1, kind: "llm",
+		name: "claude-opus-4-7", model: "claude-opus-4-7", provider: "anthropic",
+		startTS: base + 1_100, endTS: base + 2_100, durationUS: 1_000, status: "completed",
+	})
+	seedOp(t, db, opRow{
+		id: "childOp", turnID: "tp1", sessionID: "rootP", parentOpID: "parentOp", seq: 2,
+		kind: "tool", name: "Bash", toolNamespace: "shell",
+		startTS: base + 2_200, endTS: base + 2_500, durationUS: 300, status: "completed",
+	})
+
+	code, body, _ := getSessionDetail(t, p, "rootP")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(body.Turns) != 1 || len(body.Turns[0].Ops) != 2 {
+		t.Fatalf("want 1 turn with 2 ops, got %+v", body.Turns)
+	}
+	ops := body.Turns[0].Ops
+	var parent, child *struct {
+		ID             string  `json:"id"`
+		Kind           string  `json:"kind"`
+		Name           string  `json:"name"`
+		Model          string  `json:"model"`
+		Provider       string  `json:"provider"`
+		ParentOpID     *string `json:"parent_op_id"`
+		DurationUS     *int64  `json:"duration_us"`
+		Status         string  `json:"status"`
+		ErrorClass     *string `json:"error_class"`
+		CtxUsed        *int64  `json:"ctx_used"`
+		CtxMax         *int64  `json:"ctx_max"`
+		ChildSessionID *string `json:"child_session_id"`
+		PayloadRefs    []struct {
+			ID            int64   `json:"id"`
+			Kind          string  `json:"kind"`
+			Format        string  `json:"format"`
+			Compression   *string `json:"compression"`
+			OriginalBytes *int64  `json:"original_bytes"`
+			StoredBytes   *int64  `json:"stored_bytes"`
+		} `json:"payload_refs"`
+	}
+	for i := range ops {
+		switch ops[i].ID {
+		case "parentOp":
+			parent = &ops[i]
+		case "childOp":
+			child = &ops[i]
+		}
+	}
+	if parent == nil || child == nil {
+		t.Fatalf("parent/child op not found in %+v", ops)
+	}
+	// Top-level op: parent_op_id is null.
+	if parent.ParentOpID != nil {
+		t.Fatalf("parentOp parent_op_id = %v, want null (top-level op)", *parent.ParentOpID)
+	}
+	// Child op: parent_op_id equals the parent op's id.
+	if child.ParentOpID == nil {
+		t.Fatal("childOp parent_op_id is null, want parentOp's id")
+	}
+	if *child.ParentOpID != "parentOp" {
+		t.Fatalf("childOp parent_op_id = %q, want %q", *child.ParentOpID, "parentOp")
 	}
 }
 

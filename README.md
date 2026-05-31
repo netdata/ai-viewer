@@ -9,8 +9,10 @@ Watches your local session storage for `ai-agent`, `claude-code`, `codex`, and `
 **v0.1 — Phase 1 complete.** The single binary serves a live web UI (sessions
 list, session detail with Overview + Logs, sources/health) for the ai-agent
 v2/v3 adapters, with deep-linking, light/dark theme, and end-to-end +
-accessibility tests in CI. Phase 2 (Trace/Topology/Timeline views, more
-adapters, cross-session analytics) is next. See `.agents/sow/` for the SOWs.
+accessibility tests in CI. The **Trace, Topology, and Timeline** views — plus a
+cross-session `/topology` page — are delivered (SOW-0006); cross-session
+statistics/analytics and the payload byte-preview are still to come. See
+`.agents/sow/` for the SOWs.
 
 ## Why
 

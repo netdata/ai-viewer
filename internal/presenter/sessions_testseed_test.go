@@ -122,6 +122,7 @@ INSERT INTO turns (
 // opRow is the declarative seed input for one ops row.
 type opRow struct {
 	id, turnID, sessionID string
+	parentOpID            string // "" => NULL (top-level op); else FK to ops(id)
 	seq                   int64
 	kind, name            string
 	toolNamespace         string
@@ -157,11 +158,11 @@ func seedOp(t *testing.T, db *sql.DB, o opRow) {
 	}
 	if _, err := db.Exec(`
 INSERT INTO ops (
-    id, turn_id, session_id, seq, kind, name, tool_namespace, model, provider,
+    id, turn_id, session_id, parent_op_id, seq, kind, name, tool_namespace, model, provider,
     start_ts, end_ts, duration_us, status, error_class,
     tokens_in, tokens_out, cost_usd, ctx_used, ctx_max, child_session_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		o.id, o.turnID, o.sessionID, o.seq, o.kind, o.name,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.id, o.turnID, o.sessionID, nullStr(o.parentOpID), o.seq, o.kind, o.name,
 		nullStr(o.toolNamespace), nullStr(o.model), nullStr(o.provider),
 		o.startTS, endTS, nullInt(o.durationUS), o.status, nullStr(o.errorClass),
 		o.tokensIn, o.tokensOut, o.costUSD, nullInt(o.ctxUsed), nullInt(o.ctxMax),

@@ -57,24 +57,27 @@ frontend/
 │   │   ├── Tabs/
 │   │   ├── LogRow/
 │   │   ├── LoadMore/
-│   │   ├── ComingSoon/          # Phase-2 placeholder panel
+│   │   ├── ComingSoon/          # placeholder panel — now only backs the
+│   │   │                        #   still-future /tools, /models, /agents
 │   │   └── ThemeToggle/
 │   ├── pages/
 │   │   ├── SessionsList/
-│   │   ├── SessionDetail/       # OverviewTab/ + LogsTab/ (Trace/Topology/
-│   │   │   ├── OverviewTab/     #   Timeline tabs are Phase 2, rendered inline
-│   │   │   └── LogsTab/         #   as ComingSoon placeholders)
+│   │   ├── SessionDetail/       # OverviewTab/ + TraceTab/ + TopologyTab/ +
+│   │   │   ├── OverviewTab/     #   TimelineTab/ + LogsTab/ — Trace/Topology/
+│   │   │   └── LogsTab/         #   Timeline tabs SHIPPED (SOW-0006)
 │   │   ├── Sources/
 │   │   ├── NotFound.tsx
-│   │   ├── Topology/            # cross-session — Phase 2 (ComingSoon)
-│   │   ├── Tools/               # Phase 2 (ComingSoon)
-│   │   ├── Models/              # Phase 2 (ComingSoon)
-│   │   └── Agents/              # Phase 2 (ComingSoon)
+│   │   ├── Topology/            # cross-session actor graph — SHIPPED (SOW-0006)
+│   │   ├── Tools/               # Phase 3 (ComingSoon)
+│   │   ├── Models/              # Phase 3 (ComingSoon)
+│   │   └── Agents/              # Phase 3 (ComingSoon)
 │   ├── lib/
 │   │   ├── format.ts            # ts/duration/bytes/cost formatters
 │   │   └── tree.ts              # session tree helpers
 │   ├── test/                    # vitest setup (setup.ts, matchMedia.ts)
-│   └── viz/                     # D3 renderers — Phase 2 (empty in Phase 1)
+│   └── viz/                     # D3 renderers — populated (SOW-0006): trace/
+│       │                        #   topology/timeline/color/spanFade/
+│       │                        #   zoomInteraction/forceWorker
 ├── public/                      # static assets (favicon)
 └── tests/                       # Playwright E2E specs
 ```
@@ -100,6 +103,11 @@ es.addEventListener('session_changed', (e) => {
   // open Logs tab must refresh too. The key family is ['logs', id, severities];
   // a partial-match on ['logs', session_id] invalidates every severity sub-key.
   queryClient.invalidateQueries({ queryKey: ['logs', session_id] });
+  // The Trace/Timeline/Topology tabs read per-session viz endpoints; invalidate
+  // their keys so the open tab live-refreshes (SOW-0006 AC#6).
+  queryClient.invalidateQueries({ queryKey: ['session-timeline', session_id] });
+  queryClient.invalidateQueries({ queryKey: ['session-topology', session_id] });
+  queryClient.invalidateQueries({ queryKey: ['topology'] }); // cross-session graph
 });
 es.addEventListener('stats_invalidated', () => {
   queryClient.invalidateQueries({ queryKey: ['stats'] });
@@ -251,7 +259,60 @@ This inline script is the **only** JS that runs synchronously before React; ever
 - First contentful paint: under 1 s on workstation localhost.
 - Sessions list: virtualized when > 200 rows (TanStack Virtual).
 - Topology: D3 force simulation runs in a Web Worker when > 100 nodes.
-- Timeline: Canvas rendering (not SVG) when > 500 spans.
+- Timeline: Canvas rendering (not SVG) when > 500 visible spans OR when the lane stack is taller than the Canvas viewport (`lanes × laneHeight > viewport`) — so a high-lane-count / tall timeline uses the bounded, viewport-culled Canvas path instead of a full-height SVG. The Canvas backing store is bounded to the viewport (never the full lane-stack height, which could exceed the browser ~32767px canvas limit), and lanes are virtualized by native vertical scroll (`scrollTop`); X time-zoom (d3-zoom) and native Y lane-scroll coexist (SOW-0006).
+
+### Web Worker for D3 force simulation
+
+Above the 100-node threshold the topology view runs `d3-force` off the main thread
+so the layout's O(n²)-per-tick math never janks scrolling or the React tree. Vite
+has first-class worker support, so no bundler config is needed — the worker is a
+normal module imported with the `?worker` query suffix:
+
+```ts
+// viz/forceWorker.ts — runs in the worker context (no DOM, no React).
+import { forceSimulation, forceManyBody, forceLink, forceCenter } from "d3-force";
+self.onmessage = (e: MessageEvent<{ nodes: Node[]; edges: Edge[] }>) => {
+  const { nodes, edges } = e.data;
+  const sim = forceSimulation(nodes)
+    .force("charge", forceManyBody().theta(0.9))   // quad-tree approximation
+    .force("link", forceLink(edges).id((d) => d.id))
+    .force("center", forceCenter())
+    .stop();
+  const ticks = Math.min(300, Math.ceil(Math.log(nodes.length + 1) * 60));
+  for (let i = 0; i < ticks; i++) sim.tick();      // run to convergence off-thread
+  (self as unknown as Worker).postMessage({ nodes }); // post settled positions back
+};
+```
+
+```ts
+// In the renderer (main thread):
+import ForceWorker from "../viz/forceWorker?worker"; // Vite worker-import idiom
+const worker = new ForceWorker();
+worker.onmessage = (e) => applyPositions(e.data.nodes);
+worker.postMessage({ nodes, edges });
+// terminate on unmount so a navigated-away view leaks no worker:
+//   useEffect(() => () => worker.terminate(), []);
+```
+
+Rules:
+
+- **Suffix matters.** `import X from "./w?worker"` gives a constructable worker
+  class; a plain import would just run the module on the main thread. Use
+  `?worker&inline` only if a future deploy must avoid a separate worker chunk
+  (it base64-inlines the worker, growing the main bundle — measure against the
+  gzip budget first).
+- **The worker is DOM-free and React-free.** It receives plain
+  `{nodes, edges}` data, runs the simulation to convergence with a capped tick
+  count (the convergence check from Acceptance Criterion 2 — "last 5 ticks move
+  every node < 1 px" — runs here), and posts back settled `{x, y}` coordinates.
+  All rendering (SVG/Canvas) stays on the main thread.
+- **Below 100 nodes, skip the worker.** The simulation is cheap enough to run
+  inline on a `requestAnimationFrame` loop; spinning up a worker for a 10-node
+  graph is pure overhead.
+- **Always `terminate()` on unmount** (effect cleanup) so navigating away from a
+  topology view does not leak a running worker.
+- D3 in the worker is still confined to `viz/` per the D3-boundary rule above; the
+  worker module lives under `viz/` like every other D3 consumer.
 
 ## Accessibility
 

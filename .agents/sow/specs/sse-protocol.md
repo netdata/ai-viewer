@@ -92,8 +92,11 @@ re-fetch its full view. Clients that don't track it can ignore it.
 
 A session's logs are part of the session: a log write marks the session row
 dirty, so this frame also re-fetches the open session's logs. The reference
-client invalidates `['session', session_id]`, `['sessions']`, and the
-`['logs', session_id]` key family (partial-match across severity sub-keys).
+client invalidates `['session', session_id]`, `['sessions']`, the
+`['logs', session_id]` key family (partial-match across severity sub-keys), and
+the per-session viz keys `['session-timeline', session_id]` +
+`['session-topology', session_id]` plus `['topology']` (cross-session graph) so the
+open Trace/Timeline/Topology tabs live-refresh (SOW-0006 AC#6).
 
 ### `stats_invalidated`
 

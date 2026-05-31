@@ -7,7 +7,13 @@ import {
 } from '@tanstack/react-query';
 import { get, buildQuery } from './client';
 import type { Filters } from '../state/filters';
-import type { SessionDetailResponse, SessionListResponse } from './types';
+import type {
+  SessionDetailResponse,
+  SessionListResponse,
+  TimelineResponse,
+  TopologyMetric,
+  TopologyResponse,
+} from './types';
 
 // Session endpoints + TanStack Query hooks. Query keys are structured so SSE
 // invalidation can target them precisely (frontend-architecture.md §SSE
@@ -121,6 +127,69 @@ export function useSessionDetail(
   return useQuery({
     queryKey: ['session', id] as const,
     queryFn: ({ signal }) => fetchSessionDetail(id, signal),
+    enabled: id.length > 0,
+  });
+}
+
+/**
+ * fetchSessionTopology GETs the per-session actor graph (the whole session tree
+ * resolved server-side) for the given size `metric` (rest-api.md §GET
+ * /api/sessions/:id/topology). The server returns the layout-agnostic node/edge
+ * model; the client picks the layout in viz/topology.
+ */
+export function fetchSessionTopology(
+  id: string,
+  metric: TopologyMetric,
+  signal?: AbortSignal,
+): Promise<TopologyResponse> {
+  return get<TopologyResponse>(
+    `/sessions/${encodeURIComponent(id)}/topology${buildQuery({ metric })}`,
+    signal,
+  );
+}
+
+/**
+ * useSessionTopology is the query hook for the per-session Topology tab. The
+ * query key carries the metric so changing the size dimension refetches; the
+ * SSE session_changed invalidation targets ['session', id] (the detail), so the
+ * topology key is kept distinct to avoid coupling the two refetch cadences.
+ */
+export function useSessionTopology(
+  id: string,
+  metric: TopologyMetric,
+): UseQueryResult<TopologyResponse> {
+  return useQuery({
+    queryKey: ['session-topology', id, metric] as const,
+    queryFn: ({ signal }) => fetchSessionTopology(id, metric, signal),
+    enabled: id.length > 0,
+  });
+}
+
+/**
+ * fetchTimeline GETs the per-session timeline (the whole session tree resolved
+ * server-side: one lane per session, each lane's ordered spans, plus the overall
+ * t_start/t_end window — rest-api.md §GET /api/sessions/:id/timeline). The client
+ * computes the span geometry in viz/timeline.
+ */
+export function fetchTimeline(
+  id: string,
+  signal?: AbortSignal,
+): Promise<TimelineResponse> {
+  return get<TimelineResponse>(
+    `/sessions/${encodeURIComponent(id)}/timeline`,
+    signal,
+  );
+}
+
+/**
+ * useTimeline is the query hook for the per-session Timeline tab. Mirrors
+ * useSessionTopology: a distinct query key (['session-timeline', id]) keeps its
+ * refetch cadence independent of the detail's ['session', id] SSE invalidation.
+ */
+export function useTimeline(id: string): UseQueryResult<TimelineResponse> {
+  return useQuery({
+    queryKey: ['session-timeline', id] as const,
+    queryFn: ({ signal }) => fetchTimeline(id, signal),
     enabled: id.length > 0,
   });
 }

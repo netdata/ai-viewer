@@ -287,8 +287,9 @@ GET  /api/sources               → list sources, ingest cursors, parse error co
 GET  /api/sessions              → list sessions with filters and pagination                 (live)
 GET  /api/sessions/:id          → session detail with turns and ops                         (live)
 GET  /api/sessions/:id/logs     → log entries for a session                                 (live)
-GET  /api/sessions/:id/topology → topology graph for a session (nodes, edges)               (Chunks 14+ — not yet implemented)
-GET  /api/sessions/:id/timeline → ordered spans for the timeline view                       (Chunks 14+ — not yet implemented)
+GET  /api/sessions/:id/topology → topology graph for a session (nodes, edges)               (implemented — SOW-0006)
+GET  /api/sessions/:id/timeline → ordered spans for the timeline view                       (implemented — SOW-0006)
+GET  /api/topology              → cross-session topology graph over the active filter        (implemented — SOW-0006)
 GET  /api/stats                 → cross-session statistics with filters                     (live)
 GET  /api/catalog/tools         → catalog_tools, with filters                               (Chunks 12+ — not yet implemented)
 GET  /api/catalog/models        → catalog_models, with filters                              (Chunks 12+ — not yet implemented)
@@ -303,10 +304,11 @@ Chunk 11 of SOW-0001 shipped the first four "live" routes (`/`,
 `/assets/...`, `/api/health`, `/api/sources`); Chunk 12 added
 `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/logs`, and
 `/api/stats`; Chunk 13 added the SSE surface — `POST /api/subscriptions`,
-`DELETE /api/subscriptions/:id`, and `GET /api/events?sub=:id`. The
-catch-all `/api/*` handler returns a structured `NOT_FOUND` envelope
-naming the chunk in which a still-missing route (topology, timeline,
-catalog, payloads) will land, so future operators reading the response
+`DELETE /api/subscriptions/:id`, and `GET /api/events?sub=:id`. **SOW-0006
+added the per-session `/api/sessions/:id/topology` + `/api/sessions/:id/timeline`
+and the cross-session `/api/topology`.** The catch-all `/api/*` handler returns
+a structured `NOT_FOUND` envelope naming the chunk/SOW in which a still-missing
+route (`catalog`, `payloads`) will land, so future operators reading the response
 see the implementation roadmap at the error site. Anything not in the
 live set MUST NOT be added to a client (UI, curl scripts) until the
 corresponding chunk merges.

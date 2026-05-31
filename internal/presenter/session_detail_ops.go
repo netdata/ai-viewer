@@ -77,7 +77,7 @@ FROM turns WHERE session_id = ? ORDER BY seq ASC, id ASC`, sessionID)
 // defensively.
 func (p *Presenter) loadOps(ctx context.Context, sessionID string, turns []turnDetail, turnIndex map[string]int) (map[string]opLoc, error) {
 	rows, err := p.db.QueryContext(ctx, `
-SELECT id, turn_id, kind, name, IFNULL(model, ''), IFNULL(provider, ''),
+SELECT id, turn_id, parent_op_id, kind, name, IFNULL(model, ''), IFNULL(provider, ''),
        start_ts, end_ts, duration_us, status, error_class,
        tokens_in, tokens_out, cost_usd, ctx_used, ctx_max, child_session_id
 FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
@@ -91,6 +91,7 @@ FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 		var (
 			op       opDetail
 			turnID   string
+			parentID sql.NullString
 			endTS    sql.NullInt64
 			duration sql.NullInt64
 			errClass sql.NullString
@@ -98,12 +99,12 @@ FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 			ctxMax   sql.NullInt64
 			childID  sql.NullString
 		)
-		if err := rows.Scan(&op.ID, &turnID, &op.Kind, &op.Name, &op.Model, &op.Provider,
+		if err := rows.Scan(&op.ID, &turnID, &parentID, &op.Kind, &op.Name, &op.Model, &op.Provider,
 			&op.StartTS, &endTS, &duration, &op.Status, &errClass,
 			&op.TokensIn, &op.TokensOut, &op.CostUSD, &ctxUsed, &ctxMax, &childID); err != nil {
 			return nil, err
 		}
-		fillOpNullables(&op, endTS, duration, errClass, ctxUsed, ctxMax, childID)
+		fillOpNullables(&op, parentID, endTS, duration, errClass, ctxUsed, ctxMax, childID)
 		op.PayloadRefs = []payloadRef{}
 		ti, ok := turnIndex[turnID]
 		if !ok {
@@ -118,7 +119,11 @@ FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 // fillOpNullables copies the scanned sql.Null* values into the opDetail
 // pointer fields. Extracted so loadOps stays within the function-length
 // budget.
-func fillOpNullables(op *opDetail, endTS, duration sql.NullInt64, errClass sql.NullString, ctxUsed, ctxMax sql.NullInt64, childID sql.NullString) {
+func fillOpNullables(op *opDetail, parentID sql.NullString, endTS, duration sql.NullInt64, errClass sql.NullString, ctxUsed, ctxMax sql.NullInt64, childID sql.NullString) {
+	if parentID.Valid {
+		v := parentID.String
+		op.ParentOpID = &v
+	}
 	if endTS.Valid {
 		v := endTS.Int64
 		op.EndTS = &v

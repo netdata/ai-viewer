@@ -1,0 +1,246 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.select {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+}
+
+.select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The layout-mode segmented control mirrors the Trace view toggle. */
+.modeToggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-1);
+  margin: 0;
+}
+
+.modeOption {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.modeOption:has(input:checked) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.modeOption input {
+  margin: 0;
+}
+
+.freezeButton {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.freezeButton:hover {
+  background: var(--bg-tertiary);
+}
+
+.freezeButton:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.freezeButton[aria-pressed='true'] {
+  background: var(--bg-tertiary);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.nodeCount {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.vizArea {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.vizScroller {
+  overflow: auto;
+  max-width: 100%;
+}
+
+.vizSvg {
+  display: block;
+  font-family: var(--font-sans);
+  cursor: grab;
+}
+
+.vizSvg:active {
+  cursor: grabbing;
+}
+
+.vizCanvas {
+  display: block;
+  cursor: grab;
+}
+
+/* Keyboard fallback for the Canvas render path (SOW-0006 AC#5). The Canvas
+   <canvas> is a single non-focusable image, so a keyboard / screen-reader user
+   has no way to reach a node. This list mirrors every node as a real <button>
+   in the a11y tree (one accessible name per node, Enter/Space → open the
+   drawer); it is visually hidden (the canvas IS the visual) but stays operable —
+   clip-rect/1px keeps buttons focusable, unlike display:none. The SVG path does
+   not need it (its node shapes are already focusable buttons). */
+.canvasFallbackList {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  list-style: none;
+}
+
+.canvasFallbackButton {
+  /* A keyboard-reachable proxy; visually irrelevant (the parent list is hidden),
+     but focus-visible still draws a ring should a UA reveal it. */
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.canvasFallbackButton:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+/* ── Graph elements ──────────────────────────────────────────────────────── */
+
+.edges {
+  pointer-events: none;
+}
+
+.edge {
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.node {
+  cursor: pointer;
+}
+
+.node:hover {
+  filter: brightness(1.12);
+}
+
+.node:focus-visible,
+.nodeSelected:focus-visible {
+  outline: none;
+}
+
+.node:focus-visible circle,
+.node:focus-visible rect,
+.nodeSelected:focus-visible circle,
+.nodeSelected:focus-visible rect {
+  /* SVG focus ring via the box-shadow token's color on the shape outline. */
+  outline: 2px solid var(--accent);
+}
+
+.nodeSelected {
+  cursor: pointer;
+  filter: brightness(1.2);
+}
+
+.nodeLabel {
+  fill: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
+
+/* ── Legend ──────────────────────────────────────────────────────────────── */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.legendSwatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.legendSwatchSquare {
+  border-radius: 2px;
+}

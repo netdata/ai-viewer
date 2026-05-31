@@ -6,11 +6,13 @@ import {
   fetchSessionDetail,
   fetchSessions,
   fetchSessionsPage,
+  fetchSessionTopology,
   filtersToQuery,
   sessionsQueryKey,
   useSessionDetail,
   useSessions,
   useSessionsInfinite,
+  useSessionTopology,
 } from './sessions';
 import { fetchStats, statsQueryKey, useStats } from './stats';
 import { fetchHealth, fetchSources, useHealth, useSources } from './sources';
@@ -108,6 +110,29 @@ describe('sessions data layer', () => {
     const { result } = renderHook(() => useSessionDetail('s1'), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.session.id).toBe('s1');
+  });
+
+  it('fetchSessionTopology GETs /api/sessions/:id/topology with the metric (and encodes the id)', async () => {
+    const { calls } = captureUrl({ nodes: [], edges: [], max_size_metric: 0 });
+    await fetchSessionTopology('sess/1', 'cost');
+    expect(calls[0]).toBe('/api/sessions/sess%2F1/topology?metric=cost');
+  });
+
+  it('useSessionTopology keys by id+metric and fetches the graph', async () => {
+    captureUrl({
+      nodes: [{ id: 'agent:s1', kind: 'agent', label: 'a', size_metric: 1, failure_ratio: 0 }],
+      edges: [],
+      max_size_metric: 1,
+    });
+    const { result } = renderHook(() => useSessionTopology('s1', 'tokens'), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.nodes[0]?.id).toBe('agent:s1');
+  });
+
+  it('useSessionTopology is disabled for an empty id', () => {
+    captureUrl({ nodes: [], edges: [], max_size_metric: 0 });
+    const { result } = renderHook(() => useSessionTopology('', 'cost'), { wrapper });
+    expect(result.current.fetchStatus).toBe('idle');
   });
 });
 

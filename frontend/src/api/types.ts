@@ -146,6 +146,11 @@ export interface OpDetail {
   name: string;
   model: string;
   provider: string;
+  /** Canonical id of the op this op nests under (ops.parent_op_id); null for a
+   *  top-level op. The server always emits the key (Go `*string`, no omitempty);
+   *  typed optional so existing op literals/fixtures that predate the Trace view
+   *  remain valid — the Trace view rebuilds the span tree from this parentage. */
+  parent_op_id?: string | null;
   start_ts: number;
   end_ts: number | null;
   duration_us: number | null;
@@ -195,6 +200,102 @@ export interface SessionDetailResponse {
   session: SessionDetail;
   turns: TurnDetail[];
   child_sessions: ChildSummary[];
+}
+
+// ── GET /api/sessions/:id/topology ──────────────────────────────────────────
+
+/**
+ * The ?metric= selector for the topology node size (presenter
+ * session_topology.go parseTopologyMetric; default `duration`). Closed set on
+ * the server: an ABSENT or empty value defaults to `duration`; an
+ * UNKNOWN/invalid value is rejected with BAD_REQUEST (rest-api.md §GET
+ * /api/sessions/:id/topology) — it does NOT silently fall back to duration.
+ */
+export type TopologyMetric = 'cost' | 'tokens' | 'duration' | 'calls' | 'ctx_pct';
+
+/**
+ * One node of GET /api/sessions/:id/topology (presenter topoNode). `kind`
+ * distinguishes an agent (a session in the tree) from a tool. `size_metric`
+ * carries the raw value of the selected ?metric= (the client normalizes the
+ * node radius against `max_size_metric`); `failure_ratio` is failed/total ops
+ * in 0..1 (drives node color).
+ */
+export interface TopologyNode {
+  id: string;
+  kind: OpenEnum<'agent' | 'tool'>;
+  label: string;
+  size_metric: number;
+  failure_ratio: number;
+}
+
+/**
+ * One aggregated caller→callee edge (presenter topoEdge). `calls` is the op
+ * count; `total_us` is the summed duration (NULL durations counted as 0).
+ */
+export interface TopologyEdge {
+  source: string;
+  target: string;
+  calls: number;
+  total_us: number;
+}
+
+/**
+ * Topology envelope shared by GET /api/sessions/:id/topology and GET
+ * /api/topology (presenter topologyResponse). Nodes and edges are always
+ * present arrays (never null). `max_size_metric` is the maximum `size_metric`
+ * across nodes (0 when there are no nodes); the client normalizes node radii
+ * against it. `truncated` is emitted ONLY by the cross-session /api/topology
+ * route when its node cap dropped sessions (Go `omitempty` → optional key); the
+ * per-session route never truncates so the key is absent there.
+ */
+export interface TopologyResponse {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+  max_size_metric: number;
+  truncated?: boolean;
+}
+
+// ── GET /api/sessions/:id/timeline ──────────────────────────────────────────
+
+/**
+ * One span on a Timeline lane (presenter timelineSpan, session_timeline.go).
+ * `end_ts` is NULLABLE, but only a STILL-RUNNING op emits null: the server emits
+ * end_ts whenever the DB has it, so a POINT EVENT emits end_ts == start_ts (NOT
+ * null). The client treats `end_ts === null || end_ts <= start_ts` as an instant
+ * marker (drawn as a tick, not a bar) — covering both shapes. `kind==='compaction'`
+ * is emitted as an ordinary span; the client keys on the kind to draw a
+ * full-height breakpoint.
+ */
+export interface TimelineSpan {
+  id: string;
+  kind: OpKind;
+  name: string;
+  start_ts: number;
+  end_ts: number | null;
+  status: string;
+}
+
+/**
+ * One lane = one session's ordered spans (presenter timelineLane). `spans` is
+ * always a non-nil array (an op-less session serializes as []). One lane per
+ * session in the resolved tree (root + children stacked).
+ */
+export interface TimelineLane {
+  key: string;
+  label: string;
+  spans: TimelineSpan[];
+}
+
+/**
+ * GET /api/sessions/:id/timeline envelope (presenter timelineResponse). `lanes`
+ * is always present. `t_start`/`t_end` are the min start / max end across every
+ * span (0/0 when the tree has no ops); a null end_ts contributes its start_ts to
+ * `t_end` server-side, so the window always covers a running op's known extent.
+ */
+export interface TimelineResponse {
+  lanes: TimelineLane[];
+  t_start: number;
+  t_end: number;
 }
 
 // ── GET /api/sessions/:id/logs ──────────────────────────────────────────────

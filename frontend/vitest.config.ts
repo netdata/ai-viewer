@@ -36,6 +36,8 @@ export default defineConfig({
         'src/components/LogRow/**/*.{ts,tsx}',
         'src/components/LoadMore/**/*.{ts,tsx}',
         'src/components/StatusViews/**/*.{ts,tsx}',
+        'src/components/SpanDetailDrawer/**/*.{ts,tsx}',
+        'src/viz/**/*.{ts,tsx}',
         'src/pages/SessionsList/**/*.{ts,tsx}',
         'src/pages/SessionDetail/**/*.{ts,tsx}',
         'src/pages/Sources/**/*.{ts,tsx}',

@@ -70,16 +70,22 @@ scripts/install-systemd-user.sh status     # systemctl --user status for both
 scripts/install-systemd-user.sh uninstall  # stop + remove the units (keeps binaries + data)
 ```
 
-## What you can do in the UI (Phase 1)
+## What you can do in the UI
 
 - **`/`** — the sessions list (root sessions: agent, model, start, duration,
   status, turns, ops, tokens, cost, failures). A child-count cell links to a
   session whose Overview lists its sub-sessions. "Load more" pages older
   sessions. The list refreshes live as new sessions are ingested.
 - **`/sessions/:id`** — session detail. **Overview** (per-session aggregates +
-  a tools-used summary + a child-sessions table) and **Logs** (severity-filter +
-  paging). Deep-linking / reloading this URL works. Trace/Topology/Timeline tabs
-  are Phase-2 placeholders.
+  a tools-used summary + a child-sessions table), **Trace** (APM views of the
+  op tree: waterfall / flame-graph / event-list, with a shared span-detail
+  drawer), **Topology** (per-session actor graph of the agents and tools that
+  participated, node size/color encoding a selectable metric), **Timeline**
+  (video-editor lanes — one per session, spans drawn on a shared time axis),
+  and **Logs** (severity-filter + paging). Deep-linking / reloading this URL
+  works.
+- **`/topology`** — cross-session topology: the actor graph aggregated across
+  all sessions in the current timeframe + filters.
 - **`/sources`** — per-source ingest status, lag, parse-error counts, and an
   overall health badge.
 - **Theme** — Auto (follows your OS) / Dark / Light, in the header; your choice

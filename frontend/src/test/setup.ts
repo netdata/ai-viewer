@@ -1,6 +1,22 @@
 import '@testing-library/jest-dom/vitest';
-import { afterEach } from 'vitest';
+import { afterEach, expect } from 'vitest';
 import { cleanup } from '@testing-library/react';
+// jest-axe ships the accessibility matcher (toHaveNoViolations); register it on
+// vitest's expect so component tests can assert axe-clean DOM at the unit level
+// (the Playwright a11y gate is a later chunk). @types/jest-axe augments jest's
+// matcher namespace, not vitest's, so we declare the matcher for vitest below.
+import { toHaveNoViolations } from 'jest-axe';
+
+expect.extend(toHaveNoViolations);
+
+declare module 'vitest' {
+  interface Assertion {
+    toHaveNoViolations(): void;
+  }
+  interface AsymmetricMatchersContaining {
+    toHaveNoViolations(): void;
+  }
+}
 
 // Deterministic in-memory localStorage. Node 22+ ships an experimental global
 // `localStorage` that requires the `--localstorage-file` flag and otherwise
