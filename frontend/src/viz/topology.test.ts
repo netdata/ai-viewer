@@ -240,7 +240,7 @@ describe('positionsOf — snapshots a layout to id → {x,y} only', () => {
 describe('reapplyFrozenPositions — freeze pins POSITIONS, data stays live', () => {
   // Freeze stores only node id → {x,y}. On a metric/filter/SSE refetch the FRESH
   // node data (label, radius from the new size_metric, failure_ratio) is re-applied
-  // onto those pinned positions, matched by id (codex P2#5: "freeze = stop the
+  // onto those pinned positions, matched by id ("freeze = stop the
   // simulation moving nodes, NOT stop data updates").
   const frozen = new Map<string, { x: number; y: number }>([
     ['agent:root', { x: 111, y: 222 }],

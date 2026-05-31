@@ -6,8 +6,10 @@
 # work stands on its own. This gate fails (non-zero) if any reappear, and
 # passes (zero) when the tree is clean.
 #
-# Scope: cmd/, internal/, scripts/ (tests INCLUDED — the attributions were
-# in tests too). The match is deliberately narrow: a reviewer NAME adjacent
+# Scope: cmd/, internal/, scripts/, frontend/src/, frontend/tests/ (tests
+# INCLUDED — the attributions were in tests too; frontend/ is scoped to its
+# source trees so node_modules/ and dist/ are never scanned). The match is
+# deliberately narrow: a reviewer NAME adjacent
 # to an iteration/priority tag or an attribution verb. It must NOT fire on
 # legitimate DOMAIN uses of the same words — the session-storage formats
 # the tool ingests, priced model names, the redaction rules, or the
@@ -53,7 +55,7 @@ PATTERN="${PATTERN}|(${NAMES}) (flagged|caught|noted|found|suggested|wants|requi
 # Scan only the shipped source trees. -I skips binary files; tests are
 # intentionally included. This script is excluded so its own pattern
 # definition (which must list the reviewer names) is not a self-hit.
-hits="$(grep -rniIE --exclude=scan-ai-attribution.sh "$PATTERN" cmd internal scripts || true)"
+hits="$(grep -rniIE --exclude=scan-ai-attribution.sh "$PATTERN" cmd internal scripts frontend/src frontend/tests || true)"
 
 if [[ -n "$hits" ]]; then
   echo -e "${RED}[FAIL]${NC} AI-reviewer attribution comments found in shipped source:" >&2
@@ -62,4 +64,4 @@ if [[ -n "$hits" ]]; then
   exit 1
 fi
 
-echo -e "${GREEN}[PASS]${NC} no AI-reviewer attribution comments in cmd/, internal/, scripts/."
+echo -e "${GREEN}[PASS]${NC} no AI-reviewer attribution comments in cmd/, internal/, scripts/, frontend/."

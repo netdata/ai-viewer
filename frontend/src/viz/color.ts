@@ -19,7 +19,7 @@ const STATUS_TOKEN: Record<string, string> = {
 };
 
 // Actor-kind tokens, named as concrete (provably non-undefined) strings so
-// colorForActorKind needs no dead `?? NEUTRAL_TOKEN` fallback (minimax Finding 6).
+// colorForActorKind needs no dead `?? NEUTRAL_TOKEN` fallback.
 // They double as the agent/tool entries in KIND_TOKEN — single source of truth so
 // the topology palette and the op-kind palette never diverge.
 const AGENT_TOKEN = '--warning';
@@ -121,6 +121,12 @@ export function colorForStatus(status: SessionStatus): string {
  * renderer also labels the node and shows the ratio in the drawer.
  */
 export function colorForFailureRatio(ratio: number): string {
+  // STATUS_TOKEN is a Record<string,string>, and the project compiles with
+  // noUncheckedIndexedAccess (tsconfig.json), so EVEN a literal-key access yields
+  // `string | undefined` — the `?? NEUTRAL_TOKEN` fallback is type-REQUIRED here,
+  // not dead. It also keeps colorForFailureRatio degrading to neutral if the
+  // status palette is ever pruned. (Reviewer R2's "dead branch" finding does not
+  // hold under this tsconfig.)
   if (!Number.isFinite(ratio) || ratio <= 0) {
     return tokenValue(STATUS_TOKEN.completed ?? NEUTRAL_TOKEN);
   }

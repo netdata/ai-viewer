@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { OpDetail, TurnDetail } from '../../../api/types';
 import { buildOpTree, flattenTree, type TraceNode } from '../../../viz/trace';
@@ -66,6 +66,10 @@ beforeEach(() => {
     save: vi.fn(),
     restore: vi.fn(),
     scale: vi.fn(),
+    // The Detailed Canvas clips the time-track region (gutter stays fixed under
+    // X zoom/pan), so the 2D stub must carry rect + clip.
+    rect: vi.fn(),
+    clip: vi.fn(),
   };
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
     ctxStub as unknown as CanvasRenderingContext2D,
@@ -262,5 +266,158 @@ describe('Waterfall (Canvas path)', () => {
     // 30 rows × 26px = 780px tall; a click at y=10000 is past the end.
     fireEvent.click(wf, { clientY: 10000, clientX: 300 });
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+// X-only zoom/pan on the Detailed waterfall (ui-pages.md §Trace big-session
+// navigation): SHIFT+wheel zooms the TIME (X) axis only, drag pans X, a PLAIN
+// wheel scrolls the rows (native scroller, not the time track). Mirrors
+// TimelineRenderer.test.tsx's jsdom zoom-driving technique. The track <g> carries
+// matrix(k,0,0,1,tx,0): the X scale (a) zooms while the Y scale (d) stays 1 (row
+// height constant), and the left gutter labels + turn rules never move.
+
+describe('Waterfall (SVG path) — X-only time zoom/pan', () => {
+  const nodes = nodesFrom([
+    op({ id: 'a', name: 'alpha', start_ts: 0, end_ts: 400, duration_us: 400 }),
+    op({ id: 'b', name: 'beta', kind: 'llm', start_ts: 100, end_ts: 200, duration_us: 100 }),
+  ]);
+
+  /** trackGroup is the innermost <g> d3-zoom transforms (inside the clip group). */
+  function trackGroup(svg: SVGSVGElement): SVGGElement {
+    const clipGroup = svg.querySelector('g[clip-path]') as SVGGElement;
+    // <g clip-path> → <g translate(LABEL_WIDTH,0)> → <g ref={trackRef}> (deepest).
+    const groups = clipGroup.querySelectorAll('g');
+    return groups[1] as SVGGElement; // [0]=translate wrapper, [1]=the track group
+  }
+
+  /** parseMatrix pulls the 6 matrix(a,b,c,d,e,f) numbers from a group's transform. */
+  function parseMatrix(g: SVGGElement): number[] {
+    const m = /matrix\(([^)]+)\)/.exec(g.getAttribute('transform') ?? '');
+    return (m?.[1] ?? '').split(',').map(Number);
+  }
+
+  it('zooms the TIME (X) axis only on a shift+wheel (k≠1, Y scale stays 1) and keeps the gutter labels fixed', () => {
+    render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    const svg = wf.querySelector('svg') as SVGSVGElement;
+    const track = trackGroup(svg);
+    // A gutter row label's x before the zoom (it must not move under X zoom).
+    const label = within(wf).getByText('alpha') as unknown as SVGTextElement;
+    const labelXBefore = label.getAttribute('x');
+
+    const shifted = new WheelEvent('wheel', {
+      deltaY: -40,
+      shiftKey: true,
+      clientX: 300,
+      clientY: 80,
+      bubbles: true,
+      cancelable: true,
+    });
+    svg.dispatchEvent(shifted);
+
+    const [a, b, c, d, , f] = parseMatrix(track);
+    expect(a).toBeGreaterThan(1); // X (time) scaled up
+    expect(b).toBe(0);
+    expect(c).toBe(0);
+    expect(d).toBe(1); // Y scale UNCHANGED (row height constant)
+    expect(f).toBe(0); // track never translates in Y (vertical is the scroller)
+    // The gutter label did not move (it lives outside the transformed track).
+    expect(label.getAttribute('x')).toBe(labelXBefore);
+  });
+
+  it('pans the TIME (X) axis on a primary-button drag (tx changes, Y untouched)', () => {
+    render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const svg = screen
+      .getByRole('group', { name: /waterfall/i })
+      .querySelector('svg') as SVGSVGElement;
+    const track = trackGroup(svg);
+
+    // jsdom synthetic mousedown has a null view; the shared zoomEventFilter rejects
+    // a view-null mousedown, so set a view (mirrors TimelineRenderer.test.tsx).
+    const down = new MouseEvent('mousedown', { button: 0, clientX: 400, clientY: 80, bubbles: true });
+    Object.defineProperty(down, 'view', { value: window, configurable: true });
+    svg.dispatchEvent(down);
+    const move = new MouseEvent('mousemove', { clientX: 340, clientY: 80, bubbles: true });
+    Object.defineProperty(move, 'view', { value: window, configurable: true });
+    window.dispatchEvent(move);
+    const up = new MouseEvent('mouseup', { clientX: 340, clientY: 80, bubbles: true });
+    Object.defineProperty(up, 'view', { value: window, configurable: true });
+    window.dispatchEvent(up);
+
+    const [a, , , d, e, f] = parseMatrix(track);
+    expect(a).toBe(1); // no zoom on a pure pan
+    expect(d).toBe(1); // Y scale unchanged
+    expect(e).toBe(-60); // panned left by the drag delta (400 → 340)
+    expect(f).toBe(0); // never translates in Y
+  });
+
+  it('does NOT move the time track on a plain wheel (left to the native row scroller)', () => {
+    render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={false} />);
+    const svg = screen
+      .getByRole('group', { name: /waterfall/i })
+      .querySelector('svg') as SVGSVGElement;
+    const track = trackGroup(svg);
+    const before = track.getAttribute('transform');
+
+    // A plain wheel: plainWheelPan:false → the filter rejects it WITHOUT
+    // preventDefault, so it reaches the native scroller and the track is untouched.
+    const plain = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    svg.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(false);
+    expect(track.getAttribute('transform')).toBe(before);
+  });
+});
+
+describe('Waterfall (Canvas path) — X-only time zoom/pan', () => {
+  const many = Array.from({ length: 30 }, (_, i) =>
+    op({ id: `op-${i}`, name: `t${i}`, start_ts: i * 10, end_ts: i * 10 + 5, duration_us: 5 }),
+  );
+  const nodes = nodesFrom(many);
+
+  it('repaints with a scaled X track on a shift+wheel (k≠1) while the plain-wheel scroll still works', () => {
+    render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={true} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    const canvas = wf.querySelector('canvas') as HTMLCanvasElement;
+
+    // Capture the bar x-positions painted at identity (fillRect x args). jsdom has
+    // no real layout, so we assert via the stub: a zoom must re-run the paint and
+    // the painted bar x must shift (k≠1 changes screenX = LABEL_WIDTH + x*k + tx).
+    const fillRect = ctxStub.fillRect as ReturnType<typeof vi.fn>;
+    const firstBarXBefore = (fillRect.mock.calls[0]?.[0] as number) ?? null;
+    fillRect.mockClear();
+
+    const shifted = new WheelEvent('wheel', {
+      deltaY: -60,
+      shiftKey: true,
+      clientX: 400,
+      clientY: 40,
+      bubbles: true,
+      cancelable: true,
+    });
+    // The shift+wheel updates the zoom transform state; wrap in act() so the
+    // resulting state update + repaint effect flush before we assert.
+    act(() => {
+      canvas.dispatchEvent(shifted);
+    });
+
+    // The zoom re-ran the paint …
+    expect(fillRect).toHaveBeenCalled();
+    // … and at least one painted bar x reflects the zoom (differs from identity).
+    const firstBarXAfter = fillRect.mock.calls[0]?.[0] as number;
+    expect(typeof firstBarXAfter).toBe('number');
+    if (firstBarXBefore !== null) {
+      expect(firstBarXAfter).not.toBe(firstBarXBefore);
+    }
+  });
+
+  it('still scrolls the rows on a plain wheel (plain wheel is not intercepted)', () => {
+    render(<Waterfall nodes={nodes} onSelect={vi.fn()} selectedId={null} useCanvas={true} />);
+    const wf = screen.getByRole('group', { name: /waterfall/i });
+    const fillRect = ctxStub.fillRect as ReturnType<typeof vi.fn>;
+    fillRect.mockClear();
+    // The existing native scroll path (onScroll) still repaints with the culled
+    // rows — plainWheelPan:false leaves the wheel to the scroller.
+    fireEvent.scroll(wf, { target: { scrollTop: 200 } });
+    expect(fillRect).toHaveBeenCalled();
   });
 });

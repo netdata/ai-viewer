@@ -378,7 +378,7 @@ export function layoutTopology(
  * reapplyFrozenPositions re-applies the FRESH node data (label, radius from the
  * current size_metric, failure_ratio) onto a frozen set of POSITIONS, matched by
  * node id. This is what "freeze layout" means: the simulation stops moving nodes,
- * but data keeps updating (codex P2#5). A metric/filter/SSE refetch hands a new
+ * but data keeps updating. A metric/filter/SSE refetch hands a new
  * `nodes` array here; each node keeps its pinned (x,y) when its id is in `frozen`,
  * while its radius is recomputed against the fresh `maxSizeMetric` and its label /
  * failure_ratio come straight from the fresh node. A node that NEWLY appeared
@@ -416,7 +416,7 @@ export function reapplyFrozenPositions(
  * positionsOf snapshots a positioned layout down to a node id → {x,y} map — the
  * minimal state "freeze layout" pins (positions only, never the stale label /
  * radius / failure_ratio). reapplyFrozenPositions later re-applies fresh data
- * onto these coordinates (codex P2#5).
+ * onto these coordinates.
  */
 export function positionsOf(positioned: PositionedNode[]): Map<string, { x: number; y: number }> {
   return new Map(positioned.map((p) => [p.node.id, { x: p.x, y: p.y }]));

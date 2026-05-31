@@ -188,7 +188,7 @@ export interface CullWindow {
  *
  * Compaction breakpoints are the one exception to LANE culling: they render as
  * full-height vertical rules spanning every lane, so their own lane index is
- * irrelevant — they are culled by the visible TIME window only (codex P2#4).
+ * irrelevant — they are culled by the visible TIME window only.
  * They are still time-culled (a breakpoint past the visible X window is dropped).
  */
 export function cullSpans(spans: PositionedSpan[], win: CullWindow): PositionedSpan[] {
@@ -214,8 +214,8 @@ export function cullSpans(spans: PositionedSpan[], win: CullWindow): PositionedS
  * applies the zoom to the TIME axis ONLY: X is scaled by k, Y is left at scale 1
  * so lane height stays constant under zoom, and both axes are still TRANSLATED by
  * (tx,ty) — a plain-wheel vertical pan across lanes keeps working, only the
- * zoom-driven Y scale is removed (ui-pages.md §Timeline: "shift+wheel zooms time";
- * codex P2#4). The Canvas path applies the same a/0/0/1/e/f transform via
+ * zoom-driven Y scale is removed (ui-pages.md §Timeline: "shift+wheel zooms time").
+ * The Canvas path applies the same a/0/0/1/e/f transform via
  * ctx.transform. matrix(a,b,c,d,e,f): a=X-scale, d=Y-scale, e/f=translate.
  */
 export function timeXOnlyMatrix(k: number, tx: number, ty: number): string {

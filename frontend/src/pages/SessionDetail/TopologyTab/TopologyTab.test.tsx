@@ -189,7 +189,7 @@ describe('TopologyTab', () => {
     expect(screen.getByRole('button', { name: /freeze layout/i })).toBeDisabled();
   });
 
-  it('keeps node DATA live while frozen: a metric change re-applies fresh radius + failure_ratio at the pinned position (codex P2#5)', async () => {
+  it('keeps node DATA live while frozen: a metric change re-applies fresh radius + failure_ratio at the pinned position', async () => {
     const user = userEvent.setup();
     // Same node ids, but the "tokens" metric makes fs.Grep the largest node and
     // changes failure ratios — the live data a metric switch must re-apply.

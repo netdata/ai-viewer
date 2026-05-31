@@ -126,6 +126,10 @@ beforeEach(() => {
       save: vi.fn(),
       restore: vi.fn(),
       scale: vi.fn(),
+      // The Detailed Canvas clips the time-track region (fixed gutter under X
+      // zoom/pan), so the stub must carry rect + clip.
+      rect: vi.fn(),
+      clip: vi.fn(),
       set fillStyle(_v: string) {},
       set strokeStyle(_v: string) {},
       set font(_v: string) {},

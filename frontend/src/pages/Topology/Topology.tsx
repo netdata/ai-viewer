@@ -82,7 +82,7 @@ export function Topology() {
   // The pinned node POSITIONS captured when the operator froze (id → {x,y}); while
   // non-null the simulation never re-runs, but the node DATA stays live — a
   // metric/SSE refetch re-applies fresh labels/radii/failure-ratios onto these
-  // coordinates (codex P2#5).
+  // coordinates.
   const [frozenLayout, setFrozenLayout] = useState<ReadonlyMap<string, { x: number; y: number }> | null>(
     null,
   );
@@ -137,7 +137,7 @@ export function Topology() {
   // When frozen, the simulation is pinned but the DATA is live:
   // reapplyFrozenPositions keeps each node at its frozen (x,y) while re-applying
   // the fresh label/radius/failure_ratio (a new metric or SSE refetch updates the
-  // graph in place; a vanished session drops, a new one is seeded — codex P2#5).
+  // graph in place; a vanished session drops, a new one is seeded).
   const positioned: PositionedNode[] = frozen
     ? reapplyFrozenPositions(nodes, frozenLayout ?? new Map(), opts)
     : useWorker

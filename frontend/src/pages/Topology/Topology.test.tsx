@@ -226,7 +226,7 @@ describe('Topology (cross-session)', () => {
     expect(results).toHaveNoViolations();
   });
 
-  it('keeps node DATA live while frozen: a metric change re-applies fresh radius + failure_ratio at the pinned position (codex P2#5)', async () => {
+  it('keeps node DATA live while frozen: a metric change re-applies fresh radius + failure_ratio at the pinned position', async () => {
     const user = userEvent.setup();
     // Same session ids, but the "cost" metric makes the worker the largest node
     // and changes failure ratios — the live data a metric switch must re-apply.

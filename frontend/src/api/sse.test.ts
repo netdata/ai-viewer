@@ -210,7 +210,7 @@ describe('connectSse handshake', () => {
 });
 
 describe('frame → invalidation', () => {
-  it('session_changed invalidates [session,id], [sessions], the per-session graph keys, and the [logs,id] family', async () => {
+  it('session_changed invalidates [session,id], [sessions], the per-session graph keys, the cross-session [topology] graph, and the [logs,id] family', async () => {
     installFetch({ subId: 'sub-1' });
     const spy = fakeQueryClient();
     await connectSse(spy.client, {});
@@ -228,6 +228,12 @@ describe('frame → invalidation', () => {
     // The ['session-topology', id] prefix partial-matches every metric sub-key.
     expect(keyInvalidated(spy, ['session-timeline', 's7'])).toBe(true);
     expect(keyInvalidated(spy, ['session-topology', 's7'])).toBe(true);
+    // The cross-session /topology graph (keyed ['topology', metric, filters]) is
+    // built from the same filtered session set as the list, so the same frame
+    // that refreshes ['sessions'] must refresh it too; the ['topology'] prefix
+    // partial-matches every metric/filter sub-key. (viz-sse.spec.ts §16-19 defers
+    // this assertion here — it is now made honest.)
+    expect(keyInvalidated(spy, ['topology'])).toBe(true);
     // Logs belong to the session: the open Logs tab (cached under
     // ['logs', id, severities]) must refresh on a session_changed frame. The
     // invalidation uses the ['logs', id] prefix so any severities sub-key matches.

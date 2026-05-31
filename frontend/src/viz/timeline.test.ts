@@ -243,7 +243,7 @@ describe('cullSpans — viewport culling (visible X window AND visible lanes)', 
   it('keeps a compaction breakpoint inside the time window even when its lane is OFF the visible band', () => {
     // A compaction op renders as a FULL-HEIGHT vertical breakpoint spanning every
     // lane, so it must be culled by the visible TIME window only — never dropped
-    // because its own lane index falls outside the visible lane band (codex P2#4).
+    // because its own lane index falls outside the visible lane band.
     const lanes = [
       lane({ key: 'session:root', label: 'root', spans: [] }),
       lane({
@@ -283,7 +283,7 @@ describe('timeXOnlyMatrix — zoom scales the time axis (X) only, never lane hei
     // The d3-zoom transform {k,x,y} must apply to the TIME axis only: X scaled by
     // k, Y unscaled (lane height constant), translated by (x,y). The SVG matrix
     // form matrix(a,b,c,d,e,f) scales X by `a`, Y by `d` — so a===k and d===1
-    // (codex P2#4: "shift+wheel zooms TIME — lane height must stay constant").
+    // (shift+wheel zooms TIME — lane height must stay constant).
     expect(timeXOnlyMatrix(2, 30, 40)).toBe('matrix(2,0,0,1,30,40)');
   });
 

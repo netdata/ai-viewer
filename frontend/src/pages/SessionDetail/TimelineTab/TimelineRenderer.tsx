@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';
-import { select } from 'd3-selection';
-import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from 'd3-zoom';
 import { colorForOpKind } from '../../../viz/color';
 import {
   cullSpans,
@@ -12,6 +10,7 @@ import {
   type PositionedLane,
   type PositionedSpan,
 } from '../../../viz/timeline';
+import { attachZoom } from '../../../viz/zoomInteraction';
 import { fadeClassFor } from '../../../viz/spanFade';
 import { useNewlyAppeared } from '../../../viz/useNewlyAppeared';
 import { formatDuration } from '../../../lib/format';
@@ -30,7 +29,6 @@ import styles from './TimelineTab.module.css';
 // interaction; all geometry comes from viz/timeline. A span click calls
 // onSpanClick → the shared SpanDetailDrawer.
 
-const SCALE_EXTENT: [number, number] = [0.2, 64];
 const AXIS_HEIGHT = 22; // px reserved at the top for the time axis.
 const LANE_LABEL_PAD = 6; // px inset for the lane label text.
 const AXIS_TARGET_TICKS = 8;
@@ -48,81 +46,6 @@ export interface TimelineRendererProps {
   onSpanClick: (span: PositionedSpan) => void;
   /** Force a render path (tests); defaults to span-count vs VISIBLE_SPAN_CEILING. */
   useCanvas?: boolean;
-}
-
-/**
- * zoomEventFilter implements the SOW-0006 wheel convention at the d3-zoom layer:
- * a PLAIN wheel must NOT zoom (it pans, handled by a separate wheel listener), so
- * we reject it here; a SHIFT+wheel zooms (allowed through). Primary-button drag
- * pans. It also mirrors TopologyRenderer's hardening: d3-zoom's mousedown handler
- * dereferences event.view.document (via d3-drag's nodrag), and the jsdom test
- * environment dispatches synthetic pointer events with a null view — so a
- * view-less mousedown is rejected (a no-op in a real browser, which always
- * carries a view; never a silent crash).
- */
-function zoomEventFilter(event: Event): boolean {
-  const e = event as Event & { view?: unknown; button?: number; shiftKey?: boolean; ctrlKey?: boolean };
-  if (e.type === 'wheel') {
-    // Only shift+wheel reaches d3-zoom (→ zoom). Plain wheel is handled as pan.
-    // ctrl+wheel (pinch-zoom gesture / browser zoom) is also allowed to zoom.
-    return e.shiftKey === true || e.ctrlKey === true;
-  }
-  if (e.type === 'mousedown' && e.view == null) {
-    return false;
-  }
-  // Primary button only; let non-mouse events through.
-  return e.button === undefined || e.button === 0;
-}
-
-/**
- * attachZoom wires a d3-zoom behavior to a surface element and returns it plus a
- * disposer. The plain-wheel-pans behavior is added as a separate non-passive
- * wheel listener that calls zoomBehavior.translateBy, so panning flows through
- * the SAME transform/event pipeline as drag + shift-wheel-zoom (one source of
- * truth for the transform). Shared by the SVG and Canvas paths so the
- * interaction is defined once.
- */
-function attachZoom<E extends Element>(
-  surface: E,
-  onZoom: (event: D3ZoomEvent<E, unknown>) => void,
-): { behavior: ZoomBehavior<E, unknown>; dispose: () => void } {
-  const behavior = zoom<E, unknown>()
-    .scaleExtent(SCALE_EXTENT)
-    .filter(zoomEventFilter)
-    .on('zoom', onZoom);
-  const selection = select(surface);
-  selection.call(behavior);
-  // Start un-panned/un-zoomed (d3's documented selection.call idiom).
-  selection.call((s) => behavior.transform(s, zoomIdentity));
-
-  // Plain wheel → horizontal/vertical pan (video-editor feel). Non-passive so we
-  // can preventDefault and stop the page from scrolling. Shift/ctrl wheel is left
-  // to d3-zoom (it zooms via the filter above). Typed as the base Event (the
-  // generic `Element` surface has no `wheel` entry in its event map) and narrowed
-  // to WheelEvent — it always is one for a 'wheel' listener.
-  const onWheel = (evt: Event): void => {
-    const ev = evt as WheelEvent;
-    if (ev.shiftKey || ev.ctrlKey) {
-      return;
-    }
-    ev.preventDefault();
-    // deltaX pans horizontally; a plain vertical wheel scrubs the time axis too
-    // when there is no horizontal delta (the natural timeline feel), otherwise it
-    // pans vertically across lanes. translateBy is in pre-scale units, so it pans
-    // consistently at any zoom level.
-    const dx = ev.deltaX !== 0 ? ev.deltaX : ev.deltaY;
-    const dy = ev.deltaX !== 0 ? ev.deltaY : 0;
-    behavior.translateBy(selection, -dx, -dy);
-  };
-  surface.addEventListener('wheel', onWheel, { passive: false });
-
-  return {
-    behavior,
-    dispose: () => {
-      surface.removeEventListener('wheel', onWheel);
-      selection.on('.zoom', null);
-    },
-  };
 }
 
 export function TimelineRenderer({
@@ -178,7 +101,7 @@ function axisTicks(tStart: number, tEnd: number, width: number): { value: number
 /**
  * cullWindowFor inverts the X-only zoom transform into the visible track-space
  * window (the same window the Canvas paints): X is scaled by k (so divide), Y is
- * only translated since lane height does not scale with zoom (codex P2#4). Pure
+ * only translated since lane height does not scale with zoom. Pure
  * so the paint loop and the keyboard-fallback list cull to the IDENTICAL set.
  */
 function cullWindowFor(
@@ -232,13 +155,20 @@ function TimelineSvg({
     if (!svg || !g) {
       return;
     }
-    const { dispose } = attachZoom<SVGSVGElement>(svg, (event) => {
-      // Zoom the TIME axis only: scale X by k, keep Y (lane height) at scale 1.
-      // Both axes still translate so a plain-wheel vertical lane pan keeps working
-      // (ui-pages.md §Timeline; codex P2#4).
-      const t = event.transform;
-      g.setAttribute('transform', timeXOnlyMatrix(t.k, t.x, t.y));
-    });
+    const { dispose } = attachZoom<SVGSVGElement>(
+      svg,
+      (event) => {
+        // Zoom the TIME axis only: scale X by k, keep Y (lane height) at scale 1.
+        // Both axes still translate so a plain-wheel vertical lane pan keeps working
+        // (ui-pages.md §Timeline).
+        const t = event.transform;
+        g.setAttribute('transform', timeXOnlyMatrix(t.k, t.x, t.y));
+      },
+      // The Timeline pans on a plain wheel (video-editor feel); shift/ctrl wheel
+      // zooms the time axis. This is the original behavior (now opt-in via the
+      // shared attachZoom).
+      { plainWheelPan: true },
+    );
     return dispose;
   }, [width, height]);
 
@@ -412,7 +342,7 @@ function TimelineCanvas({
 
   // The spans currently inside the viewport — the EXACT set the Canvas paints AND
   // the set the keyboard-fallback list mirrors. Culling the fallback to the
-  // viewport keeps it bounded (no DOM node per span at scale — codex P2#4); a
+  // viewport keeps it bounded (no DOM node per span at scale); a
   // keyboard user reaches the on-screen spans and pans/zooms to reach the rest.
   const visible = useMemo(
     () => cullSpans(spans, cullWindowFor(transform, width, height, lanes[0]?.height ?? 1)),
@@ -424,10 +354,14 @@ function TimelineCanvas({
     if (!c) {
       return;
     }
-    const { dispose } = attachZoom<HTMLCanvasElement>(c, (event) => {
-      const tr = event.transform;
-      setTransform({ k: tr.k, x: tr.x, y: tr.y });
-    });
+    const { dispose } = attachZoom<HTMLCanvasElement>(
+      c,
+      (event) => {
+        const tr = event.transform;
+        setTransform({ k: tr.k, x: tr.x, y: tr.y });
+      },
+      { plainWheelPan: true },
+    );
     return dispose;
   }, [width, height]);
 
@@ -448,7 +382,7 @@ function TimelineCanvas({
     ctx.clearRect(0, 0, width, height);
     // Zoom the TIME axis only: scale X by k, keep Y at scale 1 (lane height
     // constant), translate both axes. ctx.transform(a,b,c,d,e,f) post-multiplies
-    // the dpr scale already on the matrix (codex P2#4). `visible` is the
+    // the dpr scale already on the matrix. `visible` is the
     // viewport-culled set (memoized above) — only on-screen spans are painted.
     ctx.transform(transform.k, 0, 0, 1, transform.x, transform.y);
 
@@ -502,7 +436,7 @@ function TimelineCanvas({
   const onClick = (e: MouseEvent<HTMLCanvasElement>): void => {
     const bounds = e.currentTarget.getBoundingClientRect();
     // Invert the X-only zoom: X is scaled by k (divide), Y is only translated
-    // (no /k) since lane height does not scale with zoom (codex P2#4).
+    // (no /k) since lane height does not scale with zoom.
     const px = (e.clientX - bounds.left - transform.x) / transform.k;
     const py = e.clientY - bounds.top - transform.y;
     let hit: PositionedSpan | null = null;
@@ -537,7 +471,7 @@ function TimelineCanvas({
           the Canvas paints) gets a real focusable button with the SVG bars'
           accessible name; visually hidden (the canvas IS the visual) but operable.
           Culling to the viewport bounds the list so a thousands-span timeline does
-          not emit a DOM node per span (codex P2#4) — panning/zooming brings other
+          not emit a DOM node per span — panning/zooming brings other
           spans into reach. */}
       <ul className={styles.canvasFallbackList} aria-label="Timeline spans">
         {visible.map((s) => (

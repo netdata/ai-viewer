@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, UIEvent } from 'react';
 import type { TraceNode, WaterfallRow } from '../../../viz/trace';
 import {
@@ -8,6 +8,7 @@ import {
   traceTimeBounds,
 } from '../../../viz/trace';
 import { colorForOpKind, colorForStatus } from '../../../viz/color';
+import { attachZoom } from '../../../viz/zoomInteraction';
 import { fadeClassFor } from '../../../viz/spanFade';
 import { useNewlyAppeared } from '../../../viz/useNewlyAppeared';
 import { formatDuration } from '../../../lib/format';
@@ -20,6 +21,17 @@ import styles from './TraceTab.module.css';
 // node per span); Canvas + viewport culling above the SVG span ceiling so a big
 // trace stays fast (frontend-architecture.md §Performance Budgets). All geometry
 // comes from viz/trace (the D3 boundary); this file only paints + handles clicks.
+//
+// The Detailed view is zoomable/pannable on the TIME (X) axis only (ui-pages.md
+// §Trace big-session navigation): SHIFT+wheel zooms time, primary-button drag
+// pans time, while a PLAIN wheel scrolls the rows vertically (the native
+// scroller). The left row-label gutter (x < LABEL_WIDTH) and the turn-boundary
+// rules stay FIXED — they are row markers, not time markers — so only the time
+// track scales/translates. This mirrors the Timeline tab's X-only convention via
+// the shared viz/zoomInteraction (one wheel convention, no drift). The transform
+// applied to the time track is matrix(k,0,0,1,tx,0): X-scale k, Y untouched (row
+// height constant under zoom), X-translate tx; ty from d3-zoom is ignored (the
+// vertical axis is the native scroller, not the transform).
 
 const ROW_HEIGHT = 26;
 const LABEL_WIDTH = 220;
@@ -27,6 +39,18 @@ const AXIS_HEIGHT = 22;
 const CANVAS_VIEWPORT = 460;
 const CULL_OVERSCAN = 6;
 const TRACK_WIDTH = 720;
+
+/**
+ * trackMatrix builds the SVG transform for the Detailed waterfall's TIME TRACK:
+ * X scaled by the d3-zoom k, Y left at scale 1 (row height constant), X
+ * translated by tx. It deliberately does NOT carry ty (unlike viz/timeline's
+ * timeXOnlyMatrix) — the waterfall's vertical axis is the native scroller, so the
+ * track must never move in Y under zoom/pan. matrix(a,b,c,d,e,f): a=X-scale,
+ * d=Y-scale, e/f=translate.
+ */
+function trackMatrix(k: number, tx: number): string {
+  return `matrix(${k},0,0,1,${tx},0)`;
+}
 
 export interface WaterfallProps {
   nodes: TraceNode[];
@@ -87,10 +111,40 @@ interface InnerProps {
 function WaterfallSvg({ rows, ticks, onSelect, selectedId, boundaries }: InnerProps) {
   const height = AXIS_HEIGHT + rows.length * ROW_HEIGHT;
   const totalWidth = LABEL_WIDTH + TRACK_WIDTH;
+  const svgRef = useRef<SVGSVGElement>(null);
+  // The innermost group d3-zoom transforms (the TIME track). Its matrix scales
+  // the X axis only; the gutter labels + turn rules live OUTSIDE it (fixed).
+  const trackRef = useRef<SVGGElement>(null);
+  // A stable unique id so the track clipPath does not collide with another
+  // waterfall instance on the page (e.g. the By-turn expanded view).
+  const clipId = useId().replace(/:/g, '');
   // Spans new since the previous render (a live session_changed refetch grew the
   // trace) fade in — SOW-0006 AC#6. fadeClassFor withholds the class under
   // prefers-reduced-motion, and the @keyframes is disabled there too.
   const newIds = useNewlyAppeared(rows.map((r) => r.node.op.id));
+
+  // X-only time zoom/pan (ui-pages.md §Trace Detailed): SHIFT+wheel zooms, drag
+  // pans, plain wheel scrolls the rows (plainWheelPan:false → the filter rejects
+  // a plain wheel without preventDefault, so it reaches the native scroller). We
+  // use only k + x from the transform (ty ignored — vertical is the scroller).
+  // Re-attached only when the geometry that defines the surface changes.
+  useEffect(() => {
+    const svg = svgRef.current;
+    const track = trackRef.current;
+    if (!svg || !track) {
+      return;
+    }
+    const { dispose } = attachZoom<SVGSVGElement>(
+      svg,
+      (event) => {
+        const t = event.transform;
+        track.setAttribute('transform', trackMatrix(t.k, t.x));
+      },
+      { plainWheelPan: false },
+    );
+    return dispose;
+  }, [totalWidth, height]);
+
   return (
     <div
       className={styles.vizScroller}
@@ -98,26 +152,23 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId, boundaries }: InnerPr
       aria-label="Trace waterfall"
     >
       <svg
+        ref={svgRef}
         width={totalWidth}
         height={height}
         viewBox={`0 0 ${totalWidth} ${height}`}
         className={styles.vizSvg}
       >
-        {/* Axis gridlines + tick labels along the top of the time track. */}
-        <g className={styles.axis}>
-          {ticks.map((t) => (
-            <g key={t.value} transform={`translate(${LABEL_WIDTH + t.x},0)`}>
-              <line y1={AXIS_HEIGHT} y2={height} className={styles.gridline} />
-              <text x={2} y={14} className={styles.axisLabel}>
-                {formatDuration(t.value - (ticks[0]?.value ?? 0))}
-              </text>
-            </g>
-          ))}
-        </g>
+        {/* Clip the time track to its region so panned content never overdraws
+            the fixed gutter. */}
+        <defs>
+          <clipPath id={clipId}>
+            <rect x={LABEL_WIDTH} y={0} width={TRACK_WIDTH} height={height} />
+          </clipPath>
+        </defs>
 
-        {/* Turn-boundary rules: a horizontal separator above each row that
-            starts a new turn, so inter-turn gaps read as "between turns"
-            (decision #6, Detailed view). */}
+        {/* FIXED layer (never transformed): row labels in the left gutter and the
+            turn-boundary rules. These are ROW markers, not time markers — they
+            must not move under X zoom/pan. */}
         <g className={styles.axis}>
           {rows.map((row) =>
             boundaries.has(row.node.op.id) ? (
@@ -132,88 +183,114 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId, boundaries }: InnerPr
             ) : null,
           )}
         </g>
-
-        {rows.map((row) => {
-          const { op } = row.node;
-          const failed = op.error_class !== null;
-          const y = AXIS_HEIGHT + row.y;
-          const indent = Math.min(row.depth * 10, LABEL_WIDTH - 40);
-          const barClass = [
-            op.id === selectedId ? styles.barSelected : styles.bar,
-            fadeClassFor(op.id, newIds, styles.fadeIn),
-          ]
-            .filter(Boolean)
-            .join(' ');
-          const fill = colorForOpKind(op.kind);
-          const label = `${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`;
-          const activate = () => {
-            onSelect(row.node);
-          };
-          const onKeyDown = (e: KeyboardEvent<SVGElement>): void => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onSelect(row.node);
-            }
-          };
-          return (
-            <g key={op.id}>
-              {/* Row label (kind/name) in the left gutter, indented by depth. */}
+        <g>
+          {rows.map((row) => {
+            const { op } = row.node;
+            const indent = Math.min(row.depth * 10, LABEL_WIDTH - 40);
+            return (
               <text
+                key={`lbl-${op.id}`}
                 x={6 + indent}
-                y={y + ROW_HEIGHT / 2 + 4}
+                y={AXIS_HEIGHT + row.y + ROW_HEIGHT / 2 + 4}
                 className={styles.rowLabel}
               >
                 {op.name || op.id}
               </text>
-              {/* Source-aware (P2#3): a point-event/running op (no measured span)
-                  is a vertical tick at start_ts; a measured op is a duration bar.
-                  A wide transparent hit-rect keeps the thin tick easy to click. */}
-              {row.instant ? (
-                <>
-                  <line
+            );
+          })}
+        </g>
+
+        {/* TIME TRACK layer: clipped to the track region, shifted so track-local
+            x=0 sits at the gutter edge, then the inner <g ref={trackRef}> applies
+            the X-only zoom matrix. Drawn in TRACK-LOCAL x (row.x / t.x), so a bar
+            at row.x renders at user x LABEL_WIDTH+row.x at identity — unchanged. */}
+        <g clipPath={`url(#${clipId})`}>
+          <g transform={`translate(${LABEL_WIDTH},0)`}>
+            <g ref={trackRef}>
+              {/* Axis gridlines + tick labels along the top of the time track. */}
+              <g className={styles.axis}>
+                {ticks.map((t) => (
+                  <g key={t.value} transform={`translate(${t.x},0)`}>
+                    <line y1={AXIS_HEIGHT} y2={height} className={styles.gridline} />
+                    <text x={2} y={14} className={styles.axisLabel}>
+                      {formatDuration(t.value - (ticks[0]?.value ?? 0))}
+                    </text>
+                  </g>
+                ))}
+              </g>
+
+              {rows.map((row) => {
+                const { op } = row.node;
+                const failed = op.error_class !== null;
+                const y = AXIS_HEIGHT + row.y;
+                const barClass = [
+                  op.id === selectedId ? styles.barSelected : styles.bar,
+                  fadeClassFor(op.id, newIds, styles.fadeIn),
+                ]
+                  .filter(Boolean)
+                  .join(' ');
+                const fill = colorForOpKind(op.kind);
+                const label = `${op.name || op.id} — ${op.kind} — ${formatDuration(op.duration_us)} — ${op.status}`;
+                const activate = () => {
+                  onSelect(row.node);
+                };
+                const onKeyDown = (e: KeyboardEvent<SVGElement>): void => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelect(row.node);
+                  }
+                };
+                // Source-aware (P2#3): a point-event/running op (no measured span)
+                // is a vertical tick at start_ts; a measured op is a duration bar.
+                // A wide transparent hit-rect keeps the thin tick easy to click.
+                return row.instant ? (
+                  <g key={op.id}>
+                    <line
+                      role="button"
+                      aria-label={label}
+                      tabIndex={0}
+                      x1={row.x}
+                      y1={y + 4}
+                      x2={row.x}
+                      y2={y + ROW_HEIGHT - 4}
+                      stroke={failed ? colorForStatus('failed') : fill}
+                      strokeWidth={op.id === selectedId ? 3 : 2}
+                      className={barClass}
+                      onClick={activate}
+                      onKeyDown={onKeyDown}
+                    />
+                    <rect
+                      x={row.x - 4}
+                      y={y + 4}
+                      width={8}
+                      height={ROW_HEIGHT - 8}
+                      fill="transparent"
+                      onClick={activate}
+                    />
+                  </g>
+                ) : (
+                  <rect
+                    key={op.id}
                     role="button"
                     aria-label={label}
                     tabIndex={0}
-                    x1={LABEL_WIDTH + row.x}
-                    y1={y + 4}
-                    x2={LABEL_WIDTH + row.x}
-                    y2={y + ROW_HEIGHT - 4}
-                    stroke={failed ? colorForStatus('failed') : fill}
-                    strokeWidth={op.id === selectedId ? 3 : 2}
+                    x={row.x}
+                    y={y + 4}
+                    width={row.width}
+                    height={ROW_HEIGHT - 8}
+                    rx={3}
+                    fill={fill}
+                    stroke={failed ? colorForStatus('failed') : 'transparent'}
+                    strokeWidth={failed ? 2 : 0}
                     className={barClass}
                     onClick={activate}
                     onKeyDown={onKeyDown}
                   />
-                  <rect
-                    x={LABEL_WIDTH + row.x - 4}
-                    y={y + 4}
-                    width={8}
-                    height={ROW_HEIGHT - 8}
-                    fill="transparent"
-                    onClick={activate}
-                  />
-                </>
-              ) : (
-                <rect
-                  role="button"
-                  aria-label={label}
-                  tabIndex={0}
-                  x={LABEL_WIDTH + row.x}
-                  y={y + 4}
-                  width={row.width}
-                  height={ROW_HEIGHT - 8}
-                  rx={3}
-                  fill={fill}
-                  stroke={failed ? colorForStatus('failed') : 'transparent'}
-                  strokeWidth={failed ? 2 : 0}
-                  className={barClass}
-                  onClick={activate}
-                  onKeyDown={onKeyDown}
-                />
-              )}
+                );
+              })}
             </g>
-          );
-        })}
+          </g>
+        </g>
       </svg>
     </div>
   );
@@ -222,8 +299,30 @@ function WaterfallSvg({ rows, ticks, onSelect, selectedId, boundaries }: InnerPr
 function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: InnerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  // X-only time zoom/pan transform (Y stays the native scroller via scrollTop).
+  // k = X scale, tx = X translate; ty from d3-zoom is ignored.
+  const [transform, setTransform] = useState({ k: 1, tx: 0 });
   const totalHeight = rows.length * ROW_HEIGHT;
   const totalWidth = LABEL_WIDTH + TRACK_WIDTH;
+
+  // Attach the shared X-only zoom to the <canvas>. plainWheelPan:false so a plain
+  // wheel reaches the native vertical scroller (rows scroll) while SHIFT+wheel
+  // zooms and drag pans the time track. Re-attached only on geometry change.
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) {
+      return;
+    }
+    const { dispose } = attachZoom<HTMLCanvasElement>(
+      c,
+      (event) => {
+        const tr = event.transform;
+        setTransform({ k: tr.k, tx: tr.x });
+      },
+      { plainWheelPan: false },
+    );
+    return dispose;
+  }, [totalWidth]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -234,6 +333,7 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: Inne
     if (!ctx) {
       return;
     }
+    const { k, tx } = transform;
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
     canvas.width = totalWidth * dpr;
     canvas.height = CANVAS_VIEWPORT * dpr;
@@ -243,67 +343,105 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: Inne
     ctx.font = '12px sans-serif';
     ctx.textBaseline = 'middle';
 
-    // Gridlines for the visible band.
+    // Only the rows overlapping the viewport are drawn (Y cull).
+    const visible = cullByY(rows, scrollTop, CANVAS_VIEWPORT, ROW_HEIGHT, CULL_OVERSCAN);
+
+    // Track region screen-x of a track-local x (NOT ctx.transform — that would
+    // drag the fixed gutter labels too): screenX = LABEL_WIDTH + trackX*k + tx.
+    const trackScreenX = (trackX: number): number => LABEL_WIDTH + trackX * k + tx;
+    // A track element is X-visible when its [screenX, screenX+width] overlaps the
+    // track region [LABEL_WIDTH, LABEL_WIDTH+TRACK_WIDTH] (in addition to the Y
+    // cull above) — panned-off content is skipped.
+    const xVisible = (screenX: number, w: number): boolean =>
+      screenX + w >= LABEL_WIDTH && screenX <= LABEL_WIDTH + TRACK_WIDTH;
+
+    // Clip the track drawing (bars/ticks/gridlines) so panned content never
+    // overdraws the fixed gutter. Row labels are drawn OUTSIDE this clip below.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(LABEL_WIDTH, 0, TRACK_WIDTH, CANVAS_VIEWPORT);
+    ctx.clip();
+
+    // Gridlines for the visible band (track-local x scaled by the zoom).
     ctx.strokeStyle = 'rgba(128,128,128,0.18)';
     ctx.lineWidth = 1;
     for (const t of ticks) {
+      const gx = trackScreenX(t.x);
+      if (!xVisible(gx, 0)) {
+        continue;
+      }
       ctx.beginPath();
-      ctx.moveTo(LABEL_WIDTH + t.x, 0);
-      ctx.lineTo(LABEL_WIDTH + t.x, CANVAS_VIEWPORT);
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, CANVAS_VIEWPORT);
       ctx.stroke();
     }
 
-    // Only the rows overlapping the viewport are drawn (culling).
-    const visible = cullByY(rows, scrollTop, CANVAS_VIEWPORT, ROW_HEIGHT, CULL_OVERSCAN);
     for (const row of visible) {
       const { op } = row.node;
       const y = row.y - scrollTop;
       const fill = colorForOpKind(op.kind);
-      // Turn-boundary rule above a row that starts a new turn (decision #6).
+      // Turn-boundary rule above a row that starts a new turn (decision #6). The
+      // rule is a ROW marker spanning the track region, so it is not X-culled.
       if (boundaries.has(op.id)) {
         ctx.strokeStyle = 'rgba(128,128,128,0.5)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(totalWidth, y);
+        ctx.moveTo(LABEL_WIDTH, y);
+        ctx.lineTo(LABEL_WIDTH + TRACK_WIDTH, y);
         ctx.stroke();
       }
       // Source-aware (P2#3): point-event/running ops paint as a vertical tick at
       // start_ts; measured ops paint as a duration bar.
+      const barX = trackScreenX(row.x);
       if (row.instant) {
+        if (!xVisible(barX, 0)) {
+          continue;
+        }
         ctx.strokeStyle = op.error_class !== null ? colorForStatus('failed') : fill;
         ctx.lineWidth = op.id === selectedId ? 3 : 2;
         ctx.beginPath();
-        ctx.moveTo(LABEL_WIDTH + row.x, y + 4);
-        ctx.lineTo(LABEL_WIDTH + row.x, y + ROW_HEIGHT - 4);
+        ctx.moveTo(barX, y + 4);
+        ctx.lineTo(barX, y + ROW_HEIGHT - 4);
         ctx.stroke();
       } else {
+        const barW = row.width * k;
+        if (!xVisible(barX, barW)) {
+          continue;
+        }
         ctx.fillStyle = fill;
-        ctx.fillRect(LABEL_WIDTH + row.x, y + 4, row.width, ROW_HEIGHT - 8);
+        ctx.fillRect(barX, y + 4, barW, ROW_HEIGHT - 8);
         if (op.error_class !== null) {
           ctx.strokeStyle = colorForStatus('failed');
           ctx.lineWidth = 2;
-          ctx.strokeRect(LABEL_WIDTH + row.x, y + 4, row.width, ROW_HEIGHT - 8);
+          ctx.strokeRect(barX, y + 4, barW, ROW_HEIGHT - 8);
         }
         if (op.id === selectedId) {
           ctx.strokeStyle = 'rgba(255,255,255,0.7)';
           ctx.lineWidth = 1;
-          ctx.strokeRect(LABEL_WIDTH + row.x - 1, y + 3, row.width + 2, ROW_HEIGHT - 6);
+          ctx.strokeRect(barX - 1, y + 3, barW + 2, ROW_HEIGHT - 6);
         }
       }
-      // Row label (selection highlight is drawn per shape above).
-      ctx.fillStyle = 'rgba(160,160,170,0.95)';
+    }
+    ctx.restore(); // end track clip
+
+    // Row labels in the FIXED gutter — drawn outside the track clip so a panned
+    // track never overwrites them (they are row markers, not time markers).
+    ctx.fillStyle = 'rgba(160,160,170,0.95)';
+    for (const row of visible) {
+      const { op } = row.node;
+      const y = row.y - scrollTop;
       const indent = Math.min(row.depth * 10, LABEL_WIDTH - 40);
       ctx.fillText(op.name || op.id, 6 + indent, y + ROW_HEIGHT / 2, LABEL_WIDTH - 12 - indent);
     }
     ctx.restore();
-  }, [rows, ticks, scrollTop, selectedId, totalWidth, boundaries]);
+  }, [rows, ticks, scrollTop, selectedId, totalWidth, boundaries, transform]);
 
   const onScroll = (e: UIEvent<HTMLDivElement>): void => {
     setScrollTop(e.currentTarget.scrollTop);
   };
 
   // A click maps to the row under the cursor (hit-test by Y), then to the op.
+  // X-zoom does not change this: clicking anywhere on a row selects its op.
   const onClick = (e: MouseEvent<HTMLDivElement>): void => {
     const target = e.currentTarget.querySelector('canvas');
     if (!target) {

@@ -326,30 +326,6 @@ stacked" model (`ui-pages.md`).
 
 The single op query is bounded by the tree size and uses `idx_ops_session_start`.
 
-### GET /api/sessions/:id/timeline
-
-**Phase 2 — not implemented in Phase 1.** Not registered; returns a structured
-`NOT_FOUND` today. The shape below is the planned contract.
-
-Returns ordered spans for the timeline view.
-
-```json
-{
-  "lanes": [
-    {
-      "key":"session:<id>",
-      "label":"nedi (root)",
-      "spans":[
-        { "id":"<op_id>","kind":"llm","name":"claude-opus-4-7","start_ts":<us>,"end_ts":<us>,"status":"completed" }
-      ]
-    }
-  ],
-  "t_start": <us>, "t_end": <us>
-}
-```
-
-One lane per session (root and children).
-
 ### GET /api/stats
 
 Cross-session aggregates over the filtered set.

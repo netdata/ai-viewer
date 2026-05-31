@@ -194,7 +194,7 @@ describe('TimelineRenderer (SVG path)', () => {
 
     // The <g> transform is an X-only matrix(a,0,0,d,e,f): a=X-scale, d=Y-scale,
     // e/f=translate. parseMatrix pulls those out so we can assert the time axis (X)
-    // scales while lane height (Y) never does (codex P2#4).
+    // scales while lane height (Y) never does.
     const parseMatrix = (): number[] => {
       const m = /matrix\(([^)]+)\)/.exec(g.getAttribute('transform') ?? '');
       return (m?.[1] ?? '').split(',').map(Number);
@@ -224,7 +224,7 @@ describe('TimelineRenderer (SVG path)', () => {
     svg.dispatchEvent(shifted);
     const [aZoom, , , dZoom] = parseMatrix();
     expect(aZoom).toBeGreaterThan(1); // X (time) scaled up
-    expect(dZoom).toBe(1); // Y (lane height) UNCHANGED — the codex P2#4 invariant
+    expect(dZoom).toBe(1); // Y (lane height) UNCHANGED — the X-only-zoom invariant
   });
 
   it('does NOT fade any span on the first render (initial load is not an append)', () => {
