@@ -13,9 +13,10 @@ import (
 )
 
 // SchemaVersion is the canonical schema version the binary was built
-// against. Every internal/store/migrations/NNNN_*.sql bumps
-// schema_meta.version together with this constant — there is no data-only /
-// version-neutral special case. Servers refuse to start when the on-disk
+// against. A migration bumps schema_meta.version together with this constant
+// when serve reads or validates its outcome — a schema-shape change, or served
+// data; an ingester-only migration serve never reads (e.g. 0002_source_progress.sql)
+// stays version-neutral. Servers refuse to start when the on-disk
 // schema_meta.version differs from this value — see CheckSchema below — so a
 // store that has not yet had the latest migration applied is rejected rather
 // than served with stale rows. 0005 (the op-duration backfill) is the latest;

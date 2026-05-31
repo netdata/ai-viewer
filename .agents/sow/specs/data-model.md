@@ -399,7 +399,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='4', key='created_at' value=...
+-- key='version' value='5', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
@@ -428,8 +428,11 @@ Migration history:
   refuses to start against a pre-0005 store still reading `'4'` — it therefore
   never serves the stale `duration_us = 0` rows this migration repairs. (The runner
   still tracks applied files in `_schema_migrations` by filename, so 0005 runs once;
-  the version bump is the serve-side compatibility gate.) Every migration bumps the
-  version with the binary — there is no version-neutral / data-only special case.
+  the version bump is the serve-side compatibility gate.) A migration bumps the
+  version (with `presenter.SchemaVersion`) when serve reads or validates its
+  outcome — a schema-shape change, or served data like these durations; an
+  ingester-only migration that serve never reads (e.g. `0002_source_progress.sql`)
+  stays version-neutral.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB

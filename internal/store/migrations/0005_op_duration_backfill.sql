@@ -17,8 +17,9 @@
 -- solely on schema_meta.version (CheckSchema, an exact-equality match), so a
 -- pre-0005 store still reads '4' and a v5 serve binary refuses to start against
 -- it — preventing serve from handing out the stale duration_us = 0 rows this
--- migration repairs. Every migration bumps the version together with the const;
--- there is no version-neutral / data-only special case.
+-- migration repairs. A migration bumps the version when serve depends on its
+-- outcome (0005 does — serve reads these durations); 0002_source_progress.sql,
+-- which serve never reads, is version-neutral.
 
 -- 1) Backfill the per-op duration from the authoritative start/end timestamps.
 -- Guards mirror the writer's finalize gate (writer.go:

@@ -10,8 +10,9 @@ import (
 // the notify change-log table (asserted by the shape/autoincrement tests
 // below) and that the schema marker advances with the migration chain.
 // openInMemory runs the FULL chain through 0005, so the on-disk
-// schema_meta.version is '5' (every migration bumps it in lockstep with
-// presenter.SchemaVersion; the serve binary refuses to start on mismatch).
+// schema_meta.version is '5' (each serve-relevant migration bumps it in lockstep
+// with presenter.SchemaVersion through 0005=v5; the serve binary refuses to start
+// on mismatch).
 // Source of truth: .agents/sow/specs/data-model.md §notify.
 func TestMigration0004_AppliesAndBumpsVersion(t *testing.T) {
 	t.Parallel()
