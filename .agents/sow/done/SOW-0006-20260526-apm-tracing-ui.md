@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
 Sub-state: activated 2026-05-31. Approved under the operator's blanket Phase-2 backlog sign-off; prerequisites MET (SOW-0001 in `done/`; SOW-0003/0004/0005 adapters all in `done/` and merged — 5 source formats render cross-format topology/lineage). Operator UX decisions captured below ("Implications And Decisions") before any code, per the decisions-before-work rule. Scope corrected to FULL-STACK (the `/topology` + `/timeline` endpoints are spec'd but unbuilt). Moved to `current/`.
 
@@ -205,7 +205,18 @@ These reshape the chunk plan (Chunk 4 = waterfall+list+flame, now + source-aware
 
 ## Validation
 
-(Filled at end. Performance numbers, test summary, review summary.)
+**Delivered + verified (final state, commit after R8):**
+- **Trace tab** — waterfall (Detailed zoomable/pannable X-only + By-turn aggregate) + flame-graph + virtualized event list; source-aware (point events draw as instant ticks + show "—", never "0µs"/zero-width bars); nesting from the persisted `parent_op_id` (cycle-safe — members hoisted, never dropped); SVG below the span ceiling, Canvas + cull above.
+- **Topology** — per-session (3 layouts: seeded-force/plain-force/hierarchical, freeze pins POSITIONS only, metric selector) + cross-session `/topology` (all-sessions scope, lineage edges, 500-node cap + `truncated`, dangling edges dropped); force sim in a Web Worker > 100 nodes; worker errors log + fall back to inline layout (no silent failure / no permanently-empty graph); worker positions re-joined onto current nodes (no stale identity / wrong-nav).
+- **Timeline** — video-editor lanes (root + children), compaction full-height breakpoints, X-only time zoom, **bounded-viewport Canvas with lane virtualization** (backing store ≤ viewport — never the full lane stack, so a 1K-lane timeline cannot exceed the browser canvas limit; lanes culled by `scrollTop`).
+- **Shared source-aware span drawer** (Trace=full op + payload_refs; Timeline=span fields; Topology=node aggregate — never fabricated zeroes), component-level **a11y** (axe clean, both themes, Canvas keyboard fallbacks), **SSE** span-fade live-refresh (invalidates `['session-timeline'|'session-topology'|'topology'|'logs'|...]`), **Playwright E2E** on every route.
+- **Backend** — `/api/sessions/:id/topology`, `/api/sessions/:id/timeline`, cross-session `/api/topology` (parameterized SQL + enum metric, HEAD/405/bad-metric, bounded queries).
+
+**Gates (final):** frontend `tsc` 0 / `eslint --max-warnings 0` 0 / `vitest` 539 pass (41 files) / `vite build` main chunk ~132 KB gzipped (≤500); backend `go vet` + `go build` + `go test -race ./...` clean + `gosec` 0 issues (presenter + whole-repo, gosec pinned `@v2.26.1`); `scan-secrets` + `scan-ai-attribution` PASS. CI green on PR #33.
+
+**Performance:** the AC perf thresholds (AC#1 flame < 200 ms, AC#2 topology < 500 ms, AC#3 timeline < 300 ms) are best-effort + `testInfo.annotations`-logged in Playwright — the deterministic E2E seed is too small to generate the 500-op/100-node/1K-session inputs the targets assume, so they are not faked as hard assertions (honest limitation; a large-fixture perf harness is future work). The Timeline Canvas now bounds its backing store + virtualizes lanes (R7), so the high-density (1K-lane) case no longer breaks the browser canvas limit.
+
+**Reviews:** 8 external rounds (codex decisive + glm + minimax); see `## Reviews`. **Deferrals:** AC#4 payload byte-preview → SOW-0033 (security-sensitive source-file reader); 3 minor presenter P3s → SOW-0034.
 
 ## Reviews
 
@@ -351,17 +362,34 @@ Verdict: NOT mergeable on the P2 (violates the SOW's own AC#3/R3 perf contract +
 - **Gates:** tsc 0, eslint 0, vitest **539 pass (41 files)**, build main chunk ≤500 KB gz, `scan-secrets` + `scan-ai-attribution` PASS (no Go change this round; backend gates unchanged since `9dc6704`).
 - Next: re-review (Round 8, same scope + these fix notes) → squash-merge SOW-0006 PR → close.
 
+### Round 8 — 2026-06-01 (codex + glm + minimax) on `57eebdd`
+
+glm + minimax = "ready to merge". **codex (decisive): NO P1/P2** — the R7 Timeline Canvas Y-virtualization is correct + complete, every R1–R6 fix verified still intact (Trace duration guards, source-aware drawer, topology worker fallback + position rejoin, dangling-edge drop, X-only zooms, SSE invalidation, gosec coverage), and backend SQL-injection safety / metric validation / method handling / cap+truncation all intact. codex's SOLE finding was one **P3 documentation drift**: `frontend-architecture.md:262` + `ui-pages.md:55` still described the Timeline Canvas switch as ">500 spans" without R7's added tall-lane-stack trigger. **This is convergence — the first round with zero code findings** (trajectory: R1 2 P1 + 4 P2 → R2–R7 one real P2 (or perf/contract) each → R8 P3-doc-only).
+
+### Round-8 fix cycle — 2026-06-01
+
+- **P3 spec drift:** `frontend-architecture.md` + `ui-pages.md` now document the Timeline Canvas trigger as `> 500 visible spans OR a lane-stack taller than the viewport`, the bounded canvas backing store, and the lane virtualization-by-scroll (matching the R7 runtime). Documentation-only; no code change.
+- **Review-skip judgment (recorded):** no Round-9 external round was run for this doc-only P3. Rationale (mirrors SOW-0017's recorded skip): the code surface was codex-verified clean at R8 (no P1/P2) and is UNCHANGED since R7; the only delta is the 2-line spec edit codex itself asked for — there is no logic for a reviewer to find a bug in, so another 3-reviewer round is disproportionate spend. The full local gate set is the gate here.
+- **Gates (final):** tsc 0, eslint 0, vitest 539, build main chunk ≤500 KB gz, `go vet` + `go build` + `gosec` 0 (presenter + whole-repo) + `go test -race` clean, `scan-secrets` + `scan-ai-attribution` PASS.
+- **Close:** SOW status → completed and moved to `done/` in this commit; PR #33 squash-merged to `master` immediately after.
+
 ## Outcome
 
-Pending.
+**Completed.** SOW-0006 (APM tracing UI — M3) delivered the three D3 viz tabs (Trace / Topology / Timeline), the cross-session `/topology` page, the shared source-aware span drawer, component a11y, SSE live-refresh, and Playwright E2E — full-stack (Go presenter endpoints + React/TS/Vite frontend). Converged after **8 external-review rounds** (codex decisive in all 8; glm/minimax said "ready" every round and missed every real P2). Closed by squash-merging **PR #33** into `master`. Follow-ups filed and tracked: **SOW-0033** (payload byte-preview endpoint + drawer wire) and **SOW-0034** (3 minor topology-presenter polish items).
 
 ## Lessons Extracted
 
-Pending.
+- **Tests must use the REAL persisted/runtime shape, not a plausible-looking one.** Two codex finds were pure "untested ≡ broken": R6 — point-event ops persist `duration_us = 0` (writer.go), not `null`, so the R5 tests (`null`) missed the Trace "0µs" fabrication; R7 — `TimelineTab` passes the FULL content height, but the renderer tests used an artificial SHORT height, masking the unbounded-canvas + no-Y-cull bug. When testing a render/perf path, derive the fixture from the producer's reality (the writer's persisted value, the tab's real height), not from what looks reasonable.
+- **codex is decisive; glm/minimax convergence is not a merge signal.** Across all 8 rounds glm + minimax returned "ready"; codex found a real P1/P2/perf-contract issue in rounds 1–7 and only the doc-drift P3 in round 8. Never merge on glm/minimax agreement — adjudicate codex on ground truth. And reject codex when it is wrong on ground truth (R2: the `?? NEUTRAL_TOKEN` fallback is type-REQUIRED under `noUncheckedIndexedAccess`, not dead).
+- **A class of bug recurs at every site; fix it in one audited pass, not whack-a-mole.** The point-event "0µs" issue surfaced at the Timeline span (R5) then the Trace op (R6) then was finally fixed by auditing EVERY `formatDuration(op.duration_us)` display site at once.
+- **`gosec@latest` in CI is fragile.** A gosec release (v2.26.1 added the G701 taint rule) broke the `lint` job with zero code change. Pin security tools to a fixed version (Dependabot bumps via a reviewed PR), and remember local gates don't run gosec — CI-only findings exist.
+- **Scan gates must cover every shipped tree.** AI-reviewer attribution comments crept back into the new frontend code because `scan-ai-attribution.sh` only scanned the Go trees; extended it to `frontend/src` + `frontend/tests`.
+- **A large viz milestone has a long review tail.** ~15K lines across 3 D3 tabs + Canvas perf paths needed 8 rounds to converge; that is the adversarial review working, not thrashing — each round's find was real and verified.
 
 ## Followup
 
-None yet.
+- **SOW-0033** (`.agents/sow/pending/`) — payload byte-preview endpoint (`GET /api/payloads/:ref`) + wire the drawer's disabled "preview coming soon" control. Split from AC#4 (security-sensitive source-file byte reader).
+- **SOW-0034** (`.agents/sow/pending/`) — 3 minor topology-presenter polish items (mutable `maxTopologyNodes` test var; possible duplicate tree-sessions query; raw `?metric=` echoed in a validation error). Verify-on-pickup.
 
 ## Regression Log
 

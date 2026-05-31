@@ -259,7 +259,7 @@ This inline script is the **only** JS that runs synchronously before React; ever
 - First contentful paint: under 1 s on workstation localhost.
 - Sessions list: virtualized when > 200 rows (TanStack Virtual).
 - Topology: D3 force simulation runs in a Web Worker when > 100 nodes.
-- Timeline: Canvas rendering (not SVG) when > 500 spans.
+- Timeline: Canvas rendering (not SVG) when > 500 visible spans OR when the lane stack is taller than the Canvas viewport (`lanes × laneHeight > viewport`) — so a high-lane-count / tall timeline uses the bounded, viewport-culled Canvas path instead of a full-height SVG. The Canvas backing store is bounded to the viewport (never the full lane-stack height, which could exceed the browser ~32767px canvas limit), and lanes are virtualized by native vertical scroll (`scrollTop`); X time-zoom (d3-zoom) and native Y lane-scroll coexist (SOW-0006).
 
 ### Web Worker for D3 force simulation
 
