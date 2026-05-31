@@ -153,7 +153,13 @@ Single decisive reviewer (code byte-identical to rounds 1-4; only the doc-PII wo
 - **P1: a raw real session id remained in a `done/` SOW** (the scanner detects the operator NAME but not raw session ids). **Fixed:** sanitized the one real id codex flagged → placeholder. The rest of the tracked UUID-shaped strings were classified: synthetic test fixtures, documented codex rollout-format examples, and HTTP request-id demos — none real. **Filed SOW-0032** to HARDEN `scan-secrets.sh` to detect raw session ids (the systematic fix that ends per-round manual whack-a-mole) + an exhaustive sweep.
 - **P3: `canonical-events.md` ctx_used gap note** listed only v3 + opencode as omitters; v2 also omits cache_write. **Fixed:** added aiagent_v2 (consistent with SOW-0031).
 
-Post-fix (orchestrator): `scan-secrets.sh` PASS; `-i` + UUID-context sweep clean of real ids; CI green carried from `5ff4d21` (code unchanged). Round-6 convergence confirmation pending.
+Post-fix (orchestrator): `scan-secrets.sh` PASS; `-i` + UUID-context sweep clean of real ids; CI green carried from `5ff4d21` (code unchanged).
+
+### Round 6 — 2026-05-31 (codex, decisive) on commit `6d96510`
+
+CI fully GREEN; runtime fixes correct (6th clean round); no real session id / home-with-username remained. codex found the LAST pre-existing leak: the operator's first name in a regex-example COMMENT inside `scripts/scan-secrets.sh` (the scanner excludes itself from its own scan, so it never self-flagged). **Fixed:** genericized the comment examples to a `<name>` placeholder — comment-only, zero logic change. **Verified:** a DIRECT `-i` sweep across all tracked files (not relying on the scanner's self-exclusion) shows the name is gone; the only residual `costa`-substring is `TestCostAliasExpansion` (a pricing test — Cost+Alias — not the operator). codex's round-6 verdict was a conditional all-clear: "single fix: that line; after that, no blocker." Condition satisfied. (Functional scanner hardening — detect raw session ids + decide self-scan — tracked in SOW-0032.)
+
+Post-fix (orchestrator): `scan-secrets.sh` PASS (661 files); direct `-i` name sweep clean. Round-7 = terminal confirmation.
 
 ## Outcome
 
