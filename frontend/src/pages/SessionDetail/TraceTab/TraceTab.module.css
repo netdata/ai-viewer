@@ -1,0 +1,238 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.viewToggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-1);
+  margin: 0;
+}
+
+.toggleOption {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+/* Highlight the checked option's label. :has is supported in all current
+   evergreen browsers; the radio itself stays as the source of truth. */
+.toggleOption:has(input:checked) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.toggleOption input {
+  /* Keep the native radio in the a11y tree but visually compact. */
+  margin: 0;
+}
+
+.opCount {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.vizArea {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.vizScroller {
+  overflow: auto;
+  max-width: 100%;
+}
+
+.vizSvg {
+  display: block;
+  font-family: var(--font-sans);
+}
+
+.vizCanvas {
+  display: block;
+}
+
+.bar {
+  cursor: pointer;
+}
+
+.bar:hover {
+  filter: brightness(1.12);
+}
+
+.bar:focus-visible,
+.barSelected:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.barSelected {
+  cursor: pointer;
+  filter: brightness(1.2);
+}
+
+.axis {
+  pointer-events: none;
+}
+
+.gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.axisLabel {
+  fill: var(--text-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+.rowLabel {
+  fill: var(--text-secondary);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.flameLabel {
+  fill: var(--bg-primary);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+/* ── Event list ─────────────────────────────────────────────────────────── */
+
+.eventSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.eventTitle {
+  margin: 0;
+  font-size: var(--font-size-base);
+  color: var(--text-primary);
+}
+
+.eventScroller {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.eventTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.eventTable thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  text-align: left;
+  font-weight: 600;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+
+.eventTable td {
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.eventRowSelected td {
+  background: var(--bg-tertiary);
+}
+
+.colTime {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.colKind {
+  color: var(--text-secondary);
+}
+
+.kindDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: var(--space-2);
+  vertical-align: middle;
+}
+
+.colName {
+  width: 100%;
+}
+
+.eventNameButton {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.eventNameButton:hover {
+  text-decoration: underline;
+}
+
+.eventNameButton:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.colNum {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.colStatus {
+  color: var(--text-secondary);
+}
+
+.statusFailed {
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--error);
+  white-space: nowrap;
+}

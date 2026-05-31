@@ -27,6 +27,9 @@ vi.mock('./LogsTab', () => ({
     <div data-testid="logs-body">logs for {sessionId}</div>
   ),
 }));
+vi.mock('./TraceTab', () => ({
+  TraceTab: () => <div data-testid="trace-body">trace</div>,
+}));
 
 import { SessionDetail } from './SessionDetail';
 
@@ -123,12 +126,18 @@ describe('SessionDetail', () => {
     expect(screen.queryByTestId('overview-body')).not.toBeInTheDocument();
   });
 
-  it('renders ComingSoon for the Phase-2 tabs', async () => {
+  it('renders the Trace tab body for ?tab=trace', async () => {
     const user = userEvent.setup();
     detailSpy.mockReturnValue(OK);
     renderAt('/sessions/s1');
     await user.click(screen.getByRole('tab', { name: 'Trace' }));
-    expect(screen.getByText('Trace (APM)')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-body')).toBeInTheDocument();
+  });
+
+  it('renders ComingSoon for the remaining Phase-2 tabs', async () => {
+    const user = userEvent.setup();
+    detailSpy.mockReturnValue(OK);
+    renderAt('/sessions/s1');
     await user.click(screen.getByRole('tab', { name: 'Topology' }));
     expect(screen.getByRole('heading', { name: 'Topology' })).toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: 'Timeline' }));
