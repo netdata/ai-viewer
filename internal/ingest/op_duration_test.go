@@ -188,8 +188,12 @@ func TestApplyOpFinalized_ReFinalizeNullEndPreservesDuration(t *testing.T) {
 		t.Fatalf("after first finalize duration_us = %+v, want valid %d", got, wantDur)
 	}
 
-	// Re-finalize with EndTs=0 (NULL end). duration_us = COALESCE(NULL, prior)
-	// must keep wantDur; catalog total_duration_us must not move.
+	// Re-finalize with EndTs=0 (NULL end). Because end_ts and duration_us are
+	// written from ONE validity gate (EndTs=0 fails it), both columns are
+	// preserved via COALESCE: duration_us keeps wantDur, end_ts keeps the prior
+	// valid value (it must NOT be clobbered to NULL), and the catalog total must
+	// not move. Duration derives from the persisted start_ts, never the
+	// finalize event's own Ts.
 	tx2, _ := db.BeginTx(ctx, nil)
 	apply(tx2, canonical.OpFinalizedEvent{
 		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: endTs},
@@ -201,7 +205,34 @@ func TestApplyOpFinalized_ReFinalizeNullEndPreservesDuration(t *testing.T) {
 	if got := scanNullInt64(t, db, `SELECT duration_us FROM ops WHERE id = ?`, opID); !got.Valid || got.Int64 != wantDur {
 		t.Fatalf("after NULL-end re-finalize duration_us = %+v, want preserved %d", got, wantDur)
 	}
+	if got := scanNullInt64(t, db, `SELECT end_ts FROM ops WHERE id = ?`, opID); !got.Valid || got.Int64 != endTs {
+		t.Fatalf("after NULL-end re-finalize end_ts = %+v, want preserved %d (must not be clobbered to NULL)", got, endTs)
+	}
 	if got := scanInt(t, db, `SELECT total_duration_us FROM catalog_tools WHERE namespace='shell' AND name='shell'`); got != wantDur {
 		t.Fatalf("catalog_tools.total_duration_us = %d, want preserved %d (NULL-end re-finalize must not move it)", got, wantDur)
+	}
+
+	// Re-finalize carrying a clock-skewed EndTs LESS THAN start_ts. The shared
+	// validity gate (EndTs >= start_ts) rejects it, so both end_ts and
+	// duration_us are again preserved — never overwritten with the skewed value
+	// nor with an invalid (negative) duration. This pins that a skewed corrective
+	// finalize cannot produce a self-contradictory row.
+	const skewedEnd = startTs - 100 // 1900 < startTs (2000)
+	tx3, _ := db.BeginTx(ctx, nil)
+	apply(tx3, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 5, Ts: endTs},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1, Status: "completed", EndTs: skewedEnd, TokensIn: 5,
+	})
+	if err := tx3.Commit(); err != nil {
+		t.Fatalf("Commit batch 3: %v", err)
+	}
+	if got := scanNullInt64(t, db, `SELECT duration_us FROM ops WHERE id = ?`, opID); !got.Valid || got.Int64 != wantDur {
+		t.Fatalf("after skewed re-finalize duration_us = %+v, want preserved %d", got, wantDur)
+	}
+	if got := scanNullInt64(t, db, `SELECT end_ts FROM ops WHERE id = ?`, opID); !got.Valid || got.Int64 != endTs {
+		t.Fatalf("after skewed re-finalize end_ts = %+v, want preserved %d (skewed end must not overwrite)", got, endTs)
+	}
+	if got := scanInt(t, db, `SELECT total_duration_us FROM catalog_tools WHERE namespace='shell' AND name='shell'`); got != wantDur {
+		t.Fatalf("catalog_tools.total_duration_us = %d, want preserved %d (skewed re-finalize must not move it)", got, wantDur)
 	}
 }

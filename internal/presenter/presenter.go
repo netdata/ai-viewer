@@ -13,11 +13,14 @@ import (
 )
 
 // SchemaVersion is the canonical schema version the binary was built
-// against. Bumped together with internal/store/migrations/NNNN_*.sql.
-// Servers refuse to start when the on-disk schema_meta.version is
-// different — see CheckSchema below. SOW-0001 Chunk 13 migration 0004
-// adds the notify change-log table and sets schema_meta.version='4';
-// this constant moves in lockstep.
+// against. It tracks the schema SHAPE, so it bumps together with each
+// schema-shape migration (internal/store/migrations/NNNN_*.sql that adds or
+// alters a table, column, or index) and STAYS PUT for data-only migrations
+// that change rows but not shape (e.g. 0005's op-duration backfill — see its
+// header). Servers refuse to start when the on-disk schema_meta.version is
+// different — see CheckSchema below. SOW-0001 Chunk 13 migration 0004 adds the
+// notify change-log table and sets schema_meta.version='4'; this constant
+// moves in lockstep with shape changes only.
 const SchemaVersion = 4
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema

@@ -168,10 +168,25 @@ Open decisions:
 ### 2026-05-31
 
 - Created SOW from SOW-0006 Trace-tab visual review finding. Root-cause + blast-radius investigation complete (evidence in Analysis/Gate). Gate filled, ready.
+- Implemented (subagent): writer.go derives duration from persisted start_ts; migration 0005 (backfill + catalog recompute); spec-conformant fixtures; tests (op_duration_test, migration_0005 test). Committed `d80de5c`. Backend gates green (race; golangci-lint 0; gosec 0; coverage 88.5% ingest / 90.9% store; secret + attribution scans clean). PR #31.
+- Review round 1 (codex+glm+minimax) addressed in a second commit (see ## Reviews); orchestrator re-verified `go test -race` + lint green on ingest/store/presenter.
 
 ## Validation
 
-Pending.
+Pending (completed at close: AC evidence + final gate run + round-2 review convergence).
+
+## Reviews
+
+### Round 1 — 2026-05-31 (codex + glm + minimax, parallel, read-only) on commit `d80de5c`
+
+All three: NO P1, NO security, NO regression; core fix (duration from persisted start_ts) + migration 0005 grouping confirmed correct. Findings, each adjudicated against code:
+
+- **P2 (codex) — end_ts/duration_us inconsistency on zero/skewed-EndTs re-finalize.** Verified real: UPDATE bound `end_ts = nullIfZero(ev.EndTs)` unconditionally, so a corrective re-finalize carrying `EndTs=0` clobbered a good `end_ts→NULL` while `duration_us` (COALESCE-preserved) stayed non-NULL — violating `duration_us = end_ts - start_ts`. **Fixed**: end_ts + duration_us computed from ONE validity gate, both written via COALESCE (`end_ts = COALESCE(?, end_ts)`), so a zero/skewed end preserves both. Test strengthened: end_ts preservation + a clock-skew (end<start) re-finalize scenario.
+- **P2 (glm) — migration catalog_models recompute imperfectly mirrored catalog.go.** Verified harmless (spurious `o.name IS NOT NULL` always true; non-empty guard implied by join to non-empty PKs). **Fixed**: removed the spurious clause; added explicit `catalog_models.provider <> '' AND name <> ''` (mirrors catalog.go:296). Tools recompute unchanged (catalog.go tool path has no non-empty guard — adding one would diverge).
+- **P2 (minimax) — stats.go:135 comment.** minimax's suggested wording ("sums ops.duration_us") was factually WRONG — `statsTotals` sums SESSION `s.end_ts - s.start_ts`, not ops.duration_us. **Fixed** with an accurate, disambiguating comment (no-false-information rule).
+- **P3 (codex)** — data-model.md migration history missing 0005 → added (data-only, schema-version-neutral). **P3 (codex)** — presenter.go SchemaVersion comment implied all migrations bump it → clarified (schema-shape vs data-only). **P3 (codex)** — 4 remaining masking fixtures (catalog_test.go, pricing_integration_test.go ×3) → set `Finalized.Ts=EndTs`; grep confirms none remain. **P3 (minimax)** — stale test comments → modernized. **P3 (glm)** — added `migration_live_parity_test.go` (live-ingest totals == migration-recompute totals).
+
+Post-fix (orchestrator, ground truth): `go test -race` green on ingest/store/presenter; golangci-lint 0; gosec 0. Round-2 re-review pending (same scope + these fix notes).
 
 ## Outcome
 

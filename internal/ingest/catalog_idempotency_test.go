@@ -387,7 +387,7 @@ func TestCatalog_LLMIdentityChangeMigratesContribution(t *testing.T) {
 		t.Errorf("corrected model total_tokens_in = %d, want 30", got)
 	}
 	if got := scanInt(t, db, `SELECT total_duration_us FROM catalog_models WHERE provider='openai' AND name='gpt-5.5-codex'`); got != 400 {
-		t.Errorf("corrected model total_duration_us = %d, want 400 (1500-1100)", got)
+		t.Errorf("corrected model total_duration_us = %d, want 400 (real op duration: EndTs 1500 − start_ts 1100)", got)
 	}
 	if got := scanInt(t, db, `SELECT COALESCE(total_tokens_in,0) FROM catalog_models WHERE provider='openai' AND name='gpt-5.5'`); got != 0 {
 		t.Errorf("old model total_tokens_in = %d, want 0 (no stranded tokens, I1)", got)

@@ -707,19 +707,24 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 			cost = w.priceOp(ctx, tx, provider.String, model.String, pricingTs, ev)
 		}
 	}
-	// Duration derives from the PERSISTED start_ts (the matching OpStarted's
-	// Ts), NOT ev.Ts: a finalize event sorts AFTER its OpStarted, so
-	// OpFinalizedEvent.Ts ≈ the op END (== ev.EndTs) and EndTs-ev.Ts ≈ 0 for
-	// every spec-conformant adapter. An orphan finalize (start_ts unknown)
-	// leaves durUS invalid → COALESCE in the UPDATE preserves the existing
-	// value rather than fabricating a duration. See data-model.md §ops.
+	// Compute end_ts and duration_us TOGETHER from one validity gate so the two
+	// columns can never disagree (data-model.md §ops: duration_us = end_ts - start_ts).
+	// A zero or clock-skewed (EndTs < start_ts) incoming end is NOT trusted: both
+	// columns are preserved via COALESCE rather than clobbering a previously-recorded
+	// good end_ts (e.g. a corrective re-finalize that carries EndTs=0). Duration
+	// derives from the PERSISTED start_ts, never ev.Ts (the finalize Ts ≈ the end:
+	// a finalize sorts AFTER its OpStarted, so EndTs-ev.Ts ≈ 0). An orphan finalize
+	// (start_ts unknown) likewise leaves both invalid → COALESCE preserves the
+	// existing values rather than fabricating a duration.
+	endTsArg := sql.NullInt64{}
 	durUS := sql.NullInt64{}
 	if ev.EndTs > 0 && startTs.Valid && startTs.Int64 > 0 && ev.EndTs >= startTs.Int64 {
+		endTsArg = sql.NullInt64{Int64: ev.EndTs, Valid: true}
 		durUS = sql.NullInt64{Int64: ev.EndTs - startTs.Int64, Valid: true}
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE ops SET
-    end_ts             = ?,
+    end_ts             = COALESCE(?, end_ts),
     duration_us        = COALESCE(?, duration_us),
     status             = ?,
     error_class        = NULLIF(?, ''),
@@ -737,7 +742,7 @@ UPDATE ops SET
     ctx_max            = NULLIF(?, 0)
 WHERE id = ?
 `,
-		nullIfZero(ev.EndTs), durUS, nonEmpty(ev.Status, string(canonical.StatusCompleted)),
+		endTsArg, durUS, nonEmpty(ev.Status, string(canonical.StatusCompleted)),
 		ev.ErrorClass, ev.ErrorMessage,
 		ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite, cost,
 		ev.BytesIn, ev.BytesOut, ev.CharsIn, ev.CharsOut, ev.CtxUsed, ev.CtxMax,
