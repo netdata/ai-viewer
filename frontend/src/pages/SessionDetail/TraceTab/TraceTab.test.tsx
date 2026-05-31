@@ -66,6 +66,8 @@ function detail(turns: TurnDetail[]): SessionDetailResponse {
       end_ts: 1000,
       tokens_in: 0,
       tokens_out: 0,
+      tokens_cache_read: 0,
+      tokens_cache_write: 0,
       cost_usd: 0,
       turn_count: turns.length,
       op_count: turns.reduce((a, t) => a + t.ops.length, 0),
