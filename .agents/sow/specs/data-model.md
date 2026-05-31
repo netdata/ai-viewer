@@ -141,12 +141,13 @@ CREATE TABLE ops (
     status          TEXT NOT NULL,                          -- 'running'|'completed'|'failed'|'cancelled'|'truncated'
     error_class     TEXT,
     error_message   TEXT,
-    tokens_in       INTEGER NOT NULL DEFAULT 0,
+    tokens_in       INTEGER NOT NULL DEFAULT 0,              -- FRESH/uncached input only (canonical-events.md token contract); cache is the two columns below, NEVER folded in. Total input = tokens_in + tokens_cache_read + tokens_cache_write.
     tokens_out      INTEGER NOT NULL DEFAULT 0,
-    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
-    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read INTEGER NOT NULL DEFAULT 0,            -- cached input read (cache-read rate); separate from tokens_in
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,           -- cache creation (cache-write rate); separate from tokens_in
     cost_usd        REAL NOT NULL DEFAULT 0.0,
     bytes_in        INTEGER NOT NULL DEFAULT 0,             -- request payload size (uncompressed)
+    -- ctx_used (below) is the TOTAL context occupancy = tokens_in + tokens_cache_read + tokens_cache_write + tokens_out, NOT tokens_in + tokens_out.
     bytes_out       INTEGER NOT NULL DEFAULT 0,
     chars_in        INTEGER,                                -- when source records UTF-8 chars instead of bytes (ai-agent v2 tools)
     chars_out       INTEGER,

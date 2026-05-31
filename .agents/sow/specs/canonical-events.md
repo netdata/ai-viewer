@@ -124,13 +124,15 @@ type TurnFinalizedEvent struct {
     Status          string    // 'running' | 'completed' | 'failed' | 'aborted'
     ErrorClass      string
     EndTs           int64
-    TokensIn        int64
+    TokensIn        int64     // FRESH / uncached input tokens ONLY — billed at the full input rate. Every adapter MUST exclude cached tokens so tokens_in means the same thing across sources and the pricer never double-counts cache. Total input the model processed = TokensIn + TokensCacheRead + TokensCacheWrite.
     TokensOut       int64
-    TokensCacheRead int64     // cache-hit tokens (Anthropic / claude-code; OpenAI / opencode if present)
-    TokensCacheWrite int64    // cache-write tokens
+    TokensCacheRead int64     // cached input tokens READ (Anthropic/claude-code cache_read_input_tokens; OpenAI/opencode cached), billed at the cache-read rate — NOT part of TokensIn.
+    TokensCacheWrite int64    // cache-CREATION tokens (Anthropic cache_creation_input_tokens), billed at the cache-write rate — NOT part of TokensIn.
     CostUSD         float64   // 0.0 when adapter cannot compute (no native cost + no pricing table hit)
 }
 ```
+
+**Token accounting contract (canonical, SOW-0029).** `TokensIn` is the FRESH/uncached input only; `TokensCacheRead` and `TokensCacheWrite` are the cache portions, counted SEPARATELY. This holds on both `TurnFinalizedEvent` and `OpFinalizedEvent`, and identically across every adapter — ai-agent v2/v3, codex, opencode, and claude-code all map the source's fresh-input field to `TokensIn` and the cache fields to `TokensCacheRead/Write`. The op-level `CtxUsed` is the TOTAL context occupancy (`TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`), not `TokensIn + TokensOut`. The pricer (`internal/pricing`) prices each component at its own rate; folding cache into `TokensIn` would double-charge it, so adapters must not.
 
 **Turn `running` status**: emitted by adapters that observe a mid-turn checkpoint (e.g. ai-agent v3 can write a `turn_end` record with `status='running'` before the turn truly ends — rare; not observed in committed real data but supported by the producer). The ingester transitions `running` → terminal (`'completed' | 'failed' | 'aborted'`) when the final `turn_end` (or equivalent) arrives. UIs should treat `running` as "in progress" rather than terminal.
 
