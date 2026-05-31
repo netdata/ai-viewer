@@ -136,7 +136,7 @@ type TurnFinalizedEvent struct {
 
 Two known, tracked gaps (NOT yet uniform):
 
-- **`CtxUsed` completeness.** `CtxUsed` is INTENDED as the total context occupancy (`TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`). claude-code and codex compute it fully; aiagent_v3 and opencode currently omit components (cache_write / output) — a pre-existing inconsistency tracked for alignment (**SOW-0031**).
+- **`CtxUsed` completeness.** `CtxUsed` is INTENDED as the total context occupancy (`TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`). claude-code and codex compute it fully; aiagent_v3, aiagent_v2, and opencode currently omit components (cache_write / output) — a pre-existing inconsistency tracked for alignment (**SOW-0031**).
 - **Token persistence is OP-rollup.** The ingester rolls turn/session token totals from OP rows (`internal/ingest/aggregates.go` SUMs `ops.tokens_in`), so an adapter's token data only reaches stored totals + pricing if it sets tokens on its `OpFinalizedEvent`s. claude-code does. codex currently sets them only on `TurnFinalizedEvent`, so codex token/cost totals do not yet persist — tracked (**SOW-0030**).
 
 **Turn `running` status**: emitted by adapters that observe a mid-turn checkpoint (e.g. ai-agent v3 can write a `turn_end` record with `status='running'` before the turn truly ends — rare; not observed in committed real data but supported by the producer). The ingester transitions `running` → terminal (`'completed' | 'failed' | 'aborted'`) when the final `turn_end` (or equivalent) arrives. UIs should treat `running` as "in progress" rather than terminal.

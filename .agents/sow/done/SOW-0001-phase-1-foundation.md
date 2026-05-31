@@ -103,7 +103,7 @@ Sources checked (at SOW drafting):
 - `ai-agent.git/.agents/sow/specs/optree.md` — opTree shape (referenced; will be re-read in detail when implementing v2 adapter).
 - `ai-agent.git/src/persistence.ts` — v2/v3 write path entry points.
 - `ai-agent.git/src/evidence/writer.ts` — v3 producer.
-- Real sample at `~/.ai-agent/sessions/0000174a-5d17-480f-bd27-1b97ddc47410.json.gz` (14 KB gz → 62 KB JSON).
+- Real sample: a v2 `.json.gz` session under `~/.ai-agent/sessions/` (~14 KB gz → ~62 KB JSON).
 - `~/.claude/projects/` layout (for Phase 2 awareness only).
 - `~/.codex/sessions/` layout (Phase 2).
 - `~/.local/share/opencode/opencode.db` (Phase 2).

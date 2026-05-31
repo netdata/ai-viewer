@@ -141,7 +141,19 @@ Same scope + notes of each round-2 fix. codex again decisive: minimax declared t
 - **P2 (codex): adapter specs contradict the now-canonical cache contract.** Verified against `internal/canonical/events.go:242-243,297-298` (cache fields ARE canonical) + emission sites: `adapter-aiagent-v2.md:188` ("summed into tokens_in" — wrong, `mapper.go:378-381` keeps them separate), `adapter-aiagent-v3.md:272/500/672` ("not canonical / recommend adding" — stale; `ops.go:113-114` emits them), `adapter-opencode.md:720` ("canonical only has tokens_in/out" — stale; `mapper_ops.go:149` emits them). **Fixed** all four specs to reflect that cache_read/write are first-class canonical fields each adapter maps (opencode's `tokens.reasoning` remains a genuine gap).
 - **P3 (codex): SOW-0031 undercounts ctx_used outliers.** `aiagent_v2/mapper.go:383` also omits `cache_write` from `CtxUsed` (verified). **Fixed:** SOW-0031 now lists aiagent_v2 as a CONFIRMED target (was "audit if it diverges").
 
-Post-fix (orchestrator, ground truth): `scan-secrets.sh` PASS; `-i` PII sweep clean; stale-spec sweep clean; frontend `tsc --noEmit` 0, `eslint` 0, `vitest` 244 pass, Playwright E2E 19 pass; Go gates unchanged (round-2 already green). Round-4 re-review pending (same scope + these fix notes).
+Post-fix (orchestrator, ground truth): `scan-secrets.sh` PASS; `-i` PII sweep clean; stale-spec sweep clean; frontend `tsc --noEmit` 0, `eslint` 0, `vitest` 244 pass, Playwright E2E 19 pass; Go gates unchanged (round-2 already green).
+
+### Round 4 — 2026-05-31 (codex + glm + minimax) on commit `35ad996`
+
+glm + minimax: "ready to merge". codex (decisive): runtime fixes correct, but **PII cleanup incomplete in the committed branch** — the round-3 review NOTE itself re-quoted the operator's name while documenting its removal, which the CI `scan-secrets.sh` gate flagged (the round-3 local scan passed only because the note was written AFTER the scan). **Fixed (`5ff4d21`):** reworded the note to never reproduce the name; also genericized the SOW-0028 home-relative project-path wording codex flagged. **Verified:** `scan-secrets.sh` PASS; `-i` sweep clean; full CI GREEN on `5ff4d21` (all 6 jobs incl. `gates` + `frontend`). codex also noted the inherent git-history/PR-diff residual (removed values still visible in `-` diff lines) — an operator-owned destructive-history decision, not a tracked-file fix.
+
+### Round 5 — 2026-05-31 (codex, decisive convergence check) on commit `5ff4d21`
+
+Single decisive reviewer (code byte-identical to rounds 1-4; only the doc-PII wording changed, and codex is the sole reliable PII reviewer). codex verified the round-4 fixes clean and re-confirmed all runtime fixes correct (5th clean round on code). Two findings, both PRE-EXISTING (not introduced by SOW-0029):
+- **P1: a raw real session id remained in a `done/` SOW** (the scanner detects the operator NAME but not raw session ids). **Fixed:** sanitized the one real id codex flagged → placeholder. The rest of the tracked UUID-shaped strings were classified: synthetic test fixtures, documented codex rollout-format examples, and HTTP request-id demos — none real. **Filed SOW-0032** to HARDEN `scan-secrets.sh` to detect raw session ids (the systematic fix that ends per-round manual whack-a-mole) + an exhaustive sweep.
+- **P3: `canonical-events.md` ctx_used gap note** listed only v3 + opencode as omitters; v2 also omits cache_write. **Fixed:** added aiagent_v2 (consistent with SOW-0031).
+
+Post-fix (orchestrator): `scan-secrets.sh` PASS; `-i` + UUID-context sweep clean of real ids; CI green carried from `5ff4d21` (code unchanged). Round-6 convergence confirmation pending.
 
 ## Outcome
 
