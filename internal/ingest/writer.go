@@ -667,26 +667,24 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 	if err != nil {
 		return err
 	}
+	// Resolve provider/model/kind and start_ts from the row recorded by the
+	// matching OpStartedEvent (or absent until it arrives). Read ONCE here,
+	// unconditionally: both the pricer (temporal tier selection) AND the
+	// duration computation below need the persisted start_ts. The kind column
+	// gates the pricer call (only kind='llm' ops carry priceable tokens).
+	// sql.ErrNoRows is expected — the op start may have been ingested in a
+	// prior batch or not yet arrived in this scan (orphan finalize); all
+	// columns then scan to their zero value (startTs invalid), which is
+	// non-fatal. Any OTHER error means the database is unhealthy and silently
+	// continuing would violate the "no silent failures" invariant in AGENTS.md.
+	var provider, model, kind sql.NullString
+	var startTs sql.NullInt64
+	if lookupErr := tx.QueryRowContext(ctx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
+		Scan(&provider, &model, &kind, &startTs); lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		return fmt.Errorf("ingest writer: lookup op %s: %w", opID, lookupErr)
+	}
 	cost := ev.CostUSD
 	if cost == 0 && w.pricer != nil {
-		// Resolve provider/model/kind and start_ts from the row we know
-		// exists (or will exist) for the matching OpStartedEvent. The
-		// kind column gates the pricer call: only kind='llm' ops carry
-		// token counts that make sense to price. start_ts drives the
-		// temporal tier selection so an op straddling a price-change
-		// date is priced against the tier that was in effect when the
-		// op STARTED, not ended (the finalize event timestamp).
-		var provider, model, kind sql.NullString
-		var startTs sql.NullInt64
-		// sql.ErrNoRows is expected (op start may have been ingested in
-		// a prior batch, or not yet arrived in this scan). Any
-		// other error means the database is unhealthy and silently
-		// returning zero cost would violate the "no silent failures"
-		// invariant in AGENTS.md.
-		if lookupErr := tx.QueryRowContext(ctx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
-			Scan(&provider, &model, &kind, &startTs); lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
-			return fmt.Errorf("ingest writer: lookup op %s for pricing: %w", opID, lookupErr)
-		}
 		// Skip pricing for non-LLM ops (kind != 'llm') and for ops
 		// without a provider/model pair — pricing those produces noisy
 		// "unknown pricing for provider \"\" model \"\"" warnings that
@@ -696,10 +694,12 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 		// their zero value and isPriceableOp returns false, so we
 		// never reach priceOp without a real (provider, model).
 		if isPriceableOp(kind, provider, model) {
-			// ops.start_ts is NOT NULL per the schema; the guard
-			// against zero is defence-in-depth in case a future
-			// migration relaxes the constraint, and to match the
-			// documented behaviour in pricing.md.
+			// start_ts drives the temporal tier selection so an op
+			// straddling a price-change date is priced against the tier
+			// in effect when the op STARTED, not ended (the finalize
+			// event timestamp). ops.start_ts is NOT NULL per the schema;
+			// the guard against zero is defence-in-depth in case a future
+			// migration relaxes the constraint, and to match pricing.md.
 			pricingTs := ev.Ts
 			if startTs.Valid && startTs.Int64 > 0 {
 				pricingTs = startTs.Int64
@@ -707,9 +707,15 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 			cost = w.priceOp(ctx, tx, provider.String, model.String, pricingTs, ev)
 		}
 	}
+	// Duration derives from the PERSISTED start_ts (the matching OpStarted's
+	// Ts), NOT ev.Ts: a finalize event sorts AFTER its OpStarted, so
+	// OpFinalizedEvent.Ts ≈ the op END (== ev.EndTs) and EndTs-ev.Ts ≈ 0 for
+	// every spec-conformant adapter. An orphan finalize (start_ts unknown)
+	// leaves durUS invalid → COALESCE in the UPDATE preserves the existing
+	// value rather than fabricating a duration. See data-model.md §ops.
 	durUS := sql.NullInt64{}
-	if ev.EndTs > 0 && ev.Ts > 0 && ev.EndTs >= ev.Ts {
-		durUS = sql.NullInt64{Int64: ev.EndTs - ev.Ts, Valid: true}
+	if ev.EndTs > 0 && startTs.Valid && startTs.Int64 > 0 && ev.EndTs >= startTs.Int64 {
+		durUS = sql.NullInt64{Int64: ev.EndTs - startTs.Int64, Valid: true}
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE ops SET

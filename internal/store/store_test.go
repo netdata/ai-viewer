@@ -147,7 +147,7 @@ func TestOpen_Idempotent(t *testing.T) {
 		// expectedMigrations grows by one each time a new SQL file is
 		// added under migrations/. Update the constant in lockstep with
 		// the new migration so this contract test stays meaningful.
-		const expectedMigrations = 4
+		const expectedMigrations = 5
 		if count != expectedMigrations {
 			t.Fatalf("round %d: _schema_migrations rows: want %d, got %d", round, expectedMigrations, count)
 		}

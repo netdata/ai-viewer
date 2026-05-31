@@ -137,7 +137,7 @@ CREATE TABLE ops (
     reasoning_kind  TEXT,                                   -- kind='reasoning': 'summary' | 'raw'
     start_ts        INTEGER NOT NULL,
     end_ts          INTEGER,
-    duration_us     INTEGER,                                -- end_ts - start_ts when both known
+    duration_us     INTEGER,                                -- end_ts - start_ts, computed at OpFinalized from the PERSISTED start_ts (OpStarted.Ts), NOT the finalize event's Ts; NULL when start/end unknown. See ingester.md §Catalog Tables.
     status          TEXT NOT NULL,                          -- 'running'|'completed'|'failed'|'cancelled'|'truncated'
     error_class     TEXT,
     error_message   TEXT,
