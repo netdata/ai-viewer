@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: gate ready; on branch `sow-0029-token-cost-semantics` (off master). Spec deltas landed (canonical-events.md + data-model.md); delegating the audit/fix/UI build. Operator-approved 2026-05-31 ("Fix data+cost AND cache UI now"), recorded before code. Discovered during the SOW-0006 real-data review: the operator's own claude-code session showed `tokens_in = 3.84B` and `cost_usd = $9,377`, both inflated. Root-caused to the claude-code adapter folding cached tokens into `tokens_in`, which (a) inflates the token total and (b) double-counts cache in the pricer. To be done on its own branch + PR (independent, fast merge — a correctness bug, not bundled into the long SOW-0006 frontend).
+Sub-state: delivered on branch `sow-0029-token-cost-semantics` (PR #32), squash-merged to master. 7 external review rounds (codex decisive) converged with zero findings; CI fully green. Operator-approved 2026-05-31 ("Fix data+cost AND cache UI now"), recorded before code. Discovered during the SOW-0006 real-data review: the operator's own claude-code session showed `tokens_in = 3.84B` and `cost_usd = $9,377`, both inflated. Root-caused to the claude-code adapter folding cached tokens into `tokens_in`, which (a) inflates the token total and (b) double-counts cache in the pricer. To be done on its own branch + PR (independent, fast merge — a correctness bug, not bundled into the long SOW-0006 frontend).
 
 ## Requirements
 
@@ -163,7 +163,13 @@ Post-fix (orchestrator): `scan-secrets.sh` PASS (661 files); direct `-i` name sw
 
 ## Outcome
 
-Pending.
+Delivered. claude-code `tokens_in` is now FRESH/uncached input only; `tokens_cache_read`/`tokens_cache_write` are separate canonical fields priced at their own rates (no more cache double-count — the $9,377 / 3.84B-token inflation on the operator's real session is gone once re-ingested); `ctx_used` = 4-term total. codex `tokens_in` is fresh + all four per-call token components floored ≥0 (`nonNeg`). The Overview tab surfaces Cache read / Cache write / Cache hit-rate StatCards and labels tokens-in as "fresh"; `/api/stats` totals expose the cache fields. Specs (canonical-events.md, data-model.md, ui-pages.md, adapter-claude-code/codex/aiagent-v2/v3/opencode) reconciled to the contract. Tests: claude-code cache golden/unit, pricing no-double-count, codex clamp (RED→GREEN), frontend Overview cache + the deep-link E2E label. Gates: gofmt/vet/build/`go test -race`/golangci-lint all clean; frontend tsc/eslint/vitest(244)/Playwright(19); `scan-secrets` PASS; full CI green.
+
+Merge: SQUASH (not `--merge`) — a deliberate, PII-driven deviation from the documented `--merge`: the operator's first name appeared transiently in intermediate branch commit DIFFS (added-then-removed across review rounds); squashing collapses them into one clean commit so the name never enters master's permanent history.
+
+Deferred (filed, pre-existing — NOT regressions of this SOW): **SOW-0030** codex token persistence (turn-emit vs op-rollup → codex totals are 0 until it emits op-level tokens); **SOW-0031** `ctx_used` 4-term alignment for aiagent_v3 + opencode + aiagent_v2; **SOW-0032** harden `scan-secrets.sh` to detect raw session ids (it currently catches only the operator name).
+
+Open operator decision (NOT a blocker; tracked-file tree ships clean): the operator name + a pre-existing session UUID remain in OLD git history / this branch's PR commit diffs; purging needs a destructive force-push (branch protection disables it) — an operator risk/destructive-op call.
 
 ## Lessons Extracted
 
