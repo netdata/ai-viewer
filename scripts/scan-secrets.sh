@@ -214,14 +214,14 @@ derive_rule1() {
 
   # Build NAME pattern: each derived name word, ERE-escaped, bounded on BOTH
   # sides by a NON-ALPHANUMERIC token boundary ((^|[^A-Za-z0-9]) … ([^A-Za-z0-9]|$))
-  # — NOT \b. \b treats '_' as a word character, so "\bcosta\b" MISSES an operator
+  # — NOT \b. \b treats '_' as a word character, so "\b<name>\b" MISSES an operator
   # name embedded after an underscore (e.g. an MCP namespace "playwright_<name>" —
   # a real leak that slipped past the old gate). Treating '_' (and every other
   # non-alphanumeric) as a delimiter catches "<sep><name>" and "<name><sep>", while
   # the TRAILING boundary still rejects a longer word that merely shares the name
   # as a prefix ("Scanner" must not match the banned word "Scan") and a leading
-  # alphanumeric rejects "…CostA…" inside "TestCostAlias". This is stricter than
-  # \b only where it must be: '_' is a delimiter, not part of the word.
+  # alphanumeric rejects "…<name>…" inside a longer identifier like "Test<name>Case".
+  # This is stricter than \b only where it must be: '_' is a delimiter, not part of the word.
   R1_NAME=""
   for w in "${words[@]}"; do
     R1_NAME="${R1_NAME}${R1_NAME:+|}(^|[^A-Za-z0-9])$(ere_escape "$w")([^A-Za-z0-9]|\$)"

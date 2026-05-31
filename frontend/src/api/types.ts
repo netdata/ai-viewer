@@ -114,6 +114,10 @@ export interface SessionDetail {
   end_ts: number | null;
   tokens_in: number;
   tokens_out: number;
+  /** Cached input tokens READ (cache-read rate); separate from tokens_in (fresh). */
+  tokens_cache_read: number;
+  /** Cache-CREATION tokens (cache-write rate); separate from tokens_in (fresh). */
+  tokens_cache_write: number;
   cost_usd: number;
   turn_count: number;
   op_count: number;
@@ -218,6 +222,10 @@ export interface StatsTotals {
   op_count: number;
   tokens_in: number;
   tokens_out: number;
+  /** Cached input tokens READ (cache-read rate); separate from tokens_in (fresh). */
+  tokens_cache_read: number;
+  /** Cache-CREATION tokens (cache-write rate); separate from tokens_in (fresh). */
+  tokens_cache_write: number;
   cost_usd: number;
   failures: number;
   duration_us: number;

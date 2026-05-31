@@ -451,6 +451,62 @@ func TestMapper_SyntheticAssistantNoLLMOp(t *testing.T) {
 	}
 }
 
+// TestMapper_LLMTokenContract pins the canonical token accounting for an
+// assistant LLM op (canonical-events.md token contract, SOW-0029): TokensIn is
+// the FRESH/uncached input ONLY, TokensCacheRead/Write are the separate cache
+// portions, and CtxUsed is the TOTAL context occupancy
+// (fresh + cacheCreate + cacheRead + output). The fixture carries all four
+// non-zero so a regression that folds cache back into TokensIn — or shrinks
+// CtxUsed to fresh+out — fails loudly.
+func TestMapper_LLMTokenContract(t *testing.T) {
+	t.Parallel()
+	const (
+		fresh      = 120
+		cacheWrite = 10
+		cacheRead  = 2000
+		out        = 45
+	)
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"assistant","uuid":"a1","sessionId":"s","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":120,"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":2000}},"timestamp":"2026-05-26T10:00:02.000Z"}`,
+	)
+	var fin canonical.OpFinalizedEvent
+	var found bool
+	for _, ev := range events {
+		of, ok := ev.(canonical.OpFinalizedEvent)
+		if !ok {
+			continue
+		}
+		// The LLM op is the first finalized op in the turn (Seq 1); a
+		// finalized op carrying tokens is the LLM call.
+		if of.TokensOut != 0 || of.TokensIn != 0 || of.TokensCacheRead != 0 {
+			fin = of
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no token-bearing OpFinalizedEvent emitted for the assistant LLM op")
+	}
+	if fin.TokensIn != fresh {
+		t.Errorf("TokensIn = %d, want %d (fresh/uncached input ONLY, cache excluded)", fin.TokensIn, fresh)
+	}
+	if fin.TokensCacheRead != cacheRead {
+		t.Errorf("TokensCacheRead = %d, want %d", fin.TokensCacheRead, cacheRead)
+	}
+	if fin.TokensCacheWrite != cacheWrite {
+		t.Errorf("TokensCacheWrite = %d, want %d", fin.TokensCacheWrite, cacheWrite)
+	}
+	if fin.TokensOut != out {
+		t.Errorf("TokensOut = %d, want %d", fin.TokensOut, out)
+	}
+	// CtxUsed is the TOTAL context occupancy, NOT fresh+out.
+	wantCtx := int64(fresh + cacheWrite + cacheRead + out)
+	if fin.CtxUsed != wantCtx {
+		t.Errorf("CtxUsed = %d, want %d (fresh+cacheCreate+cacheRead+output)", fin.CtxUsed, wantCtx)
+	}
+}
+
 // TestMapper_MCPToolNamespacing verifies MCP tool names split correctly.
 func TestMapper_MCPToolNamespacing(t *testing.T) {
 	t.Parallel()

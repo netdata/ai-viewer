@@ -144,6 +144,51 @@ func TestComputeCostFormula(t *testing.T) {
 	}
 }
 
+// TestComputeCostNoCacheDoubleCount documents the SOW-0029 invariant: now that
+// tokens_in is the FRESH/uncached input only (every adapter excludes cache —
+// see canonical-events.md token contract), the pricer charges cache_read and
+// cache_write at their OWN rates and NEVER at the input rate. The rates are
+// deliberately distinct (input 10, cacheRead 1, cacheWrite 5 per-million) so a
+// regression that re-folded cache into tokens_in — pricing R+W at the input
+// rate — would change the result and fail here.
+func TestComputeCostNoCacheDoubleCount(t *testing.T) {
+	t.Parallel()
+	const (
+		freshIn    = 100_000 // F: fresh/uncached input
+		out        = 50_000  // O: output
+		cacheRead  = 200_000 // R: cached input read
+		cacheWrite = 40_000  // W: cache creation
+	)
+	tr := tier{
+		effectiveAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		prices: resolvedPrices{
+			InputPerMillion:      10,
+			OutputPerMillion:     20,
+			CacheReadPerMillion:  1,
+			CacheWritePerMillion: 5,
+		},
+	}
+	got := computeCost(&tr, freshIn, out, cacheRead, cacheWrite)
+
+	// Each component priced at its OWN rate. Cache is NOT charged at the input
+	// rate — it appears only via CacheRead/CacheWritePerMillion.
+	want := float64(freshIn)*10/1_000_000 +
+		float64(out)*20/1_000_000 +
+		float64(cacheRead)*1/1_000_000 +
+		float64(cacheWrite)*5/1_000_000
+	if got != want {
+		t.Fatalf("computeCost = %v, want %v", got, want)
+	}
+
+	// Guard: the buggy "fold cache into tokens_in" cost (charging R and W at the
+	// input rate, on top of their own rate) must be strictly larger — proving
+	// this test would catch a regression rather than coincidentally matching.
+	doubleCounted := want + float64(cacheRead+cacheWrite)*10/1_000_000
+	if got >= doubleCounted {
+		t.Fatalf("expected no-double-count cost %v to be < double-counted cost %v", got, doubleCounted)
+	}
+}
+
 // mustMultiTierPricer parses a small two-tier synthetic doc used by
 // the resolver tests above. Lives here (not pricing_test.go) so the
 // test file is self-contained.

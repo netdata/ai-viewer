@@ -199,6 +199,7 @@ Cross-session aggregates over the filtered set.
   "totals": {
     "session_count": ..., "turn_count": ..., "op_count": ...,
     "tokens_in": ..., "tokens_out": ..., "cost_usd": ...,
+    "tokens_cache_read": ..., "tokens_cache_write": ...,
     "failures": ..., "duration_us": ...
   },
   "by_model":    [ { "name":"...","provider":"...","calls":...,"tokens_in":...,"tokens_out":...,"cost_usd":...,"failures":...,"pct_of_cost":0.42 } ],

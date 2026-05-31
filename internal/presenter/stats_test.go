@@ -11,14 +11,16 @@ import (
 // statsBody mirrors GET /api/stats.
 type statsBody struct {
 	Totals struct {
-		SessionCount int64   `json:"session_count"`
-		TurnCount    int64   `json:"turn_count"`
-		OpCount      int64   `json:"op_count"`
-		TokensIn     int64   `json:"tokens_in"`
-		TokensOut    int64   `json:"tokens_out"`
-		CostUSD      float64 `json:"cost_usd"`
-		Failures     int64   `json:"failures"`
-		DurationUS   int64   `json:"duration_us"`
+		SessionCount     int64   `json:"session_count"`
+		TurnCount        int64   `json:"turn_count"`
+		OpCount          int64   `json:"op_count"`
+		TokensIn         int64   `json:"tokens_in"`
+		TokensOut        int64   `json:"tokens_out"`
+		TokensCacheRead  int64   `json:"tokens_cache_read"`
+		TokensCacheWrite int64   `json:"tokens_cache_write"`
+		CostUSD          float64 `json:"cost_usd"`
+		Failures         int64   `json:"failures"`
+		DurationUS       int64   `json:"duration_us"`
 	} `json:"totals"`
 	ByModel []struct {
 		Name      string  `json:"name"`
@@ -107,6 +109,18 @@ func TestStats_TotalsAndBreakdowns(t *testing.T) {
 	}
 	if body.Totals.Failures != 1 {
 		t.Fatalf("failures = %d, want 1", body.Totals.Failures)
+	}
+	// Cache-token totals roll up alongside tokens_in/out (SOW-0029). tokens_in
+	// is FRESH; cache is reported separately so the Stats totals can show a
+	// cache breakdown + overall hit-rate.
+	if body.Totals.TokensIn != 1000 || body.Totals.TokensOut != 2000 {
+		t.Fatalf("tokens in/out = %d/%d, want 1000/2000 (fresh)", body.Totals.TokensIn, body.Totals.TokensOut)
+	}
+	if body.Totals.TokensCacheRead != 3000 {
+		t.Errorf("tokens_cache_read = %d, want 3000", body.Totals.TokensCacheRead)
+	}
+	if body.Totals.TokensCacheWrite != 500 {
+		t.Errorf("tokens_cache_write = %d, want 500", body.Totals.TokensCacheWrite)
 	}
 
 	// by_status over the session set.

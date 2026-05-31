@@ -30,9 +30,9 @@ test.describe('deep link', () => {
     await expect(page.getByText(id, { exact: false }).first()).toBeVisible();
 
     // The Overview tab is the default; assert a StatCard from OverviewTab is
-    // present (label "Tokens in") — proving the detail payload rendered, not a
-    // not-found / error state.
-    await expect(page.getByText('Tokens in', { exact: true })).toBeVisible();
+    // present (label "Tokens in (fresh)") — proving the detail payload rendered,
+    // not a not-found / error state.
+    await expect(page.getByText('Tokens in (fresh)', { exact: true })).toBeVisible();
     // The "Tools used" section header is always rendered on a loaded Overview.
     await expect(page.getByRole('heading', { name: 'Tools used' })).toBeVisible();
     // Negative: the not-found state must not be shown for a valid seeded id.

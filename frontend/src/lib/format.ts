@@ -120,3 +120,22 @@ export function formatPct(ratio: number | null | undefined): string {
   }
   return `${(ratio * 100).toFixed(1)}%`;
 }
+
+/**
+ * cacheHitRate computes the share of total input tokens served from cache:
+ * cache_read / (tokens_in + cache_read + cache_write), where tokens_in is the
+ * FRESH/uncached input (canonical token contract, SOW-0029). Returns null when
+ * there is no input at all (denominator 0) so the caller renders an em dash via
+ * formatPct rather than dividing by zero.
+ */
+export function cacheHitRate(
+  freshIn: number,
+  cacheRead: number,
+  cacheWrite: number,
+): number | null {
+  const total = freshIn + cacheRead + cacheWrite;
+  if (total <= 0) {
+    return null;
+  }
+  return cacheRead / total;
+}

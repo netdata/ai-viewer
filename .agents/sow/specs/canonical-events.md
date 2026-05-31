@@ -124,13 +124,20 @@ type TurnFinalizedEvent struct {
     Status          string    // 'running' | 'completed' | 'failed' | 'aborted'
     ErrorClass      string
     EndTs           int64
-    TokensIn        int64
+    TokensIn        int64     // FRESH / uncached input tokens ONLY — billed at the full input rate. Every adapter MUST exclude cached tokens so tokens_in means the same thing across sources and the pricer never double-counts cache. Total input the model processed = TokensIn + TokensCacheRead + TokensCacheWrite.
     TokensOut       int64
-    TokensCacheRead int64     // cache-hit tokens (Anthropic / claude-code; OpenAI / opencode if present)
-    TokensCacheWrite int64    // cache-write tokens
+    TokensCacheRead int64     // cached input tokens READ (Anthropic/claude-code cache_read_input_tokens; OpenAI/opencode cached), billed at the cache-read rate — NOT part of TokensIn.
+    TokensCacheWrite int64    // cache-CREATION tokens (Anthropic cache_creation_input_tokens), billed at the cache-write rate — NOT part of TokensIn.
     CostUSD         float64   // 0.0 when adapter cannot compute (no native cost + no pricing table hit)
 }
 ```
+
+**Token accounting contract (canonical, SOW-0029).** `TokensIn` is the FRESH/uncached input only; `TokensCacheRead` and `TokensCacheWrite` are the cache portions, counted SEPARATELY; total input the model processed = `TokensIn + TokensCacheRead + TokensCacheWrite`. This SEMANTIC definition is uniform across adapters — ai-agent v2/v3, codex, opencode, claude-code all map the source's fresh-input field (not the total) to `TokensIn`, and the cache fields to `TokensCacheRead/Write` — so the pricer (`internal/pricing`, which prices each component at its own rate) never double-charges cache and `tokens_in` is comparable across sources.
+
+Two known, tracked gaps (NOT yet uniform):
+
+- **`CtxUsed` completeness.** `CtxUsed` is INTENDED as the total context occupancy (`TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut`). claude-code and codex compute it fully; aiagent_v3, aiagent_v2, and opencode currently omit components (cache_write / output) — a pre-existing inconsistency tracked for alignment (**SOW-0031**).
+- **Token persistence is OP-rollup.** The ingester rolls turn/session token totals from OP rows (`internal/ingest/aggregates.go` SUMs `ops.tokens_in`), so an adapter's token data only reaches stored totals + pricing if it sets tokens on its `OpFinalizedEvent`s. claude-code does. codex currently sets them only on `TurnFinalizedEvent`, so codex token/cost totals do not yet persist — tracked (**SOW-0030**).
 
 **Turn `running` status**: emitted by adapters that observe a mid-turn checkpoint (e.g. ai-agent v3 can write a `turn_end` record with `status='running'` before the turn truly ends — rare; not observed in committed real data but supported by the producer). The ingester transitions `running` → terminal (`'completed' | 'failed' | 'aborted'`) when the final `turn_end` (or equivalent) arrives. UIs should treat `running` as "in progress" rather than terminal.
 
