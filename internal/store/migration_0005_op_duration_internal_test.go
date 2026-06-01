@@ -161,13 +161,16 @@ func TestMigration0005_BackfillsOpDurationAndCatalogTotals(t *testing.T) {
 	}
 }
 
-// TestMigration0005_BumpsSchemaVersionTo5 pins the lockstep contract: after
-// 0005 runs, schema_meta.version is '5' (matching presenter.SchemaVersion). The
-// bump is what makes a v5 serve binary refuse a pre-0005 store (CheckSchema
-// exact match) rather than serve its stale duration_us=0 rows.
+// TestMigration0005_BumpsSchemaVersionTo5 pins the lockstep contract: applying
+// the migration chain THROUGH 0005 leaves schema_meta.version '5' (matching the
+// presenter.SchemaVersion value of that era). The bump is what makes a v5 serve
+// binary refuse a pre-0005 store (CheckSchema exact match) rather than serve its
+// stale duration_us=0 rows. This applies only files <= 0005 (not the full chain,
+// which now ends at 0006=v6) so it pins 0005's OWN bump rather than the chain
+// head — keeping the assertion meaningful as later migrations are added.
 func TestMigration0005_BumpsSchemaVersionTo5(t *testing.T) {
 	t.Parallel()
-	db := openMigratedSQLite(t)
+	db := openChainThrough(t, migration0005Name)
 	var version string
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
@@ -176,6 +179,36 @@ func TestMigration0005_BumpsSchemaVersionTo5(t *testing.T) {
 	if version != "5" {
 		t.Fatalf("schema_meta.version = %q, want %q (0005 bumps the version in lockstep)", version, "5")
 	}
+}
+
+// openChainThrough opens a bare in-memory sqlite and applies every embedded
+// migration whose filename is <= lastFile (lexicographic, the runner's own
+// order), then returns the DB. Unlike openMigratedSQLite (which runs the FULL
+// chain via Up), this stops at a chosen migration so a per-migration version
+// assertion pins THAT migration's bump independent of how many later
+// migrations exist.
+func openChainThrough(t *testing.T, lastFile string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	all, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	ctx := context.Background()
+	for _, m := range all {
+		if m.name > lastFile {
+			break
+		}
+		if _, err := db.ExecContext(ctx, m.sql); err != nil {
+			t.Fatalf("apply migration %s: %v", m.name, err)
+		}
+	}
+	return db
 }
 
 // TestMigration0005_DoesNotTouchUnknownOrNullEndOps pins the backfill guards:
