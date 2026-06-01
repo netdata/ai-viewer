@@ -1,13 +1,23 @@
+import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import type {
   AggregateResponse,
   SearchResponse,
   TopResponse,
 } from '../../api/types';
 import { ApiError } from '../../api/client';
+import { useFilters } from '../../state/filters';
+import { STAT_PARAM_KEYS } from './shareState';
 
 // Stats is the live /stats analytics dashboard: a line-chart section
 // (useAggregate), a top-N bar section (useTop), and a deep-search box
@@ -96,6 +106,62 @@ function renderPage() {
       <Stats />
     </MemoryRouter>,
   );
+}
+
+/**
+ * LocationProbe reports the live URL search params to the test via an onParams
+ * callback (from an effect — never a render-time write) using the same
+ * useSearchParams the page mutates, so assertions can read the post-change query
+ * string (MemoryRouter has no window.location to inspect). Rendered as a sibling
+ * inside the same router as <Stats />.
+ */
+function LocationProbe({ onParams }: { onParams: (p: URLSearchParams) => void }) {
+  const [params] = useSearchParams();
+  // Report the live params from an effect (post-commit), which the lint rules
+  // permit — never a write during render. Tests read the latest via waitFor.
+  useEffect(() => {
+    onParams(params);
+  }, [params, onParams]);
+  return null;
+}
+
+/** A mutable holder the LocationProbe fills with the latest URL params. */
+interface ParamsSink {
+  params: URLSearchParams;
+}
+
+/** renderPageAt mounts <Stats /> at a given URL with a location probe sibling. */
+function renderPageAt(initialEntry: string) {
+  const sink: ParamsSink = { params: new URLSearchParams() };
+  const utils = render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <Stats />
+      <LocationProbe onParams={(p) => (sink.params = p)} />
+    </MemoryRouter>,
+  );
+  return { ...utils, sink };
+}
+
+/**
+ * stubClipboard installs a fake navigator.clipboard with the given writeText.
+ * jsdom exposes navigator.clipboard as a getter-only accessor, so a plain
+ * assignment throws — we defineProperty (configurable) and return a restorer
+ * that puts the original descriptor back so tests stay isolated.
+ */
+function stubClipboard(writeText: (text: string) => Promise<void>): () => void {
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(navigator, 'clipboard', original);
+    } else {
+      // delete is allowed because we created the prop as configurable.
+      delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+  };
 }
 
 const DEBOUNCE_MS = 300;
@@ -382,5 +448,141 @@ describe('Stats', () => {
     }
     const results = screen.getByRole('region', { name: /search results/i });
     expect(within(results).getByText(/hit/i)).toBeInTheDocument();
+  });
+});
+
+// ── Shareable URL (chart controls in the URL) + Copy-link button ────────────
+// The 4 chart controls are URL-backed (shareState.ts) so the whole view is
+// shareable; the global-filter params and the control params coexist via the
+// same merge-patch. The Copy-link button writes window.location.href to the
+// clipboard and announces the outcome through a polite live region.
+describe('Stats — shareable URL + copy link', () => {
+  it('initializes the controls from control params present in the URL (read)', () => {
+    const url =
+      `/stats?${STAT_PARAM_KEYS.trendMetric}=tokens_in` +
+      `&${STAT_PARAM_KEYS.bucket}=hourly` +
+      `&${STAT_PARAM_KEYS.topDimension}=tool` +
+      `&${STAT_PARAM_KEYS.topMetric}=failures`;
+    renderPageAt(url);
+    // The controls drive the hook args, so the hook calls reflect the URL state.
+    const aggOpts = aggSpy.mock.calls.at(-1)?.[1] as { bucket: string; metric: string };
+    expect(aggOpts.metric).toBe('tokens_in');
+    expect(aggOpts.bucket).toBe('hourly');
+    const topOpts = topSpy.mock.calls.at(-1)?.[1] as { dimension: string; metric: string };
+    expect(topOpts.dimension).toBe('tool');
+    expect(topOpts.metric).toBe('failures');
+    // And the selects render the URL-derived values.
+    expect(screen.getByLabelText(/trend metric/i)).toHaveValue('tokens_in');
+    expect(screen.getByLabelText(/time bucket/i)).toHaveValue('hourly');
+    expect(screen.getByLabelText(/breakdown dimension/i)).toHaveValue('tool');
+    expect(screen.getByLabelText(/breakdown metric/i)).toHaveValue('failures');
+  });
+
+  it('falls back to the defaults for unknown control param values (no throw)', () => {
+    const url =
+      `/stats?${STAT_PARAM_KEYS.trendMetric}=bogus` +
+      `&${STAT_PARAM_KEYS.bucket}=weekly` +
+      `&${STAT_PARAM_KEYS.topDimension}=nope`;
+    expect(() => renderPageAt(url)).not.toThrow();
+    const aggOpts = aggSpy.mock.calls.at(-1)?.[1] as { bucket: string; metric: string };
+    expect(aggOpts.metric).toBe('cost'); // default
+    expect(aggOpts.bucket).toBe('daily'); // default
+    const topOpts = topSpy.mock.calls.at(-1)?.[1] as { dimension: string };
+    expect(topOpts.dimension).toBe('model'); // default
+    expect(screen.getByLabelText(/trend metric/i)).toHaveValue('cost');
+  });
+
+  it('a control change writes its URL param and PRESERVES filter + control params (write)', async () => {
+    const user = userEvent.setup();
+    // Start with a global filter param AND an unrelated control param set.
+    const url = `/stats?agents=a,b&from=100&${STAT_PARAM_KEYS.trendMetric}=tokens_in`;
+    const { sink } = renderPageAt(url);
+    // Change a DIFFERENT control (the top-N dimension).
+    await user.selectOptions(screen.getByLabelText(/breakdown dimension/i), 'tool');
+    await waitFor(() => {
+      expect(sink.params.get(STAT_PARAM_KEYS.topDimension)).toBe('tool');
+    });
+    // The changed control is written, the other control is preserved …
+    expect(sink.params.get(STAT_PARAM_KEYS.trendMetric)).toBe('tokens_in');
+    // … and the global filter params are preserved (merge-patch, not replace).
+    expect(sink.params.get('agents')).toBe('a,b');
+    expect(sink.params.get('from')).toBe('100');
+  });
+
+  it('a real FilterBar filter change (useFilters) preserves the control params', async () => {
+    // Drive the ACTUAL FilterBar code path: useFilters().setFilters merges a
+    // filter patch via applyPatch on the same URL. The page's control params
+    // must survive that write (both sides use the functional merge form).
+    function FilterMutator() {
+      const { setFilters } = useFilters();
+      return (
+        <button type="button" onClick={() => setFilters({ agents: ['x'] })}>
+          set-agents
+        </button>
+      );
+    }
+    const sink: ParamsSink = { params: new URLSearchParams() };
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={[`/stats?${STAT_PARAM_KEYS.bucket}=hourly`]}>
+        <Stats />
+        <FilterMutator />
+        <LocationProbe onParams={(p) => (sink.params = p)} />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(sink.params.get(STAT_PARAM_KEYS.bucket)).toBe('hourly'); // control at mount
+    });
+    await user.click(screen.getByRole('button', { name: /set-agents/i }));
+    await waitFor(() => {
+      expect(sink.params.get('agents')).toBe('x'); // filter written
+    });
+    expect(sink.params.get(STAT_PARAM_KEYS.bucket)).toBe('hourly'); // control preserved
+  });
+
+  it('clicking "Copy link" writes window.location.href and announces "Link copied"', async () => {
+    // setup() FIRST: userEvent v14 installs its own clipboard stub on setup, so
+    // our spy must overwrite it afterwards to observe the page's writeText call.
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const restore = stubClipboard(writeText);
+    try {
+      renderPage();
+      await user.click(screen.getByRole('button', { name: /copy link/i }));
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith(window.location.href);
+      // The polite live region announces success.
+      const status = screen.getByRole('status');
+      await waitFor(() => {
+        expect(status).toHaveTextContent(/link copied/i);
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it('shows a failure message (no silent failure) when the clipboard write rejects', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    const restore = stubClipboard(writeText);
+    try {
+      renderPage();
+      await user.click(screen.getByRole('button', { name: /copy link/i }));
+      const status = screen.getByRole('status');
+      await waitFor(() => {
+        expect(status).toHaveTextContent(/copy failed/i);
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it('gives the Copy-link button an accessible name and provides a live region', () => {
+    renderPage();
+    // Accessible name via the button text.
+    expect(screen.getByRole('button', { name: /copy link/i })).toBeInTheDocument();
+    // The aria-live="polite" status region exists (empty until a copy happens).
+    const status = screen.getByRole('status');
+    expect(status).toHaveAttribute('aria-live', 'polite');
   });
 });

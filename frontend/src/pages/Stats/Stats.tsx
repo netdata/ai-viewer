@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useFilters, filtersToSubscription } from '../../state/filters';
 import { useAggregate, useTop } from '../../api/stats';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
@@ -7,14 +8,26 @@ import type { StatsBucket, StatsMetric, TopDimension } from '../../api/types';
 import { LineChart } from './charts/LineChart';
 import { BarChart } from './charts/BarChart';
 import { SearchBox } from './SearchBox';
+import {
+  applyStatPatch,
+  readStatControls,
+  type StatControlsPatch,
+} from './shareState';
 import styles from './Stats.module.css';
 
 // Statistics dashboard (ui-pages.md §/stats). Three sections over the global
 // FilterBar's filters: per-bucket TREND line chart (cost/tokens/…), a TOP-N
 // horizontal bar chart by a selectable dimension, and a deep full-text SEARCH
 // box whose hits link to the matching session. The FilterBar (in Layout) drives
-// `filters`; this page only reads them and adds its own chart controls as
-// page-LOCAL state (NOT global filters — they tune the charts, not the data set).
+// `filters`; this page reads them and adds its OWN chart controls.
+//
+// SHAREABLE (ui-pages.md §/stats "Copy-share-link"): the 4 chart controls live
+// in the URL under own param names (shareState.ts), DISTINCT from the global
+// filter keys, so the whole view (filters + chart controls) survives a reload /
+// bookmark / paste. A "Copy link" button copies window.location.href and
+// announces the result through a polite live region. Both the controls and the
+// filters write via the functional setSearchParams MERGE form, so changing a
+// chart control preserves the filter params and vice-versa.
 //
 // LIVE: useLiveUpdates(subscription) keeps one SSE subscription open; a
 // stats_invalidated frame invalidates the ['stats'] key wholesale (api/sse.ts
@@ -48,13 +61,26 @@ const TOP_N = 20;
 export function Stats() {
   const { filters } = useFilters();
 
-  // Page-local chart controls (NOT global filters). The trend chart and the
-  // top-N chart carry SEPARATE metrics on purpose: a user typically compares a
-  // cost trend over time against, say, a failures-by-tool ranking.
-  const [trendMetric, setTrendMetric] = useState<StatsMetric>('cost');
-  const [bucket, setBucket] = useState<StatsBucket>('daily');
-  const [topDimension, setTopDimension] = useState<TopDimension>('model');
-  const [topMetric, setTopMetric] = useState<StatsMetric>('cost');
+  // Chart controls live in the URL (shareState.ts), NOT page-local state, so the
+  // view is shareable. The trend chart and the top-N chart carry SEPARATE
+  // metrics on purpose: a user typically compares a cost trend over time against,
+  // say, a failures-by-tool ranking. Reads CLAMP unknown values to the default.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { trendMetric, bucket, topDimension, topMetric } = useMemo(
+    () => readStatControls(searchParams),
+    [searchParams],
+  );
+
+  // setControl merges one control patch into the URL (functional form), so the
+  // global filter params — and any control NOT in the patch — are preserved.
+  // replace:true keeps control tweaks out of the history stack (they are view
+  // tuning, not navigation), matching the SessionDetail ?tab= convention.
+  const setControl = useCallback(
+    (patch: StatControlsPatch): void => {
+      setSearchParams((prev) => applyStatPatch(prev, patch), { replace: true });
+    },
+    [setSearchParams],
+  );
 
   const aggregate = useAggregate(filters, { bucket, groupBy: 'total', metric: trendMetric });
   const ranking = useTop(filters, { dimension: topDimension, metric: topMetric, n: TOP_N });
@@ -63,9 +89,41 @@ export function Stats() {
   // ['stats']-keyed aggregate + top queries (search stays put — see file header).
   useLiveUpdates(filtersToSubscription(filters));
 
+  // Copy-share-link: copy the current URL (filters + chart controls) and
+  // announce the outcome through the polite live region below. A rejected
+  // clipboard promise surfaces a failure message — never a silent failure
+  // (AGENTS.md §6). The outcome is the announced text; a later copy replaces it.
+  const [copyStatus, setCopyStatus] = useState<string>('');
+  const handleCopyLink = useCallback(async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopyStatus('Link copied');
+    } catch {
+      setCopyStatus('Copy failed');
+    }
+  }, []);
+
   return (
     <section aria-labelledby="stats-title">
-      <h1 id="stats-title">Statistics</h1>
+      <div className={styles.header}>
+        <h1 id="stats-title">Statistics</h1>
+        <div className={styles.toolbar}>
+          <button
+            type="button"
+            className={styles.copyButton}
+            onClick={() => {
+              void handleCopyLink();
+            }}
+          >
+            Copy link
+          </button>
+          {/* Polite live region announces the copy outcome; visually hidden so
+              it never shifts layout (mirrors the ThemeToggle .srOnly recipe). */}
+          <span role="status" aria-live="polite" className={styles.srOnly}>
+            {copyStatus}
+          </span>
+        </div>
+      </div>
 
       {/* ── Trends over time (line chart) ─────────────────────────────────── */}
       <section className={styles.panel} aria-labelledby="stats-trends-title">
@@ -79,7 +137,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={trendMetric}
-                onChange={(e) => setTrendMetric(e.target.value as StatsMetric)}
+                onChange={(e) => setControl({ trendMetric: e.target.value as StatsMetric })}
               >
                 {METRIC_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -93,7 +151,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={bucket}
-                onChange={(e) => setBucket(e.target.value as StatsBucket)}
+                onChange={(e) => setControl({ bucket: e.target.value as StatsBucket })}
               >
                 <option value="daily">Daily</option>
                 <option value="hourly">Hourly</option>
@@ -127,7 +185,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={topDimension}
-                onChange={(e) => setTopDimension(e.target.value as TopDimension)}
+                onChange={(e) => setControl({ topDimension: e.target.value as TopDimension })}
               >
                 {DIMENSION_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -141,7 +199,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={topMetric}
-                onChange={(e) => setTopMetric(e.target.value as StatsMetric)}
+                onChange={(e) => setControl({ topMetric: e.target.value as StatsMetric })}
               >
                 {METRIC_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
