@@ -19,6 +19,11 @@ const (
 	defaultResolverInterval = 5 * time.Second
 )
 
+// defaultNow is the production wall-clock the incremental rollup refresh
+// uses to pick its open-bucket cutoffs: UTC microseconds, matching every
+// other timestamp in the store.
+func defaultNow() int64 { return time.Now().UTC().UnixMicro() }
+
 // ErrSourceAlreadySubmitted is returned by Submit when the caller
 // re-submits the same source ID. The ingester serialises one worker per
 // source ID; submitting again would race two workers on the same source.
@@ -75,6 +80,19 @@ func WithResolverInterval(d time.Duration) Option {
 	}
 }
 
+// WithNow overrides the wall-clock the incremental rollup refresh reads to
+// pick the open-bucket cutoffs (UTC microseconds). The default is the real
+// clock; tests inject a fixed value so the incremental refresh and
+// BackfillRollups apply the SAME closed-bucket boundary (the property the
+// Chunk-6 byte-diff gate asserts). A nil func is ignored.
+func WithNow(now func() int64) Option {
+	return func(i *Ingester) {
+		if now != nil {
+			i.now = now
+		}
+	}
+}
+
 // WithSourceFormat registers the user-facing format string for sourceID.
 // The default extracts the prefix from "format:location" (the adapter
 // SourceID convention); callers that use a different SourceID shape must
@@ -103,6 +121,10 @@ type Ingester struct {
 	batchSize        int
 	batchInterval    time.Duration
 	resolverInterval time.Duration
+	// now is the wall-clock source the incremental rollup refresh reads to
+	// pick its open-bucket cutoffs. Injectable via WithNow for deterministic
+	// tests; defaults to the real UTC-microsecond clock.
+	now func() int64
 
 	hwm      *hwmCache
 	resolver *resolver
@@ -132,6 +154,7 @@ func New(db *sql.DB, opts ...Option) (*Ingester, error) {
 		batchSize:         defaultBatchSize,
 		batchInterval:     defaultBatchInterval,
 		resolverInterval:  defaultResolverInterval,
+		now:               defaultNow,
 		hwm:               newHWMCache(),
 		workers:           make(map[string]*worker),
 		formatOverrides:   make(map[string]string),
@@ -198,6 +221,7 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 		logger:       i.logger.With("source_id", sourceID),
 		batchSize:    i.batchSize,
 		batchEvery:   i.batchInterval,
+		now:          i.now,
 	}
 	i.workers[sourceID] = w
 	ctx := i.ctx

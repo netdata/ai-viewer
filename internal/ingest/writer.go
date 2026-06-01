@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
+	"github.com/netdata/ai-viewer/internal/rollups"
 )
 
 // writer applies one canonical event to one *sql.Tx. The writer is
@@ -81,6 +82,18 @@ type writer struct {
 	// satisfying the project "no silent failures" rule without losing
 	// the priced op. Cleared at resetBatch().
 	batchObservabilityErrs []error
+	// dirtyRollupBuckets is the set of HOUR buckets (rollups.BucketTS(ts,
+	// Hourly)) whose rollup inputs this batch changed. refreshRollups
+	// (rollup_refresh.go) recomputes each closed hour and its day from this
+	// set in the same tx, before commit. Marked by markDirtyRollupBucket from
+	// the three rollup-affecting apply paths (SessionStarted, OpStarted,
+	// OpFinalized's persisted start). Cleared in resetBatch.
+	dirtyRollupBuckets map[int64]struct{}
+	// now supplies the wall-clock cutoff refreshRollups reads to pick its
+	// open hour/day. Injectable for deterministic tests (so the incremental
+	// path and BackfillRollups share one cutoff — the byte-diff gate's
+	// premise); defaults to defaultNow.
+	now func() int64
 }
 
 // logEntryOnConflict is the ON CONFLICT clause appended to every
@@ -220,6 +233,8 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 		affectedSessionIDs: make(map[string]struct{}),
 		pricingMissDedup:   make(map[pricingMissKey]struct{}),
 		pendingMissDedup:   make(map[pricingMissKey]struct{}),
+		dirtyRollupBuckets: make(map[int64]struct{}),
+		now:                defaultNow,
 	}
 }
 
@@ -242,6 +257,7 @@ func (w *writer) resetBatch() {
 	clear(w.dirtyTurnIDs)
 	clear(w.affectedSessionIDs)
 	clear(w.pendingMissDedup)
+	clear(w.dirtyRollupBuckets)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
@@ -391,6 +407,9 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
 		return fmt.Errorf("writer: insert session: %w", err)
 	}
 	w.markDirtySession(id)
+	// The session start contributes session_starts to its start-hour bucket
+	// (total/agent/cwd), so that hour's rollup must be recomputed.
+	w.markDirtyRollupBucket(ev.Ts)
 	if err := w.catalog.onSessionStarted(ctx, tx, w.sourceFormat, ev); err != nil {
 		return err
 	}
@@ -605,6 +624,12 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
+	// The op's start hour gains an op, so that hour's rollup must be
+	// recomputed. ev.Ts IS the op start (the OpStarted timestamp), which is
+	// the bucket the op rolls up into. ASSUMPTION (catalog + SOW-0027): an op
+	// never moves buckets after its start — adapters emit the authoritative
+	// start at/before finalize, so cross-bucket op migration is out of scope.
+	w.markDirtyRollupBucket(ev.Ts)
 	if err := w.catalog.onOpStarted(ctx, tx, ev, opInserted, prior); err != nil {
 		return err
 	}
@@ -752,6 +777,15 @@ WHERE id = ?
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
+	// Mark the op's START-hour bucket dirty, NOT ev.Ts (which is the END).
+	// Finalize changes the op's duration/status/tokens, all of which roll up
+	// into the op's START bucket, so that hour must be recomputed. startTs is
+	// the PERSISTED ops.start_ts read above; it is invalid only for an orphan
+	// finalize whose OpStarted never landed — in which case the UPDATE matched
+	// no row and there is no rollup contribution to refresh.
+	if startTs.Valid {
+		w.markDirtyRollupBucket(startTs.Int64)
+	}
 	// Forward the RESOLVED cost (post-pricer) to the catalog rollups so
 	// catalog_providers.total_cost_usd / catalog_models.total_cost_usd
 	// stay in sync with ops.cost_usd. The pricer mutates `cost` in this
@@ -1123,6 +1157,19 @@ func (w *writer) markDirtySession(id string) {
 }
 
 func (w *writer) markDirtyTurn(id string) { w.dirtyTurnIDs[id] = struct{}{} }
+
+// markDirtyRollupBucket records that this batch changed a rollup input whose
+// op/session-start falls in the UTC hour bucket containing ts. The bucket is
+// always floored to the HOUR (refreshRollups derives the day from each dirty
+// hour); recording at hour granularity keeps the set small and lets the
+// refresh map hours→days deterministically. Called ONLY from the three
+// rollup-affecting apply paths: applySessionStarted (session-start hour),
+// applyOpStarted (op-start hour), applyOpFinalized (the op's PERSISTED
+// start_ts hour — finalize changes the op's duration/status, so its START
+// bucket, not the end, must be recomputed).
+func (w *writer) markDirtyRollupBucket(ts int64) {
+	w.dirtyRollupBuckets[rollups.BucketTS(ts, rollups.Hourly)] = struct{}{}
+}
 
 // nullIfEmpty returns a sql.NullString backed by s when s != "" and
 // NULL otherwise. Used to keep TEXT columns null when the source did

@@ -34,10 +34,12 @@ const notifyRetention = 5 * time.Minute
 //     authoritative post-batch value, which the resolver may have
 //     rewritten) and tsUS;
 //   - at most one stats_invalidated row per batch, emitted when the batch
-//     wrote any session/op. Catalog rollups (providers, models, tools,
-//     agents, cwds) derive entirely from session/op writes, so a
-//     non-empty affectedSessionIDs is the simplest correct signal that
-//     rollups changed;
+//     changed any rollup. Catalog rollups (providers, models, tools,
+//     agents, cwds) derive entirely from session/op writes, so a non-empty
+//     affectedSessionIDs signals they changed; the time-bucketed
+//     rollup_hourly/rollup_daily tables change whenever a rollup-affecting
+//     event marked a dirty bucket (dirtyRollupBuckets). The row fires on the
+//     union of the two (ingester.md §"Incremental rollup refresh");
 //   - one source_status_changed row when the batch changed the source's
 //     parse_errors count or enabled flag (tracked via
 //     writer.sourceStatusChanged, set in bumpSourceErrorCounter).
@@ -60,8 +62,13 @@ VALUES (?, 'session_changed', ?, ?)
 		}
 	}
 
-	// At most one stats_invalidated per batch, when rollups changed.
-	if len(w.affectedSessionIDs) > 0 {
+	// At most one stats_invalidated per batch, when rollups changed. The
+	// catalog rollups derive from session/op writes (non-empty
+	// affectedSessionIDs), and the time-bucketed rollup_hourly/rollup_daily
+	// tables change whenever a rollup-affecting event marked a dirty bucket
+	// (dirtyRollupBuckets). Either signals a stats change, so fire on the
+	// union — still at most one row per batch.
+	if len(w.affectedSessionIDs) > 0 || len(w.dirtyRollupBuckets) > 0 {
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO notify (ts_us, kind) VALUES (?, 'stats_invalidated')
 `, tsUS); err != nil {

@@ -178,12 +178,16 @@ func closedDays(ctx context.Context, db *sql.DB, openHourStart int64, startsByDa
 	return days, nil
 }
 
-// dayOpsQuery selects one UTC day's closed-bucket ops joined to their session
-// and source. The JOINs are INNER: FK integrity guarantees every op has a
-// session and source. The upper bound is min(dayEnd, openHourStart) so the
-// open hour of the open day is excluded even within its own day window. The
-// shared column→OpRow mapping (scanOpRow) is reused verbatim by Chunk 5.
-const dayOpsQuery = `
+// rollupOpSelectFrom is the SELECT + FROM/JOIN prefix shared by every
+// ops→rollups.OpRow query (the one-shot backfill's dayOpsQuery and the
+// incremental refresh's window query). Sharing the exact column list + join
+// shape is REQUIRED for the backfill-vs-incremental byte-diff gate: both paths
+// must read identical columns in an identical physical row order so the
+// float-summed cost_usd folds bit-for-bit the same. Callers append their own
+// WHERE + ORDER BY (both MUST order by o.start_ts ASC, o.id ASC — see
+// dayOpsQuery). The JOINs are INNER: FK integrity guarantees every op has a
+// session and source. The column order matches scanOpRow exactly.
+const rollupOpSelectFrom = `
 SELECT o.start_ts, o.end_ts, o.duration_us, src.format,
        o.kind, o.model, o.provider, o.tool_namespace, o.name,
        s.agent_name, s.cwd,
@@ -191,9 +195,17 @@ SELECT o.start_ts, o.end_ts, o.duration_us, src.format,
        o.status
 FROM ops o
 JOIN sessions s ON o.session_id = s.id
-JOIN sources  src ON s.source_id = src.id
+JOIN sources  src ON s.source_id = src.id`
+
+// dayOpsQuery selects one UTC day's closed-bucket ops joined to their session
+// and source. The upper bound is min(dayEnd, openHourStart) so the open hour
+// of the open day is excluded even within its own day window. The `o.id ASC`
+// tiebreak is MANDATORY: equal-start_ts ops must fold in a deterministic total
+// order, else the backfill DB and the replayed-incremental DB sum cost_usd in
+// different physical orders and the byte-diff gate fails by float ULPs.
+const dayOpsQuery = rollupOpSelectFrom + `
 WHERE o.start_ts >= ? AND o.start_ts < ?
-ORDER BY o.start_ts ASC`
+ORDER BY o.start_ts ASC, o.id ASC`
 
 // loadDayOps reads every closed-bucket op for the given UTC day within the
 // caller's transaction, fully draining the cursor (so it never straddles the
@@ -266,14 +278,33 @@ func scanOpRow(rows *sql.Rows) (rollups.OpRow, error) {
 	return op, nil
 }
 
+// sessionStartSelectFrom is the SELECT + FROM/JOIN prefix shared by the
+// backfill's sessionStartsQuery and the incremental refresh's window query.
+// The column order matches scanSessionStart exactly. Callers append their own
+// WHERE clause. IFNULL collapses NULL agent_name/cwd to "" so the fold's
+// empty-string check matches the ops path.
+const sessionStartSelectFrom = `
+SELECT s.start_ts, src.format, IFNULL(s.agent_name,''), IFNULL(s.cwd,'')
+FROM sessions s
+JOIN sources src ON s.source_id = src.id`
+
 // sessionStartsQuery selects every session whose start is in a closed hour, so
 // the additive session_starts metric is attributed to the bucket of each
 // session's start. Bounded to one row per session.
-const sessionStartsQuery = `
-SELECT s.start_ts, src.format, IFNULL(s.agent_name,''), IFNULL(s.cwd,'')
-FROM sessions s
-JOIN sources src ON s.source_id = src.id
+const sessionStartsQuery = sessionStartSelectFrom + `
 WHERE s.start_ts < ?`
+
+// scanSessionStart maps one sessions⋈sources row into a rollups.SessionStart.
+// Shared by loadSessionStarts (backfill) and the incremental refresh so both
+// read the same columns in the same shape. Both queries IFNULL the nullable
+// text columns, so the scan targets plain strings.
+func scanSessionStart(rows *sql.Rows) (rollups.SessionStart, error) {
+	var ss rollups.SessionStart
+	if err := rows.Scan(&ss.StartTS, &ss.SourceFormat, &ss.AgentName, &ss.Cwd); err != nil {
+		return rollups.SessionStart{}, err
+	}
+	return ss, nil
+}
 
 // loadSessionStarts preloads all closed session starts, bucketed by their UTC
 // day so flushDay can fold the matching day's starts. Sessions are bounded
@@ -288,8 +319,8 @@ func loadSessionStarts(ctx context.Context, db *sql.DB, openHourStart int64) (ma
 
 	byDay := make(map[int64][]rollups.SessionStart)
 	for rows.Next() {
-		var ss rollups.SessionStart
-		if err := rows.Scan(&ss.StartTS, &ss.SourceFormat, &ss.AgentName, &ss.Cwd); err != nil {
+		ss, err := scanSessionStart(rows)
+		if err != nil {
 			return nil, fmt.Errorf("rollups-backfill: scan session start: %w", err)
 		}
 		day := rollups.BucketTS(ss.StartTS, rollups.Daily)

@@ -24,6 +24,10 @@ type worker struct {
 	logger       *slog.Logger
 	batchSize    int
 	batchEvery   time.Duration
+	// now supplies the wall-clock cutoff the incremental rollup refresh uses
+	// to pick its open hour/day. Injectable for deterministic tests; defaults
+	// to defaultNow when the worker is built without one.
+	now func() int64
 	// onErr is invoked for batch-level failures (commit errors, etc.).
 	// Defaults to logger.Error if not set.
 	onErr func(error)
@@ -41,6 +45,9 @@ const shutdownDrainTimeout = 10 * time.Second
 // own short-lived context so SQL writes still succeed.
 func (w *worker) run(ctx context.Context) {
 	wr := newWriter(w.sourceID, w.sourceFormat, w.location, w.pricer)
+	if w.now != nil {
+		wr.now = w.now
+	}
 	batch := make([]canonical.Event, 0, w.batchSize)
 	flushTimer := time.NewTimer(w.batchEvery)
 	defer flushTimer.Stop()
@@ -171,6 +178,16 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 		if err := wr.apply(ctx, tx, ev); err != nil {
 			return fmt.Errorf("apply event %s seq=%d: %w", ev.EventKind(), ev.EventSourceSeq(), err)
 		}
+	}
+
+	// Recompute the time-bucketed rollups for the buckets this batch touched,
+	// in THIS tx so they commit atomically with the ops/sessions they
+	// summarize (ingester.md §"Incremental rollup refresh"). Runs after the
+	// per-event apply loop (the dirty-bucket set is now complete) and before
+	// the catalog/aggregate refresh — order among the three is irrelevant
+	// since each reads the now-final ops/sessions rows.
+	if err := wr.refreshRollups(ctx, tx); err != nil {
+		return err
 	}
 
 	if err := refreshAggregates(ctx, tx, wr.dirtyTurnIDs, wr.dirtySessionIDs); err != nil {
