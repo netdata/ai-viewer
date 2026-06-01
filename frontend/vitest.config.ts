@@ -41,6 +41,11 @@ export default defineConfig({
         'src/pages/SessionsList/**/*.{ts,tsx}',
         'src/pages/SessionDetail/**/*.{ts,tsx}',
         'src/pages/Sources/**/*.{ts,tsx}',
+        // /stats dashboard charts (SOW-0007 Chunk 9a): the presentational chart
+        // components + their metric formatter are implemented and tested now; the
+        // page/route + controls (Chunk 9b) are added later, so only charts/ is
+        // measured (the future Stats page is excluded until it exists).
+        'src/pages/Stats/charts/**/*.{ts,tsx}',
       ],
       thresholds: {
         lines: 80,

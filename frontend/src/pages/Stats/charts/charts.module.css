@@ -1,0 +1,107 @@
+/*
+ * Styling for the /stats dashboard charts (LineChart, BarChart). Mirrors the
+ * Trace tab's viz conventions: gridlines use --border at low opacity, axis/label
+ * text uses --text-secondary in the mono font, and every color is a theme token
+ * so the charts track light/dark automatically (no hard-coded hex). Series/bar
+ * FILLS are set inline from viz/statsCharts var() references (theme tokens too).
+ */
+
+.chart {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Axis groups carry no paint themselves; their child lines/text are styled. */
+.axis {
+  pointer-events: none;
+}
+
+.gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.yLabel {
+  fill: var(--text-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  text-anchor: end;
+}
+
+.xLabel {
+  fill: var(--text-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  text-anchor: middle;
+}
+
+.line {
+  /* Stroke color comes from the inline var() per series. */
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* Bar chart: category key (left band) + value text (after the bar). */
+.barKey {
+  fill: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-sans);
+  text-anchor: start;
+}
+
+.barValue {
+  fill: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  text-anchor: start;
+}
+
+.bar {
+  /* Fill comes from the inline var() per bar. */
+}
+
+/* Text legend — the series differentiator (color is never the only signal). */
+.legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-sm);
+  flex: 0 0 auto;
+}
+
+.legendLabel {
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+}
+
+/* Accessible empty-state message (role="status"). */
+.empty {
+  color: var(--text-secondary);
+  font-size: var(--font-size-base);
+  padding: var(--space-4);
+  margin: 0;
+}
