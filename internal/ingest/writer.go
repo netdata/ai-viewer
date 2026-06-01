@@ -89,6 +89,21 @@ type writer struct {
 	// the three rollup-affecting apply paths (SessionStarted, OpStarted,
 	// OpFinalized's persisted start). Cleared in resetBatch.
 	dirtyRollupBuckets map[int64]struct{}
+	// dirtyOpIDs is the set of op ids whose fts_ops searchable text or
+	// error_text this batch changed (marked by BOTH applyOpStarted and
+	// applyOpFinalized — either write can alter the indexed name/model/
+	// provider/tool_namespace or the error text). refreshFTS (fts_refresh.go)
+	// DELETE-then-INSERTs each one from its FINAL persisted ops row in the same
+	// tx, before commit, so the FTS index is byte-identical to BackfillFTS over
+	// the same data. Cleared in resetBatch. fts_logs needs no dirty set: logs
+	// are append-only and indexed inline in applyLogEntry.
+	dirtyOpIDs map[string]struct{}
+	// fts5IndexLogs gates fts_logs population for THIS source: when false the
+	// applyLogEntry FTS insert is skipped (data-model.md §Full-text search).
+	// fts_ops is ALWAYS indexed regardless of this flag. Set per batch by
+	// worker.flush from the resolved worker.fts5IndexLogs (mirrors wr.now), so
+	// newWriter's signature stays unchanged and the field has a reader.
+	fts5IndexLogs bool
 	// now supplies the wall-clock cutoff refreshRollups reads to pick its
 	// open hour/day. Injectable for deterministic tests (so the incremental
 	// path and BackfillRollups share one cutoff — the byte-diff gate's
@@ -234,6 +249,7 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 		pricingMissDedup:   make(map[pricingMissKey]struct{}),
 		pendingMissDedup:   make(map[pricingMissKey]struct{}),
 		dirtyRollupBuckets: make(map[int64]struct{}),
+		dirtyOpIDs:         make(map[string]struct{}),
 		now:                defaultNow,
 	}
 }
@@ -258,6 +274,7 @@ func (w *writer) resetBatch() {
 	clear(w.affectedSessionIDs)
 	clear(w.pendingMissDedup)
 	clear(w.dirtyRollupBuckets)
+	clear(w.dirtyOpIDs)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
@@ -630,6 +647,10 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
 	// never moves buckets after its start — adapters emit the authoritative
 	// start at/before finalize, so cross-bucket op migration is out of scope.
 	w.markDirtyRollupBucket(ev.Ts)
+	// The op's indexed text (name/model/provider/tool_namespace) may have
+	// changed; refreshFTS rebuilds its fts_ops row from the final persisted
+	// columns at flush time (fts_ops is always indexed — no flag gate).
+	w.markDirtyOp(opID)
 	if err := w.catalog.onOpStarted(ctx, tx, ev, opInserted, prior); err != nil {
 		return err
 	}
@@ -786,6 +807,13 @@ WHERE id = ?
 	if startTs.Valid {
 		w.markDirtyRollupBucket(startTs.Int64)
 	}
+	// Finalize sets the op's error_class/error_message (and may change its
+	// status); refreshFTS rebuilds the op's fts_ops row (incl. error_text) from
+	// the now-persisted columns at flush time. Marked unconditionally — even an
+	// orphan finalize (no OpStarted row) is harmless: refreshFTS's DELETE
+	// matches nothing and the row-read returns no row, so no fts_ops row is
+	// inserted for a non-existent op.
+	w.markDirtyOp(opID)
 	// Forward the RESOLVED cost (post-pricer) to the catalog rollups so
 	// catalog_providers.total_cost_usd / catalog_models.total_cost_usd
 	// stay in sync with ops.cost_usd. The pricer mutates `cost` in this
@@ -1068,13 +1096,36 @@ func (w *writer) applyLogEntry(ctx context.Context, tx *sql.Tx, ev canonical.Log
 	if severity == "" {
 		severity = "INF"
 	}
-	if _, err := tx.ExecContext(ctx, `
+	// RETURNING id yields the new log_entries.id on a genuine insert and
+	// sql.ErrNoRows when the ON CONFLICT DO NOTHING fires (a replayed,
+	// byte-identical log row). That signal drives fts_logs: index ONCE per
+	// first-seen log (append-only), skip on replay so no duplicate fts_logs row
+	// is created — matching BackfillFTS, which reads the already-deduped
+	// log_entries. logID stays 0 (invalid) on conflict.
+	var logID int64
+	insertErr := tx.QueryRowContext(ctx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
-`+logEntryOnConflict, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras); err != nil {
-		return fmt.Errorf("writer: insert log_entry: %w", err)
+`+logEntryOnConflict+`
+RETURNING id`, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras).Scan(&logID)
+	insertedNewLog := true
+	if insertErr != nil {
+		if !errors.Is(insertErr, sql.ErrNoRows) {
+			return fmt.Errorf("writer: insert log_entry: %w", insertErr)
+		}
+		insertedNewLog = false // duplicate: the fts_logs row already exists.
 	}
 	w.markDirtySession(sessionID)
+	// fts_logs is gated on the source's fts5_index_logs flag (fts_ops is not).
+	// Index only newly-inserted logs from THIS source; replays are no-ops.
+	if insertedNewLog && w.fts5IndexLogs {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fts_logs (message, log_id, session_id, op_id, severity, ts)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			ev.Message, logID, sessionID, opID, severity, ev.Ts); err != nil {
+			return fmt.Errorf("writer: index log_entry in fts_logs: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1169,6 +1220,16 @@ func (w *writer) markDirtyTurn(id string) { w.dirtyTurnIDs[id] = struct{}{} }
 // bucket, not the end, must be recomputed).
 func (w *writer) markDirtyRollupBucket(ts int64) {
 	w.dirtyRollupBuckets[rollups.BucketTS(ts, rollups.Hourly)] = struct{}{}
+}
+
+// markDirtyOp records that this batch wrote op `id`, so refreshFTS rebuilds its
+// fts_ops row from the FINAL persisted ops columns at flush time. Marked by BOTH
+// applyOpStarted and applyOpFinalized: either write can change the op's indexed
+// text (name/model/provider/tool_namespace) or its error_text (error_class/
+// error_message, set at finalize). DELETE-then-INSERT against the persisted row
+// makes a started+finalized-in-one-batch op index its final error text once.
+func (w *writer) markDirtyOp(id string) {
+	w.dirtyOpIDs[id] = struct{}{}
 }
 
 // nullIfEmpty returns a sql.NullString backed by s when s != "" and

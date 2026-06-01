@@ -160,6 +160,11 @@ func (w *worker) run(ctx context.Context) {
 // the caller; the batch is dropped (we do not retry — see
 // ingester.md §Failure Recovery).
 func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event) error {
+	// Give the writer this source's resolved FTS5 log-indexing flag for the
+	// batch (mirrors how run() threads wr.now). Set here rather than via
+	// newWriter so the writer constructor signature stays unchanged (the ~6
+	// test callers of newWriter need no edit) and the flag has a reader.
+	wr.fts5IndexLogs = w.fts5IndexLogs
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -194,6 +199,15 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	// the catalog/aggregate refresh — order among the three is irrelevant
 	// since each reads the now-final ops/sessions rows.
 	if err := wr.refreshRollups(ctx, tx); err != nil {
+		return err
+	}
+
+	// Rebuild fts_ops for the ops this batch wrote, in THIS tx so the search
+	// index commits atomically with the ops it indexes (mirrors refreshRollups).
+	// fts_logs is maintained inline in applyLogEntry (append-only). Runs after
+	// the apply loop so each op's FINAL persisted columns (incl. finalize error
+	// text) are indexed.
+	if err := wr.refreshFTS(ctx, tx); err != nil {
 		return err
 	}
 

@@ -74,5 +74,19 @@ func runBackfill(args []string, stdout, stderr *os.File) int {
 		"days_processed", stats.DaysProcessed,
 		"elapsed", stats.Elapsed.String(),
 	)
+
+	// The one-shot backfill also rebuilds the FTS5 search index from scratch
+	// (ingester.md §"One-shot backfill"). fts_ops covers every op; fts_logs
+	// covers only fts5_index_logs=1 sources' session-scoped logs.
+	ftsStats, err := ingest.BackfillFTS(ctx, ws.DB(), logger)
+	if err != nil {
+		logger.Error("fts-backfill: failed", "db", resolvedDB, "err", err)
+		return 1
+	}
+	logger.Info("fts-backfill complete",
+		"fts_ops_rows", ftsStats.OpRows,
+		"fts_logs_rows", ftsStats.LogRows,
+		"elapsed", ftsStats.Elapsed.String(),
+	)
 	return 0
 }
