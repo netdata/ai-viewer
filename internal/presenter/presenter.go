@@ -207,6 +207,7 @@ func (p *Presenter) now() time.Time { return p.nowFn() }
 //   - GET /api/stats              cross-session aggregates over the filtered set
 //   - GET /api/stats/aggregate    rollup-backed time-series for the line charts
 //   - GET /api/stats/top          rollup-backed top-N dimension ranking
+//   - GET /api/search             FTS5 full-text search over ops + logs
 //
 // Every other route declared in presenter.md returns NOT_FOUND until
 // the relevant chunk lands. The middleware chain wraps the whole mux
@@ -250,6 +251,7 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/stats", p.handleStats)
 	mux.HandleFunc("/api/stats/aggregate", p.handleStatsAggregate)
 	mux.HandleFunc("/api/stats/top", p.handleStatsTop)
+	mux.HandleFunc("/api/search", p.handleSearch)
 	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
 	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)
 	mux.HandleFunc("/api/events", p.handleEvents)
