@@ -30,8 +30,15 @@ const hourSpanUS = int64(3_600_000_000)
 // Recompute is DELETE-then-INSERT per (bucket, source_format), scoped to THIS
 // writer's source_format, NOT an overwrite: a dimension value that has since
 // fallen into the __other__ tail-collapse must not strand its old per-value
-// row. Scoping to w.sourceFormat keeps a sibling source's rows in the same
-// bucket untouched.
+// row. Both halves are scoped to w.sourceFormat: the DELETE clears the
+// (bucket, source_format) cell and the re-read re-aggregates EVERY source_id of
+// that format in the window — identical to BackfillRollups, which folds ops by
+// src.format (the rollup PK is keyed by source_format, never source_id). So two
+// sources sharing a source_format in the same bucket (e.g. two --source
+// locations of the same format) are summed into one cell, exactly as the
+// backfill computes it. A "sibling source" left untouched is therefore a
+// sibling of a DIFFERENT source_format; same-format sources are aggregated
+// together, by design.
 //
 // Single-writer discipline (store.OpenWriter pins SetMaxOpenConns(1)): every
 // read fully drains its cursor into a slice BEFORE any write on this tx, so a
@@ -69,13 +76,15 @@ func (w *writer) refreshRollups(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// recomputeBucket rebuilds one (bucket, granularity) for this writer's source:
-// DELETE the bucket's rows for this source_format, re-read this source's ops +
-// session-starts in [bucketStart, bucketEnd), fold them with the pure rollups
-// package, and INSERT the result. The DELETE runs first so the subsequent
-// upsert never hits a conflict (the ON CONFLICT clause is then a harmless
-// no-op), keeping a single write path. Reads are fully drained into slices
-// before the writes (single-connection discipline).
+// recomputeBucket rebuilds one (bucket, granularity) for this writer's
+// source_format: DELETE the bucket's rows for this source_format, re-read ALL
+// of that format's ops + session-starts in [bucketStart, bucketEnd), fold them
+// with the pure rollups package, and INSERT the result. DELETE and re-read are
+// both scoped by source_format (symmetric), so the cell is rebuilt from every
+// source_id of the format — matching BackfillRollups. The DELETE runs first so
+// the subsequent upsert never hits a conflict (the ON CONFLICT clause is then a
+// harmless no-op), keeping a single write path. Reads are fully drained into
+// slices before the writes (single-connection discipline).
 func (w *writer) recomputeBucket(ctx context.Context, tx *sql.Tx, bucketStart, bucketEnd int64, bucket rollups.Bucket) error {
 	ops, err := w.loadWindowOps(ctx, tx, bucketStart, bucketEnd)
 	if err != nil {
@@ -96,18 +105,21 @@ func (w *writer) recomputeBucket(ctx context.Context, tx *sql.Tx, bucketStart, b
 	return nil
 }
 
-// windowOpsQuery reads THIS source's ops whose start falls in [?, ?), in the
-// SAME deterministic (start_ts, id) order as the backfill so float folds match
-// bit-for-bit. Source-scoped via s.source_id (ops carry no source_id; the join
-// to sessions provides it).
+// windowOpsQuery reads ALL ops of THIS source_format whose start falls in
+// [?, ?), in the SAME deterministic (start_ts, id) order as the backfill so
+// float folds match bit-for-bit. Format-scoped via src.format (rollupOpSelectFrom
+// already JOINs sources src) — INTENTIONALLY aggregating every source_id of the
+// format, matching the by-source_format rollup PK and BackfillRollups, and
+// symmetric with the by-source_format DELETE.
 var windowOpsQuery = rollupOpSelectFrom + `
-WHERE s.source_id = ? AND o.start_ts >= ? AND o.start_ts < ?
+WHERE src.format = ? AND o.start_ts >= ? AND o.start_ts < ?
 ORDER BY o.start_ts ASC, o.id ASC`
 
-// loadWindowOps reads this source's ops in [start, end) into a slice, fully
-// draining the cursor before the caller writes (single-connection discipline).
+// loadWindowOps reads this source_format's ops in [start, end) into a slice,
+// fully draining the cursor before the caller writes (single-connection
+// discipline).
 func (w *writer) loadWindowOps(ctx context.Context, tx *sql.Tx, start, end int64) ([]rollups.OpRow, error) {
-	rows, err := tx.QueryContext(ctx, windowOpsQuery, w.sourceID, start, end)
+	rows, err := tx.QueryContext(ctx, windowOpsQuery, w.sourceFormat, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("rollups-refresh: query window ops: %w", err)
 	}
@@ -127,16 +139,18 @@ func (w *writer) loadWindowOps(ctx context.Context, tx *sql.Tx, start, end int64
 	return ops, nil
 }
 
-// windowSessionStartsQuery reads THIS source's session starts whose start_ts
-// falls in [?, ?). Source-scoped via s.source_id; reuses the shared column
+// windowSessionStartsQuery reads ALL session starts of THIS source_format whose
+// start_ts falls in [?, ?). Format-scoped via src.format (sessionStartSelectFrom
+// JOINs sources src), aggregating every source_id of the format to match
+// BackfillRollups and the by-source_format DELETE; reuses the shared column
 // shape so scanSessionStart maps it identically to the backfill.
 var windowSessionStartsQuery = sessionStartSelectFrom + `
-WHERE s.source_id = ? AND s.start_ts >= ? AND s.start_ts < ?`
+WHERE src.format = ? AND s.start_ts >= ? AND s.start_ts < ?`
 
-// loadWindowSessionStarts reads this source's session starts in [start, end)
-// into a slice, fully draining the cursor before the caller writes.
+// loadWindowSessionStarts reads this source_format's session starts in
+// [start, end) into a slice, fully draining the cursor before the caller writes.
 func (w *writer) loadWindowSessionStarts(ctx context.Context, tx *sql.Tx, start, end int64) ([]rollups.SessionStart, error) {
-	rows, err := tx.QueryContext(ctx, windowSessionStartsQuery, w.sourceID, start, end)
+	rows, err := tx.QueryContext(ctx, windowSessionStartsQuery, w.sourceFormat, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("rollups-refresh: query window session starts: %w", err)
 	}
@@ -157,14 +171,17 @@ func (w *writer) loadWindowSessionStarts(ctx context.Context, tx *sql.Tx, start,
 }
 
 // rollupDeleteSQL removes one bucket's rows for one source_format before the
-// recompute reinserts them. Scoping to source_format keeps sibling sources'
-// rows in the same bucket intact. The table name is rollupTable(bucket), a
-// fixed literal (never user input); both VALUES are ?-bound.
+// recompute reinserts them. Scoping to source_format keeps a DIFFERENT-format
+// sibling's rows in the same bucket intact (same-format sources share the cell
+// and are re-aggregated together by the by-format re-read — symmetric with this
+// DELETE). The table name is rollupTable(bucket), a fixed literal (never user
+// input); both VALUES are ?-bound.
 const rollupDeleteSQL = `DELETE FROM %s WHERE bucket_ts = ? AND source_format = ?`
 
-// deleteBucketRows deletes this source's rows for the given bucket so the
+// deleteBucketRows clears this source_format's rows for the given bucket so the
 // recompute's INSERT starts from a clean slate (delete-then-insert, NOT
 // overwrite — a value that fell into __other__ must not strand its old row).
+// Symmetric with the by-source_format window re-read in recomputeBucket.
 func (w *writer) deleteBucketRows(ctx context.Context, tx *sql.Tx, bucket rollups.Bucket, bucketStart int64) error {
 	// #nosec G201 -- table is rollupTable(bucket), a fixed literal switch on a
 	// Go enum (never user input); both predicate values are ?-bound.

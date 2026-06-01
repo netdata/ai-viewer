@@ -395,6 +395,97 @@ func TestRefreshRollups_MultiSourceIsolation(t *testing.T) {
 	}
 }
 
+// TestRefreshRollups_AggregatesMultipleSourcesSameFormat pins the by-format
+// recompute: two DISTINCT sources (distinct source_ids / locations) that share
+// ONE source_format and both write the SAME closed hour bucket must aggregate
+// into a single (bucket, format) cell — exactly as BackfillRollups folds ops by
+// src.format. This is the documented two-`--source` config (e.g.
+// claude_code:/a + claude_code:/b). It would fail if the incremental refresh
+// DELETEd the whole (bucket, format) cell then re-read only the current
+// writer's source_id, silently dropping the sibling's contribution.
+func TestRefreshRollups_AggregatesMultipleSourcesSameFormat(t *testing.T) {
+	const format = "claude_code"
+	const srcA = "claude_code:/a"
+	const srcB = "claude_code:/b"
+	now := fixedNow()
+
+	hour := ts(0, 9, 0)
+	end := ts(0, 9, 5)
+
+	// Per-source op metrics (distinct so the SUM is unambiguous).
+	const (
+		aTokensIn, aTokensOut int64   = 100, 200
+		bTokensIn, bTokensOut int64   = 7, 9
+		aCost                 float64 = 0.10
+		bCost                 float64 = 0.20
+	)
+
+	// ---- Store A: incremental path — drive BOTH sources through the writer,
+	// each via its own flushBatch (one worker per source), same format/hour.
+	_, dbA := openTestStore(t)
+	seedSource(t, dbA, srcA, format)
+	seedSource(t, dbA, srcB, format)
+
+	batchA := []canonical.Event{
+		sessionStartEvent(srcA, "a-sess", "claude", "/work/proj-a", hour, 1),
+		canonical.TurnStartedEvent{EventBase: canonical.EventBase{SourceID: srcA, SourceSeq: 2, Ts: hour}, SessionNativeID: "a-sess", Seq: 1},
+	}
+	batchA = append(batchA, llmOpEvents(srcA, "a-sess", 1, 1, hour, end, "sonnet", "anthropic", aTokensIn, aTokensOut, aCost, false)...)
+	flushBatch(t, dbA, srcA, format, now, batchA)
+
+	batchB := []canonical.Event{
+		sessionStartEvent(srcB, "b-sess", "claude", "/work/proj-b", hour, 1),
+		canonical.TurnStartedEvent{EventBase: canonical.EventBase{SourceID: srcB, SourceSeq: 2, Ts: hour}, SessionNativeID: "b-sess", Seq: 1},
+	}
+	batchB = append(batchB, llmOpEvents(srcB, "b-sess", 1, 1, hour, end, "sonnet", "anthropic", bTokensIn, bTokensOut, bCost, true)...)
+	flushBatch(t, dbA, srcB, format, now, batchB)
+
+	// The shared (bucket, format, total) cell must hold BOTH sources summed.
+	total := readRollups(t, dbA, "rollup_hourly")[rollupKey{hour, format, "total", ""}]
+	if total.opCount != 2 {
+		t.Fatalf("total op_count = %d, want 2 (both sources' ops aggregated; sibling source's op was wiped?)", total.opCount)
+	}
+	if total.tokensIn != aTokensIn+bTokensIn {
+		t.Fatalf("total tokens_in = %d, want %d (sum of both sources)", total.tokensIn, aTokensIn+bTokensIn)
+	}
+	if total.tokensOut != aTokensOut+bTokensOut {
+		t.Fatalf("total tokens_out = %d, want %d (sum of both sources)", total.tokensOut, aTokensOut+bTokensOut)
+	}
+	if total.costUSD != aCost+bCost {
+		t.Fatalf("total cost_usd = %v, want %v (sum of both sources)", total.costUSD, aCost+bCost)
+	}
+	if total.failures != 1 {
+		t.Fatalf("total failures = %d, want 1 (source B's op is failed)", total.failures)
+	}
+	if total.sessionStarts != 2 {
+		t.Fatalf("total session_starts = %d, want 2 (one per source)", total.sessionStarts)
+	}
+
+	// ---- Store B: backfill path — seed the IDENTICAL ops/sessions for both
+	// sources, then BackfillRollups over the same data + same now.
+	_, dbB := openTestStore(t)
+	seedSource(t, dbB, srcA, format)
+	seedSource(t, dbB, srcB, format)
+	seedSession(t, dbB, "a-sess", srcA, "claude", "/work/proj-a", hour)
+	seedTurn(t, dbB, "a-turn", "a-sess", hour)
+	seedOp(t, dbB, opSpec{id: "a-op", turnID: "a-turn", sessionID: "a-sess", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hour, endTS: &end, durationUS: end - hour, status: "completed",
+		tokensIn: aTokensIn, tokensOut: aTokensOut, costUSD: aCost})
+	seedSession(t, dbB, "b-sess", srcB, "claude", "/work/proj-b", hour)
+	seedTurn(t, dbB, "b-turn", "b-sess", hour)
+	seedOp(t, dbB, opSpec{id: "b-op", turnID: "b-turn", sessionID: "b-sess", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hour, endTS: &end, durationUS: end - hour, status: "failed",
+		tokensIn: bTokensIn, tokensOut: bTokensOut, costUSD: bCost})
+	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	// Incremental (two same-format sources) must be byte-identical to backfill.
+	assertRollupsIdentical(t, dbA, dbB)
+}
+
 // TestRefreshRollups_SessionStartsAttribution: a session_start lands on
 // total/agent/cwd of its start bucket only — never model/provider/tool.
 func TestRefreshRollups_SessionStartsAttribution(t *testing.T) {
