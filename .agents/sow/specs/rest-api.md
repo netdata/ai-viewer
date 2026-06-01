@@ -369,6 +369,39 @@ range `from`/`to` on `start_ts`, plus `agents`, `models`, `tools`, `sources`,
 non-GET/HEAD method, control-byte rejection on path/query, and `BAD_REQUEST` on an
 unknown enum value behave exactly as the other GET routes.
 
+**Rollup fast path vs. live fold (correctness contract).** The long-form rollups
+are keyed by a SINGLE dimension per row (`data-model.md` §Rollup tables — they
+deliberately avoid the `model×provider×tool×agent×cwd` cross-product), so they can
+natively answer only a `source_format` (`sources`) + time-range filter alongside the
+requested `group_by`/`dimension`. Therefore:
+- **Rollup fast path** — taken when the ONLY filters present are `from`/`to` (no
+  dimension filter and no `sources`): closed buckets are summed from
+  `rollup_hourly`/`rollup_daily` (`WHERE dimension=? AND bucket_ts ∈ [from,
+  openBucketStart)`), and the still-open bucket(s) are folded live.
+- **Live fold** — taken when ANY of `agents`, `models`, `tools`, `status`, `q`,
+  **or `sources`** is present: the WHOLE `[from, to)` is aggregated live from `ops`
+  (joined to `sessions`), applying every filter. `sources` forces the live fold
+  because it binds to `sessions.source_id` (e.g. `codex:/loc`), which is STRICTLY
+  FINER than the rollups' `source_format` key (e.g. `codex`) — one `source_format`
+  can cover many `source_id`s (`data-model.md` §Rollup tables), so a
+  `source_format`-level filter would over-count sibling sources. Correct, just not
+  rollup-accelerated.
+
+**Bucket-window semantics.** A bucket is included iff `from <= bucket_ts < to`
+(selection by the bucket's START); within an included bucket the whole bucket's
+data is returned (the rollups cannot sub-select inside a bucket). A `from`/`to`
+that falls mid-bucket therefore excludes that partial lower bucket — this is what
+keeps the fast path and the live fold byte-identical.
+
+Both paths and the open-bucket fold compute their numbers through the SAME pure
+`internal/rollups` fold (the server reads the relevant `ops` into `rollups.OpRow`s
+and calls `Rollup(...)`), so an open bucket and a live-folded range are
+byte-consistent with the materialized closed buckets by construction — the same
+property the backfill-vs-incremental diff gate guarantees for the ingester.
+`group_by=source_format` reads the `dimension='total'` rows keyed by
+`source_format`; `group_by=total` returns the single `dimension='total'`,
+`dimension_value=''` series.
+
 ```
 ?from=<us>&to=<us>
 &bucket=daily            'hourly'|'daily' (default 'daily')

@@ -205,6 +205,8 @@ func (p *Presenter) now() time.Time { return p.nowFn() }
 //   - GET /api/sessions/{id}/timeline  per-session lanes + spans for the timeline view
 //   - GET /api/topology           cross-session actor graph (agents only) over the filtered set
 //   - GET /api/stats              cross-session aggregates over the filtered set
+//   - GET /api/stats/aggregate    rollup-backed time-series for the line charts
+//   - GET /api/stats/top          rollup-backed top-N dimension ranking
 //
 // Every other route declared in presenter.md returns NOT_FOUND until
 // the relevant chunk lands. The middleware chain wraps the whole mux
@@ -246,6 +248,8 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions/{id}/timeline", p.handleSessionTimeline)
 	mux.HandleFunc("/api/topology", p.handleCrossTopology)
 	mux.HandleFunc("/api/stats", p.handleStats)
+	mux.HandleFunc("/api/stats/aggregate", p.handleStatsAggregate)
+	mux.HandleFunc("/api/stats/top", p.handleStatsTop)
 	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
 	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)
 	mux.HandleFunc("/api/events", p.handleEvents)
