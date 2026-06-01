@@ -230,7 +230,7 @@ func TestEnsureSourceRow_FailsOnDeadTx(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	ctx, tx := rolledTx(t, db)
-	if err := ensureSourceRow(ctx, tx, "src", "fmt", "/loc"); err == nil {
+	if err := ensureSourceRow(ctx, tx, "src", "fmt", "/loc", true); err == nil {
 		t.Fatal("expected error on rolled-back tx")
 	}
 }

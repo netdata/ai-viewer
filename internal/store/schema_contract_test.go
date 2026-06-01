@@ -259,6 +259,10 @@ func expectedSchema() []tableContract {
 				{Name: "enabled", Type: "INTEGER", NotNull: true, DfltVal: "1"},
 				{Name: "parse_errors", Type: "INTEGER", NotNull: true, DfltVal: "0"},
 				{Name: "created_at", Type: "INTEGER", NotNull: true},
+				// Appended by migration 0007 (ALTER TABLE ADD COLUMN appends
+				// after created_at). Per-source FTS5 log-indexing opt-out flag,
+				// default 1 (index logs). data-model.md §Full-text search.
+				{Name: "fts5_index_logs", Type: "INTEGER", NotNull: true, DfltVal: "1"},
 			},
 			indexes: nil,
 			fks:     nil,

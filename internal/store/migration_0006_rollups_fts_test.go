@@ -9,16 +9,20 @@ import (
 // This file pins migration 0006 (SOW-0007 Chunk 2): the empty rollup tables
 // (rollup_hourly, rollup_daily) and the FTS5 search tables (fts_ops, fts_logs).
 // Schema-only — no row population (the rollup backfill + FTS indexing are
-// Chunk 4). The migration bumps schema_meta.version to '6' in lockstep with
-// presenter.SchemaVersion: serve reads all four tables (the rollup-backed
-// /api/stats, /api/stats/aggregate, /api/stats/top, and /api/search), so a v6
-// serve binary must refuse a pre-0006 store (CheckSchema, exact-equality).
+// Chunk 4). 0006 bumps schema_meta.version to '6' in lockstep with
+// presenter.SchemaVersion; that OWN bump is pinned by the internal
+// TestMigration0006_BumpsSchemaVersionTo6_Internal (which stops the chain at
+// 0006). This external file pins 0006's SCHEMA SHAPE (table/index/FTS5 tests
+// below) over the FULL chain, whose head is now 0007=v7.
 // Source of truth: .agents/sow/specs/data-model.md §Rollup tables (SOW-0007)
 // and §Full-text search (FTS5).
 
-// TestMigration0006_BumpsSchemaVersionTo6 pins the lockstep contract: after the
-// full chain (which ends at 0006) runs, schema_meta.version is '6'.
-func TestMigration0006_BumpsSchemaVersionTo6(t *testing.T) {
+// TestMigration0006_ChainHeadSchemaVersion pins the FULL-chain head version:
+// openInMemory runs every migration through the latest (0007), so the on-disk
+// schema_meta.version is '7'. 0006's OWN bump (to '6') is pinned separately by
+// the internal apply-through-0006 test; this assertion guards the lockstep with
+// presenter.SchemaVersion as new migrations are added.
+func TestMigration0006_ChainHeadSchemaVersion(t *testing.T) {
 	t.Parallel()
 
 	_, db := openInMemory(t)
@@ -28,8 +32,8 @@ func TestMigration0006_BumpsSchemaVersionTo6(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "6" {
-		t.Fatalf("schema_meta.version: want %q, got %q (0006 bumps the version in lockstep)", "6", version)
+	if version != "7" {
+		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0007)", "7", version)
 	}
 }
 

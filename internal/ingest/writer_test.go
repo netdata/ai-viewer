@@ -38,7 +38,9 @@ func ensureSourceRowDirect(ctx context.Context, db *sql.DB, id, format, loc stri
 	if err != nil {
 		return err
 	}
-	if err := ensureSourceRow(ctx, tx, id, format, loc); err != nil {
+	// true mirrors the ingester's default-resolved fts5_index_logs (indexed
+	// unless the operator opts out); these tests do not exercise the flag.
+	if err := ensureSourceRow(ctx, tx, id, format, loc, true); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

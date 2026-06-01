@@ -17,13 +17,18 @@ type worker struct {
 	sourceID     string
 	sourceFormat string
 	location     string
-	events       <-chan canonical.Event
-	db           *sql.DB
-	hwm          *hwmCache
-	pricer       Pricer
-	logger       *slog.Logger
-	batchSize    int
-	batchEvery   time.Duration
+	// fts5IndexLogs is the resolved per-source FTS5 log-indexing flag the
+	// ingester computed from WithFTS5IndexLogs (default true). ensureSourceRow
+	// persists it on the sources row so the operator's choice survives daemon
+	// restart. NOTHING reads it yet — FTS index population is a later step.
+	fts5IndexLogs bool
+	events        <-chan canonical.Event
+	db            *sql.DB
+	hwm           *hwmCache
+	pricer        Pricer
+	logger        *slog.Logger
+	batchSize     int
+	batchEvery    time.Duration
 	// now supplies the wall-clock cutoff the incremental rollup refresh uses
 	// to pick its open hour/day. Injectable for deterministic tests; defaults
 	// to defaultNow when the worker is built without one.
@@ -169,8 +174,10 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	}()
 
 	// Ensure the source row exists; subsequent FK references and
-	// source_progress depend on it.
-	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location); err != nil {
+	// source_progress depend on it. The resolved fts5IndexLogs flag is
+	// persisted here (the ingester option is the runtime source of truth, so a
+	// daemon restart re-asserts it); nothing reads it yet.
+	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location, w.fts5IndexLogs); err != nil {
 		return err
 	}
 
@@ -257,14 +264,24 @@ func (w *worker) report(err error) {
 }
 
 // ensureSourceRow inserts the source row if it does not yet exist. The
-// ingester creates one row per source on first batch flush.
-func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string) error {
+// ingester creates one row per source on first batch flush. fts5IndexLogs is
+// the resolved per-source FTS5 log-indexing flag; it is persisted on both
+// insert and conflict-update because the ingester option is the runtime source
+// of truth (a daemon restart re-asserts the configured value over whatever a
+// prior run stored). The value is config plumbing only — no FTS index
+// population reads it yet (data-model.md §Full-text search).
+func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string, fts5IndexLogs bool) error {
+	ftsFlag := 0
+	if fts5IndexLogs {
+		ftsFlag = 1
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO sources (id, format, location, enabled, created_at)
-VALUES (?, ?, ?, 1, ?)
+INSERT INTO sources (id, format, location, enabled, fts5_index_logs, created_at)
+VALUES (?, ?, ?, 1, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
-    location = excluded.location
-`, sourceID, format, location, time.Now().UTC().UnixMicro()); err != nil {
+    location        = excluded.location,
+    fts5_index_logs = excluded.fts5_index_logs
+`, sourceID, format, location, ftsFlag, time.Now().UTC().UnixMicro()); err != nil {
 		return fmt.Errorf("ensure source row: %w", err)
 	}
 	return nil
