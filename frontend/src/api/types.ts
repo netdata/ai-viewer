@@ -477,7 +477,8 @@ export interface SearchOpHit {
 export interface SearchLogHit {
   log_id: number;
   session_id: string;
-  op_id: string;
+  /** null for a session/turn-scoped log with no owning op (backend emits *string). */
+  op_id: string | null;
   severity: string;
   ts: number;
   snippet: string;

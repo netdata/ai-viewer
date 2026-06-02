@@ -399,6 +399,58 @@ func TestSearch_LogsIndexedScoping(t *testing.T) {
 	}
 }
 
+// TestSearch_DisabledSourceLogsExcludedAtQueryTime pins the per-source log
+// opt-out at QUERY time (not just via the logs_indexed gate). The flag can be
+// flipped true→false AFTER a source's logs were indexed; incremental ingest then
+// stops indexing NEW logs but does NOT clear the already-written fts_logs rows
+// (data-model.md §Full-text search — they survive until a rollups-backfill
+// rebuild). This test simulates that post-flip state: source B has fts5_index_logs=0
+// yet a stale fts_logs row for its log. With source A (enabled) ALSO in scope, the
+// logs_indexed gate is true (≥1 in-scope source indexes logs), so the fts_logs
+// query runs — and must still exclude B's stale row by filtering on the LIVE
+// src.fts5_index_logs flag. Without the JOIN-through-to-sources filter, B's stale
+// log leaks into results.
+func TestSearch_DisabledSourceLogsExcludedAtQueryTime(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	// Source A: log indexing ENABLED (default). Source B: a log + stale fts_logs
+	// row seeded WHILE enabled, then the flag flipped off — the post-flip state
+	// where rows outlive the opt-out.
+	seedSource(t, db, "srcEnabled", "aiagent_v3", "/tmp/on", base)
+	seedSource(t, db, "srcDisabled", "codex", "/tmp/off", base)
+	for _, s := range []struct{ id, src string }{{"sEnabled", "srcEnabled"}, {"sDisabled", "srcDisabled"}} {
+		seedSession(t, db, sessionRow{
+			id: s.id, sourceID: s.src, nativeID: s.id, rootID: s.id, kind: "root",
+			agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 2000,
+		})
+		// Both sessions get a log matching "needle"; seedFTSLog writes the stale
+		// fts_logs row for each while the source is still default-on.
+		seedFTSLog(t, db, logRow{sessionID: s.id, ts: base + 1200, severity: "ERR",
+			source: "x", message: "parse needle here"})
+	}
+	// Flip source B's opt-out AFTER its fts_logs row exists (the true→false case).
+	setSourceIndexLogs(t, db, "srcDisabled", false)
+
+	// BOTH sources in scope (no ?sources filter): logs_indexed is true (source A
+	// indexes logs), so the fts_logs query runs. Only source A's log may surface.
+	code, body, env := getSearch(t, p, "q=needle")
+	if code != http.StatusOK {
+		t.Fatalf("status=%d env=%+v", code, env)
+	}
+	if !body.LogsIndexed {
+		t.Errorf("logs_indexed=false, want true (source A still indexes logs)")
+	}
+	if len(body.Logs) != 1 {
+		t.Fatalf("logs=%+v, want exactly 1 (source B's stale row must be excluded)", body.Logs)
+	}
+	if body.Logs[0].SessionID != "sEnabled" {
+		t.Errorf("returned log from %q, want sEnabled (disabled source's stale fts_logs row leaked)",
+			body.Logs[0].SessionID)
+	}
+}
+
 // TestSearch_LogsIndexedScopedToSourcesFilter asserts logs_indexed is scoped to
 // the in-scope source set: with one indexed source and one opted-out source,
 // restricting ?sources= to the opted-out source yields logs_indexed=false even

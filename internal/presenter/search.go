@@ -315,15 +315,23 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 	return out, rows.Err()
 }
 
-// searchLogs runs the fts_logs MATCH joined back to log_entries⋈sessions,
+// searchLogs runs the fts_logs MATCH joined back to log_entries⋈sessions⋈sources,
 // applying the parseSessionFilter constraints. Logs are session-scoped (the
 // ingester's only fts_logs writer sets session_id), so the join chain is
 // fts_logs.log_id → log_entries.id → sessions.id → sources.id; the filter binds
-// to the session/source exactly as searchOps does. MATCH + all filter values
-// are `?`-bound. ORDER BY rank = best first; the unique fts_logs.log_id
-// tie-breaker orders rows WITHIN an equal-rank group so the total order is
-// deterministic and offset pagination stays stable across the page-1 and offset
-// queries (equal-bm25 rows are common). The cursor is fully drained.
+// to the session/source exactly as searchOps does. The `src.fts5_index_logs = 1`
+// predicate enforces the per-source log opt-out at QUERY time against the LIVE
+// flag: the flag can be flipped true→false after a source's logs were indexed,
+// and incremental ingest then stops indexing NEW logs but leaves the already-
+// written fts_logs rows in place (they survive until a rollups-backfill rebuild —
+// data-model.md §Full-text search). Filtering on the live flag here makes those
+// stale rows harmless, so a disabled source's logs never surface even when an
+// enabled source is also in scope (the logs_indexed gate alone only decides
+// whether to run this query at all). MATCH + all filter values are `?`-bound.
+// ORDER BY rank = best first; the unique fts_logs.log_id tie-breaker orders rows
+// WITHIN an equal-rank group so the total order is deterministic and offset
+// pagination stays stable across the page-1 and offset queries (equal-bm25 rows
+// are common). The cursor is fully drained.
 func (p *Presenter) searchLogs(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchLogRow, error) {
 	where, whereArgs := f.whereClause("s")
 	// The only concatenated fragment is the parameterized whereClause
@@ -335,7 +343,8 @@ SELECT fts_logs.log_id, fts_logs.session_id, fts_logs.op_id, fts_logs.severity, 
 FROM fts_logs
 JOIN log_entries le ON le.id = fts_logs.log_id
 JOIN sessions s ON le.session_id = s.id
-WHERE fts_logs MATCH ? AND ` + where + `
+JOIN sources src ON s.source_id = src.id
+WHERE fts_logs MATCH ? AND src.fts5_index_logs = 1 AND ` + where + `
 ORDER BY rank, fts_logs.log_id
 LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is the parameterized whereClause (filters.go)
 	args := make([]any, 0, len(whereArgs)+3)

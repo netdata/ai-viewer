@@ -351,12 +351,16 @@ Cross-session aggregates over the filtered set.
 }
 ```
 
-The response shape is unchanged, but as of SOW-0007 the **closed-hour** totals are
-read from the materialized rollups (`rollup_hourly`/`rollup_daily`,
-`data-model.md` §Rollup tables) rather than a full `SUM` over `ops`; only the
-**open hour** is computed live over `ops` and `UNION ALL`'d in. Same numbers,
-faster — the additivity invariant (`data-model.md`) guarantees the rollup sum
-equals the live `SUM` for any closed bucket.
+`/api/stats` is **NOT** rollup-backed and is unchanged by SOW-0007: it continues to
+compute its breakdowns live over `sessions`/`ops` for the filtered session set.
+This is deliberate — `/api/stats` is a *filtered, non-time-bucketed* summary
+(`by_status` has no rollup dimension, and `by_agent`/`by_model`/`by_source` are
+scoped to the filtered session set), none of which maps onto the time-bucketed,
+per-single-dimension, all-sessions rollups. The rollup-backed analytics surfaces
+delivered by SOW-0007 are the dedicated endpoints below — `/api/stats/aggregate`
+and `/api/stats/top`. (An earlier SOW-0007 draft proposed transparently
+rollup-backing `/api/stats`; that was dropped as ill-fitting — the summary's shape
+and filter semantics differ fundamentally from the rollups.)
 
 ### GET /api/stats/aggregate
 
@@ -508,7 +512,10 @@ Response — matched ops and logs, ranked by BM25 with `snippet()` excerpts:
 - **`logs_indexed`** reflects the per-source `fts5_index_logs` flag
   (`data-model.md`). When log indexing is disabled the `logs` array is empty and
   `"logs_indexed": false` is set, so the client can distinguish "no log matches"
-  from "logs not indexed on this install".
+  from "logs not indexed on this install". Log hits are additionally restricted at
+  query time to sources with `fts5_index_logs=1`, so a disabled source's logs never
+  appear in search even if previously-indexed `fts_logs` rows remain until a
+  `rollups-backfill` rebuild.
 - An empty/whitespace-only `q` is a `BAD_REQUEST`.
 
 ### GET /api/catalog/{tools,models,agents}
