@@ -27,7 +27,7 @@ For every adapter under `internal/adapters/<name>/`:
 
 `internal/canonical/` and `internal/ingest/`:
 
-- Event type encoding/decoding roundtrip.
+- `EventBase`/`EventKind` accessor invariants, plus property tests (`internal/canonical/property_test.go`) that round-trip generated canonical events through the real ingest→store→presenter path. (Canonical has no encode/decode — events are constructed by adapters and never serialized.)
 - Cursor parsing across all adapter formats.
 - Ingest dedup: feed two copies of the same event stream, assert SQLite rows are written once.
 - Ingest link resolution: parent arrives after child, assert eventual linking.

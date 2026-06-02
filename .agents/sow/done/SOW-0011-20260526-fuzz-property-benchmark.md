@@ -4,7 +4,7 @@
 
 ## Status
 
-Status: in progress
+Status: completed
 
 Sub-state: drafted 2026-05-26 alongside SOW-0009 and SOW-0010. **Activated 2026-06-02** under the operator's standing blanket mandate, re-scoped to the measured live delta (see "Re-scope decisions" + "Enumeration" below). Prerequisite SOW-0001 (Go module + `internal/canonical/` + the adapters) is long merged; the packages exist. Branch: `sow-0011-fuzz-property-bench`.
 
@@ -316,17 +316,40 @@ All 3 returned (minimax completed — the no-run-tests instruction fixed its rou
 - No production Go touched (the bench_test.go change is comment-only); gofmt clean, scans clean.
 - **Next**: re-review round 7 to confirm convergence → on clean, PR → self-merge → close.
 
+### 2026-06-03 — External review round 7 (codex + glm + minimax) — CONVERGED
+
+**codex** (decisive): no P1/P3; 1 P2 — `testing-strategy.md:30` still listed a canonical "encoding/decoding roundtrip" test (canonical has no encode/decode); fixed (replaced with the `EventBase`/`EventKind` accessor + ingest→store→presenter property-test surface). **glm**: mergeable, drift-class table all-clean. **minimax**: mergeable, "ready to merge", 2 non-actionable P3s. All three confirm the CODE + workflows converged (property tests non-vacuous + production-routed, gate sound, workflows secure, production Go byte-identical). The doc-drift long tail (R3–R7) is fully reconciled — exhaustive re-grep zero. **Convergence reached → PR → self-merge → close.**
+
 ## Validation
 
-Pending.
+Final pre-merge run (2026-06-03), all green:
+- `gofmt -l` clean; `go vet ./...` 0; `golangci-lint run` **0 issues**; `go test -race ./...` pass.
+- Coverage gate PASS — every gated `internal/*` package + aggregate ≥ 80% statements (`internal/canonical` 100% incl. the new property tests).
+- `scripts/check-bench.sh` PASS (5/5 benchmarks compared, no significant > 20% sec/op regression); gate self-tests pass — `check-coverage` 8/8, `check-bench` 8/8.
+- `actionlint` clean on `ci.yml` + `fuzz-nightly.yml`; secret + AI-attribution scans clean.
+- Per-push fuzz seed-corpus gate exits 0; the package-qualified fuzz-target pin matches `fuzz-nightly.yml`'s 10-entry matrix.
+- The 5 property tests are mutation-proven non-vacuous (each fails when the production writer / `loadOps` is deliberately broken, then reverted; `internal/presenter` + `writer.go` byte-identical after).
+- External review converged after **7 rounds** (codex decisive + glm + minimax): R1 P1×3 → R2 P2×3 → R3–R7 doc/comment-drift tail + one real CI bug (R5 artifact-name collision), all fixed; R7 clean.
 
 ## Outcome
 
-Pending.
+Delivered the SOW-0011 quality-infra layer, re-scoped to measured reality (the repo already had 10 adapter fuzz targets; `internal/canonical` has no decoders):
+- **Property tests** (`internal/canonical/property_test.go`, `pgregory.net/rapid`): 5 invariants, each routed through the REAL ingest→store(→presenter) path — round-trip (sessions row), ops ordering (production `loadOps`), idempotent re-ingest, schema completeness (writer-persisted required columns), µs timestamp fidelity. Mutation-proven.
+- **5 benchmarks** (Scan + Tail in `aiagent_v2`, `worker.flush`, `handleSessionsList`, `Hub.Deliver`) with a `count=6` `bench/baseline.txt` (commit-SHA + `goos/goarch/pkg/cpu` headers).
+- **`scripts/check-bench.sh`** — local/workstation regression gate (benchstat, significant > 20% sec/op, geomean + custom metrics excluded, forward + reverse vacuous-pass guards) + an 8-case self-test. Local because the workstation baseline is not comparable to GitHub-runner hardware; CI runs the bench compile-smoke + the hardware-independent self-test.
+- **CI fuzz wiring**: a per-push DETERMINISTIC seed-corpus gate (`ci.yml`) + a nightly `-fuzz` exploration matrix (`fuzz-nightly.yml`, per-(package,target), collision-safe crash-reproducer artifacts).
+- **Doc reconciliation**: the entire fuzz/property/benchmark quality-gate doc class brought to reality across `AGENTS.md`, `quality-gates.md`, `testing-strategy.md`, `workflow.md`, `project-{quality-gates,testing,workflow}`, `bench/README.md`, `bench/baseline.txt`.
+
+Zero production Go source changed (all Go is `*_test.go`). 10 branch commits; 7 external-review rounds. Deferred (see Followup): runner-baselined CI bench gate, auto-issue-on-fuzz-crash, bench PR sticky comment, `heapSampler` de-dup.
 
 ## Lessons Extracted
 
-Pending.
+- **Tautological property tests are the headline trap.** R1 found 4 of 5 property tests asserting their own generators / Go stdlib, not production. A property test must route through a real production transform (here ingest→store→presenter) and be MUTATION-PROVEN (break production, watch it fail, revert).
+- **A "round-trip"/"ordering" test that re-implements the production query is a subtler tautology** (R2/R3): assert against the production read path (the presenter handler / `loadOps`), not a copied `ORDER BY`; and anti-correlate any encoded discriminator with the value under test so "ordered by the wrong column" also fails (R6).
+- **A regression gate must fail closed on "compared nothing"** (R1/R2): benchstat silently compares disjoint groups (missing `goos/pkg/cpu` config lines) or a renamed/dropped benchmark → assert every baseline benchmark produced a real `(p=…)` row, else exit 2.
+- **Sweep the drift CLASS repo-wide, not the cited lines** (R3–R7 — the costly lesson): the fuzz/bench doc-drift spanned ~9 files; fixing only what each round cited cost five review rounds. A reviewer citing N instances means "≥N of a class" — enumerate the whole class with one grep across ALL active docs (and comments + test-file headers), fix all, re-grep to prove zero. My greps were repeatedly too narrow (missed `testing-strategy.md`'s bench section, then its canonical test-kind, then a `bench_test.go` header comment) — broaden the pattern; don't trust a single phrasing.
+- **codex decisive; glm/minimax lenient** (all 7 rounds): glm + minimax called "mergeable" from R3 on and MISSED codex's real P2s every round (incl. a genuine CI artifact-name collision at R5). Never merge on a reviewer's green light; adjudicate every finding on ground truth — accept-real / reject-false-with-evidence (the R6 `opencode:156 -count=5` was a grep collision, not drift).
+- **minimax times out if it runs the suite**: a `read-only` instruction is not enough — explicitly forbid `go test`/build/lint so it reviews statically (R2 timeout → R3+ no-run instruction fixed it).
 
 ## Followup
 
