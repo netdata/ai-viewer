@@ -83,12 +83,48 @@ type writer struct {
 	// the priced op. Cleared at resetBatch().
 	batchObservabilityErrs []error
 	// dirtyRollupBuckets is the set of HOUR buckets (rollups.BucketTS(ts,
-	// Hourly)) whose rollup inputs this batch changed. refreshRollups
-	// (rollup_refresh.go) recomputes each closed hour and its day from this
-	// set in the same tx, before commit. Marked by markDirtyRollupBucket from
-	// the three rollup-affecting apply paths (SessionStarted, OpStarted,
-	// OpFinalized's persisted start). Cleared in resetBatch.
+	// Hourly)) whose rollup inputs are pending materialization. refreshRollups
+	// (rollup_refresh.go) recomputes each CLOSED hour and its day from this set
+	// in the same tx, before commit, and REMOVES each bucket it materializes; a
+	// bucket still OPEN at refresh time is RETAINED (the open hour is never
+	// materialized — the query layer live-folds it). Marked by
+	// markDirtyRollupBucket from the three rollup-affecting apply paths
+	// (SessionStarted, OpStarted, OpFinalized's persisted start).
+	//
+	// CARRY-FORWARD (NOT per-batch): this set is writer-lifetime state, NOT
+	// cleared in resetBatch. A bucket dirtied while it was the open hour stays
+	// in the set across batches and is materialized on the first refresh after
+	// it closes — without this, a bucket whose ops all arrive during its own
+	// open hour would be skipped while open and then never re-marked, leaving
+	// the closed bucket permanently un-materialized (round-7 P1). Memory stays
+	// bounded: refreshRollups removes every closed bucket it materializes, so
+	// only open/recent-pending hours remain.
 	dirtyRollupBuckets map[int64]struct{}
+	// rollupTouchedThisBatch is true when markDirtyRollupBucket fired during
+	// THIS batch (a new op/session marked a bucket). Cleared in resetBatch.
+	// emitNotify uses it (∪ rollupMaterializedThisRefresh) instead of
+	// len(dirtyRollupBuckets) so a carried-open pending bucket does NOT make
+	// stats_invalidated fire on every batch (the original semantics: fire when
+	// this batch actually touched a rollup input, not when one is merely
+	// pending).
+	rollupTouchedThisBatch bool
+	// rollupMaterializedThisRefresh is true when refreshRollups materialized
+	// (recomputed) at least one bucket during the current batch OR a dedicated
+	// idle refresh-only pass. Cleared in resetBatch. The second half of the
+	// stats_invalidated trigger, so an idle pass that closes a carried bucket
+	// still emits exactly one notify even though no event marked a bucket.
+	rollupMaterializedThisRefresh bool
+	// pendingMaterializedBuckets buffers HOUR buckets that refreshRollups
+	// materialized WITHIN the current open tx but has NOT yet removed from the
+	// carried dirtyRollupBuckets set. The removal is deferred to AFTER commit
+	// (promoteMaterializedRollupBuckets, called by worker.flush /
+	// refreshRollupsOnly post-commit) — mirroring pendingMissDedup. If the tx
+	// rolls back, resetBatch discards this map so the bucket stays CARRIED and
+	// is retried next pass: a materialized-then-rolled-back idle refresh has no
+	// events to re-ingest (the bucket's ops were committed by a PRIOR batch), so
+	// removing it from the set on the in-memory delete alone would lose a closed
+	// bucket whose DB row never committed — the very round-7 P1 undercount.
+	pendingMaterializedBuckets map[int64]struct{}
 	// dirtyOpIDs is the set of op ids whose fts_ops searchable text or
 	// error_text this batch changed (marked by BOTH applyOpStarted and
 	// applyOpFinalized — either write can alter the indexed name/model/
@@ -238,19 +274,20 @@ func graftAiViewerKey(base, existingCol, key string) string {
 
 func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 	return &writer{
-		sourceID:           sourceID,
-		sourceFormat:       sourceFormat,
-		location:           location,
-		pricer:             pricer,
-		catalog:            newCatalogWriter(pricer),
-		dirtySessionIDs:    make(map[string]struct{}),
-		dirtyTurnIDs:       make(map[string]struct{}),
-		affectedSessionIDs: make(map[string]struct{}),
-		pricingMissDedup:   make(map[pricingMissKey]struct{}),
-		pendingMissDedup:   make(map[pricingMissKey]struct{}),
-		dirtyRollupBuckets: make(map[int64]struct{}),
-		dirtyOpIDs:         make(map[string]struct{}),
-		now:                defaultNow,
+		sourceID:                   sourceID,
+		sourceFormat:               sourceFormat,
+		location:                   location,
+		pricer:                     pricer,
+		catalog:                    newCatalogWriter(pricer),
+		dirtySessionIDs:            make(map[string]struct{}),
+		dirtyTurnIDs:               make(map[string]struct{}),
+		affectedSessionIDs:         make(map[string]struct{}),
+		pricingMissDedup:           make(map[pricingMissKey]struct{}),
+		pendingMissDedup:           make(map[pricingMissKey]struct{}),
+		dirtyRollupBuckets:         make(map[int64]struct{}),
+		pendingMaterializedBuckets: make(map[int64]struct{}),
+		dirtyOpIDs:                 make(map[string]struct{}),
+		now:                        defaultNow,
 	}
 }
 
@@ -273,12 +310,27 @@ func (w *writer) resetBatch() {
 	clear(w.dirtyTurnIDs)
 	clear(w.affectedSessionIDs)
 	clear(w.pendingMissDedup)
-	clear(w.dirtyRollupBuckets)
+	// dirtyRollupBuckets is deliberately NOT cleared here — it is writer-lifetime
+	// carry-forward state. Only refreshRollups removes a bucket, and only after it
+	// materializes it (once the bucket closes) AND the tx commits (via
+	// promoteMaterializedRollupBuckets). A bucket still open at refresh time stays
+	// carried to the next batch; clearing it here would re-introduce the round-7
+	// P1 bug (an open-hour bucket forgotten before it could materialize).
+	//
+	// pendingMaterializedBuckets IS cleared here. On rollback this discards the
+	// not-yet-committed removals so the buckets stay carried and are retried; on
+	// commit, promoteMaterializedRollupBuckets runs FIRST (post-commit, before the
+	// caller's resetBatch) and applies the removals to dirtyRollupBuckets.
+	clear(w.pendingMaterializedBuckets)
 	clear(w.dirtyOpIDs)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
 	w.sourceStatusChanged = false
+	// Per-batch rollup notify signals reset every batch; the carried
+	// dirtyRollupBuckets set (above) does not.
+	w.rollupTouchedThisBatch = false
+	w.rollupMaterializedThisRefresh = false
 	w.batchObservabilityErrs = w.batchObservabilityErrs[:0]
 }
 
@@ -290,6 +342,18 @@ func (w *writer) resetBatch() {
 func (w *writer) promotePendingMissDedup() {
 	for k := range w.pendingMissDedup {
 		w.pricingMissDedup[k] = struct{}{}
+	}
+}
+
+// promoteMaterializedRollupBuckets removes the buckets refreshRollups
+// materialized in the just-committed tx from the carried dirtyRollupBuckets set.
+// Called by worker.flush / worker.refreshRollupsOnly AFTER tx.Commit() succeeds —
+// a rolled-back materialization therefore leaves its bucket CARRIED (retried next
+// pass), mirroring promotePendingMissDedup. The pending map is left intact
+// (resetBatch clears it next), so this is idempotent against repeated calls.
+func (w *writer) promoteMaterializedRollupBuckets() {
+	for h := range w.pendingMaterializedBuckets {
+		delete(w.dirtyRollupBuckets, h)
 	}
 }
 
@@ -1330,6 +1394,15 @@ func (w *writer) markDirtyTurn(id string) { w.dirtyTurnIDs[id] = struct{}{} }
 // bucket, not the end, must be recomputed).
 func (w *writer) markDirtyRollupBucket(ts int64) {
 	w.dirtyRollupBuckets[rollups.BucketTS(ts, rollups.Hourly)] = struct{}{}
+	w.rollupTouchedThisBatch = true
+}
+
+// hasPendingRollupBuckets reports whether any rollup bucket is still awaiting
+// materialization (carried forward because it was open at the last refresh). The
+// worker's run loop reads it to decide whether to keep its flush timer armed for
+// an idle materialization tick once a carried bucket closes — see worker.run.
+func (w *writer) hasPendingRollupBuckets() bool {
+	return len(w.dirtyRollupBuckets) > 0
 }
 
 // markDirtyOp records that this batch wrote op `id`, so refreshFTS rebuilds its

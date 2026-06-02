@@ -290,6 +290,77 @@ func TestWorker_OnErrCallbackFires(t *testing.T) {
 	}
 }
 
+// TestWorker_IdleTickMaterializesClosedBucket pins the round-7 idle
+// materialization tick (Part 2). Ops arrive entirely within the OPEN hour H, then
+// ingestion goes quiet (no further events). When the injected clock advances past
+// H's close, the worker's idle tick must run a refresh-only pass and materialize H
+// into rollup_hourly WITHOUT any new event — driving the real worker.run timer.
+// The timer must keep firing while a bucket is pending (open at last flush) and
+// self-terminate once the carried set drains.
+func TestWorker_IdleTickMaterializesClosedBucket(t *testing.T) {
+	t.Parallel()
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	clk := &mutableClock{now: ts(0, 10, 10)} // open hour = H → H carried, not materialized.
+
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1000),                    // never trip on size
+		WithBatchInterval(20*time.Millisecond), // short idle tick
+		WithNow(clk.Now),
+		WithSourceFormat(src, format),
+		WithLocation(src, "/loc"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	ch := make(chan canonical.Event, 8)
+	if err := i.Submit(src, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	defer close(ch)
+
+	// One op entirely inside the open hour H, then NO further events.
+	ch <- sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1)
+	ch <- canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+		SessionNativeID: "sess-1", Seq: 1,
+	}
+	for _, ev := range llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "m", "p", 1, 1, 0, false) {
+		ch <- ev
+	}
+
+	// Wait for the first interval flush to commit the op (H open → not materialized).
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM ops`) == 1
+	}) {
+		t.Fatalf("first flush did not commit the op; ops=%d", scanInt(t, db, `SELECT COUNT(*) FROM ops`))
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH); got != 0 {
+		t.Fatalf("open hour H materialized before it closed (count=%d) — must wait for close", got)
+	}
+
+	// Close H by advancing the clock; the idle tick (no new events) must materialize it.
+	clk.now = ts(0, 11, 1)
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH) == 1
+	}) {
+		t.Fatalf("idle tick did not materialize closed hour H; rollup_hourly total rows for H=%d",
+			scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH))
+	}
+}
+
 // TestWorker_FlushPromotesPendingMissDedupAfterCommit pins that
 // the rollback/dedup writer-level tests call promotePendingMissDedup
 // manually, so a developer who removed wr.promotePendingMissDedup from

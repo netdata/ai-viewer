@@ -41,6 +41,288 @@ func flushBatch(t *testing.T, db *sql.DB, sourceID, format string, now int64, ba
 	wr.resetBatch()
 }
 
+// mutableClock is an injectable clock whose value the test advances between
+// flushes, so a bucket open at one flush is closed at the next — the open→closed
+// transition the carry-forward dirty set must survive. flushBatchReuse drives a
+// SINGLE writer across batches (production reuses wr in worker.run), so the
+// carry-forward state on the writer persists exactly as it does in production.
+type mutableClock struct{ now int64 }
+
+func (c *mutableClock) Now() int64 { return c.now }
+
+// flushBatchReuse runs one worker.flush over batch against db reusing the GIVEN
+// writer (so its carry-forward dirtyRollupBuckets survive across calls), with the
+// writer's now driving the open-bucket cutoff. Mirrors worker.run's per-batch
+// flush → resetBatch sequence, the only path that exercises cross-batch carry.
+func flushBatchReuse(t *testing.T, db *sql.DB, wr *writer, sourceID, format string, batch []canonical.Event) {
+	t.Helper()
+	ctx := context.Background()
+	w := &worker{
+		sourceID:     sourceID,
+		sourceFormat: format,
+		location:     "/loc",
+		db:           db,
+		hwm:          newHWMCache(),
+		pricer:       NopPricer{},
+		logger:       silentLogger(),
+		batchSize:    defaultBatchSize,
+		batchEvery:   defaultBatchInterval,
+	}
+	if err := w.flush(ctx, wr, batch); err != nil {
+		t.Fatalf("worker.flush: %v", err)
+	}
+	wr.resetBatch()
+}
+
+// TestRefreshRollups_OpenHourMaterializedAfterClose pins the carry-forward bug
+// (round-7 P1). An hour bucket whose ops ALL arrive while that hour is still the
+// open hour is skipped at the first refresh (the open hour is never materialized)
+// and — before the fix — was forgotten by resetBatch's clear(dirtyRollupBuckets),
+// so after the hour closed it was never re-marked and never written to
+// rollup_hourly. The all-sources fast path then silently undercounts it.
+//
+// The fix carries the dirty bucket forward across batches: a bucket skipped while
+// open is RETAINED, and materialized on the first refresh after it closes. The
+// proof is byte-parity with a fresh BackfillRollups at the FINAL now (which sees
+// the bucket closed and materializes it).
+func TestRefreshRollups_OpenHourMaterializedAfterClose(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	// Batch 1 at now=T inside hour H (H is the OPEN hour → H is skipped, retained).
+	// Batch 2 at now=T+1h+ε: H is now closed, H+1 is the new open hour.
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	nowAtBatch1 := ts(0, 10, 10) // open hour = H (10:00); H must NOT materialize yet.
+	hourH1 := ts(0, 11, 0)
+	hourH1End := ts(0, 11, 5)
+	nowAtBatch2 := ts(0, 11, 1) // open hour = H+1 (11:00); H (10:00) is now closed.
+
+	// ---- Store A: incremental path, ONE writer reused across the two batches. ----
+	_, dbA := openTestStore(t)
+	seedSource(t, dbA, src, format)
+	clk := &mutableClock{now: nowAtBatch1}
+	wr := newWriter(src, format, "/loc", NopPricer{})
+	wr.now = clk.Now
+
+	// Batch 1: session + op entirely within the OPEN hour H.
+	clk.now = nowAtBatch1
+	batch1 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/work/proj", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "sonnet", "anthropic", 10, 20, 0.1, false)...)
+	flushBatchReuse(t, dbA, wr, src, format, batch1)
+
+	// Premise: H is the open hour at batch 1, so it must NOT be materialized yet.
+	if _, ok := readRollups(t, dbA, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; ok {
+		t.Fatal("premise broken: open hour H materialized at batch 1 — the open hour is never materialized")
+	}
+
+	// Batch 2: a NEW op in hour H+1 at a now where H has closed. The carried H must
+	// now materialize; H+1 (the new open hour) must be skipped+retained.
+	clk.now = nowAtBatch2
+	batch2 := []canonical.Event{
+		sessionStartEvent(src, "sess-2", "claude", "/work/proj", hourH1, 100),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 101, Ts: hourH1},
+			SessionNativeID: "sess-2", Seq: 1,
+		},
+	}
+	batch2 = append(batch2, llmOpEvents(src, "sess-2", 1, 1, hourH1, hourH1End, "haiku", "anthropic", 1, 2, 0.05, false)...)
+	flushBatchReuse(t, dbA, wr, src, format, batch2)
+
+	// The previously-open hour H MUST now be present (carry-forward materialized it).
+	if _, ok := readRollups(t, dbA, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; !ok {
+		t.Fatal("hour H missing from rollup_hourly after it closed — carry-forward dropped it (round-7 P1)")
+	}
+
+	// ---- Store B: backfill over the SAME data at the FINAL now (H closed). ----
+	_, dbB := openTestStore(t)
+	seedSource(t, dbB, src, format)
+	seedSession(t, dbB, "sess-1", src, "claude", "/work/proj", hourH)
+	seedTurn(t, dbB, "turn-1", "sess-1", hourH)
+	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hourH, endTS: &hourHEnd, durationUS: hourHEnd - hourH, status: "completed",
+		tokensIn: 10, tokensOut: 20, costUSD: 0.1})
+	seedSession(t, dbB, "sess-2", src, "claude", "/work/proj", hourH1)
+	seedTurn(t, dbB, "turn-2", "sess-2", hourH1)
+	seedOp(t, dbB, opSpec{id: "op-2", turnID: "turn-2", sessionID: "sess-2", seq: 1,
+		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
+		startTS: hourH1, endTS: &hourH1End, durationUS: hourH1End - hourH1, status: "completed",
+		tokensIn: 1, tokensOut: 2, costUSD: 0.05})
+	if _, err := BackfillRollups(context.Background(), dbB, nowAtBatch2, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	// The incremental store (carry-forward) must be byte-identical to the backfill
+	// at the final now: H materialized, H+1 (still open) excluded from BOTH.
+	assertRollupsIdentical(t, dbA, dbB)
+}
+
+// TestRefreshRollups_RefreshOnlyMaterializesClosedCarried pins the idle
+// materialization primitive at the writer level (round-7 Part 2): after a batch
+// leaves an open hour H carried in the dirty set, a refresh-only pass (no new
+// events) at a later now where H has closed MUST materialize H and report it
+// materialized, WITHOUT a further marking event. This is exactly what the worker's
+// idle tick invokes when the batch is empty but buckets are pending. The
+// refresh-only pass must NOT wipe the carried set itself (refreshRollups removes
+// only the buckets it materialized).
+func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	nowOpen := ts(0, 10, 10)  // H is open → skipped + carried.
+	nowClosed := ts(0, 11, 1) // H is now closed → must materialize.
+
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+	clk := &mutableClock{now: nowOpen}
+	wr := newWriter(src, format, "/loc", NopPricer{})
+	wr.now = clk.Now
+
+	batch := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch = append(batch, llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "m", "p", 1, 1, 0, false)...)
+	flushBatchReuse(t, db, wr, src, format, batch)
+
+	// H is open at the first flush → carried, not yet materialized.
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("expected H carried as pending after first flush (open hour)")
+	}
+	if _, ok := readRollups(t, db, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; ok {
+		t.Fatal("premise broken: open hour H materialized at first flush")
+	}
+
+	// First, prove the ROLLBACK-SAFETY property (the deferred-promote guard): a
+	// refresh that materializes H but whose tx ROLLS BACK must keep H CARRIED, so a
+	// failed idle pass (whose bucket's ops are committed by a prior batch) is
+	// retried rather than silently dropped. Advance the clock so H is closed.
+	clk.now = nowClosed
+	ctx := context.Background()
+	txRB, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := wr.refreshRollups(ctx, txRB); err != nil {
+		t.Fatalf("refreshRollups: %v", err)
+	}
+	if !wr.rollupMaterializedThisRefresh {
+		t.Fatal("refresh over a now-closed carried bucket reported no materialization")
+	}
+	// Removal is STAGED, not yet applied (mirrors production: promote runs only
+	// after commit). H must still be carried until promote.
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("H removed from carried set before commit — the removal must be deferred to post-commit")
+	}
+	if err := txRB.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	wr.resetBatch() // discards the staged removal (pendingMaterializedBuckets) on rollback.
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("H dropped from carried set after a ROLLED-BACK materialization — round-7 P1 undercount reintroduced")
+	}
+	if _, ok := readRollups(t, db, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; ok {
+		t.Fatal("H present in rollup_hourly after rollback — the recompute must have rolled back")
+	}
+
+	// Now the committed path: refresh again, commit, then promote (exactly what
+	// worker.refreshRollupsOnly does post-commit). H must materialize and leave
+	// the carried set.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := wr.refreshRollups(ctx, tx); err != nil {
+		t.Fatalf("refreshRollups: %v", err)
+	}
+	if !wr.rollupMaterializedThisRefresh {
+		t.Fatal("refresh-only pass over a now-closed carried bucket reported no materialization")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	wr.promoteMaterializedRollupBuckets() // post-commit removal (as the worker does).
+
+	// H is now materialized and no longer pending (promote removed it).
+	if _, ok := readRollups(t, db, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; !ok {
+		t.Fatal("hour H not materialized by the refresh-only pass after it closed")
+	}
+	if wr.hasPendingRollupBuckets() {
+		t.Fatal("carried bucket still pending after a COMMITTED materialization + promote — must be removed")
+	}
+}
+
+// TestRefreshRollups_NotifyNotFiredOnMerePendingCarry pins round-7 P1b: a batch
+// that touches NO rollup input must NOT emit a rollup-driven stats_invalidated
+// merely because a previously-open bucket is still CARRIED (pending). Under the
+// carry-forward set, len(dirtyRollupBuckets) > 0 while an open bucket is pending,
+// so keying the notify off the set length would fire every batch. The fix keys it
+// off rollupTouchedThisBatch ∪ rollupMaterializedThisRefresh instead.
+//
+// Batch 1 marks the open hour H (touched → exactly one stats_invalidated). Batch 2
+// carries ONLY a SourceProgressEvent (no session/op write, no rollup mark) while H
+// is still open: affectedSessionIDs empty, nothing touched, nothing materialized →
+// NO new stats_invalidated.
+func TestRefreshRollups_NotifyNotFiredOnMerePendingCarry(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	nowOpen := ts(0, 10, 10) // H stays the open hour across BOTH batches → carried.
+
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+	clk := &mutableClock{now: nowOpen}
+	wr := newWriter(src, format, "/loc", NopPricer{})
+	wr.now = clk.Now
+
+	// Batch 1: a session + op in the open hour H → marks H (touched) → 1 notify.
+	batch1 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "m", "p", 1, 1, 0, false)...)
+	flushBatchReuse(t, db, wr, src, format, batch1)
+
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM notify WHERE kind='stats_invalidated'`); got != 1 {
+		t.Fatalf("after batch 1: stats_invalidated count = %d, want 1", got)
+	}
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("premise broken: H must be carried (open) after batch 1")
+	}
+
+	// Batch 2: ONLY a SourceProgressEvent — no session/op write, no rollup mark.
+	// H is STILL open (clock unchanged) so nothing materializes. The carried H
+	// must NOT, by itself, trigger a stats_invalidated.
+	batch2 := []canonical.Event{
+		canonical.SourceProgressEvent{
+			EventBase: canonical.EventBase{SourceID: src, SourceSeq: 0, Ts: hourH},
+			Cursor:    `{"file":"a.jsonl","offset":1}`,
+		},
+	}
+	flushBatchReuse(t, db, wr, src, format, batch2)
+
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM notify WHERE kind='stats_invalidated'`); got != 1 {
+		t.Fatalf("after batch 2 (mere pending carry): stats_invalidated count = %d, want 1 (must NOT fire on a carried-open bucket alone)", got)
+	}
+}
+
 // llmOpEvents returns the OpStarted+OpFinalized pair for one closed llm op on
 // (session, turn). Tokens/cost/duration are set so the rollup metrics are
 // non-trivial. The finalize Ts is the END (spec-conformant: a finalize sorts

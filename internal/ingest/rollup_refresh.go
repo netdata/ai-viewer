@@ -51,19 +51,40 @@ func (w *writer) refreshRollups(ctx context.Context, tx *sql.Tx) error {
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
 
-	// Collect the affected days while recomputing each closed dirty hour. A
-	// dirty hour at/after the open-hour cutoff is skipped (the open hour is
-	// never materialized), but its DAY is still considered — its other,
-	// already-closed hours may need a daily recompute.
-	days := make(map[int64]struct{}, len(w.dirtyRollupBuckets))
+	// Snapshot the dirty hours BEFORE iterating: the loop deletes materialized
+	// (closed) hours from w.dirtyRollupBuckets, and mutating a map during range
+	// over it is a Go hazard. The snapshot also lets a hour skipped-because-open
+	// be RETAINED (left in the map) and carried to the next batch/refresh —
+	// without it, a bucket whose ops all arrive during its own open hour would be
+	// skipped while open and then never re-marked, leaving the closed bucket
+	// permanently un-materialized (round-7 P1).
+	dirtyHours := make([]int64, 0, len(w.dirtyRollupBuckets))
 	for h := range w.dirtyRollupBuckets {
+		dirtyHours = append(dirtyHours, h)
+	}
+
+	// Collect the affected days while recomputing each CLOSED dirty hour. A dirty
+	// hour at/after the open-hour cutoff is skipped AND retained (the open hour is
+	// never materialized; it stays carried), but its DAY is still considered — its
+	// other, already-closed hours may need a daily recompute.
+	days := make(map[int64]struct{}, len(dirtyHours))
+	for _, h := range dirtyHours {
 		days[rollups.BucketTS(h, rollups.Daily)] = struct{}{}
 		if h >= openHourStart {
-			continue // open hour: never materialized.
+			continue // open hour: never materialized; RETAINED in the dirty set.
 		}
 		if err := w.recomputeBucket(ctx, tx, h, h+hourSpanUS, rollups.Hourly); err != nil {
 			return fmt.Errorf("rollups-refresh: hourly bucket %d: %w", h, err)
 		}
+		// Closed and materialized IN THIS TX — stage its removal from the carried
+		// set, applied only AFTER the tx commits (promoteMaterializedRollupBuckets).
+		// Deferring the delete keeps a materialized-then-rolled-back bucket CARRIED
+		// (resetBatch discards the staged removal on rollback) so it is retried —
+		// without this, an idle refresh-only pass whose commit fails would lose a
+		// closed bucket whose DB row never landed (round-7 P1 undercount). The
+		// carried set then holds only open/pending hours, so memory stays bounded.
+		w.pendingMaterializedBuckets[h] = struct{}{}
+		w.rollupMaterializedThisRefresh = true
 	}
 	for d := range days {
 		if d >= openDayStart {

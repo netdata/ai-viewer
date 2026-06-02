@@ -67,6 +67,33 @@ func (w *worker) run(ctx context.Context) {
 	}
 	timerArmed := false
 
+	// stopTimer stops flushTimer and drains a possibly-already-fired tick so a
+	// later Reset starts a clean interval (the standard time.Timer idiom).
+	stopTimer := func() {
+		if !flushTimer.Stop() {
+			select {
+			case <-flushTimer.C:
+			default:
+			}
+		}
+		timerArmed = false
+	}
+
+	// rearmTimer keeps the flush timer ticking while rollup buckets are carried
+	// (open at the last refresh) so a bucket that closes during a lull is
+	// materialized by the idle tick within ~one batchEvery interval; once the
+	// carried set drains it leaves the timer STOPPED (no idle busy-spin —
+	// ingester.md §"Incremental rollup refresh", round-7 Part 2).
+	rearmTimer := func() {
+		if wr.hasPendingRollupBuckets() {
+			stopTimer()
+			flushTimer.Reset(w.batchEvery)
+			timerArmed = true
+			return
+		}
+		stopTimer()
+	}
+
 	flush := func(reason string, flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
@@ -76,15 +103,29 @@ func (w *worker) run(ctx context.Context) {
 		}
 		batch = batch[:0]
 		wr.resetBatch()
-		if timerArmed {
-			if !flushTimer.Stop() {
-				select {
-				case <-flushTimer.C:
-				default:
-				}
-			}
-			timerArmed = false
+		// Re-arm (or stop) the timer based on whether buckets are still carried:
+		// a flush that left an open hour pending must keep ticking so the idle
+		// refresh materializes it once it closes.
+		rearmTimer()
+	}
+
+	// idleRefresh runs a dedicated rollup refresh with no events — the idle
+	// materialization path for carried buckets that have since closed. Used on an
+	// interval fire with an empty batch and on shutdown when the final batch is
+	// empty but buckets are still pending.
+	idleRefresh := func(refreshCtx context.Context) {
+		if !wr.hasPendingRollupBuckets() {
+			return
 		}
+		if err := w.refreshRollupsOnly(refreshCtx, wr); err != nil {
+			w.report(err)
+		}
+		// Reset per-batch state after the refresh-only pass (mirrors the flush
+		// closure's resetBatch). The carried dirtyRollupBuckets set is untouched by
+		// resetBatch and promoteMaterializedRollupBuckets already applied any
+		// committed removals; this clears the per-batch rollup notify flags so a
+		// later real flush that touches no rollup does not inherit a stale "fire".
+		wr.resetBatch()
 	}
 
 	for {
@@ -122,6 +163,10 @@ func (w *worker) run(ctx context.Context) {
 			default:
 			}
 			flush("ctx done", drainCtx)
+			// Final flush may have left buckets carried (or the final batch was
+			// empty with buckets still pending): run the refresh-only pass so any
+			// bucket closed by shutdown time is materialized before we exit.
+			idleRefresh(drainCtx)
 			drainCancel()
 			return
 		case ev, ok := <-w.events:
@@ -131,6 +176,10 @@ func (w *worker) run(ctx context.Context) {
 				// concurrently does not abort BeginTx.
 				drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 				flush("channel closed", drainCtx)
+				// Final flush may have left buckets carried (or the final batch was
+				// empty with buckets still pending): materialize any closed-by-now
+				// bucket before exit.
+				idleRefresh(drainCtx)
 				drainCancel()
 				return
 			}
@@ -150,7 +199,16 @@ func (w *worker) run(ctx context.Context) {
 			}
 		case <-flushTimer.C:
 			timerArmed = false
-			flush("interval", ctx)
+			if len(batch) > 0 {
+				flush("interval", ctx)
+				break // flush() already re-armed/stopped the timer as needed.
+			}
+			// Empty batch but the timer fired: this is an idle materialization
+			// tick. Run the refresh-only pass to materialize any carried bucket
+			// that has since closed, then re-arm to keep ticking until the
+			// carried set drains (rearmTimer self-terminates when empty).
+			idleRefresh(ctx)
+			rearmTimer()
 		}
 	}
 }
@@ -250,6 +308,10 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	// same (provider, model, missKind) re-emits the (now-missing)
 	// warning.
 	wr.promotePendingMissDedup()
+	// Apply the carried-set removals for buckets materialized in this committed
+	// tx (deferred from refreshRollups so a rolled-back materialization keeps its
+	// bucket carried — round-7 P1). MUST run before the caller's resetBatch.
+	wr.promoteMaterializedRollupBuckets()
 
 	if wr.batchMaxSeq > 0 {
 		w.hwm.Advance(w.sourceID, wr.batchMaxSeq)
@@ -267,6 +329,74 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 				"err", oerr)
 		}
 	}
+	return nil
+}
+
+// refreshRollupsOnly runs a DEDICATED rollup refresh with NO events — the idle
+// materialization path (ingester.md §"Incremental rollup refresh", round-7 Part
+// 2). When ingestion goes quiet with buckets carried (open at the last flush),
+// an hour that later closes must still be materialized without waiting for a new
+// event. This opens its own tx and calls ONLY wr.refreshRollups (NOT w.flush,
+// which would also rewrite aggregates / source_progress / FTS for an empty
+// batch), emits exactly one stats_invalidated IFF it materialized ≥1 bucket
+// (reusing the same notify path as flush), prunes, and commits. wr.now drives the
+// open-hour cutoff so a bucket closed since the last tick is now materialized. On
+// any error the tx rolls back and the error is returned; the carried set is left
+// intact for the next tick (refreshRollups only STAGES the removal of a
+// materialized bucket — promoteMaterializedRollupBuckets applies it post-commit —
+// so a rolled-back recompute keeps the bucket carried and is naturally retried).
+func (w *worker) refreshRollupsOnly(ctx context.Context, wr *writer) error {
+	// Clear the per-batch rollup notify signals so this pass's notify reflects
+	// ONLY what it materializes (the carried dirtyRollupBuckets set is untouched —
+	// it is writer-lifetime state that refreshRollups prunes as buckets close).
+	wr.rollupTouchedThisBatch = false
+	wr.rollupMaterializedThisRefresh = false
+
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx (idle refresh): %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && w.logger != nil {
+				w.logger.Warn("worker: rollback failed (idle refresh)", "err", rbErr)
+			}
+		}
+	}()
+
+	if err := wr.refreshRollups(ctx, tx); err != nil {
+		return fmt.Errorf("idle refresh: %w", err)
+	}
+
+	// Nothing closed since the last tick (carried buckets are all still open):
+	// refreshRollups wrote no rows, so roll back the empty tx (the deferred
+	// Rollback fires) and skip the notify/prune/commit. This keeps an
+	// open-but-pending lull from churning an empty prune-only tx every interval;
+	// the buckets stay carried and the timer keeps ticking until one closes.
+	if !wr.rollupMaterializedThisRefresh {
+		return nil
+	}
+
+	// Emit exactly one stats_invalidated — this pass materialized a bucket. No
+	// events were applied, so affectedSessionIDs is empty and rollupTouchedThisBatch
+	// is false — emitNotify therefore fires solely on rollupMaterializedThisRefresh.
+	commitTS := time.Now().UTC().UnixMicro()
+	if err := wr.emitNotify(ctx, tx, commitTS); err != nil {
+		return fmt.Errorf("idle refresh notify: %w", err)
+	}
+	if err := pruneNotify(ctx, tx, commitTS); err != nil {
+		return fmt.Errorf("idle refresh prune: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit (idle refresh): %w", err)
+	}
+	committed = true
+	// Apply the carried-set removals for buckets materialized in this committed
+	// tx (deferred from refreshRollups). On the early no-materialization return
+	// above the pending map is empty, so this is a harmless no-op there.
+	wr.promoteMaterializedRollupBuckets()
 	return nil
 }
 
