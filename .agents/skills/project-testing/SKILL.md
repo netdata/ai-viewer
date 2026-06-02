@@ -161,7 +161,7 @@ The full catalog lives in `project-quality-gates`. A PR cannot land if any gate 
 When reporting to the operator, never say "code works" without:
 
 - The test file paths covering the new behavior.
-- The gate command outputs (or `./scripts/gates.sh` summary).
+- The gate command outputs (`./scripts/lint.sh` + the per-gate commands; a `./scripts/gates.sh` summary once SOW-0013 lands it).
 - The external review status.
 
 Honest phrasings:

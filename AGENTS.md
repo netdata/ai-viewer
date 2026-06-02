@@ -291,7 +291,7 @@ For fixture files (real snapshot samples committed under `testdata/`):
 - Replace model API keys with `[REDACTED_SECRET]`.
 - Keep schema shape, timing, and token counts intact — that's what tests verify.
 
-The secret scanner in `scripts/gates.sh` is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
+The secret scanner (`scripts/scan-secrets.sh`, wired as a dedicated CI `gates` step and, once SOW-0013 lands it, invoked by `scripts/gates.sh`) is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
 
 ## Open-Source Reference Evidence
 
@@ -342,7 +342,7 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 
 ## Build, Test, Run
 
-(These commands exist after Phase 1 is delivered. See `.agents/sow/pending/SOW-0001-phase-1-foundation.md`.)
+(Status: `build.sh`, `dev.sh`, and `lint.sh` exist today. `test.sh` (SOW-0010), `gates.sh` (SOW-0013), and `spec-drift.sh` (SOW-0013) are planned aggregators — until they land, use the individual gate commands and the per-gate CI jobs. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
 
 ```bash
 ./scripts/build.sh          # build frontend + Go binaries

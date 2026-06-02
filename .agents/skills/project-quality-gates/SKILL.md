@@ -226,12 +226,12 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ## Aggregate Scripts
 
 ```bash
-./scripts/lint.sh         # all formatting + lint + static + security
-./scripts/test.sh         # all tests + coverage + race
-./scripts/gates.sh        # every gate above, in order, fail-fast
+./scripts/lint.sh         # Go: golangci umbrella + standalone gosec + govulncheck (SOW-0009; EXISTS)
+./scripts/test.sh         # all tests + coverage + race (SOW-0010; PLANNED)
+./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
 ```
 
-`scripts/gates.sh` is the canonical pre-commit gate. The assistant runs it locally before every commit. CI runs the same gates from the same scripts so local and CI behavior cannot diverge.
+Current state: `scripts/lint.sh` exists (the local Go lint+security mirror). `scripts/test.sh` (SOW-0010) and the canonical `scripts/gates.sh` aggregator (SOW-0013) are NOT yet present. Until `gates.sh` lands, run `scripts/lint.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
 
 ## When a Gate Fails
 

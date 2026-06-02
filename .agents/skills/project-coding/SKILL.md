@@ -47,7 +47,7 @@ These are non-negotiable across all code:
 
 ## Quality Gates
 
-Before any commit: run `./scripts/gates.sh` locally and confirm green. The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
+Before any commit: run the gates locally and confirm green (`./scripts/lint.sh` for Go lint/security; the per-gate commands for the rest — the single `./scripts/gates.sh` aggregator is SOW-0013 scope). The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
 
 - All Go lints (golangci-lint, gosec, govulncheck) zero warnings.
 - `go test -race -count=1 ./...` passes.

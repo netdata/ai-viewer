@@ -35,7 +35,10 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 run cd "$REPO_ROOT"
 
 GOSEC_VERSION="v2.26.1"
-GOBIN="$(go env GOPATH)/bin"
+# Resolve the install dir the way `go install` does: GOBIN if set, else
+# GOPATH/bin. Hardcoding GOPATH/bin would run a stale/missing binary when the
+# developer has GOBIN set elsewhere.
+GOBIN="$(go env GOBIN)"; [ -n "$GOBIN" ] || GOBIN="$(go env GOPATH)/bin"
 
 # --- 1. golangci-lint (umbrella: fmt + vet + all enabled linters) -----------
 PINNED_VERSION="$(tr -d '[:space:]' < .golangci-lint-version)"
