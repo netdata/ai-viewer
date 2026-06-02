@@ -348,9 +348,9 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 ./scripts/build.sh          # build frontend + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
 ./scripts/lint.sh           # all lints + static analysis, zero warnings
-./scripts/test.sh           # all tests + coverage + race
-./scripts/gates.sh          # every quality gate listed above
-./scripts/spec-drift.sh     # spec ↔ code drift detection
+./scripts/test.sh           # all tests + coverage + race (planned, SOW-0010)
+./scripts/gates.sh          # every quality gate listed above (planned, SOW-0013)
+./scripts/spec-drift.sh     # spec ↔ code drift detection (planned, SOW-0013)
 go test -race ./...         # Go tests with race
 cd frontend && npm test     # frontend tests
 ```

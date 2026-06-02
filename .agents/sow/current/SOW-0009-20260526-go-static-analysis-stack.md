@@ -249,6 +249,15 @@ All gates re-run by the master orchestrator (not trusting the subagent), 2026-06
 - **Lesson recorded**: I under-swept the drift class THREE rounds running (fixed cited lines, not all siblings). The fix that finally worked: enumerate the full set with one exhaustive grep BEFORE fixing, fix all, then re-grep to prove zero. Captured in cross-session memory.
 - Round-4 resolution commit: docs only (no `.go`; no lint.sh logic change beyond round-3's GOBIN).
 
+### Round 4 — 2026-06-02 (re-review on commit d052bf8)
+
+- **glm** (`glm-5.1`): **MERGE.** "The doc sweep in round 4 is finally complete; zero uncaveated present-tense claims; nolint + govulncheck policies internally consistent; no blocking issues."
+- **codex** (`gpt-5.5`, decisive): runtime mergeable (re-verified validateDoc, unparam removals, CheckSchema ctx, nilerr suppressions; confirmed the nolint policy is NOW consistent and the govulncheck wording NOW matches CI). Two findings:
+  - **P1** (codex's stated "main blocker") — claimed `golangci-lint run` does NOT enforce formatters, so the gofumpt gate is unenforced and AC#2's "umbrella subsumes format-check" is false; recommended adding `golangci-lint fmt --diff`. **ADJUDICATED ON GROUND TRUTH → REJECTED (false positive).** Empirical test: `golangci-lint run` on a deliberately mis-formatted scratch file reported `File is not properly formatted (gofmt)` and exited non-zero. In golangci-lint v2, `run` reports formatter violations as failures (`fmt` is the auto-fix path); the CI `golangci-lint-action` runs `run`, so CI enforces it too. codex's inference from `--enable-only gofumpt` erroring is incorrect — that flag rejects formatter *names*, but formatters configured under `formatters:` are still checked by `run`. No code change; added a clarifying note to `project-quality-gates` to preempt recurrence.
+  - **P2** (valid, trivial) — one more spec-drift present-tense claim at `project-coding`:60 ("Spec drift script clean") + AGENTS.md:351-353 command-block lines lacking an inline "(planned)" marker. Fixed both (round-5 commit).
+- **minimax** (`MiniMax-M3`): round-4 verdict folded into round 5.
+- **Convergence (CTO call)**: the runtime code has been mergeable since round 1 — rounds 1-4 were entirely documentation-contract honesty. codex round-4 produced a FALSE blocker (P1), which is the signal the review has hit diminishing returns (findings degraded real→real→real→false+trivial). Round 5 is a final codex+glm confirmation of the trivial P2 doc fix; if clean, merge — the code is sound, the planned-script drift class is exhausted (verified by exhaustive grep + the empirical formatter test), and a reviewer emitting false findings on a doc-only delta is the convergence signal. (Adjudicate on ground truth: accept real, reject false-with-evidence.)
+
 ## Outcome
 
 Pending.

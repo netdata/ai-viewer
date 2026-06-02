@@ -57,7 +57,7 @@ Before any commit: run the gates locally and confirm green (`./scripts/lint.sh` 
 - Frontend lint, typecheck, vitest with coverage, Playwright E2E, axe a11y all green.
 - Bundle size within budget.
 - Secrets scan clean.
-- Spec drift script clean.
+- Spec↔code drift audited clean (manual audit; the `scripts/spec-drift.sh` detector is SOW-0013).
 - `./scripts/build.sh` succeeds.
 - Affected specs updated in the same commit.
 - External review converged for non-trivial SOWs.
