@@ -84,12 +84,13 @@ type writer struct {
 	batchObservabilityErrs []error
 	// dirtyRollupBuckets is the set of HOUR buckets (rollups.BucketTS(ts,
 	// Hourly)) whose rollup inputs are pending materialization. refreshRollups
-	// (rollup_refresh.go) recomputes each CLOSED hour and its day from this set
-	// in the same tx, before commit, and REMOVES each bucket it materializes; a
-	// bucket still OPEN at refresh time is RETAINED (the open hour is never
-	// materialized — the query layer live-folds it). Marked by
-	// markDirtyRollupBucket from the three rollup-affecting apply paths
-	// (SessionStarted, OpStarted, OpFinalized's persisted start).
+	// (rollup_refresh.go) recomputes each CLOSED hour from this set in the same tx,
+	// before commit, and REMOVES each bucket it materializes; a bucket still OPEN at
+	// refresh time is RETAINED (the open hour is never materialized — the query
+	// layer live-folds it). The matching DAY is tracked separately in
+	// dirtyRollupDays (NOT derived from this set), so the two granularities carry
+	// independently. Marked by markDirtyRollupBucket from the three rollup-affecting
+	// apply paths (SessionStarted, OpStarted, OpFinalized's persisted start).
 	//
 	// CARRY-FORWARD (NOT per-batch): this set is writer-lifetime state, NOT
 	// cleared in resetBatch. A bucket dirtied while it was the open hour stays
@@ -125,6 +126,34 @@ type writer struct {
 	// removing it from the set on the in-memory delete alone would lose a closed
 	// bucket whose DB row never committed — the very round-7 P1 undercount.
 	pendingMaterializedBuckets map[int64]struct{}
+	// dirtyRollupDays is the DAILY twin of dirtyRollupBuckets: the set of DAY
+	// buckets (rollups.BucketTS(ts, Daily)) whose rollup_daily row is pending
+	// materialization. refreshRollups recomputes each CLOSED day from this set in
+	// the same tx, before commit, and stages its removal; a day still OPEN at
+	// refresh time is RETAINED (the open day is never materialized — the query
+	// layer live-folds it). Marked by markDirtyRollupBucket alongside the hour, so
+	// every rollup-affecting event marks BOTH its hour and its day.
+	//
+	// CARRY-FORWARD, INDEPENDENTLY OF HOURS (round-8 P1): days are NOT derived
+	// per-refresh from the dirty hours. A day touched while it was still open stays
+	// carried across batches even AFTER all of its hours have materialized and left
+	// dirtyRollupBuckets, and is materialized on the first refresh after the DAY
+	// closes. Without a separate carried day set, a day whose ops all arrive before
+	// it closes (e.g. within one still-open day, after which its hours materialize
+	// and drain the carried hour set) would be stranded once the day closes with no
+	// further events — the daily sibling of the round-7 hourly open→closed gap,
+	// silently undercounting the all-sources bucket=daily fast path. Memory stays
+	// bounded: refreshRollups removes every closed day it materializes, so only
+	// open/recent-pending days remain.
+	dirtyRollupDays map[int64]struct{}
+	// pendingMaterializedDays buffers DAY buckets that refreshRollups materialized
+	// WITHIN the current open tx but has NOT yet removed from the carried
+	// dirtyRollupDays set. The DAILY twin of pendingMaterializedBuckets: the removal
+	// is deferred to AFTER commit (promoteMaterializedRollupBuckets) so a
+	// materialized-then-rolled-back day stays CARRIED (resetBatch discards this map
+	// on rollback) and is retried — an idle refresh whose commit fails would
+	// otherwise lose a closed day whose rollup_daily row never landed.
+	pendingMaterializedDays map[int64]struct{}
 	// dirtyOpIDs is the set of op ids whose fts_ops searchable text or
 	// error_text this batch changed (marked by BOTH applyOpStarted and
 	// applyOpFinalized — either write can alter the indexed name/model/
@@ -286,6 +315,8 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 		pendingMissDedup:           make(map[pricingMissKey]struct{}),
 		dirtyRollupBuckets:         make(map[int64]struct{}),
 		pendingMaterializedBuckets: make(map[int64]struct{}),
+		dirtyRollupDays:            make(map[int64]struct{}),
+		pendingMaterializedDays:    make(map[int64]struct{}),
 		dirtyOpIDs:                 make(map[string]struct{}),
 		now:                        defaultNow,
 	}
@@ -322,6 +353,14 @@ func (w *writer) resetBatch() {
 	// commit, promoteMaterializedRollupBuckets runs FIRST (post-commit, before the
 	// caller's resetBatch) and applies the removals to dirtyRollupBuckets.
 	clear(w.pendingMaterializedBuckets)
+	// dirtyRollupDays is the DAILY twin of dirtyRollupBuckets and is likewise NOT
+	// cleared here — it is writer-lifetime carry-forward state (round-8 P1). Only
+	// refreshRollups removes a day, and only after it materializes it (once the day
+	// closes) AND the tx commits (via promoteMaterializedRollupBuckets).
+	// pendingMaterializedDays IS cleared here, mirroring pendingMaterializedBuckets:
+	// rollback discards the staged day removals so they stay carried and are
+	// retried; commit promotes them first.
+	clear(w.pendingMaterializedDays)
 	clear(w.dirtyOpIDs)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
@@ -346,14 +385,18 @@ func (w *writer) promotePendingMissDedup() {
 }
 
 // promoteMaterializedRollupBuckets removes the buckets refreshRollups
-// materialized in the just-committed tx from the carried dirtyRollupBuckets set.
-// Called by worker.flush / worker.refreshRollupsOnly AFTER tx.Commit() succeeds —
-// a rolled-back materialization therefore leaves its bucket CARRIED (retried next
-// pass), mirroring promotePendingMissDedup. The pending map is left intact
-// (resetBatch clears it next), so this is idempotent against repeated calls.
+// materialized in the just-committed tx from the carried sets: HOUR buckets from
+// dirtyRollupBuckets and DAY buckets from dirtyRollupDays. Called by worker.flush /
+// worker.refreshRollupsOnly AFTER tx.Commit() succeeds — a rolled-back
+// materialization therefore leaves its bucket CARRIED (retried next pass),
+// mirroring promotePendingMissDedup. The pending maps are left intact (resetBatch
+// clears them next), so this is idempotent against repeated calls.
 func (w *writer) promoteMaterializedRollupBuckets() {
 	for h := range w.pendingMaterializedBuckets {
 		delete(w.dirtyRollupBuckets, h)
+	}
+	for d := range w.pendingMaterializedDays {
+		delete(w.dirtyRollupDays, d)
 	}
 }
 
@@ -1384,25 +1427,30 @@ func (w *writer) markDirtySession(id string) {
 func (w *writer) markDirtyTurn(id string) { w.dirtyTurnIDs[id] = struct{}{} }
 
 // markDirtyRollupBucket records that this batch changed a rollup input whose
-// op/session-start falls in the UTC hour bucket containing ts. The bucket is
-// always floored to the HOUR (refreshRollups derives the day from each dirty
-// hour); recording at hour granularity keeps the set small and lets the
-// refresh map hours→days deterministically. Called ONLY from the three
-// rollup-affecting apply paths: applySessionStarted (session-start hour),
-// applyOpStarted (op-start hour), applyOpFinalized (the op's PERSISTED
-// start_ts hour — finalize changes the op's duration/status, so its START
-// bucket, not the end, must be recomputed).
+// op/session-start falls in the UTC bucket containing ts. It marks BOTH the HOUR
+// (dirtyRollupBuckets) and the DAY (dirtyRollupDays) the input belongs to, so each
+// granularity is an independently-carried set — the day is NOT derived from the
+// hour at refresh time (round-8 P1: a derived day is dropped once its hours
+// materialize while the day is still open, stranding rollup_daily after the day
+// closes). Called ONLY from the three rollup-affecting apply paths:
+// applySessionStarted (session-start time), applyOpStarted (op-start time),
+// applyOpFinalized (the op's PERSISTED start_ts — finalize changes the op's
+// duration/status, so its START bucket, not the end, must be recomputed).
 func (w *writer) markDirtyRollupBucket(ts int64) {
 	w.dirtyRollupBuckets[rollups.BucketTS(ts, rollups.Hourly)] = struct{}{}
+	w.dirtyRollupDays[rollups.BucketTS(ts, rollups.Daily)] = struct{}{}
 	w.rollupTouchedThisBatch = true
 }
 
-// hasPendingRollupBuckets reports whether any rollup bucket is still awaiting
-// materialization (carried forward because it was open at the last refresh). The
-// worker's run loop reads it to decide whether to keep its flush timer armed for
-// an idle materialization tick once a carried bucket closes — see worker.run.
+// hasPendingRollupBuckets reports whether any rollup bucket — HOUR or DAY — is
+// still awaiting materialization (carried forward because it was open at the last
+// refresh). The worker's run loop reads it to decide whether to keep its flush
+// timer armed for an idle materialization tick: the timer must stay armed while
+// EITHER pending hours OR pending days remain, so a day that closes during a lull
+// (after its hours have already materialized and drained the hour set) is still
+// materialized by the idle pass — see worker.run.
 func (w *writer) hasPendingRollupBuckets() bool {
-	return len(w.dirtyRollupBuckets) > 0
+	return len(w.dirtyRollupBuckets) > 0 || len(w.dirtyRollupDays) > 0
 }
 
 // markDirtyOp records that this batch wrote op `id`, so refreshFTS rebuilds its

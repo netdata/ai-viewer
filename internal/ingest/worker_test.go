@@ -361,6 +361,93 @@ func TestWorker_IdleTickMaterializesClosedBucket(t *testing.T) {
 	}
 }
 
+// TestWorker_IdleTickMaterializesClosedDayAfterMidnight pins the DAILY sibling
+// (round-8 P1) end-to-end through the real worker.run idle loop. Ops arrive
+// entirely within hour H of day0 while day0 is the open day, then ingestion goes
+// quiet. The clock first advances past H's close (the hour materializes and leaves
+// the carried hour set while day0 stays open), then past midnight (day0 closes).
+// The worker's idle timer MUST stay armed across the hour→day transition — i.e.
+// hasPendingRollupBuckets must keep returning true while only a DAY is pending —
+// and materialize day0 into rollup_daily WITHOUT any new event. Before the fix the
+// timer stopped once the carried hour set drained and day0 was never written.
+func TestWorker_IdleTickMaterializesClosedDayAfterMidnight(t *testing.T) {
+	t.Parallel()
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	day0 := ts(0, 0, 0)
+	clk := &mutableClock{now: ts(0, 10, 10)} // open hour=10:00, open day=day0 → both carried.
+
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1000),                    // never trip on size
+		WithBatchInterval(20*time.Millisecond), // short idle tick
+		WithNow(clk.Now),
+		WithSourceFormat(src, format),
+		WithLocation(src, "/loc"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	ch := make(chan canonical.Event, 8)
+	if err := i.Submit(src, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	defer close(ch)
+
+	// One op entirely inside the open hour H of the open day day0, then NO further events.
+	ch <- sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1)
+	ch <- canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+		SessionNativeID: "sess-1", Seq: 1,
+	}
+	for _, ev := range llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "m", "p", 1, 1, 0, false) {
+		ch <- ev
+	}
+
+	// First interval flush commits the op (H open, day0 open → neither materialized).
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM ops`) == 1
+	}) {
+		t.Fatalf("first flush did not commit the op; ops=%d", scanInt(t, db, `SELECT COUNT(*) FROM ops`))
+	}
+
+	// Step 1: close H (day0 still open). The idle tick materializes H; day0 must NOT
+	// appear yet, and the timer must stay armed because the DAY is still pending.
+	clk.now = ts(0, 11, 1)
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH) == 1
+	}) {
+		t.Fatalf("idle tick did not materialize closed hour H; rollup_hourly total rows for H=%d",
+			scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH))
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 0 {
+		t.Fatalf("open day day0 materialized while still open (count=%d) — must wait for midnight", got)
+	}
+
+	// Step 2: cross midnight (day0 closes). The idle tick — still armed because a DAY
+	// was pending after the hour drained — must materialize day0 into rollup_daily
+	// with NO new events. This is the round-8 P1 proof: before the fix the timer had
+	// stopped and day0 was stranded.
+	clk.now = ts(1, 0, 1)
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0) == 1
+	}) {
+		t.Fatalf("idle tick did not materialize closed day day0 after midnight; rollup_daily total rows for day0=%d",
+			scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0))
+	}
+}
+
 // TestWorker_FlushPromotesPendingMissDedupAfterCommit pins that
 // the rollback/dedup writer-level tests call promotePendingMissDedup
 // manually, so a developer who removed wr.promotePendingMissDedup from

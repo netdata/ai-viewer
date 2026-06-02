@@ -74,6 +74,30 @@ func flushBatchReuse(t *testing.T, db *sql.DB, wr *writer, sourceID, format stri
 	wr.resetBatch()
 }
 
+// refreshOnlyReuse drives worker.refreshRollupsOnly (the idle materialization
+// path) against the GIVEN reused writer, with the writer's now driving the
+// open-bucket cutoff. Mirrors worker.run's idle-tick → resetBatch sequence — the
+// no-events path that materializes carried buckets that have since closed.
+func refreshOnlyReuse(t *testing.T, db *sql.DB, wr *writer) {
+	t.Helper()
+	ctx := context.Background()
+	w := &worker{
+		sourceID:     wr.sourceID,
+		sourceFormat: wr.sourceFormat,
+		location:     wr.location,
+		db:           db,
+		hwm:          newHWMCache(),
+		pricer:       NopPricer{},
+		logger:       silentLogger(),
+		batchSize:    defaultBatchSize,
+		batchEvery:   defaultBatchInterval,
+	}
+	if err := w.refreshRollupsOnly(ctx, wr); err != nil {
+		t.Fatalf("worker.refreshRollupsOnly: %v", err)
+	}
+	wr.resetBatch()
+}
+
 // TestRefreshRollups_OpenHourMaterializedAfterClose pins the carry-forward bug
 // (round-7 P1). An hour bucket whose ops ALL arrive while that hour is still the
 // open hour is skipped at the first refresh (the open hour is never materialized)
@@ -178,8 +202,14 @@ func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
 
 	hourH := ts(0, 10, 0)
 	hourHEnd := ts(0, 10, 30)
-	nowOpen := ts(0, 10, 10)  // H is open → skipped + carried.
-	nowClosed := ts(0, 11, 1) // H is now closed → must materialize.
+	nowOpen := ts(0, 10, 10) // H is open → skipped + carried.
+	// nowClosed is past midnight so BOTH H and its DAY (day0) are closed: this test
+	// pins the hourly idle primitive + rollback safety, and asserts the carried set
+	// is empty after a committed materialization. Under the carried-DAY model
+	// (round-8) the day H belongs to is also carried, so the cutoff must close the
+	// day too for "no longer pending" to hold (TestRefreshRollups_OpenDay…
+	// covers the hour-closed-but-day-open case explicitly).
+	nowClosed := ts(1, 0, 1)
 
 	_, db := openTestStore(t)
 	seedSource(t, db, src, format)
@@ -208,7 +238,8 @@ func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
 	// First, prove the ROLLBACK-SAFETY property (the deferred-promote guard): a
 	// refresh that materializes H but whose tx ROLLS BACK must keep H CARRIED, so a
 	// failed idle pass (whose bucket's ops are committed by a prior batch) is
-	// retried rather than silently dropped. Advance the clock so H is closed.
+	// retried rather than silently dropped. Advance the clock past midnight so H AND
+	// its day are closed (both carried sets materialize and stage removal together).
 	clk.now = nowClosed
 	ctx := context.Background()
 	txRB, err := db.BeginTx(ctx, nil)
@@ -229,7 +260,7 @@ func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
 	if err := txRB.Rollback(); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	wr.resetBatch() // discards the staged removal (pendingMaterializedBuckets) on rollback.
+	wr.resetBatch() // discards the staged removals (pending hour+day maps) on rollback.
 	if !wr.hasPendingRollupBuckets() {
 		t.Fatal("H dropped from carried set after a ROLLED-BACK materialization — round-7 P1 undercount reintroduced")
 	}
@@ -1240,4 +1271,115 @@ func TestRefreshRollups_SessionStartedRepairsStubMetadataAndStart(t *testing.T) 
 	if v := postH[rollupKey{hOpStart, format, "total", ""}]; v.sessionStarts != 0 {
 		t.Fatalf("old stub bucket total session_starts = %d, want 0 (phantom start not cleared)", v.sessionStarts)
 	}
+}
+
+// TestRefreshRollups_OpenDayMaterializedAfterMidnight pins the DAILY sibling of
+// the round-7 hourly carry-forward bug (round-8 P1). The hourly fix carries the
+// open HOUR forward; days, however, were DERIVED per-refresh from the dirty
+// hours. So a day D whose ops all arrive during one of its hours H, where H then
+// closes and is materialized (leaving the carried HOUR set) while D is STILL the
+// open day, loses its only handle: the carried hour set drains, the daily
+// recompute is skipped (D open), and after midnight — with no further events —
+// NOTHING materializes rollup_daily for D. The all-sources bucket=daily fast path
+// (the Stats UI default) reads closed days only from rollup_daily, so D silently
+// undercounts.
+//
+// The fix mirrors the hourly carry-forward for days: every rollup-affecting event
+// marks BOTH its hour AND its day in independent writer-lifetime carried sets, and
+// the idle tick stays armed while EITHER pending hours OR pending days remain. So
+// D stays tracked after its hours materialize, and is materialized on the first
+// refresh after D closes. The proof is byte-parity with a fresh BackfillRollups at
+// the final now (which sees D closed and materializes it).
+//
+// Sequence (the precise open→closed gap the carried day must survive):
+//   - Batch 1 at now=day0 10:10: op in hour H=day0 10:00. H is the OPEN hour and
+//     day0 is the OPEN day → neither materializes; both are carried.
+//   - Refresh-only at now=day0 11:01: H (10:00) is now CLOSED → materialized and
+//     promoted OUT of the carried HOUR set. day0 is STILL OPEN → its daily row is
+//     skipped. Under the OLD (derive-days-from-hours) code the carried HOUR set is
+//     now empty, so day0 has no handle left.
+//   - Refresh-only at now=day1 00:01: day0 is now CLOSED. OLD code: dirty set empty
+//     → refreshRollups returns early and day0 is never written (RED). NEW code: day0
+//     was independently carried, is closed now → materialized (GREEN).
+func TestRefreshRollups_OpenDayMaterializedAfterMidnight(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	hourH := ts(0, 10, 0)      // op hour on day0.
+	hourHEnd := ts(0, 10, 30)  //
+	day0 := ts(0, 0, 0)        // the day that must not be stranded.
+	nowBatch1 := ts(0, 10, 10) // open hour=10:00, open day=day0 → H & day0 carried.
+	nowHourClosed := ts(0, 11, 1)
+	nowAfterMidnight := ts(1, 0, 1) // day0 now closed; day1 00:00 is the open day.
+
+	// ---- Store A: incremental path, ONE writer reused across batches+idle passes. ----
+	_, dbA := openTestStore(t)
+	seedSource(t, dbA, src, format)
+	clk := &mutableClock{now: nowBatch1}
+	wr := newWriter(src, format, "/loc", NopPricer{})
+	wr.now = clk.Now
+
+	// Batch 1: session + op entirely within the open hour H of the open day day0.
+	batch1 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/work/proj", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "sonnet", "anthropic", 10, 20, 0.1, false)...)
+	flushBatchReuse(t, dbA, wr, src, format, batch1)
+
+	// Premise: open hour H and open day day0 must NOT be materialized at batch 1.
+	if _, ok := readRollups(t, dbA, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; ok {
+		t.Fatal("premise broken: open hour H materialized at batch 1")
+	}
+	if _, ok := readRollups(t, dbA, "rollup_daily")[rollupKey{day0, format, "total", ""}]; ok {
+		t.Fatal("premise broken: open day day0 materialized at batch 1")
+	}
+
+	// Idle pass 1 at now=day0 11:01: H closes (materialize+promote out of the HOUR
+	// set) while day0 stays OPEN. This is the step that, under the old code, dropped
+	// day0's only handle.
+	clk.now = nowHourClosed
+	refreshOnlyReuse(t, dbA, wr)
+
+	if _, ok := readRollups(t, dbA, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; !ok {
+		t.Fatal("hour H missing from rollup_hourly after it closed")
+	}
+	if _, ok := readRollups(t, dbA, "rollup_daily")[rollupKey{day0, format, "total", ""}]; ok {
+		t.Fatal("premise broken: day0 materialized while still the open day")
+	}
+	// THE FIX'S CORE INVARIANT: day0 must still be carried (so the idle timer stays
+	// armed) even though the carried HOUR set is now empty.
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("day0 dropped from the carried set after its hour materialized while the day was still open — round-8 P1 (idle timer would stop and day0 would never materialize)")
+	}
+
+	// Idle pass 2 at now=day1 00:01: day0 is now closed, NO new events. The carried
+	// day must materialize.
+	clk.now = nowAfterMidnight
+	refreshOnlyReuse(t, dbA, wr)
+
+	if _, ok := readRollups(t, dbA, "rollup_daily")[rollupKey{day0, format, "total", ""}]; !ok {
+		t.Fatal("day0 missing from rollup_daily after midnight — carried-day drop (round-8 P1 undercount)")
+	}
+
+	// ---- Store B: backfill over the SAME data at the FINAL now (day0 closed). ----
+	_, dbB := openTestStore(t)
+	seedSource(t, dbB, src, format)
+	seedSession(t, dbB, "sess-1", src, "claude", "/work/proj", hourH)
+	seedTurn(t, dbB, "turn-1", "sess-1", hourH)
+	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hourH, endTS: &hourHEnd, durationUS: hourHEnd - hourH, status: "completed",
+		tokensIn: 10, tokensOut: 20, costUSD: 0.1})
+	if _, err := BackfillRollups(context.Background(), dbB, nowAfterMidnight, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	// The incremental store (carried day + hour) must be byte-identical to the
+	// backfill at the final now: H materialized in rollup_hourly, day0 materialized
+	// in rollup_daily.
+	assertRollupsIdentical(t, dbA, dbB)
 }

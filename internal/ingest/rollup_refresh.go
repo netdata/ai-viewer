@@ -25,7 +25,12 @@ const hourSpanUS = int64(3_600_000_000)
 // scanSessionStart) and the SAME open-bucket cutoffs from data-model.md
 // §"Open-bucket rule": rollup_hourly materializes every hour < floor(now,hour);
 // rollup_daily materializes every day < floor(now,day) (the open day is never
-// derived, even from its closed hours).
+// derived, even from its closed hours). Hours and days are each driven by an
+// INDEPENDENT carried set (dirtyRollupBuckets / dirtyRollupDays), both marked by
+// markDirtyRollupBucket: a day is never derived from the dirty hours, so it stays
+// tracked after its hours materialize and is itself materialized once IT closes
+// (round-8 P1 — otherwise a day whose hours all close while the day is still open
+// would be stranded after midnight with no further events).
 //
 // Recompute is DELETE-then-INSERT per (bucket, source_format), scoped to THIS
 // writer's source_format, NOT an overwrite: a dimension value that has since
@@ -44,32 +49,25 @@ const hourSpanUS = int64(3_600_000_000)
 // read fully drains its cursor into a slice BEFORE any write on this tx, so a
 // read cursor never straddles a write on the one pinned connection.
 func (w *writer) refreshRollups(ctx context.Context, tx *sql.Tx) error {
-	if len(w.dirtyRollupBuckets) == 0 {
+	if len(w.dirtyRollupBuckets) == 0 && len(w.dirtyRollupDays) == 0 {
 		return nil
 	}
 	now := w.now()
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
 
-	// Snapshot the dirty hours BEFORE iterating: the loop deletes materialized
-	// (closed) hours from w.dirtyRollupBuckets, and mutating a map during range
-	// over it is a Go hazard. The snapshot also lets a hour skipped-because-open
-	// be RETAINED (left in the map) and carried to the next batch/refresh —
-	// without it, a bucket whose ops all arrive during its own open hour would be
-	// skipped while open and then never re-marked, leaving the closed bucket
-	// permanently un-materialized (round-7 P1).
+	// HOUR pass. Snapshot the dirty hours BEFORE iterating: the loop stages removal
+	// of materialized (closed) hours, and mutating the map during range over it is a
+	// Go hazard. The snapshot also lets a hour skipped-because-open be RETAINED (left
+	// in the map) and carried to the next batch/refresh — without it, a bucket whose
+	// ops all arrive during its own open hour would be skipped while open and then
+	// never re-marked, leaving the closed bucket permanently un-materialized
+	// (round-7 P1).
 	dirtyHours := make([]int64, 0, len(w.dirtyRollupBuckets))
 	for h := range w.dirtyRollupBuckets {
 		dirtyHours = append(dirtyHours, h)
 	}
-
-	// Collect the affected days while recomputing each CLOSED dirty hour. A dirty
-	// hour at/after the open-hour cutoff is skipped AND retained (the open hour is
-	// never materialized; it stays carried), but its DAY is still considered — its
-	// other, already-closed hours may need a daily recompute.
-	days := make(map[int64]struct{}, len(dirtyHours))
 	for _, h := range dirtyHours {
-		days[rollups.BucketTS(h, rollups.Daily)] = struct{}{}
 		if h >= openHourStart {
 			continue // open hour: never materialized; RETAINED in the dirty set.
 		}
@@ -86,13 +84,28 @@ func (w *writer) refreshRollups(ctx context.Context, tx *sql.Tx) error {
 		w.pendingMaterializedBuckets[h] = struct{}{}
 		w.rollupMaterializedThisRefresh = true
 	}
-	for d := range days {
+
+	// DAY pass — mirrors the hour pass exactly, over the INDEPENDENTLY-carried
+	// dirtyRollupDays set (NOT derived from the dirty hours). Marking the day in
+	// markDirtyRollupBucket and carrying it here means a day stays tracked even after
+	// all of its hours have materialized and left the hour set, so a day that closes
+	// during a lull is still materialized by a later refresh/idle pass — the daily
+	// fix for the round-7 open→closed gap (round-8 P1). A day still open at refresh
+	// time is RETAINED; a closed day is materialized and its removal staged for
+	// post-commit promotion (rollback-safe, identical to hours).
+	dirtyDays := make([]int64, 0, len(w.dirtyRollupDays))
+	for d := range w.dirtyRollupDays {
+		dirtyDays = append(dirtyDays, d)
+	}
+	for _, d := range dirtyDays {
 		if d >= openDayStart {
-			continue // open day: never materialized in rollup_daily.
+			continue // open day: never materialized in rollup_daily; RETAINED.
 		}
 		if err := w.recomputeBucket(ctx, tx, d, d+daySpanUS, rollups.Daily); err != nil {
 			return fmt.Errorf("rollups-refresh: daily bucket %d: %w", d, err)
 		}
+		w.pendingMaterializedDays[d] = struct{}{}
+		w.rollupMaterializedThisRefresh = true
 	}
 	return nil
 }
