@@ -41,11 +41,13 @@ fi
 #    removed and replaced with a non-hardcoded-but-wrong early marker (e.g.
 #    `grep -q 'migration applied'`), even though a comment still names the dir.
 active="$(grep -vE '^[[:space:]]*#' "$SMOKE")"
-if printf '%s\n' "$active" | grep -q 'internal/store/migrations/.*\.sql' \
-   && printf '%s\n' "$active" | grep -q 'last_migration='; then
-  echo -e "  ${GREEN}PASS${NC}: active code derives the last migration from internal/store/migrations/"
+# One assignment must derive last_migration FROM the migrations dir (same line),
+# so an unrelated `last_migration="literal"` + a separate dir reference cannot
+# satisfy the guard.
+if printf '%s\n' "$active" | grep -qE 'last_migration=.*internal/store/migrations/.*\.sql'; then
+  echo -e "  ${GREEN}PASS${NC}: active code assigns \$last_migration from internal/store/migrations/*.sql (same line)"
 else
-  echo -e "  ${RED}FAIL${NC}: active code must derive the seed marker from internal/store/migrations/ (assign \$last_migration)." >&2
+  echo -e "  ${RED}FAIL${NC}: active code must assign \$last_migration FROM internal/store/migrations/*.sql on one line (not a literal)." >&2
   fail=1
 fi
 if printf '%s\n' "$active" | grep -qE 'grep .*"\$last_migration"'; then
