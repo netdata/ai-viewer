@@ -35,11 +35,23 @@ else
   echo -e "  ${GREEN}PASS${NC}: no hardcoded migration filename in embed-smoke.sh active code"
 fi
 
-# 2) The script derives the seed marker from the migrations directory.
-if grep -q 'internal/store/migrations' "$SMOKE"; then
-  echo -e "  ${GREEN}PASS${NC}: embed-smoke.sh derives the seed marker from internal/store/migrations/"
+# 2) ACTIVE code (comments stripped) must derive the marker from the migrations
+#    directory AND the seed poll must grep for that derived variable. Checking
+#    active code only means the guard still fails if the dynamic derivation is
+#    removed and replaced with a non-hardcoded-but-wrong early marker (e.g.
+#    `grep -q 'migration applied'`), even though a comment still names the dir.
+active="$(grep -vE '^[[:space:]]*#' "$SMOKE")"
+if printf '%s\n' "$active" | grep -q 'internal/store/migrations/.*\.sql' \
+   && printf '%s\n' "$active" | grep -q 'last_migration='; then
+  echo -e "  ${GREEN}PASS${NC}: active code derives the last migration from internal/store/migrations/"
 else
-  echo -e "  ${RED}FAIL${NC}: embed-smoke.sh does not reference internal/store/migrations/ to derive the last migration." >&2
+  echo -e "  ${RED}FAIL${NC}: active code must derive the seed marker from internal/store/migrations/ (assign \$last_migration)." >&2
+  fail=1
+fi
+if printf '%s\n' "$active" | grep -qE 'grep .*"\$last_migration"'; then
+  echo -e "  ${GREEN}PASS${NC}: the seed poll greps for the dynamically-derived \$last_migration"
+else
+  echo -e "  ${RED}FAIL${NC}: the seed poll must grep for the derived \$last_migration, not a literal or non-specific marker." >&2
   fail=1
 fi
 
