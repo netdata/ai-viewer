@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Self-test for scripts/check-coverage.sh using synthetic coverage profiles
 # with known per-package statement counts. Proves the gate exits non-zero on a
-# gated (non-/cmd/) miss and zero when all gated packages + the aggregate pass,
-# including that /cmd/ packages (binaries + nested dev-tools) are excluded.
+# gated (internal/*, non-/cmd/) miss and zero when all gated packages + the
+# aggregate pass, including that /cmd/ packages (binaries + nested dev-tools)
+# AND non-internal vendored Go (e.g. a Go port shipped under frontend/
+# node_modules) are excluded, never gated.
 #
 # Run: scripts/test/check-coverage-test.sh   (exit 0 = all assertions pass)
 set -euo pipefail
@@ -70,7 +72,24 @@ else
   echo -e "  ${RED}FAIL${NC} (aggregate-fail line missing from output)"; fail=$((fail+1))
 fi
 
-# 5) Missing profile → usage error (exit 2).
+# 5) Non-internal vendored Go must be EXCLUDED even at 0%, with the only gated
+#    internal package at 100% → PASS (exit 0). Pins the review-found defect: a
+#    frontend npm dep ships a Go port under node_modules, `go test ./...` covers
+#    it (no go.mod under frontend/), and the old /cmd/-only predicate gated it at
+#    0% whenever node_modules was present locally.
+cat > "$TMP/vendor.out" <<EOF
+mode: atomic
+$M/internal/foo/a.go:1.1,3.10 10 1
+$M/frontend/node_modules/flatted/golang/pkg/flatted/flatted.go:1.1,9.9 50 0
+EOF
+assert 0 "$TMP/vendor.out" "non-internal vendored Go (node_modules) excluded"
+if grep -qE '\[excl\].*node_modules/flatted' "$TMP/lastout"; then
+  echo -e "  ${GREEN}PASS${NC} (vendored Go tagged [excl], not gated)"; pass=$((pass+1))
+else
+  echo -e "  ${RED}FAIL${NC} (vendored Go not tagged [excl])"; fail=$((fail+1))
+fi
+
+# 6) Missing profile → usage error (exit 2).
 assert 2 "$TMP/does-not-exist.out" "missing profile"
 
 echo

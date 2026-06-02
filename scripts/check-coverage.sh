@@ -6,14 +6,22 @@
 # Policy (SOW-0010 re-scope, 2026-06-02):
 #   - Metric: statement coverage (Go's `-covermode=atomic`). Go has no
 #     first-class BRANCH coverage; the branch threshold is deferred (see spec).
-#   - Gated set: every NON-`/cmd/` package (the unit-testable core, i.e.
-#     `internal/*`) must be >= THRESHOLD, and their aggregate must be >= THRESHOLD.
-#   - Excluded: any package whose import path contains `/cmd/` — the binaries
-#     (`cmd/ai-viewer-{ingest,serve}`: main()/flag/signal wiring, covered by
-#     Playwright E2E + embed-smoke + cmd binary tests) and the dev-only tools
-#     (`internal/adapters/aiagent_v2/cmd/{genfixtures,backfillbench}`). These are
-#     reported for visibility but not gated. New-code-in-PR coverage is a
-#     separate deferred follow-up SOW.
+#   - Gated set: every `internal/*` package (the unit-testable core) must be
+#     >= THRESHOLD, and their aggregate must be >= THRESHOLD. A package is gated
+#     iff its import path contains `/internal/` AND NOT `/cmd/`.
+#   - Excluded (reported for visibility, not gated):
+#       * any path containing `/cmd/` — the binaries (`cmd/ai-viewer-{ingest,
+#         serve}`: main()/flag/signal wiring, covered by Playwright E2E +
+#         embed-smoke + cmd binary tests) and the nested dev-only tools
+#         (`internal/adapters/aiagent_v2/cmd/{genfixtures,backfillbench}`);
+#       * any path WITHOUT `/internal/` — e.g. vendored third-party Go shipped by
+#         a frontend npm dependency (`frontend/node_modules/flatted/golang/...`).
+#         `go test ./...` compiles+covers it (there is no `go.mod` under
+#         `frontend/`), but it is not our code and must never be gated. A
+#         `/cmd/`-only predicate spuriously gated it at 0% whenever node_modules
+#         was present locally (CI happened to pass only because node_modules is
+#         absent during the CI `go test`). Found in external review.
+#   - New-code-in-PR coverage is a separate deferred follow-up SOW.
 #
 # Usage: scripts/check-coverage.sh [coverage.out]   (default: ./coverage.out)
 #        COVERAGE_THRESHOLD=80 overrides the percent (default 80).
@@ -46,19 +54,19 @@ awk -v thr="$THRESHOLD" '
     tot[pkg]+=stmts
     if (cnt>0) cov[pkg]+=stmts
     seen[pkg]=1
-    excl=(index(pkg,"/cmd/")>0)
+    excl=(index(pkg,"/internal/")==0 || index(pkg,"/cmd/")>0)
     if (!excl) { gtot+=stmts; if (cnt>0) gcov+=stmts }
   }
   END {
     fail=0
     gpct = (gtot>0) ? gcov*100.0/gtot : 100.0
-    printf "Gated aggregate (non-/cmd/): %.1f%% (%d/%d stmts)  [threshold %d%%]\n", gpct, gcov, gtot, thr
+    printf "Gated aggregate (internal/*): %.1f%% (%d/%d stmts)  [threshold %d%%]\n", gpct, gcov, gtot, thr
     # Exact integer comparison (no float epsilon): pass iff covered*100 >= total*threshold.
     if (gtot>0 && gcov*100 < gtot*thr) { printf "  %sFAIL%s gated aggregate %.1f%% < %d%%\n", "\033[0;31m","\033[0m", gpct, thr; fail=1 }
     print  "Per-package:"
     for (p in seen) {
       pct = (tot[p]>0) ? cov[p]*100.0/tot[p] : 100.0
-      excl=(index(p,"/cmd/")>0)
+      excl=(index(p,"/internal/")==0 || index(p,"/cmd/")>0)
       tag = excl ? "excl" : "gate"
       printf "  [%s] %6.1f%%  %s\n", tag, pct, p
       if (!excl && tot[p]>0 && cov[p]*100 < tot[p]*thr) {

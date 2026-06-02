@@ -82,7 +82,7 @@ go tool cover -func=coverage.out | tail -1
 
 Thresholds:
 
-- **Statement** coverage (Go has no native branch coverage; branch is deferred). Gated set = every non-`/cmd/` package (`internal/*`): each ≥ 80% AND their aggregate ≥ 80%. `/cmd/` (binaries + dev tools) is excluded — reported, not gated.
+- **Statement** coverage (Go has no native branch coverage; branch is deferred). Gated set = every `internal/*` package (gated **iff** the import path contains `/internal/` and not `/cmd/`): each ≥ 80% AND their aggregate ≥ 80%. Excluded (reported, not gated): `/cmd/` (binaries + nested dev tools) and any non-`internal/` path, e.g. vendored Go a frontend npm dep ships under `frontend/node_modules/`.
 - New code in the PR: ≥ 90% lines — **deferred (SOW-0036)**, not yet enforced (see Enforcement note below).
 
 Enforcement: `scripts/check-coverage.sh coverage.out` fails if any gated (`internal/*`) package or the gated aggregate is < 80% statements; it runs as a build-failing CI step (the `test` job) and as the local pre-commit gate, with synthetic-fixture self-tests (`scripts/test/check-coverage-test.sh`). New-code-in-PR ≥ 90% is deferred to a follow-up SOW (diff↔coverage intersector).

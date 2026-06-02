@@ -52,8 +52,9 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - `scripts/test.sh` → `go test -race -coverprofile=coverage.out -covermode=atomic -count=1 ./...`.
 - **Metric: statement coverage** (Go's `-covermode=atomic`). Go has **no first-class branch coverage**; the branch threshold is **deferred** (revisit only if a mature branch-coverage tool emerges). Statement coverage is the enforced metric.
 - Thresholds (statement), enforced by `scripts/check-coverage.sh`:
-  - **Gated set = every non-`/cmd/` package** (the unit-testable core, i.e. `internal/*`): each ≥ 80%, and their aggregate ≥ 80%.
+  - **Gated set = every `internal/*` package** (the unit-testable core): a package is gated **iff its import path contains `/internal/` and not `/cmd/`**; each ≥ 80%, and their aggregate ≥ 80%.
   - **`/cmd/` is excluded** from the gate: the binaries (`cmd/ai-viewer-{ingest,serve}` — `main()`/flag/signal wiring, covered by Playwright E2E + embed-smoke + cmd binary tests) and the dev-only tools (`internal/adapters/aiagent_v2/cmd/{genfixtures,backfillbench}`). Reported for visibility, not gated.
+  - **Non-`internal/` paths are also excluded**: e.g. vendored Go that a frontend npm dependency ships under `frontend/node_modules/` (`flatted/golang/...`). `go test ./...` compiles+covers it (there is no `go.mod` under `frontend/`), but it is not our code, so the `/internal/`-positive predicate keeps it out of the gate.
   - **New-code-in-PR ≥ 90%: deferred to a follow-up SOW** (needs a diff↔coverage intersector + self-tests); the per-package + aggregate gate is the shipped base.
 - Enforcement: CI runs `scripts/check-coverage.sh coverage.out` as a build-failing step in the `test` job (after the coverage artifact uploads); the same script is the local pre-commit gate. `check-coverage.sh` has synthetic-fixture self-tests (`scripts/test/check-coverage-test.sh`).
 
