@@ -86,6 +86,206 @@ func BenchmarkScan_SyntheticCorpus(b *testing.B) {
 	}
 }
 
+// BenchmarkTail_SyntheticAppend measures the steady-state cost the v2
+// tailer pays per detected snapshot rewrite: stat → decompress → hash →
+// parse → map → emit. It drives processOnce directly — the exact unit
+// tailLoop invokes for each dirty file on a debounce flush
+// (tailer.go:169) — rather than the full Tail goroutine, because the
+// goroutine's wall time is dominated by non-deterministic OS inotify
+// delivery latency, not the CPU work this benchmark is meant to track
+// for regression. (The fsnotify→debounce→flush wiring itself is covered
+// by TestTail_* in tailer_test.go; its latency is an OS property, not
+// ours to benchmark.)
+//
+// v2 is whole-file: a producer rewrites <originId>.json.gz on every
+// snapshot, so "appending new lines" maps to "rewrite the gzip with one
+// more turn appended". Each iteration writes a DISTINCT-content rewrite
+// (an extra turn whose ops carry per-iteration high-entropy padding) so
+// the content hash always mismatches the cursor and the full
+// decompress+parse+map+emit path runs — the worst-case steady-state
+// tail step. A rewrite that re-hashed to the cursor would short-circuit
+// at scanner.go:147 and measure nothing.
+//
+// Reported metrics mirror BenchmarkScan_SyntheticCorpus:
+//
+//   - MB/s (b.SetBytes)   — DECOMPRESSED bytes mapped per second, the
+//     same throughput quantity adapter-aiagent-v2.md §Performance
+//     Considerations tracks.
+//   - events/sec          — canonical events emitted per second.
+//   - peak_heap_mb         — peak runtime HeapInuse during the measured
+//     loop (background sampler, same machinery as runScan). The tailed
+//     file stays well under the 50 MiB streamer threshold, so this is
+//     the in-memory whole-file path; a generous 200 MiB cap guards a
+//     gross allocation regression without being flaky.
+//
+// The seed write before ResetTimer establishes a cursor (so the first
+// measured iteration already exercises the rewrite-detection path, not
+// a first-sight emit) and is excluded from the timing.
+func BenchmarkTail_SyntheticAppend(b *testing.B) {
+	root := b.TempDir()
+	const origin = "tail-bench"
+	name := origin + ".json.gz"
+
+	// Seed: write an initial snapshot and prime the cursor by processing
+	// it once, so the measured loop only ever exercises the steady-state
+	// "rewrite detected" path.
+	// Channel cap generously exceeds the per-rewrite event count (a few
+	// hundred for this fixture) so processOnce never blocks on send and
+	// we can drain synchronously after each call — making the per-step
+	// event count exact and the measurement free of a drainer goroutine.
+	const chanCap = 8192
+	writeBenchSnapshot(b, root, name, syntheticSnapshot(origin, 6, 200, 1))
+	cur := newCursor()
+	seedOut := make(chan canonical.Event, chanCap)
+	if err := processOnce(context.Background(), root, sourceIDPrefix+root, name, &cur, seedOut, func(error) {}); err != nil {
+		b.Fatalf("seed processOnce: %v", err)
+	}
+
+	// Pre-build the per-iteration rewrite bodies. Turn/op COUNT is held
+	// CONSTANT across iterations (steady state — flat work per step); only
+	// the per-iteration pad seed varies, so the content hash always
+	// mismatches the cursor and the full decompress+parse+map+emit path
+	// runs. JSON marshal + gzip of the fixture is excluded from the timer.
+	bodies := make([][]byte, b.N)
+	decompressed := make([]int64, b.N)
+	for i := 0; i < b.N; i++ {
+		snap := tailRewriteSnapshot(origin, i)
+		raw, err := json.Marshal(snap)
+		if err != nil {
+			b.Fatalf("marshal rewrite %d: %v", i, err)
+		}
+		decompressed[i] = int64(len(raw))
+		bodies[i] = mkGzipBytes(raw)
+	}
+
+	out := make(chan canonical.Event, chanCap)
+	var peakHeap atomic.Uint64
+	samplerCtx, samplerCancel := context.WithCancel(context.Background())
+	samplerDone := make(chan struct{})
+	go heapSampler(samplerCtx, 50*time.Millisecond, &peakHeap, samplerDone)
+
+	var totalBytes int64
+	var lastEvents int64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Rewrite the file in place with new content. The mtime advances
+		// and the content hash differs, so processOnce re-emits.
+		if err := os.WriteFile(filepath.Join(root, name), bodies[i], 0o600); err != nil {
+			b.Fatalf("rewrite %d: %v", i, err)
+		}
+		if err := processOnce(context.Background(), root, sourceIDPrefix+root, name, &cur, out, func(error) {}); err != nil {
+			b.Fatalf("processOnce %d: %v", i, err)
+		}
+		// Synchronous non-blocking drain: count exactly what this step
+		// emitted and keep the channel empty for the next iteration.
+		lastEvents = 0
+		for drainedOne := true; drainedOne; {
+			select {
+			case <-out:
+				lastEvents++
+			default:
+				drainedOne = false
+			}
+		}
+		totalBytes += decompressed[i]
+	}
+	b.StopTimer()
+
+	b.SetBytes(totalBytes / int64(maxInt(b.N, 1)))
+	samplerCancel()
+	<-samplerDone
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	if ms.HeapInuse > peakHeap.Load() {
+		peakHeap.Store(ms.HeapInuse)
+	}
+
+	wallSec := b.Elapsed().Seconds() / float64(maxInt(b.N, 1))
+	if wallSec <= 0 {
+		wallSec = 1e-9
+	}
+	b.ReportMetric(float64(lastEvents)/wallSec, "events/sec")
+	b.ReportMetric(float64(peakHeap.Load())/(1024*1024), "peak_heap_mb")
+	if peakHeap.Load() > 200*1024*1024 {
+		b.Errorf("peak HeapInuse %d MiB exceeds 200 MiB cap for the whole-file tail path", peakHeap.Load()/(1024*1024))
+	}
+}
+
+// tailRewriteSnapshot builds the iteration-i rewrite for the tail
+// benchmark: a FIXED-shape v2 envelope (constant turn + op count, so
+// per-iteration work is flat) whose op padding is seeded by i, so every
+// rewrite hashes differently from the previous and forces the full
+// re-map path in processOnce. Shape matches a small active session a
+// producer rewrites on each new operation.
+func tailRewriteSnapshot(origin string, i int) snapshot {
+	const (
+		turns = 2
+		ops   = 6
+		pad   = 200
+	)
+	snap := simpleSnapshot(2, origin)
+	snap.OpTree.Turns = snap.OpTree.Turns[:0]
+	for t := 0; t < turns; t++ {
+		turn := turnNode{
+			ID:        fmt.Sprintf("turn-%d", t+1),
+			Index:     t + 1,
+			StartedAt: 1700000000000 + int64(t*1000),
+			EndedAt:   int64Ptr(1700000001000 + int64(t*1000)),
+		}
+		for o := 0; o < ops; o++ {
+			// Seed mixes i (iteration) and the op index so the content
+			// changes every rewrite while the structure stays constant.
+			padStr := highEntropyString(i*1009+t*ops+o, pad)
+			turn.Ops = append(turn.Ops, operationNode{
+				OpID:      fmt.Sprintf("op-%s-%d-%d", origin, t, o),
+				Kind:      "tool",
+				StartedAt: 1700000000100 + int64(t*1000+o),
+				EndedAt:   int64Ptr(1700000000200 + int64(t*1000+o)),
+				Status:    "ok",
+				Attributes: map[string]json.RawMessage{
+					"name": json.RawMessage(`"synthetic"`),
+					"pad":  mustMarshal(padStr),
+				},
+				Accounting: []accountingEntry{
+					{Type: "tool", CharactersIn: 100, CharactersOut: 200},
+				},
+			})
+		}
+		snap.OpTree.Turns = append(snap.OpTree.Turns, turn)
+	}
+	return snap
+}
+
+// writeBenchSnapshot marshals + gzips a snapshot to <root>/<name>
+// without a *testing.T (the bench helpers take *testing.B). Mirrors
+// writeSnapshot in helpers_test.go.
+func writeBenchSnapshot(b *testing.B, root, name string, snap snapshot) {
+	b.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		b.Fatalf("mkdir: %v", err)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		b.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, name), mkGzipBytes(body), 0o600); err != nil {
+		b.Fatalf("write: %v", err)
+	}
+}
+
+// maxInt returns the larger of a and b. Local to keep the bench file's
+// dependency surface minimal (the file predates the toolchain's builtin
+// max in some lint configs; an explicit helper is unambiguous).
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // runScan drives one Scan invocation start-to-finish, draining the
 // event channel concurrently so the adapter never blocks on send.
 // Returns the count of canonical events emitted and the peak heap

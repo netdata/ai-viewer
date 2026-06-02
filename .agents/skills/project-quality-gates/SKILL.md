@@ -105,7 +105,7 @@ go test -run=^$ -bench=. -benchmem -count=5 ./... > bench-current.txt
 benchstat bench/baseline.txt bench-current.txt
 ```
 
-Marked benchmarks (`func BenchmarkXxx`) exist for: adapter `Scan`, adapter `Tail`, canonical event encoding, SQLite batch insert, REST query path, SSE fanout.
+Marked benchmarks (`func BenchmarkXxx`) exist for the 5 performance-critical paths: adapter `Scan`, adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
 
 Threshold: ≤ 20% regression in any metric vs. `bench/baseline.txt`. The baseline updates only when a SOW explicitly accepts a regression with justification.
 

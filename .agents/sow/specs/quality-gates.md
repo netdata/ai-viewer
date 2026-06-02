@@ -73,7 +73,7 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Benchmarks
 
-- Marked benchmarks for: adapter `Scan`, adapter `Tail`, canonical event encode/decode, SQLite batch insert, REST query path, SSE fanout.
+- Marked benchmarks for the 5 performance-critical paths: adapter `Scan` + adapter `Tail` (`internal/adapters/aiagent_v2`), SQLite batch insert (`internal/ingest` `worker.flush`), REST query path (`internal/presenter` `handleSessionsList`), SSE fanout (`internal/notify` `Hub.Deliver`). There is **no canonical encode/decode** benchmark — canonical events are constructed directly by adapters and never serialized (`internal/canonical` has no encoders/decoders).
 - `go test -run=^$ -bench=. -benchmem -count=5 ./... > bench-current.txt`
 - `benchstat bench/baseline.txt bench-current.txt`
 - Threshold: ≤ 20% regression in any metric vs `bench/baseline.txt`. Baseline updates only on explicit SOW approval.
