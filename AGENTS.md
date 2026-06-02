@@ -99,7 +99,7 @@ Detailed patterns and prompt templates: `.agents/skills/project-delegation/SKILL
 
 ## Quality Gates (Automated)
 
-All gates run in CI on every push and must be green before merge. The assistant runs them locally before claiming any work done.
+All gates run in CI on every push and must be green before merge — **except the benchmark regression gate** (`scripts/check-bench.sh`), which is a local/workstation gate (its baseline is not comparable to GitHub-runner hardware; CI runs the bench compile-smoke + the gate's hardware-independent self-test instead). The assistant runs the gates locally before claiming any work done.
 
 | Layer | Gate | Threshold |
 |---|---|---|
@@ -110,8 +110,8 @@ All gates run in CI on every push and must be green before merge. The assistant 
 | Go static | `staticcheck`, `errcheck`, `ineffassign`, `unused` | zero warnings |
 | Go test | `go test -race ./...` | all pass |
 | Go coverage | `go test -coverprofile -covermode=atomic ./...` → `scripts/check-coverage.sh` | ≥ 80% statements per gated `internal/*` package + their aggregate (`/cmd/` excluded); branch + new-code-in-PR ≥ 90% deferred (SOW-0036) |
-| Go fuzz | `go test -fuzz=Fuzz... -fuzztime=30s` on parsers/decoders | zero crashes per CI run |
-| Go bench | `go test -bench=. -benchmem` for marked benchmarks | ≤ 20% regression vs baseline (stored in `bench/baseline.json`) |
+| Go fuzz | per-push: `go test -run='^Fuzz' ./internal/adapters/...` (deterministic seed corpus); nightly: `-fuzz -fuzztime=5m` per target (`fuzz-nightly.yml`). Canonical has no fuzz target. | zero crashes |
+| Go bench | `scripts/check-bench.sh` (benchstat vs `bench/baseline.txt`, `-count=6`) — **local/workstation gate, not CI**; CI runs the bench compile-smoke + the gate self-test | significant > 20% **sec/op** regression per benchmark (geomean + other metrics excluded) |
 | Frontend lint | `eslint` flat config, `@typescript-eslint`, `react`, `react-hooks` | zero warnings |
 | Frontend types | `tsc --noEmit` with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` | zero errors |
 | Frontend unit | `vitest run --coverage` | ≥ 80% lines per component dir |

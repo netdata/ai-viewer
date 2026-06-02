@@ -117,12 +117,9 @@ Zero warnings, zero failures, zero skipped tests without a referenced GitHub iss
 
 ## Performance Regression Tests
 
-A benchmark suite under `internal/adapters/<name>/bench_test.go`:
+A benchmark suite covering the performance-critical paths (5 benchmarks across 4 packages): adapter `Scan` + `Tail` (`internal/adapters/aiagent_v2/bench_test.go`), SQLite batch insert (`internal/ingest`), REST query (`internal/presenter`), SSE fanout (`internal/notify`).
 
-- `BenchmarkScanHappyPath`: measure events/sec.
-- `BenchmarkFullBackfill`: measure time to scan a fixture directory representative of real load.
-
-Stored baselines in `bench/baseline.json`. CI fails if any benchmark regresses > 20% versus baseline. Baselines updated by explicit commit (`scripts/update-benchmarks.sh`).
+The committed baseline is `bench/baseline.txt` (`-count=6`, with `goos/goarch/pkg/cpu` config lines). `scripts/check-bench.sh` runs `benchstat` against it and fails on a statistically-significant > 20% sec/op regression. It is a **local/workstation gate** — the baseline is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate's self-test, not the regression comparison. Baseline refresh requires an explicit SOW (no auto-update). See `quality-gates.md` §Go — Benchmarks.
 
 ## Local Test Commands
 

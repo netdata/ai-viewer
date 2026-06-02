@@ -54,7 +54,7 @@ cd frontend && npm run e2e -- --ui       # playwright UI mode
 | Go fuzz (parsers) | `internal/adapters/<name>/{fuzz_test,*_fuzz_test}.go` (canonical has no parser → no fuzz target) | seed corpus per push (deterministic), 5min/target explore nightly |
 | Go property-based (canonical mapping) | `internal/canonical/property_test.go` (rapid-go) | every commit |
 | Go E2E (ingest → store → server) | `tests/e2e/*_test.go` | every commit |
-| Performance benchmark | `internal/adapters/<name>/bench_test.go`, `internal/store/bench_test.go`, etc. | every commit, fails on > 20% regression |
+| Performance benchmark | `internal/adapters/aiagent_v2/bench_test.go`, `internal/ingest/bench_test.go`, `internal/presenter/bench_test.go`, `internal/notify/bench_test.go` | local `scripts/check-bench.sh` (workstation gate; CI runs the compile-smoke), > 20% sec/op regression |
 | Frontend component | `frontend/src/**/*.test.tsx` | every commit |
 | Frontend E2E (Playwright) | `frontend/tests/*.spec.ts` | every commit |
 | Frontend a11y (axe) | embedded in Playwright | every commit |

@@ -41,7 +41,8 @@ if [ -z "$BENCHSTAT" ] || [ ! -x "$BENCHSTAT" ]; then
   exit 2
 fi
 
-# The 5 benchmark-bearing packages (canonical has no encode/decode benchmark).
+# The 4 benchmark-bearing packages, 5 benchmarks (Scan + Tail share aiagent_v2;
+# canonical has no encode/decode benchmark).
 BENCH_PKGS=(
   ./internal/adapters/aiagent_v2/
   ./internal/ingest/
