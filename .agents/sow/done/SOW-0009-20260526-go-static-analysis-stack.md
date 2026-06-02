@@ -46,7 +46,7 @@ Enabling the full strict set (errorlint, gocritic, revive, gocyclo, misspell, ni
 | errorlint | 2 | **2** | fix: `errors.Is` instead of `==`/`!=` (test fragility) |
 | gocritic | 2 | **0** | both in `_test.go` → excluded |
 | misspell / whitespace / bodyclose | 0 | **0** | clean |
-| **TOTAL** | 158 (capped) | **64** | resolved to 0 via fixes + reasoned suppression + tuned config |
+| **TOTAL** | 158 (capped) | **64** (candidate cfg, gocyclo 20) | the final shipped cfg (gocyclo 25) reduced this to **57**; all resolved to 0 via fixes + reasoned suppression + tuning |
 
 **Inferences:**
 
@@ -81,7 +81,7 @@ Sources checked:
 Current state (2026-06-02):
 
 - Basic five linters + gofmt/goimports enforced; gosec + govulncheck standalone in CI per-push. Missing: the 12 strict linters + gofumpt, `scripts/lint.sh`, version pin, govulncheck nightly.
-- 64 residual findings under the tuned config (table above), resolved to zero by this SOW.
+- 57 residual findings under the final config (gocyclo 25), resolved to zero by this SOW (the gocyclo-20 candidate measured 64; raising the threshold to 25 dropped it to 57).
 
 Risks:
 
@@ -97,7 +97,7 @@ Status: ready (activated under blanket mandate 2026-06-02)
 
 Problem / root-cause model:
 
-- `AGENTS.md` commits to a strict Go static stack; the basic gates run but the strict set does not. The original "install before the codebase grows" framing is moot — the codebase already grew to ~36.7k LOC. So the task is a clean retrofit: enable the strict set, tune it to the codebase's measured nature (test exclusions, node_modules exclusion, a defensible gocyclo threshold), and resolve the 64 residual findings (fixes for real issues; reasoned suppression for the verified-intentional nilerr sites; config tuning for the test-noise classes).
+- `AGENTS.md` commits to a strict Go static stack; the basic gates run but the strict set does not. The original "install before the codebase grows" framing is moot — the codebase already grew to ~36.7k LOC. So the task is a clean retrofit: enable the strict set, tune it to the codebase's measured nature (test exclusions, node_modules exclusion, a defensible gocyclo threshold), and resolve the 57 residual findings (fixes for real issues; reasoned suppression for the verified-intentional nilerr sites; config tuning for the test-noise classes).
 
 Evidence reviewed:
 
@@ -110,7 +110,7 @@ Affected contracts and surfaces:
 
 - New: `scripts/lint.sh`, `.golangci-lint-version`, `.github/workflows/govulncheck-nightly.yml` (or a scheduled job).
 - Modified config: `.golangci.yml` (strict set + tuning), `.github/workflows/ci.yml` (golangci-action reads the pin from `.golangci-lint-version` via a step output; standalone gosec/govulncheck retained), `.github/workflows/govulncheck-nightly.yml` (new).
-- Modified production source (subagent-only): the 64-finding fixes — noctx×1, unconvert×8, errorlint×2, prealloc×1, revive×9, unparam×13, gofumpt×13 (auto), nilerr×8 (at-site suppression), `validateDoc` refactor×1. **Behavioral-change candidates** (test-first): `validateDoc` refactor (behavior must be byte-identical — pin with a test), any unparam signature change (compile-checked; add/adjust a test if a return value was being relied on), the noctx `QueryRowContext` change (pass the request/background context — pin behavior).
+- Modified production source (subagent-only): the 57-finding fixes — noctx×1, unconvert×8, errorlint×2, prealloc×1, revive×9, unparam×14, gofumpt×13 (auto), nilerr×9 (at-site suppression), `validateDoc` refactor×1. **Behavioral-change candidates** (test-first): `validateDoc` refactor (behavior must be byte-identical — pin with a test), any unparam signature change (compile-checked; add/adjust a test if a return value was being relied on), the noctx `QueryRowContext` change (pass the request/background context — pin behavior).
 - Unaffected: frontend, fixtures, migrations, REST/SSE contracts, data model.
 
 Spec deltas to land before any test/code:
@@ -139,7 +139,7 @@ Implementation plan:
 2. **Config** (master, owns top-level config): finalize `.golangci.yml` (strict set + gocyclo 25 + `_test.go` style exclusions + `frontend/node_modules` path exclusion + genfixtures unparam exclusion + uncapped issues). `golangci-lint config verify`.
 3. **Tooling** (master): `scripts/lint.sh` (run() helper; golangci umbrella + gosec + govulncheck), `.golangci-lint-version` = 2.11.4, `chmod +x`.
 4. **CI** (master): `ci.yml` lint job drives golangci via the action at the pinned version (read from `.golangci-lint-version`), keeps standalone gosec/govulncheck; add `govulncheck-nightly.yml` (`on.schedule`). CI keeps the cached action; `scripts/lint.sh` is the local mirror — CI-runs-aggregate-script is SOW-0013.
-5. **Source fixes** (delegated subagent, after all master edits — tree-clobber discipline): write/adjust tests first for the behavioral-change candidates, then apply all 64 fixes; subagent is **forbidden** from running external reviewers (orchestrator owns review).
+5. **Source fixes** (delegated subagent, after all master edits — tree-clobber discipline): write/adjust tests first for the behavioral-change candidates, then apply all 57 fixes; subagent is **forbidden** from running external reviewers (orchestrator owns review).
 6. **Gates** (master): `golangci-lint run` = 0; `go test -race ./...` green; `go vet`; gosec; govulncheck; frontend untouched; `scripts/scan-secrets.sh` + AI-attribution scan clean.
 7. **Commit** spec + config + scripts + CI + fixes together (no attribution trailer), branch, push, PR.
 8. **External review** (codex + glm + minimax in parallel, repo-root, `timeout 1800`, per the `project-second-opinions` skill's invocation rules) on the full diff; adjudicate on ground truth (codex decisive); iterate same-scope until codex is clean.
@@ -178,7 +178,7 @@ No operator decisions required. All choices are technical and within the assista
 2. `.golangci.yml` strict set + tuning + `golangci-lint config verify` (master).
 3. `scripts/lint.sh` + `.golangci-lint-version` (master).
 4. CI lint job (golangci-action at the pinned version + standalone gosec/govulncheck) + govulncheck nightly (master).
-5. Delegated source fixes (64 findings; tests-first for behavioral ones).
+5. Delegated source fixes (57 findings; tests-first for behavioral ones).
 6. Gates + scan + commit + PR.
 7. External review (codex/glm/minimax) → converge on codex-clean.
 8. Merge + close to done/.

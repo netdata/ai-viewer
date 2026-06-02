@@ -23,13 +23,24 @@ run() {
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 run cd "$REPO_ROOT"
 
-if [[ "${1:-}" == "--stress" ]]; then
-  count="${2:-10}"
-  echo -e "${GRAY}race stress: -count=${count} (no coverage profile)${NC}" >&2
-  run go test -race "-count=${count}" ./...
-  echo -e "${GREEN}[ok]${NC} race stress (-count=${count}) clean." >&2
-  exit 0
-fi
+case "${1:-}" in
+  "") : ;;  # normal mode (coverage profile)
+  --stress)
+    count="${2:-10}"
+    if ! [[ "$count" =~ ^[1-9][0-9]*$ ]]; then
+      echo -e "${RED}[ERROR]${NC} --stress needs a positive integer count (got '${count}')." >&2
+      exit 2
+    fi
+    echo -e "${GRAY}race stress: -count=${count} (no coverage profile)${NC}" >&2
+    run go test -race "-count=${count}" ./...
+    echo -e "${GREEN}[ok]${NC} race stress (-count=${count}) clean." >&2
+    exit 0
+    ;;
+  *)
+    echo -e "${RED}[ERROR]${NC} unknown argument: ${1} (usage: scripts/test.sh [--stress [N]])." >&2
+    exit 2
+    ;;
+esac
 
 run go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
 echo -e "${GRAY}coverage profile written: coverage.out${NC}" >&2

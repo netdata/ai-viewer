@@ -53,14 +53,15 @@ awk -v thr="$THRESHOLD" '
     fail=0
     gpct = (gtot>0) ? gcov*100.0/gtot : 100.0
     printf "Gated aggregate (non-/cmd/): %.1f%% (%d/%d stmts)  [threshold %d%%]\n", gpct, gcov, gtot, thr
-    if (gpct+0.0499 < thr) { printf "  %sFAIL%s gated aggregate %.1f%% < %d%%\n", "\033[0;31m","\033[0m", gpct, thr; fail=1 }
+    # Exact integer comparison (no float epsilon): pass iff covered*100 >= total*threshold.
+    if (gtot>0 && gcov*100 < gtot*thr) { printf "  %sFAIL%s gated aggregate %.1f%% < %d%%\n", "\033[0;31m","\033[0m", gpct, thr; fail=1 }
     print  "Per-package:"
     for (p in seen) {
       pct = (tot[p]>0) ? cov[p]*100.0/tot[p] : 100.0
       excl=(index(p,"/cmd/")>0)
       tag = excl ? "excl" : "gate"
       printf "  [%s] %6.1f%%  %s\n", tag, pct, p
-      if (!excl && pct+0.0499 < thr) {
+      if (!excl && tot[p]>0 && cov[p]*100 < tot[p]*thr) {
         printf "       %sFAIL%s %s at %.1f%% needs >= %d%% (short %.1f points)\n", "\033[0;31m","\033[0m", p, pct, thr, thr-pct
         fail=1
       }

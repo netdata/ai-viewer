@@ -226,11 +226,12 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 
 ```bash
 ./scripts/lint.sh         # Go: golangci umbrella + standalone gosec + govulncheck (SOW-0009; EXISTS)
-./scripts/test.sh         # all tests + coverage + race (SOW-0010; PLANNED)
+./scripts/test.sh         # all tests + coverage + race (SOW-0010; EXISTS)
+./scripts/check-coverage.sh  # statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
 ```
 
-Current state: `scripts/lint.sh` exists (the local Go lint+security mirror). `scripts/test.sh` (SOW-0010) and the canonical `scripts/gates.sh` aggregator (SOW-0013) are NOT yet present. Until `gates.sh` lands, run `scripts/lint.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, and `scripts/check-coverage.sh` exist (SOW-0009/0010). The canonical `scripts/gates.sh` aggregator (SOW-0013) is NOT yet present. Until it lands, run `scripts/lint.sh` + `scripts/test.sh` + `scripts/check-coverage.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
 
 ## When a Gate Fails
 

@@ -217,10 +217,11 @@ CI Go lint + security gates — `golangci-lint run` (the umbrella, driven by
 standalone `gosec` and `govulncheck`. CI enforces the same set via the
 version-pinned `golangci/golangci-lint-action` plus its standalone
 gosec/govulncheck steps (CI keeps the cached action rather than invoking
-`scripts/lint.sh`, to preserve golangci's analysis cache). The broader
-single-command aggregators — `scripts/test.sh` and `scripts/gates.sh` (run
-*every* gate, fail-fast) — are a planned convenience (SOW-0013) and are **not
-yet present**. Until they land, run the individual gates (or rely on the
+`scripts/lint.sh`, to preserve golangci's analysis cache). `scripts/test.sh` (Go
+tests + coverage profile) and `scripts/check-coverage.sh` (the statement
+coverage gate) exist (SOW-0010). The single-command aggregator `scripts/gates.sh`
+(runs *every* gate, fail-fast) is a planned convenience (SOW-0013) and is **not
+yet present**. Until it lands, run the individual scripts/gates (or rely on the
 per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
 gracefully when absent. The one exception is the security scanner: it is
 **fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if

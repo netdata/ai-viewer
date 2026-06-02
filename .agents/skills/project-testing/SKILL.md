@@ -64,9 +64,9 @@ cd frontend && npm run e2e -- --ui       # playwright UI mode
 
 | Scope | Threshold |
 |---|---|
-| Repository-wide lines | ≥ 80% |
+| Gated aggregate (`internal/*`, statement) | ≥ 80% |
 | Per-package (`internal/*`, statement) | ≥ 80% (`/cmd/` excluded; branch deferred) |
-| New code in the PR | ≥ 90% lines |
+| New code in the PR | ≥ 90% — **deferred** (SOW-0036) |
 | Frontend component directory | ≥ 80% lines |
 
 `scripts/check-coverage.sh` enforces **statement** coverage on the gated `internal/*` set (`/cmd/` excluded) against `coverage.out`. Branch coverage and new-code-in-PR ≥ 90% are deferred (see `quality-gates.md` "Go — Coverage"). Lowering a threshold to land a PR is a contract breach; either add tests or split the PR.

@@ -35,13 +35,15 @@
 #   that introduces them.
 #
 # Deferred to subsequent SOWs
-#   Some gates from .agents/sow/specs/quality-gates.md are not enforced
-#   in this initial workflow. They land in:
-#     - SOW-0009 — .golangci.yml + standalone-gosec config + pinned tool
-#                  versions (replacing go install @latest patterns below)
-#     - SOW-0010 — scripts/check-coverage.sh + branch coverage +
-#                  race -count=3 stress + coverage diff PR comment
-#     - SOW-0011 — fuzz targets + property tests + benchstat baseline
+#   Gate landing status (.agents/sow/specs/quality-gates.md):
+#     - SOW-0009 (LANDED) — strict .golangci.yml + standalone pinned gosec +
+#                  pinned tool versions; nightly govulncheck.
+#     - SOW-0010 (LANDED) — scripts/{test,check-coverage}.sh: statement
+#                  coverage gate (internal/* >= 80%, /cmd/ excluded) enforced
+#                  in the test job; nightly race stress (race-stress-nightly.yml).
+#                  Branch coverage, new-code-in-PR diff (SOW-0036), and a
+#                  per-push -count=3 / coverage PR comment were re-scoped/deferred.
+#     - SOW-0011 (pending) — fuzz targets + property tests + benchstat baseline
 #                  enforcement (replaces benchtime=1x smoke run below)
 #     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
 #                  enforcement (replaces bundle-size report below)
