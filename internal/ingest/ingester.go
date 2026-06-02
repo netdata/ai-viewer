@@ -118,8 +118,9 @@ func WithLocation(sourceID, location string) Option {
 // batch flush, so a daemon restart re-applies the configured value. When no
 // override is registered for a source the resolver defaults to true (opt-OUT —
 // logs are indexed unless the operator disables it), matching the
-// sources.fts5_index_logs column default. This step only PERSISTS the flag; no
-// FTS index population reads it yet (data-model.md §Full-text search).
+// sources.fts5_index_logs column default. The worker persists the flag on the
+// sources row and applyLogEntry reads it to gate fts_logs population (fts_ops
+// is always indexed; data-model.md §Full-text search).
 func WithFTS5IndexLogs(sourceID string, enabled bool) Option {
 	return func(i *Ingester) {
 		i.fts5IndexLogsOverrides[sourceID] = enabled
@@ -156,7 +157,7 @@ type Ingester struct {
 	// fts5IndexLogsOverrides maps sourceID → whether its FTS5 log index should
 	// be populated. Set by WithFTS5IndexLogs; absence resolves to the default
 	// (true) in resolveFTS5IndexLogs. Persisted on the sources row by the worker
-	// (config plumbing only — no FTS population reads it yet).
+	// and read by applyLogEntry to gate fts_logs population.
 	fts5IndexLogsOverrides map[string]bool
 }
 

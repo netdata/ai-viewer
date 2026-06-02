@@ -372,8 +372,11 @@ unknown enum value behave exactly as the other GET routes.
 **Rollup fast path vs. live fold (correctness contract).** The long-form rollups
 are keyed by a SINGLE dimension per row (`data-model.md` §Rollup tables — they
 deliberately avoid the `model×provider×tool×agent×cwd` cross-product), so they can
-natively answer only a `source_format` (`sources`) + time-range filter alongside the
-requested `group_by`/`dimension`. Therefore:
+natively answer only a time-range (`from`/`to`) filter alongside the requested
+`group_by`/`dimension`. ANY dimension filter — including `sources`, which binds to
+`sessions.source_id` (finer than the rollups' `source_format` key, so a
+`source_format`-level filter would over-count sibling sources) — forces the live
+fold. Therefore:
 - **Rollup fast path** — taken when the ONLY filters present are `from`/`to` (no
   dimension filter and no `sources`): closed buckets are summed from
   `rollup_hourly`/`rollup_daily` (`WHERE dimension=? AND bucket_ts ∈ [from,

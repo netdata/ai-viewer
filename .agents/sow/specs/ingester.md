@@ -383,8 +383,11 @@ transaction (not after it), the ingester INSERTs `notify` rows so they commit
 - one `session_changed` row per canonical session ID in the batch's
   `affectedSessionIDs`, carrying its `root_session_id` and the batch commit
   `ts_us`;
-- at most one `stats_invalidated` row per batch, emitted only when the batch
-  changed catalog rollups;
+- at most one `stats_invalidated` row per batch, emitted when the batch changed
+  any analytics input — the catalog rollups, the time-bucketed
+  `rollup_hourly`/`rollup_daily` (a non-empty `dirtyRollupBuckets`), or the FTS
+  tables — i.e. on `len(affectedSessionIDs) > 0 || len(dirtyRollupBuckets) > 0`
+  (`data-model.md` §Rollup tables, §Full-text search);
 - one `source_status_changed` row when a source's `parse_errors` count or
   `enabled` flag changed.
 

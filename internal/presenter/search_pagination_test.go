@@ -351,6 +351,128 @@ func TestSearch_AsymmetricPaginationOpsRunDry(t *testing.T) {
 	}
 }
 
+// TestSearch_RankTiePaginationStable pins the offset-pagination contract for
+// EQUAL-rank rows. Both FTS queries order by rank first (bm25 best-first), but
+// bm25 ties are common: rows whose indexed text is identical score identically.
+// With ORDER BY rank alone the relative order WITHIN a tie group is unspecified,
+// so it can differ between the page-1 query and the offset page-2 query and an
+// offset split can then duplicate or skip a tied row. The fix appends a unique
+// tie-breaker (fts_ops.op_id / fts_logs.log_id) so the total order is
+// deterministic across queries.
+//
+// To force a provable bm25 tie every row is seeded with IDENTICAL indexed text
+// (same term, same frequency, same document length) so each row's bm25 score is
+// exactly equal. The op rows are inserted in DESCENDING op_id order so their
+// rowid (insertion) order is the REVERSE of their op_id order — this is the
+// discriminator: without the tie-breaker SQLite returns equal-rank rows in an
+// unspecified order (here rowid/insertion order, o9..o1), so the assertion that
+// pages arrive in ascending op_id order fails; with `ORDER BY rank, op_id` they
+// arrive o1..o9 and it passes. Each page also feeds a union check that rejects
+// any duplicate or skip across the full walk.
+func TestSearch_RankTiePaginationStable(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
+	seedSession(t, db, sessionRow{
+		id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA", kind: "root",
+		agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 99_000,
+	})
+	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
+
+	// Ops: identical indexed text (name "needle", every other column empty) so
+	// bm25 is exactly equal. Inserted DESCENDING by op_id so rowid order is the
+	// reverse of op_id order; the tie-breaker must re-sort them to ascending.
+	descOpIDs := []string{"o9", "o7", "o5", "o3", "o1"}
+	wantOpsAsc := []string{"o1", "o3", "o5", "o7", "o9"}
+	for i, id := range descOpIDs {
+		seedFTSOp(t, db, opRow{
+			id: id, turnID: "t1", sessionID: "rootA", seq: int64(i + 1), kind: "tool", name: "needle",
+			startTS: base + int64(i+1)*1000, endTS: base + int64(i+1)*1000 + 100, durationUS: 100, status: "completed",
+		}, "")
+	}
+	// Logs: identical message → equal bm25. log_id is an autoincrement rowid
+	// (assigned at insert), so log_id order == insertion order; the union check
+	// below pins no-dup/no-skip for the logs side (the tie-breaker keeps the
+	// total order stable across the page-1 and offset queries).
+	wantLogs := map[int64]bool{}
+	for i := 0; i < 5; i++ {
+		id := seedFTSLog(t, db, logRow{
+			sessionID: "rootA", ts: base + int64(i+1)*1000, severity: "ERR", source: "x", message: "needle",
+		})
+		wantLogs[id] = true
+	}
+
+	// Walk every page one row at a time, recording the ORDER ops arrive in and
+	// the SET of ops/logs seen. The order list is the red→green discriminator for
+	// the op tie-breaker; the sets reject any duplicate or skip on either side.
+	var gotOpsOrder []string
+	gotOps := map[string]bool{}
+	gotLogs := map[int64]bool{}
+	cursor := ""
+	for page := 0; page < 100; page++ { // generous cap; loop breaks on empty cursor
+		q := "q=needle&limit=1"
+		if cursor != "" {
+			q += "&cursor=" + cursor
+		}
+		code, body, env := getSearch(t, p, q)
+		if code != http.StatusOK {
+			t.Fatalf("page %d status=%d env=%+v", page, code, env)
+		}
+		for _, op := range body.Ops {
+			if gotOps[op.OpID] {
+				t.Fatalf("op %q DUPLICATED across pages (unstable tie order): order so far=%v", op.OpID, gotOpsOrder)
+			}
+			gotOps[op.OpID] = true
+			gotOpsOrder = append(gotOpsOrder, op.OpID)
+		}
+		for _, lg := range body.Logs {
+			if gotLogs[lg.LogID] {
+				t.Fatalf("log %d DUPLICATED across pages (unstable tie order)", lg.LogID)
+			}
+			gotLogs[lg.LogID] = true
+		}
+		if body.NextCursor == "" {
+			break
+		}
+		cursor = body.NextCursor
+	}
+
+	// Ops arrive in ascending op_id order across the paginated walk. Equal rank
+	// for every row means only the op_id tie-breaker can produce this order;
+	// without it the order is unspecified (insertion/rowid order here) and this
+	// fails — the contract the fix establishes.
+	if !equalStrSlice(gotOpsOrder, wantOpsAsc) {
+		t.Fatalf("op tie order=%v, want %v (rank-tie rows must order by the unique op_id tie-breaker, stable across offset pages)",
+			gotOpsOrder, wantOpsAsc)
+	}
+	// Logs side: the union is exactly the seeded set — no duplicate, no skip.
+	if len(gotLogs) != len(wantLogs) {
+		t.Fatalf("logs union n=%d, want %d (a SKIP or DUP under offset pagination): got=%v want=%v",
+			len(gotLogs), len(wantLogs), gotLogs, wantLogs)
+	}
+	for id := range wantLogs {
+		if !gotLogs[id] {
+			t.Errorf("log %d SKIPPED across all pages", id)
+		}
+	}
+}
+
+// equalStrSlice reports whether two string slices have the same elements in the
+// same order (test-local helper for the rank-tie ordering assertion).
+func equalStrSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestSearch_NoMatchEmptyArrays asserts a query that matches nothing returns
 // empty (non-nil) ops/logs arrays and no cursor, with logs_indexed still
 // reflecting the source flag.

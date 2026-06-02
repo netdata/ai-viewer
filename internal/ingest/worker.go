@@ -20,7 +20,8 @@ type worker struct {
 	// fts5IndexLogs is the resolved per-source FTS5 log-indexing flag the
 	// ingester computed from WithFTS5IndexLogs (default true). ensureSourceRow
 	// persists it on the sources row so the operator's choice survives daemon
-	// restart. NOTHING reads it yet — FTS index population is a later step.
+	// restart. applyLogEntry reads it to gate fts_logs population (fts_ops is
+	// always indexed regardless of this flag).
 	fts5IndexLogs bool
 	events        <-chan canonical.Event
 	db            *sql.DB

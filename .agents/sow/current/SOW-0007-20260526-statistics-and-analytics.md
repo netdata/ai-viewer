@@ -256,6 +256,15 @@ Open decisions:
   - **F7 (P3, no action)** malformed FTS5 `MATCH` → 503 — already tracked as **SOW-0035**.
   - **REJECTED (glm/minimax, on ground truth):** dup `scanRollupOpRow` (intentional + guarded by the parity test); `__other__` lexicographic sort "fragile" (deterministic is all the byte-diff needs — the value's sort position is irrelevant to correctness; `collapse.go` produces it deterministically); search OFFSET pagination (the spec'd design — FTS rank has no keyset key); the `#nosec G701` cosmetic. minimax's P2 "document the parameterized-`whereClause` invariant at the `#nosec`" is folded in as a cheap defense-in-depth comment.
   - **Fix plan:** presenter subagent (F2 group=all, F3 half-open, F4 ORDER BY, + the #nosec doc) ∥ ingest subagent (F1 SessionUpdated dirty-buckets, F5 backfill DELETE-first); orchestrator does F6 (spec). Then RE-REVIEW same scope (codex+glm+minimax) until clean before merge.
+  - **Round-1 fixes delivered** (commit `3ec2ba6`, CI-green): F1-F6 as planned; full `-race` (ingest 344s + presenter + cmd) PASS, golangci 0, gosec 0.
+
+- **Review ROUND 2 (re-review after round-1 fixes; SAME scope + fix notes; orchestrator-adjudicated on ground truth).** All 6 round-1 fixes VERIFIED correct+complete by all three reviewers. codex found 1 new P2 + 2 P3; glm clean ("would merge"); minimax clean ("would merge") + 1 P3 + 1 non-issue. Findings (verified before accepting):
+  - **G1 (P2, codex, ACCEPT)** `/api/search` offset pagination ordered ONLY by `rank` (`search.go:290`/`:332`) → equal-bm25-rank rows have unstable SQL order → offset pages can duplicate/skip rows. Fixed: `ORDER BY rank, fts_ops.op_id` / `rank, fts_logs.log_id` (unique tiebreak) + a rank-tie pagination test (seeds equal-bm25 rows in reverse op_id order, asserts ascending-within-rank; red→green confirmed).
+  - **G2 (P3, codex, ACCEPT)** `rest-api.md` fast-path INTRO still claimed rollups natively answer a `source_format`/`sources` filter — contradicted the corrected bullets below it (the F2 fix). Corrected the intro to "time-range only; any dimension filter incl. `sources` (source_id, finer than source_format) forces live fold".
+  - **G3 (P3, codex, ACCEPT)** 3 stale `fts5IndexLogs` "nothing reads it yet" comments (`worker.go:23`, `ingester.go:122`/`:159`) — 7b's `applyLogEntry` reads it. Updated to reflect the gate.
+  - **G4 (P3, minimax, ACCEPT)** `ingester.md` §Notify Channel `stats_invalidated` line predated rollups/FTS (said "catalog rollups" only). Updated to the `affectedSessionIDs ∪ dirtyRollupBuckets` union.
+  - **REJECTED:** minimax's "status-only `SessionUpdated` doesn't touch rollups" — correct BY DESIGN (status is not a rollup dimension; the F1 gate `agent_name||cwd` deliberately excludes it; tested by `TestRefreshRollups_SessionUpdatedNoMetadataNoBucketWork`); minimax itself marked it non-actionable. SQL-injection/silent-failure/side-effect/single-writer all re-verified PASS by all three.
+  - Gates (orchestrator-verified): gofmt 0, build 0, vet 0, **golangci 0**, gosec 0, presenter `-race` PASS. **Next:** commit round-2 fixes → re-review ROUND 3 (same scope) → converge → squash-merge PR #34.
 
 ## Validation
 

@@ -271,7 +271,11 @@ func searchNextCursor(nOps, nLogs, limit int, offset int64, match string, f sess
 // parseSessionFilter constraints and rendering kind/name/model. The MATCH value
 // and every filter value are `?`-bound; only static SQL + the parameterized
 // whereClause fragment are concatenated. ORDER BY rank = bm25 ascending = best
-// first (bm25 is negative). The cursor is fully drained before return.
+// first (bm25 is negative); the unique fts_ops.op_id tie-breaker orders rows
+// WITHIN an equal-rank group so the total order is deterministic and offset
+// pagination stays stable across the page-1 and offset queries (equal-bm25 rows
+// are common, e.g. identical indexed text). The cursor is fully drained before
+// return.
 func (p *Presenter) searchOps(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchOpRow, error) {
 	where, whereArgs := f.whereClause("s")
 	// snippet(fts_ops, -1, ...) lets SQLite pick the best-matching indexed
@@ -287,7 +291,7 @@ FROM fts_ops
 JOIN ops o ON o.id = fts_ops.op_id
 JOIN sessions s ON o.session_id = s.id
 WHERE fts_ops MATCH ? AND ` + where + `
-ORDER BY rank
+ORDER BY rank, fts_ops.op_id
 LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is the parameterized whereClause (filters.go)
 	args := make([]any, 0, len(whereArgs)+3)
 	args = append(args, match)
@@ -316,7 +320,10 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 // ingester's only fts_logs writer sets session_id), so the join chain is
 // fts_logs.log_id → log_entries.id → sessions.id → sources.id; the filter binds
 // to the session/source exactly as searchOps does. MATCH + all filter values
-// are `?`-bound. ORDER BY rank = best first. The cursor is fully drained.
+// are `?`-bound. ORDER BY rank = best first; the unique fts_logs.log_id
+// tie-breaker orders rows WITHIN an equal-rank group so the total order is
+// deterministic and offset pagination stays stable across the page-1 and offset
+// queries (equal-bm25 rows are common). The cursor is fully drained.
 func (p *Presenter) searchLogs(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchLogRow, error) {
 	where, whereArgs := f.whereClause("s")
 	// The only concatenated fragment is the parameterized whereClause
@@ -329,7 +336,7 @@ FROM fts_logs
 JOIN log_entries le ON le.id = fts_logs.log_id
 JOIN sessions s ON le.session_id = s.id
 WHERE fts_logs MATCH ? AND ` + where + `
-ORDER BY rank
+ORDER BY rank, fts_logs.log_id
 LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is the parameterized whereClause (filters.go)
 	args := make([]any, 0, len(whereArgs)+3)
 	args = append(args, match)
