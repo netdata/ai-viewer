@@ -438,9 +438,10 @@ Migration history:
   (`rollup_hourly`, `rollup_daily`) and the FTS5 search tables (`fts_ops`,
   `fts_logs`) defined in §Rollup tables (SOW-0007), and bumps
   `schema_meta.version` to `'6'` in lockstep with `presenter.SchemaVersion`. Serve
-  reads all four tables (`/api/stats/aggregate`, `/api/stats/top`, `/api/search`,
-  and the rollup-backed `/api/stats`), so a v6 serve binary refuses to start
-  against a pre-0006 store.
+  reads all four tables for `/api/stats/aggregate`, `/api/stats/top`, and
+  `/api/search`, so a v6 serve binary refuses to start against a pre-0006 store.
+  (`/api/stats` itself is live over `ops` — NOT rollup-backed, `rest-api.md`
+  §`/api/stats` — but the version gate is required by the other three surfaces.)
 - `0007_fts5_index_logs.sql` — adds the `sources.fts5_index_logs` column
   (`INTEGER NOT NULL DEFAULT 1`; the per-source opt-out that gates FTS5 *log*
   indexing — `fts_ops` is always indexed) and bumps `schema_meta.version` to
@@ -502,7 +503,7 @@ For statistics views over an arbitrary timeframe:
 
 ## Rollup tables (SOW-0007)
 
-Time-bucketed, **additive**, long-form rollups that back the statistics dashboard (`/stats`) and the `/api/stats`, `/api/stats/aggregate`, `/api/stats/top` endpoints (`rest-api.md`). Refreshed incrementally by the ingester after each batch commit and rebuildable from scratch by a one-shot backfill (`ingester.md` §Rollup Refresh and FTS5 Maintenance). The schema is **long-form** — one row per dimension value per bucket — deliberately NOT the `model × provider × tool × agent × cwd` cross-product, which would explode row count combinatorially.
+Time-bucketed, **additive**, long-form rollups that back the statistics dashboard (`/stats`) and the `/api/stats/aggregate` + `/api/stats/top` endpoints (`rest-api.md`). (`/api/stats` is a separate, live, filtered session-set summary — NOT rollup-backed; see `rest-api.md` §`/api/stats`.) Refreshed incrementally by the ingester after each batch commit and rebuildable from scratch by a one-shot backfill (`ingester.md` §Rollup Refresh and FTS5 Maintenance). The schema is **long-form** — one row per dimension value per bucket — deliberately NOT the `model × provider × tool × agent × cwd` cross-product, which would explode row count combinatorially.
 
 ```sql
 CREATE TABLE rollup_hourly (

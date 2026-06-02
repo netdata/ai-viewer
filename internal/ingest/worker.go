@@ -182,7 +182,11 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	// Ensure the source row exists; subsequent FK references and
 	// source_progress depend on it. The resolved fts5IndexLogs flag is
 	// persisted here (the ingester option is the runtime source of truth, so a
-	// daemon restart re-asserts it); nothing reads it yet.
+	// daemon restart re-asserts it). The in-memory flag (w.fts5IndexLogs →
+	// wr.fts5IndexLogs) gates incremental fts_logs indexing in the writer's
+	// applyLogEntry path; the persisted sources.fts5_index_logs column is read
+	// by BackfillFTS (indexableLogsForFTSQuery) and by GET /api/search
+	// (presenter searchLogs).
 	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location, w.fts5IndexLogs); err != nil {
 		return err
 	}

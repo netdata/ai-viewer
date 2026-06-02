@@ -7,10 +7,12 @@
 -- This migration creates EMPTY tables only (DDL + indexes). The rollup
 -- backfill and the FTS5 population are SOW-0007 Chunk 4 — no row is written
 -- here. It bumps schema_meta.version to '6' in lockstep with
--- presenter.SchemaVersion: serve reads all four tables (the rollup-backed
--- /api/stats, /api/stats/aggregate, /api/stats/top, and /api/search), so a v6
--- serve binary must refuse to start against a pre-0006 store (CheckSchema,
--- exact-equality) rather than serve missing/empty analytics surfaces.
+-- presenter.SchemaVersion: serve reads all four tables — rollup_hourly/
+-- rollup_daily back /api/stats/aggregate and /api/stats/top, while fts_ops/
+-- fts_logs back /api/search (/api/stats itself is live over ops, not these
+-- tables) — so a v6 serve binary must refuse to start against a pre-0006 store
+-- (CheckSchema, exact-equality) rather than serve missing/empty analytics
+-- surfaces.
 
 -- ---------------------------------------------------------------------
 -- rollup_hourly / rollup_daily — long-form additive rollups.

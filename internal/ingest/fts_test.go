@@ -3,7 +3,8 @@ package ingest
 import (
 	"context"
 	"database/sql"
-	"sort"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -440,6 +441,108 @@ func TestFTS_BackfillEmptyStore(t *testing.T) {
 	}
 }
 
+// TestFTS_BackfillStreamsInBoundedBatches drives BackfillFTS with a tiny
+// per-batch size (2) over 5 ops and 5 indexable logs so the keyset loop must
+// cross >=3 batches ([1,2],[3,4],[5]). It pins the bounded-memory streaming
+// contract: every op and every indexable log is indexed exactly once across
+// batches (no duplicate from a >=-instead-of-> keyset bug), the final partial
+// batch IS processed (a unique token in the largest-op_id row, guaranteed to
+// fall alone in the last batch, is MATCH-able), and the fts5_index_logs=0
+// opt-out still holds when streaming (the OFF source's logs never reach
+// fts_logs). batchSize is a var so the test can force boundary crossings.
+func TestFTS_BackfillStreamsInBoundedBatches(t *testing.T) {
+	saved := ftsBackfillBatchSize
+	ftsBackfillBatchSize = 2
+	t.Cleanup(func() { ftsBackfillBatchSize = saved })
+
+	_, db := openTestStore(t)
+	const fmtCC = "claude_code"
+	srcOn := "claude_code:/on"   // fts5_index_logs = true
+	srcOff := "claude_code:/off" // fts5_index_logs = false
+	seedSourceFlag(t, db, srcOn, fmtCC, true)
+	seedSourceFlag(t, db, srcOff, fmtCC, false)
+
+	start, end := ts(0, 9, 0), ts(0, 9, 5)
+
+	// ON source: 4 ops with stable, lexically-ordered op_ids op-1..op-4 plus a
+	// 5th op-5 carrying a UNIQUE model token only it has. Ordered by id ASC,
+	// op-5 lands alone in the final partial batch ([op-1,op-2],[op-3,op-4],
+	// [op-5]) — so the MATCH below proves the last batch is processed.
+	seedSession(t, db, "on-sess", srcOn, "claude", "/w", start)
+	seedTurn(t, db, "on-turn", "on-sess", start)
+	for i := 1; i <= 4; i++ {
+		seedOp(t, db, opSpec{id: fmt.Sprintf("op-%d", i), turnID: "on-turn", sessionID: "on-sess", seq: i,
+			kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+			startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+	}
+	seedOp(t, db, opSpec{id: "op-5", turnID: "on-turn", sessionID: "on-sess", seq: 5,
+		kind: "llm", name: "chat", model: "uniquelastmodel", provider: "anthropic",
+		startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+
+	// 4 indexable logs on the ON source, plus a 5th carrying a UNIQUE token so
+	// the last log batch is provably processed too (le.id AUTOINCREMENT keyset).
+	for i := 1; i <= 4; i++ {
+		seedLog(t, db, "on-sess", fmt.Sprintf("indexed log line %d", i), "INF", ts(0, 9, i))
+	}
+	seedLog(t, db, "on-sess", "uniquelastlog token", "INF", ts(0, 9, 5))
+
+	// OFF source: one op (always indexed into fts_ops) + one log that must NOT
+	// reach fts_logs even though streaming crosses batches.
+	seedSession(t, db, "off-sess", srcOff, "claude", "/w", start)
+	seedTurn(t, db, "off-turn", "off-sess", start)
+	seedOp(t, db, opSpec{id: "op-6-off", turnID: "off-turn", sessionID: "off-sess", seq: 1,
+		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
+		startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+	seedLog(t, db, "off-sess", "excluded log line", "INF", ts(0, 9, 1))
+
+	const wantOps = 6  // 5 ON + 1 OFF (fts_ops is never gated)
+	const wantLogs = 5 // 5 ON only (OFF source's log excluded)
+
+	stats, err := BackfillFTS(context.Background(), db, silentLogger())
+	if err != nil {
+		t.Fatalf("BackfillFTS: %v", err)
+	}
+	if stats.OpRows != wantOps {
+		t.Fatalf("stats.OpRows = %d, want %d (every op across batches)", stats.OpRows, wantOps)
+	}
+	if stats.LogRows != wantLogs {
+		t.Fatalf("stats.LogRows = %d, want %d (only fts5_index_logs=1 logs)", stats.LogRows, wantLogs)
+	}
+
+	// Persisted row counts match the returned stats.
+	if n := scanInt(t, db, `SELECT COUNT(*) FROM fts_ops`); n != wantOps {
+		t.Fatalf("fts_ops count = %d, want %d", n, wantOps)
+	}
+	if n := scanInt(t, db, `SELECT COUNT(*) FROM fts_logs`); n != wantLogs {
+		t.Fatalf("fts_logs count = %d, want %d", n, wantLogs)
+	}
+
+	// No duplicates: a >=-instead-of-> keyset bug would re-read boundary rows.
+	if total, distinct := scanInt(t, db, `SELECT COUNT(*) FROM fts_ops`),
+		scanInt(t, db, `SELECT COUNT(DISTINCT op_id) FROM fts_ops`); total != distinct {
+		t.Fatalf("fts_ops has duplicates: count=%d distinct op_id=%d", total, distinct)
+	}
+	if total, distinct := scanInt(t, db, `SELECT COUNT(*) FROM fts_logs`),
+		scanInt(t, db, `SELECT COUNT(DISTINCT log_id) FROM fts_logs`); total != distinct {
+		t.Fatalf("fts_logs has duplicates: count=%d distinct log_id=%d", total, distinct)
+	}
+
+	// The OFF source's log is absent (opt-out holds across batches).
+	if got := matchLogIDs(t, db, "excluded"); len(got) != 0 {
+		t.Fatalf("MATCH 'excluded' in fts_logs = %v, want 0 rows (source flag=false)", got)
+	}
+
+	// Final partial batch processed: the unique token in the largest-op_id row
+	// (op-5) resolves to exactly that op.
+	if got := matchOpIDs(t, db, "uniquelastmodel"); len(got) != 1 || got[0] != "op-5" {
+		t.Fatalf("MATCH 'uniquelastmodel' = %v, want [op-5] (last partial op batch processed)", got)
+	}
+	// And the unique token in the last log batch resolves to exactly one log.
+	if got := matchLogIDs(t, db, "uniquelastlog"); len(got) != 1 {
+		t.Fatalf("MATCH 'uniquelastlog' in fts_logs = %v, want 1 row (last partial log batch processed)", got)
+	}
+}
+
 // seedLog inserts one session-scoped log_entries row (source_id NULL), matching
 // the shape applyLogEntry writes, so BackfillFTS's session-scoped gating sees it.
 func seedLog(t *testing.T, db *sql.DB, sessionID, message, severity string, tsUS int64) {
@@ -472,6 +575,6 @@ func matchLogIDs(t *testing.T, db *sql.DB, query string) []int64 {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate fts_logs MATCH: %v", err)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	slices.Sort(ids)
 	return ids
 }
