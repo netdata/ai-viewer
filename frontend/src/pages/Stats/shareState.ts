@@ -49,6 +49,7 @@ const METRIC_VALUES = new Set<StatsMetric>([
   'calls',
   'failures',
   'duration_us',
+  'sessions',
 ]);
 const BUCKET_VALUES = new Set<StatsBucket>(['hourly', 'daily']);
 const DIMENSION_VALUES = new Set<TopDimension>([

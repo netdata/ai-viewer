@@ -106,7 +106,7 @@ func (p *Presenter) aggregateSeries(ctx context.Context, f sessionFilter, bucket
 		// the SAME predicate the fast-path rollup query applies.
 		series = make(closedSeries)
 		if closedHi > from {
-			folded, err := p.foldOpsWindow(ctx, f, bucket, from, openStart)
+			folded, err := p.foldOpsWindow(ctx, f, bucket, metric, from, openStart)
 			if err != nil {
 				return nil, err
 			}
@@ -119,7 +119,7 @@ func (p *Presenter) aggregateSeries(ctx context.Context, f sessionFilter, bucket
 	// exactly the open bucket's data, the whole-bucket semantics a rollup
 	// row carries) and keep the bucket_ts == openStart rows.
 	if openStart >= from && openStart < to {
-		folded, err := p.foldOpsWindow(ctx, f, bucket, openStart, 0)
+		folded, err := p.foldOpsWindow(ctx, f, bucket, metric, openStart, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -192,6 +192,8 @@ func metricName(m statsMetric) string {
 		return "failures"
 	case smDurationUS:
 		return "duration_us"
+	case smSessions:
+		return "sessions"
 	default:
 		return "cost"
 	}

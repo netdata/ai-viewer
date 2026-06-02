@@ -325,19 +325,17 @@ func parseArrayParam(values []string) []string {
 // leading "WHERE") shared by the session-set queries, plus the bound
 // args in placeholder order. alias is the table alias for the sessions
 // table (e.g. "s"). The fragment never embeds user input: every value
-// is a `?` placeholder appended to args.
+// is a `?` placeholder appended to args. It applies the `start_ts` time
+// window (>= from, <= to) PLUS every session dimension condition.
 //
 // The tools filter is an EXISTS subquery against ops (a session matches
 // when ANY of its ops uses one of the named tools), matching rest-api.md
 // §GET /api/sessions ("sessions where any op uses these tools").
 func (f sessionFilter) whereClause(alias string) (string, []any) {
-	var conds []string
-	var args []any
-
-	if f.group == groupRoot {
-		conds = append(conds, alias+".kind = ?")
-		args = append(args, "root")
-	}
+	conds, args := f.dimensionConds(alias)
+	// The session start_ts time window. Prepended after the dimension conds so
+	// the dimension-only variant (whereClauseNoTimeWindow) shares the exact same
+	// dimension fragment; ordering is immaterial (all AND-joined).
 	if f.from != nil {
 		conds = append(conds, alias+".start_ts >= ?")
 		args = append(args, *f.from)
@@ -345,6 +343,36 @@ func (f sessionFilter) whereClause(alias string) (string, []any) {
 	if f.to != nil {
 		conds = append(conds, alias+".start_ts <= ?")
 		args = append(args, *f.to)
+	}
+	return joinConds(conds, args)
+}
+
+// whereClauseNoTimeWindow renders the same parameterized WHERE fragment as
+// whereClause but OMITS the `start_ts` time window (the >= from / <= to
+// conditions). It exists for the op-bucketed live fold (stats_rollup.go
+// loadFoldOps): that path bounds the OPS by o.start_ts ∈ [lower, upper) as the
+// only time bound, while the session set must constrain ONLY the session
+// dimensions (group/agents/models/status/sources/q + the tools EXISTS
+// subquery). Bounding the session set by s.start_ts there would drop an in-window
+// op whose session started before `from`, diverging from the op-bucketed rollup
+// (rest-api.md §"Rollup fast path vs. live fold" — the AC#2 parity invariant).
+// Identical injection-safety: every value is a `?` placeholder.
+func (f sessionFilter) whereClauseNoTimeWindow(alias string) (string, []any) {
+	return joinConds(f.dimensionConds(alias))
+}
+
+// dimensionConds builds the session DIMENSION conditions shared by whereClause
+// and whereClauseNoTimeWindow (group/agents/models/status/sources/q + the tools
+// EXISTS subquery) — everything EXCEPT the `start_ts` time window. Returns the
+// raw cond slice + args so each caller appends its own time conditions (or none)
+// before joining; every value is a `?` placeholder, never interpolated.
+func (f sessionFilter) dimensionConds(alias string) ([]string, []any) {
+	var conds []string
+	var args []any
+
+	if f.group == groupRoot {
+		conds = append(conds, alias+".kind = ?")
+		args = append(args, "root")
 	}
 	if c, a := inClause(alias+".agent_name", f.agents); c != "" {
 		conds = append(conds, c)
@@ -375,6 +403,13 @@ func (f sessionFilter) whereClause(alias string) (string, []any) {
 		}
 	}
 
+	return conds, args
+}
+
+// joinConds joins the AND-separated WHERE fragment, returning "1=1" for the
+// empty set so the caller always has a valid boolean predicate. Shared by
+// whereClause and whereClauseNoTimeWindow.
+func joinConds(conds []string, args []any) (string, []any) {
 	if len(conds) == 0 {
 		return "1=1", args
 	}

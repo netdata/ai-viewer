@@ -387,7 +387,9 @@ export interface StatsResponse {
 /**
  * The shared metric selector for the chart endpoints (rest-api.md §GET
  * /api/stats/aggregate / /top). Closed set on the server; `'calls'` maps to the
- * op count. An unknown value is a BAD_REQUEST. Default `'cost'`.
+ * op count and `'sessions'` to the additive session_starts column (meaningful
+ * for group_by total|agent|cwd; 0 for model|provider|tool, exactly as the rollup
+ * stores it). An unknown value is a BAD_REQUEST. Default `'cost'`.
  */
 export type StatsMetric =
   | 'cost'
@@ -395,7 +397,8 @@ export type StatsMetric =
   | 'tokens_out'
   | 'calls'
   | 'failures'
-  | 'duration_us';
+  | 'duration_us'
+  | 'sessions';
 
 /** The time-bucket granularity for /api/stats/aggregate. Default `'daily'`. */
 export type StatsBucket = 'hourly' | 'daily';

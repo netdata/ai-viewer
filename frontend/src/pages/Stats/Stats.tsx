@@ -44,6 +44,7 @@ const METRIC_OPTIONS: ReadonlyArray<{ value: StatsMetric; label: string }> = [
   { value: 'calls', label: 'Calls' },
   { value: 'failures', label: 'Failures' },
   { value: 'duration_us', label: 'Duration' },
+  { value: 'sessions', label: 'Sessions' },
 ];
 
 /** The top-N ranking dimensions (TopDimension excludes total/source_format). */

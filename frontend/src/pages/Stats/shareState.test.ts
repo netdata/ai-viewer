@@ -46,6 +46,15 @@ describe('readStatControls', () => {
     expect(c.trendMetric).toBe('tokens_out'); // valid → kept
     expect(c.bucket).toBe(STAT_CONTROL_DEFAULTS.bucket); // invalid → default
   });
+
+  it('accepts the sessions metric (session_starts) as a valid trend/top metric', () => {
+    const params = new URLSearchParams(
+      `${STAT_PARAM_KEYS.trendMetric}=sessions&${STAT_PARAM_KEYS.topMetric}=sessions`,
+    );
+    const c = readStatControls(params);
+    expect(c.trendMetric).toBe('sessions'); // valid server enum → kept, not clamped
+    expect(c.topMetric).toBe('sessions');
+  });
 });
 
 describe('applyStatPatch', () => {
@@ -75,13 +84,13 @@ describe('applyStatPatch', () => {
 
   it('round-trips: read(applyStatPatch(...)) yields the patched controls', () => {
     const next = applyStatPatch(new URLSearchParams(''), {
-      trendMetric: 'duration_us',
+      trendMetric: 'sessions',
       bucket: 'hourly',
       topDimension: 'cwd',
       topMetric: 'tokens_out',
     });
     expect(readStatControls(next)).toEqual({
-      trendMetric: 'duration_us',
+      trendMetric: 'sessions',
       bucket: 'hourly',
       topDimension: 'cwd',
       topMetric: 'tokens_out',

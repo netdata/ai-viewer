@@ -394,6 +394,17 @@ fold. Therefore:
   `source_format`-level filter would over-count sibling sources. Correct, just not
   rollup-accelerated.
 
+The live fold's TIME bound is `op.start_ts ∈ [from, to)` (the bucket key), NOT
+`session.start_ts`: the `sessions` join supplies only the agent/cwd dimension and
+the session-level dimension filters (`agents`/`status`/`sources`/`group`), so an
+op whose session STARTED before `from` is still counted iff the op itself falls in
+the window — keeping the live fold byte-equal to the op-bucketed rollup (the AC#2
+invariant). The sole exception is `metric=sessions` (`session_starts`), which is
+attributed by `session.start_ts` because it counts session starts, so its live
+fold loads the window's session starts (by `s.start_ts`) and folds them through
+`rollups.Rollup`'s `starts` input — matching how the rollup materializes the
+`session_starts` column.
+
 **Bucket-window semantics.** A bucket is included iff `from <= bucket_ts < to`
 (selection by the bucket's START); within an included bucket the whole bucket's
 data is returned (the rollups cannot sub-select inside a bucket). A `from`/`to`
@@ -417,7 +428,7 @@ property the backfill-vs-incremental diff gate guarantees for the ingester.
 ?from=<us>&to=<us>
 &bucket=daily            'hourly'|'daily' (default 'daily')
 &group_by=total          'model'|'provider'|'tool'|'agent'|'cwd'|'source_format'|'total' (default 'total')
-&metric=cost             'cost'|'tokens_in'|'tokens_out'|'calls'|'failures'|'duration_us' (default 'cost'); 'calls' maps to op_count
+&metric=cost             'cost'|'tokens_in'|'tokens_out'|'calls'|'failures'|'duration_us'|'sessions' (default 'cost'); 'calls' maps to op_count, 'sessions' to the additive session_starts column (meaningful for group_by total|agent|cwd; 0 for model|provider|tool, exactly as the rollup stores it — drives the per-day sessions trend, ui-pages.md)
 &agents=...&models=...&tools=...&sources=...&status=...&q=...   same as /api/sessions
 ```
 

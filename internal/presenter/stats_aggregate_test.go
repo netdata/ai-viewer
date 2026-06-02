@@ -218,7 +218,7 @@ func TestStatsAggregate_FastPathMatchesLiveFold(t *testing.T) {
 	materializeRollups(t, db)
 
 	groupBys := []string{"total", "model", "provider", "tool", "agent", "cwd", "source_format"}
-	metrics := []string{"cost", "tokens_in", "tokens_out", "calls", "failures", "duration_us"}
+	metrics := []string{"cost", "tokens_in", "tokens_out", "calls", "failures", "duration_us", "sessions"}
 	buckets := []string{"daily", "hourly"}
 
 	for _, bucket := range buckets {
@@ -754,6 +754,298 @@ func TestStatsAggregate_SingleClockReadAcrossBoundary(t *testing.T) {
 	// in read #1's hour, proving the fold tracks the single (first) reading.
 	if _, ok := series[boundary]; ok {
 		t.Errorf("bucket at the next hour %d must be empty (no op there): %+v", boundary, series)
+	}
+}
+
+// TestStatsAggregate_LiveFoldOpWindowIgnoresSessionStart pins the P1 contract
+// (rest-api.md §"Rollup fast path vs. live fold"): the live fold of OPS is bound
+// ONLY by o.start_ts ∈ [from, to) — NEVER by the session's start_ts. The
+// materialized rollup buckets every op by op.start_ts regardless of when its
+// session started, so an op whose SESSION started before `from` but whose own
+// start_ts is in-window MUST still be counted, or the live fold diverges from
+// the rollup fast path (the AC#2 parity invariant).
+//
+// Fixture: a session that STARTED on day 24 (before `from`), carrying a closed
+// op whose start_ts is on day 25 (inside the window). With the bug, loadFoldOps
+// builds its session set via whereClause, which adds s.start_ts >= from and
+// drops the day-24 session entirely — so the day-25 op vanishes from the live
+// fold while the rollup still counts it. The fix makes the OPS session set apply
+// only the session DIMENSION filters (not the s.start_ts window), so the op is
+// counted on both paths and they agree.
+func TestStatsAggregate_LiveFoldOpWindowIgnoresSessionStart(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	day24 := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC).UnixMicro()
+	day25 := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC).UnixMicro()
+	// Session starts on day 24; its closed op starts on day 25.
+	sessStart := atOffset(day24, 8, 0)
+	opStart := atOffset(day25, 9, 0)
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day24)
+	seedRollupSession(t, db, "preWin", "aiagent_v3:/p", "nedi", "anthropic", "/w1", sessStart)
+	seedRollupOp(t, db, rollupOpSpec{id: "preWinOp", sess: "preWin", seq: 1, kind: "llm",
+		name: "claude-opus", model: "claude-opus", provider: "anthropic",
+		start: opStart, dur: 1000, status: "completed", tokIn: 100, tokOut: 200, cost: 0.10})
+	materializeRollups(t, db)
+
+	// from = day 25 (AFTER the session start, AT/BEFORE the op start). The op's
+	// bucket (day 25) is a CLOSED daily bucket relative to fixedTime (the 27th).
+	from := i64(day25)
+
+	// Fast path: time-only filter. The rollup folds the op by op.start_ts → day 25.
+	fastQ := "bucket=daily&group_by=total&metric=calls&from=" + from
+	codeFast, fast, env := getAggregate(t, p, fastQ)
+	if codeFast != http.StatusOK {
+		t.Fatalf("fast path status=%d env=%+v", codeFast, env)
+	}
+	fm := aggregateToMap(fast)
+	if v := fm[day25][""]; !floatEq(v, 1) {
+		t.Fatalf("fast path day25 calls = %v, want 1 (rollup counts the op by op.start_ts): %+v", v, fm)
+	}
+
+	// Forced live fold (sources filter naming the seeded source). With the bug
+	// this DROPS the op (its day-24 session fails s.start_ts >= from), so the
+	// day-25 bucket is empty and the assertion below FAILS. The fix keeps it.
+	liveQ := fastQ + "&sources=aiagent_v3:/p"
+	codeLive, live, env2 := getAggregate(t, p, liveQ)
+	if codeLive != http.StatusOK {
+		t.Fatalf("live path status=%d env=%+v", codeLive, env2)
+	}
+	lm := aggregateToMap(live)
+	if v := lm[day25][""]; !floatEq(v, 1) {
+		t.Fatalf("live fold day25 calls = %v, want 1 — op DROPPED because its session "+
+			"started before `from` (live fold must bound by op.start_ts, NOT session.start_ts): %+v", v, lm)
+	}
+	// AC#2 parity: the two paths must agree exactly over the same data.
+	assertAggregateEqual(t, fast, live)
+}
+
+// TestStatsAggregate_LiveFoldOpenBucketIgnoresSessionStart is the open-bucket
+// twin of the test above: the open-bucket live fold (taken on EVERY query, fast
+// path or not) must also bound ops only by o.start_ts, never by the session's
+// start. A session started in a CLOSED hour carries an op in the OPEN hour; both
+// the default fast path and a forced live fold must count it in the open bucket.
+func TestStatsAggregate_LiveFoldOpenBucketIgnoresSessionStart(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	// fixedTime = 2026-05-27 12:00:00 UTC → open hour starts at 12:00.
+	openHour := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC).UnixMicro()
+	closedHour := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC).UnixMicro()
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", closedHour)
+	// Session starts in the closed 10:00 hour; its op is in the open 12:00 hour.
+	seedRollupSession(t, db, "openWin", "aiagent_v3:/p", "nedi", "anthropic", "/w1", closedHour)
+	seedRollupOp(t, db, rollupOpSpec{id: "openWinOp", sess: "openWin", seq: 1, kind: "llm",
+		name: "claude-opus", model: "claude-opus", provider: "anthropic",
+		start: openHour, dur: 0, status: "running", tokIn: 9, tokOut: 0, cost: 0.009})
+	materializeRollups(t, db)
+
+	// from = open hour: only the open bucket is in-window. The open-bucket fold
+	// runs on both the fast path and the forced live fold.
+	from := i64(openHour)
+	fastQ := "bucket=hourly&group_by=total&metric=calls&from=" + from
+	_, fast, _ := getAggregate(t, p, fastQ)
+	if v := aggregateToMap(fast)[openHour][""]; !floatEq(v, 1) {
+		t.Fatalf("fast path open-hour calls = %v, want 1: %+v", v, aggregateToMap(fast))
+	}
+
+	// Forced live fold: with the bug the open-bucket fold's session set applies
+	// s.start_ts >= from (== openHour), dropping the 10:00-started session, so the
+	// open-hour op vanishes. The fix counts it.
+	_, live, _ := getAggregate(t, p, fastQ+"&sources=aiagent_v3:/p")
+	if v := aggregateToMap(live)[openHour][""]; !floatEq(v, 1) {
+		t.Fatalf("live fold open-hour calls = %v, want 1 — open-bucket op DROPPED because its "+
+			"session started before `from` (open-bucket fold must bound by op.start_ts): %+v", v, aggregateToMap(live))
+	}
+	assertAggregateEqual(t, fast, live)
+}
+
+// TestStatsAggregate_SessionsMetric pins the P2 contract (rest-api.md §GET
+// /api/stats/aggregate — the `sessions` metric): metric=sessions reads the
+// additive session_starts column, attributed to each session's start bucket by
+// session.start_ts (NOT op.start_ts). Both the closed-bucket fast path (which
+// SUMs the stored session_starts) and the open-bucket live fold (which loads the
+// window's session starts and folds them via rollups.Rollup's `starts` input)
+// must agree and match a hand count — and the value must be the session COUNT,
+// not op_count.
+//
+// Fixture (group_by=total, daily): two sessions start on day 25 (with 1 op each),
+// one session starts on day 26, and two sessions start in the OPEN day (the 27th)
+// — one in the closed 11:00 hour, one in the open 12:00 hour. Expected per-day
+// session_starts: day25=2, day26=1, openDay=2.
+func TestStatsAggregate_SessionsMetric(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	day25 := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC).UnixMicro()
+	day26 := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC).UnixMicro()
+	openDay := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC).UnixMicro()
+	closedHourToday := time.Date(2026, 5, 27, 11, 0, 0, 0, time.UTC).UnixMicro()
+	openHour := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC).UnixMicro()
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day25)
+
+	// Day 25: two sessions (each with a closed op so they also have op rows).
+	for i, ss := range []int64{atOffset(day25, 9, 0), atOffset(day25, 15, 0)} {
+		id := "d25-" + i64(int64(i))
+		seedRollupSession(t, db, id, "aiagent_v3:/p", "nedi", "anthropic", "/w1", ss)
+		seedRollupOp(t, db, rollupOpSpec{id: id + "-op", sess: id, seq: 1, kind: "llm",
+			name: "claude-opus", model: "claude-opus", provider: "anthropic",
+			start: ss, dur: 100, status: "completed", cost: 0.01})
+	}
+	// Day 26: one session.
+	seedRollupSession(t, db, "d26", "aiagent_v3:/p", "worker", "openai", "/w2", atOffset(day26, 14, 0))
+	seedRollupOp(t, db, rollupOpSpec{id: "d26-op", sess: "d26", seq: 1, kind: "llm",
+		name: "gpt-5", model: "gpt-5", provider: "openai", start: atOffset(day26, 14, 0),
+		dur: 200, status: "completed", cost: 0.02})
+	// Open day: one session in the closed 11:00 hour, one in the open 12:00 hour.
+	seedRollupSession(t, db, "d27-closed", "aiagent_v3:/p", "nedi", "anthropic", "/w1", closedHourToday)
+	seedRollupSession(t, db, "d27-open", "aiagent_v3:/p", "nedi", "anthropic", "/w1", openHour)
+	materializeRollups(t, db)
+
+	// Daily group_by=total: per-day session-start counts.
+	code, body, env := getAggregate(t, p, "bucket=daily&group_by=total&metric=sessions")
+	if code != http.StatusOK {
+		t.Fatalf("status=%d env=%+v", code, env)
+	}
+	if body.Metric != "sessions" {
+		t.Fatalf("echoed metric = %q, want \"sessions\"", body.Metric)
+	}
+	got := aggregateToMap(body)
+	for _, c := range []struct {
+		day  int64
+		want float64
+		name string
+	}{
+		{day25, 2, "day25"},
+		{day26, 1, "day26"},
+		{openDay, 2, "openDay (1 closed-hour + 1 open-hour session start, live-folded)"},
+	} {
+		if v := got[c.day][""]; !floatEq(v, c.want) {
+			t.Errorf("%s session_starts = %v, want %v: %+v", c.name, v, c.want, got)
+		}
+	}
+
+	// Parity: the closed-bucket fast path and the forced live fold must agree on
+	// EVERY bucket's session_starts (the live fold loads session starts by
+	// s.start_ts and folds them through rollups.Rollup's `starts` input).
+	_, live, env2 := getAggregate(t, p, "bucket=daily&group_by=total&metric=sessions&sources=aiagent_v3:/p")
+	if env2.Error.Code != "" {
+		t.Fatalf("live env=%+v", env2)
+	}
+	assertAggregateEqual(t, body, live)
+
+	// sessions != calls: day25 has 2 sessions but also 2 ops; day26 has 1 session
+	// and 1 op. Prove the value is session_starts, not op_count, where they differ
+	// — use the open day: 2 session starts but only ZERO closed ops (both sessions'
+	// only "activity" is their start; neither has an op), and 1 op total? No — make
+	// the distinction explicit via group_by=agent below instead.
+	//
+	// Concretely here: openDay sessions=2 while openDay calls=0 (neither open-day
+	// session carries an op). That alone proves sessions reads session_starts.
+	_, callsBody, _ := getAggregate(t, p, "bucket=daily&group_by=total&metric=calls")
+	if v := aggregateToMap(callsBody)[openDay][""]; !floatEq(v, 0) {
+		t.Fatalf("openDay calls = %v, want 0 (no ops on the open day) — fixture invariant", v)
+	}
+	if v := got[openDay][""]; !floatEq(v, 2) {
+		t.Fatalf("openDay sessions = %v, want 2 — sessions metric must read session_starts, not op_count", v)
+	}
+}
+
+// TestStatsAggregate_SessionsMetricDimensions pins the dimension behavior of the
+// sessions metric (rest-api.md §GET /api/stats/aggregate): session_starts is
+// meaningful for group_by ∈ {total, agent, cwd} and is 0 for {model, provider,
+// tool} — exactly as the rollup stores it (the fold never attributes
+// session_starts to model/provider/tool rows). Returning the stored 0 for those
+// dims is correct, NOT a rejection.
+func TestStatsAggregate_SessionsMetricDimensions(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	day25 := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC).UnixMicro()
+	openDay := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC).UnixMicro()
+	openHour := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC).UnixMicro()
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day25)
+	// Closed-day session under agent "nedi", cwd "/w1".
+	seedRollupSession(t, db, "agA", "aiagent_v3:/p", "nedi", "anthropic", "/w1", atOffset(day25, 9, 0))
+	seedRollupOp(t, db, rollupOpSpec{id: "agA-op", sess: "agA", seq: 1, kind: "llm",
+		name: "claude-opus", model: "claude-opus", provider: "anthropic",
+		start: atOffset(day25, 9, 0), dur: 100, status: "completed", cost: 0.01})
+	// Open-hour session under agent "worker", cwd "/w2" (exercises the live fold).
+	seedRollupSession(t, db, "agB", "aiagent_v3:/p", "worker", "openai", "/w2", openHour)
+	materializeRollups(t, db)
+
+	// group_by=agent: session_starts attributed per agent (closed + open day).
+	_, agentBody, _ := getAggregate(t, p, "bucket=daily&group_by=agent&metric=sessions")
+	am := aggregateToMap(agentBody)
+	if v := am[day25]["nedi"]; !floatEq(v, 1) {
+		t.Errorf("day25 agent=nedi session_starts = %v, want 1: %+v", v, am[day25])
+	}
+	if v := am[openDay]["worker"]; !floatEq(v, 1) {
+		t.Errorf("openDay agent=worker session_starts = %v, want 1 (live-folded): %+v", v, am[openDay])
+	}
+
+	// group_by=cwd: same attribution by cwd.
+	_, cwdBody, _ := getAggregate(t, p, "bucket=daily&group_by=cwd&metric=sessions")
+	cm := aggregateToMap(cwdBody)
+	if v := cm[day25]["/w1"]; !floatEq(v, 1) {
+		t.Errorf("day25 cwd=/w1 session_starts = %v, want 1: %+v", v, cm[day25])
+	}
+
+	// group_by ∈ {model, provider, tool}: 0 (session_starts is never attributed
+	// there). The fast path SUMs a stored 0; the live fold folds 0 — both yield
+	// EMPTY series for the sessions metric (no key carries a non-zero value).
+	for _, gb := range []string{"model", "provider", "tool"} {
+		_, b, env := getAggregate(t, p, "bucket=daily&group_by="+gb+"&metric=sessions")
+		if env.Error.Code != "" {
+			t.Fatalf("group_by=%s metric=sessions must NOT be rejected, env=%+v", gb, env)
+		}
+		for ts, keys := range aggregateToMap(b) {
+			for k, v := range keys {
+				if v != 0 {
+					t.Errorf("group_by=%s metric=sessions: bucket %d key %q = %v, want 0 (session_starts not attributed to %s)", gb, ts, k, v, gb)
+				}
+			}
+		}
+	}
+}
+
+// TestStatsTop_SessionsMetric asserts /api/stats/top also serves the sessions
+// metric: ranking agents by their session_starts over the window (closed + open).
+func TestStatsTop_SessionsMetric(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	day25 := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC).UnixMicro()
+	openHour := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC).UnixMicro()
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day25)
+	// nedi: 2 session starts (one closed day, one open hour). worker: 1.
+	seedRollupSession(t, db, "n1", "aiagent_v3:/p", "nedi", "anthropic", "/w1", atOffset(day25, 9, 0))
+	seedRollupSession(t, db, "n2", "aiagent_v3:/p", "nedi", "anthropic", "/w1", openHour)
+	seedRollupSession(t, db, "w1", "aiagent_v3:/p", "worker", "openai", "/w2", atOffset(day25, 10, 0))
+	materializeRollups(t, db)
+
+	code, body, env := getTop(t, p, "dimension=agent&metric=sessions&n=200")
+	if code != http.StatusOK {
+		t.Fatalf("status=%d env=%+v", code, env)
+	}
+	if body.Metric != "sessions" {
+		t.Fatalf("echoed metric = %q, want \"sessions\"", body.Metric)
+	}
+	tm := topToMap(body)
+	if v := tm["nedi"]; !floatEq(v, 2) {
+		t.Errorf("top agent nedi session_starts = %v, want 2: %+v", v, body.Items)
+	}
+	if v := tm["worker"]; !floatEq(v, 1) {
+		t.Errorf("top agent worker session_starts = %v, want 1: %+v", v, body.Items)
+	}
+	// nedi (2) ranks above worker (1).
+	if len(body.Items) >= 2 && body.Items[0].Key != "nedi" {
+		t.Errorf("ranking: top item = %q, want nedi (2 > 1): %+v", body.Items[0].Key, body.Items)
 	}
 }
 

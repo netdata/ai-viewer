@@ -60,7 +60,7 @@ func TestStatsTop_FastPathMatchesLiveFold(t *testing.T) {
 	materializeRollups(t, db)
 
 	dims := []string{"model", "provider", "tool", "agent", "cwd"}
-	metrics := []string{"cost", "tokens_in", "tokens_out", "calls", "failures", "duration_us"}
+	metrics := []string{"cost", "tokens_in", "tokens_out", "calls", "failures", "duration_us", "sessions"}
 	for _, d := range dims {
 		for _, m := range metrics {
 			t.Run(d+"/"+m, func(t *testing.T) {
