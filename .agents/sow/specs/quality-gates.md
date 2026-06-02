@@ -94,7 +94,7 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 ### Go — Race Stress
 
 - Concurrency-touching changes: `scripts/test.sh --stress 10` (`-race -count=10`) locally before commit.
-- CI: per-push runs `-race -count=1` (the `test` job — kept at 1 so PR feedback stays fast); race **stress** runs nightly via `race-stress-nightly.yml` (`scripts/test.sh --stress 10`, scheduled, not a per-push gate). Per-push `-count>1` is gated on first speeding up the ~240s `internal/ingest` rollup test (SOW-0009 Followup); until then the marginal added race-coverage per push does not justify the latency.
+- CI: per-push runs `-race -count=1` (the `test` job — kept at 1 so PR feedback stays fast); race **stress** runs nightly via `race-stress-nightly.yml` (`scripts/test.sh --stress 10`, scheduled, not a per-push gate). Per-push `-count>1` is gated on first speeding up the slow `internal/ingest` rollup test (`TestRefreshRollups_OtherStaleRowRemoval` — several minutes under `-race`, grown since SOW-0009; re-time before raising the count) (SOW-0009 Followup); until then the marginal added race-coverage per push does not justify the latency.
 
 ### Frontend — Lint
 

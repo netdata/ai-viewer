@@ -20,7 +20,7 @@ Add a gate that fails a PR when the lines it ADDS/changes are covered below 90% 
 
 ### Acceptance Criteria
 
-1. A new-code coverage computor (in-tree Go helper preferred) takes `coverage.out` + a base ref, computes the statement coverage of added/changed lines in the PR diff, and fails when < 90%. Excludes the same `/cmd/` set SOW-0010 excludes, and excludes pure-comment/blank additions.
+1. A new-code coverage computor (in-tree Go helper preferred) takes `coverage.out` + a base ref, computes the statement coverage of added/changed lines in the PR diff, and fails when < 90%. Excludes exactly the set SOW-0010's gate excludes — a path is gated **iff** it contains `/internal/` and not `/cmd/` (so `/cmd/` binaries + dev-tools AND non-internal vendored Go under `frontend/node_modules/` are excluded) — and excludes pure-comment/blank additions.
 2. Self-tests with synthetic diffs + profiles exercise pass + below-threshold miss (the gate is itself code that must be correct).
 3. Wired into CI on `pull_request` (base = the PR base; build-failing) and documented as a local command. Statement-based (consistent with SOW-0010; branch coverage remains deferred — Go has no native branch coverage).
 4. `quality-gates.md` + `project-quality-gates` + `project-testing` updated: new-code ≥ 90% moves from "deferred" to enforced; spec-drift clean.
@@ -31,7 +31,7 @@ Sources: SOW-0010 (`done/` after merge) — the shipped `check-coverage.sh` + th
 
 Risks:
 - **R1 — diff base selection in CI**: `pull_request` events provide the base SHA; merge-base vs base-ref differences can mis-scope added lines. Mitigation: use `git merge-base origin/<base> HEAD` and `--unified=0`; self-test the line-range parser.
-- **R2 — generated/excluded files**: added lines in `/cmd/`, generated code, or test files must be excluded consistently with SOW-0010's gated set. Mitigation: reuse the same `/cmd/` exclusion predicate.
+- **R2 — generated/excluded files**: added lines in `/cmd/`, non-internal vendored Go (e.g. `frontend/node_modules/`), generated code, or test files must be excluded consistently with SOW-0010's gated set. Mitigation: reuse SOW-0010's gated-set predicate — gated **iff** the path contains `/internal/` and not `/cmd/`. Do NOT reintroduce a `/cmd/`-only exclusion (that re-opens the vendored-Go defect SOW-0010 round 3 fixed).
 
 ## Pre-Implementation Gate
 

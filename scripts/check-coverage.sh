@@ -42,8 +42,11 @@ fi
 
 # Parse the coverage profile directly. Line format (after the `mode:` header):
 #   <importpath>/<file>.go:<sLine>.<sCol>,<eLine>.<eCol> <numStmts> <count>
-# Sum numStmts per package (covered when count>0); a package is EXCLUDED from
-# the gate iff its path contains "/cmd/".
+# Sum numStmts per package (covered when count>0); a package is GATED iff its
+# import path contains "/internal/" and not "/cmd/" (so the /cmd/ binaries +
+# nested dev-tools AND non-internal vendored Go such as frontend/node_modules
+# are excluded). The predicate assumes Go's standard `internal/<name>/` package
+# layout (all of this repo's core code lives under such paths).
 awk -v thr="$THRESHOLD" '
   NR==1 && $1=="mode:" { next }
   NF<3 { next }
