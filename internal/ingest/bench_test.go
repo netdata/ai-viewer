@@ -19,11 +19,14 @@ import (
 // (worker.go:221). This is the throughput-critical inner loop of
 // ingestion — every snapshot the adapters parse funnels through it.
 //
-// Each iteration flushes the SAME ~1000-event synthetic batch into a
+// Each iteration flushes the SAME 530-event synthetic batch into a
 // FRESH in-memory store so the measurement is the cost of writing one
 // full batch from a clean schema (the worst case: no rows to upsert
 // against, every index entry created). Building the batch and opening
 // the store are excluded from the timer; only the flush is measured.
+// 530 = buildSyntheticBatch's constants: 5 sessions (5 SessionStarted)
+// + 5×5 turns (25 TurnStarted) + 5×5×10 op pairs (500 OpStarted/
+// OpFinalized); matches the baseline's reported batch_events.
 //
 // The batch mirrors a realistic session shape — a handful of root
 // sessions, each with several turns, each turn carrying llm + tool ops
@@ -94,9 +97,11 @@ func BenchmarkBatchInsert(b *testing.B) {
 	b.ReportMetric(float64(len(batch)), "batch_events")
 }
 
-// buildSyntheticBatch constructs a deterministic ~1000-event canonical
+// buildSyntheticBatch constructs a deterministic 530-event canonical
 // batch: rootSessions root sessions, each with turnsPerSession turns,
-// each turn with opsPerTurn llm+tool op pairs. SourceSeq is globally
+// each turn with opsPerTurn llm+tool op pairs. With rootSessions=5,
+// turnsPerSession=5, opsPerTurn=10 that is 5 + (5×5) + (5×5×10×2) =
+// 530 events. SourceSeq is globally
 // monotonic across the batch so the writer's ordering assumptions hold
 // and source_progress advances to a stable max. Timestamps are spaced
 // so every op closes (EndTs > start) and lands in a deterministic

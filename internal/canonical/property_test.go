@@ -233,14 +233,33 @@ FROM sessions WHERE source_id = ? AND native_id = ?`, sourceID, want.NativeID).
 		if gotKind != string(want.Kind) {
 			rt.Fatalf("kind = %q, want %q", gotKind, want.Kind)
 		}
+		// The generator draws every column from rapid.StringN(1,…) so each
+		// emitted value is non-empty; the writer must therefore persist a
+		// non-NULL column. Assert .Valid before .String so a future writer
+		// regression that stores NULL instead of the value is caught even if
+		// the generator is later relaxed to allow empty strings (a NULL would
+		// otherwise scan into .String == "" and slip past the equality check
+		// when want.X is also empty).
+		if !gotAgent.Valid {
+			rt.Fatalf("agent_name persisted NULL, want non-NULL %q", want.AgentName)
+		}
 		if gotAgent.String != want.AgentName {
 			rt.Fatalf("agent_name = %q, want %q", gotAgent.String, want.AgentName)
+		}
+		if !gotModel.Valid {
+			rt.Fatalf("model persisted NULL, want non-NULL %q", want.Model)
 		}
 		if gotModel.String != want.Model {
 			rt.Fatalf("model = %q, want %q", gotModel.String, want.Model)
 		}
+		if !gotCwd.Valid {
+			rt.Fatalf("cwd persisted NULL, want non-NULL %q", want.Cwd)
+		}
 		if gotCwd.String != want.Cwd {
 			rt.Fatalf("cwd = %q, want %q", gotCwd.String, want.Cwd)
+		}
+		if !gotCallPath.Valid {
+			rt.Fatalf("call_path persisted NULL, want non-NULL %q", want.CallPath)
 		}
 		if gotCallPath.String != want.CallPath {
 			rt.Fatalf("call_path = %q, want %q", gotCallPath.String, want.CallPath)
@@ -276,9 +295,18 @@ FROM sessions WHERE source_id = ? AND native_id = ?`, sourceID, want.NativeID).
 // returned ops carry no `seq` in the JSON (opDetail omits it), so each op's
 // canonical Seq is encoded into its Name ("op-NNNN"); the assertion decodes
 // the Name of every returned op, in returned order, and requires it to equal
-// the ascending ground-truth seqs. A regression in loadOps's ORDER BY would
-// reorder the JSON and fail this test — which a copy of the query in the test
-// could not catch.
+// the ascending ground-truth seqs.
+//
+// The Name encoding is deliberately ANTI-CORRELATED with Seq (seqName encodes
+// seqNameBig-opSeq, so a higher Seq yields a lower Name). This guards against
+// ordering by the wrong COLUMN, not merely the wrong direction: were the Name
+// monotonic with Seq, a production regression that ordered ops by `name`
+// instead of `seq` would still return them in the right order and pass. With
+// the anti-correlation, the correct `ORDER BY seq ASC` recovers ascending
+// seqs (PASS) while a wrong `ORDER BY name ASC` recovers DESCENDING seqs that
+// fail the ascending assertion — so this test fails for BOTH a wrong-column
+// and a wrong-direction regression in loadOps's ORDER BY, which a copy of the
+// query in the test could not catch.
 //
 // It was previously named TestPropertyMonotoneOrdering and re-implemented
 // sort.SliceStable over data engineered so SourceSeq co-increased with Ts —
@@ -299,9 +327,11 @@ func TestPropertyOpsReturnedInSeqOrder(t *testing.T) {
 		// Build a single turn whose ops have strictly-increasing Seq and
 		// non-decreasing timestamps. Each op is a start+finalize pair. seqs
 		// is the ASCENDING ground-truth order we expect to read back. Each op's
-		// canonical Seq is encoded into its Name so the production response —
-		// which surfaces op `name` but not op `seq` — lets us recover the seq
-		// the presenter returned and assert the returned order.
+		// canonical Seq is encoded (anti-correlated, via seqName) into its Name
+		// so the production response — which surfaces op `name` but not op
+		// `seq` — lets us recover the seq the presenter returned and assert the
+		// returned order; the anti-correlation also catches a presenter that
+		// orders by `name` instead of `seq` (see seqName / the doc comment).
 		var srcSeq uint64
 		var ts int64
 		next := func() (uint64, int64) {
@@ -379,11 +409,26 @@ func TestPropertyOpsReturnedInSeqOrder(t *testing.T) {
 	})
 }
 
+// seqNameBig is the fixed offset seqName subtracts from opSeq to make the
+// persisted Name ANTI-CORRELATED with the canonical Seq. nOps is at most 12
+// (TestPropertyOpsReturnedInSeqOrder draws rapid.IntRange(2,12)), so opSeq is
+// in 1..12 and seqNameBig-opSeq stays in 9987..9998 — always positive and
+// exactly 4 digits, keeping the "op-%04d" token reversible.
+const seqNameBig = 9999
+
 // seqName encodes an op's canonical Seq into a zero-padded Name the writer
 // persists verbatim (writer.go applyOpStarted binds ev.Name) and the detail
-// response surfaces as op `name`. Zero-padding keeps the value a stable,
-// reversible token; opSeqsFromPresenter parses it back.
-func seqName(opSeq int) string { return fmt.Sprintf("op-%04d", opSeq) }
+// response surfaces as op `name`. The encoded value is seqNameBig-opSeq, so
+// the Name DECREASES as Seq increases (anti-correlation). This closes an
+// ordering blind spot: a token monotonic with Seq would still come back in
+// the right order if production ordered ops by `name` instead of `seq`, so a
+// wrong-COLUMN regression would pass. With the anti-correlation, the correct
+// `ORDER BY seq ASC` returns Seq 1,2,3… → Names op-9998,op-9997,… → the parser
+// recovers 1,2,3… (PASS), whereas a wrong `ORDER BY name ASC` returns Names
+// op-9987… ascending → Seq 12,11,10… → the parser recovers a DESCENDING
+// sequence that fails the ascending assertion. Zero-padding keeps the value a
+// stable, reversible token; opSeqsFromPresenter inverts it back.
+func seqName(opSeq int) string { return fmt.Sprintf("op-%04d", seqNameBig-opSeq) }
 
 // opSeqsFromPresenter drives the PRODUCTION GET /api/sessions/{id} handler
 // against db and returns the canonical Seq of every op, in the order the
@@ -439,11 +484,16 @@ func opSeqsFromPresenter(rt *rapid.T, db *sql.DB, sessionID string) []int {
 	got := make([]int, 0, len(body.Turns))
 	for _, tn := range body.Turns {
 		for _, op := range tn.Ops {
-			var seq int
-			if _, err := fmt.Sscanf(op.Name, "op-%04d", &seq); err != nil {
+			// The Name encodes seqNameBig-opSeq (see seqName); invert it to
+			// recover the canonical Seq. The inversion preserves order
+			// direction: an ascending-by-name response decodes to a
+			// descending Seq sequence, which is exactly how this test detects
+			// production ordering by the wrong column.
+			var encoded int
+			if _, err := fmt.Sscanf(op.Name, "op-%04d", &encoded); err != nil {
 				rt.Fatalf("op name %q is not a seqName token: %v", op.Name, err)
 			}
-			got = append(got, seq)
+			got = append(got, seqNameBig-encoded)
 		}
 	}
 	return got

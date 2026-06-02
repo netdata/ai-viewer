@@ -272,6 +272,17 @@ Re-ran all 3 reviewers on the same whole-surface scope + the round-1 fix notes. 
 - Gates green (re-verified by master): golangci-lint 0, `go test -race` pass, `check-bench.sh` PASS (5/5 compared), self-tests 8/8 + 7/7, actionlint clean, secret + attribution scans clean.
 - **Next**: re-review round 3 (all 3; minimax with an explicit no-run-tests instruction) → converge → PR → self-merge → close.
 
+### 2026-06-03 — External review round 3 (codex + glm + minimax — full triad) + fixes
+
+All 3 returned (minimax completed — the no-run-tests instruction fixed its round-2 timeout). **codex**: no P1; 1 P2 (doc-contract drift) + 3 P3. **glm**: mergeable; 1 P2 (round-trip `sql.NullString` `.Valid`) + 4 P3. **minimax**: mergeable; the same doc-drift P2 + **a NEW P2 codex missed** (project-testing listed a dead `internal/store/bench_test.go` path) + P3 nits. Trajectory: round-1 P1×3 → round-2 P2×3 → round-3 P2(doc)/P3. Fixes:
+
+- **Doc-drift class swept** (codex P2 + minimax P2-2; commit `fe6cd6e`): reconciled `AGENTS.md` (Go-fuzz + Go-bench table rows + the "all gates in CI" line), `quality-gates.md` + `project-quality-gates` + `project-testing` ("every gate in CI" now notes the local bench gate; the dead store-bench path → the real packages), `testing-strategy.md` (baseline.json + a nonexistent `update-benchmarks.sh` + CI-fails → `baseline.txt` + local `check-bench.sh`), and "5 packages"→"4 packages, 5 benchmarks". Re-grepped the whole class (`baseline.json` / `store/bench_test` / `5 benchmark packages`) → zero active instances.
+- **Ordering test name anti-correlated** (codex P3; subagent, this commit): op names now encode `seqNameBig - opSeq` (higher seq → lower name), so a production bug that orders by `name` instead of `seq` returns the WRONG order and fails. **Mutation-proven for BOTH `seq DESC` and `ORDER BY name`** (the new coverage); presenter reverted byte-identical.
+- **Round-trip `.Valid` assertions** (glm P2-1; subagent): the round-trip now asserts each `sql.NullString` column is `.Valid` before comparing `.String` — catches a NULL-instead-of-value writer regression even if the generator is later relaxed.
+- **BatchInsert comment 1000→530** (codex P3; subagent): corrected to the exact generated event count (5 + 25 + 500).
+- Gates green: golangci-lint 0, `go test -race` (5 property tests pass), `check-bench.sh` PASS, self-tests 8/8 + 8/8, actionlint clean, scans clean.
+- **Next**: re-review round 4 to confirm convergence → on clean, PR → self-merge → close.
+
 ## Validation
 
 Pending.
