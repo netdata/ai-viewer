@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: in progress
+Status: completed
 
 Sub-state: drafted 2026-05-26 with SOW-0009/0011. Activated 2026-06-02 under the operator's standing blanket mandate. **Re-scoped on activation to the measured live delta** (the "no tests / fresh codebase" premise is dead — 193 test files exist; CI already runs `go test -race -count=1 -coverprofile -covermode=atomic` + uploads the coverage artifact + prints a coverage summary). Measured per-package coverage (full profile, 2026-06-02): all 13 `internal/*` packages are **≥80%** (84–100%), gated aggregate 90.4%. The non-gated packages: the 4 `cmd/*` entries — the two binaries (`ai-viewer-ingest` 55.0%, `ai-viewer-serve` 25.7%: `main()`/flag/signal wiring, covered by Playwright E2E + embed-smoke + the cmd binary tests) and the two dev-only tools (`genfixtures`, `backfillbench`: 0%, no tests, code generators not shipped) — plus the vendored `flatted` Go port (0%), excluded as non-`internal/` (`go test ./...` covers it but it is not our code; see the Execution Log round-3 fix). So this SOW is **gate + tuning + tooling**, not a test-writing effort.
 
@@ -200,15 +200,30 @@ No operator decisions required. The two open items in the Pre-Implementation Gat
 
 ## Validation
 
-Pending.
+- **AC#1 (`scripts/test.sh`)**: executable; `bash -n` clean; runs race + `-coverprofile -covermode=atomic -count=1 ./...`; `--stress [N]` (default 10) does `-race -count=N` with no profile; rejects unknown args, `--stress 0`, and trailing args (exit 2).
+- **AC#2/#5 (`scripts/check-coverage.sh` + CI gate)**: statement gate, gated **iff** path has `/internal/` and not `/cmd/` (excludes binaries, nested dev-tools, and non-internal vendored Go). Exact integer threshold (no float epsilon). Live full profile: 13 gated `internal/*` (84–100%), aggregate 90.4% (8961/9908) → **PASS**; a synthetic 50% `internal/*` pkg → **FAIL** (gate not weakened); missing profile → exit 2. Self-test `check-coverage-test.sh` 8/8, run in CI before the build-failing gate, after the coverage-artifact upload.
+- **AC#3 (branch)**: deferred (Go has no native branch coverage); spec/skills relabelled statement-only.
+- **AC#4 (race cadence)**: per-push `-count=1`; nightly `race-stress-nightly.yml` `-count=10` (`scripts/test.sh --stress 10`), `contents: read`, no untrusted `run:` input.
+- **AC#6/#7 (PR comment/badge)**: deferred (Followup). **AC#8 (new-code ≥90%)**: deferred → SOW-0036 (filed).
+- **AC#9 (spec/skill lockstep)**: `quality-gates.md`, `project-quality-gates`, `project-testing`, `project-coding`, `AGENTS.md`, `testing-strategy.md` reflect the shipped gate; no drift.
+- **embed-smoke regression (folded)**: full `build.sh && embed-smoke.sh` passes end-to-end (seed awaits the dynamically-derived `0007_fts5_index_logs.sql` → serve boots → all UI/SPA/404 assertions green); the pin `embed-smoke-seed-marker-test.sh` is CI-wired and proven to catch a hardcoded + a contrived same-line bypass marker.
+- CI green on the merge commit (lint / frontend / test / embed-smoke / gates).
 
 ## Outcome
 
-Pending.
+Delivered via PR #36 (2026-06-02), squash-merged after CI green + 7-round review convergence. The Go statement-coverage gate is enforced build-failing in CI (`scripts/check-coverage.sh`: every gated `internal/*` package ≥ 80% + their aggregate ≥ 80%; `/cmd/` and non-internal vendored Go excluded; exact integer math), alongside `scripts/test.sh` (race + coverprofile; `--stress [N]`), the self-test `check-coverage-test.sh` (8/8, CI-run before the gate), and a nightly `-count=10` race-stress workflow. Re-scoped on activation to the measured live delta — statement-only (branch deferred, Go-limited), `internal/*` gated, per-push `-count=1` + nightly stress; new-code-diff (SOW-0036), `gates.sh` integration (SOW-0013), and PR comment/badge (Followup) deferred.
+
+Folded per operator decision: a pre-existing **master-wide embed-smoke flake** — a SOW-0007 regression where a hardcoded `0005` seed marker raced migrations 0006/0007 and intermittently seeded a v5 DB `ai-viewer-serve` rejected — fixed by a dynamic last-migration seed + a CI-wired regression pin (SOW-0007 reopened with a `## Regression - 2026-06-02` record).
+
+Seven external-review rounds (codex decisive + glm + minimax). Two real P1s surfaced and were fixed: **R1** a float-epsilon that let 79.95% pass an 80% gate (→ exact integer math); **R3** the gate silently gating a vendored `flatted` Go port (failed locally; CI passed only because `node_modules` is absent in CI's `go test`) — **caught by minimax, missed by codex+glm** — fixed by the `/internal/`-positive predicate. R2/R4 were doc-drift + stale-number cleanups; R5 converged the coverage work (all three clean); R6/R7 converged the folded embed-smoke fix (codex test-hardening P2 → guard hardened to prove the derivation dataflow on one line).
 
 ## Lessons Extracted
 
-Pending.
+- **A reviewer's CRITICAL can be real even when the decisive reviewer misses it AND your own analysis "disproves" it.** R3: minimax flagged the gate gating vendored `flatted` Go; codex+glm both passed the predicate, and I nearly rejected it on the confident-but-false premise "`go test ./...` never covers node_modules". `go list ./...` proved minimax right (a JS dep vendors a Go port; no `go.mod` under `frontend/`). Verify a finding's PREMISE empirically — run the command — never reject on reasoning alone. (Memory: `feedback-adjudicate-reviews-ground-truth`.)
+- **Local-vs-CI divergence via vendored Go.** The gate failed locally (node_modules present) but CI passed (node_modules absent during `go test`). A `go ./...` gate's correctness must not depend on which files happen to be present — exclude non-core paths with a positive predicate (`/internal/`), never a negative one.
+- **Sweep the class on a predicate change.** When `/cmd/`-only became `/internal/`-positive, stale wording survived in a second in-script comment + a dependent SOW (SOW-0036) — re-flagged in R4. After a predicate/value change, grep ALL references (comments + dependent docs), not just the obvious site.
+- **Re-scope a stale SOW to the measured live delta before implementing.** SOW-0010's "fresh codebase / no tests" premise was dead; the real work was gate + tooling, not test-writing. Measure first.
+- **A hardcoded "last migration" marker in a seed harness drifts.** The embed-smoke seed is now derived dynamically + pinned by a CI guard that proves the derivation dataflow — producer/consumer maintenance-coupling gaps need a test, not a comment.
 
 ## Followup
 
