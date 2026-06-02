@@ -142,7 +142,7 @@ Implementation plan:
 5. **Source fixes** (delegated subagent, after all master edits — tree-clobber discipline): write/adjust tests first for the behavioral-change candidates, then apply all 64 fixes; subagent is **forbidden** from running external reviewers (orchestrator owns review).
 6. **Gates** (master): `golangci-lint run` = 0; `go test -race ./...` green; `go vet`; gosec; govulncheck; frontend untouched; `scripts/scan-secrets.sh` + AI-attribution scan clean.
 7. **Commit** spec + config + scripts + CI + fixes together (no attribution trailer), branch, push, PR.
-8. **External review** (codex + glm + minimax in parallel, repo-root, background, timeout 1800) on the full diff; adjudicate on ground truth (codex decisive); iterate same-scope until codex is clean.
+8. **External review** (codex + glm + minimax in parallel, repo-root, `timeout 1800`, per the `project-second-opinions` skill's invocation rules) on the full diff; adjudicate on ground truth (codex decisive); iterate same-scope until codex is clean.
 9. **Merge** (`gh pr merge --merge --delete-branch`); move SOW to `done/` with `Status: completed` in the same commit context; record Validation/Reviews/Outcome/Lessons.
 
 Validation plan:
@@ -258,6 +258,12 @@ All gates re-run by the master orchestrator (not trusting the subagent), 2026-06
 - **minimax** (`MiniMax-M3`): round-4 verdict folded into round 5.
 - **Convergence (CTO call)**: the runtime code has been mergeable since round 1 — rounds 1-4 were entirely documentation-contract honesty. codex round-4 produced a FALSE blocker (P1), which is the signal the review has hit diminishing returns (findings degraded real→real→real→false+trivial). Round 5 is a final codex+glm confirmation of the trivial P2 doc fix; if clean, merge — the code is sound, the planned-script drift class is exhausted (verified by exhaustive grep + the empirical formatter test), and a reviewer emitting false findings on a doc-only delta is the convergence signal. (Adjudicate on ground truth: accept real, reject false-with-evidence.)
 
+### Round 5 — 2026-06-02 (confirmation re-review on commit 8a2252e)
+
+- **codex** (`gpt-5.5`, decisive): **CONVERGED.** Independently verified the round-4 P1 was a FALSE POSITIVE via the golangci v2.11.4 source (`lintersdb/manager.go` folds `formatters.enable` into enabled linters; `goformatters/analyzer.go` reports diffs as diagnostics) — `golangci-lint run` DOES enforce formatters. Confirmed: planned-script wording clean ("no uncaveated present-tense claims found"); runtime clean (validateDoc, unparam removals, CheckSchema ctx, errors.Is, max renames, suppressions, config, CI security — "no actionable issue"). One trivial finding — **P3**: SOW-0009:145 said reviewers run "background", contradicting `project-second-opinions` ("foreground; no `&`, no `run_in_background`"). codex: *"I would merge after the one SOW wording fix."* **FIXED** (dropped "background"; now references the skill's invocation rules).
+- **glm** (`glm-5.1`): confirmation verdict (folded at close).
+- **Convergence reached**: codex pre-approved merge conditional on the P3 one-line fix (now done). The runtime code has been mergeable since round 1; the planned-script drift class is exhausted (codex-verified). No round-6 — codex stated the merge condition and it is met. Five rounds, all documentation-contract honesty after round 1's code landed clean.
+
 ## Outcome
 
 Pending.
@@ -270,6 +276,7 @@ Pending.
 
 - **CI test-timing (minimax R1 note, non-blocking, pre-existing)**: `internal/ingest/rollup_refresh_test.go`'s `TestRefreshRollups_OtherStaleRowRemoval` runs ~240s under `-race -count=1`; the CI `test` job's 15-min budget is comfortable today but tightens as rollup tests grow. NOT introduced by SOW-0009 (this PR only gofumpt-reformatted those files). Fold into **SOW-0010** (test infra/coverage): parallelize or shrink the fixture before more rollup tests land.
 - **Scanner `sc.Err()` audit**: pre-existing `bufio.Scanner` loop in `claude_code/scanner.go:~1058` ignores `sc.Err()` (silent-truncation class; gopls `scannererr`, not a golangci finding). Out of SOW-0009 scope; spawned as a separate task.
+- **Review-execution convention (process, low priority)**: actual practice this SOW ran the external reviewers via the harness `run_in_background: true` (tracked + notifies on completion — no reviewer was lost across 5 rounds), whereas `project-second-opinions` mandates foreground ("no `run_in_background`"). The skill's rule guards against the `&` detach idiom that loses processes; harness-tracked background does not have that failure mode and avoided blocking the turn ~20 min per round. Consider a future skill-update SOW to permit harness-tracked `run_in_background` (explicitly distinct from `&`). Not changed here (out of SOW-0009 scope; the SOW wording was aligned to the existing skill instead).
 
 ## Regression Log
 
