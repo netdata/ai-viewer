@@ -2,9 +2,18 @@
 
 ## Status
 
-Status: open
+Status: in progress
 
-Sub-state: drafted 2026-05-26 alongside SOW-0009 and SOW-0011 to land the Go-side quality gates spec'd in `.agents/sow/specs/quality-gates.md`. Awaiting operator approval. Prerequisite: SOW-0001 Chunk 2 (CI scaffolding workflow file) must be in place so this SOW extends an existing workflow rather than creating one from scratch.
+Sub-state: drafted 2026-05-26 with SOW-0009/0011. Activated 2026-06-02 under the operator's standing blanket mandate. **Re-scoped on activation to the measured live delta** (the "no tests / fresh codebase" premise is dead — 193 test files exist; CI already runs `go test -race -count=1 -coverprofile -covermode=atomic` + uploads the coverage artifact + prints a coverage summary). Measured per-package coverage (2026-06-02): all 13 `internal/*` packages are **≥80%** (84.1–100%); the 4 sub-80% packages are all `cmd/*` — the two binaries (`ai-viewer-ingest` 55.0%, `ai-viewer-serve` 25.7%: `main()`/flag/signal wiring, covered by Playwright E2E + embed-smoke + the cmd binary tests) and the two dev-only tools (`genfixtures`, `backfillbench`: 0%, no tests, code generators not shipped). So this SOW is **gate + tuning + tooling**, not a test-writing effort.
+
+### Re-scope decisions (CTO, 2026-06-02)
+
+1. **Branch coverage (≥70%) — DEFERRED (not shippable with Go's toolchain).** Go's stdlib coverage (`-covermode=atomic`) is **statement**-based; there is no first-class branch coverage, and the third-party tools (gobco etc.) are immature/unmaintained. Per the original AC#3 option (c): ship statement coverage only; relabel the branch threshold "deferred — Go has no native branch coverage" in `quality-gates.md` + the skill. Recorded as a Followup (not a tracked implementation SOW — a branch-coverage gate is low-value + Go-limited; revisit only if a mature tool emerges).
+2. **Per-package threshold scope — `internal/*` only; `cmd/*` excluded.** Enforce ≥80% statement per package on `internal/*` (the unit-testable core — already met). Exclude `cmd/*` (entrypoints + dev tools): `main()`/flag/signal wiring is covered by E2E + embed-smoke + the cmd binary tests, not unit-coverage targets; `genfixtures`/`backfillbench` are dev-only generators. The exclusion list + rationale live in `scripts/check-coverage.sh` and the spec — mirrors the SOW-0009 fit-for-purpose call (don't force a metric on code where it is low-value).
+3. **New-code-in-PR ≥90% diff-coverage — DEFERRED to a follow-up SOW.** It requires a diff↔coverage intersector (Python `diff-cover` dep, or a bespoke in-tree Go helper) plus its own self-tests — a self-contained, testable addition best done with focus. The per-package + repo-wide statement gate this SOW ships is the high-value base that prevents under-coverage; new-code-90% is a refinement. Tracked Followup.
+4. **Race cadence — per-push stays `-count=1`; stress is nightly.** The `internal/ingest` suite includes a ~240s test (`TestRefreshRollups_OtherStaleRowRemoval`, flagged in SOW-0009); `-count=3` on every push would balloon the test job (~30 min) and hurt PR feedback latency for marginal added race-coverage. Keep per-push `-count=1` (current); add a **nightly** scheduled race-stress job (`-count=10`); document the local `--stress` flag (`-count=10`). Higher per-push counts are gated on first speeding up that test (SOW-0009 Followup).
+5. **`scripts/gates.sh` integration (orig AC#8) — SOW-0013 scope.** `gates.sh` does not exist (it is SOW-0013's deliverable). SOW-0010 delivers `scripts/test.sh` + `scripts/check-coverage.sh`; wiring them into the canonical `gates.sh` aggregate is SOW-0013.
+6. **PR sticky comment + README badge (orig AC#6/#7) — kept but low-priority; defer if non-trivial.** The threshold ENFORCEMENT (check-coverage.sh in CI, build-failing) is the core gate. The sticky-comment + badge are reporting niceties; implement if low-friction, else Followup.
 
 ## Requirements
 
@@ -40,14 +49,17 @@ Unknowns:
 
 ### Acceptance Criteria
 
-1. `scripts/test.sh` exists, executable, runs `go test -race -coverprofile=coverage.out -covermode=atomic -count=1 ./...`. **Verification**: `bash -n scripts/test.sh` parses clean; run on the current tree exits 0; `coverage.out` is produced.
-2. `scripts/check-coverage.sh` exists, executable, takes `coverage.out` plus the PR diff (or no diff for full-tree mode) and enforces all four thresholds: repo-wide ≥ 80% lines; per-changed-package ≥ 80% lines and ≥ 70% branches; new-code-in-PR ≥ 90% lines. Output is human-readable and actionable (names the failing package and the missing percentage). **Verification**: synthetic input fixtures with known coverage exercise each threshold; script exits non-zero on each miss and zero when all pass.
-3. Branch coverage strategy decided and documented in the SOW execution log per the CTO note above; if option (c) is chosen, this SOW updates `.agents/sow/specs/quality-gates.md` and `.agents/skills/project-quality-gates/SKILL.md` to label branch coverage as "deferred to SOW-XXXX" with a tracked follow-up SOW. **Verification**: spec/skill diff in the same commit; tracked follow-up SOW in `.agents/sow/pending/` if applicable.
-4. Race stress is wired at three cadences: `-count=10` documented as the local pre-commit command for concurrency-touching changes (in `scripts/test.sh` as a flag or separate `scripts/test-stress.sh`); `-count=3` per push in CI; `-count=20` nightly in CI. **Verification**: CI workflow file shows both schedules; local script supports the stress flag.
-5. CI publishes the HTML coverage report (`go tool cover -html=coverage.out -o coverage.html`) as a per-PR artifact retained for 14 days. **Verification**: PR run shows the artifact in the "Artifacts" section.
-6. CI posts a sticky PR comment summarizing: repo-wide coverage, per-package coverage for packages touched by the PR, new-code coverage. Comment updates in place on subsequent pushes (no comment spam). **Verification**: open a sample PR; verify single comment that updates across pushes.
-7. README gains a coverage badge driven by the repo-wide line coverage from the latest main-branch run. (Optional but recommended; if the badge service requires anything beyond what the workflow already produces, the implementer may defer this to a follow-up SOW.) **Verification**: badge renders in README and updates after a main-branch run.
-8. `./scripts/gates.sh` invokes `scripts/test.sh` followed by `scripts/check-coverage.sh` (with empty-diff = full-tree mode) so the canonical local pre-commit gate enforces coverage identically to CI. **Verification**: `scripts/gates.sh` exit code = 0 on a passing tree; non-zero on a synthetic failing tree.
+(Re-scoped 2026-06-02 — see "Re-scope decisions" above. Statement coverage only; `internal/*` is the gated set; new-code-diff + branch + gates.sh-integration are deferred per those decisions.)
+
+1. `scripts/test.sh` exists, executable, uses the `run()` transparency helper, runs `go test -race -coverprofile=coverage.out -covermode=atomic -count=1 ./...`, and supports a `--stress [N]` flag (`-count=N`, default 10) for concurrency-touching changes. **Verification**: `bash -n scripts/test.sh` parses clean; a run on the current tree exits 0 and produces `coverage.out`.
+2. `scripts/check-coverage.sh` exists, executable, parses `coverage.out` (`go tool cover -func`) and enforces **statement** coverage: **repo-wide ≥ 80%** and **per-package ≥ 80% for every `internal/*` package**. `cmd/*` is excluded from the per-package gate (entrypoints + dev tools; covered by E2E/embed-smoke/cmd-binary tests) — the exclusion list + rationale are in the script. Output is human-readable and actionable (names the failing package + the missing percentage). **Verification**: synthetic `coverage.out` fixtures with known per-package percentages exercise pass + each below-threshold miss; the script exits non-zero on each miss, zero when all pass; a run on the current tree exits 0 (all `internal/*` ≥ 80%).
+3. Branch coverage (orig ≥ 70%) is **deferred**: `quality-gates.md` + `project-quality-gates` + `project-testing` are updated to state statement coverage is the enforced metric and branch coverage is deferred (Go has no native branch coverage). **Verification**: spec/skill diffs in the same commit; Followup recorded (no tracked implementation SOW — see Re-scope decision 1).
+4. Race stress: per-push CI stays `-count=1` (already wired); a **nightly** scheduled CI job runs `-count=10` race stress; `scripts/test.sh --stress` is the documented local equivalent. **Verification**: a scheduled workflow (`on.schedule`) runs the stress job; `scripts/test.sh --stress 3` runs `-count=3`.
+5. CI runs `scripts/check-coverage.sh` as a **build-failing** gate (extends the existing `test` job, which already produces `coverage.out` + uploads the HTML artifact). **Verification**: the `test` job invokes `scripts/check-coverage.sh`; a synthetic sub-threshold profile fails it; the coverage artifact still uploads.
+6. (Re-scoped, low-priority) A sticky PR comment summarizing repo-wide + touched-package coverage is implemented IF low-friction (`marocchino/sticky-pull-request-comment`); otherwise recorded as a Followup. **Verification**: comment present on a sample PR, or Followup noted.
+7. (Re-scoped, optional) README coverage badge if low-friction; else Followup. **Verification**: badge renders, or Followup noted.
+8. New-code-in-PR ≥ 90% diff-coverage is **deferred to a tracked follow-up SOW** (`.agents/sow/pending/`) — it needs a diff↔coverage intersector + self-tests (Re-scope decision 3). The per-package + repo-wide gate is the shipped base. **Verification**: follow-up SOW filed.
+9. Specs/skills updated in lockstep: `quality-gates.md` "Go — Coverage" + "Go — Race Stress", `project-quality-gates`, `project-testing` reflect statement-only thresholds, the `internal/*` gated scope + `cmd/*` exclusion, the deferred branch + new-code gates, and the per-push-1 / nightly-stress cadences. `scripts/gates.sh` integration is left to SOW-0013 (which creates `gates.sh`), noted in the spec. **Verification**: spec-drift check clean; specs match what landed.
 
 ## Analysis
 
@@ -74,7 +86,7 @@ Risks:
 
 ## Pre-Implementation Gate
 
-Status: blocked (operator approval pending)
+Status: ready (activated 2026-06-02 under the blanket mandate; the "Re-scope decisions" block above governs where it differs from the original draft — statement-only coverage, `internal/*` gated scope, deferred branch + new-code + gates.sh-integration, per-push-1 / nightly-stress race cadence)
 
 Problem / root-cause model:
 
@@ -172,7 +184,17 @@ No operator decisions required. The two open items in the Pre-Implementation Gat
 
 ## Execution Log
 
-Pending.
+### 2026-06-02 — Activation + implementation (master)
+
+- Measured per-package coverage (grounds the scope): all 13 `internal/*` packages ≥ 80% (84.1–100%); the 4 sub-80% are all `/cmd/` — binaries `ai-viewer-ingest` 55.0% / `ai-viewer-serve` 25.7% (E2E/smoke-covered) and dev tools `genfixtures`/`backfillbench` 0% (no tests, not shipped). The per-package gate already passes on the core → this SOW is gate + tooling, not test-writing.
+- Delivered (master-owned scripts/CI/specs — no production `.go` change):
+  - `scripts/test.sh` (race + `-coverprofile -covermode=atomic -count=1`; `--stress [N]` flag).
+  - `scripts/check-coverage.sh` — statement gate: gated aggregate + per-package ≥ 80% on non-`/cmd/` packages; `/cmd/` excluded by substring (catches top-level `cmd/` binaries AND nested `internal/.../cmd/` dev-tools). Validated on the live profile: gated aggregate 90.4%, all `internal/*` 84–100%, PASS.
+  - `scripts/test/check-coverage-test.sh` — 5 synthetic-fixture self-tests (pass / gated-miss / cmd-excluded / aggregate-miss / missing-profile); 5/5 pass.
+  - `ci.yml`: "Enforce coverage thresholds" build-failing step in the `test` job (after the artifact upload).
+  - `race-stress-nightly.yml`: scheduled `-count=10` race stress via `scripts/test.sh --stress 10`; per-push stays `-count=1`.
+  - Specs/skills: `quality-gates.md` "Go — Coverage" + "Go — Race Stress"; `project-testing`; `project-quality-gates`.
+- Deferred (per Re-scope decisions): new-code-in-PR ≥ 90% → **SOW-0036** (filed in `pending/`); branch coverage → indefinite (Go-limited); `gates.sh` integration → SOW-0013; PR sticky-comment + README badge → Followup.
 
 ## Validation
 
@@ -188,7 +210,10 @@ Pending.
 
 ## Followup
 
-None yet.
+- **New-code-in-PR ≥ 90% diff coverage** → SOW-0036 (filed in `pending/`): needs a diff↔coverage intersector + self-tests.
+- **Branch coverage** → deferred indefinitely (Go has no native branch coverage; revisit only if a mature tool emerges).
+- **PR sticky coverage comment + README coverage badge** (orig AC#6/#7) → deferred reporting niceties; the build-failing `check-coverage.sh` gate is the value. Implement opportunistically or fold into SOW-0013's CI wiring.
+- **`gates.sh` integration** of `test.sh` + `check-coverage.sh` → SOW-0013 (which creates the canonical aggregate).
 
 ## Regression Log
 

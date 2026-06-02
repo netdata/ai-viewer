@@ -232,6 +232,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Build-failing coverage gate (SOW-0010): repo-wide + per-package >= 80%
+      # statement coverage on the gated (non-/cmd/) packages. Runs AFTER the
+      # artifact upload so the profile is always retained for diagnosis even
+      # when the gate fails.
+      - name: Enforce coverage thresholds
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          chmod +x scripts/check-coverage.sh
+          ./scripts/check-coverage.sh coverage.out
+
       - name: Detect benchmarks
         if: steps.detect.outputs.go == 'true'
         id: bench

@@ -1,0 +1,42 @@
+# Nightly race-detector stress (SOW-0010).
+#
+# Per-push CI runs the suite once under `-race -count=1` (ci.yml `test` job).
+# Rare data races surface only under repetition, so this scheduled job re-runs
+# the whole suite under `-race -count=10` nightly. It is NOT a per-push gate
+# (the repetition makes it slow); a failure here is a real race to investigate.
+#
+# Local equivalent: `scripts/test.sh --stress 10`.
+# Authoritative gate: .agents/sow/specs/quality-gates.md "Go — Race Stress".
+name: race-stress-nightly
+
+on:
+  schedule:
+    # 06:00 UTC daily — off-peak, staggered from govulncheck-nightly (07:00).
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  race-stress:
+    name: race stress (-count=10)
+    runs-on: ubuntu-latest
+    # Generous: the full suite under -race x10 (the slow internal/ingest rollup
+    # test dominates; speeding it up is tracked in SOW-0009 Followup).
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Race stress (-count=10)
+        run: |
+          chmod +x scripts/test.sh
+          ./scripts/test.sh --stress 10

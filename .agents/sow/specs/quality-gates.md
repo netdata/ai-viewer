@@ -49,12 +49,13 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Coverage
 
-- `go test -race -coverprofile=coverage.out -covermode=atomic ./...`
-- Thresholds:
-  - Repository-wide lines ≥ 80%.
-  - Per-package on changed code ≥ 80% lines, ≥ 70% branches.
-  - New code in the PR ≥ 90% lines.
-- Enforcement: `scripts/check-coverage.sh` parses `coverage.out` plus the PR diff. Failing thresholds blocks merge.
+- `scripts/test.sh` → `go test -race -coverprofile=coverage.out -covermode=atomic -count=1 ./...`.
+- **Metric: statement coverage** (Go's `-covermode=atomic`). Go has **no first-class branch coverage**; the branch threshold is **deferred** (revisit only if a mature branch-coverage tool emerges). Statement coverage is the enforced metric.
+- Thresholds (statement), enforced by `scripts/check-coverage.sh`:
+  - **Gated set = every non-`/cmd/` package** (the unit-testable core, i.e. `internal/*`): each ≥ 80%, and their aggregate ≥ 80%.
+  - **`/cmd/` is excluded** from the gate: the binaries (`cmd/ai-viewer-{ingest,serve}` — `main()`/flag/signal wiring, covered by Playwright E2E + embed-smoke + cmd binary tests) and the dev-only tools (`internal/adapters/aiagent_v2/cmd/{genfixtures,backfillbench}`). Reported for visibility, not gated.
+  - **New-code-in-PR ≥ 90%: deferred to a follow-up SOW** (needs a diff↔coverage intersector + self-tests); the per-package + aggregate gate is the shipped base.
+- Enforcement: CI runs `scripts/check-coverage.sh coverage.out` as a build-failing step in the `test` job (after the coverage artifact uploads); the same script is the local pre-commit gate. `check-coverage.sh` has synthetic-fixture self-tests (`scripts/test/check-coverage-test.sh`).
 
 ### Go — Fuzzing
 
@@ -91,8 +92,8 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Race Stress
 
-- Concurrency-touching changes: `-count=10` locally before commit.
-- CI: `-count=3` per push, `-count=20` nightly.
+- Concurrency-touching changes: `scripts/test.sh --stress 10` (`-race -count=10`) locally before commit.
+- CI: per-push runs `-race -count=1` (the `test` job — kept at 1 so PR feedback stays fast); race **stress** runs nightly via `race-stress-nightly.yml` (`scripts/test.sh --stress 10`, scheduled, not a per-push gate). Per-push `-count>1` is gated on first speeding up the ~240s `internal/ingest` rollup test (SOW-0009 Followup); until then the marginal added race-coverage per push does not justify the latency.
 
 ### Frontend — Lint
 

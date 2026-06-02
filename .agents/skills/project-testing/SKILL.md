@@ -65,18 +65,18 @@ cd frontend && npm run e2e -- --ui       # playwright UI mode
 | Scope | Threshold |
 |---|---|
 | Repository-wide lines | ≥ 80% |
-| Per-package on changed code | ≥ 80% lines, ≥ 70% branches |
+| Per-package (`internal/*`, statement) | ≥ 80% (`/cmd/` excluded; branch deferred) |
 | New code in the PR | ≥ 90% lines |
 | Frontend component directory | ≥ 80% lines |
 
-`scripts/check-coverage.sh` enforces these against `coverage.out` and the PR diff. Lowering a threshold to land a PR is a contract breach; either add tests or split the PR.
+`scripts/check-coverage.sh` enforces **statement** coverage on the gated `internal/*` set (`/cmd/` excluded) against `coverage.out`. Branch coverage and new-code-in-PR ≥ 90% are deferred (see `quality-gates.md` "Go — Coverage"). Lowering a threshold to land a PR is a contract breach; either add tests or split the PR.
 
 ## Mandatory Test Kinds
 
 - **Every adapter exposes at least one `FuzzXxx` target** covering its parse path.
 - **`internal/canonical` exposes a `FuzzXxx` target** for each decoder it owns.
 - **Performance-critical paths have benchmarks** with a baseline in `bench/baseline.txt`. Benchmarks run with `-count=5` for variance.
-- **Concurrency-touching code is tested with `-race -count=10` locally**, `-count=3` in CI, `-count=20` nightly.
+- **Concurrency-touching code is stress-tested with `scripts/test.sh --stress 10` (`-race -count=10`) locally**; CI runs `-count=1` per push and `-count=10` race stress nightly.
 - **Frontend E2E covers golden paths AND error states** (network failure, empty list, malformed SSE event). axe runs on every route.
 - **Every UI change has at least one Playwright assertion** that proves the behavior end-to-end. Component tests alone are not sufficient for user-visible behavior.
 

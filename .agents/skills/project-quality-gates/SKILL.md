@@ -82,11 +82,10 @@ go tool cover -func=coverage.out | tail -1
 
 Thresholds:
 
-- Repository-wide: ≥ 80% lines covered.
-- Per-package on changed code: ≥ 80% lines, ≥ 70% branches.
+- **Statement** coverage (Go has no native branch coverage; branch is deferred). Gated set = every non-`/cmd/` package (`internal/*`): each ≥ 80% AND their aggregate ≥ 80%. `/cmd/` (binaries + dev tools) is excluded — reported, not gated.
 - New code in the PR: ≥ 90% lines covered.
 
-Enforcement: `scripts/check-coverage.sh` parses `coverage.out` and fails if thresholds not met. New code coverage is computed via `go test` + diff scope.
+Enforcement: `scripts/check-coverage.sh coverage.out` fails if any gated (`internal/*`) package or the gated aggregate is < 80% statements; it runs as a build-failing CI step (the `test` job) and as the local pre-commit gate, with synthetic-fixture self-tests (`scripts/test/check-coverage-test.sh`). New-code-in-PR ≥ 90% is deferred to a follow-up SOW (diff↔coverage intersector).
 
 ### Go — Fuzzing
 
@@ -116,7 +115,7 @@ Threshold: ≤ 20% regression in any metric vs. `bench/baseline.txt`. The baseli
 go test -race -count=10 ./...       # local pre-commit on concurrency-touching changes
 ```
 
-For changes to ingest pipeline, SSE hub, or anything with channels/goroutines: run `-count=10` locally; CI runs `-count=3` on every push and `-count=20` nightly.
+For changes to ingest pipeline, SSE hub, or anything with channels/goroutines: run `scripts/test.sh --stress 10` locally; CI runs `-count=1` per push (the `test` job) and `-count=10` race stress nightly (`race-stress-nightly.yml`).
 
 ### Frontend — Lint
 
