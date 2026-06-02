@@ -48,23 +48,30 @@ HAVE_VERSION="$(golangci-lint version 2>/dev/null | grep -oE 'version v?[0-9]+\.
 # Normalize both to a leading 'v' for comparison.
 [[ "$HAVE_VERSION" == v* ]] || HAVE_VERSION="v${HAVE_VERSION}"
 WANT_VERSION="$PINNED_VERSION"; [[ "$WANT_VERSION" == v* ]] || WANT_VERSION="v${WANT_VERSION}"
+# Intentional WARN (not auto-install): golangci-lint is the developer's own
+# primary tool and is heavy to reinstall over; CI enforces the exact pin
+# authoritatively via golangci-lint-action. gosec/govulncheck below ARE
+# auto-(re)installed at the pin because lint.sh manages them and they are cheap.
 if [[ "$HAVE_VERSION" != "$WANT_VERSION" ]]; then
-  echo -e "${YELLOW}[warn]${NC} golangci-lint ${HAVE_VERSION} != pinned ${WANT_VERSION} (.golangci-lint-version); CI uses the pinned version." >&2
+  echo -e "${YELLOW}[warn]${NC} golangci-lint ${HAVE_VERSION} != pinned ${WANT_VERSION} (.golangci-lint-version); CI enforces the pin via golangci-lint-action — re-pin locally if results differ." >&2
 fi
 run golangci-lint run --timeout=5m
 
-# --- 2. gosec (standalone) --------------------------------------------------
-if [[ ! -x "${GOBIN}/gosec" ]]; then
-  echo -e "${GRAY}installing gosec ${GOSEC_VERSION}...${NC}" >&2
-  run go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
-fi
+# --- 2. gosec (standalone, pinned) ------------------------------------------
+# Always (re)install the pinned version — exactly as CI does. A `go install`d
+# gosec self-reports "dev" (release version ldflags are not injected), so the
+# binary's version cannot be verified after the fact; pinning at install time
+# is the only reliable guarantee. The install is fast once the module+build
+# caches are warm, and it overwrites any stale gosec a dev may already have.
+echo -e "${GRAY}installing pinned gosec ${GOSEC_VERSION}...${NC}" >&2
+run go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
 run "${GOBIN}/gosec" -severity medium -confidence medium ./...
 
-# --- 3. govulncheck ---------------------------------------------------------
-if [[ ! -x "${GOBIN}/govulncheck" ]]; then
-  echo -e "${GRAY}installing govulncheck (latest)...${NC}" >&2
-  run go install golang.org/x/vuln/cmd/govulncheck@latest
-fi
+# --- 3. govulncheck (latest, as CI) -----------------------------------------
+# Always install latest — the CVE database tooling should be current, and CI
+# does the same. Idempotent + fast when cached.
+echo -e "${GRAY}installing govulncheck (latest)...${NC}" >&2
+run go install golang.org/x/vuln/cmd/govulncheck@latest
 run "${GOBIN}/govulncheck" ./...
 
 echo -e "${GREEN}[ok]${NC} lint.sh: golangci-lint + gosec + govulncheck all clean." >&2

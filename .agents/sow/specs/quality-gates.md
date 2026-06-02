@@ -210,10 +210,17 @@ CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
 `scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
 
-Single-command aggregators — `scripts/lint.sh`, `scripts/test.sh`, and
-`scripts/gates.sh` (run every gate, fail-fast) — are a planned convenience and
-are **not yet present**. Until they land, run the individual gates (or rely on
-the per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
+`scripts/lint.sh` (SOW-0009) **is present**: it is the local mirror of the
+CI Go lint + security gates — `golangci-lint run` (the umbrella, driven by
+`.golangci.yml` at the version pinned in `.golangci-lint-version`) then
+standalone `gosec` and `govulncheck`. CI enforces the same set via the
+version-pinned `golangci/golangci-lint-action` plus its standalone
+gosec/govulncheck steps (CI keeps the cached action rather than invoking
+`scripts/lint.sh`, to preserve golangci's analysis cache). The broader
+single-command aggregators — `scripts/test.sh` and `scripts/gates.sh` (run
+*every* gate, fail-fast) — are a planned convenience (SOW-0013) and are **not
+yet present**. Until they land, run the individual gates (or rely on the
+per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
 gracefully when absent. The one exception is the security scanner: it is
 **fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if
 `scripts/scan-secrets.sh` or its self-test is missing, never skips it.

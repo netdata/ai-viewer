@@ -208,4 +208,4 @@ func TestScanHappyPath(t *testing.T) {
 
 ## Linting Configuration
 
-`.golangci.yml` enables: `govet`, `errcheck`, `staticcheck`, `unused`, `gosimple`, `ineffassign`, `gosec`, `revive`, `gofmt`, `goimports`. Zero warnings policy. See `scripts/lint.sh`.
+`.golangci.yml` (v2) enables the strict set — errcheck, govet, ineffassign, staticcheck, unused, errorlint, gocritic, revive, gocyclo (min-complexity 25), misspell, nilerr, prealloc, unconvert, unparam, whitespace, bodyclose, noctx — plus the gofmt/goimports/gofumpt formatters. `gosimple` is folded into staticcheck (v2); `gosec` runs standalone (not as a golangci linter). Zero-warnings policy. The authoritative gate catalog is `.agents/sow/specs/quality-gates.md` "Go — Lint" and the `project-quality-gates` skill; run locally via `scripts/lint.sh`.
