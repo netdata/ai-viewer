@@ -9,9 +9,10 @@ import (
 )
 
 // This file pins migration 0007 (SOW-0007 Chunk 7a): the per-source
-// fts5_index_logs opt-out flag on sources (default 1), config plumbing only —
-// no fts_ops/fts_logs population happens here (that index population is a
-// separate later step). It is an internal (package store) test so it can apply
+// fts5_index_logs opt-out flag on sources (default 1). This test covers only the
+// migration's schema shape, not indexing behaviour; the flag itself gates
+// fts_logs indexing in the FTS backfill and /api/search (both filter on
+// src.fts5_index_logs = 1). It is an internal (package store) test so it can apply
 // the embedded migration chain THROUGH a chosen file via openChainThrough,
 // pinning each migration's OWN schema_meta bump independent of how many later
 // migrations exist.

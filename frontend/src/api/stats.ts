@@ -177,9 +177,12 @@ export interface SearchOptions {
  * prefix — search results are not invalidated by stats_invalidated (the FTS
  * tables and the rollups have independent refresh paths); Chunk 9b decides its
  * live wiring. `q` is part of the key so each query string caches separately.
+ * `cursor` is part of the key too: this is a plain useQuery, so two fetches that
+ * differ only by page would otherwise collide on one cache entry and serve the
+ * wrong page (unlike useInfiniteQuery, which keys pages internally via pageParam).
  */
-export function searchQueryKey(filters: Filters, q: string, limit: number) {
-  return ['search', filters, q, limit] as const;
+export function searchQueryKey(filters: Filters, q: string, limit: number, cursor?: string) {
+  return ['search', filters, q, limit, cursor ?? null] as const;
 }
 
 /** SEARCH_LIMIT_DEFAULT mirrors the server default page size (rest-api.md). */
@@ -221,7 +224,7 @@ export function useSearch(
 ): UseQueryResult<SearchResponse> {
   const limit = opts.limit ?? SEARCH_LIMIT_DEFAULT;
   return useQuery({
-    queryKey: searchQueryKey(filters, q, limit),
+    queryKey: searchQueryKey(filters, q, limit, opts.cursor),
     queryFn: ({ signal }) => fetchSearch(filters, q, opts, signal),
     enabled: q.trim().length > 0,
   });

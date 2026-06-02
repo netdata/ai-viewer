@@ -156,8 +156,16 @@ describe('stats top data layer', () => {
 describe('stats search data layer', () => {
   it('searchQueryKey is prefixed ["search"] (its own SSE wiring is decided in 9b)', () => {
     const key = searchQueryKey(EMPTY, 'boom', 50);
-    expect(key).toEqual(['search', EMPTY, 'boom', 50]);
+    expect(key).toEqual(['search', EMPTY, 'boom', 50, null]);
     expect(key[0]).toBe('search');
+  });
+
+  it('searchQueryKey caches each page separately and is stable when the cursor is absent', () => {
+    // Distinct cursors must produce distinct keys, else a plain useQuery serves
+    // the wrong page (two fetches differing only by cursor would collide).
+    expect(searchQueryKey(EMPTY, 'q', 50, 'A')).not.toEqual(searchQueryKey(EMPTY, 'q', 50, 'B'));
+    // An omitted cursor normalises to null, so the cursor-less default is stable.
+    expect(searchQueryKey(EMPTY, 'q', 50)).toEqual(searchQueryKey(EMPTY, 'q', 50, undefined));
   });
 
   it('fetchSearch GETs /api/search with the query, filters, and limit', async () => {

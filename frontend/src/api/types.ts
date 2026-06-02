@@ -495,6 +495,8 @@ export interface SearchResponse {
   ops: SearchOpHit[];
   logs: SearchLogHit[];
   logs_indexed: boolean;
+  /** Opaque next-page cursor; present only when more rows exist (rest-api.md §Conventions). The dashboard SearchBox shows the first page only (top-N finder) and does not consume it; included for contract honesty and parity with the logs/sessions envelopes. */
+  next_cursor?: string;
 }
 
 // ── GET /api/sources ────────────────────────────────────────────────────────

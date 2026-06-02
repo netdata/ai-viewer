@@ -4,9 +4,10 @@
 --
 -- This migration adds ONE column to sources; it does NOT populate fts_ops or
 -- fts_logs (that ingester-side FTS index population is a SEPARATE later step).
--- The flag is config plumbing only here: the ingester persists the operator's
--- choice per source so a later step can read it and skip/clear log indexing for
--- sources that opt out. SQLite supports ALTER TABLE ... ADD COLUMN with a
+-- The ingester persists the operator's per-source choice into this column; the
+-- persisted flag is read by the incremental FTS path (skips fts_logs for opt-out
+-- sources), the one-shot BackfillFTS, and GET /api/search (all gate on
+-- src.fts5_index_logs = 1). SQLite supports ALTER TABLE ... ADD COLUMN with a
 -- NOT NULL DEFAULT (the default backfills existing rows in place), so the
 -- additive change needs no table rebuild and no data move.
 --

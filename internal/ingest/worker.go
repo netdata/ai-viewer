@@ -287,8 +287,9 @@ func (w *worker) report(err error) {
 // the resolved per-source FTS5 log-indexing flag; it is persisted on both
 // insert and conflict-update because the ingester option is the runtime source
 // of truth (a daemon restart re-asserts the configured value over whatever a
-// prior run stored). The value is config plumbing only — no FTS index
-// population reads it yet (data-model.md §Full-text search).
+// prior run stored). The persisted flag gates fts_logs indexing: the FTS
+// backfill (indexableLogsForFTSQuery) and /api/search (searchLogs) both filter
+// on src.fts5_index_logs = 1 (data-model.md §Full-text search).
 func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string, fts5IndexLogs bool) error {
 	ftsFlag := 0
 	if fts5IndexLogs {

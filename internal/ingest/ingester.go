@@ -323,7 +323,8 @@ func (i *Ingester) deriveSourceFields(sourceID string) (format, location string)
 // populated. A registered WithFTS5IndexLogs override wins; absence resolves to
 // true (opt-OUT default — logs are indexed unless the operator disables it),
 // matching the sources.fts5_index_logs column default. The worker persists the
-// resolved value on the sources row; nothing reads it yet (config plumbing).
+// resolved value on the sources row, where it gates fts_logs indexing: the FTS
+// backfill and /api/search both filter on src.fts5_index_logs = 1.
 func (i *Ingester) resolveFTS5IndexLogs(sourceID string) bool {
 	if v, ok := i.fts5IndexLogsOverrides[sourceID]; ok {
 		return v

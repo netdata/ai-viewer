@@ -307,8 +307,9 @@ func submitOneSessionAndWaitForSource(t *testing.T, i *Ingester, db *sql.DB, sou
 
 // TestWithFTS5IndexLogs_PersistsZeroWhenDisabled pins the opt-out path: a source
 // registered with WithFTS5IndexLogs(id, false) has its sources row persisted
-// with fts5_index_logs = 0. The flag is only persisted here (config plumbing);
-// no FTS index population reads it yet (that is a separate later step).
+// with fts5_index_logs = 0. The persisted flag gates fts_logs indexing: the FTS
+// backfill and /api/search both filter on src.fts5_index_logs = 1, so a disabled
+// source is excluded from both.
 func TestWithFTS5IndexLogs_PersistsZeroWhenDisabled(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
