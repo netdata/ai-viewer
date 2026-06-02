@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: in progress
+Status: completed
 
 Sub-state: drafted 2026-05-26 as the first of the quality/CI cluster (with SOW-0010/0011). Activated 2026-06-02 under the operator's standing blanket mandate ("deliver the whole backlog autonomously, pick order yourself"). Re-scoped on activation: the original draft assumed it would run against a near-empty Phase-1 codebase ("No Go source yet … strict rules from the first lines"); that premise is dead — M1-M4 shipped ~36.7k LOC of production Go before this SOW ran, so this is a **retrofit** of the strict stack onto a mature, heavily-reviewed codebase, measured below.
 
@@ -266,11 +266,22 @@ All gates re-run by the master orchestrator (not trusting the subagent), 2026-06
 
 ## Outcome
 
-Pending.
+Delivered + merged: PR #35, squash commit `8cd2065`, 2026-06-02. The strict golangci-lint v2 linter set is enforced (locally via `scripts/lint.sh`; in CI via the version-pinned `golangci-lint-action` + standalone gosec/govulncheck); all 57 findings the strict set surfaced on the existing ~36.7k-LOC tree are resolved to zero. Tooling landed: `scripts/lint.sh`, `.golangci-lint-version` pin (single-sourced into CI), `govulncheck-nightly.yml`. AC#1-8 met (AC#3 gosec + AC#7 zero-bare-nolint were satisfied pre-SOW; `gosimple` dropped as v2-merged-into-staticcheck; `gocyclo` tuned to min-complexity 25 with documented rationale; gosec runs standalone).
+
+Final verification (master orchestrator, independently of the subagent): `golangci-lint run` = 0; `go vet` clean; `go test -race -count=1` all 15 packages pass; gosec 0; govulncheck clean (one unreachable transitive CVE, not called); secrets + AI-attribution scans clean; CI green on the merged commit (lint 1m51s — under the 2-min AC#5 target; test 11m26s).
+
+Count correction (minimax R4, ground-truth-verified): the SOW's "8 nilerr" was the PRODUCTION count; the subagent correctly suppressed **9** total reasoned `//nolint:nilerr` sites — 8 production (`loader_null_check.go` ×4; `aiagent_v2/tailer.go`, `claude_code/tailer.go`, `codex/scanner.go`, `codex/tailer.go`) + 1 test-helper (`codex/golden_test.go:173` — "walk best-effort; a stat error just leaves mtime fresh"). All 9 are justified; `golangci-lint run` = 0.
+
+Five external-review rounds (codex decisive + glm + minimax). Round 1 confirmed the runtime code mergeable; rounds 1-5 were documentation-contract honesty (the bootstrap docs over-claimed a not-yet-built aggregate-script system) plus the lint.sh GOBIN fix. codex's round-4 "main blocker" (formatter gate unenforced) was a FALSE positive, rejected on empirical ground truth and confirmed false by codex itself on round 5.
 
 ## Lessons Extracted
 
-Pending.
+1. **Enumerate-then-fix-all-then-re-grep for any drift class.** codex found documentation-contract drift in THREE consecutive rounds (R1-R3) because each round I fixed only the lines it cited, not the whole class. What worked (R4): one exhaustive grep of ALL affected tokens (the three planned scripts `test.sh`/`gates.sh`/`spec-drift.sh`) across every durable doc, fix every hit, then re-grep to prove zero. A reviewer citing 3 examples means "≥3 of a class" — sweep the class, not the citations.
+2. **Adjudicate every reviewer finding on ground truth; reject false positives with evidence.** codex (decisive) is usually right, but its R4 "main blocker" (golangci-lint run does not enforce formatters) was FALSE — an empirical test (`golangci-lint run` on a mis-formatted file → "File is not properly formatted" + non-zero exit) disproved it, and codex confirmed via source on R5. Never mechanically comply with a blocker without verifying; never merge on convergence without verifying either.
+3. **A reviewer producing false/trivial findings is the convergence signal.** codex's findings degraded real→real→real→false+trivial across 5 rounds while the runtime code was sound from round 1. When the decisive reviewer pre-approves ("I would merge after X") and X is a one-line doc fix, that is convergence — stop iterating on doc nits.
+4. **Production-vs-total count discipline.** "8 nilerr" came from a production-only grep (`-v _test`), but the gate runs nilerr on tests too, so the true total was 9. When a linter is active on tests, count test hits in the total.
+5. **Strip AI-tool names from commit MESSAGES, not just trailers.** One commit body slipped "codex converged"; a squash-merge with an explicit clean message scrubbed it. The SOW Reviews section MAY name reviewers (project convention; `scan-ai-attribution` excludes `.agents/`), but commit messages and PR descriptions may not.
+6. **Retrofitting strict linters onto a mature codebase ≠ a fresh-codebase config.** The original SOW assumed a near-empty Phase-1 tree; on 36.7k reviewed LOC the fit-for-purpose call was tuning (gocyclo 25 not 15; `_test.go` style-linter exclusions; node_modules path-exclusion) + reasoned suppressions, NOT churning working hot-path functions for a metric.
 
 ## Followup
 
