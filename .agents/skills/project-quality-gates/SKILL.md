@@ -82,11 +82,10 @@ go tool cover -func=coverage.out | tail -1
 
 Thresholds:
 
-- Repository-wide: ≥ 80% lines covered.
-- Per-package on changed code: ≥ 80% lines, ≥ 70% branches.
-- New code in the PR: ≥ 90% lines covered.
+- **Statement** coverage (Go has no native branch coverage; branch is deferred). Gated set = every `internal/*` package (gated **iff** the import path contains `/internal/` and not `/cmd/`): each ≥ 80% AND their aggregate ≥ 80%. Excluded (reported, not gated): `/cmd/` (binaries + nested dev tools) and any non-`internal/` path, e.g. vendored Go a frontend npm dep ships under `frontend/node_modules/`.
+- New code in the PR: ≥ 90% lines — **deferred (SOW-0036)**, not yet enforced (see Enforcement note below).
 
-Enforcement: `scripts/check-coverage.sh` parses `coverage.out` and fails if thresholds not met. New code coverage is computed via `go test` + diff scope.
+Enforcement: `scripts/check-coverage.sh coverage.out` fails if any gated (`internal/*`) package or the gated aggregate is < 80% statements; it runs as a build-failing CI step (the `test` job) and as the local pre-commit gate, with synthetic-fixture self-tests (`scripts/test/check-coverage-test.sh`). New-code-in-PR ≥ 90% is deferred to a follow-up SOW (diff↔coverage intersector).
 
 ### Go — Fuzzing
 
@@ -116,7 +115,7 @@ Threshold: ≤ 20% regression in any metric vs. `bench/baseline.txt`. The baseli
 go test -race -count=10 ./...       # local pre-commit on concurrency-touching changes
 ```
 
-For changes to ingest pipeline, SSE hub, or anything with channels/goroutines: run `-count=10` locally; CI runs `-count=3` on every push and `-count=20` nightly.
+For changes to ingest pipeline, SSE hub, or anything with channels/goroutines: run `scripts/test.sh --stress 10` locally; CI runs `-count=1` per push (the `test` job) and `-count=10` race stress nightly (`race-stress-nightly.yml`).
 
 ### Frontend — Lint
 
@@ -227,11 +226,12 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 
 ```bash
 ./scripts/lint.sh         # Go: golangci umbrella + standalone gosec + govulncheck (SOW-0009; EXISTS)
-./scripts/test.sh         # all tests + coverage + race (SOW-0010; PLANNED)
+./scripts/test.sh         # all tests + coverage + race (SOW-0010; EXISTS)
+./scripts/check-coverage.sh  # statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
 ```
 
-Current state: `scripts/lint.sh` exists (the local Go lint+security mirror). `scripts/test.sh` (SOW-0010) and the canonical `scripts/gates.sh` aggregator (SOW-0013) are NOT yet present. Until `gates.sh` lands, run `scripts/lint.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, and `scripts/check-coverage.sh` exist (SOW-0009/0010). The canonical `scripts/gates.sh` aggregator (SOW-0013) is NOT yet present. Until it lands, run `scripts/lint.sh` + `scripts/test.sh` + `scripts/check-coverage.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
 
 ## When a Gate Fails
 

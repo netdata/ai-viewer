@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: in progress
+Status: completed
 
 Sub-state: drafted 2026-05-26 as the first of the quality/CI cluster (with SOW-0010/0011). Activated 2026-06-02 under the operator's standing blanket mandate ("deliver the whole backlog autonomously, pick order yourself"). Re-scoped on activation: the original draft assumed it would run against a near-empty Phase-1 codebase ("No Go source yet … strict rules from the first lines"); that premise is dead — M1-M4 shipped ~36.7k LOC of production Go before this SOW ran, so this is a **retrofit** of the strict stack onto a mature, heavily-reviewed codebase, measured below.
 
@@ -46,7 +46,7 @@ Enabling the full strict set (errorlint, gocritic, revive, gocyclo, misspell, ni
 | errorlint | 2 | **2** | fix: `errors.Is` instead of `==`/`!=` (test fragility) |
 | gocritic | 2 | **0** | both in `_test.go` → excluded |
 | misspell / whitespace / bodyclose | 0 | **0** | clean |
-| **TOTAL** | 158 (capped) | **64** | resolved to 0 via fixes + reasoned suppression + tuned config |
+| **TOTAL** | 158 (capped) | **64** (candidate cfg, gocyclo 20) | the final shipped cfg (gocyclo 25) reduced this to **57**; all resolved to 0 via fixes + reasoned suppression + tuning |
 
 **Inferences:**
 
@@ -81,7 +81,7 @@ Sources checked:
 Current state (2026-06-02):
 
 - Basic five linters + gofmt/goimports enforced; gosec + govulncheck standalone in CI per-push. Missing: the 12 strict linters + gofumpt, `scripts/lint.sh`, version pin, govulncheck nightly.
-- 64 residual findings under the tuned config (table above), resolved to zero by this SOW.
+- 57 residual findings under the final config (gocyclo 25), resolved to zero by this SOW (the gocyclo-20 candidate measured 64; raising the threshold to 25 dropped it to 57).
 
 Risks:
 
@@ -97,7 +97,7 @@ Status: ready (activated under blanket mandate 2026-06-02)
 
 Problem / root-cause model:
 
-- `AGENTS.md` commits to a strict Go static stack; the basic gates run but the strict set does not. The original "install before the codebase grows" framing is moot — the codebase already grew to ~36.7k LOC. So the task is a clean retrofit: enable the strict set, tune it to the codebase's measured nature (test exclusions, node_modules exclusion, a defensible gocyclo threshold), and resolve the 64 residual findings (fixes for real issues; reasoned suppression for the verified-intentional nilerr sites; config tuning for the test-noise classes).
+- `AGENTS.md` commits to a strict Go static stack; the basic gates run but the strict set does not. The original "install before the codebase grows" framing is moot — the codebase already grew to ~36.7k LOC. So the task is a clean retrofit: enable the strict set, tune it to the codebase's measured nature (test exclusions, node_modules exclusion, a defensible gocyclo threshold), and resolve the 57 residual findings (fixes for real issues; reasoned suppression for the verified-intentional nilerr sites; config tuning for the test-noise classes).
 
 Evidence reviewed:
 
@@ -110,7 +110,7 @@ Affected contracts and surfaces:
 
 - New: `scripts/lint.sh`, `.golangci-lint-version`, `.github/workflows/govulncheck-nightly.yml` (or a scheduled job).
 - Modified config: `.golangci.yml` (strict set + tuning), `.github/workflows/ci.yml` (golangci-action reads the pin from `.golangci-lint-version` via a step output; standalone gosec/govulncheck retained), `.github/workflows/govulncheck-nightly.yml` (new).
-- Modified production source (subagent-only): the 64-finding fixes — noctx×1, unconvert×8, errorlint×2, prealloc×1, revive×9, unparam×13, gofumpt×13 (auto), nilerr×8 (at-site suppression), `validateDoc` refactor×1. **Behavioral-change candidates** (test-first): `validateDoc` refactor (behavior must be byte-identical — pin with a test), any unparam signature change (compile-checked; add/adjust a test if a return value was being relied on), the noctx `QueryRowContext` change (pass the request/background context — pin behavior).
+- Modified production source (subagent-only): the 57-finding fixes — noctx×1, unconvert×8, errorlint×2, prealloc×1, revive×9, unparam×14, gofumpt×13 (auto), nilerr×8 (at-site suppression), `validateDoc` refactor×1 (these per-linter counts sum to 57; a 9th reasoned `//nolint:nilerr` lives in a test helper, `golden_test.go:173`, outside the 57 production findings — see the Outcome count-correction). **Behavioral-change candidates** (test-first): `validateDoc` refactor (behavior must be byte-identical — pin with a test), any unparam signature change (compile-checked; add/adjust a test if a return value was being relied on), the noctx `QueryRowContext` change (pass the request/background context — pin behavior).
 - Unaffected: frontend, fixtures, migrations, REST/SSE contracts, data model.
 
 Spec deltas to land before any test/code:
@@ -139,7 +139,7 @@ Implementation plan:
 2. **Config** (master, owns top-level config): finalize `.golangci.yml` (strict set + gocyclo 25 + `_test.go` style exclusions + `frontend/node_modules` path exclusion + genfixtures unparam exclusion + uncapped issues). `golangci-lint config verify`.
 3. **Tooling** (master): `scripts/lint.sh` (run() helper; golangci umbrella + gosec + govulncheck), `.golangci-lint-version` = 2.11.4, `chmod +x`.
 4. **CI** (master): `ci.yml` lint job drives golangci via the action at the pinned version (read from `.golangci-lint-version`), keeps standalone gosec/govulncheck; add `govulncheck-nightly.yml` (`on.schedule`). CI keeps the cached action; `scripts/lint.sh` is the local mirror — CI-runs-aggregate-script is SOW-0013.
-5. **Source fixes** (delegated subagent, after all master edits — tree-clobber discipline): write/adjust tests first for the behavioral-change candidates, then apply all 64 fixes; subagent is **forbidden** from running external reviewers (orchestrator owns review).
+5. **Source fixes** (delegated subagent, after all master edits — tree-clobber discipline): write/adjust tests first for the behavioral-change candidates, then apply all 57 fixes; subagent is **forbidden** from running external reviewers (orchestrator owns review).
 6. **Gates** (master): `golangci-lint run` = 0; `go test -race ./...` green; `go vet`; gosec; govulncheck; frontend untouched; `scripts/scan-secrets.sh` + AI-attribution scan clean.
 7. **Commit** spec + config + scripts + CI + fixes together (no attribution trailer), branch, push, PR.
 8. **External review** (codex + glm + minimax in parallel, repo-root, `timeout 1800`, per the `project-second-opinions` skill's invocation rules) on the full diff; adjudicate on ground truth (codex decisive); iterate same-scope until codex is clean.
@@ -178,7 +178,7 @@ No operator decisions required. All choices are technical and within the assista
 2. `.golangci.yml` strict set + tuning + `golangci-lint config verify` (master).
 3. `scripts/lint.sh` + `.golangci-lint-version` (master).
 4. CI lint job (golangci-action at the pinned version + standalone gosec/govulncheck) + govulncheck nightly (master).
-5. Delegated source fixes (64 findings; tests-first for behavioral ones).
+5. Delegated source fixes (57 findings; tests-first for behavioral ones).
 6. Gates + scan + commit + PR.
 7. External review (codex/glm/minimax) → converge on codex-clean.
 8. Merge + close to done/.
@@ -196,7 +196,7 @@ No operator decisions required. All choices are technical and within the assista
 
 - Master-owned (config/tooling/specs): `.golangci.yml` strict set + tuning (schema-verified); `.golangci-lint-version` = v2.11.4; `scripts/lint.sh` (local mirror); `ci.yml` reads the pin via a step output; `.github/workflows/govulncheck-nightly.yml`; spec + skill deltas.
 - Delegated (subagent) the 57 source fixes; master verified independently (did NOT trust the subagent summary):
-  - gofumpt 13 (reformatted via `golangci-lint fmt`); unconvert 8 (removed redundant `json.RawMessage` casts); revive 9 (3 unused-param→`_`, 3 `max`-shadow renames, 1 exported-doc, 1 ctx-as-arg reorder + 22 callers, 1 var-declaration suppressed-with-reason); prealloc 1; noctx 1 (`CheckSchema` threaded the real request ctx → `QueryRowContext`); errorlint 2 (`errors.Is`); nilerr 8 (all suppressed at-site with site-specific reasons — verified intentional); unparam 14 (6 removed + 35 callers updated, 8 interface/dispatch-required suppressed with verified reasons); gocyclo 1 (`pricing.validateDoc` 31 → refactored into `validateDocHeader`/`validateProvider`/`validateModel`, byte-identical, existing `TestLoaderValidationCases` covers it).
+  - gofumpt 13 (reformatted via `golangci-lint fmt`); unconvert 8 (removed redundant `json.RawMessage` casts); revive 9 (3 unused-param→`_`, 3 `max`-shadow renames, 1 exported-doc, 1 ctx-as-arg reorder + 22 callers, 1 var-declaration suppressed-with-reason); prealloc 1; noctx 1 (`CheckSchema` threaded the real request ctx → `QueryRowContext`); errorlint 2 (`errors.Is`); nilerr 8 production (all suppressed at-site with site-specific reasons — verified intentional; a 9th reasoned suppression is in a test helper, `golden_test.go:173`, counted in the Outcome correction, not in these 57); unparam 14 (6 removed + 35 callers updated, 8 interface/dispatch-required suppressed with verified reasons); gocyclo 1 (`pricing.validateDoc` 31 → refactored into `validateDocHeader`/`validateProvider`/`validateModel`, byte-identical, existing `TestLoaderValidationCases` covers it).
 - Highest-risk changes spot-checked by master: `writeJSON` was genuinely always-`StatusOK` (errors use a separate `writeJSONError` path); `validateDoc` helpers thread the dedup maps correctly.
 - 60 `.go` files changed; scope clean (no edits outside `internal/`+`cmd/` beyond the master-owned config/specs/SOW).
 - Pre-existing finding filed as a follow-up (not in scope): a `bufio.Scanner` loop in `claude_code/scanner.go:~1058` ignores `sc.Err()` (silent-truncation class; gopls `scannererr`, not a golangci finding). Audit task spawned.
@@ -266,11 +266,22 @@ All gates re-run by the master orchestrator (not trusting the subagent), 2026-06
 
 ## Outcome
 
-Pending.
+Delivered + merged: PR #35, squash commit `8cd2065`, 2026-06-02. The strict golangci-lint v2 linter set is enforced (locally via `scripts/lint.sh`; in CI via the version-pinned `golangci-lint-action` + standalone gosec/govulncheck); all 57 findings the strict set surfaced on the existing ~36.7k-LOC tree are resolved to zero. Tooling landed: `scripts/lint.sh`, `.golangci-lint-version` pin (single-sourced into CI), `govulncheck-nightly.yml`. AC#1-8 met (AC#3 gosec + AC#7 zero-bare-nolint were satisfied pre-SOW; `gosimple` dropped as v2-merged-into-staticcheck; `gocyclo` tuned to min-complexity 25 with documented rationale; gosec runs standalone).
+
+Final verification (master orchestrator, independently of the subagent): `golangci-lint run` = 0; `go vet` clean; `go test -race -count=1` all 15 packages pass; gosec 0; govulncheck clean (one unreachable transitive CVE, not called); secrets + AI-attribution scans clean; CI green on the merged commit (lint 1m51s — under the 2-min AC#5 target; test 11m26s).
+
+Count correction (minimax R4, ground-truth-verified): the SOW's "8 nilerr" was the PRODUCTION count; the subagent correctly suppressed **9** total reasoned `//nolint:nilerr` sites — 8 production (`loader_null_check.go` ×4; `aiagent_v2/tailer.go`, `claude_code/tailer.go`, `codex/scanner.go`, `codex/tailer.go`) + 1 test-helper (`codex/golden_test.go:173` — "walk best-effort; a stat error just leaves mtime fresh"). All 9 are justified; `golangci-lint run` = 0.
+
+Five external-review rounds (codex decisive + glm + minimax). Round 1 confirmed the runtime code mergeable; rounds 1-5 were documentation-contract honesty (the bootstrap docs over-claimed a not-yet-built aggregate-script system) plus the lint.sh GOBIN fix. codex's round-4 "main blocker" (formatter gate unenforced) was a FALSE positive, rejected on empirical ground truth and confirmed false by codex itself on round 5.
 
 ## Lessons Extracted
 
-Pending.
+1. **Enumerate-then-fix-all-then-re-grep for any drift class.** codex found documentation-contract drift in THREE consecutive rounds (R1-R3) because each round I fixed only the lines it cited, not the whole class. What worked (R4): one exhaustive grep of ALL affected tokens (the three planned scripts `test.sh`/`gates.sh`/`spec-drift.sh`) across every durable doc, fix every hit, then re-grep to prove zero. A reviewer citing 3 examples means "≥3 of a class" — sweep the class, not the citations.
+2. **Adjudicate every reviewer finding on ground truth; reject false positives with evidence.** codex (decisive) is usually right, but its R4 "main blocker" (golangci-lint run does not enforce formatters) was FALSE — an empirical test (`golangci-lint run` on a mis-formatted file → "File is not properly formatted" + non-zero exit) disproved it, and codex confirmed via source on R5. Never mechanically comply with a blocker without verifying; never merge on convergence without verifying either.
+3. **A reviewer producing false/trivial findings is the convergence signal.** codex's findings degraded real→real→real→false+trivial across 5 rounds while the runtime code was sound from round 1. When the decisive reviewer pre-approves ("I would merge after X") and X is a one-line doc fix, that is convergence — stop iterating on doc nits.
+4. **Production-vs-total count discipline.** "8 nilerr" came from a production-only grep (`-v _test`), but the gate runs nilerr on tests too, so the true total was 9. When a linter is active on tests, count test hits in the total.
+5. **Strip AI-tool names from commit MESSAGES, not just trailers.** One commit body slipped "codex converged"; a squash-merge with an explicit clean message scrubbed it. The SOW Reviews section MAY name reviewers (project convention; `scan-ai-attribution` excludes `.agents/`), but commit messages and PR descriptions may not.
+6. **Retrofitting strict linters onto a mature codebase ≠ a fresh-codebase config.** The original SOW assumed a near-empty Phase-1 tree; on 36.7k reviewed LOC the fit-for-purpose call was tuning (gocyclo 25 not 15; `_test.go` style-linter exclusions; node_modules path-exclusion) + reasoned suppressions, NOT churning working hot-path functions for a metric.
 
 ## Followup
 

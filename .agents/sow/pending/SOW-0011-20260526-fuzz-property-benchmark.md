@@ -184,6 +184,26 @@ No operator decisions required at SOW approval time. The single Open Decision ab
 8. Exercise + tuning iteration (potentially high effort if real bugs surface — those are fixed, not silenced).
 9. External review + convergence.
 
+## Pre-measurement — 2026-06-02 (re-scope input, not yet activated)
+
+This SOW was drafted 2026-05-26 assuming **zero** fuzz/property/benchmark coverage. Measured live on 2026-06-02 (read-only Explore sweep); the premise is stale and there is a **doc-drift cluster** to reconcile. The Pre-Implementation Gate (filled at activation, after SOW-0010 merges) must re-scope to this measured delta.
+
+**Measured reality (re-verify with file:line in the activation gate):**
+- **Fuzz targets: 10 exist across all 5 adapters** (codex ×2, aiagent_v3 ×2, opencode ×2, claude_code ×2, aiagent_v2 ×2). → **AC#1 already satisfied.**
+- **Canonical fuzz: 0** (`internal/canonical/fuzz_test.go` absent). → AC#2 open.
+- **Property tests: 0**; `pgregory.net/rapid` not in `go.mod`. → AC#4 open.
+- **Benchmarks: 1 of 6** — only `aiagent_v2/bench_test.go BenchmarkScan_SyntheticCorpus`. Missing: adapter `Tail`, canonical encode/decode, SQLite batch insert, REST query, SSE fanout. → AC#5 partial.
+- **Baseline:** `bench/baseline.txt` exists but lacks the implementing-commit-SHA header AC#6 requires. → AC#6 partial.
+- **CI fuzz wiring: none** (no `-fuzz`/`-fuzztime`/nightly/auto-issue in `.github/workflows/`). → AC#3 open.
+- **`scripts/check-bench.sh` + benchstat regression gate: absent.** CI bench step runs `-count=1` smoke, artifact-only, no benchstat diff. → AC#7 open; AC#5/#9/#10 partial.
+
+**Doc-drift to reconcile in this SOW (claims that do NOT match reality):**
+- `.agents/sow/specs/quality-gates.md` (Go — Fuzzing / Property / Benchmarks): canonical fuzz, fuzz CI schedule, auto-issue, `property_test.go`, `-count=5`, benchstat gate — claimed present, none exist.
+- `.agents/skills/project-testing/SKILL.md` (pyramid + mandatory-kinds): canonical fuzz file, fuzz cadence, property file, the 5 missing benchmarks, `-count=5`, regression gate.
+- `.agents/skills/project-quality-gates/SKILL.md` (Go — Fuzzing / Benchmarks): canonical-fuzz "MUST", fuzz CI, auto-issue, 5 missing benchmarks, regression gate.
+
+**Re-scope direction (CTO; finalize in the activation gate):** real delta = canonical fuzz targets + property tests (`rapid`, 5 invariants) + the 5 missing benchmarks + CI fuzz wiring + `check-bench.sh` regression gate + baseline SHA header + reconcile the 3 drift artifacts to reality. **Open decision for activation:** whether auto-file-GitHub-issue-on-fuzz-crash stays in-scope or is deferred to a follow-up — it adds non-trivial CI complexity, and nightly job-failure visibility may suffice; decide with evidence at activation, do not carry the stale AC blindly.
+
 ## Execution Log
 
 Pending.

@@ -35,13 +35,15 @@
 #   that introduces them.
 #
 # Deferred to subsequent SOWs
-#   Some gates from .agents/sow/specs/quality-gates.md are not enforced
-#   in this initial workflow. They land in:
-#     - SOW-0009 — .golangci.yml + standalone-gosec config + pinned tool
-#                  versions (replacing go install @latest patterns below)
-#     - SOW-0010 — scripts/check-coverage.sh + branch coverage +
-#                  race -count=3 stress + coverage diff PR comment
-#     - SOW-0011 — fuzz targets + property tests + benchstat baseline
+#   Gate landing status (.agents/sow/specs/quality-gates.md):
+#     - SOW-0009 (LANDED) — strict .golangci.yml + standalone pinned gosec +
+#                  pinned tool versions; nightly govulncheck.
+#     - SOW-0010 (LANDED) — scripts/{test,check-coverage}.sh: statement
+#                  coverage gate (internal/* >= 80%, /cmd/ excluded) enforced
+#                  in the test job; nightly race stress (race-stress-nightly.yml).
+#                  Branch coverage, new-code-in-PR diff (SOW-0036), and a
+#                  per-push -count=3 / coverage PR comment were re-scoped/deferred.
+#     - SOW-0011 (pending) — fuzz targets + property tests + benchstat baseline
 #                  enforcement (replaces benchtime=1x smoke run below)
 #     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
 #                  enforcement (replaces bundle-size report below)
@@ -231,6 +233,25 @@ jobs:
           path: coverage.out
           if-no-files-found: error
           retention-days: 14
+
+      # Self-test the coverage gate script itself (synthetic profiles) so a
+      # regression in scripts/check-coverage.sh is caught in CI, not just locally.
+      - name: Self-test coverage gate
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          chmod +x scripts/test/check-coverage-test.sh
+          ./scripts/test/check-coverage-test.sh
+
+      # Build-failing coverage gate (SOW-0010): aggregate + per-package >= 80%
+      # statement coverage on the gated internal/* packages (import path contains
+      # /internal/ and not /cmd/; non-internal vendored Go is excluded). Runs
+      # AFTER the artifact upload so the profile is always retained for diagnosis
+      # even when the gate fails.
+      - name: Enforce coverage thresholds
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          chmod +x scripts/check-coverage.sh
+          ./scripts/check-coverage.sh coverage.out
 
       - name: Detect benchmarks
         if: steps.detect.outputs.go == 'true'
@@ -461,6 +482,15 @@ jobs:
             exit 1
           fi
           echo "frontend_dist/ tree clean after build (only .gitkeep tracked)."
+
+      - name: Guard embed-smoke seed marker (regression SOW-0007)
+        if: steps.detect.outputs.ready == 'true'
+        shell: bash
+        # The seed must wait for the dynamically-derived LAST migration, not a
+        # hardcoded one — a stale 0005 marker once seeded an un-finished v5 DB
+        # serve rejected (flaky). Fast content guard; the smoke run below is the
+        # behavioral test.
+        run: bash scripts/test/embed-smoke-seed-marker-test.sh
 
       - name: Serve the built UI and assert it is real
         if: steps.detect.outputs.ready == 'true'

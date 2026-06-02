@@ -109,7 +109,7 @@ All gates run in CI on every push and must be green before merge. The assistant 
 | Go security | `gosec`, `govulncheck` | zero high/critical findings |
 | Go static | `staticcheck`, `errcheck`, `ineffassign`, `unused` | zero warnings |
 | Go test | `go test -race ./...` | all pass |
-| Go coverage | `go test -coverprofile -covermode=atomic ./...` | ≥ 80% lines, ≥ 70% branches per package; new code ≥ 90% |
+| Go coverage | `go test -coverprofile -covermode=atomic ./...` → `scripts/check-coverage.sh` | ≥ 80% statements per gated `internal/*` package + their aggregate (`/cmd/` excluded); branch + new-code-in-PR ≥ 90% deferred (SOW-0036) |
 | Go fuzz | `go test -fuzz=Fuzz... -fuzztime=30s` on parsers/decoders | zero crashes per CI run |
 | Go bench | `go test -bench=. -benchmem` for marked benchmarks | ≤ 20% regression vs baseline (stored in `bench/baseline.json`) |
 | Frontend lint | `eslint` flat config, `@typescript-eslint`, `react`, `react-hooks` | zero warnings |
@@ -257,7 +257,8 @@ ai-viewer.git/
 │   ├── build.sh                 builds frontend, embeds, builds Go binaries
 │   ├── dev.sh                   dev workflow (vite dev + go run)
 │   ├── lint.sh                  all lint + static analysis, zero warnings
-│   ├── test.sh                  all tests + coverage + race (planned, SOW-0010)
+│   ├── test.sh                  all tests + coverage + race
+│   ├── check-coverage.sh        statement coverage gate (internal/* ≥ 80%)
 │   ├── gates.sh                 runs every quality gate listed above (planned, SOW-0013)
 │   ├── spec-drift.sh            spec ↔ code drift detection (planned, SOW-0013)
 │   └── sanitize-fixture.sh      fixture sanitization
@@ -342,13 +343,14 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 
 ## Build, Test, Run
 
-(Status: `build.sh`, `dev.sh`, and `lint.sh` exist today. `test.sh` (SOW-0010), `gates.sh` (SOW-0013), and `spec-drift.sh` (SOW-0013) are planned aggregators — until they land, use the individual gate commands and the per-gate CI jobs. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
+(Status: `build.sh`, `dev.sh`, `lint.sh`, `test.sh`, and `check-coverage.sh` exist today. `gates.sh` (SOW-0013) and `spec-drift.sh` (SOW-0013) are planned aggregators — until those land, use the individual gate commands and the per-gate CI jobs. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
 
 ```bash
 ./scripts/build.sh          # build frontend + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
 ./scripts/lint.sh           # all lints + static analysis, zero warnings
-./scripts/test.sh           # all tests + coverage + race (planned, SOW-0010)
+./scripts/test.sh           # all tests + coverage + race
+./scripts/check-coverage.sh # statement coverage gate (internal/* ≥ 80%)
 ./scripts/gates.sh          # every quality gate listed above (planned, SOW-0013)
 ./scripts/spec-drift.sh     # spec ↔ code drift detection (planned, SOW-0013)
 go test -race ./...         # Go tests with race

@@ -51,7 +51,7 @@ Before any commit: run the gates locally and confirm green (`./scripts/lint.sh` 
 
 - All Go lints (golangci-lint, gosec, govulncheck) zero warnings.
 - `go test -race -count=1 ./...` passes.
-- Coverage thresholds met (≥ 80% per package, ≥ 90% on new code).
+- Coverage thresholds met (≥ 80% statements per gated `internal/*` package + aggregate; new-code ≥ 90% deferred — SOW-0036).
 - Fuzz targets run clean for the configured CI duration.
 - Benchmarks within 20% of baseline.
 - Frontend lint, typecheck, vitest with coverage, Playwright E2E, axe a11y all green.

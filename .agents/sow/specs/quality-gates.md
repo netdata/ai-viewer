@@ -49,12 +49,14 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Coverage
 
-- `go test -race -coverprofile=coverage.out -covermode=atomic ./...`
-- Thresholds:
-  - Repository-wide lines ≥ 80%.
-  - Per-package on changed code ≥ 80% lines, ≥ 70% branches.
-  - New code in the PR ≥ 90% lines.
-- Enforcement: `scripts/check-coverage.sh` parses `coverage.out` plus the PR diff. Failing thresholds blocks merge.
+- `scripts/test.sh` → `go test -race -coverprofile=coverage.out -covermode=atomic -count=1 ./...`.
+- **Metric: statement coverage** (Go's `-covermode=atomic`). Go has **no first-class branch coverage**; the branch threshold is **deferred** (revisit only if a mature branch-coverage tool emerges). Statement coverage is the enforced metric.
+- Thresholds (statement), enforced by `scripts/check-coverage.sh`:
+  - **Gated set = every `internal/*` package** (the unit-testable core): a package is gated **iff its import path contains `/internal/` and not `/cmd/`**; each ≥ 80%, and their aggregate ≥ 80%.
+  - **`/cmd/` is excluded** from the gate: the binaries (`cmd/ai-viewer-{ingest,serve}` — `main()`/flag/signal wiring, covered by Playwright E2E + embed-smoke + cmd binary tests) and the dev-only tools (`internal/adapters/aiagent_v2/cmd/{genfixtures,backfillbench}`). Reported for visibility, not gated.
+  - **Non-`internal/` paths are also excluded**: e.g. vendored Go that a frontend npm dependency ships under `frontend/node_modules/` (`flatted/golang/...`). `go test ./...` compiles+covers it (there is no `go.mod` under `frontend/`), but it is not our code, so the `/internal/`-positive predicate keeps it out of the gate.
+  - **New-code-in-PR ≥ 90%: deferred to a follow-up SOW** (needs a diff↔coverage intersector + self-tests); the per-package + aggregate gate is the shipped base.
+- Enforcement: CI runs `scripts/check-coverage.sh coverage.out` as a build-failing step in the `test` job (after the coverage artifact uploads); the same script is the local pre-commit gate. `check-coverage.sh` has synthetic-fixture self-tests (`scripts/test/check-coverage-test.sh`).
 
 ### Go — Fuzzing
 
@@ -91,8 +93,8 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Race Stress
 
-- Concurrency-touching changes: `-count=10` locally before commit.
-- CI: `-count=3` per push, `-count=20` nightly.
+- Concurrency-touching changes: `scripts/test.sh --stress 10` (`-race -count=10`) locally before commit.
+- CI: per-push runs `-race -count=1` (the `test` job — kept at 1 so PR feedback stays fast); race **stress** runs nightly via `race-stress-nightly.yml` (`scripts/test.sh --stress 10`, scheduled, not a per-push gate). Per-push `-count>1` is gated on first speeding up the slow `internal/ingest` rollup test (`TestRefreshRollups_OtherStaleRowRemoval` — several minutes under `-race`, grown since SOW-0009; re-time before raising the count) (SOW-0009 Followup); until then the marginal added race-coverage per push does not justify the latency.
 
 ### Frontend — Lint
 
@@ -216,10 +218,11 @@ CI Go lint + security gates — `golangci-lint run` (the umbrella, driven by
 standalone `gosec` and `govulncheck`. CI enforces the same set via the
 version-pinned `golangci/golangci-lint-action` plus its standalone
 gosec/govulncheck steps (CI keeps the cached action rather than invoking
-`scripts/lint.sh`, to preserve golangci's analysis cache). The broader
-single-command aggregators — `scripts/test.sh` and `scripts/gates.sh` (run
-*every* gate, fail-fast) — are a planned convenience (SOW-0013) and are **not
-yet present**. Until they land, run the individual gates (or rely on the
+`scripts/lint.sh`, to preserve golangci's analysis cache). `scripts/test.sh` (Go
+tests + coverage profile) and `scripts/check-coverage.sh` (the statement
+coverage gate) exist (SOW-0010). The single-command aggregator `scripts/gates.sh`
+(runs *every* gate, fail-fast) is a planned convenience (SOW-0013) and is **not
+yet present**. Until it lands, run the individual scripts/gates (or rely on the
 per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
 gracefully when absent. The one exception is the security scanner: it is
 **fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if
@@ -249,7 +252,7 @@ which run in parallel.
 ## Why These Specific Gates
 
 - **Lint + static + security at zero warnings**: standard Go quality bar; cheap to enforce; high signal.
-- **Coverage thresholds**: prevents the "I tested the happy path" gap; new-code ≥ 90% prevents coverage erosion.
+- **Coverage thresholds**: prevents the "I tested the happy path" gap; new-code ≥ 90% (deferred — SOW-0036) will prevent coverage erosion once a diff↔coverage intersector lands.
 - **Fuzz on parsers/decoders**: ai-viewer ingests untrusted JSON from disk; fuzz catches the panics and unbounded allocations static analysis misses.
 - **Bench regression**: the perf target (full backfill of 294K v2 files under 60 min) is fragile to per-event regressions; 20% per-bench is a sensitive early signal.
 - **Race stress**: ingest pipeline + SSE hub are concurrent; race detector on every run is the minimum bar.

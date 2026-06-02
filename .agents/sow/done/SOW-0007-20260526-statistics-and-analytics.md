@@ -361,3 +361,13 @@ None yet.
 None yet.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
+
+## Regression - 2026-06-02
+
+Found during SOW-0010 review. `scripts/embed-smoke.sh` seeded its temp DB by polling the ingester log for a **hardcoded** `0005_op_duration_backfill.sql` "migration applied" line, then killing the ingester. This SOW added migrations **0006_rollups_and_fts.sql** and **0007_fts5_index_logs.sql** (bumping the `schema_meta.version` that `ai-viewer-serve`'s `CheckSchema` requires to 7), but the embed-smoke seed marker was not updated — so the seed killed the ingester after 0005, racing the synchronous apply of 0006/0007 inside `OpenWriter`. The kill usually lost the race (0006/0007 finished first → v7 → serve booted), so embed-smoke passed most of the time; intermittently it won → seeded an un-finished **v5** DB → `ai-viewer-serve` refused to boot (`schema version mismatch … is 5, want 7`). A flaky, master-wide CI failure.
+
+**Root cause:** a hardcoded last-migration marker that silently drifts when a new migration lands — the producer (migrations) was updated; the embed-smoke seed consumer was not (a maintenance-coupling gap).
+
+**Failing test (pins the regression, written before the fix):** `scripts/test/embed-smoke-seed-marker-test.sh` fails if the seed marker is a hardcoded `000N_*.sql` literal in active (non-comment) code and requires the marker to be derived from `internal/store/migrations/`. It failed on the stale script and passes after the fix; wired into the CI `embed-smoke` job before the behavioral smoke run.
+
+**Fix (landed with SOW-0010 per operator decision to fold):** `embed-smoke.sh` now derives the last migration dynamically (`ls internal/store/migrations/*.sql | sort | tail -1`) and waits for THAT "migration applied" line — race-free (nothing runs after the last migration) and drift-proof (auto-tracks any future migration).
