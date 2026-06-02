@@ -134,7 +134,7 @@ The full catalog lives in `project-quality-gates`. A PR cannot land if any gate 
 - Any fuzz target crashed during its run.
 - Any benchmark regresses > 20% from baseline.
 - Any committed fixture trips the secret scanner.
-- Any spec is stale relative to code (`scripts/spec-drift.sh`).
+- Any spec is stale relative to code (the planned `scripts/spec-drift.sh`, SOW-0013; manual audit until then).
 - Axe accessibility violations at serious/critical level.
 - Frontend bundle exceeds size budget.
 

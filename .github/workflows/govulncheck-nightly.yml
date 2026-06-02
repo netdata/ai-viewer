@@ -1,9 +1,11 @@
 # Nightly govulncheck (SOW-0009).
 #
-# Rationale: a CVE disclosed against a transitive dependency mid-day must not
-# block an unrelated PR within the same hour. The per-push govulncheck in
-# ci.yml is advisory for such drive-by CVEs; THIS scheduled job is the standing
-# gate that surfaces newly-disclosed vulnerabilities against master daily.
+# The per-push govulncheck (ci.yml) is the primary gate and BLOCKS the build —
+# but govulncheck is call-graph aware, so it fails only when the code actually
+# CALLS a vulnerable symbol; an unreachable transitive CVE does not flap it.
+# THIS scheduled job is an ADDITIONAL sweep: it re-runs govulncheck against
+# master daily so a CVE disclosed BETWEEN pushes surfaces within a day rather
+# than waiting for the next PR to trigger CI.
 #
 # Authoritative gate: .agents/sow/specs/quality-gates.md "Go — Security".
 name: govulncheck-nightly

@@ -182,7 +182,7 @@ target.
 
 ### Spec Drift
 
-- `scripts/spec-drift.sh` lints common drift indicators:
+- `scripts/spec-drift.sh` (planned, SOW-0013; manual spec↔code audit until it lands) will lint common drift indicators:
   - REST endpoints registered in `internal/presenter/` vs. `specs/rest-api.md`.
   - SSE event types in `internal/presenter/sse.go` vs. `specs/sse-protocol.md`.
   - SQLite columns in `internal/store/migrations/` vs. `specs/data-model.md`.

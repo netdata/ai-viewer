@@ -194,7 +194,7 @@ Threshold: zero hits.
 ### Spec Drift
 
 ```bash
-scripts/spec-drift.sh
+scripts/spec-drift.sh    # planned (SOW-0013); manual spec↔code audit until it lands
 ```
 
 Lints common drift indicators:
@@ -249,7 +249,7 @@ When a new class of bug or risk is discovered:
 1. Determine whether existing gates would have caught it. If yes, the gate has a hole — fix the hole.
 2. If no existing gate covers it, design a new one. Specify command, threshold, scope.
 3. Add it to this skill, to `.agents/sow/specs/quality-gates.md`, and to CI in the same commit.
-4. Bake it into `scripts/gates.sh`.
+4. Wire it into CI as a dedicated job, and into `scripts/gates.sh` once that aggregator lands (SOW-0013).
 5. Update `AGENTS.md` if the gate adds a top-level commitment.
 
 ## Removing a Gate
@@ -258,7 +258,7 @@ Removing a gate requires a SOW with: evidence the gate is wrong or obsolete, wha
 
 ## Performance Note
 
-Local full-gate runs should complete in under 5 minutes on the operator's workstation. If `scripts/gates.sh` exceeds that, profile and parallelize before adding more gates.
+Local full-gate runs should complete in under 5 minutes on the operator's workstation. Once the aggregate `scripts/gates.sh` lands (SOW-0013), if it exceeds that, profile and parallelize before adding more gates.
 
 ## Cross-References
 

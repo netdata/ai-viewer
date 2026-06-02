@@ -119,7 +119,7 @@ All gates run in CI on every push and must be green before merge. The assistant 
 | Frontend a11y | axe checks on every Playwright route | zero serious/critical violations |
 | Frontend bundle | `vite build` size budget | ≤ 500 KB gzipped main chunk |
 | Secrets scan | grep `testdata/` and committed source for common secret patterns | zero hits |
-| Spec drift | `scripts/spec-drift.sh` (added in Phase 1) | zero drift on listed indicators |
+| Spec drift | `scripts/spec-drift.sh` (planned, SOW-0013; manual spec↔code audit until then) | zero drift on listed indicators |
 
 The authoritative gate catalog with exact commands lives at `.agents/sow/specs/quality-gates.md` (durable) and `.agents/skills/project-quality-gates/SKILL.md` (runtime).
 
@@ -257,9 +257,9 @@ ai-viewer.git/
 │   ├── build.sh                 builds frontend, embeds, builds Go binaries
 │   ├── dev.sh                   dev workflow (vite dev + go run)
 │   ├── lint.sh                  all lint + static analysis, zero warnings
-│   ├── test.sh                  all tests + coverage + race
-│   ├── gates.sh                 runs every quality gate listed above
-│   ├── spec-drift.sh            spec ↔ code drift detection
+│   ├── test.sh                  all tests + coverage + race (planned, SOW-0010)
+│   ├── gates.sh                 runs every quality gate listed above (planned, SOW-0013)
+│   ├── spec-drift.sh            spec ↔ code drift detection (planned, SOW-0013)
 │   └── sanitize-fixture.sh      fixture sanitization
 └── .github/
     └── workflows/               CI: every gate above on every push

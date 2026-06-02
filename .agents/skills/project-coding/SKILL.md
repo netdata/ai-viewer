@@ -74,7 +74,7 @@ Weakening a gate to make it pass is a contract breach. Fix the root cause.
 - Global mutable state. Use struct dependencies passed via constructors.
 - `exec.Command` for any user-facing functionality. Pure Go only.
 - Skipping tests with `t.Skip()` without a linked GitHub issue and a SOW for removal.
-- `// nolint` comments without a linked issue and an expiry note.
+- `// nolint` comments without a reason (per the `project-quality-gates` nolint policy: a permanent, architectural suppression needs a reason explaining why it is correct; a deferred-fix suppression needs an issue/SOW link).
 - `_ = err` or empty `if err != nil { }` — every error is either handled or wrapped and returned.
 - Catching errors in subagent-produced code and reporting "fixed" without re-running the gate that would have caught it.
 - Claiming code "works" without automated tests proving it.
