@@ -20,6 +20,22 @@ mkbench() {
   { echo "pkg: selftest"; for v in "$@"; do echo "BenchmarkFoo-16   10000   ${v} ns/op   100 B/op   2 allocs/op"; done; } > "$f"
 }
 
+# mkbench_named writes ONE benchmark block (explicit pkg + name + samples) with a
+# full goos/goarch/pkg/cpu header — for the vacuous-pass guard cases below.
+mkbench_named() {
+  local f="$1" pkg="$2" name="$3"; shift 3
+  { echo "goos: linux"; echo "goarch: amd64"; echo "pkg: ${pkg}"; echo "cpu: selftest"
+    for v in "$@"; do echo "Benchmark${name}-16   10000   ${v} ns/op   100 B/op   2 allocs/op"; done; } > "$f"
+}
+
+# mkbench_two writes TWO benchmark blocks (Foo + Bar) under one pkg.
+mkbench_two() {
+  local f="$1" pkg="$2"
+  { echo "goos: linux"; echo "goarch: amd64"; echo "pkg: ${pkg}"; echo "cpu: selftest"
+    for v in 100 101 99 100 102 98; do echo "BenchmarkFoo-16   10000   ${v} ns/op   100 B/op   2 allocs/op"; done
+    for v in 200 201 199 200 202 198; do echo "BenchmarkBar-16   10000   ${v} ns/op   100 B/op   2 allocs/op"; done; } > "$f"
+}
+
 # assert <want-exit> <base> <cur> <desc>
 assert() {
   local want="$1" base="$2" cur="$3" desc="$4" got=0
@@ -41,6 +57,17 @@ assert 0 "$TMP/base" "$TMP/within"  "+10% within threshold"
 assert 0 "$TMP/base" "$TMP/improve" "improvement (faster)"
 # missing file -> usage/tool error (exit 2)
 assert 2 "$TMP/base" "$TMP/does-not-exist" "missing current file"
+
+# Vacuous-pass guard: the gate must NEVER pass by comparing nothing.
+#  - a baseline benchmark missing from the current run (renamed/removed) ->
+#    benchstat prints a one-sided row with no "(p=...)" verdict -> exit 2.
+mkbench_two   "$TMP/base_two" selftest
+mkbench_named "$TMP/cur_one"  selftest Foo 100 101 99 100 102 98
+assert 2 "$TMP/base_two" "$TMP/cur_one" "baseline benchmark dropped from current -> vacuous guard"
+#  - disjoint config groups (different pkg) -> benchstat compares nothing -> exit 2.
+mkbench_named "$TMP/base_pkgA" pkgA Foo 100 101 99 100 102 98
+mkbench_named "$TMP/cur_pkgB"  pkgB Foo 100 101 99 100 102 98
+assert 2 "$TMP/base_pkgA" "$TMP/cur_pkgB" "disjoint config groups -> vacuous guard"
 
 echo
 if [ "$fail" -eq 0 ]; then

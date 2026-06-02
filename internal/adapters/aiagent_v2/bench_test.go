@@ -99,12 +99,30 @@ func BenchmarkScan_SyntheticCorpus(b *testing.B) {
 //
 // v2 is whole-file: a producer rewrites <originId>.json.gz on every
 // snapshot, so "appending new lines" maps to "rewrite the gzip with one
-// more turn appended". Each iteration writes a DISTINCT-content rewrite
-// (an extra turn whose ops carry per-iteration high-entropy padding) so
-// the content hash always mismatches the cursor and the full
-// decompress+parse+map+emit path runs — the worst-case steady-state
-// tail step. A rewrite that re-hashed to the cursor would short-circuit
-// at scanner.go:147 and measure nothing.
+// more turn appended". The benchmark measures only the TAILER's per-rewrite
+// CPU — stat → decompress → hash → parse → map → emit — NOT the producer's
+// write. The file write is the agent process's job in production; here it is
+// fenced out of the timed region with b.StopTimer/b.StartTimer (mirroring
+// BenchmarkBatchInsert's store-open fencing) so the reported number is the
+// steady-state tail-step cost, not disk-write jitter.
+//
+// DETERMINISM (was ~±200% run-to-run, benchstat reported `~`, SOW-0011
+// review): two stabilizations.
+//  1. FIXED content. Earlier each iteration rewrote DISTINCT high-entropy
+//     padding, so every decompress+parse touched different bytes and the
+//     per-op CPU itself varied. Now exactly TWO byte-identical fixed bodies
+//     (variant 0/1) are pre-built before the timer and alternated A,B,A,B…:
+//     consecutive contents always differ (so the content hash always
+//     mismatches the cursor and the full decompress+parse+map+emit path runs
+//     — a rewrite that re-hashed to the cursor would short-circuit at
+//     scanner.go and measure nothing), while the work per iteration is
+//     constant (only two distinct payloads, identical size and shape).
+//  2. WRITE FENCED OUT. The dominant variance was per-iteration os.WriteFile
+//     to the ext4-backed b.TempDir(). The write now runs under b.StopTimer;
+//     the timed region is purely processOnce, which reads the just-written
+//     file back from the page cache (fast, steady) and re-stats — with no
+//     write inside the timed window, processOnce's post-read mtime check
+//     never fires its retry, so the timed work is exactly one processFile.
 //
 // Reported metrics mirror BenchmarkScan_SyntheticCorpus:
 //
@@ -141,22 +159,19 @@ func BenchmarkTail_SyntheticAppend(b *testing.B) {
 		b.Fatalf("seed processOnce: %v", err)
 	}
 
-	// Pre-build the per-iteration rewrite bodies. Turn/op COUNT is held
-	// CONSTANT across iterations (steady state — flat work per step); only
-	// the per-iteration pad seed varies, so the content hash always
-	// mismatches the cursor and the full decompress+parse+map+emit path
-	// runs. JSON marshal + gzip of the fixture is excluded from the timer.
-	bodies := make([][]byte, b.N)
-	decompressed := make([]int64, b.N)
-	for i := 0; i < b.N; i++ {
-		snap := tailRewriteSnapshot(origin, i)
-		raw, err := json.Marshal(snap)
-		if err != nil {
-			b.Fatalf("marshal rewrite %d: %v", i, err)
-		}
-		decompressed[i] = int64(len(raw))
-		bodies[i] = mkGzipBytes(raw)
+	// Pre-build the TWO fixed rewrite bodies (variant 0 and 1) ONCE, before
+	// the timer. Turn/op COUNT and padding content are both held constant, so
+	// every A iteration does identical work and every B iteration does
+	// identical work; the only thing that changes between A and B is the
+	// fixed pad string, which flips the content hash so processOnce never
+	// short-circuits. JSON marshal + gzip is excluded from the timer.
+	bodies := [2][]byte{
+		mkGzipBytes(mustJSON(b, tailRewriteSnapshotFixed(origin, 0))),
+		mkGzipBytes(mustJSON(b, tailRewriteSnapshotFixed(origin, 1))),
 	}
+	// Both variants decompress to the same byte count (identical shape, equal
+	// pad length), so a single constant is the per-op decompressed size.
+	decompressed := int64(len(mustJSON(b, tailRewriteSnapshotFixed(origin, 0))))
 
 	out := make(chan canonical.Event, chanCap)
 	var peakHeap atomic.Uint64
@@ -170,11 +185,17 @@ func BenchmarkTail_SyntheticAppend(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Rewrite the file in place with new content. The mtime advances
-		// and the content hash differs, so processOnce re-emits.
-		if err := os.WriteFile(filepath.Join(root, name), bodies[i], 0o600); err != nil {
+		// Rewrite the file in place with the next fixed body. The write is
+		// the PRODUCER's action, not the tailer's, and is the dominant
+		// disk-I/O variance source — fence it out of the timed region. The
+		// content differs from the previous iteration (A↔B), so the content
+		// hash mismatches the cursor and processOnce re-emits.
+		b.StopTimer()
+		if err := os.WriteFile(filepath.Join(root, name), bodies[i%2], 0o600); err != nil {
 			b.Fatalf("rewrite %d: %v", i, err)
 		}
+		b.StartTimer()
+
 		if err := processOnce(context.Background(), root, sourceIDPrefix+root, name, &cur, out, func(error) {}); err != nil {
 			b.Fatalf("processOnce %d: %v", i, err)
 		}
@@ -189,11 +210,11 @@ func BenchmarkTail_SyntheticAppend(b *testing.B) {
 				drainedOne = false
 			}
 		}
-		totalBytes += decompressed[i]
+		totalBytes += decompressed
 	}
 	b.StopTimer()
 
-	b.SetBytes(totalBytes / int64(maxInt(b.N, 1)))
+	b.SetBytes(totalBytes / int64(max(b.N, 1)))
 	samplerCancel()
 	<-samplerDone
 
@@ -203,7 +224,7 @@ func BenchmarkTail_SyntheticAppend(b *testing.B) {
 		peakHeap.Store(ms.HeapInuse)
 	}
 
-	wallSec := b.Elapsed().Seconds() / float64(maxInt(b.N, 1))
+	wallSec := b.Elapsed().Seconds() / float64(max(b.N, 1))
 	if wallSec <= 0 {
 		wallSec = 1e-9
 	}
@@ -214,18 +235,48 @@ func BenchmarkTail_SyntheticAppend(b *testing.B) {
 	}
 }
 
-// tailRewriteSnapshot builds the iteration-i rewrite for the tail
-// benchmark: a FIXED-shape v2 envelope (constant turn + op count, so
-// per-iteration work is flat) whose op padding is seeded by i, so every
-// rewrite hashes differently from the previous and forces the full
-// re-map path in processOnce. Shape matches a small active session a
-// producer rewrites on each new operation.
-func tailRewriteSnapshot(origin string, i int) snapshot {
+// mustJSON marshals v or fails the benchmark. Keeps the body-building lines
+// in BenchmarkTail_SyntheticAppend terse while still surfacing a marshal
+// error instead of panicking.
+func mustJSON(b *testing.B, v any) []byte {
+	b.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		b.Fatalf("marshal: %v", err)
+	}
+	return raw
+}
+
+// tailRewriteSnapshotFixed builds one of TWO fixed rewrite bodies for the
+// tail benchmark. variant must be 0 or 1; the two bodies are byte-identical
+// in shape, op/turn count, and pad LENGTH, differing only in a single fixed
+// marker byte in the pad so their gzip content hashes differ. Alternating
+// the two (A,B,A,B…) guarantees every rewrite mismatches the previous
+// content hash — forcing processOnce's full decompress+parse+map path — while
+// keeping the per-iteration CPU constant (no per-iteration entropy), which is
+// what removed the benchmark's content-driven variance. Shape matches a small
+// active session a producer rewrites on each new operation.
+func tailRewriteSnapshotFixed(origin string, variant int) snapshot {
 	const (
 		turns = 2
 		ops   = 6
 		pad   = 200
 	)
+	// A fixed, representative pad: a constant printable filler whose only
+	// per-variant difference is the leading marker byte. Same length and same
+	// (incompressible-enough) shape for both variants, so decompressed size
+	// and parse cost are identical; only the hash differs.
+	marker := byte('A' + variant) // 'A' or 'B'
+	padBytes := make([]byte, pad)
+	padBytes[0] = marker
+	for j := 1; j < pad; j++ {
+		// Deterministic, content-fixed filler (NOT seeded by iteration). The
+		// span of printable values keeps gzip from collapsing it to near-zero
+		// so the decompress path does representative work.
+		padBytes[j] = byte(0x21 + (j*7)%94)
+	}
+	padStr := string(padBytes)
+
 	snap := simpleSnapshot(2, origin)
 	snap.OpTree.Turns = snap.OpTree.Turns[:0]
 	for t := 0; t < turns; t++ {
@@ -236,9 +287,6 @@ func tailRewriteSnapshot(origin string, i int) snapshot {
 			EndedAt:   int64Ptr(1700000001000 + int64(t*1000)),
 		}
 		for o := 0; o < ops; o++ {
-			// Seed mixes i (iteration) and the op index so the content
-			// changes every rewrite while the structure stays constant.
-			padStr := highEntropyString(i*1009+t*ops+o, pad)
 			turn.Ops = append(turn.Ops, operationNode{
 				OpID:      fmt.Sprintf("op-%s-%d-%d", origin, t, o),
 				Kind:      "tool",
@@ -274,16 +322,6 @@ func writeBenchSnapshot(b *testing.B, root, name string, snap snapshot) {
 	if err := os.WriteFile(filepath.Join(root, name), mkGzipBytes(body), 0o600); err != nil {
 		b.Fatalf("write: %v", err)
 	}
-}
-
-// maxInt returns the larger of a and b. Local to keep the bench file's
-// dependency surface minimal (the file predates the toolchain's builtin
-// max in some lint configs; an explicit helper is unambiguous).
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // runScan drives one Scan invocation start-to-finish, draining the

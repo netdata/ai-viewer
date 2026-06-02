@@ -85,7 +85,7 @@ func BenchmarkBatchInsert(b *testing.B) {
 		peakHeap.Store(ms.HeapInuse)
 	}
 
-	wallSec := b.Elapsed().Seconds() / float64(maxIntIngest(b.N, 1))
+	wallSec := b.Elapsed().Seconds() / float64(max(b.N, 1))
 	if wallSec <= 0 {
 		wallSec = 1e-9
 	}
@@ -221,12 +221,4 @@ func heapSamplerIngest(ctx context.Context, interval time.Duration, peak *atomic
 			}
 		}
 	}
-}
-
-// maxIntIngest returns the larger of a and b.
-func maxIntIngest(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

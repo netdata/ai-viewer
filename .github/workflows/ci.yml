@@ -235,7 +235,19 @@ jobs:
       # found in unchanged code would block an unrelated PR, non-reproducibly).
       - name: Fuzz seed corpus (deterministic)
         if: steps.detect.outputs.go == 'true'
-        run: go test -run='^Fuzz' ./internal/adapters/...
+        run: |
+          # Run every adapter FuzzXxx target's seed corpus as a deterministic
+          # subtest (no -fuzz flag → f.Add seeds + any committed reproducers).
+          go test -run='^Fuzz' ./internal/adapters/...
+          # Pin the target SET: `-run` on a package with no matching fuzz test
+          # still passes, so a deleted/renamed target would slip past the line
+          # above. Assert the 10 targets exist (must match fuzz-nightly.yml's
+          # matrix; changing the set is a deliberate two-file edit).
+          found=$(go test -list='^Fuzz' ./internal/adapters/... | grep -c '^Fuzz')
+          if [ "$found" -ne 10 ]; then
+            echo "::error::expected 10 adapter fuzz targets, found ${found} — update ci.yml and fuzz-nightly.yml together"
+            exit 1
+          fi
 
       - name: Coverage summary
         if: steps.detect.outputs.go == 'true'
@@ -264,8 +276,11 @@ jobs:
         # tool: its baseline is workstation-measured and is not comparable to
         # GitHub-runner hardware, so it is not run as a CI gate here. Its benchstat
         # parser is hardware-independent, so the synthetic-fixture self-test runs in
-        # CI to keep the gate script itself correct (SOW-0011).
+        # CI to keep the gate script itself correct (SOW-0011). The self-test drives
+        # the real check-bench.sh, which needs benchstat — install it PINNED (the
+        # parser depends on benchstat's output format; @latest would risk drift).
         run: |
+          go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260512194132-3cf34090a3db
           chmod +x scripts/test/check-bench-test.sh
           ./scripts/test/check-bench-test.sh
 

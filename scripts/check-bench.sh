@@ -22,8 +22,14 @@
 # Exit: 0 = within threshold; 1 = a > 20% sec/op regression; 2 = usage/tooling error.
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; GRAY='\033[0;90m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; GRAY='\033[0;90m'; NC='\033[0m'
 THRESH="${BENCH_THRESHOLD:-20}"
+# The 20% sec/op threshold is the documented contract (quality-gates.md). The
+# env override exists only for local experimentation; warn loudly so it can
+# never be a quiet way to land a regressing change.
+if [ "$THRESH" != "20" ]; then
+  echo -e "${YELLOW}[warn]${NC} BENCH_THRESHOLD=${THRESH} overrides the contract 20% sec/op gate — for local experimentation only, never to land a regression." >&2
+fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Resolve benchstat (GOBIN, then GOPATH/bin, then PATH).
@@ -31,7 +37,7 @@ BENCHSTAT="$(go env GOBIN 2>/dev/null)/benchstat"
 [ -x "$BENCHSTAT" ] || BENCHSTAT="$(go env GOPATH)/bin/benchstat"
 [ -x "$BENCHSTAT" ] || BENCHSTAT="$(command -v benchstat 2>/dev/null || true)"
 if [ -z "$BENCHSTAT" ] || [ ! -x "$BENCHSTAT" ]; then
-  echo -e "${RED}[ERROR]${NC} benchstat not found — install: go install golang.org/x/perf/cmd/benchstat@latest" >&2
+  echo -e "${RED}[ERROR]${NC} benchstat not found — install: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260512194132-3cf34090a3db" >&2
   exit 2
 fi
 
@@ -60,6 +66,32 @@ fi
 
 report="$("$BENCHSTAT" "$base" "$cur" 2>&1)" || { echo "$report" >&2; echo -e "${RED}[ERROR]${NC} benchstat failed" >&2; exit 2; }
 echo "$report"
+
+# Vacuous-pass guard. benchstat emits a "vs base" sec/op comparison row ONLY for
+# a benchmark present in BOTH files under the SAME goos/goarch/pkg/cpu config. If
+# the current run renamed/dropped a benchmark, or the two files land in disjoint
+# config groups, that benchmark gets NO comparison row — and the regression scan
+# below would then silently see "no regression" and PASS, certifying nothing.
+# So: require every benchmark in the BASELINE to have a sec/op comparison row;
+# any missing one is a tooling error (exit 2), never a pass. The baseline is the
+# source of truth for what MUST be compared (auto-syncs on baseline refresh).
+expected="$(grep -E '^Benchmark' "$base" | awk '{print $1}' | sed -E 's/^Benchmark//; s/-[0-9]+$//' | sort -u)"
+# A benchmark counts as "compared" ONLY if its sec/op row carries the vs-base
+# verdict "(p=… n=…)" — benchstat emits that only when BOTH files contributed
+# samples. A one-sided row (benchmark present in just one file) prints a single
+# measurement with NO "(p=", so it must NOT count as compared.
+compared="$(printf '%s\n' "$report" | awk '
+  /vs base/ { insec = ($0 ~ /sec\/op/) ? 1 : 0; next }
+  insec && $1 != "geomean" && $1 ~ /^[A-Za-z]/ && /\(p=/ { name = $1; sub(/-[0-9]+$/, "", name); print name }' | sort -u)"
+if [ -n "$expected" ]; then
+  missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$compared"))"
+  if [ -n "$missing" ]; then
+    echo -e "${RED}[ERROR]${NC} benchstat produced no sec/op comparison for:" >&2
+    printf '  %s\n' $missing >&2
+    echo -e "${RED}        baseline and current are disjoint (different goos/goarch/pkg/cpu config, a renamed/removed benchmark) — the gate cannot certify 'no regression'.${NC}" >&2
+    exit 2
+  fi
+fi
 
 # Gate ONLY the sec/op metric block. benchstat emits one table per metric, each
 # introduced by a "│ ... │ <metric>  vs base │" header. Inside the sec/op block,
