@@ -337,6 +337,103 @@ func TestStatsAggregate_OpenHourInclusion(t *testing.T) {
 	}
 }
 
+// TestStatsAggregate_FoldOrderDeterminism pins F4: the live-fold ops query MUST
+// feed ops to the rollup fold in the SAME deterministic order the ingester uses
+// (o.start_ts ASC, o.id ASC — rollup_backfill.go / rollup_refresh.go), or the
+// floating-point cost SUM can differ from the materialized rollup by addition
+// order. Float addition is NOT associative.
+//
+// All ops share one start_ts (so the only tiebreak is o.id ASC) and are INSERTED
+// in a scrambled rowid order (op_c, op_a, op_b). Costs are chosen so the sum is
+// order-sensitive: in id-ASC order [op_a=1e16, op_b=1.0, op_c=-1e16] the 1.0 is
+// swallowed by 1e16 then cancelled to 0.0; in rowid order [op_c, op_a, op_b] the
+// 1.0 survives as 1.0. The materialized rollup folds in id-ASC order (→0.0), so
+// the live fold must too. Without the ORDER BY, SQLite returns rowid order
+// (→1.0) and the parity below fails.
+func TestStatsAggregate_FoldOrderDeterminism(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	day := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC).UnixMicro()
+	start := atOffset(day, 9, 0)
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day)
+	seedRollupSession(t, db, "sess", "aiagent_v3:/p", "nedi", "anthropic", "/w1", start)
+	// INSERT order (rowid) is c, a, b; all share `start`. Costs are deliberately
+	// float-order-sensitive (1e16 absorbs/cancels the 1.0 depending on order).
+	costByID := map[string]float64{"opc": -1e16, "opa": 1e16, "opb": 1.0}
+	for i, id := range []string{"opc", "opa", "opb"} {
+		seedRollupOp(t, db, rollupOpSpec{id: id, sess: "sess", seq: int64(i + 1), kind: "llm",
+			name: "claude-opus", model: "claude-opus", provider: "anthropic",
+			start: start, dur: 100, status: "completed", cost: costByID[id]})
+	}
+	materializeRollups(t, db)
+
+	// Fast path (reads the materialized rollup, folded id-ASC → 0.0).
+	const q = "bucket=daily&group_by=total&metric=cost"
+	_, fast, env := getAggregate(t, p, q)
+	if env.Error.Code != "" {
+		t.Fatalf("fast env=%+v", env)
+	}
+	// Live fold (forced via a sources filter selecting the one source). With the
+	// ORDER BY it folds id-ASC → 0.0; without it, rowid order → 1.0.
+	_, live, env2 := getAggregate(t, p, q+"&sources=aiagent_v3:/p")
+	if env2.Error.Code != "" {
+		t.Fatalf("live env=%+v", env2)
+	}
+	fastV := aggregateToMap(fast)[day][""]
+	liveV := aggregateToMap(live)[day][""]
+	if fastV != liveV {
+		t.Fatalf("fold order non-determinism: fast=%v live=%v (must be byte-identical — needs ORDER BY o.start_ts, o.id)", fastV, liveV)
+	}
+	// Concretely: the id-ASC fold cancels to exactly 0.0.
+	if fastV != 0.0 {
+		t.Errorf("fast=%v, want 0.0 (1e16 + 1.0 + -1e16 folded in id-ASC order)", fastV)
+	}
+}
+
+// TestStatsAggregate_ToBoundaryExclusive pins F3: the stats window is half-open
+// (from <= bucket_ts < to), so a bucket whose bucket_ts is EXACTLY `to` is
+// EXCLUDED. The frontend serializes `to` as exclusive (frontend/src/state/
+// filters.ts: "exclusive/now upper bound"), so timeWindow must not add +1 (the
+// old bug made a bucket at `to` wrongly included). The default (no `to`) still
+// includes the open bucket.
+func TestStatsAggregate_ToBoundaryExclusive(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	a := seedRollupFixture(t, db)
+	materializeRollups(t, db)
+
+	// to == closedHourToday (11:00): that bucket's bucket_ts == to, so half-open
+	// [from, to) EXCLUDES it. The 09:00/14:00 closed hours on earlier days are
+	// before `to`, so they remain.
+	q := "bucket=hourly&group_by=total&metric=calls&to=" + i64(a.closedHourToday)
+	code, body, env := getAggregate(t, p, q)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d env=%+v", code, env)
+	}
+	got := aggregateToMap(body)
+	if _, ok := got[a.closedHourToday]; ok {
+		t.Errorf("bucket at exactly `to` (%d) must be EXCLUDED (half-open window): %+v", a.closedHourToday, got)
+	}
+	if _, ok := got[a.openHour]; ok {
+		t.Errorf("open hour (%d) is after `to` and must be excluded: %+v", a.openHour, got)
+	}
+	// A bucket strictly below `to` (day25's 09:00 hour) is still present.
+	day25Hour := atOffset(a.day25, 9, 0)
+	day25Bucket := time.UnixMicro(day25Hour).Truncate(time.Hour).UnixMicro()
+	if _, ok := got[day25Bucket]; !ok {
+		t.Errorf("bucket strictly below `to` must remain: want %d in %+v", day25Bucket, got)
+	}
+
+	// Default (no `to`) still includes the open hour (live-folded).
+	_, dflt, _ := getAggregate(t, p, "bucket=hourly&group_by=total&metric=calls")
+	if _, ok := aggregateToMap(dflt)[a.openHour]; !ok {
+		t.Errorf("default to=now must still include the open hour %d: %+v", a.openHour, dflt.Buckets)
+	}
+}
+
 // TestStatsAggregate_SourceFormatAndTotalShapes covers the two special
 // group_by values' key shapes.
 func TestStatsAggregate_SourceFormatAndTotalShapes(t *testing.T) {
@@ -493,6 +590,92 @@ func TestStatsAggregate_Empty(t *testing.T) {
 	}
 	if body.Bucket != "daily" || body.Metric != "cost" {
 		t.Fatalf("defaults: bucket=%q metric=%q", body.Bucket, body.Metric)
+	}
+}
+
+// seedSubAgentSession seeds one kind='sub_agent' session (a child of parentID)
+// with one turn, so a rollup test can prove the stats endpoints aggregate over
+// ALL session kinds — not just roots. Mirrors seedRollupSession but with a
+// non-root kind + a parent link.
+func seedSubAgentSession(t *testing.T, db *sql.DB, id, parentID, sourceID, agent, provider, cwd string, startTS int64) {
+	t.Helper()
+	if _, err := db.Exec(`
+INSERT INTO sessions (id, source_id, native_id, parent_session_id, root_session_id, kind,
+    agent_name, provider, cwd, status, start_ts, last_activity_ts)
+VALUES (?, ?, ?, ?, ?, 'sub_agent', ?, ?, ?, 'completed', ?, ?)`,
+		id, sourceID, id, parentID, parentID, agent, provider, cwd, startTS, startTS); err != nil {
+		t.Fatalf("seed sub-agent session %s: %v", id, err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO turns (id, session_id, seq, start_ts, status) VALUES (?, ?, 1, ?, 'completed')`,
+		id+"-t", id, startTS); err != nil {
+		t.Fatalf("seed sub-agent turn for %s: %v", id, err)
+	}
+}
+
+// TestStatsAggregate_IncludesSubAgentSessions pins F2: the rollup-backed stats
+// endpoints aggregate over ALL sessions (root + sub-agent), not just roots. The
+// materialized rollups fold every op regardless of session kind, so the live
+// fold MUST match — handleStatsAggregate forces group=all so whereClause omits
+// the s.kind='root' constraint. Without that, the fast path (all ops) and the
+// live fold (root-only under the default group=root) disagree.
+//
+// Fixture: a root op (claude-opus, $0.10) and a sub-agent op (gpt-5, $0.05) in
+// the SAME closed day. Both the fast path and the live fold must report the
+// sub-agent's $0.05 — and the day-total must be $0.15.
+func TestStatsAggregate_IncludesSubAgentSessions(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	day := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC).UnixMicro()
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day)
+	// Root session + op.
+	seedRollupSession(t, db, "root1", "aiagent_v3:/p", "nedi", "anthropic", "/w1", atOffset(day, 9, 0))
+	seedRollupOp(t, db, rollupOpSpec{id: "rootOp", sess: "root1", seq: 1, kind: "llm", name: "claude-opus",
+		model: "claude-opus", provider: "anthropic", start: atOffset(day, 9, 0), dur: 1000,
+		status: "completed", tokIn: 100, tokOut: 200, cost: 0.10})
+	// Sub-agent session (child of root1) + op, same closed day.
+	seedSubAgentSession(t, db, "sub1", "root1", "aiagent_v3:/p", "worker", "openai", "/w1", atOffset(day, 9, 30))
+	seedRollupOp(t, db, rollupOpSpec{id: "subOp", sess: "sub1", seq: 1, kind: "llm", name: "gpt-5",
+		model: "gpt-5", provider: "openai", start: atOffset(day, 9, 30), dur: 2000,
+		status: "completed", tokIn: 50, tokOut: 60, cost: 0.05})
+	materializeRollups(t, db)
+
+	// group_by=model so the sub-agent's gpt-5 is a distinct, assertable key.
+	const fastQ = "bucket=daily&group_by=model&metric=cost"
+	codeFast, fast, env := getAggregate(t, p, fastQ)
+	if codeFast != http.StatusOK {
+		t.Fatalf("fast path status=%d env=%+v", codeFast, env)
+	}
+	codeLive, live, env2 := getAggregate(t, p, fastQ+"&sources=aiagent_v3:/p")
+	if codeLive != http.StatusOK {
+		t.Fatalf("live path status=%d env=%+v", codeLive, env2)
+	}
+	// The sub-agent op must appear in BOTH paths (this is what F2 guarantees).
+	for _, c := range []struct {
+		name string
+		body aggregateBody
+	}{{"fast", fast}, {"live", live}} {
+		m := aggregateToMap(c.body)
+		if v := m[day]["gpt-5"]; !floatEq(v, 0.05) {
+			t.Errorf("%s path: sub-agent gpt-5 cost = %v, want 0.05 (sub-agent ops must be aggregated): %+v", c.name, v, m[day])
+		}
+		if v := m[day]["claude-opus"]; !floatEq(v, 0.10) {
+			t.Errorf("%s path: root claude-opus cost = %v, want 0.10: %+v", c.name, v, m[day])
+		}
+	}
+	// And the two paths must agree exactly.
+	assertAggregateEqual(t, fast, live)
+
+	// /api/stats/top must also rank the sub-agent's model.
+	codeTop, top, envTop := getTop(t, p, "dimension=model&metric=cost&n=200")
+	if codeTop != http.StatusOK {
+		t.Fatalf("top status=%d env=%+v", codeTop, envTop)
+	}
+	tm := topToMap(top)
+	if v := tm["gpt-5"]; !floatEq(v, 0.05) {
+		t.Errorf("top: sub-agent gpt-5 cost = %v, want 0.05 (sub-agent ops must be ranked): %+v", v, top.Items)
 	}
 }
 

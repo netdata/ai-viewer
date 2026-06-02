@@ -462,6 +462,75 @@ WHERE id = ?
 		return fmt.Errorf("writer: update session: %w", err)
 	}
 	w.markDirtySession(id)
+	// agent_name and cwd are session-denormalized rollup inputs: the fold reads
+	// sessions.agent_name/cwd via the ops⋈sessions join (rollup_backfill.go
+	// scanOpRow) AND attributes session_starts to the agent/cwd dimensions. So a
+	// SessionUpdated that CHANGES either one invalidates the materialized agent/
+	// cwd dimension rows of EVERY hour bucket holding one of this session's ops
+	// (a session's ops span many buckets), plus the session-start bucket. The
+	// incremental refresh only recomputes buckets in dirtyRollupBuckets, so
+	// without marking them here a late metadata repair (e.g. claude_code
+	// re-emitting agent/cwd) would leave those dimension rows STALE until a full
+	// backfill. Marking is idempotent (recomputing an unchanged bucket yields the
+	// same row), so over-marking when only one of agent/cwd changed is harmless.
+	if ev.AgentName != "" || ev.Cwd != "" {
+		if err := w.markSessionRollupBucketsDirty(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// markSessionRollupBucketsDirty marks every rollup hour bucket whose recompute
+// reads this session's denormalized agent_name/cwd: the session's START-hour
+// bucket (for session_starts re-attribution) and the START-hour bucket of each
+// of the session's ops (for the agent/cwd dimension folds). Called by
+// applySessionUpdated when agent_name or cwd may have changed. Single-connection
+// discipline: each cursor is fully drained into a slice BEFORE any marking, and
+// marking is in-memory only (no SQL write follows the cursor on the batch tx).
+func (w *writer) markSessionRollupBucketsDirty(ctx context.Context, tx *sql.Tx, sessionID string) error {
+	// Session start hour: session_starts is attributed to total/agent/cwd of the
+	// session's start bucket, so a changed agent/cwd must re-attribute it.
+	var startTs sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT start_ts FROM sessions WHERE id = ?`, sessionID).Scan(&startTs); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("writer: read session start_ts %s: %w", sessionID, err)
+		}
+	}
+
+	// Distinct op-start hour buckets for this session. Drain the whole cursor
+	// into a slice first (no write may straddle an open read on the single
+	// pinned connection), THEN mark — bucket math via the same rollups helper
+	// markDirtyRollupBucket uses, so the dirty set matches the op-write paths.
+	rows, err := tx.QueryContext(ctx, `SELECT start_ts FROM ops WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return fmt.Errorf("writer: query session op buckets %s: %w", sessionID, err)
+	}
+	var opStarts []int64
+	for rows.Next() {
+		var opStart int64
+		if scanErr := rows.Scan(&opStart); scanErr != nil {
+			_ = rows.Close()
+			return fmt.Errorf("writer: scan session op start %s: %w", sessionID, scanErr)
+		}
+		opStarts = append(opStarts, opStart)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		_ = rows.Close()
+		return fmt.Errorf("writer: iterate session op buckets %s: %w", sessionID, iterErr)
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return fmt.Errorf("writer: close session op buckets %s: %w", sessionID, closeErr)
+	}
+
+	// All reads drained — now mark (idempotent in-memory map inserts).
+	if startTs.Valid {
+		w.markDirtyRollupBucket(startTs.Int64)
+	}
+	for _, opStart := range opStarts {
+		w.markDirtyRollupBucket(opStart)
+	}
 	return nil
 }
 

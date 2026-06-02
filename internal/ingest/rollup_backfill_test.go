@@ -483,6 +483,121 @@ func TestBackfillRollups_SessionStartOnlyDay(t *testing.T) {
 	}
 }
 
+// T10 (F5): BackfillRollups is the stale-repair path, so it must DELETE the
+// rollup tables before rebuilding — an upsert-only run cannot remove a row the
+// recompute no longer produces (a dimension value that has since collapsed into
+// __other__, or a row from data that has since changed). Seed a bogus row that
+// the current ops do NOT produce, run the backfill, and assert the stale row is
+// GONE while the correct rows are present.
+func TestBackfillRollups_DeletesStaleRows(t *testing.T) {
+	_, db := openTestStore(t)
+	seedSource(t, db, "claude_code:/loc", "claude_code")
+	startSess := ts(0, 9, 0)
+	seedSession(t, db, "sess-1", "claude_code:/loc", "claude", "/work/proj", startSess)
+	seedTurn(t, db, "turn-1", "sess-1", startSess)
+	opEnd := ts(0, 9, 30)
+	seedOp(t, db, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1",
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: ts(0, 9, 15), endTS: &opEnd, durationUS: 1_000_000, status: "completed",
+		tokensIn: 100, tokensOut: 200, costUSD: 0.5})
+
+	now := ts(2, 12, 0) // two days later → everything closed
+
+	// Inject stale rows into BOTH tables that the recompute will NOT reproduce:
+	//  - an hourly row for a model value no op carries (a collapsed/vanished key),
+	//  - a daily row for a stale agent value.
+	// An upsert-only backfill would leave these stranded forever.
+	insertStaleRollup(t, db, "rollup_hourly", rollupKey{ts(0, 9, 0), "claude_code", "model", "ghost-model"})
+	insertStaleRollup(t, db, "rollup_daily", rollupKey{ts(0, 0, 0), "claude_code", "agent", "ghost-agent"})
+
+	if _, err := BackfillRollups(context.Background(), db, now, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	h := readRollups(t, db, "rollup_hourly")
+	d := readRollups(t, db, "rollup_daily")
+
+	// Stale rows must be gone (delete-before-rebuild).
+	if _, ok := h[rollupKey{ts(0, 9, 0), "claude_code", "model", "ghost-model"}]; ok {
+		t.Fatal("stale hourly ghost-model row survived backfill — backfill did not DELETE before rebuild")
+	}
+	if _, ok := d[rollupKey{ts(0, 0, 0), "claude_code", "agent", "ghost-agent"}]; ok {
+		t.Fatal("stale daily ghost-agent row survived backfill — backfill did not DELETE before rebuild")
+	}
+
+	// Correct rows from the real op must be present and accurate.
+	model := h[rollupKey{ts(0, 9, 0), "claude_code", "model", "sonnet"}]
+	if model.opCount != 1 || model.tokensIn != 100 {
+		t.Fatalf("real model row wrong after backfill: %+v", model)
+	}
+	total := h[rollupKey{ts(0, 9, 0), "claude_code", "total", ""}]
+	if total.opCount != 1 || total.sessionStarts != 1 {
+		t.Fatalf("real total row wrong after backfill: %+v", total)
+	}
+}
+
+// T11 (F5): the DELETE-before-rebuild must not break idempotency — running
+// BackfillRollups twice (now WITH the leading DELETE) yields byte-identical
+// tables. This re-pins T4's property after the delete-first change.
+func TestBackfillRollups_DeleteFirstStillIdempotent(t *testing.T) {
+	_, db := openTestStore(t)
+	seedSource(t, db, "claude_code:/loc", "claude_code")
+	seedSession(t, db, "sess-1", "claude_code:/loc", "claude", "/w", ts(0, 8, 0))
+	seedTurn(t, db, "turn-1", "sess-1", ts(0, 8, 0))
+	for i, hm := range [][2]int{{9, 0}, {9, 30}, {10, 0}} {
+		end := ts(0, hm[0], hm[1]+1)
+		seedOp(t, db, opSpec{
+			id: "op-" + string(rune('a'+i)), turnID: "turn-1", sessionID: "sess-1",
+			kind: "llm", name: "c", model: "m", provider: "p",
+			startTS: ts(0, hm[0], hm[1]), endTS: &end, durationUS: 100, status: "completed",
+			tokensIn: 7, costUSD: 0.1,
+		})
+	}
+	now := ts(2, 0, 0)
+
+	if _, err := BackfillRollups(context.Background(), db, now, silentLogger()); err != nil {
+		t.Fatalf("first backfill: %v", err)
+	}
+	h1 := readRollups(t, db, "rollup_hourly")
+	d1 := readRollups(t, db, "rollup_daily")
+
+	if _, err := BackfillRollups(context.Background(), db, now, silentLogger()); err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	h2 := readRollups(t, db, "rollup_hourly")
+	d2 := readRollups(t, db, "rollup_daily")
+
+	if len(h1) != len(h2) || len(d1) != len(d2) {
+		t.Fatalf("row counts changed across delete-first runs: hourly %d->%d daily %d->%d",
+			len(h1), len(h2), len(d1), len(d2))
+	}
+	for k, v := range h1 {
+		if h2[k] != v {
+			t.Fatalf("hourly row %+v changed across delete-first runs: %+v -> %+v", k, v, h2[k])
+		}
+	}
+	for k, v := range d1 {
+		if d2[k] != v {
+			t.Fatalf("daily row %+v changed across delete-first runs: %+v -> %+v", k, v, d2[k])
+		}
+	}
+}
+
+// insertStaleRollup writes a single zero-metric rollup row directly, simulating a
+// row a prior recompute produced but the current data no longer does. The table
+// name is a fixed test literal; values are ?-bound.
+func insertStaleRollup(t *testing.T, db *sql.DB, table string, k rollupKey) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO `+table+` (bucket_ts, source_format, dimension, dimension_value,
+                       op_count, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,
+                       cost_usd, failures, duration_us, session_starts)
+VALUES (?, ?, ?, ?, 99, 99, 99, 0, 0, 9.9, 9, 999, 9)`,
+		k.bucketTS, k.sourceFormat, k.dimension, k.dimensionValue); err != nil {
+		t.Fatalf("insert stale %s row %+v: %v", table, k, err)
+	}
+}
+
 // T9: empty DB → no error, zero rows.
 func TestBackfillRollups_EmptyDB(t *testing.T) {
 	_, db := openTestStore(t)

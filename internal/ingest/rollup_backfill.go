@@ -40,6 +40,24 @@ func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Lo
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
 
+	// Wipe both rollup tables before rebuilding so this run is a TRUE full
+	// recompute, not an overwrite. The backfill is the recovery path "when
+	// rollups are missing OR STALE" (ingester.md §One-shot backfill), but the
+	// per-day upserts below (ON CONFLICT DO UPDATE) can only refresh rows the
+	// recompute still produces — they cannot remove a row it no longer produces
+	// (e.g. a dimension value that has since collapsed into __other__, or any row
+	// from data that has since changed). Deleting first makes the backfill able
+	// to repair stale artifacts, mirroring the incremental path's delete-then-
+	// insert (rollup_refresh.go) and BackfillFTS's delete-before-rebuild
+	// (fts_backfill.go). Only closed buckets are ever materialized and the open
+	// bucket is never materialized, so clearing everything then rebuilding the
+	// closed buckets below is correct. Runs in its own short transaction that
+	// commits before the per-day loop, keeping the single writer connection
+	// (SetMaxOpenConns(1)) uncontended.
+	if err := truncateRollups(ctx, db); err != nil {
+		return BackfillStats{}, err
+	}
+
 	startsByDay, err := loadSessionStarts(ctx, db, openHourStart)
 	if err != nil {
 		return BackfillStats{}, err
@@ -70,6 +88,30 @@ func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Lo
 			"days", stats.DaysProcessed, "hourly_rows", stats.HourlyRows, "daily_rows", stats.DailyRows)
 	}
 	return stats, nil
+}
+
+// truncateRollups empties rollup_hourly and rollup_daily in one short
+// transaction so BackfillRollups starts every run from a clean slate (see the
+// caller comment for why a delete-before-rebuild is required for stale repair).
+// The DELETEs are constant SQL (fixed table names, no parameters, no user
+// input); the commit drains before the per-day loop opens its own transactions.
+func truncateRollups(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("rollups-backfill: begin truncate tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rollup_hourly`); err != nil {
+		return fmt.Errorf("rollups-backfill: clear rollup_hourly: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rollup_daily`); err != nil {
+		return fmt.Errorf("rollups-backfill: clear rollup_daily: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rollups-backfill: commit truncate: %w", err)
+	}
+	return nil
 }
 
 // backfiller carries per-run state. It is not safe for concurrent use; one

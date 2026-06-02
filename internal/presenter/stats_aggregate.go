@@ -57,6 +57,11 @@ func (p *Presenter) handleStatsAggregate(w http.ResponseWriter, r *http.Request)
 		p.writeBadFilter(w, r, err)
 		return
 	}
+	// Rollup-backed stats aggregate over ALL sessions (root + sub-agent); the
+	// group distinction is a session-LIST concern and does not apply here.
+	// Forcing group=all keeps the fast path (all-session rollups) consistent
+	// with the live fold (rest-api.md §"Rollup fast path vs. live fold").
+	f.forceAllSessions()
 
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
@@ -129,23 +134,37 @@ func buildAggregateBuckets(series closedSeries) []aggregateBucket {
 	return buckets
 }
 
-// timeWindow returns the effective [from, to) the aggregate/top endpoints
-// scan: from defaults to 0 (all history) when ?from is omitted; to defaults to
-// now (parseSessionFilter already applied the now-default to f.to). The window
-// is half-open on the upper bound to match the rollup bucket_ts < cutoff
-// convention, whereas the session list's whereClause uses start_ts <= to — the
-// rollup endpoints own their own half-open window so a bucket boundary is never
-// double-counted.
+// timeWindow returns the effective half-open [from, to) the aggregate/top
+// endpoints scan, branching on whether the operator SUPPLIED `to` (f.toRaw is
+// the value before parseSessionFilter's now-default — non-nil iff ?to was
+// given):
+//
+//   - ?to SUPPLIED: it is EXCLUSIVE (the frontend serializes `to` as an
+//     exclusive upper bound — frontend/src/state/filters.ts) and the stats
+//     window is half-open `from <= bucket_ts < to` (rest-api.md §"Bucket-window
+//     semantics"), so it is used verbatim — NO +1. A bucket whose bucket_ts is
+//     exactly `to` is excluded, which also keeps the fast path (bucket_ts < to)
+//     byte-identical to the live fold.
+//   - ?to OMITTED (default = now, rest-api.md §Conventions): the window must
+//     cover the present instant INCLUSIVE of the currently-open bucket (which
+//     starts at or before now and is always live-folded). The half-open upper
+//     bound is therefore now+1µs (≡ bucket_ts <= now), so the open bucket is
+//     included even when now lands exactly on a bucket boundary (now ==
+//     openStart). Using a bare `now` would wrongly drop the open bucket at that
+//     boundary instant.
+//
+// from defaults to 0 (all history) when ?from is omitted. This window is the
+// rollup endpoints' own half-open contract, distinct from the session list's
+// whereClause (start_ts <= to, inclusive).
 func (f sessionFilter) timeWindow(now time.Time) (int64, int64) {
 	var from int64
 	if f.from != nil {
 		from = *f.from
 	}
-	to := now.UnixMicro()
-	if f.to != nil {
-		to = *f.to + 1 // f.to is inclusive (start_ts <= to); make the window half-open.
+	if f.toRaw != nil {
+		return from, *f.toRaw // operator-supplied: exclusive, verbatim.
 	}
-	return from, to
+	return from, now.UnixMicro() + 1 // default now: include the open bucket (bucket_ts <= now).
 }
 
 // bucketName / metricName echo the resolved enums back on the wire.

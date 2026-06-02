@@ -295,6 +295,72 @@ func TestSearch_FiltersNarrowOps(t *testing.T) {
 	}
 }
 
+// TestSearch_FindsSubAgentSessionContent pins F2 for /api/search: search spans
+// ALL sessions (root + sub-agent), not just roots. parseSessionFilter defaults
+// group=root, whose whereClause adds s.kind='root' — handleSearch must force
+// group=all so an op/log living in a sub-agent session is still found. Without
+// the fix the sub-agent op and log are silently excluded.
+func TestSearch_FindsSubAgentSessionContent(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
+	// Root session with a matching op.
+	seedSession(t, db, sessionRow{
+		id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA", kind: "root",
+		agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 9000,
+	})
+	seedTurn(t, db, turnRow{id: "tR", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
+	seedFTSOp(t, db, opRow{
+		id: "opRoot", turnID: "tR", sessionID: "rootA", seq: 1, kind: "tool", name: "Bash",
+		toolNamespace: "shell", startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+	}, "needle in root")
+	// Sub-agent session (child of rootA) with a matching op AND a matching log.
+	seedSession(t, db, sessionRow{
+		id: "subA", sourceID: "src1", nativeID: "nS", parentID: "rootA", rootID: "rootA", kind: "sub_agent",
+		agent: "worker", status: "completed", startTS: base + 2000, endTS: base + 4000,
+	})
+	seedTurn(t, db, turnRow{id: "tS", sessionID: "subA", seq: 1, startTS: base + 2000, status: "completed"})
+	seedFTSOp(t, db, opRow{
+		id: "opSub", turnID: "tS", sessionID: "subA", seq: 1, kind: "tool", name: "Read",
+		toolNamespace: "fs", startTS: base + 2100, endTS: base + 2200, durationUS: 100, status: "completed",
+	}, "needle in sub-agent")
+	seedFTSLog(t, db, logRow{sessionID: "subA", opID: "opSub", ts: base + 2150, severity: "ERR",
+		source: "aiagent_v3", message: "needle log in sub-agent"})
+
+	code, body, env := getSearch(t, p, "q=needle")
+	if code != http.StatusOK {
+		t.Fatalf("status=%d env=%+v", code, env)
+	}
+	// Both the root op and the sub-agent op must be returned (F2: all sessions).
+	var sawRootOp, sawSubOp bool
+	for _, op := range body.Ops {
+		switch op.OpID {
+		case "opRoot":
+			sawRootOp = true
+		case "opSub":
+			sawSubOp = true
+		}
+	}
+	if !sawRootOp {
+		t.Errorf("root op missing from search: %+v", body.Ops)
+	}
+	if !sawSubOp {
+		t.Errorf("sub-agent op missing from search (F2: search must span all sessions): %+v", body.Ops)
+	}
+	// The sub-agent log must also be found.
+	var sawSubLog bool
+	for _, lg := range body.Logs {
+		if lg.SessionID == "subA" {
+			sawSubLog = true
+		}
+	}
+	if !sawSubLog {
+		t.Errorf("sub-agent log missing from search (F2): %+v", body.Logs)
+	}
+}
+
 // TestSearch_LogsIndexedScoping asserts the logs_indexed contract: when the
 // in-scope source has fts5_index_logs=0, a log that WOULD match is not returned
 // and logs_indexed=false; flipping it on returns the log and logs_indexed=true.

@@ -106,6 +106,11 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 		p.writeBadFilter(w, r, err)
 		return
 	}
+	// Search spans ALL sessions (root + sub-agent); the group distinction is a
+	// session-LIST concern and does not apply here. Forcing group=all before the
+	// cursor/fingerprint is computed keeps an op/log in a sub-agent session
+	// reachable (rest-api.md §GET /api/search) and the cursor self-consistent.
+	f.forceAllSessions()
 	limit := parseSearchLimit(q.Get("limit"))
 	offset, err := parseSearchCursor(q.Get("cursor"), match, f)
 	if err != nil {

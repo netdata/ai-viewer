@@ -59,6 +59,11 @@ func (p *Presenter) handleStatsTop(w http.ResponseWriter, r *http.Request) {
 		p.writeBadFilter(w, r, err)
 		return
 	}
+	// Rollup-backed stats aggregate over ALL sessions (root + sub-agent); the
+	// group distinction is a session-LIST concern and does not apply here.
+	// Forcing group=all keeps the fast path (all-session rollups) consistent
+	// with the live fold (rest-api.md §"Rollup fast path vs. live fold").
+	f.forceAllSessions()
 
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()

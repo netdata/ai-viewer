@@ -400,7 +400,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='6', key='created_at' value=...
+-- key='version' value='7', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
@@ -441,6 +441,12 @@ Migration history:
   reads all four tables (`/api/stats/aggregate`, `/api/stats/top`, `/api/search`,
   and the rollup-backed `/api/stats`), so a v6 serve binary refuses to start
   against a pre-0006 store.
+- `0007_fts5_index_logs.sql` — adds the `sources.fts5_index_logs` column
+  (`INTEGER NOT NULL DEFAULT 1`; the per-source opt-out that gates FTS5 *log*
+  indexing — `fts_ops` is always indexed) and bumps `schema_meta.version` to
+  `'7'` in lockstep with `presenter.SchemaVersion`. The `sources` column shape is
+  part of the surface serve validates, so a v7 serve binary refuses a pre-0007
+  store.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB

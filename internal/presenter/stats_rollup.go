@@ -254,7 +254,10 @@ func (p *Presenter) loadFoldOps(ctx context.Context, f sessionFilter, lower, upp
 	where, args := f.whereClause("s")
 	sessionSet := "SELECT s.id FROM sessions s WHERE " + where
 	// Column order matches scanRollupOpRow exactly. INNER JOINs: FK integrity
-	// guarantees every op has a session and source.
+	// guarantees every op has a session and source. `where`/`sessionSet` come
+	// from filters.go and are ALWAYS `?`-parameterized (no string interpolation
+	// of user input); a future edit that interpolates a value here would break
+	// that injection-safety invariant.
 	q := `
 SELECT o.start_ts, o.end_ts, o.duration_us, src.format,
        o.kind, o.model, o.provider, o.tool_namespace, o.name,
@@ -270,6 +273,13 @@ WHERE o.session_id IN (` + sessionSet + `) AND o.start_ts >= ?` // #nosec G201 G
 		q += ` AND o.start_ts < ?`
 		qArgs = append(qArgs, upper)
 	}
+	// Deterministic fold order: the ingester folds ops ORDER BY o.start_ts ASC,
+	// o.id ASC (rollup_backfill.go / rollup_refresh.go). Float SUMs (cost_usd)
+	// are addition-order sensitive, so the live fold MUST feed ops in the SAME
+	// order or it can diverge from the materialized rollup. This keeps the
+	// fast-path vs live-fold parity byte-identical.
+	q += `
+ORDER BY o.start_ts ASC, o.id ASC`
 	rows, err := p.db.QueryContext(ctx, q, qArgs...) // #nosec G201 G701 -- static SQL + ?-placeholders; values bound via args
 	if err != nil {
 		return nil, err

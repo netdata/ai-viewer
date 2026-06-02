@@ -216,6 +216,19 @@ func parseCursorParam(v url.Values, f *sessionFilter) error {
 	return nil
 }
 
+// forceAllSessions widens an already-parsed filter to span every session kind
+// by setting group=all, so whereClause omits the s.kind='root' constraint. The
+// rollup-backed stats endpoints (/api/stats/aggregate, /api/stats/top) and
+// /api/search call this after parseSessionFilter: those surfaces aggregate /
+// search over ALL sessions (root + sub-agent), and the materialized rollups
+// fold every op regardless of kind, so forcing group=all keeps the live-fold /
+// search path consistent with the all-session rollup fast path. The root-vs-all
+// distinction is a session-LIST concern (/api/sessions) and does not apply here;
+// parseSessionFilter's group=root default is intentionally left untouched.
+func (f *sessionFilter) forceAllSessions() {
+	f.group = groupAll
+}
+
 // wrapBadFilter joins errBadFilter with a human-readable reason so the
 // handler can surface the message in the error envelope while callers
 // still match on errBadFilter via errors.Is.

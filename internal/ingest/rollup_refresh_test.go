@@ -654,3 +654,204 @@ func TestRefreshRollups_OpFinalizedAcrossHourMarksStartBucket(t *testing.T) {
 		t.Fatalf("start-bucket duration_us = %d, want %d (finalize must refresh the START bucket %d)", v.durationUS, end-start, startBucket)
 	}
 }
+
+// TestRefreshRollups_SessionUpdatedReattributesAgent pins F1: agent_name/cwd are
+// session-denormalized rollup inputs (the fold reads sessions.agent_name/cwd via
+// the join). A SessionUpdated that changes agent_name in a LATER batch — after the
+// session's ops have already been rolled up incrementally — must re-attribute
+// EVERY hour bucket that holds one of the session's ops, plus the session-start
+// bucket (for session_starts). The proof is byte-parity with a fresh
+// BackfillRollups over the FINAL session state (the new agent name): if
+// applySessionUpdated failed to dirty the op buckets, the incremental store would
+// keep the old agent's dimension rows and diverge from the backfill.
+func TestRefreshRollups_SessionUpdatedReattributesAgent(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+	now := fixedNow()
+
+	// ---- Store A: incremental path. ----
+	_, dbA := openTestStore(t)
+	seedSource(t, dbA, src, format)
+
+	// Session starts at day0 08:00 with the OLD agent name; its ops land in TWO
+	// distinct closed hours (09:00 and 10:00) so the multi-bucket re-attribution
+	// is exercised (a session's ops span many buckets — F1's core hazard).
+	startA := ts(0, 8, 0)
+	hour1Start, hour1End := ts(0, 9, 0), ts(0, 9, 30)
+	hour2Start, hour2End := ts(0, 10, 0), ts(0, 10, 20)
+	batch1 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "old-agent", "/work/proj", startA, 100),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 101, Ts: startA},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 1, hour1Start, hour1End, "sonnet", "anthropic", 100, 200, 0.1, false)...)
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 2, hour2Start, hour2End, "haiku", "anthropic", 5, 7, 0.05, true)...)
+	flushBatch(t, dbA, src, format, now, batch1)
+
+	// Premise: the OLD agent's dimension rows exist in both hour buckets before
+	// the update, so a missing re-attribution would leave a stale row.
+	preH := readRollups(t, dbA, "rollup_hourly")
+	if _, ok := preH[rollupKey{hour1Start, format, "agent", "old-agent"}]; !ok {
+		t.Fatal("premise broken: old-agent row missing in hour1 before update")
+	}
+	if _, ok := preH[rollupKey{hour2Start, format, "agent", "old-agent"}]; !ok {
+		t.Fatal("premise broken: old-agent row missing in hour2 before update")
+	}
+
+	// Later batch: a SessionUpdated repairs the agent name (e.g. claude_code
+	// re-emitting agent metadata). No new ops — only the metadata changes.
+	batch2 := []canonical.Event{
+		canonical.SessionUpdatedEvent{
+			EventBase: canonical.EventBase{SourceID: src, SourceSeq: 200, Ts: ts(0, 10, 30)},
+			NativeID:  "sess-1",
+			AgentName: "new-agent",
+		},
+	}
+	flushBatch(t, dbA, src, format, now, batch2)
+
+	// ---- Store B: backfill over the FINAL state (session carries new-agent). ----
+	_, dbB := openTestStore(t)
+	seedSource(t, dbB, src, format)
+	seedSession(t, dbB, "sess-1", src, "new-agent", "/work/proj", startA)
+	seedTurn(t, dbB, "turn-1", "sess-1", startA)
+	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hour1Start, endTS: &hour1End, durationUS: hour1End - hour1Start, status: "completed",
+		tokensIn: 100, tokensOut: 200, costUSD: 0.1})
+	seedOp(t, dbB, opSpec{id: "op-2", turnID: "turn-1", sessionID: "sess-1", seq: 2,
+		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
+		startTS: hour2Start, endTS: &hour2End, durationUS: hour2End - hour2Start, status: "failed",
+		tokensIn: 5, tokensOut: 7, costUSD: 0.05})
+	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	// The incremental store must now be byte-identical to the backfill — both
+	// agent dimension rows re-attributed to new-agent, old-agent gone from BOTH
+	// op buckets AND the session-start bucket.
+	assertRollupsIdentical(t, dbA, dbB)
+
+	// Explicit guards (so a regression names the exact failure, not just "diff").
+	postH := readRollups(t, dbA, "rollup_hourly")
+	for _, h := range []int64{hour1Start, hour2Start} {
+		if _, ok := postH[rollupKey{h, format, "agent", "old-agent"}]; ok {
+			t.Fatalf("stale old-agent row survived in hour bucket %d — op bucket not re-attributed", h)
+		}
+		if _, ok := postH[rollupKey{h, format, "agent", "new-agent"}]; !ok {
+			t.Fatalf("new-agent row missing in hour bucket %d — op bucket not re-attributed", h)
+		}
+	}
+	// The session-start bucket (08:00) must move session_starts onto new-agent.
+	if v := postH[rollupKey{startA, format, "agent", "new-agent"}]; v.sessionStarts != 1 {
+		t.Fatalf("session-start bucket agent=new-agent session_starts = %d, want 1", v.sessionStarts)
+	}
+	if _, ok := postH[rollupKey{startA, format, "agent", "old-agent"}]; ok {
+		t.Fatal("stale old-agent session_starts row survived in the start bucket")
+	}
+}
+
+// TestRefreshRollups_SessionUpdatedReattributesCwd pins F1 for the cwd dimension:
+// a SessionUpdated changing cwd (with agent unchanged) must re-attribute the
+// session's op buckets to the new cwd, byte-identical to a fresh backfill over the
+// final state. Guards the `ev.Cwd != ""` half of the dirty-marking trigger.
+func TestRefreshRollups_SessionUpdatedReattributesCwd(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+	now := fixedNow()
+
+	_, dbA := openTestStore(t)
+	seedSource(t, dbA, src, format)
+
+	startA := ts(0, 8, 0)
+	hourStart, hourEnd := ts(0, 9, 0), ts(0, 9, 30)
+	batch1 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/work/old", startA, 100),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 101, Ts: startA},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 1, hourStart, hourEnd, "sonnet", "anthropic", 10, 20, 0.1, false)...)
+	flushBatch(t, dbA, src, format, now, batch1)
+
+	batch2 := []canonical.Event{
+		canonical.SessionUpdatedEvent{
+			EventBase: canonical.EventBase{SourceID: src, SourceSeq: 200, Ts: ts(0, 9, 45)},
+			NativeID:  "sess-1",
+			Cwd:       "/work/new",
+		},
+	}
+	flushBatch(t, dbA, src, format, now, batch2)
+
+	_, dbB := openTestStore(t)
+	seedSource(t, dbB, src, format)
+	seedSession(t, dbB, "sess-1", src, "claude", "/work/new", startA)
+	seedTurn(t, dbB, "turn-1", "sess-1", startA)
+	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hourStart, endTS: &hourEnd, durationUS: hourEnd - hourStart, status: "completed",
+		tokensIn: 10, tokensOut: 20, costUSD: 0.1})
+	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	assertRollupsIdentical(t, dbA, dbB)
+
+	postH := readRollups(t, dbA, "rollup_hourly")
+	if _, ok := postH[rollupKey{hourStart, format, "cwd", "/work/old"}]; ok {
+		t.Fatal("stale /work/old cwd row survived — op bucket not re-attributed on cwd change")
+	}
+	if _, ok := postH[rollupKey{hourStart, format, "cwd", "/work/new"}]; !ok {
+		t.Fatal("/work/new cwd row missing — op bucket not re-attributed on cwd change")
+	}
+}
+
+// TestRefreshRollups_SessionUpdatedNoMetadataNoBucketWork pins the negative case:
+// a SessionUpdated carrying neither agent_name nor cwd (e.g. a status-only update)
+// must NOT trigger the op-bucket dirty-marking scan — its only rollup-relevant
+// inputs are unchanged, so the rollup tables stay byte-identical. This guards the
+// `ev.AgentName != "" || ev.Cwd != ""` gate against firing on every SessionUpdated.
+func TestRefreshRollups_SessionUpdatedNoMetadataNoBucketWork(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+	now := fixedNow()
+
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+
+	startA := ts(0, 8, 0)
+	hourStart, hourEnd := ts(0, 9, 0), ts(0, 9, 30)
+	batch1 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/work/proj", startA, 100),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 101, Ts: startA},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch1 = append(batch1, llmOpEvents(src, "sess-1", 1, 1, hourStart, hourEnd, "sonnet", "anthropic", 10, 20, 0.1, false)...)
+	flushBatch(t, db, src, format, now, batch1)
+
+	before := readRollups(t, db, "rollup_hourly")
+
+	// Status-only update: no agent, no cwd.
+	batch2 := []canonical.Event{
+		canonical.SessionUpdatedEvent{
+			EventBase: canonical.EventBase{SourceID: src, SourceSeq: 200, Ts: ts(0, 9, 45)},
+			NativeID:  "sess-1",
+			Status:    "completed",
+		},
+	}
+	flushBatch(t, db, src, format, now, batch2)
+
+	after := readRollups(t, db, "rollup_hourly")
+	if len(before) != len(after) {
+		t.Fatalf("row count changed on metadata-free SessionUpdated: %d -> %d", len(before), len(after))
+	}
+	for k, v := range before {
+		if after[k] != v {
+			t.Fatalf("rollup row %+v changed on metadata-free SessionUpdated: %+v -> %+v", k, v, after[k])
+		}
+	}
+}
