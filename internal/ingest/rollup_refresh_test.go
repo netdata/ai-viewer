@@ -855,3 +855,107 @@ func TestRefreshRollups_SessionUpdatedNoMetadataNoBucketWork(t *testing.T) {
 		}
 	}
 }
+
+// TestRefreshRollups_SessionStartedRepairsStubMetadataAndStart pins the twin of
+// F1 for applySessionStarted (round-6 P2). When an op references a not-yet-seen
+// session, requireSessionID inserts a metadata-EMPTY stub (start_ts = the op's
+// ts, empty agent/cwd). A LATER SessionStarted then REPAIRS agent_name/cwd via
+// the UPSERT's COALESCE(NULLIF(...)) AND can move start_ts EARLIER via MIN. Both
+// invalidate already-materialized rollup rows that applySessionStarted, before
+// this fix, never re-marked:
+//   - metadata repair → every hour bucket holding one of the session's ops kept
+//     STALE empty-agent/empty-cwd dimension rows (the exact class F1 fixed for
+//     applySessionUpdated), and
+//   - the MIN start-move → the OLD start bucket kept a phantom session_starts and
+//     the NEW start bucket lacked it.
+//
+// The proof is byte-parity with a fresh BackfillRollups over the FINAL session
+// state (repaired agent/cwd, earlier start). The batches are ordered so the op
+// is rolled up under the empty stub BEFORE the repairing SessionStarted arrives,
+// which is the only way to exercise the incremental-only hazard.
+func TestRefreshRollups_SessionStartedRepairsStubMetadataAndStart(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+	now := fixedNow()
+
+	// hOp is BOTH the stub's start (requireSessionID sets start_ts = op ts) and
+	// the op's hour bucket; hStart is the repairing SessionStarted's ts, EARLIER
+	// than hOp so MIN moves the session start back a bucket.
+	hStart := ts(0, 8, 0)
+	hOpStart, hOpEnd := ts(0, 10, 0), ts(0, 10, 20)
+
+	// ---- Store A: incremental path. ----
+	_, dbA := openTestStore(t)
+	seedSource(t, dbA, src, format)
+
+	// Batch 1: an op for sess-1 with NO prior SessionStarted. applyOpStarted →
+	// requireSessionID stubs sess-1 (start_ts = hOpStart, agent/cwd empty), and the
+	// op folds into the hOpStart bucket under the empty agent/cwd dimensions.
+	batch1 := llmOpEvents(src, "sess-1", 1, 1, hOpStart, hOpEnd, "sonnet", "anthropic", 100, 200, 0.1, false)
+	flushBatch(t, dbA, src, format, now, batch1)
+
+	// Premise: the empty stub produced NO agent/cwd dimension rows for the op (the
+	// fold emits an agent/cwd row only when the value is non-empty), and the stub's
+	// session_starts landed on the op bucket = hOpStart (the stub's start_ts), on
+	// the total dimension only. A missing re-mark on repair would leave the op
+	// bucket WITHOUT the repaired agent/cwd rows and WITH the phantom start.
+	preH := readRollups(t, dbA, "rollup_hourly")
+	if _, ok := preH[rollupKey{hOpStart, format, "agent", "claude-x"}]; ok {
+		t.Fatal("premise broken: claude-x agent row present before repair (stub should be empty)")
+	}
+	if v := preH[rollupKey{hOpStart, format, "total", ""}]; v.sessionStarts != 1 {
+		t.Fatalf("premise broken: stub session_starts on op bucket = %d, want 1", v.sessionStarts)
+	}
+	if v := preH[rollupKey{hOpStart, format, "total", ""}]; v.opCount != 1 {
+		t.Fatalf("premise broken: op_count on op bucket = %d, want 1", v.opCount)
+	}
+
+	// Batch 2: SessionStarted REPAIRS agent/cwd and moves start EARLIER (hStart <
+	// hOpStart → MIN). No new ops — only the metadata + start change.
+	batch2 := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude-x", "/w", hStart, 100),
+	}
+	flushBatch(t, dbA, src, format, now, batch2)
+
+	// ---- Store B: backfill over the FINAL state (repaired agent/cwd, earlier
+	// start). The op keeps its own start bucket. ----
+	_, dbB := openTestStore(t)
+	seedSource(t, dbB, src, format)
+	seedSession(t, dbB, "sess-1", src, "claude-x", "/w", hStart)
+	seedTurn(t, dbB, "turn-1", "sess-1", hStart)
+	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
+		startTS: hOpStart, endTS: &hOpEnd, durationUS: hOpEnd - hOpStart, status: "completed",
+		tokensIn: 100, tokensOut: 200, costUSD: 0.1})
+	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
+		t.Fatalf("BackfillRollups: %v", err)
+	}
+
+	// Byte-parity: the incremental store must match the backfill exactly — op
+	// bucket re-attributed to claude-x//w, empty dimensions gone, and the
+	// session_starts moved from the stub bucket (hOpStart) to the repaired start
+	// bucket (hStart).
+	assertRollupsIdentical(t, dbA, dbB)
+
+	// Explicit guards so a regression names the exact failure, not just "diff".
+	postH := readRollups(t, dbA, "rollup_hourly")
+	// The op bucket must now carry the repaired agent/cwd dimension rows (metadata
+	// repair re-folded the op), which were absent under the empty stub.
+	if _, ok := postH[rollupKey{hOpStart, format, "agent", "claude-x"}]; !ok {
+		t.Fatal("claude-x agent row missing in op bucket — op bucket not re-attributed on stub repair")
+	}
+	if _, ok := postH[rollupKey{hOpStart, format, "cwd", "/w"}]; !ok {
+		t.Fatal("/w cwd row missing in op bucket — op bucket not re-attributed on stub repair")
+	}
+	// session_starts must MOVE from the old stub bucket (hOpStart) to the new start
+	// bucket (hStart) once start_ts is pulled earlier by MIN.
+	if v := postH[rollupKey{hStart, format, "total", ""}]; v.sessionStarts != 1 {
+		t.Fatalf("new start bucket total session_starts = %d, want 1 (start-move not re-marked)", v.sessionStarts)
+	}
+	if _, ok := postH[rollupKey{hStart, format, "agent", "claude-x"}]; !ok {
+		t.Fatal("new start bucket missing claude-x agent session_starts row (start-move not re-marked)")
+	}
+	if v := postH[rollupKey{hOpStart, format, "total", ""}]; v.sessionStarts != 0 {
+		t.Fatalf("old stub bucket total session_starts = %d, want 0 (phantom start not cleared)", v.sessionStarts)
+	}
+}

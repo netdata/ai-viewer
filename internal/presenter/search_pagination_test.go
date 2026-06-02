@@ -62,6 +62,80 @@ func TestSearch_Pagination(t *testing.T) {
 	}
 }
 
+// TestSearch_ExactMultipleNoPhantomCursor pins the limit+1 PEEK (round-6 P3):
+// when EXACTLY `limit` rows match (an exact-multiple last page), next_cursor must
+// be EMPTY — emitting one would point at an empty next page, violating the global
+// "next_cursor when more rows exist" contract (rest-api.md §Pagination). The
+// pre-peek code minted a cursor whenever a side filled `limit`, so this is the
+// red→green discriminator. Cross-checked against limit+1 matches, where the
+// cursor MUST appear and replaying it returns exactly the one remaining row.
+func TestSearch_ExactMultipleNoPhantomCursor(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
+	seedSession(t, db, sessionRow{
+		id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA", kind: "root",
+		agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 99_000,
+	})
+	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
+
+	const limit = 3
+	// Exactly `limit` matching ops, distinct relevance so the rank order is total
+	// and there are NO logs (logs_indexed true but no log match) — so this isolates
+	// the ops-side exact-multiple boundary.
+	wantOps := []string{"e1", "e2", "e3"}
+	for i, id := range wantOps {
+		seedFTSOp(t, db, opRow{
+			id: id, turnID: "t1", sessionID: "rootA", seq: int64(i + 1), kind: "tool", name: id,
+			startTS: base + int64(i+1)*1000, endTS: base + int64(i+1)*1000 + 100, durationUS: 100, status: "completed",
+		}, strings.Repeat("needle ", limit-i)) // e1 most relevant … e3 least.
+	}
+
+	// Exactly `limit` matches → a single FULL page, NO next_cursor (the peek saw
+	// no extra row).
+	code, body, env := getSearch(t, p, "q=needle&limit=3")
+	if code != http.StatusOK {
+		t.Fatalf("exact-multiple status=%d env=%+v", code, env)
+	}
+	if len(body.Ops) != limit {
+		t.Fatalf("exact-multiple ops len=%d, want %d", len(body.Ops), limit)
+	}
+	if body.NextCursor != "" {
+		t.Fatalf("exact-multiple: next_cursor=%q, want EMPTY (no further rows; phantom cursor)", body.NextCursor)
+	}
+
+	// Now add a 4th match (> limit) → next_cursor MUST appear, and replaying it
+	// returns exactly the one remaining op, then no further cursor.
+	seedFTSOp(t, db, opRow{
+		id: "e4", turnID: "t1", sessionID: "rootA", seq: 4, kind: "tool", name: "e4",
+		startTS: base + 4000, endTS: base + 4100, durationUS: 100, status: "completed",
+	}, "needle") // least relevant → sorts last → lands on page 2.
+
+	code, body, env = getSearch(t, p, "q=needle&limit=3")
+	if code != http.StatusOK {
+		t.Fatalf("over-limit page1 status=%d env=%+v", code, env)
+	}
+	if len(body.Ops) != limit {
+		t.Fatalf("over-limit page1 ops len=%d, want %d", len(body.Ops), limit)
+	}
+	if body.NextCursor == "" {
+		t.Fatal("over-limit page1: want a next_cursor (4 matches > limit 3)")
+	}
+
+	code, body, env = getSearch(t, p, "q=needle&limit=3&cursor="+body.NextCursor)
+	if code != http.StatusOK {
+		t.Fatalf("over-limit page2 status=%d env=%+v", code, env)
+	}
+	if len(body.Ops) != 1 || body.Ops[0].OpID != "e4" {
+		t.Fatalf("over-limit page2 ops=%+v, want [e4]", body.Ops)
+	}
+	if body.NextCursor != "" {
+		t.Errorf("over-limit page2: next_cursor=%q, want EMPTY (last page exhausted)", body.NextCursor)
+	}
+}
+
 // TestSearch_CursorFingerprintMismatch asserts a cursor minted on one query is
 // rejected when replayed against a DIFFERENT query (changed q), mirroring the
 // other paginated endpoints' fingerprint-stability guard.

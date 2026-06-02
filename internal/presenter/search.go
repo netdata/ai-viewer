@@ -123,13 +123,15 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	resp := searchResponse{Ops: []searchOpRow{}, Logs: []searchLogRow{}}
 
-	if resp.Ops, err = p.searchOps(ctx, f, match, limit, offset); err != nil {
+	var opsHasMore, logsHasMore bool
+	if resp.Ops, opsHasMore, err = p.searchOps(ctx, f, match, limit, offset); err != nil {
 		p.writeDBError(w, r, ctx, "search.ops", err)
 		return
 	}
 
 	// logs_indexed reflects the per-source fts5_index_logs flag over the
-	// in-scope source set; when false the fts_logs query is skipped entirely.
+	// in-scope source set; when false the fts_logs query is skipped entirely
+	// (so logsHasMore stays false — there is nothing to paginate on that side).
 	indexed, err := p.logsIndexedInScope(ctx, f)
 	if err != nil {
 		p.writeDBError(w, r, ctx, "search.logs_indexed", err)
@@ -137,13 +139,13 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.LogsIndexed = indexed
 	if indexed {
-		if resp.Logs, err = p.searchLogs(ctx, f, match, limit, offset); err != nil {
+		if resp.Logs, logsHasMore, err = p.searchLogs(ctx, f, match, limit, offset); err != nil {
 			p.writeDBError(w, r, ctx, "search.logs", err)
 			return
 		}
 	}
 
-	resp.NextCursor = searchNextCursor(len(resp.Ops), len(resp.Logs), limit, offset, match, f)
+	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore, limit, offset, match, f)
 	writeJSON(w, r, p.logger, http.StatusOK, resp)
 }
 
@@ -249,13 +251,17 @@ func parseSearchCursor(c, match string, f sessionFilter) (int64, error) {
 	return cur.TS, nil
 }
 
-// searchNextCursor mints the next page's opaque cursor, or "" when neither the
-// ops nor the logs result filled the page (no further rows on EITHER side).
-// Pagination advances BOTH arrays by the same offset (rest-api.md §GET
-// /api/search), so a further page exists when either array returned a full
-// `limit` rows; the next offset is the current offset + limit.
-func searchNextCursor(nOps, nLogs, limit int, offset int64, match string, f sessionFilter) string {
-	if nOps < limit && nLogs < limit {
+// searchNextCursor mints the next page's opaque cursor, or "" when no further
+// row exists on EITHER side. Pagination advances BOTH arrays by the same offset
+// (rest-api.md §GET /api/search), so a further page exists exactly when the ops
+// OR the logs PEEK (searchOps/searchLogs bind limit+1) saw an extra row; the
+// next offset is the current offset + limit. Peeking — rather than testing
+// len==limit — is what keeps an exact-multiple last page from minting a cursor
+// onto an empty next page (the global "next_cursor when more rows exist"
+// contract, rest-api.md §Pagination), mirroring session_logs/sessions_list/
+// topology_cross.
+func searchNextCursor(hasMore bool, limit int, offset int64, match string, f sessionFilter) string {
+	if !hasMore {
 		return ""
 	}
 	return pageCursor{
@@ -276,14 +282,18 @@ func searchNextCursor(nOps, nLogs, limit int, offset int64, match string, f sess
 // pagination stays stable across the page-1 and offset queries (equal-bm25 rows
 // are common, e.g. identical indexed text). The cursor is fully drained before
 // return.
-func (p *Presenter) searchOps(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchOpRow, error) {
+func (p *Presenter) searchOps(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchOpRow, bool, error) {
 	where, whereArgs := f.whereClause("s")
 	// snippet(fts_ops, -1, ...) lets SQLite pick the best-matching indexed
 	// column for the excerpt (the same form the migration test exercises). The
 	// only concatenated fragment is the parameterized whereClause (filters.go);
 	// the MATCH value, filter values, limit, and offset are all ?-bound, so the
 	// query carries no user input in its text — same convention as
-	// stats_rollup.go's loadFoldOps.
+	// stats_rollup.go's loadFoldOps. We bind limit+1 (PEEK) so a full page can be
+	// distinguished from a full-page-plus-more without a COUNT — exactly the
+	// session_logs/sessions_list/topology_cross pattern. The extra row is trimmed
+	// before return; its presence is reported via hasMore so the caller emits
+	// next_cursor only when a further row truly exists.
 	q := `
 SELECT fts_ops.op_id, fts_ops.session_id, o.kind, o.name, IFNULL(o.model, ''),
        snippet(fts_ops, -1, '[', ']', '…', 10) AS snip, bm25(fts_ops) AS rank
@@ -296,23 +306,30 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 	args := make([]any, 0, len(whereArgs)+3)
 	args = append(args, match)
 	args = append(args, whereArgs...)
-	args = append(args, limit, offset)
+	args = append(args, limit+1, offset)
 
 	rows, err := p.db.QueryContext(ctx, q, args...) // #nosec G201 G701 -- static SQL + ?-placeholders; values bound via args
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := make([]searchOpRow, 0, limit)
+	out := make([]searchOpRow, 0, limit+1)
 	for rows.Next() {
 		var row searchOpRow
 		if err := rows.Scan(&row.OpID, &row.SessionID, &row.Kind, &row.Name, &row.Model, &row.Snippet, &row.Rank); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 
 // searchLogs runs the fts_logs MATCH joined back to log_entries⋈sessions⋈sources,
@@ -332,11 +349,13 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 // WITHIN an equal-rank group so the total order is deterministic and offset
 // pagination stays stable across the page-1 and offset queries (equal-bm25 rows
 // are common). The cursor is fully drained.
-func (p *Presenter) searchLogs(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchLogRow, error) {
+func (p *Presenter) searchLogs(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchLogRow, bool, error) {
 	where, whereArgs := f.whereClause("s")
 	// The only concatenated fragment is the parameterized whereClause
 	// (filters.go); the MATCH value, filter values, limit, and offset are all
-	// ?-bound — same convention as searchOps / stats_rollup.go.
+	// ?-bound — same convention as searchOps / stats_rollup.go. limit+1 is the
+	// PEEK (see searchOps): the extra row, when present, is trimmed and reported
+	// via hasMore so next_cursor is emitted only when a further row exists.
 	q := `
 SELECT fts_logs.log_id, fts_logs.session_id, fts_logs.op_id, fts_logs.severity, fts_logs.ts,
        snippet(fts_logs, -1, '[', ']', '…', 10) AS snip, bm25(fts_logs) AS rank
@@ -350,22 +369,22 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 	args := make([]any, 0, len(whereArgs)+3)
 	args = append(args, match)
 	args = append(args, whereArgs...)
-	args = append(args, limit, offset)
+	args = append(args, limit+1, offset)
 
 	rows, err := p.db.QueryContext(ctx, q, args...) // #nosec G201 G701 -- static SQL + ?-placeholders; values bound via args
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := make([]searchLogRow, 0, limit)
+	out := make([]searchLogRow, 0, limit+1)
 	for rows.Next() {
 		var (
 			row  searchLogRow
 			opID sql.NullString
 		)
 		if err := rows.Scan(&row.LogID, &row.SessionID, &opID, &row.Severity, &row.TS, &row.Snippet, &row.Rank); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if opID.Valid {
 			v := opID.String
@@ -373,7 +392,14 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 
 // logsIndexedInScope reports whether AT LEAST ONE in-scope source has

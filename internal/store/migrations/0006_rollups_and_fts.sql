@@ -58,8 +58,10 @@ CREATE TABLE rollup_hourly (
 -- range. The PK leads with bucket_ts, so it cannot seek by dimension; this
 -- secondary index leads with dimension and then bucket_ts so the planner seeks
 -- dimension=? AND bucket_ts >= ? AND bucket_ts < ? and scans only the matching
--- slice. The optional source_format filter (parseSessionFilter `sources`, 5
--- possible values) is applied as a residual predicate on the scanned rows.
+-- slice. (A `sources` filter binds source_IDs via parseSessionFilter — finer
+-- than the rollup source_format key — so it cannot be served from these
+-- rollups and instead forces a live fold over ops; the rollup fast path runs
+-- only for all-sources queries. See stats_rollup.go isRollupFastPath.)
 CREATE INDEX idx_rollup_hourly_dim ON rollup_hourly(dimension, bucket_ts);
 
 CREATE TABLE rollup_daily (

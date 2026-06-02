@@ -388,6 +388,22 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	if kind == "" {
 		kind = string(canonical.KindRoot)
 	}
+	// Read the existing row's start_ts BEFORE the UPSERT so we know (a) whether the
+	// session already existed (a requireSessionID stub from an out-of-order op/log,
+	// or a prior re-emit) and (b) its OLD start_ts, which the UPSERT's
+	// MIN(sessions.start_ts, excluded.start_ts) may pull earlier. Both feed the
+	// rollup re-marking below.
+	var oldStart sql.NullInt64
+	existed := false
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT start_ts FROM sessions WHERE id = ?`, id).Scan(&oldStart); {
+	case err == nil:
+		existed = true
+	case errors.Is(err, sql.ErrNoRows):
+		// genuine new insert
+	default:
+		return fmt.Errorf("writer: read session start_ts %s: %w", id, err)
+	}
 	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
 	// `aiViewer` stash sub-object, which is grafted back when a stash-free
 	// re-emit omits it (SOW-0003 P1.7b). The claude-code sub-agent SessionStarted
@@ -427,6 +443,31 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
 	// The session start contributes session_starts to its start-hour bucket
 	// (total/agent/cwd), so that hour's rollup must be recomputed.
 	w.markDirtyRollupBucket(ev.Ts)
+	// Twin of the applySessionUpdated/F1 re-marking: this UPSERT can REPAIR an
+	// already-existing session's denormalized rollup inputs. A requireSessionID
+	// stub (out-of-order op/log) carries empty agent_name/cwd and start_ts = the
+	// referencing event's ts; a later SessionStarted then (a) fills agent/cwd via
+	// COALESCE(NULLIF(...)) and (b) can pull start_ts EARLIER via MIN. Both stale
+	// the materialized rollups the incremental refresh already wrote, and neither
+	// is covered by markDirtyRollupBucket(ev.Ts) alone:
+	//   - filled agent/cwd → every hour bucket holding one of this session's ops
+	//     kept the old (empty/previous) agent/cwd dimension fold, exactly the
+	//     multi-bucket hazard F1 fixed for applySessionUpdated, so re-mark them all.
+	//   - start moved earlier → the OLD start bucket keeps a phantom session_start
+	//     that must be recomputed away (the NEW start bucket ev.Ts is already
+	//     marked above). On a genuine first insert neither applies.
+	// Marking is idempotent (recomputing an unchanged bucket yields the same row),
+	// so over-marking is harmless.
+	if existed {
+		if ev.AgentName != "" || ev.Cwd != "" {
+			if err := w.markSessionRollupBucketsDirty(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		if oldStart.Valid && ev.Ts < oldStart.Int64 {
+			w.markDirtyRollupBucket(oldStart.Int64)
+		}
+	}
 	if err := w.catalog.onSessionStarted(ctx, tx, w.sourceFormat, ev); err != nil {
 		return err
 	}
