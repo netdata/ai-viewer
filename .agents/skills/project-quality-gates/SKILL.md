@@ -90,13 +90,13 @@ Enforcement: `scripts/check-coverage.sh coverage.out` fails if any gated (`inter
 ### Go — Fuzzing
 
 ```bash
-go test -fuzz=Fuzz -fuzztime=30s ./internal/adapters/...
-go test -fuzz=Fuzz -fuzztime=30s ./internal/canonical/...
+go test -run='^Fuzz' ./internal/adapters/...                                    # per-push: seed corpus, deterministic
+go test -run='^$' -fuzz='^FuzzParseSnapshot$' -fuzztime=5m ./internal/adapters/aiagent_v2/   # nightly: explore (one target per pkg)
 ```
 
-Every adapter and canonical decoder MUST expose at least one `FuzzXxx` target. CI runs each fuzz target for 30 seconds per push and for 5 minutes on nightly schedule. Crashes from nightly runs are auto-filed as GitHub issues (config in CI workflow).
+Every adapter parser exposes at least one `FuzzXxx` target (10 across the 5 adapter packages). `internal/canonical` has **no** fuzz target — it owns no parsers/decoders. CI per-push runs the seed corpus deterministically (`-run='^Fuzz'`, PR-blocking); `fuzz-nightly.yml` runs `-fuzz -fuzztime=5m` per target (non-blocking, uploads any crash reproducer). Commit a found reproducer under `testdata/fuzz/<Target>/` to make it a deterministic per-push regression. Auto-filing a GitHub issue on crash is a deferred follow-up.
 
-Threshold: zero crashes per run. Crashes block merge.
+Threshold: zero crashes per run. A seed-corpus crash blocks merge.
 
 ### Go — Benchmarks
 

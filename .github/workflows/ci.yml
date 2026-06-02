@@ -43,8 +43,13 @@
 #                  in the test job; nightly race stress (race-stress-nightly.yml).
 #                  Branch coverage, new-code-in-PR diff (SOW-0036), and a
 #                  per-push -count=3 / coverage PR comment were re-scoped/deferred.
-#     - SOW-0011 (pending) — fuzz targets + property tests + benchstat baseline
-#                  enforcement (replaces benchtime=1x smoke run below)
+#     - SOW-0011 (LANDED) — adapter fuzz seed corpus per push (deterministic;
+#                  the "Fuzz seed corpus" step); -fuzz exploration nightly
+#                  (fuzz-nightly.yml); rapid property tests. The benchstat
+#                  regression gate is LOCAL (workstation baseline is not
+#                  comparable to runner hardware), so the benchtime=1x smoke
+#                  below STAYS as the per-push bench signal and the gate's
+#                  hardware-independent self-test runs (scripts/test/check-bench-test.sh).
 #     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
 #                  enforcement (replaces bundle-size report below)
 #     - SOW-0013 — scripts/{gates,spec-drift}.sh + CodeQL workflow +
@@ -220,6 +225,17 @@ jobs:
             -coverprofile=coverage.out \
             -covermode=atomic \
             ./...
+
+      # Per-push fuzz gate (SOW-0011): run every adapter FuzzXxx target as a
+      # seed-corpus test (no -fuzz flag => deterministic; executes the f.Add
+      # seeds + any committed testdata/fuzz reproducers). The `./...` run above
+      # already exercises these, but this explicit step pins the gate so it
+      # survives test-job refactors and is legible. Non-deterministic -fuzz
+      # EXPLORATION runs nightly only (fuzz-nightly.yml), never per push (a crash
+      # found in unchanged code would block an unrelated PR, non-reproducibly).
+      - name: Fuzz seed corpus (deterministic)
+        if: steps.detect.outputs.go == 'true'
+        run: go test -run='^Fuzz' ./internal/adapters/...
 
       - name: Coverage summary
         if: steps.detect.outputs.go == 'true'

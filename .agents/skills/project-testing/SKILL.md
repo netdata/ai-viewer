@@ -51,7 +51,7 @@ cd frontend && npm run e2e -- --ui       # playwright UI mode
 | Adapter unit | `internal/adapters/<name>/*_test.go` | every commit |
 | Canonical/ingest/store unit | `internal/*/  *_test.go` | every commit |
 | Presenter handler | `internal/presenter/*_test.go` | every commit |
-| Go fuzz (parsers/decoders) | `internal/adapters/<name>/fuzz_test.go`, `internal/canonical/fuzz_test.go` | 30s every commit, 5min nightly |
+| Go fuzz (parsers) | `internal/adapters/<name>/{fuzz_test,*_fuzz_test}.go` (canonical has no parser → no fuzz target) | seed corpus per push (deterministic), 5min/target explore nightly |
 | Go property-based (canonical mapping) | `internal/canonical/property_test.go` (rapid-go) | every commit |
 | Go E2E (ingest → store → server) | `tests/e2e/*_test.go` | every commit |
 | Performance benchmark | `internal/adapters/<name>/bench_test.go`, `internal/store/bench_test.go`, etc. | every commit, fails on > 20% regression |
@@ -74,8 +74,8 @@ cd frontend && npm run e2e -- --ui       # playwright UI mode
 ## Mandatory Test Kinds
 
 - **Every adapter exposes at least one `FuzzXxx` target** covering its parse path.
-- **`internal/canonical` exposes a `FuzzXxx` target** for each decoder it owns.
-- **Performance-critical paths have benchmarks** with a baseline in `bench/baseline.txt`. Benchmarks run with `-count=5` for variance.
+- **`internal/canonical` exposes no `FuzzXxx` target** — it owns no decoders; all untrusted-bytes parsing (and thus all fuzzing) lives in the adapters.
+- **Performance-critical paths have benchmarks** (`bench/baseline.txt` baseline). `scripts/check-bench.sh` runs `-count=6` (benchstat's 0.95-CI minimum) and gates a statistically-significant > 20% sec/op regression per benchmark; it is a **local/workstation** gate (the workstation baseline is not comparable to CI-runner hardware), so CI runs only the bench compile-smoke + the gate's hardware-independent self-test.
 - **Concurrency-touching code is stress-tested with `scripts/test.sh --stress 10` (`-race -count=10`) locally**; CI runs `-count=1` per push and `-count=10` race stress nightly.
 - **Frontend E2E covers golden paths AND error states** (network failure, empty list, malformed SSE event). axe runs on every route.
 - **Every UI change has at least one Playwright assertion** that proves the behavior end-to-end. Component tests alone are not sufficient for user-visible behavior.

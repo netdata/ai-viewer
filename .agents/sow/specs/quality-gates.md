@@ -60,10 +60,9 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Fuzzing
 
-- Every adapter parser exposes at least one `FuzzXxx` target.
-- Every canonical decoder exposes at least one `FuzzXxx` target.
-- CI: 30 seconds per target per push, 5 minutes per target nightly.
-- Crashes from nightly runs are auto-filed as issues by the CI workflow.
+- Every adapter parser exposes at least one `FuzzXxx` target (10 targets across the 5 adapter packages). `internal/canonical` has **no** fuzz target — it owns no parsers/decoders (pure event types; all untrusted-bytes parsing lives in adapters).
+- **Per-push (deterministic, PR-blocking)**: `go test -run='^Fuzz' ./internal/adapters/...` runs every target's seed corpus (`f.Add` inputs + any committed `testdata/fuzz/` reproducers) as normal subtests. No `-fuzz` exploration runs per push — it is non-deterministic (a crash found in unchanged code would block an unrelated PR, and pass/fail would flip run-to-run).
+- **Nightly (exploration, non-blocking)**: `fuzz-nightly.yml` runs `go test -fuzz=<Target> -fuzztime=5m` per target (matrix, one target per package per invocation). A crash fails that target's job and uploads the reproducer as an artifact; commit it under `testdata/fuzz/<Target>/` so the per-push gate reproduces it deterministically until fixed. Auto-filing a GitHub issue on crash is a deferred follow-up (job-failure visibility + the artifact suffice).
 - Threshold: zero crashes per run.
 
 ### Go — Property-Based Tests
