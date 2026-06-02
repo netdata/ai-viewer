@@ -32,12 +32,14 @@ standard `ns/op` and `B/s`:
 |---|---|
 | `files/sec`             | files processed per second (wall) |
 | `events/sec`            | canonical events emitted per second |
-| `peak_rss_mb`           | process RSS sample after the run; hard cap **200 MB** |
+| `peak_heap_mb`          | peak `runtime.MemStats.HeapInuse` observed during the run |
 | `corpus_compressed_mb`  | total compressed input the bench wrote |
 
-The 200 MB RSS cap reflects `adapter-aiagent-v2.md` §Memory: the
-streamer kicks in at 50 MiB compressed and the bench corpus
-deliberately includes files above that threshold to exercise it.
+The corpus stays **below** the 50 MiB compressed streamer threshold:
+it measures the small/medium-file fast path that dominates real
+throughput (>99.9% of operator files). Streamer correctness is
+exercised separately by `streamer_test.go` (`TestStreamer_*`), and
+streamer throughput end-to-end by the real-data harness.
 
 ## Real-data harness
 

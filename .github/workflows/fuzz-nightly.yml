@@ -41,17 +41,20 @@ jobs:
       # One target crashing must not cancel the other targets' exploration.
       fail-fast: false
       matrix:
+        # `slug` (package basename) disambiguates the crash-artifact name —
+        # FuzzParseCursor/FuzzParseLine repeat across packages, so a target-only
+        # artifact name would collide if two same-named jobs crash in one run.
         include:
-          - { pkg: internal/adapters/aiagent_v2, target: FuzzParseSnapshot }
-          - { pkg: internal/adapters/aiagent_v2, target: FuzzParseCursor }
-          - { pkg: internal/adapters/aiagent_v3, target: FuzzParseLine }
-          - { pkg: internal/adapters/aiagent_v3, target: FuzzParseCursor }
-          - { pkg: internal/adapters/claude_code, target: FuzzParseLine }
-          - { pkg: internal/adapters/claude_code, target: FuzzParseCursor }
-          - { pkg: internal/adapters/codex, target: FuzzParseLine }
-          - { pkg: internal/adapters/codex, target: FuzzParseCursor }
-          - { pkg: internal/adapters/opencode, target: FuzzDecodeMessageData }
-          - { pkg: internal/adapters/opencode, target: FuzzDecodePartData }
+          - { pkg: internal/adapters/aiagent_v2, target: FuzzParseSnapshot, slug: aiagent_v2 }
+          - { pkg: internal/adapters/aiagent_v2, target: FuzzParseCursor, slug: aiagent_v2 }
+          - { pkg: internal/adapters/aiagent_v3, target: FuzzParseLine, slug: aiagent_v3 }
+          - { pkg: internal/adapters/aiagent_v3, target: FuzzParseCursor, slug: aiagent_v3 }
+          - { pkg: internal/adapters/claude_code, target: FuzzParseLine, slug: claude_code }
+          - { pkg: internal/adapters/claude_code, target: FuzzParseCursor, slug: claude_code }
+          - { pkg: internal/adapters/codex, target: FuzzParseLine, slug: codex }
+          - { pkg: internal/adapters/codex, target: FuzzParseCursor, slug: codex }
+          - { pkg: internal/adapters/opencode, target: FuzzDecodeMessageData, slug: opencode }
+          - { pkg: internal/adapters/opencode, target: FuzzDecodePartData, slug: opencode }
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -79,7 +82,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          name: fuzz-crash-${{ matrix.slug }}-${{ matrix.target }}-${{ github.run_id }}
           path: ${{ matrix.pkg }}/testdata/fuzz/
           if-no-files-found: ignore
           retention-days: 30

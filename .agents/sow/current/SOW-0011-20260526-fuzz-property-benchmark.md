@@ -13,11 +13,11 @@ Sub-state: drafted 2026-05-26 alongside SOW-0009 and SOW-0010. **Activated 2026-
 Drafted 2026-05-26 assuming **zero** fuzz/property/benchmark coverage; the measured live delta (see "Pre-measurement — 2026-06-02" below) supersedes that premise. Decisions:
 
 1. **AC#1 (adapter fuzz) — ALREADY SATISFIED**: 10 `FuzzXxx` targets exist across all 5 adapters. Scope narrows to verifying them + adding committed seed corpora (`testdata/fuzz/`) where absent.
-2. **AC#2 (canonical fuzz) — IN SCOPE**: enumerate the `internal/canonical` decoders at impl start; add ≥1 `FuzzXxx` per decoder.
+2. **AC#2 (canonical fuzz) — IN SCOPE**: enumerate the `internal/canonical` decoders at impl start; add ≥1 `FuzzXxx` per decoder. **[SUPERSEDED by the Enumeration below: `internal/canonical` has NO decoders — AC#2 satisfied by ZERO; all fuzz targets live in the adapters.]**
 3. **AC#4 (property tests, `rapid`, 5 invariants) — IN SCOPE**: add `pgregory.net/rapid` + `internal/canonical/property_test.go` with the five named invariants.
-4. **AC#5/#6 (benchmarks + baseline) — IN SCOPE (partial today)**: 1 of 6 benchmarks exists (`aiagent_v2` Scan). Add the 5 missing (adapter `Tail`, canonical encode/decode, SQLite batch insert, REST query, SSE fanout); add the implementing-commit-SHA header to `bench/baseline.txt`.
+4. **AC#5/#6 (benchmarks + baseline) — IN SCOPE (partial today)**: 1 of 6 benchmarks exists (`aiagent_v2` Scan). Add the 5 missing (adapter `Tail`, canonical encode/decode, SQLite batch insert, REST query, SSE fanout); add the implementing-commit-SHA header to `bench/baseline.txt`. **[SUPERSEDED by the Enumeration below: FIVE benchmarks total, not six — there is no canonical encode/decode benchmark (canonical is construct-only, never serialized); `count=6`.]**
 5. **AC#7 (`scripts/check-bench.sh` + benchstat regression gate) — IN SCOPE**: build it with self-tests (a synthetic-regression must fail it); ≤ 20% threshold.
-6. **AC#3 (CI fuzz wiring) — IN SCOPE for the per-push 30s + nightly 5min runs that FAIL the job on a crash. Auto-file-GitHub-issue-on-crash — DEFERRED** to a follow-up: a failed nightly fuzz job is already visible (red CI + GitHub workflow-failure notifications); auto-issue-with-crashing-input adds non-trivial CI machinery (issue create + artifact attach + dedup) for marginal value over job-failure visibility. Mirrors SOW-0010's deferral of reporting niceties; the crash-fails-the-gate behaviour is the value.
+6. **AC#3 (CI fuzz wiring) — IN SCOPE for the per-push 30s + nightly 5min runs that FAIL the job on a crash. Auto-file-GitHub-issue-on-crash — DEFERRED** **[SUPERSEDED by the Execution Log: per-push runs the DETERMINISTIC seed corpus (`go test -run='^Fuzz'`, NO `-fuzz`); the non-deterministic `-fuzz` exploration is nightly only.]** to a follow-up: a failed nightly fuzz job is already visible (red CI + GitHub workflow-failure notifications); auto-issue-with-crashing-input adds non-trivial CI machinery (issue create + artifact attach + dedup) for marginal value over job-failure visibility. Mirrors SOW-0010's deferral of reporting niceties; the crash-fails-the-gate behaviour is the value.
 7. **AC#10 (bench sticky PR comment) — DEFERRED** (reporting nicety; artifact upload suffices; follow-up or fold into SOW-0013 CI wiring), mirroring SOW-0010.
 8. **Doc-drift reconcile — IN SCOPE**: `quality-gates.md`, `project-testing`, `project-quality-gates` currently over-claim canonical fuzz / property tests / fuzz-CI / the bench regression gate as present; bring them to reality in lockstep as each lands (the severe drift cluster from the pre-measurement).
 
@@ -295,6 +295,16 @@ All 3 returned (minimax completed — the no-run-tests instruction fixed its rou
 - **Exhaustive re-grep** of the full drift class (`baseline.json` / `BackfillV2`-in-baseline / `store/bench_test` / `5 benchmark packages` / canonical-decoder-fuzz / bench-in-CI / PR-time) → **zero active instances** across all active docs (done SOWs + the banner-covered SOW-0011 draft excluded). This round closes the doc-drift long tail (rounds 3-4 chased it across AGENTS.md, the specs, the skills, testing-strategy, bench/README, baseline.txt, workflow.md, project-workflow).
 - Gates: no Go touched (golangci-lint/race unchanged from `6ce5b41`); fuzz-pin `got==want`, actionlint clean, check-bench self-test 8/8, scans clean.
 - **Next**: re-review round 5 to confirm convergence → on clean, PR → self-merge → close.
+
+### 2026-06-03 — External review round 5 (codex + glm + minimax) + fixes
+
+**codex** (decisive): no P1; 2 P2 + 1 P3. **glm** + **minimax**: mergeable, cosmetic P3 only — both again MISSED codex's 2 P2s (the pattern across all 5 rounds — codex decisive, glm/minimax lenient/incomplete). codex's findings verified real on ground truth; fixed (this commit):
+- **Fuzz crash-artifact name collision** (codex P2 — a real CI bug, not doc-drift): `fuzz-nightly.yml`'s artifact name was `fuzz-crash-<target>-<runid>`, but `FuzzParseCursor`/`FuzzParseLine` repeat across packages, so two same-named jobs crashing in one run would collide (`upload-artifact@v7` errors / drops a reproducer). Added a `slug` (package basename) per matrix entry → `fuzz-crash-<slug>-<target>-<runid>`, unique per job.
+- **bench/README.md Scan-detail drift** (codex P2): the metrics table said `peak_rss_mb` (code reports `peak_heap_mb`) and claimed the corpus "includes files above the 50 MiB streamer threshold" (the code deliberately stays BELOW it — verified `bench_test.go`). Corrected both — the last spot of the round-3/4 README pass.
+- **SOW Re-scope sub-bullets** (codex P3): annotated the 3 pre-Enumeration bullets (canonical-fuzz-in-scope, 6 benchmarks, per-push 30s) inline as **[SUPERSEDED]** so a grep of the durable memory isn't misled.
+- glm/minimax cosmetic P3s (countRows hardcoded-literal SQL concat; BenchmarkTail/notify informational-metric shape) — verified non-issues, no action.
+- No Go touched; `actionlint` clean, scans clean.
+- **Next**: re-review round 6 to confirm convergence → on clean, PR → self-merge → close.
 
 ## Validation
 
