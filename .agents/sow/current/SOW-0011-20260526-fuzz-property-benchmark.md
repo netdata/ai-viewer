@@ -229,7 +229,13 @@ This SOW was drafted 2026-05-26 assuming **zero** fuzz/property/benchmark covera
 
 ## Execution Log
 
-Pending.
+### 2026-06-02 — Activation + implementation (master orchestrator; Go code by subagents)
+
+- **Activated + re-scoped** (see "Re-scope decisions" + "Enumeration" above): AC#1 ✅ pre-satisfied (10 adapter fuzz targets exist); AC#2 ✅ zero-needed (`internal/canonical` has no decoders — verified `rg`); AC#5 reduced 6→5 (no canonical encode/decode — canonical events are construct-only, never serialized).
+- **Chunk A — property tests** (commit `a7deb58`): `pgregory.net/rapid v1.3.0` + `internal/canonical/property_test.go` (5 invariants). Master-verified independently (NOT the subagent summary): `go test -race ./internal/canonical` ok, golangci-lint 0, gofmt clean. The `[BrokenImport]` gopls diagnostic was LSP lag, disproved by running the real toolchain.
+- **Chunk B — benchmarks** (commit `1ebb47e`): the 4 new `BenchmarkXxx` (aiagent_v2 `Tail`→`processOnce`, ingest `worker.flush`, presenter `handleSessionsList`, notify `Hub.Deliver`) + the spec 6→5 correction. Master-verified: all 5 compile+run, golangci-lint 0. (The gopls `modernize` hints — rangeint/bloop/newexpr — are not in `.golangci.yml`, so not gated; left for convention consistency with the existing Scan bench.)
+- **Chunk C — bench regression gate** (this commit): `scripts/check-bench.sh` (benchstat; statistically-significant **> 20% sec/op** per-benchmark; geomean + custom metrics excluded) + `scripts/test/check-bench-test.sh` (4/4 self-test, CI-wired) + `bench/baseline.txt` (count=6 + commit-SHA header + `goos/goarch/pkg/cpu` config lines). CTO re-scopes (measured reality): **count 5→6** (benchstat needs ≥6 for a 0.95 CI); the gate is **local/workstation, not CI** (workstation baseline ≠ GitHub-runner hardware) — CI keeps the bench compile-smoke + the hardware-independent self-test. **Two gate bugs caught during master verification**: a vacuous pass (baseline lacked the `goos/pkg/cpu` config lines → benchstat silently compared disjoint groups → single-column "no vs base" output) and a geomean false-positive (the noise-sensitive aggregate moved +36% while every individual benchmark was `~` insignificant → excluded geomean, gate per-benchmark only).
+- **Pending**: Chunk D — per-push + nightly CI fuzz wiring + adapter seed corpora + reconcile the fuzz doc-drift (canonical-decoder fuzz → adapters-only). Then external review → converge → PR → merge → close.
 
 ## Validation
 
@@ -245,7 +251,9 @@ Pending.
 
 ## Followup
 
-None yet.
+- **Improve `BenchmarkTail_SyntheticAppend` determinism**: it has ~±200% run-to-run variance (per-iteration high-entropy file rewrite + I/O + GC), so benchstat marks it `~` and it carries no usable regression signal. The other 4 benchmarks are stable (±1–9%). Re-design (fixed content / pinned `-benchtime` / steadier I/O) so it becomes a real signal, or drop it. (Found in Chunk C verification, 2026-06-02.)
+- **Runner-baselined CI bench-regression gate**: `check-bench.sh` is workstation-local because `bench/baseline.txt` is not comparable to GitHub-runner hardware. A CI regression gate needs a baseline captured ON the CI runner (separate runner-baseline file + higher-variance handling) — deferred.
+- **Auto-file a GitHub issue on a nightly fuzz crash** (orig AC#3) and the **bench-results PR sticky comment** (orig AC#10): deferred reporting niceties (per the Re-scope decisions); job-failure visibility + artifact upload suffice for now.
 
 ## Regression Log
 

@@ -101,13 +101,13 @@ Threshold: zero crashes per run. Crashes block merge.
 ### Go — Benchmarks
 
 ```bash
-go test -run=^$ -bench=. -benchmem -count=5 ./... > bench-current.txt
-benchstat bench/baseline.txt bench-current.txt
+scripts/check-bench.sh             # count=6, benchstat vs bench/baseline.txt, > 20% sec/op gate
+scripts/test/check-bench-test.sh   # hardware-independent self-test of the gate's benchstat parser
 ```
 
 Marked benchmarks (`func BenchmarkXxx`) exist for the 5 performance-critical paths: adapter `Scan`, adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
 
-Threshold: ≤ 20% regression in any metric vs. `bench/baseline.txt`. The baseline updates only when a SOW explicitly accepts a regression with justification.
+Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries the commit SHA + `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update).
 
 ### Go — Race + Stress
 

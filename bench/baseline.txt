@@ -1,17 +1,61 @@
 # ai-viewer benchmark baseline
-# Hardware: 12th Gen Intel(R) Core(TM) i9-12900K (16 logical CPUs), 125 GiB RAM, NVMe SSD
-# Method: synthetic Go bench from `go test -bench` (single warm run); real-corpus from
-#         a single warm run of `scripts/bench-v2-backfill.sh` against
-#         ~/.ai-agent/sessions (294,316 files, 25.4 GB compressed). Page cache state at
-#         the time of the run is documented in bench/v2-backfill-2026-05-27.txt.
-# Quality gate: per .agents/sow/specs/quality-gates.md §Go Benchmarks, future runs
-#               compare via `benchstat bench/baseline.txt bench-current.txt` and must
-#               not regress > 20% on any metric without a SOW that explicitly accepts.
+# Commit: 1ebb47ebe893d956445c3e030bfc2f0639f9b147 (SOW-0011 Chunk B — the code these measure)
+# Generated: go test -run=^$ -bench=. -benchmem -count=6  (2026-06-02, i9-12900K, GOMAXPROCS=16)
+#   count=6 is benchstat's minimum for a 0.95 confidence interval. The goos/goarch/pkg/cpu
+#   config lines below are REQUIRED — benchstat groups by them, so baseline and the gate's
+#   current run must share the same config to be compared (not silently put in disjoint groups).
+# Quality gate: scripts/check-bench.sh runs `benchstat bench/baseline.txt bench-current.txt`
+#   and FAILS on a > 20% sec/op regression for any benchmark. Only sec/op is gated; the custom
+#   ReportMetric values (B/s, events/sec, peak_heap_mb, ...) are informational. Baseline refresh
+#   requires an explicit SOW (check-bench.sh has no auto-update mode).
+# Real-corpus (operator-run, scripts/bench-v2-backfill.sh) is recorded below for trend only.
 
-# Synthetic in-package Go bench (1,024 synthetic v2 .json.gz fixtures, mixed sizes
-# including a few > 50 MiB to exercise the streamer). i9-12900K, GOMAXPROCS=16.
-BenchmarkScan_SyntheticCorpus-16       8       138781449 ns/op    57.16 MB/s    106657 events/sec    7206 files/sec    4.453 peak_heap_mb    134795306 B/op    225804 allocs/op
+goos: linux
+goarch: amd64
+pkg: github.com/netdata/ai-viewer/internal/adapters/aiagent_v2
+cpu: 12th Gen Intel(R) Core(TM) i9-12900K
+BenchmarkScan_SyntheticCorpus-16    	       8	 135156378 ns/op	  58.69 MB/s	         4.884 corpus_compressed_mb	    109518 events/sec	      7399 files/sec	         3.688 peak_heap_mb	134700054 B/op	  225762 allocs/op
+BenchmarkScan_SyntheticCorpus-16    	       8	 134604838 ns/op	  58.93 MB/s	         4.884 corpus_compressed_mb	    109966 events/sec	      7429 files/sec	         4.180 peak_heap_mb	134703853 B/op	  225776 allocs/op
+BenchmarkScan_SyntheticCorpus-16    	       8	 140446141 ns/op	  56.48 MB/s	         4.884 corpus_compressed_mb	    105393 events/sec	      7120 files/sec	         4.016 peak_heap_mb	134703252 B/op	  225774 allocs/op
+BenchmarkScan_SyntheticCorpus-16    	       8	 133468205 ns/op	  59.43 MB/s	         4.884 corpus_compressed_mb	    110903 events/sec	      7492 files/sec	         4.172 peak_heap_mb	134702937 B/op	  225778 allocs/op
+BenchmarkScan_SyntheticCorpus-16    	       8	 135716671 ns/op	  58.45 MB/s	         4.884 corpus_compressed_mb	    109065 events/sec	      7368 files/sec	         4.750 peak_heap_mb	134702568 B/op	  225774 allocs/op
+BenchmarkScan_SyntheticCorpus-16    	       8	 138498194 ns/op	  57.27 MB/s	         4.884 corpus_compressed_mb	    106875 events/sec	      7220 files/sec	         3.867 peak_heap_mb	134704768 B/op	  225783 allocs/op
+BenchmarkTail_SyntheticAppend-16    	    9447	    222146 ns/op	  26.38 MB/s	    135046 events/sec	        74.21 peak_heap_mb	   94189 B/op	     424 allocs/op
+BenchmarkTail_SyntheticAppend-16    	    2421	    564135 ns/op	  10.39 MB/s	     53179 events/sec	        20.23 peak_heap_mb	   94209 B/op	     424 allocs/op
+BenchmarkTail_SyntheticAppend-16    	    2350	    487010 ns/op	  12.03 MB/s	     61600 events/sec	        19.76 peak_heap_mb	   94210 B/op	     424 allocs/op
+BenchmarkTail_SyntheticAppend-16    	    8935	    128161 ns/op	  45.72 MB/s	    234080 events/sec	        69.37 peak_heap_mb	   94189 B/op	     424 allocs/op
+BenchmarkTail_SyntheticAppend-16    	    9076	    138326 ns/op	  42.36 MB/s	    216880 events/sec	        70.84 peak_heap_mb	   94189 B/op	     424 allocs/op
+BenchmarkTail_SyntheticAppend-16    	    7797	    137546 ns/op	  42.60 MB/s	    218109 events/sec	        64.50 peak_heap_mb	   94190 B/op	     424 allocs/op
+goos: linux
+goarch: amd64
+pkg: github.com/netdata/ai-viewer/internal/ingest
+cpu: 12th Gen Intel(R) Core(TM) i9-12900K
+BenchmarkBatchInsert-16    	       9	 119038652 ns/op	       530.0 batch_events	      4452 events/sec	         3.969 peak_heap_mb	 6568499 B/op	  113731 allocs/op
+BenchmarkBatchInsert-16    	       9	 120031089 ns/op	       530.0 batch_events	      4416 events/sec	         4.164 peak_heap_mb	 6546082 B/op	  113693 allocs/op
+BenchmarkBatchInsert-16    	       9	 118356011 ns/op	       530.0 batch_events	      4478 events/sec	         4.266 peak_heap_mb	 6553532 B/op	  113699 allocs/op
+BenchmarkBatchInsert-16    	       9	 117985012 ns/op	       530.0 batch_events	      4492 events/sec	         3.984 peak_heap_mb	 6540711 B/op	  113682 allocs/op
+BenchmarkBatchInsert-16    	       9	 118645727 ns/op	       530.0 batch_events	      4467 events/sec	         4.117 peak_heap_mb	 6544225 B/op	  113689 allocs/op
+BenchmarkBatchInsert-16    	       9	 119293384 ns/op	       530.0 batch_events	      4443 events/sec	         4.047 peak_heap_mb	 6549628 B/op	  113695 allocs/op
+goos: linux
+goarch: amd64
+pkg: github.com/netdata/ai-viewer/internal/presenter
+cpu: 12th Gen Intel(R) Core(TM) i9-12900K
+BenchmarkSessionsListQuery-16    	    2076	    548314 ns/op	      1824 requests/sec	       100.0 rows	  128797 B/op	    3179 allocs/op
+BenchmarkSessionsListQuery-16    	    2289	    548519 ns/op	      1823 requests/sec	       100.0 rows	  129764 B/op	    3179 allocs/op
+BenchmarkSessionsListQuery-16    	    2032	    546902 ns/op	      1828 requests/sec	       100.0 rows	  129724 B/op	    3179 allocs/op
+BenchmarkSessionsListQuery-16    	    2257	    535178 ns/op	      1869 requests/sec	       100.0 rows	  129195 B/op	    3179 allocs/op
+BenchmarkSessionsListQuery-16    	    2316	    537421 ns/op	      1861 requests/sec	       100.0 rows	  129575 B/op	    3179 allocs/op
+BenchmarkSessionsListQuery-16    	    2085	    553240 ns/op	      1808 requests/sec	       100.0 rows	  129641 B/op	    3179 allocs/op
+goos: linux
+goarch: amd64
+pkg: github.com/netdata/ai-viewer/internal/notify
+cpu: 12th Gen Intel(R) Core(TM) i9-12900K
+BenchmarkHubFanout-16    	 1000000	      1226 ns/op	    815564 deliveries/sec	      1000 subscriptions	       7 B/op	       0 allocs/op
+BenchmarkHubFanout-16    	 1000000	      1314 ns/op	    761026 deliveries/sec	      1000 subscriptions	       7 B/op	       0 allocs/op
+BenchmarkHubFanout-16    	 1000000	      1213 ns/op	    824383 deliveries/sec	      1000 subscriptions	       7 B/op	       0 allocs/op
+BenchmarkHubFanout-16    	 1000000	      1266 ns/op	    789818 deliveries/sec	      1000 subscriptions	       7 B/op	       0 allocs/op
+BenchmarkHubFanout-16    	 1000000	      1212 ns/op	    825038 deliveries/sec	      1000 subscriptions	       7 B/op	       0 allocs/op
+BenchmarkHubFanout-16    	 1000000	      1194 ns/op	    837468 deliveries/sec	      1000 subscriptions	       7 B/op	       0 allocs/op
 
-# Real-corpus end-to-end backfill. Operator workstation, page cache cold at start
-# (no pre-warm). Hard SOW-0001 gate: < 60 min.
+# Real-corpus end-to-end backfill (operator workstation, cold cache). SOW-0001 gate: < 60 min.
 BackfillV2_RealCorpus    wall=2m11.665s    files=294316    files_per_sec=2235.3    bytes=25.40GB_compressed    throughput=197.54MB/s    peak_rss=6073MB    workers=16    streamed=22    zero_byte=29    tmp_skip=2    parse_errors=0    events=20869087

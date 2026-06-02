@@ -74,9 +74,9 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 ### Go — Benchmarks
 
 - Marked benchmarks for the 5 performance-critical paths: adapter `Scan` + adapter `Tail` (`internal/adapters/aiagent_v2`), SQLite batch insert (`internal/ingest` `worker.flush`), REST query path (`internal/presenter` `handleSessionsList`), SSE fanout (`internal/notify` `Hub.Deliver`). There is **no canonical encode/decode** benchmark — canonical events are constructed directly by adapters and never serialized (`internal/canonical` has no encoders/decoders).
-- `go test -run=^$ -bench=. -benchmem -count=5 ./... > bench-current.txt`
-- `benchstat bench/baseline.txt bench-current.txt`
-- Threshold: ≤ 20% regression in any metric vs `bench/baseline.txt`. Baseline updates only on explicit SOW approval.
+- `scripts/check-bench.sh` runs `go test -run=^$ -bench=. -benchmem -count=6` over the 5 benchmark packages and compares to `bench/baseline.txt` via `benchstat` (`-count=6` is benchstat's minimum for a 0.95 confidence interval).
+- Threshold: a **statistically-significant > 20% sec/op regression for any individual benchmark** fails the gate. Only **sec/op** is gated — the custom `ReportMetric` values (B/s, events/sec, peak_heap_mb, …) are informational (peak_heap_mb is benchtime-sensitive), and the per-block `geomean` aggregate is excluded (a noisy benchmark moves it without any single benchmark significantly regressing). Self-tested by `scripts/test/check-bench-test.sh`.
+- **`check-bench.sh` is a local/workstation gate**, not a CI gate: `bench/baseline.txt` is workstation-measured and is not comparable to GitHub-runner hardware. CI keeps the bench compile-smoke (`-benchtime=1x`, artifact-uploaded for trend) and runs the hardware-independent gate self-test; a runner-baselined CI regression gate is a deferred follow-up. `bench/baseline.txt` carries the implementing commit SHA and the `goos/goarch/pkg/cpu` config lines (benchstat groups by config — baseline and current must share it). Baseline refresh requires an explicit SOW (no auto-update).
 
 ### Go — Rollup Correctness Diff (SOW-0007)
 

@@ -242,6 +242,17 @@ jobs:
           chmod +x scripts/test/check-coverage-test.sh
           ./scripts/test/check-coverage-test.sh
 
+      - name: Self-test bench gate
+        if: steps.detect.outputs.go == 'true'
+        # The bench REGRESSION gate (scripts/check-bench.sh) is a local/workstation
+        # tool: its baseline is workstation-measured and is not comparable to
+        # GitHub-runner hardware, so it is not run as a CI gate here. Its benchstat
+        # parser is hardware-independent, so the synthetic-fixture self-test runs in
+        # CI to keep the gate script itself correct (SOW-0011).
+        run: |
+          chmod +x scripts/test/check-bench-test.sh
+          ./scripts/test/check-bench-test.sh
+
       # Build-failing coverage gate (SOW-0010): aggregate + per-package >= 80%
       # statement coverage on the gated internal/* packages (import path contains
       # /internal/ and not /cmd/; non-internal vendored Go is excluded). Runs
