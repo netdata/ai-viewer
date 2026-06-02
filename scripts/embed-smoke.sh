@@ -56,24 +56,31 @@ mkdir -p "$emptysrc"
 
 # Seed a schema'd DB: ai-viewer-serve refuses to start unless the store carries
 # the expected schema_meta.version (CheckSchema at startup). The ingester runs
-# all migrations synchronously inside OpenWriter and logs each "migration
-# applied" before it does anything else; the last migration
-# (0005_op_duration_backfill.sql) sets the version this binary expects (the
-# latest serve-relevant migration sets it; 0005 is the latest). Poll for that line — it is
-# emitted on a fresh DB regardless of source discovery, so we never kill the
-# process mid-migration (a bare file-exists check is race-prone: OpenWriter
-# creates the file before migrations finish), and proceeding only after the
-# last migration guarantees serve's version gate is satisfied. An explicit
-# --source on an empty dir bypasses auto-discovery, so the seed never scans a
-# developer's real ~/.ai-agent on a local run. Info level so the migration
-# lines are emitted.
-echo -e "${GRAY}seeding schema'd DB at${NC} $db" >&2
+# all migrations synchronously inside OpenWriter and logs "migration applied"
+# with each migration's filename before it does anything else. Wait for the LAST
+# migration's line — derived dynamically from internal/store/migrations/ so it
+# never drifts when a new migration lands — then kill the ingester. Waiting for
+# the *last* migration is race-free (nothing runs after it) and guarantees the DB
+# reached the version serve's gate requires. (Regression SOW-0007 → SOW-0010: a
+# hardcoded "0005_op_duration_backfill.sql" marker killed the ingester before
+# 0006/0007 ran once those migrations landed → seeded an un-finished v5 DB that
+# serve rejected; it surfaced as a flaky embed-smoke. A bare file-exists check is
+# also race-prone: OpenWriter creates the file before migrations finish.) An
+# explicit --source on an empty dir bypasses auto-discovery, so the seed never
+# scans a developer's real ~/.ai-agent on a local run. Info level so the
+# migration lines are emitted.
+last_migration="$(basename "$(ls "$REPO_ROOT"/internal/store/migrations/*.sql | sort | tail -1)")"
+if [[ -z "$last_migration" ]]; then
+  echo -e "${RED}[ERROR]${NC} no migrations found under internal/store/migrations/" >&2
+  exit 1
+fi
+echo -e "${GRAY}seeding schema'd DB at${NC} $db ${GRAY}(awaiting migration${NC} $last_migration${GRAY})${NC}" >&2
 "$INGEST_BIN" --db "$db" --state-dir "$tmp" --log-level info \
   --source "aiagent_v3:$emptysrc" > "$tmp/ingest.log" 2>&1 &
 ing_pid=$!
 seeded=0
 for _ in $(seq 1 100); do
-  if grep -q '0005_op_duration_backfill.sql' "$tmp/ingest.log"; then
+  if grep -q "$last_migration" "$tmp/ingest.log"; then
     seeded=1; break
   fi
   # Bail early if the ingester died before migrations completed.

@@ -93,7 +93,7 @@ A sanitization helper script lives at `scripts/sanitize-fixture.sh` (built durin
 
 ## Coverage Targets
 
-**Enforced gate** — statement coverage via `scripts/check-coverage.sh` (authority: `quality-gates.md` "Go — Coverage"): every gated `internal/*` package ≥ 80% statements AND their aggregate ≥ 80%; `/cmd/` (binaries + dev tools) is excluded (reported, not gated). Branch coverage and new-code-in-PR ≥ 90% are deferred (SOW-0036). Go has no first-class branch coverage and no `//coverage:ignore` directive — neither is used here.
+**Enforced gate** — statement coverage via `scripts/check-coverage.sh` (authority: `quality-gates.md` "Go — Coverage"): every gated `internal/*` package ≥ 80% statements AND their aggregate ≥ 80%; `/cmd/` (binaries + dev tools) is excluded (reported, not gated). Branch coverage and new-code-in-PR ≥ 90% are deferred (SOW-0036). Go has no first-class branch coverage. The Go toolchain also has no `//coverage:ignore` directive. Neither mechanism is used here.
 
 Non-gated aspirational aims (guide where to invest test effort; not enforced):
 - ingest / store / canonical: aim > 90%.

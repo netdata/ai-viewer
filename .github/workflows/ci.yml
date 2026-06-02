@@ -483,6 +483,15 @@ jobs:
           fi
           echo "frontend_dist/ tree clean after build (only .gitkeep tracked)."
 
+      - name: Guard embed-smoke seed marker (regression SOW-0007)
+        if: steps.detect.outputs.ready == 'true'
+        shell: bash
+        # The seed must wait for the dynamically-derived LAST migration, not a
+        # hardcoded one — a stale 0005 marker once seeded an un-finished v5 DB
+        # serve rejected (flaky). Fast content guard; the smoke run below is the
+        # behavioral test.
+        run: bash scripts/test/embed-smoke-seed-marker-test.sh
+
       - name: Serve the built UI and assert it is real
         if: steps.detect.outputs.ready == 'true'
         shell: bash
