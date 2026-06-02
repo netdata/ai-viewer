@@ -109,31 +109,43 @@ func seedRollupFixture(t *testing.T, db *sql.DB) rollupAnchors {
 
 	// Day 25 (closed): two ops in one session, anthropic/claude, shell.Bash.
 	seedRollupSession(t, db, "s25", "aiagent_v3:/p", "nedi", "anthropic", "/w1", atOffset(a.day25, 9, 0))
-	seedRollupOp(t, db, rollupOpSpec{id: "o25a", sess: "s25", seq: 1, kind: "llm", name: "claude-opus", model: "claude-opus",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "o25a", sess: "s25", seq: 1, kind: "llm", name: "claude-opus", model: "claude-opus",
 		provider: "anthropic", start: atOffset(a.day25, 9, 0), dur: 1000, status: "completed",
-		tokIn: 100, tokOut: 200, cost: 0.10})
-	seedRollupOp(t, db, rollupOpSpec{id: "o25b", sess: "s25", seq: 2, kind: "tool", name: "Bash", toolNS: "shell",
-		start: atOffset(a.day25, 9, 30), dur: 300, status: "completed", tokIn: 10, tokOut: 20, cost: 0.01})
+		tokIn: 100, tokOut: 200, cost: 0.10,
+	})
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "o25b", sess: "s25", seq: 2, kind: "tool", name: "Bash", toolNS: "shell",
+		start: atOffset(a.day25, 9, 30), dur: 300, status: "completed", tokIn: 10, tokOut: 20, cost: 0.01,
+	})
 
 	// Day 26 (closed): a gpt op on codex + a FAILED tool op, agent "worker".
 	seedRollupSession(t, db, "s26", "codex:/p", "worker", "openai", "/w2", atOffset(a.day26, 14, 0))
-	seedRollupOp(t, db, rollupOpSpec{id: "o26a", sess: "s26", seq: 1, kind: "llm", name: "gpt-5", model: "gpt-5",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "o26a", sess: "s26", seq: 1, kind: "llm", name: "gpt-5", model: "gpt-5",
 		provider: "openai", start: atOffset(a.day26, 14, 0), dur: 2000, status: "completed",
-		tokIn: 50, tokOut: 60, cost: 0.05})
-	seedRollupOp(t, db, rollupOpSpec{id: "o26b", sess: "s26", seq: 2, kind: "tool", name: "Read", toolNS: "fs",
-		start: atOffset(a.day26, 14, 10), dur: 100, status: "failed", tokIn: 5, tokOut: 5, cost: 0.0})
+		tokIn: 50, tokOut: 60, cost: 0.05,
+	})
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "o26b", sess: "s26", seq: 2, kind: "tool", name: "Read", toolNS: "fs",
+		start: atOffset(a.day26, 14, 10), dur: 100, status: "failed", tokIn: 5, tokOut: 5, cost: 0.0,
+	})
 
 	// Closed hour TODAY (11:00) — a closed hour inside the still-open day.
 	seedRollupSession(t, db, "s27a", "aiagent_v3:/p", "nedi", "anthropic", "/w1", a.closedHourToday)
-	seedRollupOp(t, db, rollupOpSpec{id: "o27a", sess: "s27a", seq: 1, kind: "llm", name: "claude-opus", model: "claude-opus",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "o27a", sess: "s27a", seq: 1, kind: "llm", name: "claude-opus", model: "claude-opus",
 		provider: "anthropic", start: a.closedHourToday, dur: 500, status: "completed",
-		tokIn: 70, tokOut: 80, cost: 0.07})
+		tokIn: 70, tokOut: 80, cost: 0.07,
+	})
 
 	// OPEN hour (op at exactly `now`): claude on anthropic, agent nedi.
 	seedRollupSession(t, db, "s27open", "aiagent_v3:/p", "nedi", "anthropic", "/w1", a.openHour)
-	seedRollupOp(t, db, rollupOpSpec{id: "o27open", sess: "s27open", seq: 1, kind: "llm", name: "claude-opus", model: "claude-opus",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "o27open", sess: "s27open", seq: 1, kind: "llm", name: "claude-opus", model: "claude-opus",
 		provider: "anthropic", start: a.openHour, dur: 0, status: "running",
-		tokIn: 9, tokOut: 0, cost: 0.009})
+		tokIn: 9, tokOut: 0, cost: 0.009,
+	})
 	return a
 }
 
@@ -364,9 +376,11 @@ func TestStatsAggregate_FoldOrderDeterminism(t *testing.T) {
 	// float-order-sensitive (1e16 absorbs/cancels the 1.0 depending on order).
 	costByID := map[string]float64{"opc": -1e16, "opa": 1e16, "opb": 1.0}
 	for i, id := range []string{"opc", "opa", "opb"} {
-		seedRollupOp(t, db, rollupOpSpec{id: id, sess: "sess", seq: int64(i + 1), kind: "llm",
+		seedRollupOp(t, db, rollupOpSpec{
+			id: id, sess: "sess", seq: int64(i + 1), kind: "llm",
 			name: "claude-opus", model: "claude-opus", provider: "anthropic",
-			start: start, dur: 100, status: "completed", cost: costByID[id]})
+			start: start, dur: 100, status: "completed", cost: costByID[id],
+		})
 	}
 	materializeRollups(t, db)
 
@@ -633,14 +647,18 @@ func TestStatsAggregate_IncludesSubAgentSessions(t *testing.T) {
 	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day)
 	// Root session + op.
 	seedRollupSession(t, db, "root1", "aiagent_v3:/p", "nedi", "anthropic", "/w1", atOffset(day, 9, 0))
-	seedRollupOp(t, db, rollupOpSpec{id: "rootOp", sess: "root1", seq: 1, kind: "llm", name: "claude-opus",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "rootOp", sess: "root1", seq: 1, kind: "llm", name: "claude-opus",
 		model: "claude-opus", provider: "anthropic", start: atOffset(day, 9, 0), dur: 1000,
-		status: "completed", tokIn: 100, tokOut: 200, cost: 0.10})
+		status: "completed", tokIn: 100, tokOut: 200, cost: 0.10,
+	})
 	// Sub-agent session (child of root1) + op, same closed day.
 	seedSubAgentSession(t, db, "sub1", "root1", "aiagent_v3:/p", "worker", "openai", "/w1", atOffset(day, 9, 30))
-	seedRollupOp(t, db, rollupOpSpec{id: "subOp", sess: "sub1", seq: 1, kind: "llm", name: "gpt-5",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "subOp", sess: "sub1", seq: 1, kind: "llm", name: "gpt-5",
 		model: "gpt-5", provider: "openai", start: atOffset(day, 9, 30), dur: 2000,
-		status: "completed", tokIn: 50, tokOut: 60, cost: 0.05})
+		status: "completed", tokIn: 50, tokOut: 60, cost: 0.05,
+	})
 	materializeRollups(t, db)
 
 	// group_by=model so the sub-agent's gpt-5 is a distinct, assertable key.
@@ -709,9 +727,11 @@ func TestStatsAggregate_SingleClockReadAcrossBoundary(t *testing.T) {
 	// One op inside that open hour. Live-folded regardless of fast/live path.
 	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", openHour)
 	seedRollupSession(t, db, "sboundary", "aiagent_v3:/p", "nedi", "anthropic", "/w1", openHour)
-	seedRollupOp(t, db, rollupOpSpec{id: "oboundary", sess: "sboundary", seq: 1, kind: "llm",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "oboundary", sess: "sboundary", seq: 1, kind: "llm",
 		name: "claude-opus", model: "claude-opus", provider: "anthropic",
-		start: openHour, dur: 0, status: "running", tokIn: 1, tokOut: 0, cost: 0.001})
+		start: openHour, dur: 0, status: "running", tokIn: 1, tokOut: 0, cost: 0.001,
+	})
 
 	// Counter clock: 1st call = boundary-1µs (before the boundary, in the open
 	// hour that holds the op); every LATER call = boundary+5µs (after, in the
@@ -784,9 +804,11 @@ func TestStatsAggregate_LiveFoldOpWindowIgnoresSessionStart(t *testing.T) {
 	opStart := atOffset(day25, 9, 0)
 	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day24)
 	seedRollupSession(t, db, "preWin", "aiagent_v3:/p", "nedi", "anthropic", "/w1", sessStart)
-	seedRollupOp(t, db, rollupOpSpec{id: "preWinOp", sess: "preWin", seq: 1, kind: "llm",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "preWinOp", sess: "preWin", seq: 1, kind: "llm",
 		name: "claude-opus", model: "claude-opus", provider: "anthropic",
-		start: opStart, dur: 1000, status: "completed", tokIn: 100, tokOut: 200, cost: 0.10})
+		start: opStart, dur: 1000, status: "completed", tokIn: 100, tokOut: 200, cost: 0.10,
+	})
 	materializeRollups(t, db)
 
 	// from = day 25 (AFTER the session start, AT/BEFORE the op start). The op's
@@ -837,9 +859,11 @@ func TestStatsAggregate_LiveFoldOpenBucketIgnoresSessionStart(t *testing.T) {
 	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", closedHour)
 	// Session starts in the closed 10:00 hour; its op is in the open 12:00 hour.
 	seedRollupSession(t, db, "openWin", "aiagent_v3:/p", "nedi", "anthropic", "/w1", closedHour)
-	seedRollupOp(t, db, rollupOpSpec{id: "openWinOp", sess: "openWin", seq: 1, kind: "llm",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "openWinOp", sess: "openWin", seq: 1, kind: "llm",
 		name: "claude-opus", model: "claude-opus", provider: "anthropic",
-		start: openHour, dur: 0, status: "running", tokIn: 9, tokOut: 0, cost: 0.009})
+		start: openHour, dur: 0, status: "running", tokIn: 9, tokOut: 0, cost: 0.009,
+	})
 	materializeRollups(t, db)
 
 	// from = open hour: only the open bucket is in-window. The open-bucket fold
@@ -891,15 +915,19 @@ func TestStatsAggregate_SessionsMetric(t *testing.T) {
 	for i, ss := range []int64{atOffset(day25, 9, 0), atOffset(day25, 15, 0)} {
 		id := "d25-" + i64(int64(i))
 		seedRollupSession(t, db, id, "aiagent_v3:/p", "nedi", "anthropic", "/w1", ss)
-		seedRollupOp(t, db, rollupOpSpec{id: id + "-op", sess: id, seq: 1, kind: "llm",
+		seedRollupOp(t, db, rollupOpSpec{
+			id: id + "-op", sess: id, seq: 1, kind: "llm",
 			name: "claude-opus", model: "claude-opus", provider: "anthropic",
-			start: ss, dur: 100, status: "completed", cost: 0.01})
+			start: ss, dur: 100, status: "completed", cost: 0.01,
+		})
 	}
 	// Day 26: one session.
 	seedRollupSession(t, db, "d26", "aiagent_v3:/p", "worker", "openai", "/w2", atOffset(day26, 14, 0))
-	seedRollupOp(t, db, rollupOpSpec{id: "d26-op", sess: "d26", seq: 1, kind: "llm",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "d26-op", sess: "d26", seq: 1, kind: "llm",
 		name: "gpt-5", model: "gpt-5", provider: "openai", start: atOffset(day26, 14, 0),
-		dur: 200, status: "completed", cost: 0.02})
+		dur: 200, status: "completed", cost: 0.02,
+	})
 	// Open day: one session in the closed 11:00 hour, one in the open 12:00 hour.
 	seedRollupSession(t, db, "d27-closed", "aiagent_v3:/p", "nedi", "anthropic", "/w1", closedHourToday)
 	seedRollupSession(t, db, "d27-open", "aiagent_v3:/p", "nedi", "anthropic", "/w1", openHour)
@@ -971,9 +999,11 @@ func TestStatsAggregate_SessionsMetricDimensions(t *testing.T) {
 	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", day25)
 	// Closed-day session under agent "nedi", cwd "/w1".
 	seedRollupSession(t, db, "agA", "aiagent_v3:/p", "nedi", "anthropic", "/w1", atOffset(day25, 9, 0))
-	seedRollupOp(t, db, rollupOpSpec{id: "agA-op", sess: "agA", seq: 1, kind: "llm",
+	seedRollupOp(t, db, rollupOpSpec{
+		id: "agA-op", sess: "agA", seq: 1, kind: "llm",
 		name: "claude-opus", model: "claude-opus", provider: "anthropic",
-		start: atOffset(day25, 9, 0), dur: 100, status: "completed", cost: 0.01})
+		start: atOffset(day25, 9, 0), dur: 100, status: "completed", cost: 0.01,
+	})
 	// Open-hour session under agent "worker", cwd "/w2" (exercises the live fold).
 	seedRollupSession(t, db, "agB", "aiagent_v3:/p", "worker", "openai", "/w2", openHour)
 	materializeRollups(t, db)

@@ -5,6 +5,7 @@ package canonical
 // See .agents/sow/specs/canonical-events.md.
 type EventKind string
 
+// EventKind discriminator values for the canonical event variants.
 const (
 	EvSessionStarted   EventKind = "session_started"
 	EvSessionUpdated   EventKind = "session_updated"

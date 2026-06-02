@@ -108,7 +108,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	defer func() { _ = rs.Close() }()
 
-	if err := presenter.CheckSchema(rs.DB(), presenter.SchemaVersion); err != nil {
+	if err := presenter.CheckSchema(ctx, rs.DB(), presenter.SchemaVersion); err != nil {
 		logger.Error("ai-viewer-serve: schema version mismatch",
 			"db", dbPath, "expected", presenter.SchemaVersion, "err", err)
 		return 1

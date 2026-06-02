@@ -58,10 +58,10 @@ func (p *Presenter) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 
 	items, err := p.querySessions(ctx, f)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "sessions.list", err)
+		p.writeDBError(ctx, w, r, "sessions.list", err)
 		return
 	}
-	writeJSON(w, r, p.logger, http.StatusOK, buildSessionsResponse(items, f))
+	writeJSON(w, r, p.logger, buildSessionsResponse(items, f))
 }
 
 // buildSessionListQuery renders the parameterized list query and its bound

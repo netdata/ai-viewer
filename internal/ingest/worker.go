@@ -481,11 +481,11 @@ ON CONFLICT (source_id) DO UPDATE SET
 // batchMaxTs returns the maximum Ts across the events in batch. Used
 // only as a diagnostics aid in source_progress.last_ts_us.
 func batchMaxTs(batch []canonical.Event) int64 {
-	var max int64
+	var maxTs int64
 	for _, ev := range batch {
-		if ts := ev.EventTs(); ts > max {
-			max = ts
+		if ts := ev.EventTs(); ts > maxTs {
+			maxTs = ts
 		}
 	}
-	return max
+	return maxTs
 }

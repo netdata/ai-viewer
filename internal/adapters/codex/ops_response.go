@@ -12,6 +12,8 @@ import (
 // by the parser; an empty type is unreachable here (parseLine skips it). The
 // full record is threaded through so emitters can size PayloadRef.OriginalBytes
 // from the verbatim line and read sibling fields (e.g. message.phase) off Raw.
+//
+//nolint:unparam // error return is required by the record-type dispatch in mapRecord, which calls mapEventMsg/mapResponseItem through a uniform (evs, error) shape and propagates a non-nil error from either
 func (m *fileMapper) mapResponseItem(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	p := rec.ResponseItem
 	if p == nil {

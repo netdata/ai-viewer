@@ -166,6 +166,23 @@ func parseDoc(jsonBytes []byte) (map[modelKey]*modelEntry, *rawDoc, error) {
 // negative ctx_max, empty schema_url). Errors carry full
 // "provider X model Y tier Z" context.
 func validateDoc(doc *rawDoc) error {
+	if err := validateDocHeader(doc); err != nil {
+		return err
+	}
+	seenProviders := make(map[string]bool, len(doc.Providers))
+	for pi := range doc.Providers {
+		if err := validateProvider(&doc.Providers[pi], pi, seenProviders); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateDocHeader checks the document-level fields (schema version, the
+// required string fields, currency, and the non-empty providers invariant)
+// before any per-provider walk. Error messages and check order are identical
+// to the original inline block.
+func validateDocHeader(doc *rawDoc) error {
 	if doc.Version != schemaVersion {
 		return fmt.Errorf("pricing: unsupported schema version %d (want %d)", doc.Version, schemaVersion)
 	}
@@ -190,77 +207,90 @@ func validateDoc(doc *rawDoc) error {
 	if doc.GeneratedBy == "" {
 		return fmt.Errorf("pricing: generated_by is required")
 	}
+	return nil
+}
 
-	seenProviders := make(map[string]bool, len(doc.Providers))
-	for pi := range doc.Providers {
-		p := &doc.Providers[pi]
-		if p.Name == "" {
-			return fmt.Errorf("pricing: providers[%d].name is empty", pi)
+// validateProvider validates one provider (name presence/pattern, alias
+// patterns, case-folded uniqueness via seenProviders, non-empty models) and
+// walks its models. pi is the provider index for the empty-name message.
+func validateProvider(p *rawProvider, pi int, seenProviders map[string]bool) error {
+	if p.Name == "" {
+		return fmt.Errorf("pricing: providers[%d].name is empty", pi)
+	}
+	if !namePattern.MatchString(p.Name) {
+		return fmt.Errorf("pricing: invalid provider name %q (must match %s)", p.Name, namePattern.String())
+	}
+	for ai, a := range p.Aliases {
+		if !namePattern.MatchString(a) {
+			return fmt.Errorf("pricing: provider %q aliases[%d] %q is invalid (must match %s)", p.Name, ai, a, namePattern.String())
 		}
-		if !namePattern.MatchString(p.Name) {
-			return fmt.Errorf("pricing: invalid provider name %q (must match %s)", p.Name, namePattern.String())
+	}
+	pn := strings.ToLower(p.Name)
+	if seenProviders[pn] {
+		return fmt.Errorf("pricing: duplicate provider %q", p.Name)
+	}
+	seenProviders[pn] = true
+	if len(p.Models) == 0 {
+		return fmt.Errorf("pricing: provider %q has no models[]", p.Name)
+	}
+	seenModels := make(map[string]bool, len(p.Models))
+	for mi := range p.Models {
+		if err := validateModel(p.Name, &p.Models[mi], mi, seenModels); err != nil {
+			return err
 		}
-		for ai, a := range p.Aliases {
-			if !namePattern.MatchString(a) {
-				return fmt.Errorf("pricing: provider %q aliases[%d] %q is invalid (must match %s)", p.Name, ai, a, namePattern.String())
-			}
+	}
+	return nil
+}
+
+// validateModel validates one model under provider provName (name
+// presence/pattern, alias patterns, non-negative ctx_max, case-folded
+// uniqueness via seenModels, non-empty tiers) and walks its tiers
+// (effective_date presence/format/uniqueness, citation_url, source, prices).
+// mi is the model index for the empty-name message.
+func validateModel(provName string, m *rawModel, mi int, seenModels map[string]bool) error {
+	if m.Name == "" {
+		return fmt.Errorf("pricing: provider %q models[%d].name is empty", provName, mi)
+	}
+	if !namePattern.MatchString(m.Name) {
+		return fmt.Errorf("pricing: provider %q invalid model name %q (must match %s)", provName, m.Name, namePattern.String())
+	}
+	for ai, a := range m.Aliases {
+		if !namePattern.MatchString(a) {
+			return fmt.Errorf("pricing: provider %q model %q aliases[%d] %q is invalid (must match %s)", provName, m.Name, ai, a, namePattern.String())
 		}
-		pn := strings.ToLower(p.Name)
-		if seenProviders[pn] {
-			return fmt.Errorf("pricing: duplicate provider %q", p.Name)
+	}
+	if m.CtxMax < 0 {
+		return fmt.Errorf("pricing: provider %q model %q ctx_max is negative (%d)", provName, m.Name, m.CtxMax)
+	}
+	mn := strings.ToLower(m.Name)
+	if seenModels[mn] {
+		return fmt.Errorf("pricing: provider %q has duplicate model %q", provName, m.Name)
+	}
+	seenModels[mn] = true
+	if len(m.Tiers) == 0 {
+		return fmt.Errorf("pricing: provider %q model %q has no tiers[]", provName, m.Name)
+	}
+	seenDates := make(map[string]bool, len(m.Tiers))
+	for ti := range m.Tiers {
+		t := &m.Tiers[ti]
+		if t.EffectiveDate == "" {
+			return fmt.Errorf("pricing: provider %q model %q tiers[%d].effective_date is empty", provName, m.Name, ti)
 		}
-		seenProviders[pn] = true
-		if len(p.Models) == 0 {
-			return fmt.Errorf("pricing: provider %q has no models[]", p.Name)
+		if _, err := time.Parse(dateLayout, t.EffectiveDate); err != nil {
+			return fmt.Errorf("pricing: provider %q model %q tiers[%d].effective_date %q is not YYYY-MM-DD: %w", provName, m.Name, ti, t.EffectiveDate, err)
 		}
-		seenModels := make(map[string]bool, len(p.Models))
-		for mi := range p.Models {
-			m := &p.Models[mi]
-			if m.Name == "" {
-				return fmt.Errorf("pricing: provider %q models[%d].name is empty", p.Name, mi)
-			}
-			if !namePattern.MatchString(m.Name) {
-				return fmt.Errorf("pricing: provider %q invalid model name %q (must match %s)", p.Name, m.Name, namePattern.String())
-			}
-			for ai, a := range m.Aliases {
-				if !namePattern.MatchString(a) {
-					return fmt.Errorf("pricing: provider %q model %q aliases[%d] %q is invalid (must match %s)", p.Name, m.Name, ai, a, namePattern.String())
-				}
-			}
-			if m.CtxMax < 0 {
-				return fmt.Errorf("pricing: provider %q model %q ctx_max is negative (%d)", p.Name, m.Name, m.CtxMax)
-			}
-			mn := strings.ToLower(m.Name)
-			if seenModels[mn] {
-				return fmt.Errorf("pricing: provider %q has duplicate model %q", p.Name, m.Name)
-			}
-			seenModels[mn] = true
-			if len(m.Tiers) == 0 {
-				return fmt.Errorf("pricing: provider %q model %q has no tiers[]", p.Name, m.Name)
-			}
-			seenDates := make(map[string]bool, len(m.Tiers))
-			for ti := range m.Tiers {
-				t := &m.Tiers[ti]
-				if t.EffectiveDate == "" {
-					return fmt.Errorf("pricing: provider %q model %q tiers[%d].effective_date is empty", p.Name, m.Name, ti)
-				}
-				if _, err := time.Parse(dateLayout, t.EffectiveDate); err != nil {
-					return fmt.Errorf("pricing: provider %q model %q tiers[%d].effective_date %q is not YYYY-MM-DD: %w", p.Name, m.Name, ti, t.EffectiveDate, err)
-				}
-				if seenDates[t.EffectiveDate] {
-					return fmt.Errorf("pricing: provider %q model %q has duplicate effective_date %q", p.Name, m.Name, t.EffectiveDate)
-				}
-				seenDates[t.EffectiveDate] = true
-				if t.CitationURL == "" {
-					return fmt.Errorf("pricing: provider %q model %q tier %q is missing citation_url", p.Name, m.Name, t.EffectiveDate)
-				}
-				if t.Source == "" {
-					return fmt.Errorf("pricing: provider %q model %q tier %q is missing source", p.Name, m.Name, t.EffectiveDate)
-				}
-				if err := validatePrices(p.Name, m.Name, t.EffectiveDate, &t.Prices); err != nil {
-					return err
-				}
-			}
+		if seenDates[t.EffectiveDate] {
+			return fmt.Errorf("pricing: provider %q model %q has duplicate effective_date %q", provName, m.Name, t.EffectiveDate)
+		}
+		seenDates[t.EffectiveDate] = true
+		if t.CitationURL == "" {
+			return fmt.Errorf("pricing: provider %q model %q tier %q is missing citation_url", provName, m.Name, t.EffectiveDate)
+		}
+		if t.Source == "" {
+			return fmt.Errorf("pricing: provider %q model %q tier %q is missing source", provName, m.Name, t.EffectiveDate)
+		}
+		if err := validatePrices(provName, m.Name, t.EffectiveDate, &t.Prices); err != nil {
+			return err
 		}
 	}
 	return nil

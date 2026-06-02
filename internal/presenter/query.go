@@ -35,7 +35,7 @@ func withQueryTimeout(parent context.Context) (context.Context, context.CancelFu
 // DB_UNAVAILABLE, matching the existing /api/sources failure path. The
 // op string names the failing query for the log line so a failure is
 // greppable back to its source.
-func (p *Presenter) writeDBError(w http.ResponseWriter, r *http.Request, ctx context.Context, op string, err error) {
+func (p *Presenter) writeDBError(ctx context.Context, w http.ResponseWriter, r *http.Request, op string, err error) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "presenter: query timed out",
 			slog.String("op", op),

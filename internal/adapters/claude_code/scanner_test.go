@@ -494,10 +494,7 @@ func TestMetaHashes_SymlinkedRootDescends(t *testing.T) {
 	// Walk the UNRESOLVED (symlinked) root as the configured root; the resolved
 	// root is threaded for containment + descent. With the fix, the walk descends
 	// the resolved tree and finds the sidecar.
-	hashes, herr := metaHashes(linkRoot, resolved, func(error) {})
-	if herr != nil {
-		t.Fatalf("metaHashes: %v", herr)
-	}
+	hashes := metaHashes(linkRoot, resolved, func(error) {})
 	if len(hashes) == 0 {
 		t.Fatalf("metaHashes found 0 sidecars under a symlinked projects root (P2.6c — WalkDir did not descend the resolved root)")
 	}

@@ -61,7 +61,7 @@ func TestCheckSchema_NonNumeric(t *testing.T) {
 	if _, err := s.DB().Exec(`UPDATE schema_meta SET value='abc' WHERE key='version'`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	err = CheckSchema(s.DB(), SchemaVersion)
+	err = CheckSchema(ctx, s.DB(), SchemaVersion)
 	if err == nil || !errors.Is(err, ErrSchemaMismatch) {
 		t.Fatalf("got %v, want ErrSchemaMismatch", err)
 	}
@@ -80,7 +80,7 @@ func TestCheckSchema_MissingRow(t *testing.T) {
 	if _, err := s.DB().Exec(`DELETE FROM schema_meta WHERE key='version'`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	err = CheckSchema(s.DB(), SchemaVersion)
+	err = CheckSchema(ctx, s.DB(), SchemaVersion)
 	if err == nil || !errors.Is(err, ErrSchemaMismatch) {
 		t.Fatalf("got %v, want ErrSchemaMismatch", err)
 	}

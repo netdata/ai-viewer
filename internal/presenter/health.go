@@ -148,7 +148,7 @@ func (p *Presenter) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp.Status = healthStatusOK
 	}
 
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // collectNotifyHealth derives the notify-poller window from the poller's

@@ -102,6 +102,8 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 // LLM op (started+finalized with usage), a nested reasoning op per thinking
 // block, and an op-start per tool_use block (finalized later on its
 // tool_result). A synthetic model emits a LogEntry only (spec §3.2, §5.4).
+//
+//nolint:unparam // error return is required by the record-type dispatch in mapRecord, where the sibling mapUser arm returns real errors; the uniform (evs, error) shape across all arms is intentional
 func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	tsUs := m.recordTs(rec)
 	msg := rec.Assistant
@@ -279,7 +281,7 @@ func assistantUsageExtras(u *assistantUsage) map[string]any {
 		extras["serviceTier"] = u.ServiceTier
 	}
 	if len(u.ServerToolUse) > 0 {
-		extras["serverToolUse"] = json.RawMessage(u.ServerToolUse)
+		extras["serverToolUse"] = u.ServerToolUse
 	}
 	return extras
 }
@@ -287,6 +289,8 @@ func assistantUsageExtras(u *assistantUsage) map[string]any {
 // mapSystem handles a `system` record. compact_boundary emits the synthetic
 // compaction op; turn_duration finalizes the current turn; api_error and the
 // rest become LogEntry rows (spec §5.4).
+//
+//nolint:unparam // error return is required by the record-type dispatch in mapRecord, where the sibling mapUser arm returns real errors; the uniform (evs, error) shape across all arms is intentional
 func (m *fileMapper) mapSystem(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	tsUs := m.recordTs(rec)
 	body := rec.System
@@ -310,7 +314,7 @@ func (m *fileMapper) mapSystem(rec record, advance func(int64) canonical.EventBa
 	case "api_error":
 		ev := m.logEntry(advance(tsUs), "ERR", "api_error", rec)
 		if body != nil && len(body.APIError) > 0 {
-			ev.Extras["error"] = json.RawMessage(body.APIError)
+			ev.Extras["error"] = body.APIError
 		}
 		return []canonical.Event{ev}, nil
 	case "stop_hook_summary":
@@ -394,10 +398,10 @@ func compactionExtras(cm *compactMetadata) map[string]any {
 		"durationMs": cm.DurationMs,
 	}
 	if len(cm.PreservedSegment) > 0 {
-		extras["preservedSegment"] = json.RawMessage(cm.PreservedSegment)
+		extras["preservedSegment"] = cm.PreservedSegment
 	}
 	if len(cm.PreservedMessage) > 0 {
-		extras["preservedMessages"] = json.RawMessage(cm.PreservedMessage)
+		extras["preservedMessages"] = cm.PreservedMessage
 	}
 	return extras
 }

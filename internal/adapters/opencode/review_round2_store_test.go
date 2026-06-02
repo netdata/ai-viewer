@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -118,7 +119,7 @@ func TestP2C_ReadMigrationsPropagatesError(t *testing.T) {
 	if err == nil {
 		t.Fatal("readMigrations over a closed DB = nil error; want the fault propagated (P2-C)")
 	}
-	if err == errNoMigrationsTable {
+	if errors.Is(err, errNoMigrationsTable) {
 		t.Fatal("readMigrations over a closed DB returned the soft sentinel; want the real fault (P2-C)")
 	}
 }

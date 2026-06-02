@@ -166,8 +166,9 @@ func (m *fileMapper) nextOp(ts *turnState) (int, int) {
 // enrichment event) finalizes/enriches the SAME op (spec rule #9, #14-16). A
 // call_id of "" is not tracked (an unpaired op finalizes inline or at turn end).
 // namespace is stored so a late-enrichment OpStarted re-emit (F4) restates the
-// op's tool_namespace faithfully.
-func (m *fileMapper) trackOp(callID, turnID string, turnSeq, opSeq int, kind canonical.OpKind, name, namespace string) {
+// op's tool_namespace faithfully. Every call_id-correlated op in codex is a tool
+// op, so kind is fixed to canonical.OpTool.
+func (m *fileMapper) trackOp(callID, turnID string, turnSeq, opSeq int, name, namespace string) {
 	if callID == "" {
 		return
 	}
@@ -175,7 +176,7 @@ func (m *fileMapper) trackOp(callID, turnID string, turnSeq, opSeq int, kind can
 		turnID:    turnID,
 		turnSeq:   turnSeq,
 		opSeq:     opSeq,
-		kind:      kind,
+		kind:      canonical.OpTool,
 		name:      name,
 		namespace: namespace,
 		extras:    map[string]any{},

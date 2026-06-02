@@ -206,8 +206,10 @@ func TestHub_OnRemoveCalledOnExpiryAndRemove(t *testing.T) {
 func TestHub_OnRemoveNotCalledForUnknownRemove(t *testing.T) {
 	t.Parallel()
 	var n int
-	h := New(Options{ChannelCap: 4, ReplayBuffer: 4, Retention: time.Second,
-		OnRemove: func(string) { n++ }})
+	h := New(Options{
+		ChannelCap: 4, ReplayBuffer: 4, Retention: time.Second,
+		OnRemove: func(string) { n++ },
+	})
 	t.Cleanup(h.Shutdown)
 	h.Remove("ghost") // unknown → no hook
 	h.Add("s1")
@@ -226,8 +228,10 @@ func TestHub_OnRemoveNotCalledForUnknownRemove(t *testing.T) {
 func TestHub_OnRemoveNotCalledOnShutdown(t *testing.T) {
 	t.Parallel()
 	var n int
-	h := New(Options{ChannelCap: 4, ReplayBuffer: 4, Retention: time.Second,
-		OnRemove: func(string) { n++ }})
+	h := New(Options{
+		ChannelCap: 4, ReplayBuffer: 4, Retention: time.Second,
+		OnRemove: func(string) { n++ },
+	})
 	h.Add("s1")
 	h.Add("s2")
 	h.Shutdown()
@@ -316,8 +320,10 @@ func TestHub_SetOnRemoveReplaces(t *testing.T) {
 func TestHub_ExpireUnknownIDNoOp(t *testing.T) {
 	t.Parallel()
 	var fired int
-	h := New(Options{ChannelCap: 4, ReplayBuffer: 4, Retention: time.Second,
-		OnRemove: func(string) { fired++ }})
+	h := New(Options{
+		ChannelCap: 4, ReplayBuffer: 4, Retention: time.Second,
+		OnRemove: func(string) { fired++ },
+	})
 	t.Cleanup(h.Shutdown)
 	// No such id: expire is a no-op and must not fire OnRemove.
 	h.expire("ghost", nil, 1)

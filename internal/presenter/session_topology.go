@@ -108,16 +108,16 @@ func (p *Presenter) handleSessionTopology(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.topology.root", err)
+		p.writeDBError(ctx, w, r, "session.topology.root", err)
 		return
 	}
 
 	resp, err := p.buildTopology(ctx, rootID, metric)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.topology.build", err)
+		p.writeDBError(ctx, w, r, "session.topology.build", err)
 		return
 	}
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // buildTopology assembles the node/edge graph for a resolved session

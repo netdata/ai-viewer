@@ -47,7 +47,7 @@ func TestP2_1_WarnSinkBuffersFlushesResets(t *testing.T) {
 	if n := s.flush(func(e error) { got = append(got, e) }); n != 2 {
 		t.Fatalf("flush returned %d, want 2", n)
 	}
-	if len(got) != 2 || got[0] != e1 || got[1] != e2 {
+	if len(got) != 2 || !errors.Is(got[0], e1) || !errors.Is(got[1], e2) {
 		t.Fatalf("flush order = %v, want [w1 w2]", got)
 	}
 	if s.len() != 0 {

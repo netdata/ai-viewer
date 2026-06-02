@@ -203,7 +203,7 @@ func processOnce(ctx context.Context, root, sourceID, name string, cur *Cursor, 
 	if err != nil {
 		// File may have been atomically renamed away mid-read; not
 		// fatal.
-		return nil
+		return nil //nolint:nilerr // intentional: file rotated/removed between read and post-stat is transient, not fatal — the change already processed above stands
 	}
 	if postInfo.ModTime().UnixNano() == preMtime {
 		return nil

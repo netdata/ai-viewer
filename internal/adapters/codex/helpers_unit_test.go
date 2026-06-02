@@ -3,8 +3,6 @@ package codex
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
 // These unit tests exercise the pure helper functions' edge and error branches
@@ -349,7 +347,7 @@ func TestSmallHelpers(t *testing.T) {
 		t.Error("mergeExtras did not merge")
 	}
 	// trackOp empty call_id is not tracked.
-	m.trackOp("", "t", 1, 1, canonical.OpTool, "x", "shell")
+	m.trackOp("", "t", 1, 1, "x", "shell")
 	if len(m.openOps) != 0 {
 		t.Error("trackOp tracked an empty call_id")
 	}

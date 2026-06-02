@@ -157,10 +157,7 @@ func TestScan_CancellableContext(t *testing.T) {
 func TestCoerceCursor_AlienTypeYieldsEmpty(t *testing.T) {
 	t.Parallel()
 	a, _ := New("/x", canonical.AdapterOptions{})
-	cur, err := a.coerceCursor(alienCursor{})
-	if err != nil {
-		t.Fatalf("coerceCursor: %v", err)
-	}
+	cur := a.coerceCursor(alienCursor{})
 	if len(cur.Files) != 0 {
 		t.Fatalf("expected empty Files, got %d", len(cur.Files))
 	}
@@ -169,10 +166,7 @@ func TestCoerceCursor_AlienTypeYieldsEmpty(t *testing.T) {
 func TestCoerceCursor_NormalisesEmptyVersion(t *testing.T) {
 	t.Parallel()
 	a, _ := New("/x", canonical.AdapterOptions{})
-	cur, err := a.coerceCursor(Cursor{})
-	if err != nil {
-		t.Fatalf("coerceCursor: %v", err)
-	}
+	cur := a.coerceCursor(Cursor{})
 	if cur.Version != cursorVersion {
 		t.Fatalf("Version: got %d want %d", cur.Version, cursorVersion)
 	}

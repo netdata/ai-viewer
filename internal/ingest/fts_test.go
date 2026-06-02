@@ -355,15 +355,18 @@ func TestFTS_Backfill(t *testing.T) {
 	// Source ON: one op + one session-scoped log.
 	seedSession(t, db, "on-sess", srcOn, "claude", "/w", start)
 	seedTurn(t, db, "on-turn", "on-sess", start)
-	seedOp(t, db, opSpec{id: "on-op", turnID: "on-turn", sessionID: "on-sess", seq: 1,
+	seedOp(t, db, opSpec{
+		id: "on-op", turnID: "on-turn", sessionID: "on-sess", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
-		startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+		startTS: start, endTS: &end, durationUS: end - start, status: "completed",
+	})
 	seedLog(t, db, "on-sess", "indexed log message here", "INF", ts(0, 9, 1))
 
 	// Source OFF: one op + one session-scoped log (log must NOT be indexed).
 	seedSession(t, db, "off-sess", srcOff, "claude", "/w", start)
 	seedTurn(t, db, "off-turn", "off-sess", start)
-	seedOp(t, db, opSpec{id: "off-op", turnID: "off-turn", sessionID: "off-sess", seq: 1,
+	seedOp(t, db, opSpec{
+		id: "off-op", turnID: "off-turn", sessionID: "off-sess", seq: 1,
 		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
 		startTS: start, endTS: &end, durationUS: end - start, status: "failed",
 		// error columns are NULL here (seedOp does not set them) → error_text "".
@@ -471,13 +474,17 @@ func TestFTS_BackfillStreamsInBoundedBatches(t *testing.T) {
 	seedSession(t, db, "on-sess", srcOn, "claude", "/w", start)
 	seedTurn(t, db, "on-turn", "on-sess", start)
 	for i := 1; i <= 4; i++ {
-		seedOp(t, db, opSpec{id: fmt.Sprintf("op-%d", i), turnID: "on-turn", sessionID: "on-sess", seq: i,
+		seedOp(t, db, opSpec{
+			id: fmt.Sprintf("op-%d", i), turnID: "on-turn", sessionID: "on-sess", seq: i,
 			kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
-			startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+			startTS: start, endTS: &end, durationUS: end - start, status: "completed",
+		})
 	}
-	seedOp(t, db, opSpec{id: "op-5", turnID: "on-turn", sessionID: "on-sess", seq: 5,
+	seedOp(t, db, opSpec{
+		id: "op-5", turnID: "on-turn", sessionID: "on-sess", seq: 5,
 		kind: "llm", name: "chat", model: "uniquelastmodel", provider: "anthropic",
-		startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+		startTS: start, endTS: &end, durationUS: end - start, status: "completed",
+	})
 
 	// 4 indexable logs on the ON source, plus a 5th carrying a UNIQUE token so
 	// the last log batch is provably processed too (le.id AUTOINCREMENT keyset).
@@ -490,9 +497,11 @@ func TestFTS_BackfillStreamsInBoundedBatches(t *testing.T) {
 	// reach fts_logs even though streaming crosses batches.
 	seedSession(t, db, "off-sess", srcOff, "claude", "/w", start)
 	seedTurn(t, db, "off-turn", "off-sess", start)
-	seedOp(t, db, opSpec{id: "op-6-off", turnID: "off-turn", sessionID: "off-sess", seq: 1,
+	seedOp(t, db, opSpec{
+		id: "op-6-off", turnID: "off-turn", sessionID: "off-sess", seq: 1,
 		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
-		startTS: start, endTS: &end, durationUS: end - start, status: "completed"})
+		startTS: start, endTS: &end, durationUS: end - start, status: "completed",
+	})
 	seedLog(t, db, "off-sess", "excluded log line", "INF", ts(0, 9, 1))
 
 	const wantOps = 6  // 5 ON + 1 OFF (fts_ops is never gated)

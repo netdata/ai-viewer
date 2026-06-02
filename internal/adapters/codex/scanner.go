@@ -315,7 +315,7 @@ func firstRecordIsSessionMeta(f *os.File, size int64) (bool, error) {
 		if perr != nil {
 			// A malformed first line is not a usable session_meta; the file is
 			// corrupt for rule-#24 purposes.
-			return false, nil
+			return false, nil //nolint:nilerr // intentional: a malformed first line means "not a session_meta" (false), not a fatal scan error — rule #24 treats it as a non-rollout
 		}
 		if skip {
 			continue

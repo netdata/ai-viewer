@@ -88,7 +88,7 @@ func (p *Presenter) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 
 	exists, err := p.sessionExists(ctx, id)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.logs.exists", err)
+		p.writeDBError(ctx, w, r, "session.logs.exists", err)
 		return
 	}
 	if !exists {
@@ -99,10 +99,10 @@ func (p *Presenter) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 
 	items, next, err := p.queryLogs(ctx, lf, limit, cursor)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.logs.query", err)
+		p.writeDBError(ctx, w, r, "session.logs.query", err)
 		return
 	}
-	writeJSON(w, r, p.logger, http.StatusOK, logsResponse{Items: items, NextCursor: next})
+	writeJSON(w, r, p.logger, logsResponse{Items: items, NextCursor: next})
 }
 
 // logFilter is the result-defining filter of GET /api/sessions/:id/logs:

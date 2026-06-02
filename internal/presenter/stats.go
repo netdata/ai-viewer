@@ -106,31 +106,31 @@ func (p *Presenter) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := p.statsTotals(ctx, where, args, &resp.Totals); err != nil {
-		p.writeDBError(w, r, ctx, "stats.totals", err)
+		p.writeDBError(ctx, w, r, "stats.totals", err)
 		return
 	}
 	if err := p.statsByStatus(ctx, where, args, &resp); err != nil {
-		p.writeDBError(w, r, ctx, "stats.by_status", err)
+		p.writeDBError(ctx, w, r, "stats.by_status", err)
 		return
 	}
 	if err := p.statsBySource(ctx, where, args, &resp); err != nil {
-		p.writeDBError(w, r, ctx, "stats.by_source", err)
+		p.writeDBError(ctx, w, r, "stats.by_source", err)
 		return
 	}
 	if err := p.statsByAgent(ctx, where, args, resp.Totals.SessionCount, &resp); err != nil {
-		p.writeDBError(w, r, ctx, "stats.by_agent", err)
+		p.writeDBError(ctx, w, r, "stats.by_agent", err)
 		return
 	}
 	if err := p.statsByModel(ctx, sessionSet, args, &resp); err != nil {
-		p.writeDBError(w, r, ctx, "stats.by_model", err)
+		p.writeDBError(ctx, w, r, "stats.by_model", err)
 		return
 	}
 	if err := p.statsByTool(ctx, sessionSet, args, &resp); err != nil {
-		p.writeDBError(w, r, ctx, "stats.by_tool", err)
+		p.writeDBError(ctx, w, r, "stats.by_tool", err)
 		return
 	}
 
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // statsTotals aggregates the session-level rollup columns over the

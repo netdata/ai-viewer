@@ -125,7 +125,7 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	var opsHasMore, logsHasMore bool
 	if resp.Ops, opsHasMore, err = p.searchOps(ctx, f, match, limit, offset); err != nil {
-		p.writeDBError(w, r, ctx, "search.ops", err)
+		p.writeDBError(ctx, w, r, "search.ops", err)
 		return
 	}
 
@@ -134,19 +134,19 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// (so logsHasMore stays false — there is nothing to paginate on that side).
 	indexed, err := p.logsIndexedInScope(ctx, f)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "search.logs_indexed", err)
+		p.writeDBError(ctx, w, r, "search.logs_indexed", err)
 		return
 	}
 	resp.LogsIndexed = indexed
 	if indexed {
 		if resp.Logs, logsHasMore, err = p.searchLogs(ctx, f, match, limit, offset); err != nil {
-			p.writeDBError(w, r, ctx, "search.logs", err)
+			p.writeDBError(ctx, w, r, "search.logs", err)
 			return
 		}
 	}
 
 	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore, limit, offset, match, f)
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // sessionFilterValues returns a shallow copy of v with the search-owned keys

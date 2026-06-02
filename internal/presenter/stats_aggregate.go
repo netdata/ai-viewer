@@ -68,12 +68,12 @@ func (p *Presenter) handleStatsAggregate(w http.ResponseWriter, r *http.Request)
 
 	series, err := p.aggregateSeries(ctx, f, bucket, dim, metric)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "stats.aggregate", err)
+		p.writeDBError(ctx, w, r, "stats.aggregate", err)
 		return
 	}
 
 	resp := aggregateResponse{Buckets: buildAggregateBuckets(series), Bucket: bucketName(bucket), Metric: metricName(metric)}
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // aggregateSeries computes the per-(bucket,key) metric series across the

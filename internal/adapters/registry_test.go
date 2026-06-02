@@ -27,6 +27,7 @@ func (f *fakeAdapter) Format() string { return f.name }
 func (f *fakeAdapter) Scan(context.Context, canonical.Cursor, chan<- canonical.Event) error {
 	return errors.New("not used")
 }
+
 func (f *fakeAdapter) Tail(context.Context, chan<- canonical.Event) error {
 	return errors.New("not used")
 }

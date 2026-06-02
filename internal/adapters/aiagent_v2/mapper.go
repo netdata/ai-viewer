@@ -401,7 +401,7 @@ func opStartedExtras(op operationNode) map[string]any {
 		out["childSessionRef"] = op.ChildSessionRef.SessionID
 	}
 	if op.ChildSessionSummary != nil {
-		out["childSessionSummary"] = json.RawMessage(op.ChildSessionSummary)
+		out["childSessionSummary"] = op.ChildSessionSummary
 	}
 	if len(op.Accounting) > 0 {
 		acc := op.Accounting[0]
@@ -440,13 +440,13 @@ func buildSessionStarted(ctx *mapContext, node opTree, parentNativeID, parentOpK
 		extras["nodeId"] = node.ID
 	}
 	if len(node.Totals) > 0 {
-		extras["totals"] = json.RawMessage(node.Totals)
+		extras["totals"] = node.Totals
 	}
 	if len(node.FinalReport) > 0 {
-		extras["final_report"] = json.RawMessage(node.FinalReport)
+		extras["final_report"] = node.FinalReport
 	}
 	if len(node.PluginMetas) > 0 {
-		extras["plugin_metas"] = json.RawMessage(node.PluginMetas)
+		extras["plugin_metas"] = node.PluginMetas
 	}
 	if node.TraceID != ctx.originID && parentNativeID == "" {
 		// Diagnostic per `adapter-aiagent-v2.md` §Edge Cases item 9.

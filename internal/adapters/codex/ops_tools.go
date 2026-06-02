@@ -42,7 +42,7 @@ func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) can
 	if bodyBytes > 0 {
 		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
 	}
-	m.trackOp(p.CallID, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, name, namespace)
+	m.trackOp(p.CallID, m.activeTurnID, turnSeq, opSeq, name, namespace)
 	return out
 }
 
@@ -124,7 +124,7 @@ func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) c
 // queued op, so interleaved searches pair in order. If no end arrives the op
 // finalizes at turn close as a dangling op (it is tracked under a synthetic
 // per-op call_id so finalizeDanglingOps closes it).
-func (m *fileMapper) mapWebSearchCall(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
+func (m *fileMapper) mapWebSearchCall(_ *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	ts := m.ensureTurn(tsUs)
 	out := make([]canonical.Event, 0, 2)
 	if ev := m.emitTurnStarted(ts, advance(tsUs)); ev != nil {
@@ -148,7 +148,7 @@ func (m *fileMapper) mapWebSearchCall(p *responseItemPayload, advance func(int64
 	// if no web_search_end arrives; the synthetic id never collides with a real
 	// call_id (the "ws#" prefix is not a codex call_id form).
 	synthetic := fmt.Sprintf("ws#%d:%d", turnSeq, opSeq)
-	m.trackOp(synthetic, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, "web_search", "web")
+	m.trackOp(synthetic, m.activeTurnID, turnSeq, opSeq, "web_search", "web")
 	m.openWebSearch = append(m.openWebSearch, &openWebSearchRef{turnID: m.activeTurnID, turnSeq: turnSeq, opSeq: opSeq, syntheticCallID: synthetic})
 	return out
 }
@@ -188,7 +188,7 @@ func (m *fileMapper) emitSingleToolOp(callID, name, namespace string, advance fu
 	if bodyBytes > 0 {
 		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
 	}
-	m.trackOp(callID, m.activeTurnID, turnSeq, opSeq, canonical.OpTool, name, namespace)
+	m.trackOp(callID, m.activeTurnID, turnSeq, opSeq, name, namespace)
 	return out
 }
 

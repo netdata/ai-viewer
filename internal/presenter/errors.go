@@ -73,13 +73,14 @@ func writeJSONError(w http.ResponseWriter, r *http.Request, logger *slog.Logger,
 		// can be grepped together with the deferred access log line for
 		// the same request. Per observability.md §"Trace IDs" every
 		// request-scoped log line MUST carry the field.
-		attrs := []any{
+		attrs := make([]any, 0, 10+2*len(details))
+		attrs = append(attrs,
 			"status", status,
 			"code", code,
 			"path", r.URL.Path,
 			"method", r.Method,
 			"request_id", requestIDFromContext(r.Context()),
-		}
+		)
 		for k, v := range details {
 			attrs = append(attrs, "detail."+k, v)
 		}
@@ -113,14 +114,16 @@ func toAttrs(kv []any) []slog.Attr {
 	return out
 }
 
-// writeJSON encodes v as JSON, sets Content-Type, and writes the status
-// code. The helper exists so every handler emits identical headers and
-// the gzip middleware sees a single Content-Type to gate on. For HEAD
-// requests the handler still sets headers and the status code but
-// skips writing the body, per RFC 9110 §9.3.2.
-func writeJSON(w http.ResponseWriter, r *http.Request, logger *slog.Logger, status int, v any) {
+// writeJSON encodes v as JSON, sets Content-Type, and writes 200 OK. The
+// helper exists so every handler emits identical headers and the gzip
+// middleware sees a single Content-Type to gate on. Every success body in the
+// presenter is a 200 (non-200 success codes have their own paths), so the
+// status is fixed; error responses go through writeJSONError. For HEAD requests
+// the handler still sets headers and the status code but skips writing the
+// body, per RFC 9110 §9.3.2.
+func writeJSON(w http.ResponseWriter, r *http.Request, logger *slog.Logger, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
 	}

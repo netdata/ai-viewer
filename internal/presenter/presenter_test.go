@@ -141,7 +141,7 @@ func TestCheckSchemaMatches(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if err := CheckSchema(s.DB(), SchemaVersion); err != nil {
+	if err := CheckSchema(ctx, s.DB(), SchemaVersion); err != nil {
 		t.Fatalf("CheckSchema: %v", err)
 	}
 }
@@ -156,7 +156,7 @@ func TestCheckSchemaMismatch(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	err = CheckSchema(s.DB(), 999)
+	err = CheckSchema(ctx, s.DB(), 999)
 	if err == nil {
 		t.Fatal("CheckSchema(999): want error, got nil")
 	}
@@ -169,7 +169,7 @@ func TestCheckSchemaMismatch(t *testing.T) {
 // front rather than panicking on QueryRow.
 func TestCheckSchemaRejectsNilDB(t *testing.T) {
 	t.Parallel()
-	if err := CheckSchema(nil, 1); err == nil {
+	if err := CheckSchema(context.Background(), nil, 1); err == nil {
 		t.Fatal("CheckSchema(nil): want error")
 	}
 }

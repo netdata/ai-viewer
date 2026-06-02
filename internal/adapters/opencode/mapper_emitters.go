@@ -34,6 +34,8 @@ func (m *sessionMapper) emitTextPayload(tc *turnContext, p partRow) []canonical.
 // re-emitted onto the LLM op at step-finish (closeLLMOp). When no LLM op is open
 // the patch is dropped (no op to attach to); this is rare (patch always follows a
 // step-start in practice). Returns no events of its own.
+//
+//nolint:unparam // []canonical.Event return is required by the part-emitter dispatch in mapPart, where sibling emitters (openLLMOp, emitToolOp, …) return real event slices through the same shape
 func (m *sessionMapper) recordPatch(tc *turnContext, data partData) []canonical.Event {
 	if tc.llmOpSeq == 0 || tc.llmExtras == nil {
 		return nil

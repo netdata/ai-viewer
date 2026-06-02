@@ -253,14 +253,18 @@ func TestBackfillRollups_OpenHourExclusion(t *testing.T) {
 
 	// closed op at 09:05 (bucket 09:00).
 	cEnd := ts(0, 9, 10)
-	seedOp(t, db, opSpec{id: "op-closed", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-closed", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "c", model: "m", provider: "p",
-		startTS: ts(0, 9, 5), endTS: &cEnd, durationUS: 1, status: "completed"})
+		startTS: ts(0, 9, 5), endTS: &cEnd, durationUS: 1, status: "completed",
+	})
 	// open-hour op at 14:10 (bucket 14:00 == openHourStart) → excluded.
 	oEnd := ts(0, 14, 20)
-	seedOp(t, db, opSpec{id: "op-open", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-open", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "o", model: "m", provider: "p",
-		startTS: ts(0, 14, 10), endTS: &oEnd, durationUS: 1, status: "completed"})
+		startTS: ts(0, 14, 10), endTS: &oEnd, durationUS: 1, status: "completed",
+	})
 
 	if _, err := BackfillRollups(context.Background(), db, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
@@ -286,14 +290,18 @@ func TestBackfillRollups_OpenDayVsClosedHour(t *testing.T) {
 
 	// op on day1 (fully closed day) at 10:00.
 	d1End := ts(1, 10, 5)
-	seedOp(t, db, opSpec{id: "op-d1", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-d1", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "a", model: "m", provider: "p",
-		startTS: ts(1, 10, 0), endTS: &d1End, durationUS: 1, status: "completed"})
+		startTS: ts(1, 10, 0), endTS: &d1End, durationUS: 1, status: "completed",
+	})
 	// op on day2 (open day) at 09:00 — a CLOSED hour of the OPEN day.
 	d2End := ts(2, 9, 5)
-	seedOp(t, db, opSpec{id: "op-d2", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-d2", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "b", model: "m", provider: "p",
-		startTS: ts(2, 9, 0), endTS: &d2End, durationUS: 1, status: "completed"})
+		startTS: ts(2, 9, 0), endTS: &d2End, durationUS: 1, status: "completed",
+	})
 
 	if _, err := BackfillRollups(context.Background(), db, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
@@ -375,13 +383,17 @@ func TestBackfillRollups_MultiSourceSplit(t *testing.T) {
 	seedTurn(t, db, "turn-cx", "sess-cx", ts(0, 8, 0))
 
 	ccEnd := ts(0, 9, 5)
-	seedOp(t, db, opSpec{id: "op-cc", turnID: "turn-cc", sessionID: "sess-cc",
+	seedOp(t, db, opSpec{
+		id: "op-cc", turnID: "turn-cc", sessionID: "sess-cc",
 		kind: "llm", name: "a", model: "m", provider: "p",
-		startTS: ts(0, 9, 0), endTS: &ccEnd, durationUS: 1, status: "completed", tokensIn: 5})
+		startTS: ts(0, 9, 0), endTS: &ccEnd, durationUS: 1, status: "completed", tokensIn: 5,
+	})
 	cxEnd := ts(0, 9, 5)
-	seedOp(t, db, opSpec{id: "op-cx", turnID: "turn-cx", sessionID: "sess-cx",
+	seedOp(t, db, opSpec{
+		id: "op-cx", turnID: "turn-cx", sessionID: "sess-cx",
 		kind: "llm", name: "b", model: "m", provider: "p",
-		startTS: ts(0, 9, 0), endTS: &cxEnd, durationUS: 1, status: "completed", tokensIn: 9})
+		startTS: ts(0, 9, 0), endTS: &cxEnd, durationUS: 1, status: "completed", tokensIn: 9,
+	})
 
 	if _, err := BackfillRollups(context.Background(), db, ts(2, 0, 0), silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
@@ -403,13 +415,17 @@ func TestBackfillRollups_FailedStatus(t *testing.T) {
 	seedTurn(t, db, "turn-1", "sess-1", ts(0, 8, 0))
 
 	fEnd := ts(0, 9, 5)
-	seedOp(t, db, opSpec{id: "op-fail", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-fail", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "a", model: "m", provider: "p",
-		startTS: ts(0, 9, 0), endTS: &fEnd, durationUS: 1, status: "failed"})
+		startTS: ts(0, 9, 0), endTS: &fEnd, durationUS: 1, status: "failed",
+	})
 	cEnd := ts(0, 9, 10)
-	seedOp(t, db, opSpec{id: "op-ok", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-ok", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "b", model: "m", provider: "p",
-		startTS: ts(0, 9, 8), endTS: &cEnd, durationUS: 1, status: "completed"})
+		startTS: ts(0, 9, 8), endTS: &cEnd, durationUS: 1, status: "completed",
+	})
 
 	if _, err := BackfillRollups(context.Background(), db, ts(2, 0, 0), silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
@@ -429,14 +445,18 @@ func TestBackfillRollups_RunningOp(t *testing.T) {
 	seedTurn(t, db, "turn-1", "sess-1", ts(0, 8, 0))
 
 	// running op: end_ts NULL, duration_us NULL.
-	seedOp(t, db, opSpec{id: "op-run", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-run", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "a", model: "m", provider: "p",
-		startTS: ts(0, 9, 0), endTS: nil, durationUS: 0, status: "running"})
+		startTS: ts(0, 9, 0), endTS: nil, durationUS: 0, status: "running",
+	})
 	// closed op same hour with real duration.
 	cEnd := ts(0, 9, 30)
-	seedOp(t, db, opSpec{id: "op-done", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-done", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "b", model: "m", provider: "p",
-		startTS: ts(0, 9, 20), endTS: &cEnd, durationUS: 600_000, status: "completed"})
+		startTS: ts(0, 9, 20), endTS: &cEnd, durationUS: 600_000, status: "completed",
+	})
 
 	if _, err := BackfillRollups(context.Background(), db, ts(2, 0, 0), silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
@@ -496,10 +516,12 @@ func TestBackfillRollups_DeletesStaleRows(t *testing.T) {
 	seedSession(t, db, "sess-1", "claude_code:/loc", "claude", "/work/proj", startSess)
 	seedTurn(t, db, "turn-1", "sess-1", startSess)
 	opEnd := ts(0, 9, 30)
-	seedOp(t, db, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1",
+	seedOp(t, db, opSpec{
+		id: "op-1", turnID: "turn-1", sessionID: "sess-1",
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: ts(0, 9, 15), endTS: &opEnd, durationUS: 1_000_000, status: "completed",
-		tokensIn: 100, tokensOut: 200, costUSD: 0.5})
+		tokensIn: 100, tokensOut: 200, costUSD: 0.5,
+	})
 
 	now := ts(2, 12, 0) // two days later → everything closed
 

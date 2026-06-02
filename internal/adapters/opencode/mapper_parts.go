@@ -178,6 +178,8 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 // mapPart dispatches one part to its emitter per the part-type table (adapter-
 // opencode.md §"Per-table emit rules"). Returns the events for that part,
 // advancing tc's op/LLM/step state. An unknown $.type is skipped with one WRN.
+//
+//nolint:unparam // error return is required by the mapper family contract: the sibling mapMessage/mapAssistantTurn return real errors and the caller loop propagates mapPart's error through the same (evs, error) shape
 func (m *sessionMapper) mapPart(tc *turnContext, msg *messageData, p partRow) ([]canonical.Event, error) {
 	data, err := decodePartData(p.Data)
 	if err != nil {

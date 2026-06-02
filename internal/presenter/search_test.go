@@ -326,8 +326,10 @@ func TestSearch_FindsSubAgentSessionContent(t *testing.T) {
 		id: "opSub", turnID: "tS", sessionID: "subA", seq: 1, kind: "tool", name: "Read",
 		toolNamespace: "fs", startTS: base + 2100, endTS: base + 2200, durationUS: 100, status: "completed",
 	}, "needle in sub-agent")
-	seedFTSLog(t, db, logRow{sessionID: "subA", opID: "opSub", ts: base + 2150, severity: "ERR",
-		source: "aiagent_v3", message: "needle log in sub-agent"})
+	seedFTSLog(t, db, logRow{
+		sessionID: "subA", opID: "opSub", ts: base + 2150, severity: "ERR",
+		source: "aiagent_v3", message: "needle log in sub-agent",
+	})
 
 	code, body, env := getSearch(t, p, "q=needle")
 	if code != http.StatusOK {
@@ -427,8 +429,10 @@ func TestSearch_DisabledSourceLogsExcludedAtQueryTime(t *testing.T) {
 		})
 		// Both sessions get a log matching "needle"; seedFTSLog writes the stale
 		// fts_logs row for each while the source is still default-on.
-		seedFTSLog(t, db, logRow{sessionID: s.id, ts: base + 1200, severity: "ERR",
-			source: "x", message: "parse needle here"})
+		seedFTSLog(t, db, logRow{
+			sessionID: s.id, ts: base + 1200, severity: "ERR",
+			source: "x", message: "parse needle here",
+		})
 	}
 	// Flip source B's opt-out AFTER its fts_logs row exists (the true→false case).
 	setSourceIndexLogs(t, db, "srcDisabled", false)
@@ -468,8 +472,10 @@ func TestSearch_LogsIndexedScopedToSourcesFilter(t *testing.T) {
 			id: s.id, sourceID: s.src, nativeID: s.id, rootID: s.id, kind: "root",
 			agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 2000,
 		})
-		seedFTSLog(t, db, logRow{sessionID: s.id, ts: base + 1200, severity: "ERR",
-			source: "x", message: "parse needle"})
+		seedFTSLog(t, db, logRow{
+			sessionID: s.id, ts: base + 1200, severity: "ERR",
+			source: "x", message: "parse needle",
+		})
 	}
 
 	// Scope to the opted-out source only → false, no logs.
