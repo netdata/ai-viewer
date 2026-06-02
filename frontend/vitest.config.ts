@@ -41,6 +41,10 @@ export default defineConfig({
         'src/pages/SessionsList/**/*.{ts,tsx}',
         'src/pages/SessionDetail/**/*.{ts,tsx}',
         'src/pages/Sources/**/*.{ts,tsx}',
+        // /stats dashboard (SOW-0007 Chunk 9a charts + Chunk 9b page): the
+        // presentational chart components, the page that wires the data hooks +
+        // controls, and the deep-search box are all implemented and tested.
+        'src/pages/Stats/**/*.{ts,tsx}',
       ],
       thresholds: {
         lines: 80,

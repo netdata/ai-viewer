@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
+	"github.com/netdata/ai-viewer/internal/rollups"
 )
 
 // writer applies one canonical event to one *sql.Tx. The writer is
@@ -81,6 +82,98 @@ type writer struct {
 	// satisfying the project "no silent failures" rule without losing
 	// the priced op. Cleared at resetBatch().
 	batchObservabilityErrs []error
+	// dirtyRollupBuckets is the set of HOUR buckets (rollups.BucketTS(ts,
+	// Hourly)) whose rollup inputs are pending materialization. refreshRollups
+	// (rollup_refresh.go) recomputes each CLOSED hour from this set in the same tx,
+	// before commit, and REMOVES each bucket it materializes; a bucket still OPEN at
+	// refresh time is RETAINED (the open hour is never materialized — the query
+	// layer live-folds it). The matching DAY is tracked separately in
+	// dirtyRollupDays (NOT derived from this set), so the two granularities carry
+	// independently. Marked by markDirtyRollupBucket from the three rollup-affecting
+	// apply paths (SessionStarted, OpStarted, OpFinalized's persisted start).
+	//
+	// CARRY-FORWARD (NOT per-batch): this set is writer-lifetime state, NOT
+	// cleared in resetBatch. A bucket dirtied while it was the open hour stays
+	// in the set across batches and is materialized on the first refresh after
+	// it closes — without this, a bucket whose ops all arrive during its own
+	// open hour would be skipped while open and then never re-marked, leaving
+	// the closed bucket permanently un-materialized (round-7 P1). Memory stays
+	// bounded: refreshRollups removes every closed bucket it materializes, so
+	// only open/recent-pending hours remain.
+	dirtyRollupBuckets map[int64]struct{}
+	// rollupTouchedThisBatch is true when markDirtyRollupBucket fired during
+	// THIS batch (a new op/session marked a bucket). Cleared in resetBatch.
+	// emitNotify uses it (∪ rollupMaterializedThisRefresh) instead of
+	// len(dirtyRollupBuckets) so a carried-open pending bucket does NOT make
+	// stats_invalidated fire on every batch (the original semantics: fire when
+	// this batch actually touched a rollup input, not when one is merely
+	// pending).
+	rollupTouchedThisBatch bool
+	// rollupMaterializedThisRefresh is true when refreshRollups materialized
+	// (recomputed) at least one bucket during the current batch OR a dedicated
+	// idle refresh-only pass. Cleared in resetBatch. The second half of the
+	// stats_invalidated trigger, so an idle pass that closes a carried bucket
+	// still emits exactly one notify even though no event marked a bucket.
+	rollupMaterializedThisRefresh bool
+	// pendingMaterializedBuckets buffers HOUR buckets that refreshRollups
+	// materialized WITHIN the current open tx but has NOT yet removed from the
+	// carried dirtyRollupBuckets set. The removal is deferred to AFTER commit
+	// (promoteMaterializedRollupBuckets, called by worker.flush /
+	// refreshRollupsOnly post-commit) — mirroring pendingMissDedup. If the tx
+	// rolls back, resetBatch discards this map so the bucket stays CARRIED and
+	// is retried next pass: a materialized-then-rolled-back idle refresh has no
+	// events to re-ingest (the bucket's ops were committed by a PRIOR batch), so
+	// removing it from the set on the in-memory delete alone would lose a closed
+	// bucket whose DB row never committed — the very round-7 P1 undercount.
+	pendingMaterializedBuckets map[int64]struct{}
+	// dirtyRollupDays is the DAILY twin of dirtyRollupBuckets: the set of DAY
+	// buckets (rollups.BucketTS(ts, Daily)) whose rollup_daily row is pending
+	// materialization. refreshRollups recomputes each CLOSED day from this set in
+	// the same tx, before commit, and stages its removal; a day still OPEN at
+	// refresh time is RETAINED (the open day is never materialized — the query
+	// layer live-folds it). Marked by markDirtyRollupBucket alongside the hour, so
+	// every rollup-affecting event marks BOTH its hour and its day.
+	//
+	// CARRY-FORWARD, INDEPENDENTLY OF HOURS (round-8 P1): days are NOT derived
+	// per-refresh from the dirty hours. A day touched while it was still open stays
+	// carried across batches even AFTER all of its hours have materialized and left
+	// dirtyRollupBuckets, and is materialized on the first refresh after the DAY
+	// closes. Without a separate carried day set, a day whose ops all arrive before
+	// it closes (e.g. within one still-open day, after which its hours materialize
+	// and drain the carried hour set) would be stranded once the day closes with no
+	// further events — the daily sibling of the round-7 hourly open→closed gap,
+	// silently undercounting the all-sources bucket=daily fast path. Memory stays
+	// bounded: refreshRollups removes every closed day it materializes, so only
+	// open/recent-pending days remain.
+	dirtyRollupDays map[int64]struct{}
+	// pendingMaterializedDays buffers DAY buckets that refreshRollups materialized
+	// WITHIN the current open tx but has NOT yet removed from the carried
+	// dirtyRollupDays set. The DAILY twin of pendingMaterializedBuckets: the removal
+	// is deferred to AFTER commit (promoteMaterializedRollupBuckets) so a
+	// materialized-then-rolled-back day stays CARRIED (resetBatch discards this map
+	// on rollback) and is retried — an idle refresh whose commit fails would
+	// otherwise lose a closed day whose rollup_daily row never landed.
+	pendingMaterializedDays map[int64]struct{}
+	// dirtyOpIDs is the set of op ids whose fts_ops searchable text or
+	// error_text this batch changed (marked by BOTH applyOpStarted and
+	// applyOpFinalized — either write can alter the indexed name/model/
+	// provider/tool_namespace or the error text). refreshFTS (fts_refresh.go)
+	// DELETE-then-INSERTs each one from its FINAL persisted ops row in the same
+	// tx, before commit, so the FTS index is byte-identical to BackfillFTS over
+	// the same data. Cleared in resetBatch. fts_logs needs no dirty set: logs
+	// are append-only and indexed inline in applyLogEntry.
+	dirtyOpIDs map[string]struct{}
+	// fts5IndexLogs gates fts_logs population for THIS source: when false the
+	// applyLogEntry FTS insert is skipped (data-model.md §Full-text search).
+	// fts_ops is ALWAYS indexed regardless of this flag. Set per batch by
+	// worker.flush from the resolved worker.fts5IndexLogs (mirrors wr.now), so
+	// newWriter's signature stays unchanged and the field has a reader.
+	fts5IndexLogs bool
+	// now supplies the wall-clock cutoff refreshRollups reads to pick its
+	// open hour/day. Injectable for deterministic tests (so the incremental
+	// path and BackfillRollups share one cutoff — the byte-diff gate's
+	// premise); defaults to defaultNow.
+	now func() int64
 }
 
 // logEntryOnConflict is the ON CONFLICT clause appended to every
@@ -210,16 +303,22 @@ func graftAiViewerKey(base, existingCol, key string) string {
 
 func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 	return &writer{
-		sourceID:           sourceID,
-		sourceFormat:       sourceFormat,
-		location:           location,
-		pricer:             pricer,
-		catalog:            newCatalogWriter(pricer),
-		dirtySessionIDs:    make(map[string]struct{}),
-		dirtyTurnIDs:       make(map[string]struct{}),
-		affectedSessionIDs: make(map[string]struct{}),
-		pricingMissDedup:   make(map[pricingMissKey]struct{}),
-		pendingMissDedup:   make(map[pricingMissKey]struct{}),
+		sourceID:                   sourceID,
+		sourceFormat:               sourceFormat,
+		location:                   location,
+		pricer:                     pricer,
+		catalog:                    newCatalogWriter(pricer),
+		dirtySessionIDs:            make(map[string]struct{}),
+		dirtyTurnIDs:               make(map[string]struct{}),
+		affectedSessionIDs:         make(map[string]struct{}),
+		pricingMissDedup:           make(map[pricingMissKey]struct{}),
+		pendingMissDedup:           make(map[pricingMissKey]struct{}),
+		dirtyRollupBuckets:         make(map[int64]struct{}),
+		pendingMaterializedBuckets: make(map[int64]struct{}),
+		dirtyRollupDays:            make(map[int64]struct{}),
+		pendingMaterializedDays:    make(map[int64]struct{}),
+		dirtyOpIDs:                 make(map[string]struct{}),
+		now:                        defaultNow,
 	}
 }
 
@@ -242,10 +341,35 @@ func (w *writer) resetBatch() {
 	clear(w.dirtyTurnIDs)
 	clear(w.affectedSessionIDs)
 	clear(w.pendingMissDedup)
+	// dirtyRollupBuckets is deliberately NOT cleared here — it is writer-lifetime
+	// carry-forward state. Only refreshRollups removes a bucket, and only after it
+	// materializes it (once the bucket closes) AND the tx commits (via
+	// promoteMaterializedRollupBuckets). A bucket still open at refresh time stays
+	// carried to the next batch; clearing it here would re-introduce the round-7
+	// P1 bug (an open-hour bucket forgotten before it could materialize).
+	//
+	// pendingMaterializedBuckets IS cleared here. On rollback this discards the
+	// not-yet-committed removals so the buckets stay carried and are retried; on
+	// commit, promoteMaterializedRollupBuckets runs FIRST (post-commit, before the
+	// caller's resetBatch) and applies the removals to dirtyRollupBuckets.
+	clear(w.pendingMaterializedBuckets)
+	// dirtyRollupDays is the DAILY twin of dirtyRollupBuckets and is likewise NOT
+	// cleared here — it is writer-lifetime carry-forward state (round-8 P1). Only
+	// refreshRollups removes a day, and only after it materializes it (once the day
+	// closes) AND the tx commits (via promoteMaterializedRollupBuckets).
+	// pendingMaterializedDays IS cleared here, mirroring pendingMaterializedBuckets:
+	// rollback discards the staged day removals so they stay carried and are
+	// retried; commit promotes them first.
+	clear(w.pendingMaterializedDays)
+	clear(w.dirtyOpIDs)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
 	w.sourceStatusChanged = false
+	// Per-batch rollup notify signals reset every batch; the carried
+	// dirtyRollupBuckets set (above) does not.
+	w.rollupTouchedThisBatch = false
+	w.rollupMaterializedThisRefresh = false
 	w.batchObservabilityErrs = w.batchObservabilityErrs[:0]
 }
 
@@ -257,6 +381,22 @@ func (w *writer) resetBatch() {
 func (w *writer) promotePendingMissDedup() {
 	for k := range w.pendingMissDedup {
 		w.pricingMissDedup[k] = struct{}{}
+	}
+}
+
+// promoteMaterializedRollupBuckets removes the buckets refreshRollups
+// materialized in the just-committed tx from the carried sets: HOUR buckets from
+// dirtyRollupBuckets and DAY buckets from dirtyRollupDays. Called by worker.flush /
+// worker.refreshRollupsOnly AFTER tx.Commit() succeeds — a rolled-back
+// materialization therefore leaves its bucket CARRIED (retried next pass),
+// mirroring promotePendingMissDedup. The pending maps are left intact (resetBatch
+// clears them next), so this is idempotent against repeated calls.
+func (w *writer) promoteMaterializedRollupBuckets() {
+	for h := range w.pendingMaterializedBuckets {
+		delete(w.dirtyRollupBuckets, h)
+	}
+	for d := range w.pendingMaterializedDays {
+		delete(w.dirtyRollupDays, d)
 	}
 }
 
@@ -355,6 +495,22 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	if kind == "" {
 		kind = string(canonical.KindRoot)
 	}
+	// Read the existing row's start_ts BEFORE the UPSERT so we know (a) whether the
+	// session already existed (a requireSessionID stub from an out-of-order op/log,
+	// or a prior re-emit) and (b) its OLD start_ts, which the UPSERT's
+	// MIN(sessions.start_ts, excluded.start_ts) may pull earlier. Both feed the
+	// rollup re-marking below.
+	var oldStart sql.NullInt64
+	existed := false
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT start_ts FROM sessions WHERE id = ?`, id).Scan(&oldStart); {
+	case err == nil:
+		existed = true
+	case errors.Is(err, sql.ErrNoRows):
+		// genuine new insert
+	default:
+		return fmt.Errorf("writer: read session start_ts %s: %w", id, err)
+	}
 	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
 	// `aiViewer` stash sub-object, which is grafted back when a stash-free
 	// re-emit omits it (SOW-0003 P1.7b). The claude-code sub-agent SessionStarted
@@ -391,6 +547,34 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
 		return fmt.Errorf("writer: insert session: %w", err)
 	}
 	w.markDirtySession(id)
+	// The session start contributes session_starts to its start-hour bucket
+	// (total/agent/cwd), so that hour's rollup must be recomputed.
+	w.markDirtyRollupBucket(ev.Ts)
+	// Twin of the applySessionUpdated/F1 re-marking: this UPSERT can REPAIR an
+	// already-existing session's denormalized rollup inputs. A requireSessionID
+	// stub (out-of-order op/log) carries empty agent_name/cwd and start_ts = the
+	// referencing event's ts; a later SessionStarted then (a) fills agent/cwd via
+	// COALESCE(NULLIF(...)) and (b) can pull start_ts EARLIER via MIN. Both stale
+	// the materialized rollups the incremental refresh already wrote, and neither
+	// is covered by markDirtyRollupBucket(ev.Ts) alone:
+	//   - filled agent/cwd → every hour bucket holding one of this session's ops
+	//     kept the old (empty/previous) agent/cwd dimension fold, exactly the
+	//     multi-bucket hazard F1 fixed for applySessionUpdated, so re-mark them all.
+	//   - start moved earlier → the OLD start bucket keeps a phantom session_start
+	//     that must be recomputed away (the NEW start bucket ev.Ts is already
+	//     marked above). On a genuine first insert neither applies.
+	// Marking is idempotent (recomputing an unchanged bucket yields the same row),
+	// so over-marking is harmless.
+	if existed {
+		if ev.AgentName != "" || ev.Cwd != "" {
+			if err := w.markSessionRollupBucketsDirty(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		if oldStart.Valid && ev.Ts < oldStart.Int64 {
+			w.markDirtyRollupBucket(oldStart.Int64)
+		}
+	}
 	if err := w.catalog.onSessionStarted(ctx, tx, w.sourceFormat, ev); err != nil {
 		return err
 	}
@@ -426,6 +610,75 @@ WHERE id = ?
 		return fmt.Errorf("writer: update session: %w", err)
 	}
 	w.markDirtySession(id)
+	// agent_name and cwd are session-denormalized rollup inputs: the fold reads
+	// sessions.agent_name/cwd via the ops⋈sessions join (rollup_backfill.go
+	// scanOpRow) AND attributes session_starts to the agent/cwd dimensions. So a
+	// SessionUpdated that CHANGES either one invalidates the materialized agent/
+	// cwd dimension rows of EVERY hour bucket holding one of this session's ops
+	// (a session's ops span many buckets), plus the session-start bucket. The
+	// incremental refresh only recomputes buckets in dirtyRollupBuckets, so
+	// without marking them here a late metadata repair (e.g. claude_code
+	// re-emitting agent/cwd) would leave those dimension rows STALE until a full
+	// backfill. Marking is idempotent (recomputing an unchanged bucket yields the
+	// same row), so over-marking when only one of agent/cwd changed is harmless.
+	if ev.AgentName != "" || ev.Cwd != "" {
+		if err := w.markSessionRollupBucketsDirty(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// markSessionRollupBucketsDirty marks every rollup hour bucket whose recompute
+// reads this session's denormalized agent_name/cwd: the session's START-hour
+// bucket (for session_starts re-attribution) and the START-hour bucket of each
+// of the session's ops (for the agent/cwd dimension folds). Called by
+// applySessionUpdated when agent_name or cwd may have changed. Single-connection
+// discipline: each cursor is fully drained into a slice BEFORE any marking, and
+// marking is in-memory only (no SQL write follows the cursor on the batch tx).
+func (w *writer) markSessionRollupBucketsDirty(ctx context.Context, tx *sql.Tx, sessionID string) error {
+	// Session start hour: session_starts is attributed to total/agent/cwd of the
+	// session's start bucket, so a changed agent/cwd must re-attribute it.
+	var startTs sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT start_ts FROM sessions WHERE id = ?`, sessionID).Scan(&startTs); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("writer: read session start_ts %s: %w", sessionID, err)
+		}
+	}
+
+	// Distinct op-start hour buckets for this session. Drain the whole cursor
+	// into a slice first (no write may straddle an open read on the single
+	// pinned connection), THEN mark — bucket math via the same rollups helper
+	// markDirtyRollupBucket uses, so the dirty set matches the op-write paths.
+	rows, err := tx.QueryContext(ctx, `SELECT start_ts FROM ops WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return fmt.Errorf("writer: query session op buckets %s: %w", sessionID, err)
+	}
+	var opStarts []int64
+	for rows.Next() {
+		var opStart int64
+		if scanErr := rows.Scan(&opStart); scanErr != nil {
+			_ = rows.Close()
+			return fmt.Errorf("writer: scan session op start %s: %w", sessionID, scanErr)
+		}
+		opStarts = append(opStarts, opStart)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		_ = rows.Close()
+		return fmt.Errorf("writer: iterate session op buckets %s: %w", sessionID, iterErr)
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return fmt.Errorf("writer: close session op buckets %s: %w", sessionID, closeErr)
+	}
+
+	// All reads drained — now mark (idempotent in-memory map inserts).
+	if startTs.Valid {
+		w.markDirtyRollupBucket(startTs.Int64)
+	}
+	for _, opStart := range opStarts {
+		w.markDirtyRollupBucket(opStart)
+	}
 	return nil
 }
 
@@ -605,6 +858,16 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
+	// The op's start hour gains an op, so that hour's rollup must be
+	// recomputed. ev.Ts IS the op start (the OpStarted timestamp), which is
+	// the bucket the op rolls up into. ASSUMPTION (catalog + SOW-0027): an op
+	// never moves buckets after its start — adapters emit the authoritative
+	// start at/before finalize, so cross-bucket op migration is out of scope.
+	w.markDirtyRollupBucket(ev.Ts)
+	// The op's indexed text (name/model/provider/tool_namespace) may have
+	// changed; refreshFTS rebuilds its fts_ops row from the final persisted
+	// columns at flush time (fts_ops is always indexed — no flag gate).
+	w.markDirtyOp(opID)
 	if err := w.catalog.onOpStarted(ctx, tx, ev, opInserted, prior); err != nil {
 		return err
 	}
@@ -752,6 +1015,22 @@ WHERE id = ?
 	}
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
+	// Mark the op's START-hour bucket dirty, NOT ev.Ts (which is the END).
+	// Finalize changes the op's duration/status/tokens, all of which roll up
+	// into the op's START bucket, so that hour must be recomputed. startTs is
+	// the PERSISTED ops.start_ts read above; it is invalid only for an orphan
+	// finalize whose OpStarted never landed — in which case the UPDATE matched
+	// no row and there is no rollup contribution to refresh.
+	if startTs.Valid {
+		w.markDirtyRollupBucket(startTs.Int64)
+	}
+	// Finalize sets the op's error_class/error_message (and may change its
+	// status); refreshFTS rebuilds the op's fts_ops row (incl. error_text) from
+	// the now-persisted columns at flush time. Marked unconditionally — even an
+	// orphan finalize (no OpStarted row) is harmless: refreshFTS's DELETE
+	// matches nothing and the row-read returns no row, so no fts_ops row is
+	// inserted for a non-existent op.
+	w.markDirtyOp(opID)
 	// Forward the RESOLVED cost (post-pricer) to the catalog rollups so
 	// catalog_providers.total_cost_usd / catalog_models.total_cost_usd
 	// stay in sync with ops.cost_usd. The pricer mutates `cost` in this
@@ -1034,13 +1313,36 @@ func (w *writer) applyLogEntry(ctx context.Context, tx *sql.Tx, ev canonical.Log
 	if severity == "" {
 		severity = "INF"
 	}
-	if _, err := tx.ExecContext(ctx, `
+	// RETURNING id yields the new log_entries.id on a genuine insert and
+	// sql.ErrNoRows when the ON CONFLICT DO NOTHING fires (a replayed,
+	// byte-identical log row). That signal drives fts_logs: index ONCE per
+	// first-seen log (append-only), skip on replay so no duplicate fts_logs row
+	// is created — matching BackfillFTS, which reads the already-deduped
+	// log_entries. logID stays 0 (invalid) on conflict.
+	var logID int64
+	insertErr := tx.QueryRowContext(ctx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
-`+logEntryOnConflict, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras); err != nil {
-		return fmt.Errorf("writer: insert log_entry: %w", err)
+`+logEntryOnConflict+`
+RETURNING id`, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras).Scan(&logID)
+	insertedNewLog := true
+	if insertErr != nil {
+		if !errors.Is(insertErr, sql.ErrNoRows) {
+			return fmt.Errorf("writer: insert log_entry: %w", insertErr)
+		}
+		insertedNewLog = false // duplicate: the fts_logs row already exists.
 	}
 	w.markDirtySession(sessionID)
+	// fts_logs is gated on the source's fts5_index_logs flag (fts_ops is not).
+	// Index only newly-inserted logs from THIS source; replays are no-ops.
+	if insertedNewLog && w.fts5IndexLogs {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fts_logs (message, log_id, session_id, op_id, severity, ts)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			ev.Message, logID, sessionID, opID, severity, ev.Ts); err != nil {
+			return fmt.Errorf("writer: index log_entry in fts_logs: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1123,6 +1425,43 @@ func (w *writer) markDirtySession(id string) {
 }
 
 func (w *writer) markDirtyTurn(id string) { w.dirtyTurnIDs[id] = struct{}{} }
+
+// markDirtyRollupBucket records that this batch changed a rollup input whose
+// op/session-start falls in the UTC bucket containing ts. It marks BOTH the HOUR
+// (dirtyRollupBuckets) and the DAY (dirtyRollupDays) the input belongs to, so each
+// granularity is an independently-carried set — the day is NOT derived from the
+// hour at refresh time (round-8 P1: a derived day is dropped once its hours
+// materialize while the day is still open, stranding rollup_daily after the day
+// closes). Called ONLY from the three rollup-affecting apply paths:
+// applySessionStarted (session-start time), applyOpStarted (op-start time),
+// applyOpFinalized (the op's PERSISTED start_ts — finalize changes the op's
+// duration/status, so its START bucket, not the end, must be recomputed).
+func (w *writer) markDirtyRollupBucket(ts int64) {
+	w.dirtyRollupBuckets[rollups.BucketTS(ts, rollups.Hourly)] = struct{}{}
+	w.dirtyRollupDays[rollups.BucketTS(ts, rollups.Daily)] = struct{}{}
+	w.rollupTouchedThisBatch = true
+}
+
+// hasPendingRollupBuckets reports whether any rollup bucket — HOUR or DAY — is
+// still awaiting materialization (carried forward because it was open at the last
+// refresh). The worker's run loop reads it to decide whether to keep its flush
+// timer armed for an idle materialization tick: the timer must stay armed while
+// EITHER pending hours OR pending days remain, so a day that closes during a lull
+// (after its hours have already materialized and drained the hour set) is still
+// materialized by the idle pass — see worker.run.
+func (w *writer) hasPendingRollupBuckets() bool {
+	return len(w.dirtyRollupBuckets) > 0 || len(w.dirtyRollupDays) > 0
+}
+
+// markDirtyOp records that this batch wrote op `id`, so refreshFTS rebuilds its
+// fts_ops row from the FINAL persisted ops columns at flush time. Marked by BOTH
+// applyOpStarted and applyOpFinalized: either write can change the op's indexed
+// text (name/model/provider/tool_namespace) or its error_text (error_class/
+// error_message, set at finalize). DELETE-then-INSERT against the persisted row
+// makes a started+finalized-in-one-batch op index its final error text once.
+func (w *writer) markDirtyOp(id string) {
+	w.dirtyOpIDs[id] = struct{}{}
+}
 
 // nullIfEmpty returns a sql.NullString backed by s when s != "" and
 // NULL otherwise. Used to keep TEXT columns null when the source did

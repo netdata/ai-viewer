@@ -30,10 +30,14 @@ var expectedTables = []string{
 	"catalog_models",
 	"catalog_providers",
 	"catalog_tools",
+	"fts_logs",
+	"fts_ops",
 	"log_entries",
 	"notify",
 	"ops",
 	"payload_refs",
+	"rollup_daily",
+	"rollup_hourly",
 	"schema_meta",
 	"sessions",
 	"source_progress",
@@ -85,6 +89,14 @@ func listTables(t *testing.T, db *sql.DB) []string {
 		if len(name) >= 7 && name[:7] == "sqlite_" {
 			continue
 		}
+		// FTS5 virtual tables (fts_ops, fts_logs from migration 0006) each
+		// spawn five shadow tables of type='table': <base>_{data,idx,docsize,
+		// config,content}. The base virtual tables ARE application schema and
+		// stay in the contract; their shadow tables are FTS5-internal storage
+		// and are skipped, mirroring the sqlite_* skip above.
+		if isFTSShadowTable(name) {
+			continue
+		}
 		out = append(out, name)
 	}
 	if err := rows.Err(); err != nil {
@@ -94,8 +106,28 @@ func listTables(t *testing.T, db *sql.DB) []string {
 	return out
 }
 
+// isFTSShadowTable reports whether name is one of the shadow tables FTS5
+// auto-creates for an external/content-owning index. For each FTS5 virtual
+// table `<base>` (migration 0006 creates fts_ops and fts_logs), SQLite
+// materialises `<base>_data`, `<base>_idx`, `<base>_docsize`, `<base>_config`,
+// and `<base>_content` as type='table' rows in sqlite_master. They are
+// FTS5-internal storage, not application schema, so the contract list skips
+// them — while keeping the base virtual tables. Matching the exact known
+// suffixes (rather than any `fts_*` prefix) keeps a real future table named,
+// say, fts_settings from being silently dropped from the contract.
+func isFTSShadowTable(name string) bool {
+	for _, base := range []string{"fts_ops", "fts_logs"} {
+		for _, suffix := range []string{"_data", "_idx", "_docsize", "_config", "_content"} {
+			if name == base+suffix {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // TestOpen_RunsMigrations asserts every contract table is created and
-// schema_meta carries version='5' (the latest migration, 0005, bumps it).
+// schema_meta carries version='7' (the latest migration, 0007, bumps it).
 func TestOpen_RunsMigrations(t *testing.T) {
 	t.Parallel()
 
@@ -111,8 +143,8 @@ func TestOpen_RunsMigrations(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "5" {
-		t.Fatalf("schema_meta.version: want %q, got %q", "5", version)
+	if version != "7" {
+		t.Fatalf("schema_meta.version: want %q, got %q", "7", version)
 	}
 
 	var createdAt string
@@ -147,21 +179,21 @@ func TestOpen_Idempotent(t *testing.T) {
 		// expectedMigrations grows by one each time a new SQL file is
 		// added under migrations/. Update the constant in lockstep with
 		// the new migration so this contract test stays meaningful.
-		const expectedMigrations = 5
+		const expectedMigrations = 7
 		if count != expectedMigrations {
 			t.Fatalf("round %d: _schema_migrations rows: want %d, got %d", round, expectedMigrations, count)
 		}
 
 		// Inserting the same schema_meta version twice would be a defect
 		// only if the migration ran a second time without the INSERT OR
-		// REPLACE guard. Sanity-check the version is still '5'.
+		// REPLACE guard. Sanity-check the version is still '7'.
 		var version string
 		if err := s.DB().QueryRowContext(context.Background(),
 			`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 			t.Fatalf("round %d: read schema_meta.version: %v", round, err)
 		}
-		if version != "5" {
-			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "5", version)
+		if version != "7" {
+			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "7", version)
 		}
 
 		if err := s.Close(); err != nil {

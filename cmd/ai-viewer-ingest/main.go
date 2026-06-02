@@ -70,6 +70,13 @@ func main() {
 // run is the testable entrypoint. Returns the process exit code so
 // main() is a one-liner.
 func run(args []string, stdout, stderr *os.File) int {
+	// Thin subcommand dispatch. Existing invocations pass only flags
+	// (leading '-'), so the daemon path below is preserved. A bare
+	// "rollups-backfill" first arg routes to the one-shot recompute.
+	if len(args) > 0 && args[0] == "rollups-backfill" {
+		return runBackfill(args[1:], stdout, stderr)
+	}
+
 	cfg, exitCode, ok := parseFlags(args, stderr)
 	if !ok {
 		return exitCode

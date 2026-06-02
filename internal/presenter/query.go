@@ -61,6 +61,15 @@ func (p *Presenter) writeBadFilter(w http.ResponseWriter, r *http.Request, err e
 		CodeBadRequest, badFilterReason(err), nil)
 }
 
+// writeBadEnum maps an unknown enum query value (bucket/group_by/metric/
+// dimension on the stats endpoints) to a 400 BAD_REQUEST envelope naming the
+// offending parameter, mirroring how parseScalarFilters rejects unknown scalar
+// enums (rest-api.md §GET /api/stats/aggregate, §GET /api/stats/top).
+func (p *Presenter) writeBadEnum(w http.ResponseWriter, r *http.Request, param string) {
+	writeJSONError(w, r, p.logger, http.StatusBadRequest,
+		CodeBadRequest, "unknown "+param+" value", map[string]any{"param": param})
+}
+
 // badFilterReason extracts the human-readable reason from a wrapped
 // errBadFilter. errors.Join renders the errBadFilter sentinel and the
 // specific reason on separate lines; the last non-empty line is the

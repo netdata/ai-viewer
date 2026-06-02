@@ -351,6 +351,188 @@ Cross-session aggregates over the filtered set.
 }
 ```
 
+`/api/stats` is **NOT** rollup-backed and is unchanged by SOW-0007: it continues to
+compute its breakdowns live over `sessions`/`ops` for the filtered session set.
+This is deliberate — `/api/stats` is a *filtered, non-time-bucketed* summary
+(`by_status` has no rollup dimension, and `by_agent`/`by_model`/`by_source` are
+scoped to the filtered session set), none of which maps onto the time-bucketed,
+per-single-dimension, all-sessions rollups. The rollup-backed analytics surfaces
+delivered by SOW-0007 are the dedicated endpoints below — `/api/stats/aggregate`
+and `/api/stats/top`. (An earlier SOW-0007 draft proposed transparently
+rollup-backing `/api/stats`; that was dropped as ill-fitting — the summary's shape
+and filter semantics differ fundamentally from the rollups.)
+
+### GET /api/stats/aggregate
+
+A time-series aggregate for the statistics dashboard's line charts. Reads the
+materialized rollups for closed buckets and `UNION ALL`s a live aggregate over
+`ops` for the open bucket (`data-model.md` §Rollup tables — open-hour rule). Reuses
+the **same filter params as `GET /api/sessions`** via `parseSessionFilter` (time
+range `from`/`to` on `start_ts`, plus `agents`, `models`, `tools`, `sources`,
+`status`, `q`), all bound via `?` placeholders. HEAD, 405 `METHOD_NOT_ALLOWED` on a
+non-GET/HEAD method, control-byte rejection on path/query, and `BAD_REQUEST` on an
+unknown enum value behave exactly as the other GET routes.
+
+**Rollup fast path vs. live fold (correctness contract).** The long-form rollups
+are keyed by a SINGLE dimension per row (`data-model.md` §Rollup tables — they
+deliberately avoid the `model×provider×tool×agent×cwd` cross-product), so they can
+natively answer only a time-range (`from`/`to`) filter alongside the requested
+`group_by`/`dimension`. ANY dimension filter — including `sources`, which binds to
+`sessions.source_id` (finer than the rollups' `source_format` key, so a
+`source_format`-level filter would over-count sibling sources) — forces the live
+fold. Therefore:
+- **Rollup fast path** — taken when the ONLY filters present are `from`/`to` (no
+  dimension filter and no `sources`): closed buckets are summed from
+  `rollup_hourly`/`rollup_daily` (`WHERE dimension=? AND bucket_ts ∈ [from,
+  openBucketStart)`), and the still-open bucket(s) are folded live.
+- **Live fold** — taken when ANY of `agents`, `models`, `tools`, `status`, `q`,
+  **or `sources`** is present: the WHOLE `[from, to)` is aggregated live from `ops`
+  (joined to `sessions`), applying every filter. `sources` forces the live fold
+  because it binds to `sessions.source_id` (e.g. `codex:/loc`), which is STRICTLY
+  FINER than the rollups' `source_format` key (e.g. `codex`) — one `source_format`
+  can cover many `source_id`s (`data-model.md` §Rollup tables), so a
+  `source_format`-level filter would over-count sibling sources. Correct, just not
+  rollup-accelerated.
+
+The live fold's TIME bound is `op.start_ts ∈ [from, to)` (the bucket key), NOT
+`session.start_ts`: the `sessions` join supplies only the agent/cwd dimension and
+the session-level dimension filters (`agents`/`status`/`sources`/`group`), so an
+op whose session STARTED before `from` is still counted iff the op itself falls in
+the window — keeping the live fold byte-equal to the op-bucketed rollup (the AC#2
+invariant). The sole exception is `metric=sessions` (`session_starts`), which is
+attributed by `session.start_ts` because it counts session starts, so its live
+fold loads the window's session starts (by `s.start_ts`) and folds them through
+`rollups.Rollup`'s `starts` input — matching how the rollup materializes the
+`session_starts` column.
+
+**Bucket-window semantics.** A bucket is included iff `from <= bucket_ts < to`
+(selection by the bucket's START); within an included bucket the whole bucket's
+data is returned (the rollups cannot sub-select inside a bucket). A `from`/`to`
+that falls mid-bucket therefore excludes that partial lower bucket — this is what
+keeps the fast path and the live fold byte-identical. The default-`to` window
+bound and the open-bucket cutoff (`openStart`) are computed from a SINGLE
+wall-clock read per request, so a clock that crosses an hour/day boundary
+mid-request cannot desync them and drop the just-open bucket's live fold
+(`closedHi = min(to, openStart)`).
+
+Both paths and the open-bucket fold compute their numbers through the SAME pure
+`internal/rollups` fold (the server reads the relevant `ops` into `rollups.OpRow`s
+and calls `Rollup(...)`), so an open bucket and a live-folded range are
+byte-consistent with the materialized closed buckets by construction — the same
+property the backfill-vs-incremental diff gate guarantees for the ingester.
+`group_by=source_format` reads the `dimension='total'` rows keyed by
+`source_format`; `group_by=total` returns the single `dimension='total'`,
+`dimension_value=''` series.
+
+```
+?from=<us>&to=<us>
+&bucket=daily            'hourly'|'daily' (default 'daily')
+&group_by=total          'model'|'provider'|'tool'|'agent'|'cwd'|'source_format'|'total' (default 'total')
+&metric=cost             'cost'|'tokens_in'|'tokens_out'|'calls'|'failures'|'duration_us'|'sessions' (default 'cost'); 'calls' maps to op_count, 'sessions' to the additive session_starts column (meaningful for group_by total|agent|cwd; 0 for model|provider|tool, exactly as the rollup stores it — drives the per-day sessions trend, ui-pages.md)
+&agents=...&models=...&tools=...&sources=...&status=...&q=...   same as /api/sessions
+```
+
+Response — one entry per time bucket, each carrying the per-`group_by`-value series
+for that bucket:
+
+```json
+{
+  "buckets": [
+    {
+      "bucket_ts": <us>,
+      "series": [
+        { "key": "<dimension_value>", "value": <number> }
+      ]
+    }
+  ],
+  "bucket": "daily",
+  "metric": "cost"
+}
+```
+
+- `bucket_ts` is the UTC bucket start in microseconds (hour or day, per `bucket`).
+- `key` is the `dimension_value` for the row (a model name, provider, `"<ns>.<name>"`
+  tool id, agent name, cwd, or source format). `group_by=total` returns a single
+  series entry keyed `""`.
+- `value` is the selected `metric` summed over that `(bucket, key)`.
+- An unknown `bucket`, `group_by`, or `metric` value is a `BAD_REQUEST`.
+
+### GET /api/stats/top
+
+Top-N ranking for the dashboard's horizontal bar charts: the highest-`metric`
+dimension values over the window. Computed by summing the dimension's rollup rows
+over `[from, to)` (plus the live open hour) and `ORDER BY value DESC LIMIT n`.
+Same filter params and HEAD/405/bad-param behavior as `/api/stats/aggregate`.
+
+```
+?from=<us>&to=<us>
+&dimension=model         'model'|'provider'|'tool'|'agent'|'cwd'
+&metric=cost             same enum as /api/stats/aggregate (default 'cost'; 'calls' → op_count)
+&n=20                    default 20, max 200
+&agents=...&models=...&tools=...&sources=...&status=...&q=...   same as /api/sessions
+```
+
+Response — items ordered by `value` descending, top-N:
+
+```json
+{
+  "dimension": "model",
+  "metric": "cost",
+  "items": [
+    { "key": "<value>", "value": <number> }
+  ]
+}
+```
+
+An unknown `dimension` or `metric` value is a `BAD_REQUEST`; `n` is clamped to the
+`[1, 200]` range.
+
+### GET /api/search
+
+Deep full-text search across ops and logs, backed by the FTS5 tables (`fts_ops`,
+`fts_logs`; `data-model.md` §Full-text search). Drives the `/stats` deep-search box.
+Reuses the standard filter params (`from`/`to`, `agents`, `models`, `tools`,
+`sources`, `status`) via `parseSessionFilter`. HEAD, 405, and control-byte
+rejection behave as the other GET routes.
+
+```
+?q=<text>                required; non-empty after trim; control chars rejected (BAD_REQUEST)
+&from=<us>&to=<us>&agents=...&models=...&tools=...&sources=...&status=...   same as /api/sessions
+&limit=50                default 50, max 200
+&cursor=<opaque>         pagination (offset-style; mirrors /api/sessions/:id/logs)
+```
+
+Response — matched ops and logs, ranked by BM25 with `snippet()` excerpts:
+
+```json
+{
+  "ops": [
+    { "op_id":"...","session_id":"...","kind":"tool","name":"...","model":"...","snippet":"…matched…","rank":<number> }
+  ],
+  "logs": [
+    { "log_id":123,"session_id":"...","op_id":"...","severity":"ERR","ts":<us>,"snippet":"…matched…","rank":<number> }
+  ],
+  "logs_indexed": true
+}
+```
+
+- `q` is passed as the FTS5 `MATCH` argument, **always parameterized** (bound `?`):
+  FTS5 query syntax (`AND`/`OR`/`NEAR`/prefix `*`/phrase `"…"`) is intentionally
+  exposed to the operator, but because the `MATCH` value is a bound parameter there
+  is no SQL-injection surface — the query string never reaches the SQL text.
+- `rank` is the BM25 score; `ops` and `logs` are each ordered by `rank` (best
+  first). `snippet()` returns the matched excerpt for display.
+- `op_id`/`session_id` (and `log_id`/`session_id`/`op_id` for logs) are the linkage
+  the UI uses to navigate to the session/op.
+- **`logs_indexed`** reflects the per-source `fts5_index_logs` flag
+  (`data-model.md`). When log indexing is disabled the `logs` array is empty and
+  `"logs_indexed": false` is set, so the client can distinguish "no log matches"
+  from "logs not indexed on this install". Log hits are additionally restricted at
+  query time to sources with `fts5_index_logs=1`, so a disabled source's logs never
+  appear in search even if previously-indexed `fts_logs` rows remain until a
+  `rollups-backfill` rebuild.
+- An empty/whitespace-only `q` is a `BAD_REQUEST`.
+
 ### GET /api/catalog/{tools,models,agents}
 
 **Phase 2 — not implemented in Phase 1.** The catalog tables are populated by the

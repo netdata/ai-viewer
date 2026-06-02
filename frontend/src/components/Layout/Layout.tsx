@@ -11,6 +11,7 @@ import styles from './Layout.module.css';
 const NAV: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/', label: 'Sessions' },
   { to: '/topology', label: 'Topology' },
+  { to: '/stats', label: 'Statistics' },
   { to: '/tools', label: 'Tools' },
   { to: '/models', label: 'Models' },
   { to: '/agents', label: 'Agents' },

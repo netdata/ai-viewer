@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -278,5 +279,141 @@ func TestWithSourceFormat_OverridesParsing(t *testing.T) {
 	f, l := i.deriveSourceFields("custom-id")
 	if f != "my-format" || l != "/data" {
 		t.Errorf("deriveSourceFields = (%q, %q), want (my-format, /data)", f, l)
+	}
+}
+
+// submitOneSessionAndWaitForSource submits a single SessionStartedEvent for
+// sourceID and blocks until ensureSourceRow has materialised the sources row.
+// Shared by the fts5_index_logs persistence tests so each asserts only the
+// column value, not the plumbing. The channel is closed by the helper after the
+// row appears so the worker drains and stops cleanly under i.Stop().
+func submitOneSessionAndWaitForSource(t *testing.T, i *Ingester, db *sql.DB, sourceID string) {
+	t.Helper()
+	ch := make(chan canonical.Event, 1)
+	ch <- canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: sourceID, SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	}
+	if err := i.Submit(sourceID, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sources WHERE id=?`, sourceID) == 1
+	}) {
+		t.Fatalf("sources row for %q not created", sourceID)
+	}
+	close(ch)
+}
+
+// TestWithFTS5IndexLogs_PersistsZeroWhenDisabled pins the opt-out path: a source
+// registered with WithFTS5IndexLogs(id, false) has its sources row persisted
+// with fts5_index_logs = 0. The persisted flag gates fts_logs indexing: the FTS
+// backfill and /api/search both filter on src.fts5_index_logs = 1, so a disabled
+// source is excluded from both.
+func TestWithFTS5IndexLogs_PersistsZeroWhenDisabled(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	const sourceID = "aiagent_v3:/tmp"
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1),
+		WithBatchInterval(time.Second),
+		WithFTS5IndexLogs(sourceID, false),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	submitOneSessionAndWaitForSource(t, i, db, sourceID)
+
+	if got := scanInt(t, db, `SELECT fts5_index_logs FROM sources WHERE id=?`, sourceID); got != 0 {
+		t.Errorf("fts5_index_logs = %d, want 0 (WithFTS5IndexLogs(false))", got)
+	}
+}
+
+// TestFTS5IndexLogs_DefaultsToOneWithoutOption pins the opt-out DEFAULT: with no
+// WithFTS5IndexLogs option for the source, the persisted sources row carries
+// fts5_index_logs = 1 (the ingester resolves the absence of an override to the
+// indexed-by-default value, matching the migration column default).
+func TestFTS5IndexLogs_DefaultsToOneWithoutOption(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	const sourceID = "aiagent_v3:/tmp"
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1),
+		WithBatchInterval(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	submitOneSessionAndWaitForSource(t, i, db, sourceID)
+
+	if got := scanInt(t, db, `SELECT fts5_index_logs FROM sources WHERE id=?`, sourceID); got != 1 {
+		t.Errorf("fts5_index_logs = %d, want 1 (default, no WithFTS5IndexLogs option)", got)
+	}
+}
+
+// TestWithFTS5IndexLogs_ReassertsOnRestart pins the daemon-restart contract: the
+// ingester option is the runtime source of truth, so ensureSourceRow's
+// ON CONFLICT updates fts5_index_logs to the resolved value even when a prior
+// row persisted the opposite. We seed a row with fts5_index_logs=0, then run an
+// ingester WITHOUT the option (resolves to the default 1) and assert the row is
+// re-asserted to 1.
+func TestWithFTS5IndexLogs_ReassertsOnRestart(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	const sourceID = "aiagent_v3:/tmp"
+	ctx := context.Background()
+
+	// Prior run persisted the opt-out (0).
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO sources (id, format, location, fts5_index_logs, created_at) VALUES (?, 'aiagent_v3', '/tmp', 0, 1000)`,
+		sourceID); err != nil {
+		t.Fatalf("seed prior source row: %v", err)
+	}
+
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1),
+		WithBatchInterval(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	// The sources row already exists (seeded with 0), so a row-count wait would
+	// pass before the batch flush runs ensureSourceRow's ON CONFLICT UPDATE.
+	// Wait on the column flipping to the re-asserted value instead.
+	ch := make(chan canonical.Event, 1)
+	ch <- canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: sourceID, SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	}
+	if err := i.Submit(sourceID, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	defer close(ch)
+
+	if !waitFor(2*time.Second, func() bool {
+		return scanInt(t, db, `SELECT fts5_index_logs FROM sources WHERE id=?`, sourceID) == 1
+	}) {
+		got := scanInt(t, db, `SELECT fts5_index_logs FROM sources WHERE id=?`, sourceID)
+		t.Fatalf("fts5_index_logs = %d, want 1 (ingester re-asserts default on restart)", got)
 	}
 }

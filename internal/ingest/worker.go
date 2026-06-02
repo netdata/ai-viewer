@@ -17,13 +17,23 @@ type worker struct {
 	sourceID     string
 	sourceFormat string
 	location     string
-	events       <-chan canonical.Event
-	db           *sql.DB
-	hwm          *hwmCache
-	pricer       Pricer
-	logger       *slog.Logger
-	batchSize    int
-	batchEvery   time.Duration
+	// fts5IndexLogs is the resolved per-source FTS5 log-indexing flag the
+	// ingester computed from WithFTS5IndexLogs (default true). ensureSourceRow
+	// persists it on the sources row so the operator's choice survives daemon
+	// restart. applyLogEntry reads it to gate fts_logs population (fts_ops is
+	// always indexed regardless of this flag).
+	fts5IndexLogs bool
+	events        <-chan canonical.Event
+	db            *sql.DB
+	hwm           *hwmCache
+	pricer        Pricer
+	logger        *slog.Logger
+	batchSize     int
+	batchEvery    time.Duration
+	// now supplies the wall-clock cutoff the incremental rollup refresh uses
+	// to pick its open hour/day. Injectable for deterministic tests; defaults
+	// to defaultNow when the worker is built without one.
+	now func() int64
 	// onErr is invoked for batch-level failures (commit errors, etc.).
 	// Defaults to logger.Error if not set.
 	onErr func(error)
@@ -41,6 +51,9 @@ const shutdownDrainTimeout = 10 * time.Second
 // own short-lived context so SQL writes still succeed.
 func (w *worker) run(ctx context.Context) {
 	wr := newWriter(w.sourceID, w.sourceFormat, w.location, w.pricer)
+	if w.now != nil {
+		wr.now = w.now
+	}
 	batch := make([]canonical.Event, 0, w.batchSize)
 	flushTimer := time.NewTimer(w.batchEvery)
 	defer flushTimer.Stop()
@@ -54,6 +67,33 @@ func (w *worker) run(ctx context.Context) {
 	}
 	timerArmed := false
 
+	// stopTimer stops flushTimer and drains a possibly-already-fired tick so a
+	// later Reset starts a clean interval (the standard time.Timer idiom).
+	stopTimer := func() {
+		if !flushTimer.Stop() {
+			select {
+			case <-flushTimer.C:
+			default:
+			}
+		}
+		timerArmed = false
+	}
+
+	// rearmTimer keeps the flush timer ticking while rollup buckets are carried
+	// (open at the last refresh) so a bucket that closes during a lull is
+	// materialized by the idle tick within ~one batchEvery interval; once the
+	// carried set drains it leaves the timer STOPPED (no idle busy-spin —
+	// ingester.md §"Incremental rollup refresh", round-7 Part 2).
+	rearmTimer := func() {
+		if wr.hasPendingRollupBuckets() {
+			stopTimer()
+			flushTimer.Reset(w.batchEvery)
+			timerArmed = true
+			return
+		}
+		stopTimer()
+	}
+
 	flush := func(reason string, flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
@@ -63,15 +103,29 @@ func (w *worker) run(ctx context.Context) {
 		}
 		batch = batch[:0]
 		wr.resetBatch()
-		if timerArmed {
-			if !flushTimer.Stop() {
-				select {
-				case <-flushTimer.C:
-				default:
-				}
-			}
-			timerArmed = false
+		// Re-arm (or stop) the timer based on whether buckets are still carried:
+		// a flush that left an open hour pending must keep ticking so the idle
+		// refresh materializes it once it closes.
+		rearmTimer()
+	}
+
+	// idleRefresh runs a dedicated rollup refresh with no events — the idle
+	// materialization path for carried buckets that have since closed. Used on an
+	// interval fire with an empty batch and on shutdown when the final batch is
+	// empty but buckets are still pending.
+	idleRefresh := func(refreshCtx context.Context) {
+		if !wr.hasPendingRollupBuckets() {
+			return
 		}
+		if err := w.refreshRollupsOnly(refreshCtx, wr); err != nil {
+			w.report(err)
+		}
+		// Reset per-batch state after the refresh-only pass (mirrors the flush
+		// closure's resetBatch). The carried dirtyRollupBuckets set is untouched by
+		// resetBatch and promoteMaterializedRollupBuckets already applied any
+		// committed removals; this clears the per-batch rollup notify flags so a
+		// later real flush that touches no rollup does not inherit a stale "fire".
+		wr.resetBatch()
 	}
 
 	for {
@@ -109,6 +163,10 @@ func (w *worker) run(ctx context.Context) {
 			default:
 			}
 			flush("ctx done", drainCtx)
+			// Final flush may have left buckets carried (or the final batch was
+			// empty with buckets still pending): run the refresh-only pass so any
+			// bucket closed by shutdown time is materialized before we exit.
+			idleRefresh(drainCtx)
 			drainCancel()
 			return
 		case ev, ok := <-w.events:
@@ -118,6 +176,10 @@ func (w *worker) run(ctx context.Context) {
 				// concurrently does not abort BeginTx.
 				drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 				flush("channel closed", drainCtx)
+				// Final flush may have left buckets carried (or the final batch was
+				// empty with buckets still pending): materialize any closed-by-now
+				// bucket before exit.
+				idleRefresh(drainCtx)
 				drainCancel()
 				return
 			}
@@ -137,7 +199,16 @@ func (w *worker) run(ctx context.Context) {
 			}
 		case <-flushTimer.C:
 			timerArmed = false
-			flush("interval", ctx)
+			if len(batch) > 0 {
+				flush("interval", ctx)
+				break // flush() already re-armed/stopped the timer as needed.
+			}
+			// Empty batch but the timer fired: this is an idle materialization
+			// tick. Run the refresh-only pass to materialize any carried bucket
+			// that has since closed, then re-arm to keep ticking until the
+			// carried set drains (rearmTimer self-terminates when empty).
+			idleRefresh(ctx)
+			rearmTimer()
 		}
 	}
 }
@@ -148,6 +219,11 @@ func (w *worker) run(ctx context.Context) {
 // the caller; the batch is dropped (we do not retry — see
 // ingester.md §Failure Recovery).
 func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event) error {
+	// Give the writer this source's resolved FTS5 log-indexing flag for the
+	// batch (mirrors how run() threads wr.now). Set here rather than via
+	// newWriter so the writer constructor signature stays unchanged (the ~6
+	// test callers of newWriter need no edit) and the flag has a reader.
+	wr.fts5IndexLogs = w.fts5IndexLogs
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -162,8 +238,14 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	}()
 
 	// Ensure the source row exists; subsequent FK references and
-	// source_progress depend on it.
-	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location); err != nil {
+	// source_progress depend on it. The resolved fts5IndexLogs flag is
+	// persisted here (the ingester option is the runtime source of truth, so a
+	// daemon restart re-asserts it). The in-memory flag (w.fts5IndexLogs →
+	// wr.fts5IndexLogs) gates incremental fts_logs indexing in the writer's
+	// applyLogEntry path; the persisted sources.fts5_index_logs column is read
+	// by BackfillFTS (indexableLogsForFTSQuery) and by GET /api/search
+	// (presenter searchLogs).
+	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location, w.fts5IndexLogs); err != nil {
 		return err
 	}
 
@@ -171,6 +253,25 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 		if err := wr.apply(ctx, tx, ev); err != nil {
 			return fmt.Errorf("apply event %s seq=%d: %w", ev.EventKind(), ev.EventSourceSeq(), err)
 		}
+	}
+
+	// Recompute the time-bucketed rollups for the buckets this batch touched,
+	// in THIS tx so they commit atomically with the ops/sessions they
+	// summarize (ingester.md §"Incremental rollup refresh"). Runs after the
+	// per-event apply loop (the dirty-bucket set is now complete) and before
+	// the catalog/aggregate refresh — order among the three is irrelevant
+	// since each reads the now-final ops/sessions rows.
+	if err := wr.refreshRollups(ctx, tx); err != nil {
+		return err
+	}
+
+	// Rebuild fts_ops for the ops this batch wrote, in THIS tx so the search
+	// index commits atomically with the ops it indexes (mirrors refreshRollups).
+	// fts_logs is maintained inline in applyLogEntry (append-only). Runs after
+	// the apply loop so each op's FINAL persisted columns (incl. finalize error
+	// text) are indexed.
+	if err := wr.refreshFTS(ctx, tx); err != nil {
+		return err
 	}
 
 	if err := refreshAggregates(ctx, tx, wr.dirtyTurnIDs, wr.dirtySessionIDs); err != nil {
@@ -207,6 +308,10 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	// same (provider, model, missKind) re-emits the (now-missing)
 	// warning.
 	wr.promotePendingMissDedup()
+	// Apply the carried-set removals for buckets materialized in this committed
+	// tx (deferred from refreshRollups so a rolled-back materialization keeps its
+	// bucket carried — round-7 P1). MUST run before the caller's resetBatch.
+	wr.promoteMaterializedRollupBuckets()
 
 	if wr.batchMaxSeq > 0 {
 		w.hwm.Advance(w.sourceID, wr.batchMaxSeq)
@@ -227,6 +332,74 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	return nil
 }
 
+// refreshRollupsOnly runs a DEDICATED rollup refresh with NO events — the idle
+// materialization path (ingester.md §"Incremental rollup refresh", round-7 Part
+// 2). When ingestion goes quiet with buckets carried (open at the last flush),
+// an hour that later closes must still be materialized without waiting for a new
+// event. This opens its own tx and calls ONLY wr.refreshRollups (NOT w.flush,
+// which would also rewrite aggregates / source_progress / FTS for an empty
+// batch), emits exactly one stats_invalidated IFF it materialized ≥1 bucket
+// (reusing the same notify path as flush), prunes, and commits. wr.now drives the
+// open-hour cutoff so a bucket closed since the last tick is now materialized. On
+// any error the tx rolls back and the error is returned; the carried set is left
+// intact for the next tick (refreshRollups only STAGES the removal of a
+// materialized bucket — promoteMaterializedRollupBuckets applies it post-commit —
+// so a rolled-back recompute keeps the bucket carried and is naturally retried).
+func (w *worker) refreshRollupsOnly(ctx context.Context, wr *writer) error {
+	// Clear the per-batch rollup notify signals so this pass's notify reflects
+	// ONLY what it materializes (the carried dirtyRollupBuckets set is untouched —
+	// it is writer-lifetime state that refreshRollups prunes as buckets close).
+	wr.rollupTouchedThisBatch = false
+	wr.rollupMaterializedThisRefresh = false
+
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx (idle refresh): %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && w.logger != nil {
+				w.logger.Warn("worker: rollback failed (idle refresh)", "err", rbErr)
+			}
+		}
+	}()
+
+	if err := wr.refreshRollups(ctx, tx); err != nil {
+		return fmt.Errorf("idle refresh: %w", err)
+	}
+
+	// Nothing closed since the last tick (carried buckets are all still open):
+	// refreshRollups wrote no rows, so roll back the empty tx (the deferred
+	// Rollback fires) and skip the notify/prune/commit. This keeps an
+	// open-but-pending lull from churning an empty prune-only tx every interval;
+	// the buckets stay carried and the timer keeps ticking until one closes.
+	if !wr.rollupMaterializedThisRefresh {
+		return nil
+	}
+
+	// Emit exactly one stats_invalidated — this pass materialized a bucket. No
+	// events were applied, so affectedSessionIDs is empty and rollupTouchedThisBatch
+	// is false — emitNotify therefore fires solely on rollupMaterializedThisRefresh.
+	commitTS := time.Now().UTC().UnixMicro()
+	if err := wr.emitNotify(ctx, tx, commitTS); err != nil {
+		return fmt.Errorf("idle refresh notify: %w", err)
+	}
+	if err := pruneNotify(ctx, tx, commitTS); err != nil {
+		return fmt.Errorf("idle refresh prune: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit (idle refresh): %w", err)
+	}
+	committed = true
+	// Apply the carried-set removals for buckets materialized in this committed
+	// tx (deferred from refreshRollups). On the early no-materialization return
+	// above the pending map is empty, so this is a harmless no-op there.
+	wr.promoteMaterializedRollupBuckets()
+	return nil
+}
+
 func (w *worker) report(err error) {
 	if w.onErr != nil {
 		w.onErr(err)
@@ -240,14 +413,25 @@ func (w *worker) report(err error) {
 }
 
 // ensureSourceRow inserts the source row if it does not yet exist. The
-// ingester creates one row per source on first batch flush.
-func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string) error {
+// ingester creates one row per source on first batch flush. fts5IndexLogs is
+// the resolved per-source FTS5 log-indexing flag; it is persisted on both
+// insert and conflict-update because the ingester option is the runtime source
+// of truth (a daemon restart re-asserts the configured value over whatever a
+// prior run stored). The persisted flag gates fts_logs indexing: the FTS
+// backfill (indexableLogsForFTSQuery) and /api/search (searchLogs) both filter
+// on src.fts5_index_logs = 1 (data-model.md §Full-text search).
+func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string, fts5IndexLogs bool) error {
+	ftsFlag := 0
+	if fts5IndexLogs {
+		ftsFlag = 1
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO sources (id, format, location, enabled, created_at)
-VALUES (?, ?, ?, 1, ?)
+INSERT INTO sources (id, format, location, enabled, fts5_index_logs, created_at)
+VALUES (?, ?, ?, 1, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
-    location = excluded.location
-`, sourceID, format, location, time.Now().UTC().UnixMicro()); err != nil {
+    location        = excluded.location,
+    fts5_index_logs = excluded.fts5_index_logs
+`, sourceID, format, location, ftsFlag, time.Now().UTC().UnixMicro()); err != nil {
 		return fmt.Errorf("ensure source row: %w", err)
 	}
 	return nil

@@ -1,0 +1,205 @@
+/*
+ * Styling for the /stats dashboard (Stats + SearchBox). Mirrors the app's token
+ * conventions: panels use --bg-secondary with a --border hairline, headings use
+ * --text-primary, secondary text/meta uses --text-secondary, and every color is
+ * a theme token so light/dark tracks automatically (no hard-coded hex). The
+ * charts bring their own (charts.module.css) styling.
+ */
+
+.panel {
+  margin-top: var(--space-6);
+  padding: var(--space-4);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* Page header row: the title on the left, the share toolbar on the right. */
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* "Copy link" button — mirrors the secondary-button look (token-only). */
+.copyButton {
+  appearance: none;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.copyButton:hover {
+  background: var(--bg-tertiary);
+}
+
+.copyButton:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Visually hidden but exposed to assistive tech (the copy-result live region).
+   Matches the ThemeToggle .srOnly recipe so announcements never affect layout. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Title + controls sit on one row that wraps on narrow widths. */
+.panelHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  color: var(--text-primary);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+/* A label wrapping its control: the text label sits above the select/input so
+   the control has an associated accessible name (no aria-label needed). */
+.control {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.controlLabel {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.select {
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-base);
+  font-family: var(--font-sans);
+}
+
+.select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Search box ──────────────────────────────────────────────────────────── */
+
+.search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.searchField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 32rem;
+}
+
+.searchInput {
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-base);
+  font-family: var(--font-sans);
+}
+
+.searchInput:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.searchHint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-base);
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.resultsTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.hitList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* One hit row: link (kind/severity) + meta + the FTS snippet, aligned. */
+.hit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.hitLink {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  flex: 0 0 auto;
+}
+
+.hitMeta {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.hitSnippet {
+  color: var(--text-primary);
+  font-size: var(--font-size-base);
+  flex: 1 1 12rem;
+  min-width: 0;
+}

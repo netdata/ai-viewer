@@ -34,10 +34,14 @@ const notifyRetention = 5 * time.Minute
 //     authoritative post-batch value, which the resolver may have
 //     rewritten) and tsUS;
 //   - at most one stats_invalidated row per batch, emitted when the batch
-//     wrote any session/op. Catalog rollups (providers, models, tools,
-//     agents, cwds) derive entirely from session/op writes, so a
-//     non-empty affectedSessionIDs is the simplest correct signal that
-//     rollups changed;
+//     changed any rollup. Catalog rollups (providers, models, tools,
+//     agents, cwds) derive entirely from session/op writes, so a non-empty
+//     affectedSessionIDs signals they changed; the time-bucketed
+//     rollup_hourly/rollup_daily tables change when this batch marked a
+//     rollup input (rollupTouchedThisBatch) OR this refresh materialized a
+//     carried bucket (rollupMaterializedThisRefresh) — NOT merely because a
+//     carried-open bucket is still pending in dirtyRollupBuckets. The row
+//     fires on the union (ingester.md §"Incremental rollup refresh");
 //   - one source_status_changed row when the batch changed the source's
 //     parse_errors count or enabled flag (tracked via
 //     writer.sourceStatusChanged, set in bumpSourceErrorCounter).
@@ -60,8 +64,18 @@ VALUES (?, 'session_changed', ?, ?)
 		}
 	}
 
-	// At most one stats_invalidated per batch, when rollups changed.
-	if len(w.affectedSessionIDs) > 0 {
+	// At most one stats_invalidated per batch, when rollups changed. The
+	// catalog rollups derive from session/op writes (non-empty
+	// affectedSessionIDs), and the time-bucketed rollup_hourly/rollup_daily
+	// tables change when THIS batch marked a rollup input
+	// (rollupTouchedThisBatch) OR this refresh materialized a (carried) bucket
+	// (rollupMaterializedThisRefresh). We do NOT key off len(dirtyRollupBuckets):
+	// under carry-forward that set is non-empty whenever an open bucket is merely
+	// pending, which would fire stats_invalidated on every batch. The per-batch
+	// signals preserve the original semantics — fire when the batch actually
+	// touched/materialized a rollup, not when one is still pending. Fire on the
+	// union — still at most one row per batch (round-7 P1b).
+	if len(w.affectedSessionIDs) > 0 || w.rollupTouchedThisBatch || w.rollupMaterializedThisRefresh {
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO notify (ts_us, kind) VALUES (?, 'stats_invalidated')
 `, tsUS); err != nil {

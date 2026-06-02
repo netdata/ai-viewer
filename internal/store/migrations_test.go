@@ -44,7 +44,7 @@ func TestUp_NilLogger(t *testing.T) {
 	}
 	// Grows by one for every NNNN_*.sql under migrations/. Update in
 	// lockstep with each new migration.
-	const expectedMigrations = 5
+	const expectedMigrations = 7
 	if count != expectedMigrations {
 		t.Fatalf("_schema_migrations rows: want %d, got %d", expectedMigrations, count)
 	}
@@ -74,7 +74,7 @@ func TestUp_DoubleCall(t *testing.T) {
 	}
 	// Grows by one for every NNNN_*.sql under migrations/. Update in
 	// lockstep with each new migration.
-	const expectedMigrations = 5
+	const expectedMigrations = 7
 	if count != expectedMigrations {
 		t.Fatalf("_schema_migrations rows: want %d, got %d", expectedMigrations, count)
 	}

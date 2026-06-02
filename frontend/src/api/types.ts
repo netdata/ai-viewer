@@ -382,6 +382,126 @@ export interface StatsResponse {
   by_source: StatSourceRow[];
 }
 
+// ── GET /api/stats/aggregate, /api/stats/top (dashboard charts) ───────────────
+
+/**
+ * The shared metric selector for the chart endpoints (rest-api.md §GET
+ * /api/stats/aggregate / /top). Closed set on the server; `'calls'` maps to the
+ * op count and `'sessions'` to the additive session_starts column (meaningful
+ * for group_by total|agent|cwd; 0 for model|provider|tool, exactly as the rollup
+ * stores it). An unknown value is a BAD_REQUEST. Default `'cost'`.
+ */
+export type StatsMetric =
+  | 'cost'
+  | 'tokens_in'
+  | 'tokens_out'
+  | 'calls'
+  | 'failures'
+  | 'duration_us'
+  | 'sessions';
+
+/** The time-bucket granularity for /api/stats/aggregate. Default `'daily'`. */
+export type StatsBucket = 'hourly' | 'daily';
+
+/**
+ * The single grouping dimension for /api/stats/aggregate (rest-api.md). The
+ * rollups are keyed by ONE dimension per row, so this is one value, not a
+ * cross-product. `'total'` collapses to a single series keyed `''`. Default
+ * `'total'`.
+ */
+export type AggregateGroupBy =
+  | 'model'
+  | 'provider'
+  | 'tool'
+  | 'agent'
+  | 'cwd'
+  | 'source_format'
+  | 'total';
+
+/**
+ * The ranking dimension for /api/stats/top (rest-api.md). NOTE: narrower than
+ * AggregateGroupBy — top-N has no `'total'`/`'source_format'` (a single-row or
+ * format ranking is meaningless).
+ */
+export type TopDimension = 'model' | 'provider' | 'tool' | 'agent' | 'cwd';
+
+/** One `(key,value)` pair within an aggregate bucket's series. */
+export interface AggregateSeriesPoint {
+  /** The `dimension_value` (model name, provider, "<ns>.<name>" tool id, agent,
+   *  cwd, or source format). `group_by=total` yields a single entry keyed `''`. */
+  key: string;
+  /** The selected metric summed over this `(bucket, key)`. */
+  value: number;
+}
+
+/** One time bucket plus its per-`group_by`-value series (rest-api.md). */
+export interface AggregateBucket {
+  /** UTC bucket start in microseconds (hour or day, per `bucket`). */
+  bucket_ts: number;
+  series: AggregateSeriesPoint[];
+}
+
+/** GET /api/stats/aggregate envelope (rest-api.md). */
+export interface AggregateResponse {
+  buckets: AggregateBucket[];
+  bucket: StatsBucket;
+  metric: string;
+}
+
+/** One ranked item of GET /api/stats/top (ordered by `value` descending). */
+export interface TopItem {
+  key: string;
+  value: number;
+}
+
+/** GET /api/stats/top envelope (rest-api.md). Items are pre-sorted desc. */
+export interface TopResponse {
+  dimension: string;
+  metric: string;
+  items: TopItem[];
+}
+
+// ── GET /api/search (deep full-text search) ──────────────────────────────────
+
+/** One matched op of GET /api/search, ranked by BM25 (rest-api.md). */
+export interface SearchOpHit {
+  op_id: string;
+  session_id: string;
+  kind: string;
+  name: string;
+  model: string;
+  /** The matched excerpt (FTS5 `snippet()`), for display. */
+  snippet: string;
+  /** BM25 score; ops are ordered by rank (best first). */
+  rank: number;
+}
+
+/** One matched log of GET /api/search, ranked by BM25 (rest-api.md). */
+export interface SearchLogHit {
+  log_id: number;
+  session_id: string;
+  /** null for a session/turn-scoped log with no owning op (backend emits *string). */
+  op_id: string | null;
+  severity: string;
+  ts: number;
+  snippet: string;
+  rank: number;
+}
+
+/**
+ * GET /api/search envelope (rest-api.md). `logs_indexed` reflects the per-source
+ * `fts5_index_logs` flag: when log indexing is disabled `logs` is empty and the
+ * flag is `false`, so the client distinguishes "no log matches" from "logs not
+ * indexed on this install".
+ */
+export interface SearchResponse {
+  ops: SearchOpHit[];
+  logs: SearchLogHit[];
+  logs_indexed: boolean;
+  /** Opaque next-page cursor; present only when more rows exist (rest-api.md §Conventions). The dashboard SearchBox shows the first page only (top-N finder) and does not consume it; included for contract honesty and parity with the logs/sessions envelopes. */
+  next_cursor?: string;
+}
+
 // ── GET /api/sources ────────────────────────────────────────────────────────
 
 /** One row of GET /api/sources (presenter sourceItem). */

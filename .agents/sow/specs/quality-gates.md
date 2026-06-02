@@ -71,6 +71,19 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - `benchstat bench/baseline.txt bench-current.txt`
 - Threshold: ≤ 20% regression in any metric vs `bench/baseline.txt`. Baseline updates only on explicit SOW approval.
 
+### Go — Rollup Correctness Diff (SOW-0007)
+
+- A CI test that, over the same fixture, runs (a) a full backfill-from-scratch (`rollups-backfill`, `ingester.md` §Rollup Refresh) and (b) an incremental refresh starting from an empty DB, then sorts and diffs the two `rollup_hourly` tables — and the two `rollup_daily` tables — **byte-for-byte**. Passes only when the backfill and incremental results are identical.
+- This is the executable form of the additivity invariant (`data-model.md` §Rollup tables): a closed bucket's value must be path-independent, so backfill and incremental cannot diverge.
+- Gates any commit touching the rollups package.
+- Threshold: zero diff between the two materializations.
+
+### Go — Aggregate / Search Perf (SOW-0007, best-effort)
+
+- `GET /api/stats/aggregate` p95 < 200 ms over a 1M-op fixture.
+- `GET /api/search` p95 < 500 ms over a 10M-log fixture.
+- These follow the same convention as SOW-0006's E2E perf budgets: where a large deterministic fixture is not yet available, the measurement is **annotation-logged in CI** (recorded, surfaced, trended) rather than hard-failing the build; it becomes a hard gate once the deterministic fixture exists. The `≤ 20%`-vs-baseline bench-regression rule (§Go — Benchmarks) still applies to whatever rollup/search benchmarks are baselined in `bench/baseline.txt`.
+
 ### Go — Race Stress
 
 - Concurrency-touching changes: `-count=10` locally before commit.
@@ -155,6 +168,12 @@ target.
 - **Negative self-test.** The scanner ships with a test that plants an
   operator-identity string in a temp file and asserts the scan flags it, so the
   enforcement itself cannot silently rot.
+- **FTS5 fixture sanitization (SOW-0007).** Log-message fixtures committed to
+  `testdata/` MUST be sanitized via `scripts/sanitize-fixture.sh` before commit —
+  `fts_logs` indexes the message body verbatim (`data-model.md` §Full-text search),
+  so an unsanitized log line would carry real message text into both the fixture
+  and any index built over it. The secret scanner is the safety net, not a
+  substitute for sanitizing at write-time (AGENTS.md §Sensitive Data).
 
 ### Spec Drift
 

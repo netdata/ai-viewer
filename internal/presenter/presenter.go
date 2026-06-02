@@ -19,9 +19,11 @@ import (
 // stays version-neutral. Servers refuse to start when the on-disk
 // schema_meta.version differs from this value — see CheckSchema below — so a
 // store that has not yet had the latest migration applied is rejected rather
-// than served with stale rows. 0005 (the op-duration backfill) is the latest;
-// it sets schema_meta.version='5'.
-const SchemaVersion = 5
+// than served with stale rows. 0007 (sources.fts5_index_logs column, SOW-0007)
+// is the latest; it sets schema_meta.version='7'. It is a sources-table-shape
+// change serve validates at startup, so a v7 binary must refuse a pre-0007
+// store (whose sources table lacks the column).
+const SchemaVersion = 7
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema
 // version disagrees with the binary's expected version. The main()
@@ -203,6 +205,9 @@ func (p *Presenter) now() time.Time { return p.nowFn() }
 //   - GET /api/sessions/{id}/timeline  per-session lanes + spans for the timeline view
 //   - GET /api/topology           cross-session actor graph (agents only) over the filtered set
 //   - GET /api/stats              cross-session aggregates over the filtered set
+//   - GET /api/stats/aggregate    rollup-backed time-series for the line charts
+//   - GET /api/stats/top          rollup-backed top-N dimension ranking
+//   - GET /api/search             FTS5 full-text search over ops + logs
 //
 // Every other route declared in presenter.md returns NOT_FOUND until
 // the relevant chunk lands. The middleware chain wraps the whole mux
@@ -244,6 +249,9 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions/{id}/timeline", p.handleSessionTimeline)
 	mux.HandleFunc("/api/topology", p.handleCrossTopology)
 	mux.HandleFunc("/api/stats", p.handleStats)
+	mux.HandleFunc("/api/stats/aggregate", p.handleStatsAggregate)
+	mux.HandleFunc("/api/stats/top", p.handleStatsTop)
+	mux.HandleFunc("/api/search", p.handleSearch)
 	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
 	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)
 	mux.HandleFunc("/api/events", p.handleEvents)
