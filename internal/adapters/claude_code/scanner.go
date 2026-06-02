@@ -108,11 +108,7 @@ func discoverTranscripts(root string, onError func(error)) ([]transcript, error)
 		// SourceError (visible in /api/health + Sources panel) and is skipped, so
 		// discovery continues with the remaining projects rather than zeroing out
 		// ingestion. Only the configured ROOT itself is fatal (handled above).
-		ts, derr := discoverProject(root, resolvedRoot, projDir, onError)
-		if derr != nil {
-			onError(fmt.Errorf("claude_code: discover project %s: %w; skipping", projDir, derr))
-			continue
-		}
+		ts := discoverProject(root, resolvedRoot, projDir, onError)
 		out = append(out, ts...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
@@ -151,16 +147,16 @@ func withinSourceRoot(resolvedRoot, abs string, onError func(error)) bool {
 // continues with the remaining entries. discoverProject never aborts the
 // enclosing source scan on one bad entry; only os.IsNotExist on the project dir
 // (a race where it was removed mid-scan) returns benign-empty.
-func discoverProject(root, resolvedRoot, projDir string, onError func(error)) ([]transcript, error) {
+func discoverProject(root, resolvedRoot, projDir string, onError func(error)) []transcript {
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil
 		}
 		// An unreadable project dir surfaces a SourceError and yields no
 		// transcripts for THIS project; the caller continues with other projects.
 		onError(fmt.Errorf("claude_code: read project dir %s: %w; skipping", projDir, err))
-		return nil, nil
+		return nil
 	}
 	var out []transcript
 	for _, e := range entries {
@@ -200,7 +196,7 @@ func discoverProject(root, resolvedRoot, projDir string, onError func(error)) ([
 			sessionDir: filepath.Join(projDir, sessionID),
 		})
 	}
-	return out, nil
+	return out
 }
 
 // discoverSessionSubagents enumerates the subagent transcripts under
@@ -440,7 +436,7 @@ func collectMetaPaths(dir string, onError func(error)) []string {
 // same, so it matches discovery's relPath(root, …) keys). Each meta read is
 // size-capped (P2.6b) and the read failure / oversize surfaces a SourceError
 // (P2.4b, no silent failure).
-func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]string, error) {
+func metaHashes(root, resolvedRoot string, onError func(error)) map[string]string {
 	_ = root // rel keys are computed against resolvedRoot (identical subtree); see doc.
 	out := map[string]string{}
 	// A walk error over an unreadable meta subtree is surfaced via onError (P2.9)
@@ -473,7 +469,7 @@ func metaHashes(root, resolvedRoot string, onError func(error)) (map[string]stri
 		}
 		out[rel] = hashBytes(raw)
 	}
-	return out, nil
+	return out
 }
 
 // hashBytes returns the hex-encoded sha256 of b. Shared by the scan-time
@@ -616,7 +612,7 @@ func agentIDFromNative(nativeID string) string {
 // emitted-event count and the absolute offset just past the last complete
 // line consumed. Parse errors before emitFrom are not re-surfaced (they were
 // reported on the first pass).
-func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript, sourceID string, mapper *fileMapper, out chan<- canonical.Event, onError func(error)) (int, int64, error) {
+func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript, _ string, mapper *fileMapper, out chan<- canonical.Event, onError func(error)) (int, int64, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	emitted := 0
 	off := int64(0)
@@ -916,13 +912,12 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	// BEFORE withMetaSeen records the new hashes (after recording it would be
 	// suppressed as unchanged). `start.MetaSeen` is the persisted starting state (cur
 	// may have been reset to a fresh cursor above, so use start, not cur).
-	if hashes, herr := metaHashes(root, resolvedRoot, onError); herr == nil {
-		if rerr := repairChangedMetas(ctx, sourceID, root, resolvedRoot, start.MetaSeen, hashes, out, onError); rerr != nil {
-			return cur, rerr
-		}
-		for rel, h := range hashes {
-			cur = cur.withMetaSeen(rel, h)
-		}
+	hashes := metaHashes(root, resolvedRoot, onError)
+	if rerr := repairChangedMetas(ctx, sourceID, root, resolvedRoot, start.MetaSeen, hashes, out, onError); rerr != nil {
+		return cur, rerr
+	}
+	for rel, h := range hashes {
+		cur = cur.withMetaSeen(rel, h)
 	}
 
 	// Persist the parked completions that survived pairing (children still

@@ -13,8 +13,10 @@ import (
 // none of the human-readable tokens and is far shorter than the encoded query.
 func TestFingerprint_IsCanonicalStringNotHash(t *testing.T) {
 	t.Parallel()
-	f := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{"alpha", "beta"}}
+	f := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{"alpha", "beta"},
+	}
 	fp := f.fingerprint()
 	// The canonical string embeds the dimension names verbatim.
 	for _, tok := range []string{"models", "agents", "status", "sort", "order"} {
@@ -66,10 +68,14 @@ func TestFingerprint_SeparatorCollisionResolved(t *testing.T) {
 	t.Parallel()
 	// {"a\x1eb", "c"} vs {"a", "b\x1ec"}: under separator-join both render the
 	// elements as a<RS>b<RS>c and collide; length-prefixing keeps them apart.
-	left := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{"a\x1eb", "c"}}
-	right := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{"a", "b\x1ec"}}
+	left := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{"a\x1eb", "c"},
+	}
+	right := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{"a", "b\x1ec"},
+	}
 	if left.fingerprint() == right.fingerprint() {
 		t.Fatalf("crafted-collision sets share a fingerprint %q; length-prefixing failed",
 			left.fingerprint())
@@ -82,10 +88,14 @@ func TestFingerprint_SeparatorCollisionResolved(t *testing.T) {
 // unambiguous, so {agents:["models"]} and {models:["agents"]} differ.
 func TestFingerprint_CrossDimensionNoBleed(t *testing.T) {
 	t.Parallel()
-	a := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		agents: []string{"models"}}
-	b := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{"agents"}}
+	a := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		agents: []string{"models"},
+	}
+	b := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{"agents"},
+	}
 	if a.fingerprint() == b.fingerprint() {
 		t.Fatalf("cross-dimension values collide on fingerprint %q", a.fingerprint())
 	}
@@ -99,8 +109,10 @@ func TestFingerprint_CrossDimensionNoBleed(t *testing.T) {
 func TestFingerprint_EmptyVsSingleEmptyElement(t *testing.T) {
 	t.Parallel()
 	none := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc"}
-	oneEmpty := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{""}}
+	oneEmpty := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{""},
+	}
 	if none.fingerprint() == oneEmpty.fingerprint() {
 		t.Fatalf("absent dimension collides with single-empty-element dimension")
 	}
@@ -113,10 +125,14 @@ func TestFingerprint_EmptyVsSingleEmptyElement(t *testing.T) {
 // preserves first-appearance order for the SQL IN(...) list.
 func TestFingerprint_OrderInsensitive(t *testing.T) {
 	t.Parallel()
-	ab := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{"a", "b"}, agents: []string{"x", "y"}}
-	ba := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc",
-		models: []string{"b", "a"}, agents: []string{"y", "x"}}
+	ab := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{"a", "b"}, agents: []string{"x", "y"},
+	}
+	ba := sessionFilter{
+		group: groupRoot, sort: sortStartTS, order: "desc",
+		models: []string{"b", "a"}, agents: []string{"y", "x"},
+	}
 	if ab.fingerprint() != ba.fingerprint() {
 		t.Fatalf("reordered same-set fingerprints differ: %q != %q",
 			ab.fingerprint(), ba.fingerprint())

@@ -67,16 +67,16 @@ func (p *Presenter) handleSessionTimeline(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.timeline.root", err)
+		p.writeDBError(ctx, w, r, "session.timeline.root", err)
 		return
 	}
 
 	resp, err := p.buildTimeline(ctx, rootID)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.timeline.build", err)
+		p.writeDBError(ctx, w, r, "session.timeline.build", err)
 		return
 	}
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // buildTimeline assembles the lanes + spans for a resolved session tree in

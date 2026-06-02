@@ -21,7 +21,7 @@ func rejectNullsInOptionals(jsonBytes []byte) error {
 	if err := json.Unmarshal(jsonBytes, &raw); err != nil {
 		// A non-object root is caught by the strict decode in parseDoc;
 		// returning nil here lets the strict error message win.
-		return nil
+		return nil //nolint:nilerr // intentional: structural errors are surfaced by the strict decode in parseDoc, not here
 	}
 	provRaw, ok := raw["providers"]
 	if !ok || isJSONNull(provRaw) {
@@ -29,7 +29,7 @@ func rejectNullsInOptionals(jsonBytes []byte) error {
 	}
 	var providers []map[string]json.RawMessage
 	if err := json.Unmarshal(provRaw, &providers); err != nil {
-		return nil // Strict decode catches non-array providers.
+		return nil //nolint:nilerr // intentional: a non-array providers is surfaced by the strict decode in parseDoc, not here
 	}
 	for pi, p := range providers {
 		pName := stringOrIndex(p, "name", pi)
@@ -52,7 +52,7 @@ func walkModels(modelsRaw json.RawMessage, pName string) error {
 	}
 	var models []map[string]json.RawMessage
 	if err := json.Unmarshal(modelsRaw, &models); err != nil {
-		return nil
+		return nil //nolint:nilerr // intentional: a non-array models is surfaced by the strict decode in parseDoc, not here
 	}
 	for mi, m := range models {
 		mName := stringOrIndex(m, "name", mi)
@@ -93,7 +93,7 @@ func rejectNullsInTiers(tiersRaw json.RawMessage, modelCtx string) error {
 	}
 	var tiers []map[string]json.RawMessage
 	if err := json.Unmarshal(tiersRaw, &tiers); err != nil {
-		return nil
+		return nil //nolint:nilerr // intentional: a non-array tiers is surfaced by the strict decode in parseDoc, not here
 	}
 	for ti, t := range tiers {
 		ctx := fmt.Sprintf("%s tiers[%d]", modelCtx, ti)

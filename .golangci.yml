@@ -1,15 +1,20 @@
 # golangci-lint v2 configuration for ai-viewer.
 #
-# This is the minimal foundation co-landing with go.mod in SOW-0001 Chunk 3.
-# The full linter set (gosec, errorlint, gocritic, revive, gocyclo, gofumpt,
-# misspell, nilerr, prealloc, unconvert, unparam, whitespace, bodyclose,
-# noctx) lands in SOW-0009. Do not weaken; only extend.
+# Authoritative gate list: .agents/sow/specs/quality-gates.md "Go — Lint".
+# Runtime companion: .agents/skills/project-quality-gates/SKILL.md.
+# Version pinned in .golangci-lint-version (single source for CI + scripts/lint.sh).
 #
-# Notes on v2 vs v1:
-#   - `gosimple` is merged into `staticcheck` in v2 and must not be listed.
-#   - `gofmt`/`goimports` are formatters, not linters; they live under the
-#     `formatters:` section.
-#   - The `version: "2"` declaration is required.
+# `golangci-lint run` is the umbrella gate: with the formatters enabled it also
+# enforces Go — Format, and the `govet` linter covers Go — Vet.
+#
+# v2 notes:
+#   - `gosimple` is merged into `staticcheck` in v2 and must NOT be listed.
+#   - `gosec` is NOT enabled here; it runs standalone in CI / scripts/lint.sh
+#     (Go — Security) to avoid duplicate analysis and to use a newer standalone
+#     gosec than golangci's bundled copy.
+#   - `gofmt`/`goimports`/`gofumpt` are formatters, under `formatters:`.
+#   - Path/rule exclusions live under `linters.exclusions` (v1 `run.skip-dirs`
+#     is gone).
 version: "2"
 
 run:
@@ -18,21 +23,69 @@ run:
 linters:
   default: none
   enable:
+    # Bug-finders — active everywhere, including tests.
     - errcheck
     - govet
     - ineffassign
     - staticcheck
     - unused
+    - errorlint
+    - nilerr
+    - bodyclose
+    # Style / complexity — active on production code (see test exclusion below).
+    - gocritic
+    - revive
+    - gocyclo
+    - misspell
+    - prealloc
+    - unconvert
+    - unparam
+    - whitespace
+    - noctx
+  settings:
+    gocyclo:
+      # 25, not 15: the stream parsers/scanners/tailers and the SOW-0007
+      # ingest event loop sit legitimately at 16-24 cyclomatic. Complexity-15
+      # produced ~23 false-positive-class findings on heavily-reviewed,
+      # hot-path code; refactoring them for a metric is unjustified churn/risk.
+      # 25 flags genuinely-egregious complexity (the one production outlier,
+      # pricing.validateDoc, was refactored under it) and prevents future creep.
+      min-complexity: 25
   exclusions:
     generated: lax
+    paths:
+      # A transitive npm dependency ships a Go reference impl; not our code.
+      - frontend/node_modules
+    rules:
+      # Test files: the style/complexity linters are noise on table-driven
+      # tests (branchy by design), context-less DB calls in test setup, and
+      # test helpers with call-site-specific params. The bug-finders above
+      # stay active on tests.
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - noctx
+          - unparam
+          - prealloc
+          - revive
+          - gocritic
+      # genfixtures is a dev-only fixture generator, not shipped code.
+      - path: cmd/genfixtures/
+        linters:
+          - unparam
 
 formatters:
   enable:
     - gofmt
     - goimports
+    - gofumpt
   exclusions:
     generated: lax
+    paths:
+      - frontend/node_modules
 
 issues:
+  # 0 = unlimited. Defaults (50 per linter, 3 per same-issue) silently truncate
+  # finding counts and can hide regressions; never weaken to non-zero.
   max-issues-per-linter: 0
   max-same-issues: 0

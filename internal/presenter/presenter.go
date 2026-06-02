@@ -1,6 +1,7 @@
 package presenter
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io/fs"
@@ -334,12 +335,12 @@ func (p *Presenter) notImplemented(w http.ResponseWriter, r *http.Request) {
 // context when the row is absent or carries a different version. The
 // caller (the serve binary's main) surfaces the error with an exit
 // code so the operator sees a clear failure.
-func CheckSchema(db *sql.DB, expectedVersion int) error {
+func CheckSchema(ctx context.Context, db *sql.DB, expectedVersion int) error {
 	if db == nil {
 		return errors.New("presenter.CheckSchema: nil db")
 	}
 	var raw string
-	if err := db.QueryRow(`SELECT value FROM schema_meta WHERE key='version'`).Scan(&raw); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='version'`).Scan(&raw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.Join(ErrSchemaMismatch, errors.New("schema_meta.version row missing"))
 		}

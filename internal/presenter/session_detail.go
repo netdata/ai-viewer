@@ -149,22 +149,22 @@ func (p *Presenter) handleSessionDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.detail.session", err)
+		p.writeDBError(ctx, w, r, "session.detail.session", err)
 		return
 	}
 
 	turns, err := p.loadTurnsWithOps(ctx, id)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.detail.turns", err)
+		p.writeDBError(ctx, w, r, "session.detail.turns", err)
 		return
 	}
 	children, err := p.loadChildSessions(ctx, id)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "session.detail.children", err)
+		p.writeDBError(ctx, w, r, "session.detail.children", err)
 		return
 	}
 
-	writeJSON(w, r, p.logger, http.StatusOK, sessionDetailResponse{
+	writeJSON(w, r, p.logger, sessionDetailResponse{
 		Session:       sess,
 		Turns:         turns,
 		ChildSessions: children,

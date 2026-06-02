@@ -81,10 +81,7 @@ func (a *Adapter) Format() string { return Format }
 // source or when ctx is cancelled. The caller owns `out`; Scan never
 // closes it.
 func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error {
-	start, err := a.coerceCursor(since)
-	if err != nil {
-		return err
-	}
+	start := a.coerceCursor(since)
 	_, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
 	if sErr != nil {
 		if errors.Is(sErr, context.Canceled) || errors.Is(sErr, context.DeadlineExceeded) {
@@ -121,9 +118,9 @@ func (a *Adapter) ParseCursor(stored string) (canonical.Cursor, error) {
 // nil canonical.Cursor (first run), or any other concrete type — in
 // the latter case it returns an empty cursor so the ingester's "I
 // lost track" path simply re-scans from scratch.
-func (a *Adapter) coerceCursor(c canonical.Cursor) (Cursor, error) {
+func (a *Adapter) coerceCursor(c canonical.Cursor) Cursor {
 	if c == nil {
-		return newCursor(), nil
+		return newCursor()
 	}
 	if typed, ok := c.(Cursor); ok {
 		if typed.Files == nil {
@@ -132,9 +129,9 @@ func (a *Adapter) coerceCursor(c canonical.Cursor) (Cursor, error) {
 		if typed.Version == 0 {
 			typed.Version = cursorVersion
 		}
-		return typed, nil
+		return typed
 	}
-	return newCursor(), nil
+	return newCursor()
 }
 
 // snapshotCursor builds a cursor from current on-disk file mtimes so

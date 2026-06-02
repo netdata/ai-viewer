@@ -297,7 +297,7 @@ func TestAttrString(t *testing.T) {
 func TestCoerceCursor_NormalisesTyped(t *testing.T) {
 	t.Parallel()
 	a, _ := New("/x", canonical.AdapterOptions{})
-	cur, _ := a.coerceCursor(Cursor{Version: 1})
+	cur := a.coerceCursor(Cursor{Version: 1})
 	if cur.Files == nil {
 		t.Fatalf("Files should be initialised")
 	}

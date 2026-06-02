@@ -119,7 +119,7 @@ All gates run in CI on every push and must be green before merge. The assistant 
 | Frontend a11y | axe checks on every Playwright route | zero serious/critical violations |
 | Frontend bundle | `vite build` size budget | ≤ 500 KB gzipped main chunk |
 | Secrets scan | grep `testdata/` and committed source for common secret patterns | zero hits |
-| Spec drift | `scripts/spec-drift.sh` (added in Phase 1) | zero drift on listed indicators |
+| Spec drift | `scripts/spec-drift.sh` (planned, SOW-0013; manual spec↔code audit until then) | zero drift on listed indicators |
 
 The authoritative gate catalog with exact commands lives at `.agents/sow/specs/quality-gates.md` (durable) and `.agents/skills/project-quality-gates/SKILL.md` (runtime).
 
@@ -257,9 +257,9 @@ ai-viewer.git/
 │   ├── build.sh                 builds frontend, embeds, builds Go binaries
 │   ├── dev.sh                   dev workflow (vite dev + go run)
 │   ├── lint.sh                  all lint + static analysis, zero warnings
-│   ├── test.sh                  all tests + coverage + race
-│   ├── gates.sh                 runs every quality gate listed above
-│   ├── spec-drift.sh            spec ↔ code drift detection
+│   ├── test.sh                  all tests + coverage + race (planned, SOW-0010)
+│   ├── gates.sh                 runs every quality gate listed above (planned, SOW-0013)
+│   ├── spec-drift.sh            spec ↔ code drift detection (planned, SOW-0013)
 │   └── sanitize-fixture.sh      fixture sanitization
 └── .github/
     └── workflows/               CI: every gate above on every push
@@ -291,7 +291,7 @@ For fixture files (real snapshot samples committed under `testdata/`):
 - Replace model API keys with `[REDACTED_SECRET]`.
 - Keep schema shape, timing, and token counts intact — that's what tests verify.
 
-The secret scanner in `scripts/gates.sh` is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
+The secret scanner (`scripts/scan-secrets.sh`, wired as a dedicated CI `gates` step and, once SOW-0013 lands it, invoked by `scripts/gates.sh`) is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
 
 ## Open-Source Reference Evidence
 
@@ -342,15 +342,15 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 
 ## Build, Test, Run
 
-(These commands exist after Phase 1 is delivered. See `.agents/sow/pending/SOW-0001-phase-1-foundation.md`.)
+(Status: `build.sh`, `dev.sh`, and `lint.sh` exist today. `test.sh` (SOW-0010), `gates.sh` (SOW-0013), and `spec-drift.sh` (SOW-0013) are planned aggregators — until they land, use the individual gate commands and the per-gate CI jobs. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
 
 ```bash
 ./scripts/build.sh          # build frontend + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
 ./scripts/lint.sh           # all lints + static analysis, zero warnings
-./scripts/test.sh           # all tests + coverage + race
-./scripts/gates.sh          # every quality gate listed above
-./scripts/spec-drift.sh     # spec ↔ code drift detection
+./scripts/test.sh           # all tests + coverage + race (planned, SOW-0010)
+./scripts/gates.sh          # every quality gate listed above (planned, SOW-0013)
+./scripts/spec-drift.sh     # spec ↔ code drift detection (planned, SOW-0013)
 go test -race ./...         # Go tests with race
 cd frontend && npm test     # frontend tests
 ```

@@ -119,6 +119,8 @@ func (d *scanDest) warnCorrupt(col, _ string) {
 // instead aborts the page so the cursor stays at the last good watermark — a
 // corrupt required cell never advances the durable resume state. The raw value is
 // NOT included in the error (it could be sensitive); only the table/column.
+//
+//nolint:unparam // col is retained for diagnostics: it names the offending column in both error messages (all current callers pass "time_updated", but the value is not hardcoded into the error text)
 func (d *scanDest) i64Required(idx columnIndex, col string) (int64, error) {
 	i, ok := idx[col]
 	if !ok || !d.holders[i].Valid {

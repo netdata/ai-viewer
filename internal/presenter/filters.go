@@ -331,6 +331,8 @@ func parseArrayParam(values []string) []string {
 // The tools filter is an EXISTS subquery against ops (a session matches
 // when ANY of its ops uses one of the named tools), matching rest-api.md
 // §GET /api/sessions ("sessions where any op uses these tools").
+//
+//nolint:unparam // alias is a structural parameter threaded through the sibling helper family (whereClauseNoTimeWindow, dimensionConds) to qualify the sessions table; all current callers pass "s" but the parameter is part of the shared fragment-building contract
 func (f sessionFilter) whereClause(alias string) (string, []any) {
 	conds, args := f.dimensionConds(alias)
 	// The session start_ts time window. Prepended after the dimension conds so

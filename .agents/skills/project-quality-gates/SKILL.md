@@ -7,7 +7,11 @@ description: Catalog of every automated quality gate ai-viewer enforces — comm
 
 ## Operating Rule
 
-Every gate listed here runs in CI on every push. The assistant runs them all locally before reporting work done. If a gate fails: fix the root cause. **Never weaken a gate to make it pass.** Lowering a threshold, marking a test skipped, suppressing a linter, or adding a `// nolint` is a contract breach unless the SOW explicitly justifies the suppression with a linked issue.
+Every gate listed here runs in CI on every push. The assistant runs them all locally before reporting work done. If a gate fails: fix the root cause. **Never weaken a gate to make it pass.** Lowering a threshold or marking a test skipped to land a PR is a contract breach.
+
+**nolint policy** (two cases, both require a reason — never a bare `//nolint`):
+- **Deferred-fix suppression** (the finding is real but fixing it now is out of scope): forbidden unless the active SOW justifies it AND the directive links the tracking issue/SOW — `//nolint:rule // <reason>; see SOW-XXXX`.
+- **Permanent-architectural suppression** (the finding is a verified false-positive for a deliberate, durable pattern — e.g. `nilerr` on a `return nil` that intentionally lets a stricter downstream check win, or on poll-loop rotation-tolerance): allowed with a `//nolint:rule // <reason>` stating *why the pattern is correct*. No tracking link is required because there is nothing to fix later. The reason must be specific; "false positive" alone is not enough. Prefer a config-level exclusion (with a YAML rationale comment) when a whole file or rule class is involved. Bare/unexplained `//nolint` is always a contract breach.
 
 When a new pattern emerges that warrants enforcement, add it here AND to `.agents/sow/specs/quality-gates.md` AND to CI in the same commit.
 
@@ -33,10 +37,14 @@ Threshold: zero warnings.
 ### Go — Lint (golangci-lint)
 
 ```bash
-golangci-lint run --timeout=5m
+golangci-lint run --timeout=5m      # umbrella: also enforces fmt + vet
 ```
 
-`.golangci.yml` enables at minimum: `govet`, `errcheck`, `staticcheck`, `unused`, `gosimple`, `ineffassign`, `gosec`, `revive`, `gofmt`, `goimports`, `bodyclose`, `noctx`, `errorlint`, `gocritic`, `gocyclo` (≤ 15), `gofumpt`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`.
+golangci-lint is **v2** (`.golangci.yml` has `version: "2"`). `golangci-lint run` is the umbrella gate — with the formatters enabled it enforces Go — Format, and the `govet` linter covers Go — Vet, so a clean `run` means fmt+vet+lint all pass. (In golangci-lint v2, `golangci-lint run` REPORTS formatter violations — gofmt/goimports/gofumpt — as failures; `golangci-lint fmt` is the separate auto-fix path. `run` enforces formatting; it is not merely a linter-only pass. Note: `--enable-only <formatter>` is rejected because formatters are configured under `formatters:`, not enabled as linters — this does not mean `run` skips them.) Run it locally via `./scripts/lint.sh` (which then runs the standalone security tools). The version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`); CI runs it via `golangci/golangci-lint-action` at that pinned version.
+
+`.golangci.yml` enables linters: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `errorlint`, `gocritic`, `revive`, `gocyclo`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`, `bodyclose`, `noctx`; formatters: `gofmt`, `goimports`, `gofumpt`. NOT enabled: `gosimple` (v2 merged it into `staticcheck`) and `gosec` (runs standalone — see Go — Security — to avoid duplicate analysis).
+
+Tuning (rationale in the `.golangci.yml` inline comments): `gocyclo` uses `min-complexity: 25` (the stream parsers/scanners/tailers and the SOW-0007 ingest event loop legitimately sit at 16–24; 15 is false-positive churn on reviewed hot-path code). `_test.go` is excluded from the style/complexity linters (`gocyclo`, `noctx`, `unparam`, `prealloc`, `revive`, `gocritic`) but NOT from the bug-finders. `frontend/node_modules` is path-excluded (a transitive npm dep ships a non-project Go file).
 
 Threshold: zero warnings.
 
@@ -49,7 +57,7 @@ govulncheck ./...
 
 Threshold: zero high/critical findings from gosec; zero known vulnerabilities from govulncheck. Govulncheck runs in CI on a schedule plus every push so newly-disclosed CVEs surface fast.
 
-**GOTCHA — standalone `gosec@latest` ≠ golangci's bundled gosec.** CI's "Go — Security" step installs and runs `gosec@latest` STANDALONE; that version ships newer analyzers (e.g. **G705** XSS-taint) that golangci-lint's older *bundled* gosec does not have. So `golangci-lint run` returning 0 does NOT mean `gosec` passes — they are different gates. Always run the standalone `gosec -severity medium -confidence medium ./...` locally (install with `go install github.com/securego/gosec/v2/cmd/gosec@latest`) AND `goimports -l` AND `govulncheck ./...` before pushing — not just `gofmt`/`vet`/`golangci-lint`/`test`/`build`. (govulncheck exits 0 when a required-but-uncalled module has a CVE — "your code doesn't appear to call" — that is a pass.)
+**GOTCHA — standalone pinned `gosec` ≠ golangci's bundled gosec.** CI's "Go — Security" step and `scripts/lint.sh` both install and run a **pinned standalone** `gosec@v2.26.1`; that version ships newer analyzers (e.g. **G705** XSS-taint) that golangci-lint's older *bundled* gosec does not have (which is why `gosec` is NOT enabled as a golangci linter — it runs standalone). So `golangci-lint run` returning 0 does NOT mean `gosec` passes — they are different gates. Always run the standalone `gosec -severity medium -confidence medium ./...` locally (install the pin: `go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1`, or just run `./scripts/lint.sh`, which installs/verifies the pinned gosec + runs golangci + govulncheck) AND `govulncheck ./...` before pushing — not just `gofmt`/`vet`/`golangci-lint`/`test`/`build`. (govulncheck exits 0 when a required-but-uncalled module has a CVE — "your code doesn't appear to call" — that is a pass.)
 
 **Suppressions:** gosec honors the **hash** form `// #nosec G705 -- justification` (NOT `//nosec`). Per the Operating Rule, any `#nosec`/`//nolint` MUST be a verified false positive AND justified in the active SOW. Prefer restructuring to the gosec-clean pattern of a sibling handler over suppressing; suppress only when the finding is provably impossible (e.g. body is trusted embedded build output served on an exact-match route).
 
@@ -186,7 +194,7 @@ Threshold: zero hits.
 ### Spec Drift
 
 ```bash
-scripts/spec-drift.sh
+scripts/spec-drift.sh    # planned (SOW-0013); manual spec↔code audit until it lands
 ```
 
 Lints common drift indicators:
@@ -218,12 +226,12 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ## Aggregate Scripts
 
 ```bash
-./scripts/lint.sh         # all formatting + lint + static + security
-./scripts/test.sh         # all tests + coverage + race
-./scripts/gates.sh        # every gate above, in order, fail-fast
+./scripts/lint.sh         # Go: golangci umbrella + standalone gosec + govulncheck (SOW-0009; EXISTS)
+./scripts/test.sh         # all tests + coverage + race (SOW-0010; PLANNED)
+./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
 ```
 
-`scripts/gates.sh` is the canonical pre-commit gate. The assistant runs it locally before every commit. CI runs the same gates from the same scripts so local and CI behavior cannot diverge.
+Current state: `scripts/lint.sh` exists (the local Go lint+security mirror). `scripts/test.sh` (SOW-0010) and the canonical `scripts/gates.sh` aggregator (SOW-0013) are NOT yet present. Until `gates.sh` lands, run `scripts/lint.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
 
 ## When a Gate Fails
 
@@ -241,7 +249,7 @@ When a new class of bug or risk is discovered:
 1. Determine whether existing gates would have caught it. If yes, the gate has a hole — fix the hole.
 2. If no existing gate covers it, design a new one. Specify command, threshold, scope.
 3. Add it to this skill, to `.agents/sow/specs/quality-gates.md`, and to CI in the same commit.
-4. Bake it into `scripts/gates.sh`.
+4. Wire it into CI as a dedicated job, and into `scripts/gates.sh` once that aggregator lands (SOW-0013).
 5. Update `AGENTS.md` if the gate adds a top-level commitment.
 
 ## Removing a Gate
@@ -250,7 +258,7 @@ Removing a gate requires a SOW with: evidence the gate is wrong or obsolete, wha
 
 ## Performance Note
 
-Local full-gate runs should complete in under 5 minutes on the operator's workstation. If `scripts/gates.sh` exceeds that, profile and parallelize before adding more gates.
+Local full-gate runs should complete in under 5 minutes on the operator's workstation. Once the aggregate `scripts/gates.sh` lands (SOW-0013), if it exceeds that, profile and parallelize before adding more gates.
 
 ## Cross-References
 

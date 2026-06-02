@@ -47,7 +47,7 @@ These are non-negotiable across all code:
 
 ## Quality Gates
 
-Before any commit: run `./scripts/gates.sh` locally and confirm green. The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
+Before any commit: run the gates locally and confirm green (`./scripts/lint.sh` for Go lint/security; the per-gate commands for the rest — the single `./scripts/gates.sh` aggregator is SOW-0013 scope). The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
 
 - All Go lints (golangci-lint, gosec, govulncheck) zero warnings.
 - `go test -race -count=1 ./...` passes.
@@ -57,7 +57,7 @@ Before any commit: run `./scripts/gates.sh` locally and confirm green. The full 
 - Frontend lint, typecheck, vitest with coverage, Playwright E2E, axe a11y all green.
 - Bundle size within budget.
 - Secrets scan clean.
-- Spec drift script clean.
+- Spec↔code drift audited clean (manual audit; the `scripts/spec-drift.sh` detector is SOW-0013).
 - `./scripts/build.sh` succeeds.
 - Affected specs updated in the same commit.
 - External review converged for non-trivial SOWs.
@@ -74,7 +74,7 @@ Weakening a gate to make it pass is a contract breach. Fix the root cause.
 - Global mutable state. Use struct dependencies passed via constructors.
 - `exec.Command` for any user-facing functionality. Pure Go only.
 - Skipping tests with `t.Skip()` without a linked GitHub issue and a SOW for removal.
-- `// nolint` comments without a linked issue and an expiry note.
+- `// nolint` comments without a reason (per the `project-quality-gates` nolint policy: a permanent, architectural suppression needs a reason explaining why it is correct; a deferred-fix suppression needs an issue/SOW link).
 - `_ = err` or empty `if err != nil { }` — every error is either handled or wrapped and returned.
 - Catching errors in subagent-produced code and reporting "fixed" without re-running the gate that would have caught it.
 - Claiming code "works" without automated tests proving it.

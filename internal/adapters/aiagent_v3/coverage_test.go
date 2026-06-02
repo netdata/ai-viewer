@@ -266,10 +266,7 @@ func TestCoerceCursor_AlienTypeYieldsEmpty(t *testing.T) {
 	t.Parallel()
 
 	a, _ := New("/tmp/x", canonical.AdapterOptions{})
-	cur, err := a.coerceCursor(fakeCursor{})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	cur := a.coerceCursor(fakeCursor{})
 	if len(cur.Files) != 0 {
 		t.Fatalf("expected empty cursor, got %+v", cur)
 	}
@@ -282,10 +279,7 @@ func TestCoerceCursor_OurTypeHonored(t *testing.T) {
 	a, _ := New("/tmp/x", canonical.AdapterOptions{})
 	in := newCursor()
 	in.Files["x.jsonl"] = FileCursor{Offset: 42}
-	got, err := a.coerceCursor(in)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	got := a.coerceCursor(in)
 	if got.Files["x.jsonl"].Offset != 42 {
 		t.Fatalf("offset lost: %+v", got)
 	}
@@ -297,10 +291,7 @@ func TestCoerceCursor_NilFilesPreserved(t *testing.T) {
 	t.Parallel()
 
 	a, _ := New("/tmp/x", canonical.AdapterOptions{})
-	got, err := a.coerceCursor(Cursor{})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	got := a.coerceCursor(Cursor{})
 	if got.Files == nil {
 		t.Fatalf("expected non-nil Files map")
 	}

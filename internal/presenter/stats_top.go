@@ -70,7 +70,7 @@ func (p *Presenter) handleStatsTop(w http.ResponseWriter, r *http.Request) {
 
 	totals, err := p.topTotals(ctx, f, bucket, dim, metric)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "stats.top", err)
+		p.writeDBError(ctx, w, r, "stats.top", err)
 		return
 	}
 
@@ -82,7 +82,7 @@ func (p *Presenter) handleStatsTop(w http.ResponseWriter, r *http.Request) {
 		items = []seriesItem{}
 	}
 	resp := topResponse{Dimension: dim.dimension, Metric: metricName(metric), Items: items}
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // topTotals sums the requested dimension's metric per key across the whole

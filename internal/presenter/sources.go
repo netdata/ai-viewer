@@ -133,5 +133,5 @@ ORDER BY s.created_at, s.id
 		return
 	}
 
-	writeJSON(w, r, p.logger, http.StatusOK, sourcesResponse{Items: items})
+	writeJSON(w, r, p.logger, sourcesResponse{Items: items})
 }

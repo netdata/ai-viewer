@@ -134,7 +134,7 @@ The full catalog lives in `project-quality-gates`. A PR cannot land if any gate 
 - Any fuzz target crashed during its run.
 - Any benchmark regresses > 20% from baseline.
 - Any committed fixture trips the secret scanner.
-- Any spec is stale relative to code (`scripts/spec-drift.sh`).
+- Any spec is stale relative to code (the planned `scripts/spec-drift.sh`, SOW-0013; manual audit until then).
 - Axe accessibility violations at serious/critical level.
 - Frontend bundle exceeds size budget.
 
@@ -161,7 +161,7 @@ The full catalog lives in `project-quality-gates`. A PR cannot land if any gate 
 When reporting to the operator, never say "code works" without:
 
 - The test file paths covering the new behavior.
-- The gate command outputs (or `./scripts/gates.sh` summary).
+- The gate command outputs (`./scripts/lint.sh` + the per-gate commands; a `./scripts/gates.sh` summary once SOW-0013 lands it).
 - The external review status.
 
 Honest phrasings:

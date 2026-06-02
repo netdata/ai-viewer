@@ -143,51 +143,73 @@ func TestRollupGolden(t *testing.T) {
 	want := []RollupRow{
 		// --- bucket A, claude_code ---
 		// total: ops 1+2 metrics + 1 session_start.
-		{BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "total", DimensionValue: "",
+		{
+			BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "total", DimensionValue: "",
 			OpCount: 2, TokensIn: 101, TokensOut: 200, TokensCacheRead: 10, TokensCacheWrite: 5,
-			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 1},
+			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 1,
+		},
 		// model row: only op 1 (kind=llm).
-		{BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "model", DimensionValue: "claude",
+		{
+			BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "model", DimensionValue: "claude",
 			OpCount: 1, TokensIn: 100, TokensOut: 200, TokensCacheRead: 10, TokensCacheWrite: 5,
-			CostUSD: 0.5, Failures: 0, DurationUS: 1000, SessionStarts: 0},
+			CostUSD: 0.5, Failures: 0, DurationUS: 1000, SessionStarts: 0,
+		},
 		// provider row: ops 1+2 (both anthropic).
-		{BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "provider", DimensionValue: "anthropic",
+		{
+			BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "provider", DimensionValue: "anthropic",
 			OpCount: 2, TokensIn: 101, TokensOut: 200, TokensCacheRead: 10, TokensCacheWrite: 5,
-			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 0},
+			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 0,
+		},
 		// tool row: only op 2 (kind=tool), id "mcp:fs.read".
-		{BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "tool", DimensionValue: "mcp:fs.read",
+		{
+			BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "tool", DimensionValue: "mcp:fs.read",
 			OpCount: 1, TokensIn: 1, TokensOut: 0, TokensCacheRead: 0, TokensCacheWrite: 0,
-			CostUSD: 0, Failures: 1, DurationUS: 0, SessionStarts: 0},
+			CostUSD: 0, Failures: 1, DurationUS: 0, SessionStarts: 0,
+		},
 		// agent row: ops 1+2 + session_start.
-		{BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "agent", DimensionValue: "main",
+		{
+			BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "agent", DimensionValue: "main",
 			OpCount: 2, TokensIn: 101, TokensOut: 200, TokensCacheRead: 10, TokensCacheWrite: 5,
-			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 1},
+			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 1,
+		},
 		// cwd row: ops 1+2 + session_start.
-		{BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "cwd", DimensionValue: "/repo",
+		{
+			BucketTS: bucketA, SourceFormat: "claude_code", Dimension: "cwd", DimensionValue: "/repo",
 			OpCount: 2, TokensIn: 101, TokensOut: 200, TokensCacheRead: 10, TokensCacheWrite: 5,
-			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 1},
+			CostUSD: 0.5, Failures: 1, DurationUS: 1000, SessionStarts: 1,
+		},
 
 		// --- bucket B, codex ---
 		// total: op 3.
-		{BucketTS: bucketB, SourceFormat: "codex", Dimension: "total", DimensionValue: "",
+		{
+			BucketTS: bucketB, SourceFormat: "codex", Dimension: "total", DimensionValue: "",
 			OpCount: 1, TokensIn: 0, TokensOut: 7, TokensCacheRead: 0, TokensCacheWrite: 0,
-			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0},
+			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0,
+		},
 		// provider row: op 3 (openai).
-		{BucketTS: bucketB, SourceFormat: "codex", Dimension: "provider", DimensionValue: "openai",
+		{
+			BucketTS: bucketB, SourceFormat: "codex", Dimension: "provider", DimensionValue: "openai",
 			OpCount: 1, TokensIn: 0, TokensOut: 7, TokensCacheRead: 0, TokensCacheWrite: 0,
-			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0},
+			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0,
+		},
 		// tool row: op 3, id "bash" (no namespace → bare name).
-		{BucketTS: bucketB, SourceFormat: "codex", Dimension: "tool", DimensionValue: "bash",
+		{
+			BucketTS: bucketB, SourceFormat: "codex", Dimension: "tool", DimensionValue: "bash",
 			OpCount: 1, TokensIn: 0, TokensOut: 7, TokensCacheRead: 0, TokensCacheWrite: 0,
-			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0},
+			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0,
+		},
 		// agent row: op 3 (worker).
-		{BucketTS: bucketB, SourceFormat: "codex", Dimension: "agent", DimensionValue: "worker",
+		{
+			BucketTS: bucketB, SourceFormat: "codex", Dimension: "agent", DimensionValue: "worker",
 			OpCount: 1, TokensIn: 0, TokensOut: 7, TokensCacheRead: 0, TokensCacheWrite: 0,
-			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0},
+			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0,
+		},
 		// cwd row: op 3 (/other).
-		{BucketTS: bucketB, SourceFormat: "codex", Dimension: "cwd", DimensionValue: "/other",
+		{
+			BucketTS: bucketB, SourceFormat: "codex", Dimension: "cwd", DimensionValue: "/other",
 			OpCount: 1, TokensIn: 0, TokensOut: 7, TokensCacheRead: 0, TokensCacheWrite: 0,
-			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0},
+			CostUSD: 0.1, Failures: 0, DurationUS: 2000, SessionStarts: 0,
+		},
 	}
 	sortRows(want)
 

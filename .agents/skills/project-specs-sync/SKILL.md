@@ -73,7 +73,7 @@ Before marking SOW completed:
 1. Read every spec listed in `Spec Deltas`.
 2. Confirm it reflects the **final** code (the spec may have iterated during implementation).
 3. Refresh examples that became stale.
-4. Run `./scripts/spec-drift.sh` and confirm zero drift.
+4. Do the manual spec↔code drift audit (the `scripts/spec-drift.sh` detector is future work — see "Spec Drift Detection" below).
 5. Bump dated notes only where the spec explicitly versions itself.
 
 ## Spec Drift Detection (manual until automated)

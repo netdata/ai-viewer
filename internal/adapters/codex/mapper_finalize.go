@@ -137,18 +137,18 @@ func parseTsToMicros(s string) (int64, error) {
 	return t.UnixMicro(), nil
 }
 
-// trimPreview returns at most max runes of s with surrounding whitespace
+// trimPreview returns at most maxRunes runes of s with surrounding whitespace
 // removed, for a non-sensitive Extras preview (e.g. compaction message,
 // last_agent_message). Bodies are never inlined wholesale — full content lives
 // behind the PayloadRef (spec edge #7).
-func trimPreview(s string, max int) string {
+func trimPreview(s string, maxRunes int) string {
 	s = strings.TrimSpace(s)
-	if max <= 0 {
+	if maxRunes <= 0 {
 		return ""
 	}
 	r := []rune(s)
-	if len(r) <= max {
+	if len(r) <= maxRunes {
 		return s
 	}
-	return string(r[:max])
+	return string(r[:maxRunes])
 }

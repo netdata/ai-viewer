@@ -12,6 +12,8 @@ import (
 // an already-emitted op and do NOT emit a second op. Variants the adapter uses
 // only for the UI (agent_reasoning*, agent_message) produce a LogEntry, never a
 // duplicate op.
+//
+//nolint:unparam // error return is required by the record-type dispatch in mapRecord, which calls mapEventMsg/mapResponseItem through a uniform (evs, error) shape and propagates a non-nil error from either
 func (m *fileMapper) mapEventMsg(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	p := rec.EventMsg
 	if p == nil {

@@ -174,10 +174,8 @@ func catchUpFromCursor(ctx context.Context, resolvedRoot, root, sourceID string,
 	// sidecar rewritten during the window is picked up (flushDirty skips
 	// unchanged hashes via metaSeen).
 	metaDirty := make(map[string]struct{})
-	if hashes, herr := metaHashes(root, resolvedRoot, onError); herr == nil {
-		for rel := range hashes {
-			metaDirty[rel] = struct{}{}
-		}
+	for rel := range metaHashes(root, resolvedRoot, onError) {
+		metaDirty[rel] = struct{}{}
 	}
 	return flushDirty(ctx, resolvedRoot, root, sourceID, dirty, metaDirty, cur, def, out, onError)
 }
@@ -257,7 +255,7 @@ func markExistingDirty(base, dir string, dirty, metaDirty map[string]struct{}, o
 		}
 		rel, rerr := relPath(base, path)
 		if rerr != nil {
-			return nil
+			return nil //nolint:nilerr // intentional: a path that does not resolve under base is skipped, not fatal — continue walking the rest of the new dir
 		}
 		switch {
 		case strings.HasSuffix(d.Name(), metaExt):

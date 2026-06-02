@@ -1,0 +1,41 @@
+# Nightly govulncheck (SOW-0009).
+#
+# The per-push govulncheck (ci.yml) is the primary gate and BLOCKS the build —
+# but govulncheck is call-graph aware, so it fails only when the code actually
+# CALLS a vulnerable symbol; an unreachable transitive CVE does not flap it.
+# THIS scheduled job is an ADDITIONAL sweep: it re-runs govulncheck against
+# master daily so a CVE disclosed BETWEEN pushes surfaces within a day rather
+# than waiting for the next PR to trigger CI.
+#
+# Authoritative gate: .agents/sow/specs/quality-gates.md "Go — Security".
+name: govulncheck-nightly
+
+on:
+  schedule:
+    # 07:00 UTC daily — a low-traffic hour; far from typical PR bursts.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

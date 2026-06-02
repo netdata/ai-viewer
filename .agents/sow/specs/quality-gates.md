@@ -28,8 +28,13 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Lint
 
-- `golangci-lint run --timeout=5m`.
-- `.golangci.yml` enables: `govet`, `errcheck`, `staticcheck`, `unused`, `gosimple`, `ineffassign`, `gosec`, `revive`, `gofmt`, `goimports`, `bodyclose`, `noctx`, `errorlint`, `gocritic`, `gocyclo` (max 15), `gofumpt`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`.
+- `golangci-lint run --timeout=5m` is the umbrella gate: with the formatters enabled it also enforces Go — Format, and the `govet` linter covers Go — Vet, so this single command is the authoritative lint surface. `scripts/lint.sh` runs it (then the standalone security tools); CI runs it via the version-pinned `golangci/golangci-lint-action`.
+- golangci-lint is **v2**; `.golangci.yml` declares `version: "2"`. `gosimple` is NOT enabled — golangci v2 merged it into `staticcheck`. `gosec` is NOT a golangci linter here — it runs standalone (Go — Security) to avoid duplicate analysis.
+- `.golangci.yml` enables linters: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `errorlint`, `gocritic`, `revive`, `gocyclo`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`, `bodyclose`, `noctx`; formatters: `gofmt`, `goimports`, `gofumpt`.
+- `gocyclo` uses `min-complexity: 25` (not 15): the stream parsers/scanners/tailers and the SOW-0007-hardened ingest event loop sit legitimately at 16–24 cyclomatic, so complexity-15 produced ~23 false-positive-class findings on heavily-reviewed, hot-path code. 25 flags genuinely-egregious complexity (the one production outlier, `pricing.validateDoc`, was refactored under it) while preventing future creep.
+- `_test.go` is excluded from the style/complexity linters (`gocyclo`, `noctx`, `unparam`, `prealloc`, `revive`, `gocritic`): table-driven tests are intentionally branchy, test setup uses context-less DB calls, and test helpers carry call-site-specific params. The bug-finders (`errcheck`, `staticcheck`, `govet`, `ineffassign`, `unused`, `nilerr`, `errorlint`, `bodyclose`) stay active on tests.
+- `frontend/node_modules` is path-excluded (a transitive npm dependency ships a Go reference file that is not project code).
+- Version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`).
 - Threshold: zero warnings.
 
 ### Go — Security
@@ -177,7 +182,7 @@ target.
 
 ### Spec Drift
 
-- `scripts/spec-drift.sh` lints common drift indicators:
+- `scripts/spec-drift.sh` (planned, SOW-0013; manual spec↔code audit until it lands) will lint common drift indicators:
   - REST endpoints registered in `internal/presenter/` vs. `specs/rest-api.md`.
   - SSE event types in `internal/presenter/sse.go` vs. `specs/sse-protocol.md`.
   - SQLite columns in `internal/store/migrations/` vs. `specs/data-model.md`.
@@ -205,10 +210,17 @@ CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
 `scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
 
-Single-command aggregators — `scripts/lint.sh`, `scripts/test.sh`, and
-`scripts/gates.sh` (run every gate, fail-fast) — are a planned convenience and
-are **not yet present**. Until they land, run the individual gates (or rely on
-the per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
+`scripts/lint.sh` (SOW-0009) **is present**: it is the local mirror of the
+CI Go lint + security gates — `golangci-lint run` (the umbrella, driven by
+`.golangci.yml` at the version pinned in `.golangci-lint-version`) then
+standalone `gosec` and `govulncheck`. CI enforces the same set via the
+version-pinned `golangci/golangci-lint-action` plus its standalone
+gosec/govulncheck steps (CI keeps the cached action rather than invoking
+`scripts/lint.sh`, to preserve golangci's analysis cache). The broader
+single-command aggregators — `scripts/test.sh` and `scripts/gates.sh` (run
+*every* gate, fail-fast) — are a planned convenience (SOW-0013) and are **not
+yet present**. Until they land, run the individual gates (or rely on the
+per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
 gracefully when absent. The one exception is the security scanner: it is
 **fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if
 `scripts/scan-secrets.sh` or its self-test is missing, never skips it.

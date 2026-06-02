@@ -78,10 +78,10 @@ func (p *Presenter) handleCrossTopology(w http.ResponseWriter, r *http.Request) 
 
 	resp, err := p.buildCrossTopology(ctx, f, metric)
 	if err != nil {
-		p.writeDBError(w, r, ctx, "topology.cross.build", err)
+		p.writeDBError(ctx, w, r, "topology.cross.build", err)
 		return
 	}
-	writeJSON(w, r, p.logger, http.StatusOK, resp)
+	writeJSON(w, r, p.logger, resp)
 }
 
 // crossAgent is one matched session reduced to the node fields plus the

@@ -147,14 +147,20 @@ jobs:
         if: steps.detect.outputs.go == 'true'
         run: go vet ./...
 
+      - name: Read pinned golangci-lint version
+        id: golangci_version
+        if: steps.detect.outputs.go == 'true' && steps.detect.outputs.golangci == 'true'
+        shell: bash
+        run: echo "version=$(tr -d '[:space:]' < .golangci-lint-version)" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         if: steps.detect.outputs.go == 'true' && steps.detect.outputs.golangci == 'true'
         uses: golangci/golangci-lint-action@v9
         with:
-          # Pinned to dodge transient upstream issue where 'latest'
-          # resolves to a release tag whose binary tarball is 404.
-          # SOW-0009 lands the full version-pinning policy.
-          version: v2.11.4
+          # Single source of truth: .golangci-lint-version (SOW-0009). A version
+          # bump is an intentional, reviewable one-line diff. The action also
+          # caches golangci's analysis cache, keeping the warm CI run fast.
+          version: ${{ steps.golangci_version.outputs.version }}
           args: --timeout=5m
 
       - name: govulncheck

@@ -139,5 +139,7 @@ func TestCursor_String_HandlesNilFiles(t *testing.T) {
 
 // _alienCursorCompiles asserts the helper type from adapter_test.go
 // continues to satisfy canonical.Cursor as the interface evolves.
-var _alienCursorCompiles canonical.Cursor = alienCursor{}
-var _ = _alienCursorCompiles
+var (
+	_alienCursorCompiles canonical.Cursor = alienCursor{}
+	_                                     = _alienCursorCompiles
+)

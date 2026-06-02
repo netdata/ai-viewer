@@ -14,7 +14,7 @@ import (
 // package-level variable (defaulting to crypto/rand.Reader) only so tests
 // can substitute a failing reader to exercise the RNG-failure path; it is
 // never reassigned at runtime.
-var randReader io.Reader = rand.Reader
+var randReader io.Reader = rand.Reader //nolint:revive // explicit io.Reader: tests reassign this var with a different concrete reader (failingReader), so inferring rand.reader would break those assignments
 
 // subscriptionEntry is one registered subscription's server-side state: the
 // validated filter the poller matches against and the creation time
@@ -78,7 +78,8 @@ type notifyHubAdder struct {
 func newSubscriptionManager(hub interface {
 	Add(string)
 	Remove(string)
-}) *subscriptionManager {
+},
+) *subscriptionManager {
 	return &subscriptionManager{
 		hub:     &notifyHubAdder{add: hub.Add, remove: hub.Remove},
 		entries: make(map[string]subscriptionEntry),
@@ -265,7 +266,7 @@ func (p *Presenter) handleSubscriptionsCreate(w http.ResponseWriter, r *http.Req
 			CodeInternalError, "failed to generate subscription id", nil)
 		return
 	}
-	writeJSON(w, r, p.logger, http.StatusOK, createSubscriptionResponse{
+	writeJSON(w, r, p.logger, createSubscriptionResponse{
 		ID:     id,
 		Filter: filter.normalized(),
 	})

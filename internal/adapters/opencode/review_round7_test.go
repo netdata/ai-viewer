@@ -204,7 +204,7 @@ func TestP1_R7_SameMsStress(t *testing.T) {
 	rng := rand.New(rand.NewSource(0xC0DE57)) //nolint:gosec // deterministic test PRNG, not security-sensitive
 	insertSeq := 0                            // strictly-increasing id/ms counter for new INSERTs
 	curBoundaryMs := startMs                  // the ms in-place updates target (the cursor boundary)
-	var lastCursor = cur
+	lastCursor := cur
 
 	out := make(chan canonical.Event, 8192)
 

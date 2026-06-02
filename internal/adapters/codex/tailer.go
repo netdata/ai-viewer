@@ -237,7 +237,7 @@ func markExistingDirty(base, dir string, dirty map[string]struct{}, onError func
 		}
 		rel, rerr := relPath(base, path)
 		if rerr != nil {
-			return nil
+			return nil //nolint:nilerr // intentional: a path that does not resolve under base is skipped, not fatal — continue walking the rest of the tree
 		}
 		dirty[rel] = struct{}{}
 		return nil
@@ -310,7 +310,7 @@ func resetDebounce(t *time.Timer) {
 // read via readRollout so the offset advance, partial-line hold-back,
 // truncation defense, rule-#24 skip, and EOF stale-finalize are identical to
 // the Scan path. A rel that no longer maps to a recognized rollout is skipped.
-func flushDirty(ctx context.Context, resolvedRoot, root, sourceID string, dirty map[string]struct{}, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
+func flushDirty(ctx context.Context, resolvedRoot, _, sourceID string, dirty map[string]struct{}, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
 	if len(dirty) == 0 {
 		return nil
 	}

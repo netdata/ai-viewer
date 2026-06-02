@@ -27,14 +27,20 @@ func TestSearch_Pagination(t *testing.T) {
 	})
 	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
 	// Three matching ops, distinct relevance so the rank order is total.
-	seedFTSOp(t, db, opRow{id: "p1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
-		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "p1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
+		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+	},
 		"needle needle needle needle")
-	seedFTSOp(t, db, opRow{id: "p2", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "B",
-		startTS: base + 1300, endTS: base + 1400, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "p2", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "B",
+		startTS: base + 1300, endTS: base + 1400, durationUS: 100, status: "completed",
+	},
 		"needle needle needle")
-	seedFTSOp(t, db, opRow{id: "p3", turnID: "t1", sessionID: "rootA", seq: 3, kind: "tool", name: "C",
-		startTS: base + 1500, endTS: base + 1600, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "p3", turnID: "t1", sessionID: "rootA", seq: 3, kind: "tool", name: "C",
+		startTS: base + 1500, endTS: base + 1600, durationUS: 100, status: "completed",
+	},
 		"needle needle")
 
 	// Page 1: limit=2 → first two by rank, plus a next_cursor.
@@ -150,11 +156,15 @@ func TestSearch_CursorFingerprintMismatch(t *testing.T) {
 		agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 9000,
 	})
 	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
-	seedFTSOp(t, db, opRow{id: "o1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
-		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "o1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
+		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+	},
 		"alpha alpha beta")
-	seedFTSOp(t, db, opRow{id: "o2", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "B",
-		startTS: base + 1300, endTS: base + 1400, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "o2", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "B",
+		startTS: base + 1300, endTS: base + 1400, durationUS: 100, status: "completed",
+	},
 		"alpha")
 
 	_, body, _ := getSearch(t, p, "q=alpha&limit=1")
@@ -315,11 +325,15 @@ func TestSearch_FTS5SyntaxHonored(t *testing.T) {
 	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
 	// adjacent: contains the phrase "connection refused"; scattered: has both
 	// words but not adjacent.
-	seedFTSOp(t, db, opRow{id: "adjacent", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
-		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "adjacent", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
+		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+	},
 		"connection refused by peer")
-	seedFTSOp(t, db, opRow{id: "scattered", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "B",
-		startTS: base + 1300, endTS: base + 1400, durationUS: 100, status: "completed"},
+	seedFTSOp(t, db, opRow{
+		id: "scattered", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "B",
+		startTS: base + 1300, endTS: base + 1400, durationUS: 100, status: "completed",
+	},
 		"connection was later refused")
 
 	// Phrase query: only the adjacent op matches. q is URL-encoded ("..." → %22).
@@ -394,8 +408,10 @@ func TestSearch_AsymmetricPaginationOpsRunDry(t *testing.T) {
 	})
 	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
 	// One matching op, three matching logs.
-	seedFTSOp(t, db, opRow{id: "o1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
-		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed"}, "needle once")
+	seedFTSOp(t, db, opRow{
+		id: "o1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "A",
+		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+	}, "needle once")
 	seedFTSLog(t, db, logRow{sessionID: "rootA", ts: base + 1100, severity: "ERR", source: "x", message: "needle needle needle"})
 	seedFTSLog(t, db, logRow{sessionID: "rootA", ts: base + 1200, severity: "WRN", source: "x", message: "needle needle"})
 	seedFTSLog(t, db, logRow{sessionID: "rootA", ts: base + 1300, severity: "INF", source: "x", message: "needle x"})

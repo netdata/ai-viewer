@@ -169,16 +169,20 @@ func TestRefreshRollups_OpenHourMaterializedAfterClose(t *testing.T) {
 	seedSource(t, dbB, src, format)
 	seedSession(t, dbB, "sess-1", src, "claude", "/work/proj", hourH)
 	seedTurn(t, dbB, "turn-1", "sess-1", hourH)
-	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hourH, endTS: &hourHEnd, durationUS: hourHEnd - hourH, status: "completed",
-		tokensIn: 10, tokensOut: 20, costUSD: 0.1})
+		tokensIn: 10, tokensOut: 20, costUSD: 0.1,
+	})
 	seedSession(t, dbB, "sess-2", src, "claude", "/work/proj", hourH1)
 	seedTurn(t, dbB, "turn-2", "sess-2", hourH1)
-	seedOp(t, dbB, opSpec{id: "op-2", turnID: "turn-2", sessionID: "sess-2", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-2", turnID: "turn-2", sessionID: "sess-2", seq: 1,
 		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
 		startTS: hourH1, endTS: &hourH1End, durationUS: hourH1End - hourH1, status: "completed",
-		tokensIn: 1, tokensOut: 2, costUSD: 0.05})
+		tokensIn: 1, tokensOut: 2, costUSD: 0.05,
+	})
 	if _, err := BackfillRollups(context.Background(), dbB, nowAtBatch2, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
@@ -451,29 +455,37 @@ func TestRefreshRollups_ParityWithBackfill(t *testing.T) {
 	seedSource(t, dbB, src, format)
 	seedSession(t, dbB, "sess-1", src, "claude", "/work/proj", startA)
 	seedTurn(t, dbB, "turn-1", "sess-1", startA)
-	seedOp(t, dbB, opSpec{id: "op-eq-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-eq-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: eqStart, endTS: &eqEnd, durationUS: eqEnd - eqStart, status: "completed",
-		tokensIn: 100, tokensOut: 200, costUSD: 0.1})
-	seedOp(t, dbB, opSpec{id: "op-eq-2", turnID: "turn-1", sessionID: "sess-1", seq: 2,
+		tokensIn: 100, tokensOut: 200, costUSD: 0.1,
+	})
+	seedOp(t, dbB, opSpec{
+		id: "op-eq-2", turnID: "turn-1", sessionID: "sess-1", seq: 2,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: eqStart, endTS: &eqEnd, durationUS: eqEnd - eqStart, status: "failed",
-		tokensIn: 7, tokensOut: 9, costUSD: 0.2})
+		tokensIn: 7, tokensOut: 9, costUSD: 0.2,
+	})
 	op3End := ts(0, 10, 5)
-	seedOp(t, dbB, opSpec{id: "op-3", turnID: "turn-1", sessionID: "sess-1", seq: 3,
+	seedOp(t, dbB, opSpec{
+		id: "op-3", turnID: "turn-1", sessionID: "sess-1", seq: 3,
 		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
 		startTS: ts(0, 10, 0), endTS: &op3End, durationUS: op3End - ts(0, 10, 0), status: "completed",
-		tokensIn: 1, tokensOut: 2, costUSD: 0.05})
+		tokensIn: 1, tokensOut: 2, costUSD: 0.05,
+	})
 	for i := 0; i < distinctCwds; i++ {
 		sess := fmt.Sprintf("csess-%d", i)
 		cwd := fmt.Sprintf("/work/c%05d", i)
 		turn := "cturn-" + sess
 		seedSession(t, dbB, sess, src, "claude", cwd, collapseHourStart)
 		seedTurn(t, dbB, turn, sess, collapseHourStart)
-		seedOp(t, dbB, opSpec{id: "cop-" + sess, turnID: turn, sessionID: sess, seq: 1,
+		seedOp(t, dbB, opSpec{
+			id: "cop-" + sess, turnID: turn, sessionID: sess, seq: 1,
 			kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 			startTS: collapseHourStart, endTS: &collapseEnd, durationUS: collapseEnd - collapseHourStart,
-			status: "completed", tokensIn: 1, tokensOut: 1, costUSD: 0.001})
+			status: "completed", tokensIn: 1, tokensOut: 1, costUSD: 0.001,
+		})
 	}
 	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
@@ -781,16 +793,20 @@ func TestRefreshRollups_AggregatesMultipleSourcesSameFormat(t *testing.T) {
 	seedSource(t, dbB, srcB, format)
 	seedSession(t, dbB, "a-sess", srcA, "claude", "/work/proj-a", hour)
 	seedTurn(t, dbB, "a-turn", "a-sess", hour)
-	seedOp(t, dbB, opSpec{id: "a-op", turnID: "a-turn", sessionID: "a-sess", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "a-op", turnID: "a-turn", sessionID: "a-sess", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hour, endTS: &end, durationUS: end - hour, status: "completed",
-		tokensIn: aTokensIn, tokensOut: aTokensOut, costUSD: aCost})
+		tokensIn: aTokensIn, tokensOut: aTokensOut, costUSD: aCost,
+	})
 	seedSession(t, dbB, "b-sess", srcB, "claude", "/work/proj-b", hour)
 	seedTurn(t, dbB, "b-turn", "b-sess", hour)
-	seedOp(t, dbB, opSpec{id: "b-op", turnID: "b-turn", sessionID: "b-sess", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "b-op", turnID: "b-turn", sessionID: "b-sess", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hour, endTS: &end, durationUS: end - hour, status: "failed",
-		tokensIn: bTokensIn, tokensOut: bTokensOut, costUSD: bCost})
+		tokensIn: bTokensIn, tokensOut: bTokensOut, costUSD: bCost,
+	})
 	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
@@ -1029,14 +1045,18 @@ func TestRefreshRollups_SessionUpdatedReattributesAgent(t *testing.T) {
 	seedSource(t, dbB, src, format)
 	seedSession(t, dbB, "sess-1", src, "new-agent", "/work/proj", startA)
 	seedTurn(t, dbB, "turn-1", "sess-1", startA)
-	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hour1Start, endTS: &hour1End, durationUS: hour1End - hour1Start, status: "completed",
-		tokensIn: 100, tokensOut: 200, costUSD: 0.1})
-	seedOp(t, dbB, opSpec{id: "op-2", turnID: "turn-1", sessionID: "sess-1", seq: 2,
+		tokensIn: 100, tokensOut: 200, costUSD: 0.1,
+	})
+	seedOp(t, dbB, opSpec{
+		id: "op-2", turnID: "turn-1", sessionID: "sess-1", seq: 2,
 		kind: "llm", name: "chat", model: "haiku", provider: "anthropic",
 		startTS: hour2Start, endTS: &hour2End, durationUS: hour2End - hour2Start, status: "failed",
-		tokensIn: 5, tokensOut: 7, costUSD: 0.05})
+		tokensIn: 5, tokensOut: 7, costUSD: 0.05,
+	})
 	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
@@ -1102,10 +1122,12 @@ func TestRefreshRollups_SessionUpdatedReattributesCwd(t *testing.T) {
 	seedSource(t, dbB, src, format)
 	seedSession(t, dbB, "sess-1", src, "claude", "/work/new", startA)
 	seedTurn(t, dbB, "turn-1", "sess-1", startA)
-	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hourStart, endTS: &hourEnd, durationUS: hourEnd - hourStart, status: "completed",
-		tokensIn: 10, tokensOut: 20, costUSD: 0.1})
+		tokensIn: 10, tokensOut: 20, costUSD: 0.1,
+	})
 	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
@@ -1236,10 +1258,12 @@ func TestRefreshRollups_SessionStartedRepairsStubMetadataAndStart(t *testing.T) 
 	seedSource(t, dbB, src, format)
 	seedSession(t, dbB, "sess-1", src, "claude-x", "/w", hStart)
 	seedTurn(t, dbB, "turn-1", "sess-1", hStart)
-	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hOpStart, endTS: &hOpEnd, durationUS: hOpEnd - hOpStart, status: "completed",
-		tokensIn: 100, tokensOut: 200, costUSD: 0.1})
+		tokensIn: 100, tokensOut: 200, costUSD: 0.1,
+	})
 	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
@@ -1370,10 +1394,12 @@ func TestRefreshRollups_OpenDayMaterializedAfterMidnight(t *testing.T) {
 	seedSource(t, dbB, src, format)
 	seedSession(t, dbB, "sess-1", src, "claude", "/work/proj", hourH)
 	seedTurn(t, dbB, "turn-1", "sess-1", hourH)
-	seedOp(t, dbB, opSpec{id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
+	seedOp(t, dbB, opSpec{
+		id: "op-1", turnID: "turn-1", sessionID: "sess-1", seq: 1,
 		kind: "llm", name: "chat", model: "sonnet", provider: "anthropic",
 		startTS: hourH, endTS: &hourHEnd, durationUS: hourHEnd - hourH, status: "completed",
-		tokensIn: 10, tokensOut: 20, costUSD: 0.1})
+		tokensIn: 10, tokensOut: 20, costUSD: 0.1,
+	})
 	if _, err := BackfillRollups(context.Background(), dbB, nowAfterMidnight, silentLogger()); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
