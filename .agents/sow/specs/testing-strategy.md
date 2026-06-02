@@ -93,9 +93,12 @@ A sanitization helper script lives at `scripts/sanitize-fixture.sh` (built durin
 
 ## Coverage Targets
 
-- Adapter packages: > 85% line coverage. Anything less requires a `//coverage:ignore` comment explaining why.
-- ingest/store/canonical: > 90%.
-- presenter handlers: > 80%.
+**Enforced gate** — statement coverage via `scripts/check-coverage.sh` (authority: `quality-gates.md` "Go — Coverage"): every gated `internal/*` package ≥ 80% statements AND their aggregate ≥ 80%; `/cmd/` (binaries + dev tools) is excluded (reported, not gated). Branch coverage and new-code-in-PR ≥ 90% are deferred (SOW-0036). Go has no first-class branch coverage and no `//coverage:ignore` directive — neither is used here.
+
+Non-gated aspirational aims (guide where to invest test effort; not enforced):
+- ingest / store / canonical: aim > 90%.
+- adapter packages: aim > 85%.
+- presenter handlers: aim > 80%.
 - Frontend: not formally measured (Vitest's c8 reports it but we don't gate on it; component tests + E2E are enough).
 
 ## CI Gates

@@ -109,7 +109,7 @@ All gates run in CI on every push and must be green before merge. The assistant 
 | Go security | `gosec`, `govulncheck` | zero high/critical findings |
 | Go static | `staticcheck`, `errcheck`, `ineffassign`, `unused` | zero warnings |
 | Go test | `go test -race ./...` | all pass |
-| Go coverage | `go test -coverprofile -covermode=atomic ./...` | ≥ 80% lines, ≥ 70% branches per package; new code ≥ 90% |
+| Go coverage | `go test -coverprofile -covermode=atomic ./...` → `scripts/check-coverage.sh` | ≥ 80% statements per gated `internal/*` package + their aggregate (`/cmd/` excluded); branch + new-code-in-PR ≥ 90% deferred (SOW-0036) |
 | Go fuzz | `go test -fuzz=Fuzz... -fuzztime=30s` on parsers/decoders | zero crashes per CI run |
 | Go bench | `go test -bench=. -benchmem` for marked benchmarks | ≤ 20% regression vs baseline (stored in `bench/baseline.json`) |
 | Frontend lint | `eslint` flat config, `@typescript-eslint`, `react`, `react-hooks` | zero warnings |

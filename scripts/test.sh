@@ -31,6 +31,10 @@ case "${1:-}" in
       echo -e "${RED}[ERROR]${NC} --stress needs a positive integer count (got '${count}')." >&2
       exit 2
     fi
+    if [[ "$#" -gt 2 ]]; then
+      echo -e "${RED}[ERROR]${NC} --stress takes at most one argument (count); unexpected: ${*:3} (usage: scripts/test.sh [--stress [N]])." >&2
+      exit 2
+    fi
     echo -e "${GRAY}race stress: -count=${count} (no coverage profile)${NC}" >&2
     run go test -race "-count=${count}" ./...
     echo -e "${GREEN}[ok]${NC} race stress (-count=${count}) clean." >&2

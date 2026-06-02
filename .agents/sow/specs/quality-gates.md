@@ -251,7 +251,7 @@ which run in parallel.
 ## Why These Specific Gates
 
 - **Lint + static + security at zero warnings**: standard Go quality bar; cheap to enforce; high signal.
-- **Coverage thresholds**: prevents the "I tested the happy path" gap; new-code ≥ 90% prevents coverage erosion.
+- **Coverage thresholds**: prevents the "I tested the happy path" gap; new-code ≥ 90% (deferred — SOW-0036) will prevent coverage erosion once a diff↔coverage intersector lands.
 - **Fuzz on parsers/decoders**: ai-viewer ingests untrusted JSON from disk; fuzz catches the panics and unbounded allocations static analysis misses.
 - **Bench regression**: the perf target (full backfill of 294K v2 files under 60 min) is fragile to per-event regressions; 20% per-bench is a sensitive early signal.
 - **Race stress**: ingest pipeline + SSE hub are concurrent; race detector on every run is the minimum bar.
