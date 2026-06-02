@@ -64,14 +64,27 @@ describe('LineChart', () => {
     expect(screen.getByRole('img')).toHaveAccessibleName(/1 series: total/i);
   });
 
-  it('renders a single-point series without crashing (one bucket)', () => {
+  it('renders a single-point series with a visible marker (one bucket is not blank)', () => {
     const onePoint: AggregateBucket[] = [
       { bucket_ts: 1_700_000_000_000_000, series: [{ key: 'gpt-5', value: 2 }] },
     ];
     const { container } = render(<LineChart buckets={onePoint} metric="tokens_in" bucket="hourly" />);
-    // A lone M-only path is emitted (a degenerate but valid polyline).
+    // A lone M-only path is emitted (a degenerate but valid polyline)…
     const path = container.querySelector('path[data-series="gpt-5"]');
     expect(path?.getAttribute('d')?.startsWith('M')).toBe(true);
+    // …and because that path draws nothing, a circle marker makes the lone
+    // sample visible (regression guard for the "blank one-bucket chart" bug).
+    const marker = container.querySelector('circle[data-marker="gpt-5"]');
+    expect(marker).not.toBeNull();
+    expect(Number(marker?.getAttribute('r'))).toBeGreaterThan(0);
+  });
+
+  it('does NOT add point markers to multi-point series (no clutter, no regression)', () => {
+    const { container } = render(<LineChart buckets={TWO_SERIES} metric="cost" bucket="daily" />);
+    // The polylines still render (two distinct series paths)…
+    expect(container.querySelectorAll('path[data-series]')).toHaveLength(2);
+    // …and no single-point markers are emitted for the multi-point series.
+    expect(container.querySelector('circle[data-marker]')).toBeNull();
   });
 
   it('has no axe violations with data', async () => {

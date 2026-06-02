@@ -114,6 +114,25 @@ export function LineChart({ buckets, metric, bucket }: LineChartProps) {
             />
           ))}
         </g>
+
+        {/* Point markers for SINGLE-POINT series: a lone bucket emits an M-only
+            (zero-length) path which draws nothing, so a one-bucket trend would
+            look blank. A small filled dot (the series color) makes that sample
+            visible. Multi-point series keep their polyline only (no marker
+            clutter), so this never changes their rendering. */}
+        {layout.series.map((s) =>
+          s.points.length === 1 && s.points[0] ? (
+            <circle
+              key={s.key}
+              data-marker={s.key || 'total'}
+              cx={s.points[0].x}
+              cy={s.points[0].y}
+              r={3}
+              fill={s.color}
+              className={styles.marker}
+            />
+          ) : null,
+        )}
       </svg>
 
       {/* TEXT legend — the series differentiator (color is never the only cue).

@@ -398,7 +398,11 @@ fold. Therefore:
 (selection by the bucket's START); within an included bucket the whole bucket's
 data is returned (the rollups cannot sub-select inside a bucket). A `from`/`to`
 that falls mid-bucket therefore excludes that partial lower bucket — this is what
-keeps the fast path and the live fold byte-identical.
+keeps the fast path and the live fold byte-identical. The default-`to` window
+bound and the open-bucket cutoff (`openStart`) are computed from a SINGLE
+wall-clock read per request, so a clock that crosses an hour/day boundary
+mid-request cannot desync them and drop the just-open bucket's live fold
+(`closedHi = min(to, openStart)`).
 
 Both paths and the open-bucket fold compute their numbers through the SAME pure
 `internal/rollups` fold (the server reads the relevant `ops` into `rollups.OpRow`s

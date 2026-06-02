@@ -50,6 +50,11 @@
   stroke-linecap: round;
 }
 
+/* Single-point marker dot; fill is the series' inline var() (theme token). */
+.marker {
+  /* Fill color comes from the inline var() per series. */
+}
+
 /* Bar chart: category key (left band) + value text (after the bar). */
 .barKey {
   fill: var(--text-primary);
@@ -63,6 +68,16 @@
   font-size: var(--font-size-sm);
   font-family: var(--font-mono);
   text-anchor: start;
+}
+
+/* Value label drawn INSIDE a long bar's end (end-anchored). Uses the stronger
+   text token for legibility over the colored fill; anchor is also set inline so
+   the rendered text box stays within the viewBox. */
+.barValueInside {
+  fill: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  text-anchor: end;
 }
 
 .bar {

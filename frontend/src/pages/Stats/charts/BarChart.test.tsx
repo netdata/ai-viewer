@@ -56,6 +56,40 @@ describe('BarChart', () => {
     expect(bars).toHaveLength(2);
   });
 
+  it('keeps the longest bar value label inside the viewport (no right-edge clip)', () => {
+    // VIEW_WIDTH=720, PADDING.right=16 → the right viewport edge is 704. The
+    // longest bar fills the band so its end sits at the edge; a start-anchored
+    // outside label would overflow. The fix flips it to an end-anchored label
+    // drawn inside the bar, whose effective right edge (x, since text-anchor:end)
+    // must be ≤ 704 so the text box stays within the SVG.
+    const VIEW_RIGHT = 720 - 16;
+    const { container } = render(<BarChart items={ITEMS} dimension="model" metric="cost" />);
+    const longest = container.querySelector('text[data-value="claude-opus"]');
+    expect(longest).not.toBeNull();
+    expect(longest?.getAttribute('data-inside')).toBe('true');
+    expect(longest?.getAttribute('text-anchor')).toBe('end');
+    const x = Number(longest?.getAttribute('x'));
+    expect(Number.isFinite(x)).toBe(true);
+    // End-anchored: the text grows LEFT from x, so x is its right edge.
+    expect(x).toBeLessThanOrEqual(VIEW_RIGHT);
+    expect(x).toBeGreaterThanOrEqual(0);
+  });
+
+  it('places a short bar value label outside the bar end (start-anchored, in viewport)', () => {
+    // A short bar leaves room to the right, so its label is start-anchored just
+    // after the bar end and must still begin within the viewport.
+    const VIEW_RIGHT = 720 - 16;
+    const { container } = render(
+      <BarChart items={[{ key: 'tiny', value: 1 }, { key: 'huge', value: 1000 }]} dimension="model" metric="calls" />,
+    );
+    const shortLabel = container.querySelector('text[data-value="tiny"]');
+    expect(shortLabel?.getAttribute('data-inside')).toBe('false');
+    expect(shortLabel?.getAttribute('text-anchor')).toBe('start');
+    const x = Number(shortLabel?.getAttribute('x'));
+    // Start-anchored: x is the LEFT edge; it must sit within the viewport.
+    expect(x).toBeLessThanOrEqual(VIEW_RIGHT);
+  });
+
   it('has no axe violations with data', async () => {
     const { container } = render(<BarChart items={ITEMS} dimension="model" metric="cost" />);
     expect(await axe(container)).toHaveNoViolations();

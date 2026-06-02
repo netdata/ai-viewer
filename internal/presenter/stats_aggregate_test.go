@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/ingest"
+	"github.com/netdata/ai-viewer/internal/rollups"
 )
 
 // i64 renders an int64 µs timestamp as a query-string value.
@@ -676,6 +677,83 @@ func TestStatsAggregate_IncludesSubAgentSessions(t *testing.T) {
 	tm := topToMap(top)
 	if v := tm["gpt-5"]; !floatEq(v, 0.05) {
 		t.Errorf("top: sub-agent gpt-5 cost = %v, want 0.05 (sub-agent ops must be ranked): %+v", v, top.Items)
+	}
+}
+
+// TestStatsAggregate_SingleClockReadAcrossBoundary pins the single-clock-read
+// contract of aggregateSeries: the window (`to`) and the open-bucket cutoff
+// (`openStart`) must derive from ONE p.now() reading, so a clock that crosses an
+// hour boundary between two reads cannot desync them and drop the open bucket's
+// live fold (closedHi = min(to, openStart)).
+//
+// We inject a COUNTER clock that returns DIFFERENT values on consecutive calls:
+//   - read #1 (timeWindow): one µs BEFORE an hour boundary → to = boundary.
+//   - read #2 (BucketTS):   just AFTER the boundary → BucketTS = boundary (next
+//     hour). The op is seeded in the hour the FIRST read falls in (the hour
+//     ending at `boundary`), so a correct single-read fold MUST include it.
+//
+// With the (buggy) two-read code, openStart comes from read #2 (== boundary)
+// while `to` comes from read #1 (== boundary); the open-bucket guard
+// `openStart >= from && openStart < to` becomes `boundary < boundary` → false,
+// so the bucket is dropped and the op vanishes. The single-read fix makes read
+// #2 irrelevant: both values come from read #1 and the op is always present.
+func TestStatsAggregate_SingleClockReadAcrossBoundary(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	// An hour boundary; read #1 is 1µs before it, read #2 is just after it.
+	boundary := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC).UnixMicro()
+	openHour := rollups.BucketTS(boundary-1, rollups.Hourly) // 11:00 — the hour read #1 lands in.
+
+	// One op inside that open hour. Live-folded regardless of fast/live path.
+	seedSource(t, db, "aiagent_v3:/p", "aiagent_v3", "/p", openHour)
+	seedRollupSession(t, db, "sboundary", "aiagent_v3:/p", "nedi", "anthropic", "/w1", openHour)
+	seedRollupOp(t, db, rollupOpSpec{id: "oboundary", sess: "sboundary", seq: 1, kind: "llm",
+		name: "claude-opus", model: "claude-opus", provider: "anthropic",
+		start: openHour, dur: 0, status: "running", tokIn: 1, tokOut: 0, cost: 0.001})
+
+	// Counter clock: 1st call = boundary-1µs (before the boundary, in the open
+	// hour that holds the op); every LATER call = boundary+5µs (after, in the
+	// NEXT hour). The later value is "poisoned": if aggregateSeries consulted the
+	// clock a second time for openStart, openStart would be the next hour and the
+	// open-bucket guard would drop the op. The single-read fix never consults it,
+	// so the result is computed entirely from the first reading.
+	var calls int
+	p.nowFn = func() time.Time {
+		calls++
+		if calls == 1 {
+			return time.UnixMicro(boundary - 1).UTC()
+		}
+		return time.UnixMicro(boundary + 5).UTC()
+	}
+
+	// Call aggregateSeries directly so ONLY its now() read(s) are exercised
+	// (the HTTP path's parseSessionFilter now() read is outside this function).
+	f := sessionFilter{group: groupRoot, sort: sortStartTS, order: "desc", limit: defaultLimit}
+	f.forceAllSessions()
+	series, err := p.aggregateSeries(context.Background(), f, rollups.Hourly,
+		rollupDimension{dimension: "total"}, smCalls)
+	if err != nil {
+		t.Fatalf("aggregateSeries: %v", err)
+	}
+	if calls < 1 {
+		t.Fatal("aggregateSeries never read the clock")
+	}
+
+	// The open hour (where read #1 lands) MUST be present with the one op. With
+	// the two-read bug the boundary crossing drops this bucket entirely.
+	bkt, ok := series[openHour]
+	if !ok {
+		t.Fatalf("open hour %d dropped — window/open-bucket desynced across the boundary (series=%+v)", openHour, series)
+	}
+	if v := bkt[""]; !floatEq(v, 1) {
+		t.Errorf("open-hour calls = %v, want 1 (single clock read keeps the open bucket): %+v", v, bkt)
+	}
+	// And nothing must land in the next hour (read #2's bucket) — the data is
+	// in read #1's hour, proving the fold tracks the single (first) reading.
+	if _, ok := series[boundary]; ok {
+		t.Errorf("bucket at the next hour %d must be empty (no op there): %+v", boundary, series)
 	}
 }
 

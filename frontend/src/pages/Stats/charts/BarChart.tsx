@@ -20,6 +20,8 @@ const ROW_HEIGHT = 28;
 const PADDING = { top: 8, right: 16, bottom: 24, left: 8 };
 // Label band reserved on the left of each row for the category + value text.
 const LABEL_BAND = 220;
+// Horizontal gap between a bar's end and its value label (outside or inside).
+const VALUE_GAP = 6;
 
 export interface BarChartProps {
   items: TopItem[];
@@ -72,6 +74,15 @@ export function BarChart({ items, dimension, metric }: BarChartProps) {
         {layout.bars.map((bar, i) => {
           const rowY = bar.y;
           const textY = rowY + bar.h / 2;
+          // Value-label placement: by default just AFTER the bar end (start-
+          // anchored), which keeps it off the colored fill. But a long bar whose
+          // outside-end label would spill past the right gutter is instead drawn
+          // INSIDE the bar end (end-anchored at barEnd - pad), so the rendered
+          // text box always stays within [PADDING.left, VIEW_WIDTH-PADDING.right]
+          // — a start-anchored label clamped to the edge would overflow the SVG.
+          const barEnd = LABEL_BAND + bar.x + bar.w;
+          const outsideX = barEnd + VALUE_GAP;
+          const valueInside = outsideX > VIEW_WIDTH - PADDING.right;
           return (
             <g key={bar.key}>
               {/* Category label (text differentiator — never color-only). */}
@@ -89,11 +100,15 @@ export function BarChart({ items, dimension, metric }: BarChartProps) {
                 fill={seriesColorVar(i)}
                 className={styles.bar}
               />
-              {/* Value text just after the bar end, inside the viewBox. */}
+              {/* Value text: outside the bar end by default; inside (end-anchored,
+                  higher-contrast token) when an outside label would clip. */}
               <text
-                x={Math.min(LABEL_BAND + bar.x + bar.w + 6, VIEW_WIDTH - PADDING.right)}
+                data-value={bar.key}
+                data-inside={valueInside ? 'true' : 'false'}
+                x={valueInside ? barEnd - VALUE_GAP : outsideX}
                 y={textY + 4}
-                className={styles.barValue}
+                textAnchor={valueInside ? 'end' : 'start'}
+                className={valueInside ? styles.barValueInside : styles.barValue}
               >
                 {formatMetricValue(metric, bar.value)}
               </text>

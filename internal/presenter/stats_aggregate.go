@@ -85,8 +85,13 @@ func (p *Presenter) handleStatsAggregate(w http.ResponseWriter, r *http.Request)
 // fold stays byte-consistent with the materialized closed buckets even when
 // from/to fall mid-bucket (rest-api.md §"Rollup fast path vs. live fold").
 func (p *Presenter) aggregateSeries(ctx context.Context, f sessionFilter, bucket rollups.Bucket, dim rollupDimension, metric statsMetric) (closedSeries, error) {
-	from, to := f.timeWindow(p.now())
-	openStart := rollups.BucketTS(p.now().UnixMicro(), bucket)
+	// Single clock read so the window and the open-bucket cutoff are consistent
+	// across a boundary crossing: two separate p.now() calls could straddle an
+	// hour/day boundary, desyncing `to` from `openStart` and dropping the
+	// just-open bucket's live fold (closedHi = min(to, openStart)).
+	now := p.now()
+	from, to := f.timeWindow(now)
+	openStart := rollups.BucketTS(now.UnixMicro(), bucket)
 	closedHi := minInt64(to, openStart) // closed buckets: bucket_ts ∈ [from, closedHi)
 
 	var series closedSeries

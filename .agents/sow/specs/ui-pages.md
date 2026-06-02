@@ -82,9 +82,16 @@ Layout:
   over the selected range, from
   `GET /api/stats/aggregate?bucket=daily&group_by=total` (one metric per chart, or
   a metric toggle). Sessions are plotted from the additive `session_starts` metric
-  (`data-model.md` §Rollup tables), never a non-additive distinct count.
+  (`data-model.md` §Rollup tables), never a non-additive distinct count. A series
+  with a SINGLE data point (one bucket) renders a small filled dot at that point —
+  a lone-`M` polyline draws nothing, so the marker keeps a one-bucket trend
+  visible; multi-point series draw the polyline only.
 - **Horizontal bar charts** — top-N model / provider / tool / agent / cwd, from
-  `GET /api/stats/top` (one chart per dimension, dimension/metric selectable).
+  `GET /api/stats/top` (one chart per dimension, dimension/metric selectable). Each
+  bar's value label sits just after the bar end by default; a long bar whose
+  outside label would clip the right edge draws the label INSIDE the bar end
+  (end-anchored, higher-contrast text token) so it always stays within the SVG
+  viewport.
 - **Deep-search box** — a text input that posts its query to `GET /api/search`;
   results list matched ops and logs and link to the relevant session/op
   (`rest-api.md` — `op_id`/`session_id`/`log_id` linkage). When the matched source
