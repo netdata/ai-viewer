@@ -1,5 +1,7 @@
 # SOW-0011 - Fuzz, Property-Based, and Benchmark Infrastructure
 
+> **⚠️ This document mixes the original 2026-05-26 draft with the delivered scope.** The original Purpose / Plan / Acceptance-Criteria / Validation prose (30s per-push `-fuzz`, canonical fuzz + canonical encode/decode benchmark, six benchmarks, `count=5`, a CI bench regression gate, auto-issue + sticky-comment) is **superseded** by the **"Re-scope decisions"**, the **superseded-AC note**, and the **"Execution Log"** below. Those record the authoritative DELIVERED contract: canonical has no fuzz/encode-decode (no decoders); per-push = deterministic fuzz seed corpus + nightly `-fuzz`; FIVE benchmarks; `count=6`; `check-bench.sh` is a LOCAL/workstation gate (not CI); auto-issue + sticky-comment deferred. Where the draft body and those sections differ, those sections win.
+
 ## Status
 
 Status: in progress
@@ -257,6 +259,18 @@ This SOW was drafted 2026-05-26 assuming **zero** fuzz/property/benchmark covera
 - **`BENCH_THRESHOLD` override warns** (minimax P3-5); builtin `max` replaces local `maxInt`/`maxIntIngest` (glm P2-1); stale AC marked superseded above (codex P2-6).
 - Gates green (re-verified by master): golangci-lint 0, `go test -race ./...` pass, coverage gate PASS, `check-bench.sh` PASS (5/5 compared), self-tests 8/8 + 6/6, actionlint clean, secret + AI-attribution scans clean.
 - **Next**: re-review (same scope + fix notes) → converge → PR → self-merge → close.
+
+### 2026-06-03 — External review round 2 (codex + glm; minimax timed out) + fixes
+
+Re-ran all 3 reviewers on the same whole-surface scope + the round-1 fix notes. **codex** (decisive): no P1 (the round-1 P1s confirmed fixed), 3 P2 + 2 P3. **glm**: mergeable, 1 P2 + 4 P3. **minimax**: TIMED OUT (exit 124) — it spent its 30-min budget running `go test -race ./...` twice instead of reviewing statically; the round-3 prompt forbids running the suite. Adjudicated on ground truth (codex↔glm disagreed on the ordering test — codex was right on the literal code: the test embedded a copied `ORDER BY`). Fixes (this commit):
+
+- **Ordering property → production read path** (codex P2-b; subagent): `TestPropertyOpsReturnedInSeqOrder` now ingests SHUFFLED ops, then reads them back through the REAL presenter handler (`GET /api/sessions/{id}` → `handleSessionDetail` → `loadOps`) instead of a hand-copied `ORDER BY`. The op seq is encoded in the op name (the detail JSON omits seq) and parsed from the returned order. **Mutation-proven**: flipping `loadOps` `ORDER BY … seq ASC→DESC` fails it; production reverted (`internal/presenter` byte-identical).
+- **Fuzz pin → exact set** (codex P2-a / glm P3-2): ci.yml asserts the exact sorted target multiset (not just count=10) — a renamed target now fails per-push, not only nightly.
+- **check-bench.sh reverse warn** (glm P2-1): warns (does not fail) when a current benchmark is absent from the baseline (un-gated until a refresh SOW); self-test 6→7. Unique-name assumption documented (codex P3-e).
+- **baseline SHA restored** (codex P2-c): the header carries the implementing commit SHA again (`39b5bb2`), matching `quality-gates.md` + this SOW.
+- **Top-of-SOW supersede banner** (codex P3-d): the whole original draft body is marked superseded.
+- Gates green (re-verified by master): golangci-lint 0, `go test -race` pass, `check-bench.sh` PASS (5/5 compared), self-tests 8/8 + 7/7, actionlint clean, secret + attribution scans clean.
+- **Next**: re-review round 3 (all 3; minimax with an explicit no-run-tests instruction) → converge → PR → self-merge → close.
 
 ## Validation
 

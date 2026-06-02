@@ -1,4 +1,7 @@
 # ai-viewer benchmark baseline
+# Commit: 39b5bb238056ee1a4d0c09ac93a95f760ea4afd2 (SOW-0011 review-fix — the
+#   deterministic-BenchmarkTail code these numbers measure; benchmark code is
+#   unchanged after that commit, so the numbers remain valid).
 # Regenerated: 2026-06-02 (SOW-0011 review-fix round) — measures the code committed
 #   alongside this baseline: BenchmarkTail_SyntheticAppend rewritten deterministic
 #   (fixed append content + StopTimer-fenced producer I/O; previously ~±200% noise,

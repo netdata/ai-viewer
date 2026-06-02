@@ -69,6 +69,17 @@ mkbench_named "$TMP/base_pkgA" pkgA Foo 100 101 99 100 102 98
 mkbench_named "$TMP/cur_pkgB"  pkgB Foo 100 101 99 100 102 98
 assert 2 "$TMP/base_pkgA" "$TMP/cur_pkgB" "disjoint config groups -> vacuous guard"
 
+# Reverse direction: a NEW current benchmark absent from the baseline -> WARN but
+# exit 0 (it cannot regress against a nonexistent baseline; not a gate failure).
+mkbench_named "$TMP/base_foo"   selftest Foo 100 101 99 100 102 98
+mkbench_two   "$TMP/cur_foobar" selftest
+assert 0 "$TMP/base_foo" "$TMP/cur_foobar" "new current benchmark (Bar) warns, does not fail"
+if grep -q 'absent from the baseline' "$TMP/out"; then
+  echo -e "  ${GREEN}PASS${NC} (reverse-direction warn emitted): Bar flagged un-gated"; pass=$((pass+1))
+else
+  echo -e "  ${RED}FAIL${NC} (reverse-direction warn missing)"; sed 's/^/      /' "$TMP/out"; fail=$((fail+1))
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
   echo -e "${GREEN}[ok]${NC} check-bench self-test: ${pass}/${pass} assertions pass."

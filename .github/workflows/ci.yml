@@ -239,13 +239,15 @@ jobs:
           # Run every adapter FuzzXxx target's seed corpus as a deterministic
           # subtest (no -fuzz flag → f.Add seeds + any committed reproducers).
           go test -run='^Fuzz' ./internal/adapters/...
-          # Pin the target SET: `-run` on a package with no matching fuzz test
-          # still passes, so a deleted/renamed target would slip past the line
-          # above. Assert the 10 targets exist (must match fuzz-nightly.yml's
-          # matrix; changing the set is a deliberate two-file edit).
-          found=$(go test -list='^Fuzz' ./internal/adapters/... | grep -c '^Fuzz')
-          if [ "$found" -ne 10 ]; then
-            echo "::error::expected 10 adapter fuzz targets, found ${found} — update ci.yml and fuzz-nightly.yml together"
+          # Pin the EXACT target set (sorted, with duplicates) — not just the
+          # count. A rename keeps the count at 10 but changes a name, leaving
+          # fuzz-nightly.yml's matrix pointing at a target that no longer exists;
+          # an exact-set check catches that. This list MUST match the matrix in
+          # fuzz-nightly.yml (changing the set is a deliberate two-file edit).
+          got=$(go test -list='^Fuzz' ./internal/adapters/... | grep '^Fuzz' | sort | tr '\n' ',')
+          want='FuzzDecodeMessageData,FuzzDecodePartData,FuzzParseCursor,FuzzParseCursor,FuzzParseCursor,FuzzParseCursor,FuzzParseLine,FuzzParseLine,FuzzParseLine,FuzzParseSnapshot,'
+          if [ "$got" != "$want" ]; then
+            echo "::error::adapter fuzz target set changed (got [${got}] want [${want}]) — update ci.yml AND fuzz-nightly.yml's matrix together"
             exit 1
           fi
 

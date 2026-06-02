@@ -3,9 +3,14 @@ package canonical_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -13,6 +18,7 @@ import (
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 	"github.com/netdata/ai-viewer/internal/ingest"
+	"github.com/netdata/ai-viewer/internal/presenter"
 	"github.com/netdata/ai-viewer/internal/store"
 )
 
@@ -263,9 +269,18 @@ FROM sessions WHERE source_id = ? AND native_id = ?`, sourceID, want.NativeID).
 // The test generates one turn's worth of ops (each with a distinct,
 // strictly-increasing canonical Seq), SHUFFLES the emitted event slice so
 // the ingester sees them out of order, ingests them through the real
-// pipeline, then reads the ops back with the SAME query string production
-// uses and asserts the returned seq column is strictly increasing. It was
-// previously named TestPropertyMonotoneOrdering and re-implemented
+// pipeline, then reads the ops back THROUGH THE PRODUCTION PRESENTER:
+// it constructs presenter.New against the SAME store the ingester wrote and
+// drives GET /api/sessions/{id} (handleSessionDetail → loadTurnsWithOps →
+// loadOps) via httptest, exactly as the presenter's own tests do. The
+// returned ops carry no `seq` in the JSON (opDetail omits it), so each op's
+// canonical Seq is encoded into its Name ("op-NNNN"); the assertion decodes
+// the Name of every returned op, in returned order, and requires it to equal
+// the ascending ground-truth seqs. A regression in loadOps's ORDER BY would
+// reorder the JSON and fail this test — which a copy of the query in the test
+// could not catch.
+//
+// It was previously named TestPropertyMonotoneOrdering and re-implemented
 // sort.SliceStable over data engineered so SourceSeq co-increased with Ts —
 // that asserted the test's own sort, not production. canonical-events.md
 // §Ordering Guarantees documents SourceSeq as a per-file observability
@@ -283,7 +298,10 @@ func TestPropertyOpsReturnedInSeqOrder(t *testing.T) {
 
 		// Build a single turn whose ops have strictly-increasing Seq and
 		// non-decreasing timestamps. Each op is a start+finalize pair. seqs
-		// is the ASCENDING ground-truth order we expect to read back.
+		// is the ASCENDING ground-truth order we expect to read back. Each op's
+		// canonical Seq is encoded into its Name so the production response —
+		// which surfaces op `name` but not op `seq` — lets us recover the seq
+		// the presenter returned and assert the returned order.
 		var srcSeq uint64
 		var ts int64
 		next := func() (uint64, int64) {
@@ -315,7 +333,7 @@ func TestPropertyOpsReturnedInSeqOrder(t *testing.T) {
 				Seq:             opSeq,
 				ParentOpSeq:     -1,
 				Kind:            genOpKind(rt),
-				Name:            rapid.StringN(0, 16, 16).Draw(rt, "OpName"),
+				Name:            seqName(opSeq),
 			})
 			of, ofts := next()
 			emitted = append(emitted, canonical.OpFinalizedEvent{
@@ -343,34 +361,92 @@ func TestPropertyOpsReturnedInSeqOrder(t *testing.T) {
 		const sourceID = "aiagent_v3:/property/ordering"
 		ingestEvents(rt, db, sourceID, "aiagent_v3", "/property/ordering", shuffled)
 
-		// Read ops back with the EXACT order production uses
-		// (session_detail_ops.go loadOps). The canonical session id is an
-		// ingest-package internal, so scope by (source_id, native_id) through
-		// a join on sessions instead — same ORDER BY production applies.
-		rows, err := db.QueryContext(ctx, `
-SELECT o.seq FROM ops o
-JOIN sessions s ON s.id = o.session_id
-WHERE s.source_id = ? AND s.native_id = ?
-ORDER BY o.turn_id ASC, o.seq ASC, o.id ASC`, sourceID, nativeID)
-		if err != nil {
-			rt.Fatalf("query ops: %v", err)
+		// Read the ops back through the PRODUCTION read path (loadOps), not a
+		// copy of its query. GET /api/sessions/{id} keys on the canonical
+		// sessions.id, which is an ingest-package internal; translate the
+		// known native id into it with a single id lookup (a translation, not
+		// the ordering under test) and drive the presenter handler.
+		var canonicalID string
+		if err := db.QueryRowContext(ctx,
+			`SELECT id FROM sessions WHERE source_id = ? AND native_id = ?`,
+			sourceID, nativeID).Scan(&canonicalID); err != nil {
+			rt.Fatalf("resolve canonical session id: %v", err)
 		}
-		defer func() { _ = rows.Close() }()
-		got := make([]int, 0, nOps)
-		for rows.Next() {
-			var seq int
-			if scanErr := rows.Scan(&seq); scanErr != nil {
-				rt.Fatalf("scan op seq: %v", scanErr)
-			}
-			got = append(got, seq)
-		}
-		if iterErr := rows.Err(); iterErr != nil {
-			rt.Fatalf("iterate ops: %v", iterErr)
-		}
+		got := opSeqsFromPresenter(rt, db, canonicalID)
 		if diff := cmp.Diff(seqs, got); diff != "" {
 			rt.Fatalf("ops not returned in ascending seq order (-want +got):\n%s", diff)
 		}
 	})
+}
+
+// seqName encodes an op's canonical Seq into a zero-padded Name the writer
+// persists verbatim (writer.go applyOpStarted binds ev.Name) and the detail
+// response surfaces as op `name`. Zero-padding keeps the value a stable,
+// reversible token; opSeqsFromPresenter parses it back.
+func seqName(opSeq int) string { return fmt.Sprintf("op-%04d", opSeq) }
+
+// opSeqsFromPresenter drives the PRODUCTION GET /api/sessions/{id} handler
+// against db and returns the canonical Seq of every op, in the order the
+// presenter emitted them across the response's turns→ops tree. It mirrors the
+// presenter's own httptest harness (bench_test.go newBenchPresenter /
+// session_detail_test.go getSessionDetail): build presenter.New against the
+// same store the ingester wrote, ServeHTTP a GET, and decode the JSON. A
+// non-200 status or a decode failure fails the test — a broken read path must
+// surface, never be swallowed. Op `seq` is not part of the JSON, so each op's
+// Name (set to seqName) is parsed back into its seq.
+func opSeqsFromPresenter(rt *rapid.T, db *sql.DB, sessionID string) []int {
+	rt.Helper()
+	now := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	frontend := fstest.MapFS{
+		"frontend_dist/index.html": &fstest.MapFile{
+			Data:    []byte("<!doctype html><title>property</title>"),
+			ModTime: now,
+		},
+	}
+	p, err := presenter.New(presenter.Options{
+		DB:            db,
+		Logger:        silentLogger(),
+		Version:       "property-test",
+		DBPath:        "/tmp/property.db",
+		StartedAt:     now.Add(-30 * time.Second),
+		SchemaVersion: presenter.SchemaVersion,
+		Now:           func() time.Time { return now },
+		FrontendFS:    frontend,
+	})
+	if err != nil {
+		rt.Fatalf("presenter.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+sessionID, nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		rt.Fatalf("GET /api/sessions/%s: status = %d, want 200 (body=%q)",
+			sessionID, rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Turns []struct {
+			Ops []struct {
+				Name string `json:"name"`
+			} `json:"ops"`
+		} `json:"turns"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		rt.Fatalf("decode session detail: %v (raw=%q)", err, rr.Body.Bytes())
+	}
+
+	got := make([]int, 0, len(body.Turns))
+	for _, tn := range body.Turns {
+		for _, op := range tn.Ops {
+			var seq int
+			if _, err := fmt.Sscanf(op.Name, "op-%04d", &seq); err != nil {
+				rt.Fatalf("op name %q is not a seqName token: %v", op.Name, err)
+			}
+			got = append(got, seq)
+		}
+	}
+	return got
 }
 
 // TestPropertyIdempotentIngestion asserts the idempotent-ingestion
