@@ -283,6 +283,19 @@ All 3 returned (minimax completed — the no-run-tests instruction fixed its rou
 - Gates green: golangci-lint 0, `go test -race` (5 property tests pass), `check-bench.sh` PASS, self-tests 8/8 + 8/8, actionlint clean, scans clean.
 - **Next**: re-review round 4 to confirm convergence → on clean, PR → self-merge → close.
 
+### 2026-06-03 — External review round 4 (codex + glm + minimax — full triad) + fixes
+
+**codex** (decisive): no P1; 3 P2 (all doc/gate, no code). **glm**: "merge as-is" (2 cosmetic P3). **minimax**: mergeable; verified everything ground-truth + found one more drift instance codex missed (`bench/baseline.txt:9` "5 benchmark packages"). All findings are doc-drift surfaces my round-3 sweep missed + one gate-robustness gap — the **code is converged** (all 3 verify the property tests, benchmarks, gate, and ordering-blind-spot fix as genuine/non-vacuous; production byte-identical). Fixes (this commit):
+
+- **Fuzz pin → package-qualified** (codex P2): `ci.yml` now compares the exact sorted `(package:target)` set, not bare function names — a same-named target (`FuzzParseCursor`/`FuzzParseLine` repeat across packages) moved between packages no longer evades the per-push check. Verified `got == want` locally.
+- **bench/README.md reconciled** (codex P2): intro (Scan-only / "runs in CI" → 5 benchmarks + local `check-bench.sh` + CI smoke), the `baseline.txt` section (old `BackfillV2_RealCorpus`-in-baseline format → the current benchstat 5-benchmark format; the real-data digest lives in a separate dated `bench/v2-backfill-*.txt`), and the PR-time line → local.
+- **workflow.md:55 + project-workflow:63** (codex P2): "every canonical decoder has a fuzz target" → adapters-only (canonical owns no parser; its invariants are the property tests).
+- **bench/baseline.txt:9** (minimax): "5 benchmark packages" → "4 packages, 5 benchmarks".
+- **Self-test `mkbench` unified** (glm/minimax P3): emits the full `goos/goarch/pkg/cpu` header like the other helpers (cosmetic consistency).
+- **Exhaustive re-grep** of the full drift class (`baseline.json` / `BackfillV2`-in-baseline / `store/bench_test` / `5 benchmark packages` / canonical-decoder-fuzz / bench-in-CI / PR-time) → **zero active instances** across all active docs (done SOWs + the banner-covered SOW-0011 draft excluded). This round closes the doc-drift long tail (rounds 3-4 chased it across AGENTS.md, the specs, the skills, testing-strategy, bench/README, baseline.txt, workflow.md, project-workflow).
+- Gates: no Go touched (golangci-lint/race unchanged from `6ce5b41`); fuzz-pin `got==want`, actionlint clean, check-bench self-test 8/8, scans clean.
+- **Next**: re-review round 5 to confirm convergence → on clean, PR → self-merge → close.
+
 ## Validation
 
 Pending.

@@ -239,15 +239,17 @@ jobs:
           # Run every adapter FuzzXxx target's seed corpus as a deterministic
           # subtest (no -fuzz flag → f.Add seeds + any committed reproducers).
           go test -run='^Fuzz' ./internal/adapters/...
-          # Pin the EXACT target set (sorted, with duplicates) — not just the
-          # count. A rename keeps the count at 10 but changes a name, leaving
-          # fuzz-nightly.yml's matrix pointing at a target that no longer exists;
-          # an exact-set check catches that. This list MUST match the matrix in
-          # fuzz-nightly.yml (changing the set is a deliberate two-file edit).
-          got=$(go test -list='^Fuzz' ./internal/adapters/... | grep '^Fuzz' | sort | tr '\n' ',')
-          want='FuzzDecodeMessageData,FuzzDecodePartData,FuzzParseCursor,FuzzParseCursor,FuzzParseCursor,FuzzParseCursor,FuzzParseLine,FuzzParseLine,FuzzParseLine,FuzzParseSnapshot,'
+          # Pin the EXACT (package:target) set — not just bare function names.
+          # FuzzParseCursor/FuzzParseLine repeat across packages, so a same-named
+          # target MOVED between packages would keep a bare-name multiset unchanged
+          # while breaking fuzz-nightly.yml's per-(package,target) matrix. This list
+          # MUST match that matrix (changing the set is a deliberate two-file edit).
+          got=$(for p in aiagent_v2 aiagent_v3 claude_code codex opencode; do
+                  go test -list='^Fuzz' ./internal/adapters/$p/ | grep '^Fuzz' | sed "s|^|$p:|"
+                done | sort | tr '\n' ',')
+          want='aiagent_v2:FuzzParseCursor,aiagent_v2:FuzzParseSnapshot,aiagent_v3:FuzzParseCursor,aiagent_v3:FuzzParseLine,claude_code:FuzzParseCursor,claude_code:FuzzParseLine,codex:FuzzParseCursor,codex:FuzzParseLine,opencode:FuzzDecodeMessageData,opencode:FuzzDecodePartData,'
           if [ "$got" != "$want" ]; then
-            echo "::error::adapter fuzz target set changed (got [${got}] want [${want}]) — update ci.yml AND fuzz-nightly.yml's matrix together"
+            echo "::error::adapter fuzz (package:target) set changed (got [${got}] want [${want}]) — update ci.yml AND fuzz-nightly.yml's matrix together"
             exit 1
           fi
 

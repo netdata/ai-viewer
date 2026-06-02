@@ -17,7 +17,8 @@ pass=0; fail=0
 # benchstat can compute a 0.95 CI).
 mkbench() {
   local f="$1"; shift
-  { echo "pkg: selftest"; for v in "$@"; do echo "BenchmarkFoo-16   10000   ${v} ns/op   100 B/op   2 allocs/op"; done; } > "$f"
+  { echo "goos: linux"; echo "goarch: amd64"; echo "pkg: selftest"; echo "cpu: selftest"
+    for v in "$@"; do echo "BenchmarkFoo-16   10000   ${v} ns/op   100 B/op   2 allocs/op"; done; } > "$f"
 }
 
 # mkbench_named writes ONE benchmark block (explicit pkg + name + samples) with a
