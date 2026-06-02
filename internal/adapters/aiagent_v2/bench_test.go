@@ -20,8 +20,9 @@ import (
 // against a deterministic synthetic corpus that mirrors the
 // approximate size distribution of the operator's real
 // ~/.ai-agent/sessions directory (median ~10 KB compressed, p99
-// ~1 MB, plus a handful of fixtures over the 50 MiB streamer
-// threshold). The corpus is regenerated under b.TempDir() on each
+// ~1 MB), all staying below the 50 MiB streamer threshold so the
+// bench measures the dominant small/medium-file fast path. The
+// corpus is regenerated under b.TempDir() on each
 // bench invocation so the run is hermetic and never touches operator
 // data.
 //
@@ -35,8 +36,9 @@ import (
 //     §Memory talks about ("≤ 40 MB across 8 workers" for p99,
 //     "MUST stream" for the 151 MB compressed outlier). We require
 //     it to stay under 200 MiB on the synthetic corpus, which
-//     deliberately includes three files above the 50 MiB streamer
-//     threshold. The bound is intentionally generous against the
+//     deliberately stays BELOW the 50 MiB streamer threshold
+//     (streamer behavior is covered by streamer_test.go). The bound
+//     is intentionally generous against the
 //     spec's worker-pool numbers because the bench is sequential
 //     (one in-flight file at a time).
 //
