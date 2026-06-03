@@ -105,14 +105,17 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Frontend — Lint
 
-- `npm run lint -- --max-warnings=0`.
+- `npm run lint -- --max-warnings=0`. Run locally via the build-free
+  `scripts/lint.sh` frontend section (alongside Go lint), or standalone from
+  `frontend/`.
 - ESLint flat config (`frontend/eslint.config.ts` — `.ts`, not the `.js` some older notes name) with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import` (resolver: `eslint-import-resolver-typescript`).
 - Built with ESLint core's `defineConfig()` + `globalIgnores()` (`eslint/config`), not the `@deprecated` `tseslint.config()` helper. jsx-a11y + import use native flat-config (`flatConfigs.*`) — no `FlatCompat`. import/recommended's three `'warn'` rules are promoted to `'error'`. `jsx-a11y/no-noninteractive-tabindex` allows `role="region"` (scrollable-region pattern). Untyped-plugin friction handled without `any`: an ambient `src/types/eslint-plugin-jsx-a11y.d.ts` shim + a narrow `Plugins[string]` cast for react-hooks + a config-file-scoped relaxation block (details in `project-frontend` skill §Lint).
 - Threshold: zero warnings.
 
 ### Frontend — Type Check
 
-- `npm run typecheck` (invokes `tsc --noEmit`).
+- `npm run typecheck` (invokes `tsc --noEmit`). Also run locally by the
+  `scripts/lint.sh` frontend section (build-free).
 - `tsconfig.json` enforces `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noFallthroughCasesInSwitch`, `noUnusedLocals`, `noUnusedParameters`.
 - Threshold: zero errors.
 
@@ -239,11 +242,23 @@ CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
 `scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
 
-`scripts/lint.sh` (SOW-0009) **is present**: it is the local mirror of the
-CI Go lint + security gates — `golangci-lint run` (the umbrella, driven by
-`.golangci.yml` at the version pinned in `.golangci-lint-version`) then
-standalone `gosec` and `govulncheck`. CI enforces the same set via the
-version-pinned `golangci/golangci-lint-action` plus its standalone
+`scripts/lint.sh` (SOW-0009; frontend section added SOW-0012) **is present**: it
+is the local, **build-free** static-analysis entrypoint mirroring CI's
+static-analysis gates. Its Go section mirrors the CI `lint` job —
+`golangci-lint run` (the umbrella, driven by `.golangci.yml` at the version
+pinned in `.golangci-lint-version`) then standalone `gosec` and `govulncheck`.
+Its frontend section (skipped cleanly when `frontend/` is absent) mirrors the
+build-free static gates of the CI `frontend` job, fail-fast in order: ensure
+deps are present (reusing `scripts/build.sh`'s `npm ci`/`npm install` fallback,
+but only when `node_modules` is missing — this is a fast analysis pass, not a
+build), `npm run lint -- --max-warnings 0`, `npm run typecheck`, then the two
+**hermetic gate-logic self-tests** `npm run check:bundle-size:selftest` and
+`npm run check:coverage-thresholds:selftest`. `scripts/lint.sh` does **not** run
+the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`) or the
+REAL coverage run (`npm run test -- --run --coverage`): those need a build / full
+test run and live in the CI `frontend` job (and `scripts/build.sh` /
+`scripts/test.sh`), not in this build-free entrypoint. CI enforces the Go set via
+the version-pinned `golangci/golangci-lint-action` plus its standalone
 gosec/govulncheck steps (CI keeps the cached action rather than invoking
 `scripts/lint.sh`, to preserve golangci's analysis cache). `scripts/test.sh` (Go
 tests + coverage profile) and `scripts/check-coverage.sh` (the statement

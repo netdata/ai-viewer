@@ -437,6 +437,37 @@ for the keyboard-fallback gap, not just the lint-flagged lines.
   exit 0; Chunk-A bundle self-test 8/8; `actionlint` clean; secret +
   AI-attribution scans clean (794 tracked files).
 
+### 2026-06-03 — Chunk E: scripts/lint.sh frontend static-analysis section (delegated)
+
+- Extended `scripts/lint.sh` with a build-free, fail-fast frontend section after
+  the Go section. CTO decision (made up-front, not punted): lint.sh is the
+  build-free static-analysis entrypoint, so the frontend section runs analysis +
+  gate-LOGIC self-tests only, never a build. Order: presence-skip (no
+  `frontend/package.json` → skip clean) → deps only if `node_modules` missing
+  (reuses build.sh's `npm ci`/`npm install` fallback) → `npm run lint --
+  --max-warnings 0` → `npm run typecheck` → bundle-size self-test → per-dir
+  coverage self-test. Runs in a `( … )` subshell so the parent's `set -e` aborts
+  on any failure (fail-fast).
+- The REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`) and
+  the REAL coverage run already run in CI's `frontend` job (`ci.yml` ~404 / ~509)
+  + after the build; NOT duplicated into lint.sh. `build.sh` left untouched
+  (verified the real gate is already deterministically wired in CI).
+- Mirrors the existing `run()`/`set -euo pipefail`/color convention; the Go
+  section + `run()` helper are unchanged (the only Go-region edit is the final
+  `[ok]` echo reworded). The pre-existing SC2059 info-note on the `run()` printf
+  is not introduced here.
+- Spec sync: `quality-gates.md` (lint.sh paragraph → Go + frontend, build-free vs
+  real-gate distinction; Frontend Lint/Type-Check local-runner notes),
+  `project-quality-gates` skill (aggregate-scripts block), `project-frontend`
+  skill (local aggregate-runner pointer), `AGENTS.md` "Build, Test, Run" one-liner.
+- Orchestrator verification (run myself): reviewed the full lint.sh diff
+  (build-free, fail-fast, Go section/run() untouched) + AGENTS.md (accurate, no
+  overclaim that lint.sh runs the real gates); ran `bash scripts/lint.sh`
+  end-to-end → **EXIT=0** (golangci-lint + gosec + govulncheck clean; frontend
+  eslint + tsc + bundle self-test 8/8 + coverage self-test 2/2 clean). Fail-fast
+  confirmed by the inject-a-failure-then-revert proof (downstream steps did not
+  run; the script aborted non-zero).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

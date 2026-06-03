@@ -348,7 +348,7 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 ```bash
 ./scripts/build.sh          # build frontend + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
-./scripts/lint.sh           # all lints + static analysis, zero warnings
+./scripts/lint.sh           # build-free static analysis: Go (golangci+gosec+govulncheck) AND frontend (eslint+tsc+bundle/coverage gate self-tests); zero warnings
 ./scripts/test.sh           # all tests + coverage + race
 ./scripts/check-coverage.sh # statement coverage gate (internal/* ≥ 80%)
 ./scripts/gates.sh          # every quality gate listed above (planned, SOW-0013)
