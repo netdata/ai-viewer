@@ -52,7 +52,7 @@ Per behavior:
 
 Mandatory test kinds the project enforces:
 
-- Every adapter and canonical decoder has at least one fuzz target.
+- Every adapter parser has at least one fuzz target. (`internal/canonical` owns no decoder/parser, so it has none — all untrusted-bytes parsing is in the adapters.)
 - Performance-critical paths have benchmarks with a stored baseline.
 - Concurrency-touching code has race-detector coverage at `-count=10` locally.
 - Every UI behavior has at least one Playwright assertion plus an axe a11y check.

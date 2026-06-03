@@ -7,7 +7,7 @@ description: Catalog of every automated quality gate ai-viewer enforces — comm
 
 ## Operating Rule
 
-Every gate listed here runs in CI on every push. The assistant runs them all locally before reporting work done. If a gate fails: fix the root cause. **Never weaken a gate to make it pass.** Lowering a threshold or marking a test skipped to land a PR is a contract breach.
+Every gate listed here runs in CI on every push — except the benchmark regression gate (`scripts/check-bench.sh`), which is a local/workstation gate (its baseline is not comparable to CI-runner hardware; CI runs the bench compile-smoke + the gate's hardware-independent self-test). The assistant runs them all locally before reporting work done. If a gate fails: fix the root cause. **Never weaken a gate to make it pass.** Lowering a threshold or marking a test skipped to land a PR is a contract breach.
 
 **nolint policy** (two cases, both require a reason — never a bare `//nolint`):
 - **Deferred-fix suppression** (the finding is real but fixing it now is out of scope): forbidden unless the active SOW justifies it AND the directive links the tracking issue/SOW — `//nolint:rule // <reason>; see SOW-XXXX`.
@@ -90,24 +90,24 @@ Enforcement: `scripts/check-coverage.sh coverage.out` fails if any gated (`inter
 ### Go — Fuzzing
 
 ```bash
-go test -fuzz=Fuzz -fuzztime=30s ./internal/adapters/...
-go test -fuzz=Fuzz -fuzztime=30s ./internal/canonical/...
+go test -run='^Fuzz' ./internal/adapters/...                                    # per-push: seed corpus, deterministic
+go test -run='^$' -fuzz='^FuzzParseSnapshot$' -fuzztime=5m ./internal/adapters/aiagent_v2/   # nightly: explore (one target per pkg)
 ```
 
-Every adapter and canonical decoder MUST expose at least one `FuzzXxx` target. CI runs each fuzz target for 30 seconds per push and for 5 minutes on nightly schedule. Crashes from nightly runs are auto-filed as GitHub issues (config in CI workflow).
+Every adapter parser exposes at least one `FuzzXxx` target (10 across the 5 adapter packages). `internal/canonical` has **no** fuzz target — it owns no parsers/decoders. CI per-push runs the seed corpus deterministically (`-run='^Fuzz'`, PR-blocking); `fuzz-nightly.yml` runs `-fuzz -fuzztime=5m` per target (non-blocking, uploads any crash reproducer). Commit a found reproducer under `testdata/fuzz/<Target>/` to make it a deterministic per-push regression. Auto-filing a GitHub issue on crash is a deferred follow-up.
 
-Threshold: zero crashes per run. Crashes block merge.
+Threshold: zero crashes per run. A seed-corpus crash blocks merge.
 
 ### Go — Benchmarks
 
 ```bash
-go test -run=^$ -bench=. -benchmem -count=5 ./... > bench-current.txt
-benchstat bench/baseline.txt bench-current.txt
+scripts/check-bench.sh             # count=6, benchstat vs bench/baseline.txt, > 20% sec/op gate
+scripts/test/check-bench-test.sh   # hardware-independent self-test of the gate's benchstat parser
 ```
 
-Marked benchmarks (`func BenchmarkXxx`) exist for: adapter `Scan`, adapter `Tail`, canonical event encoding, SQLite batch insert, REST query path, SSE fanout.
+Marked benchmarks (`func BenchmarkXxx`) exist for the 5 performance-critical paths: adapter `Scan`, adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
 
-Threshold: ≤ 20% regression in any metric vs. `bench/baseline.txt`. The baseline updates only when a SOW explicitly accepts a regression with justification.
+Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries the commit SHA + `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update).
 
 ### Go — Race + Stress
 

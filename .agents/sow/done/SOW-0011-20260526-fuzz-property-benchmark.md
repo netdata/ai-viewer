@@ -1,0 +1,366 @@
+# SOW-0011 - Fuzz, Property-Based, and Benchmark Infrastructure
+
+> **⚠️ This document mixes the original 2026-05-26 draft with the delivered scope.** The original Purpose / Plan / Acceptance-Criteria / Validation prose (30s per-push `-fuzz`, canonical fuzz + canonical encode/decode benchmark, six benchmarks, `count=5`, a CI bench regression gate, auto-issue + sticky-comment) is **superseded** by the **"Re-scope decisions"**, the **superseded-AC note**, and the **"Execution Log"** below. Those record the authoritative DELIVERED contract: canonical has no fuzz/encode-decode (no decoders); per-push = deterministic fuzz seed corpus + nightly `-fuzz`; FIVE benchmarks; `count=6`; `check-bench.sh` is a LOCAL/workstation gate (not CI); auto-issue + sticky-comment deferred. Where the draft body and those sections differ, those sections win.
+
+## Status
+
+Status: completed
+
+Sub-state: drafted 2026-05-26 alongside SOW-0009 and SOW-0010. **Activated 2026-06-02** under the operator's standing blanket mandate, re-scoped to the measured live delta (see "Re-scope decisions" + "Enumeration" below). Prerequisite SOW-0001 (Go module + `internal/canonical/` + the adapters) is long merged; the packages exist. Branch: `sow-0011-fuzz-property-bench`.
+
+### Re-scope decisions (CTO, 2026-06-02) — proposed activation, governs over the original draft where they differ
+
+Drafted 2026-05-26 assuming **zero** fuzz/property/benchmark coverage; the measured live delta (see "Pre-measurement — 2026-06-02" below) supersedes that premise. Decisions:
+
+1. **AC#1 (adapter fuzz) — ALREADY SATISFIED**: 10 `FuzzXxx` targets exist across all 5 adapters. Scope narrows to verifying them + adding committed seed corpora (`testdata/fuzz/`) where absent.
+2. **AC#2 (canonical fuzz) — IN SCOPE**: enumerate the `internal/canonical` decoders at impl start; add ≥1 `FuzzXxx` per decoder. **[SUPERSEDED by the Enumeration below: `internal/canonical` has NO decoders — AC#2 satisfied by ZERO; all fuzz targets live in the adapters.]**
+3. **AC#4 (property tests, `rapid`, 5 invariants) — IN SCOPE**: add `pgregory.net/rapid` + `internal/canonical/property_test.go` with the five named invariants.
+4. **AC#5/#6 (benchmarks + baseline) — IN SCOPE (partial today)**: 1 of 6 benchmarks exists (`aiagent_v2` Scan). Add the 5 missing (adapter `Tail`, canonical encode/decode, SQLite batch insert, REST query, SSE fanout); add the implementing-commit-SHA header to `bench/baseline.txt`. **[SUPERSEDED by the Enumeration below: FIVE benchmarks total, not six — there is no canonical encode/decode benchmark (canonical is construct-only, never serialized); `count=6`.]**
+5. **AC#7 (`scripts/check-bench.sh` + benchstat regression gate) — IN SCOPE**: build it with self-tests (a synthetic-regression must fail it); ≤ 20% threshold.
+6. **AC#3 (CI fuzz wiring) — IN SCOPE for the per-push 30s + nightly 5min runs that FAIL the job on a crash. Auto-file-GitHub-issue-on-crash — DEFERRED** **[SUPERSEDED by the Execution Log: per-push runs the DETERMINISTIC seed corpus (`go test -run='^Fuzz'`, NO `-fuzz`); the non-deterministic `-fuzz` exploration is nightly only.]** to a follow-up: a failed nightly fuzz job is already visible (red CI + GitHub workflow-failure notifications); auto-issue-with-crashing-input adds non-trivial CI machinery (issue create + artifact attach + dedup) for marginal value over job-failure visibility. Mirrors SOW-0010's deferral of reporting niceties; the crash-fails-the-gate behaviour is the value.
+7. **AC#10 (bench sticky PR comment) — DEFERRED** (reporting nicety; artifact upload suffices; follow-up or fold into SOW-0013 CI wiring), mirroring SOW-0010.
+8. **Doc-drift reconcile — IN SCOPE**: `quality-gates.md`, `project-testing`, `project-quality-gates` currently over-claim canonical fuzz / property tests / fuzz-CI / the bench regression gate as present; bring them to reality in lockstep as each lands (the severe drift cluster from the pre-measurement).
+
+**Enumeration (2026-06-02, read-only sweep — resolves the open items + two scope-reducing facts):**
+
+- **AC#2 (canonical fuzz) → satisfied by ZERO.** `internal/canonical` has **no decoder/parser functions** — it is pure event-type definitions + the `Event` interface (`events.go`); all untrusted-bytes parsing lives in the adapters (covered by AC#1's 10 existing fuzz targets). Nothing to add. **Spec delta**: `quality-gates.md` "Go — Fuzzing" + the skills say "every canonical decoder exposes a FuzzXxx" → correct to "adapters expose the fuzz targets; canonical has no decoders to fuzz."
+- **AC#5 → 5 benchmarks, not 6 (4 new).** Canonical events are **constructed directly by adapters, never serialized/deserialized**, so the named "canonical event encode/decode" benchmark is **moot**. Real set: adapter `Scan` (exists — `internal/adapters/aiagent_v2/bench_test.go`) + 4 new: adapter `Tail` (`aiagent_v2/adapter.go`), SQLite batch insert (`internal/ingest` `worker.flush`, `worker.go:221`), REST query (`internal/presenter` `handleSessionsList`, `sessions_list.go:44`), SSE fanout (`internal/notify` `Hub.Deliver`, `hub.go:233`). Each `-count=5`. **[SUPERSEDED: delivered as `-count=6` — benchstat's 0.95-CI minimum.]** **Spec delta**: correct the 6→5 path list in `quality-gates.md` "Go — Benchmarks".
+- **AC#4 (property tests)** → `internal/canonical/property_test.go` + `pgregory.net/rapid` (go.mod is `go 1.26`; add the pinned dep). Five invariants → targets: (a) round-trip equality — **adapter-mediated** (canonical has no decode), (b) monotone `SourceSeq` ordering, (c) idempotent re-ingest (`internal/ingest`), (d) schema completeness over the 11 event types, (e) timestamp µs precision across the ISO-8601→int64 boundary.
+- **AC#6/#7** → add the implementing-commit-SHA header to `bench/baseline.txt` (absent today); `scripts/check-bench.sh` mirrors `scripts/bench-v2-backfill.sh` conventions + `benchstat` (fail > 20%), with synthetic-regression self-tests.
+- **AC#3** → per-push `go test -fuzz=Fuzz -fuzztime=30s ./internal/adapters/...` step in `ci.yml`; a new `fuzz-nightly.yml` (`-fuzztime=5m`, cron staggered from the 06:00 race-stress / 07:00 govulncheck nightlies), mirroring `race-stress-nightly.yml`. **[SUPERSEDED: per-push runs the DETERMINISTIC seed corpus (`go test -run='^Fuzz'`, NO `-fuzz`); the non-deterministic `-fuzz -fuzztime=5m` exploration is nightly only — see Execution Log.]** Auto-issue-on-crash DEFERRED (decision 6 above). Seed corpora under `testdata/fuzz/` where absent.
+
+**Net**: AC#1 ✅ done; AC#2 ✅ zero-needed (architectural); AC#5 reduced 6→5 (4 new); AC#3/#4/#6/#7 in scope; AC#10 + auto-issue deferred; doc-drift reconciled in lockstep. These two reductions are measured-reality re-scopes (CTO), surfaced to the operator for visibility — not requiring approval, mirroring SOW-0010's activation.
+
+## Requirements
+
+### Purpose
+
+Land the highest-signal quality gates in the catalog: fuzz testing on every adapter parser and canonical decoder, property-based tests on canonical mapping invariants, and a benchmark suite with regression-gating against a committed baseline. After this SOW, every adapter parse path is fuzzed for at least 30 seconds per push and 5 minutes nightly; canonical encoders and decoders satisfy five named invariants under property generation; performance-critical paths (adapter Scan, adapter Tail, canonical encode/decode, SQLite batch insert, REST query, SSE fanout) cannot regress by more than 20% on any metric without an explicit baseline-refresh SOW.
+
+### User Request
+
+`AGENTS.md` Quality Gates table commits to lines 111-112: "Go fuzz → zero crashes per CI run" and "Go bench → ≤ 20% regression vs baseline". `.agents/sow/specs/quality-gates.md` lines 56-77 spec the fuzz cadences, the property-based test requirement, and the benchstat-based regression check. `.agents/skills/project-testing/SKILL.md` lines 49-83 list every mandatory test kind including the fuzz and benchmark requirements. None of these are enforced today; this SOW operationalizes them.
+
+### Assistant Understanding
+
+Facts:
+
+- `.agents/sow/specs/quality-gates.md` lines 56-73 spec fuzz cadence (30s push, 5min nightly), property-based tests for canonical mapping invariants, and benchmark thresholds (≤ 20% regression vs `bench/baseline.txt`).
+- `.agents/skills/project-testing/SKILL.md` lines 52-58 enumerate the test pyramid layers including Go fuzz, property-based, and performance-benchmark layers.
+- Go's built-in fuzzing (`go test -fuzz=Fuzz...`) is stable since Go 1.18 and is the canonical choice.
+- `pgregory.net/rapid` is the dominant Go property-based testing library, maintained, and is what `.agents/skills/project-testing/SKILL.md` line 54 implies ("property-based").
+- `benchstat` (from `golang.org/x/perf/cmd/benchstat`) is the canonical regression-comparison tool for Go benchmarks.
+- The repo currently has zero fuzz tests, zero property tests, zero benchmarks, zero baseline file.
+
+Inferences:
+
+- Each adapter (aiagent_v3, aiagent_v2, claude_code, codex, opencode) needs at least one `FuzzXxx` per `quality-gates.md` line 56-58. Phase 1 (SOW-0001) ships aiagent_v3 and aiagent_v2 first; this SOW lands their fuzz targets immediately and stubs the future ones with TODOs that themselves block when claude_code/codex/opencode adapters ship in later milestones.
+- Initial fuzz corpus seeds come from the sanitized fixtures under `testdata/<adapter>/` — fuzz with empty corpus discovers shallow crashes only.
+- Properties for canonical mapping that the implementer must encode (five named per the SOW spec below): (1) **decode-then-encode round-trip equality** (canonical events round-trip without field loss); (2) **monotone ordering** under stable sort key (sequence numbers never decrease within a session); (3) **idempotent ingestion** (re-ingesting the same source file produces zero new rows); (4) **schema completeness** (every emitted event has all required canonical fields populated per `specs/canonical-events.md`); (5) **timestamp boundary** (microsecond precision preserved across the ISO-8601 → int64 boundary, no value drift > 0 µs).
+- Benchmark variance on shared-CPU GitHub runners is the well-known reason for `-count=5` plus `benchstat`'s p-value filtering; this SOW pins both.
+- Bench results posted as PR comments need the same sticky-comment pattern as SOW-0010 coverage; if SOW-0010 lands first, this SOW reuses the same comment library.
+
+Unknowns:
+
+- The exact list of canonical-decoder fuzz targets — depends on what `internal/canonical/` looks like after SOW-0001 Chunk 3. The implementer enumerates at start of this SOW and updates the SOW plan if it differs from "one fuzz target per decoder".
+- Whether benchmark variance on GitHub-hosted runners is small enough for a 20% threshold to be stable. Mitigation: measure during Chunk 5; if false-positive regressions appear, the implementer either raises `-count` to 10, switches to self-hosted runner for benchmarks (operator decision if needed), or files a follow-up SOW to refine the threshold per metric. No silent threshold lowering.
+
+### Acceptance Criteria
+
+> **⚠️ SUPERSEDED VALUES — read alongside "Re-scope decisions" + "Execution Log".** The numbered AC below is the original 2026-05-26 draft, written before the codebase was enumerated. The DELIVERED contract differs where measured reality forced it (each change is documented + verified in the Execution Log and the landed `quality-gates.md`):
+> - **AC#2 (canonical-decoder fuzz)** → satisfied by ZERO: `internal/canonical` owns no decoders/parsers, so it has no fuzz target; all 10 fuzz targets live in the adapters.
+> - **AC#3 (per-push `-fuzztime=30s`; auto-issue on crash)** → per-push runs the DETERMINISTIC seed corpus (`-run='^Fuzz'`), not non-deterministic `-fuzz` (which would flake unrelated PRs); `-fuzz` exploration is nightly (`fuzz-nightly.yml`). Auto-issue-on-crash is DEFERRED (Followup) — job failure + the crash-reproducer artifact suffice.
+> - **AC#5 (six benchmarks incl. "canonical event encode/decode"; `-count=5`)** → FIVE benchmarks (canonical is construct-only, never serialized → no encode/decode bench); `-count=6` (benchstat's 0.95-CI minimum).
+> - **AC#6 (`-count=5` baseline)** → `-count=6`, with `goos/goarch/pkg/cpu` config lines (benchstat groups by them).
+> - **AC#7 (gate "any metric > 20%")** → gates **sec/op only** and only a statistically-significant regression (geomean + custom metrics excluded). `scripts/check-bench.sh` fails closed if any baseline benchmark is not actually compared.
+> - **AC#9 (CI runs the bench regression gate per push)** → `check-bench.sh` is a LOCAL/workstation gate (workstation baseline ≠ GitHub-runner hardware); CI keeps the bench compile-smoke + the gate's hardware-independent self-test. A runner-baselined CI regression gate is a deferred Followup.
+> - **AC#10 (sticky PR comment)** → DEFERRED (Followup); artifact upload suffices.
+
+1. Every adapter package that exists at SOW execution time (aiagent_v3 and aiagent_v2 from SOW-0001 minimum) exposes at least one `FuzzXxx` function in `internal/adapters/<name>/fuzz_test.go`, with seed corpus drawn from sanitized fixtures. **Verification**: `grep -l "^func Fuzz" internal/adapters/*/fuzz_test.go` lists every adapter package; `go test -fuzz=Fuzz -fuzztime=30s ./internal/adapters/<each>` exits 0.
+2. `internal/canonical/fuzz_test.go` exposes at least one `FuzzXxx` per decoder function in `internal/canonical/`. **Verification**: as above for the canonical package.
+3. CI runs each fuzz target for `-fuzztime=30s` per push and `-fuzztime=5m` nightly. Nightly crashes auto-file a GitHub issue with the crashing input attached. **Verification**: workflow file shows both schedules; auto-issue logic exercised once via a deliberate seed crash that is then reverted (proof recorded in execution log).
+4. `internal/canonical/property_test.go` exists and uses `pgregory.net/rapid` to encode at least 5 named invariants: (a) decode-then-encode round-trip equality; (b) monotone ordering under sequence key; (c) idempotent ingestion of the same source file; (d) schema completeness per `specs/canonical-events.md`; (e) timestamp microsecond precision preservation. Each invariant is a separate `func TestPropertyXxx(t *testing.T) { rapid.Check(t, ...) }`. **Verification**: `go test -run=TestProperty ./internal/canonical -count=1` exits 0; `go doc` on each test names the invariant.
+5. Benchmark suite (`*_test.go` files with `BenchmarkXxx` functions) exists for the six paths spec'd in `quality-gates.md` "Go — Benchmarks": adapter `Scan`, adapter `Tail`, canonical event encode/decode, SQLite batch insert, REST query path, SSE fanout. Each benchmark runs `-count=5`. **Verification**: `go test -run=^$ -bench=. -benchmem -count=5 ./... > /tmp/bench.txt` exits 0 and includes all six named benchmarks.
+6. `bench/baseline.txt` is committed at first SOW completion. The contents are the output of `go test -run=^$ -bench=. -benchmem -count=5 ./...` on the implementing commit. **Verification**: file exists; head shows the implementing commit SHA in a comment line at the top.
+7. `scripts/check-bench.sh` runs the bench suite, invokes `benchstat bench/baseline.txt bench-current.txt`, and exits non-zero if any metric regresses > 20%. Output is actionable (names the regressed benchmark and the delta). **Verification**: synthetic regression injected into a benchmark causes the script to fail with the regressed name and percentage; reverting the regression makes the script pass.
+8. Baseline refresh requires an explicit SOW. `scripts/check-bench.sh` produces no auto-update mode. **Verification**: code-review the script for any auto-overwrite path; none present.
+9. CI integrates fuzz + bench steps into the workflow. Per-push budget: fuzz at 30s × N targets + bench at `-count=5` × M benchmarks must fit within the < 5-min total-gate budget from `quality-gates.md` "Performance Target". **Verification**: timed CI run logged; if budget exceeded, split bench to a separate job that runs in parallel with the static analysis job.
+10. Bench results posted as sticky PR comment showing per-benchmark delta vs baseline (if SOW-0010's sticky-comment infrastructure has landed; otherwise an artifact upload suffices and a follow-up SOW for the comment is filed). **Verification**: PR comment visible on a sample PR.
+
+## Analysis
+
+Sources checked:
+
+- `.agents/sow/specs/quality-gates.md` (authoritative fuzz/property/bench gates).
+- `.agents/skills/project-testing/SKILL.md` (test pyramid layers and mandatory test kinds).
+- `.agents/skills/project-quality-gates/SKILL.md` (runtime catalog with commands).
+- `.agents/sow/specs/canonical-events.md` (the schema the canonical fuzz targets and property tests must honor).
+- `.agents/sow/current/SOW-0001-phase-1-foundation.md` (Chunks 3, 6, 8 land the canonical package and the first two adapters this SOW attaches tests to).
+- `pgregory.net/rapid` upstream README and examples for property-test idioms (cite exact commit in execution log when adopted).
+- `golang.org/x/perf/cmd/benchstat` upstream for benchstat invocation patterns.
+
+Current state:
+
+- Zero fuzz, zero property tests, zero benchmarks, no baseline file. Phase 1 ships without any of these (correctly — they need this dedicated SOW).
+- Once SOW-0001 Chunk 3 lands `internal/canonical/`, the canonical fuzz + property tests have a target. Once Chunk 6 and 8 land aiagent_v3 and aiagent_v2 adapters, their fuzz + bench targets have a home.
+
+Risks:
+
+- **R1 — fuzz corpus emptiness**: starting fuzz with empty corpus discovers shallow crashes only. Mitigation: seed each fuzz target from the sanitized fixtures under `testdata/<adapter>/` (canonical also gets seeds from the round-trip output of the adapter fuzzes).
+- **R2 — fuzz target API drift**: Go fuzz is stable since 1.18, low concern. The actual risk is upstream `pgregory.net/rapid` behavioral drift; mitigation: pin the dependency in `go.mod` and consult upstream release notes on upgrade.
+- **R3 — rapid library learning curve**: the small team (assistant + future reviewers) needs to recognize rapid idioms in code review. Mitigation: this SOW also updates `.agents/skills/project-testing/SKILL.md` with a short "Property Testing With rapid" subsection plus an in-tree example pointer.
+- **R4 — benchmark variance on shared-CPU GitHub runners**: known issue. Mitigation: `-count=5` plus `benchstat`'s built-in p-value filtering. If still noisy in practice, the implementer raises to `-count=10` for the worst benchmarks (documented per benchmark) before considering threshold changes. Switching to a self-hosted runner for benchmarks is an operator-decision option recorded in Open Decisions.
+- **R5 — baseline staleness**: a fresh baseline taken on a slow CI day will be too forgiving; one taken on a fast day will trigger spurious regressions. Mitigation: the SOW that refreshes the baseline (this one, on first commit, and any future refresh SOW) takes the baseline from a 3-run-average on the same CI runner type used by the gate.
+- **R6 — CI runtime budget**: 30s fuzz × ~10 targets + 5-run bench × ~6 benchmarks can exceed the < 5-min total budget. Mitigation: parallel jobs; if still over, split fuzz/bench from the per-push pipeline into a dedicated "heavy gates" job that still blocks merge but runs concurrently with the static-analysis job.
+
+## Pre-Implementation Gate
+
+Status: ready (activated 2026-06-02 under the blanket mandate; the "Re-scope decisions" + "Enumeration" above govern where they differ from this original draft — AC#1 ✅ done, AC#2 ✅ zero-needed (canonical has no decoders, verified), AC#5 reduced 6→5 paths / 4 new, AC#3/#4/#6/#7 in scope, AC#10 + auto-issue-on-crash deferred). Spec deltas to land before tests: `quality-gates.md` "Go — Fuzzing" (canonical-decoder → adapters-only) + "Go — Benchmarks" (6→5 paths); `project-testing` + `project-quality-gates` fuzz/property/bench rows reconciled to reality. Validation plan (named files): `internal/canonical/property_test.go` (5 `TestPropertyXxx`), 4 new `BenchmarkXxx` (aiagent_v2 `Tail`, ingest `worker.flush`, presenter `handleSessionsList`, notify `Hub.Deliver`), `scripts/check-bench.sh` + its self-test, `.github/workflows/fuzz-nightly.yml` + a per-push fuzz step in `ci.yml`, `bench/baseline.txt` SHA header.)
+
+Problem / root-cause model:
+
+- The repo commits to fuzz, property, and benchmark gates in spec but has none of them. Adapters and canonical decoders ingest untrusted JSON from disk — exactly the class of input where fuzz catches the panics, OOMs, and stack overflows that static analysis cannot. Property tests are the only practical way to encode mapping invariants (idempotency, ordering, round-trip) that cannot be enumerated as line-coverage cases. Benchmarks without a regression gate are decorative; the gate is what makes them useful.
+
+Evidence reviewed:
+
+- `.agents/sow/specs/quality-gates.md` lines 56-77 (fuzz, property, bench thresholds).
+- `.agents/skills/project-testing/SKILL.md` lines 49-83 (mandatory test kinds).
+- `.agents/skills/project-quality-gates/SKILL.md` lines 76-104 (runtime catalog with commands).
+- `.agents/sow/specs/canonical-events.md` (schema for property test (d) "schema completeness").
+- `.agents/sow/current/SOW-0001-phase-1-foundation.md` Chunks 3/6/8 (prerequisite source surfaces).
+- Go fuzz docs and `pgregory.net/rapid` upstream (consulted at SOW drafting; cite exact commits in execution log when adopted).
+
+Affected contracts and surfaces:
+
+- New: `internal/adapters/<name>/fuzz_test.go` per adapter; `internal/canonical/fuzz_test.go`; `internal/canonical/property_test.go`; `internal/adapters/<name>/bench_test.go` per adapter; `internal/store/bench_test.go`; `internal/presenter/bench_test.go`; `bench/baseline.txt`; `scripts/check-bench.sh`; CI workflow extensions.
+- Modified: existing CI workflow from SOW-0001 Chunk 2 (extensions for fuzz + bench jobs); `scripts/gates.sh` (add bench check); `.agents/skills/project-testing/SKILL.md` (add "Property Testing With rapid" subsection); `.agents/sow/specs/quality-gates.md` only if implementation surfaces a needed correction.
+- Unaffected: production Go source behavior, fixtures (used read-only for seed corpus), frontend.
+
+Existing patterns to reuse:
+
+- `AGENTS.md` "Transparency in scripts" pattern for `scripts/check-bench.sh`.
+- The sticky PR comment infrastructure from SOW-0010 if it has landed (graceful degradation if not).
+- `testdata/<adapter>/` fixture layout from SOW-0001 for fuzz seed corpus.
+
+Risk and blast radius:
+
+- Local-only impact (workstation tool + CI workflow).
+- A crashing fuzz target reveals a real adapter defect; the fix is in the adapter, not the fuzz target.
+- A spuriously-failing bench gate can block legitimate PRs; mitigation per R4/R5/R6 above.
+- Property-test failures pin real canonical-mapping bugs; the fix is in `internal/canonical/`.
+
+Sensitive data handling plan:
+
+- Fuzz seed corpus comes from `testdata/<adapter>/`, which is mandatorily sanitized before commit per `AGENTS.md` "Sensitive Data In Durable Artifacts". The fuzz machinery never reads from `~/.ai-agent/sessions/` or any unsanitized source.
+- Fuzz crashes auto-filed as GitHub issues attach the crashing input. The implementer adds a sanitization filter to the auto-issue logic: any seed-derived input goes raw (already sanitized); any mutator-generated input is bytes-only with no plausible secret pattern (random bytes do not produce real customer data, but the implementer adds a defensive entropy check before posting, and on hit, the issue is filed without the input and the input is uploaded as an artifact retained for the assistant to inspect privately).
+- Property-test generators (rapid) produce random structured data; same defensive posture as above.
+- Bench output contains only timing/allocation numbers; no sensitive data exposure.
+
+Implementation plan:
+
+1. **Spec read-back**: re-read `.agents/sow/specs/quality-gates.md`, `.agents/sow/specs/canonical-events.md`, and `.agents/skills/project-testing/SKILL.md` at start; confirm no drift since SOW approval.
+2. **Property invariants finalized**: confirm the five named invariants in Acceptance Criterion 4 are still the right five; adjust based on what `internal/canonical/` looks like after SOW-0001 Chunk 3. Any change is documented in the execution log.
+3. **Adapter fuzz targets**: one `FuzzXxx` per adapter package that exists (aiagent_v3, aiagent_v2 at SOW start; placeholder TODOs for the others if not yet landed). Seed corpus from `testdata/<adapter>/`.
+4. **Canonical fuzz targets**: one `FuzzXxx` per decoder in `internal/canonical/`.
+5. **Property tests**: `internal/canonical/property_test.go` with the five invariants. Each invariant is a named `TestPropertyXxx` calling `rapid.Check`.
+6. **Benchmark suite**: `BenchmarkXxx` functions for the six spec'd paths. Each benchmark uses representative input (a fixture session) to keep variance low.
+7. **Baseline capture**: run the bench suite three times on a fresh CI runner; take the median; commit as `bench/baseline.txt` with a header comment naming the commit SHA and runner type.
+8. **`scripts/check-bench.sh`**: author the regression-check script with synthetic-fixture self-tests.
+9. **CI fuzz job**: extend the workflow with a per-push fuzz step (30s per target) and a nightly fuzz step (5min per target). Wire the auto-issue logic for nightly crashes (use `actions/github-script` or a small Go helper; pin exact version in execution log).
+10. **CI bench job**: extend the workflow with a per-push bench step running `scripts/check-bench.sh` and posting the diff as a sticky PR comment (or artifact if SOW-0010's comment infra is not yet landed).
+11. **`scripts/gates.sh` integration**: ensure `scripts/check-bench.sh` runs as part of the canonical local pre-commit gate.
+12. **`.agents/skills/project-testing/SKILL.md`**: add a short "Property Testing With rapid" subsection with an in-tree example pointer.
+13. **Local exercise**: run every new gate locally; address any finding (adapter or canonical bugs surfaced by fuzz or property tests are real bugs, fixed in their own subagent task, not silenced).
+14. **CI exercise**: open a sample PR; verify all jobs run, timing fits the < 5-min budget, comments/artifacts land.
+15. **Spec / skill sync**: update `.agents/sow/specs/quality-gates.md` and `.agents/skills/project-quality-gates/SKILL.md` if any threshold or command differs from what landed.
+16. **External review** (per `project-second-opinions`): at least three reviewers in parallel on the diff.
+17. **Address findings**, re-review, mark SOW completed.
+
+Validation plan:
+
+- Acceptance Criteria 1-10 each have a named verification method.
+- Synthetic regression test for `scripts/check-bench.sh` (the gate itself must be correct).
+- One deliberate seed crash to exercise the auto-issue logic, then reverted (proof in execution log).
+- External reviewers confirm: every adapter and canonical decoder has a real fuzz target (not a stub), five property invariants are real assertions (not tautologies), baseline is honest (not taken on a fast outlier run), and the 20% threshold is not silently weakened anywhere.
+
+Artifact impact plan:
+
+- `AGENTS.md`: no change expected.
+- Specs: `.agents/sow/specs/quality-gates.md` updated only if commands/thresholds drift from what landed.
+- Runtime project skills: `.agents/skills/project-testing/SKILL.md` updated with the rapid subsection; `.agents/skills/project-quality-gates/SKILL.md` reviewed for command accuracy.
+- End-user docs: none affected.
+- SOW lifecycle: on success, this SOW moves to `.agents/sow/done/` with `Status: completed` in the same commit as the final tests, scripts, and CI updates. Any adapter or canonical bug surfaced by fuzz/property runs is fixed in its own subagent task and either folded into this SOW (if trivial) or filed as a follow-up SOW (if non-trivial); the choice is recorded in the execution log per the tech-debt-is-paid-not-deferred rule.
+
+Open-source reference evidence:
+
+- `pgregory.net/rapid @ <commit>` cited in execution log when adopted.
+- `golang.org/x/perf @ <commit>` (for benchstat) cited in execution log when adopted.
+- Any sticky-comment action reused from SOW-0010 inherits its pinned tag.
+- No workstation absolute paths to external OSS recorded here.
+
+Open decisions:
+
+- Whether benchmark variance on shared-CPU GitHub runners is low enough for the 20% threshold to be stable, or whether bench should move to a self-hosted runner. This is an operator decision **only if** the variance proves unacceptable during Chunk 5 measurement. Default path: stay on GitHub-hosted runners with `-count=5` and `benchstat` p-value filtering; raise only if data forces it.
+
+## Implications And Decisions
+
+No operator decisions required at SOW approval time. The single Open Decision above only escalates to the operator if Chunk 5 measurement proves the default insufficient; otherwise it stays a CTO call within the SOW.
+
+## Plan
+
+1. Property invariants finalized against the actual canonical package (low effort, gates Chunk 5).
+2. Adapter fuzz targets + canonical fuzz targets (medium effort; seed corpus assembly).
+3. Property tests with rapid (medium effort; five named invariants).
+4. Benchmark suite (medium effort; six paths, representative input).
+5. Baseline capture + `scripts/check-bench.sh` with self-tests (medium risk; the gate must be correct).
+6. CI integration for fuzz + bench (medium risk; runtime budget).
+7. Skill update for rapid idioms (low effort).
+8. Exercise + tuning iteration (potentially high effort if real bugs surface — those are fixed, not silenced).
+9. External review + convergence.
+
+## Pre-measurement — 2026-06-02 (re-scope input, not yet activated)
+
+This SOW was drafted 2026-05-26 assuming **zero** fuzz/property/benchmark coverage. Measured live on 2026-06-02 (read-only Explore sweep); the premise is stale and there is a **doc-drift cluster** to reconcile. The Pre-Implementation Gate (filled at activation, after SOW-0010 merges) must re-scope to this measured delta.
+
+**Measured reality (re-verify with file:line in the activation gate):**
+- **Fuzz targets: 10 exist across all 5 adapters** (codex ×2, aiagent_v3 ×2, opencode ×2, claude_code ×2, aiagent_v2 ×2). → **AC#1 already satisfied.**
+- **Canonical fuzz: 0** (`internal/canonical/fuzz_test.go` absent). → AC#2 open.
+- **Property tests: 0**; `pgregory.net/rapid` not in `go.mod`. → AC#4 open.
+- **Benchmarks: 1 of 6** — only `aiagent_v2/bench_test.go BenchmarkScan_SyntheticCorpus`. Missing: adapter `Tail`, canonical encode/decode, SQLite batch insert, REST query, SSE fanout. → AC#5 partial.
+- **Baseline:** `bench/baseline.txt` exists but lacks the implementing-commit-SHA header AC#6 requires. → AC#6 partial.
+- **CI fuzz wiring: none** (no `-fuzz`/`-fuzztime`/nightly/auto-issue in `.github/workflows/`). → AC#3 open.
+- **`scripts/check-bench.sh` + benchstat regression gate: absent.** CI bench step runs `-count=1` smoke, artifact-only, no benchstat diff. → AC#7 open; AC#5/#9/#10 partial.
+
+**Doc-drift to reconcile in this SOW (claims that do NOT match reality):**
+- `.agents/sow/specs/quality-gates.md` (Go — Fuzzing / Property / Benchmarks): canonical fuzz, fuzz CI schedule, auto-issue, `property_test.go`, `-count=5`, benchstat gate — claimed present, none exist.
+- `.agents/skills/project-testing/SKILL.md` (pyramid + mandatory-kinds): canonical fuzz file, fuzz cadence, property file, the 5 missing benchmarks, `-count=5`, regression gate.
+- `.agents/skills/project-quality-gates/SKILL.md` (Go — Fuzzing / Benchmarks): canonical-fuzz "MUST", fuzz CI, auto-issue, 5 missing benchmarks, regression gate.
+
+**Re-scope direction (CTO; finalize in the activation gate):** real delta = canonical fuzz targets + property tests (`rapid`, 5 invariants) + the 5 missing benchmarks + CI fuzz wiring + `check-bench.sh` regression gate + baseline SHA header + reconcile the 3 drift artifacts to reality. **Open decision for activation:** whether auto-file-GitHub-issue-on-fuzz-crash stays in-scope or is deferred to a follow-up — it adds non-trivial CI complexity, and nightly job-failure visibility may suffice; decide with evidence at activation, do not carry the stale AC blindly.
+
+## Execution Log
+
+### 2026-06-02 — Activation + implementation (master orchestrator; Go code by subagents)
+
+- **Activated + re-scoped** (see "Re-scope decisions" + "Enumeration" above): AC#1 ✅ pre-satisfied (10 adapter fuzz targets exist); AC#2 ✅ zero-needed (`internal/canonical` has no decoders — verified `rg`); AC#5 reduced 6→5 (no canonical encode/decode — canonical events are construct-only, never serialized).
+- **Chunk A — property tests** (commit `a7deb58`): `pgregory.net/rapid v1.3.0` + `internal/canonical/property_test.go` (5 invariants). Master-verified independently (NOT the subagent summary): `go test -race ./internal/canonical` ok, golangci-lint 0, gofmt clean. The `[BrokenImport]` gopls diagnostic was LSP lag, disproved by running the real toolchain.
+- **Chunk B — benchmarks** (commit `1ebb47e`): the 4 new `BenchmarkXxx` (aiagent_v2 `Tail`→`processOnce`, ingest `worker.flush`, presenter `handleSessionsList`, notify `Hub.Deliver`) + the spec 6→5 correction. Master-verified: all 5 compile+run, golangci-lint 0. (The gopls `modernize` hints — rangeint/bloop/newexpr — are not in `.golangci.yml`, so not gated; left for convention consistency with the existing Scan bench.)
+- **Chunk C — bench regression gate** (this commit): `scripts/check-bench.sh` (benchstat; statistically-significant **> 20% sec/op** per-benchmark; geomean + custom metrics excluded) + `scripts/test/check-bench-test.sh` (4/4 self-test, CI-wired) + `bench/baseline.txt` (count=6 + commit-SHA header + `goos/goarch/pkg/cpu` config lines). CTO re-scopes (measured reality): **count 5→6** (benchstat needs ≥6 for a 0.95 CI); the gate is **local/workstation, not CI** (workstation baseline ≠ GitHub-runner hardware) — CI keeps the bench compile-smoke + the hardware-independent self-test. **Two gate bugs caught during master verification**: a vacuous pass (baseline lacked the `goos/pkg/cpu` config lines → benchstat silently compared disjoint groups → single-column "no vs base" output) and a geomean false-positive (the noise-sensitive aggregate moved +36% while every individual benchmark was `~` insignificant → excluded geomean, gate per-benchmark only).
+- **Chunk D — CI fuzz wiring + doc-drift reconcile** (this commit): per-push deterministic fuzz-seed gate (`go test -run='^Fuzz' ./internal/adapters/...`, ci.yml "Fuzz seed corpus" step — the existing `./...` run already exercises the seeds; the explicit step pins + documents the gate and survives test-job refactors). New `fuzz-nightly.yml`: matrix over the 10 `(package, target)` pairs, `-fuzz -fuzztime=5m` each, `fail-fast: false`, crash-reproducer artifact on failure, env-var idiom for the matrix interpolation (no `${{ }}`-in-`run`). CTO decision (documented in spec): **no per-push `-fuzz` exploration** — it is non-deterministic (a crash in unchanged code would block an unrelated PR and flip pass/fail run-to-run); per-push = deterministic seeds, nightly = exploration; a nightly-found reproducer is committed under `testdata/fuzz/` to become a deterministic per-push regression. No adapter seed corpora needed on disk (all 10 targets seed inline via `f.Add`). Reconciled the fuzz doc-drift across `quality-gates.md`, `project-quality-gates`, `project-testing` (canonical has **no** fuzz target — owns no decoders; auto-issue-on-crash deferred to a follow-up). Also swept the `count=5`→`count=6` live-spec drift in `project-testing`. Verified: `actionlint` clean on both workflows; the per-push fuzz-seed gate exits 0 locally.
+### 2026-06-02 — External review round 1 (codex + glm + minimax) + fixes
+
+3 reviewers ran in parallel on the whole A–D surface; every finding adjudicated on ground truth (codex decisive — glm's ✅-merge and minimax's mergeable-with-caveats each MISSED 2 real codex P1s, verified). Unanimous fact: 4 of 5 property tests were tautological. Fixes (this commit):
+
+- **Property tests rewritten** (subagent) to route through the REAL `ingest`+store path, mirroring the genuine idempotency test: round-trip → ingest `SessionStarted`, read the `sessions` row back, assert 9 columns; ordering → ingest SHUFFLED ops, read via production's `ORDER BY turn_id, seq, id` (renamed `TestPropertyOpsReturnedInSeqOrder`); schema-completeness → ingest a full session, assert required columns persisted; timestamp → store round-trip of a µs `Ts`. Non-vacuity **mutation-proven** (each fails when `writer.go` is deliberately broken, then reverted). `writer.go` byte-identical afterward (verified).
+- **`check-bench.sh` vacuous-pass guard** (codex P1-2): fails closed (exit 2) unless every baseline benchmark has a real `(p=…)` sec/op comparison row — catches disjoint-config groups + renamed/dropped benchmarks. Verified empirically against benchstat (both vacuous cases → exit 2; matched → PASS); self-test extended 4→6 cases.
+- **CI installs pinned benchstat** before the bench self-test (codex P1-1 — the self-test drives the real `check-bench.sh`, which needs benchstat); pinned to `golang.org/x/perf@v0.0.0-20260512194132-3cf34090a3db` (codex P3-7).
+- **Per-push fuzz-target pin** (codex P2-4): asserts exactly 10 adapter fuzz targets exist, so a deleted/renamed target can't slip past `-run='^Fuzz'`.
+- **`BenchmarkTail` made deterministic** (all 3 reviewers flagged ±200% noise; subagent): fixed append content + `StopTimer`-fenced producer I/O → ~±3%; re-baselined at `-count=6`. It can now actually catch a Tail regression (was decorative `~`).
+- **`BENCH_THRESHOLD` override warns** (minimax P3-5); builtin `max` replaces local `maxInt`/`maxIntIngest` (glm P2-1); stale AC marked superseded above (codex P2-6).
+- Gates green (re-verified by master): golangci-lint 0, `go test -race ./...` pass, coverage gate PASS, `check-bench.sh` PASS (5/5 compared), self-tests 8/8 + 6/6, actionlint clean, secret + AI-attribution scans clean.
+- **Next**: re-review (same scope + fix notes) → converge → PR → self-merge → close.
+
+### 2026-06-03 — External review round 2 (codex + glm; minimax timed out) + fixes
+
+Re-ran all 3 reviewers on the same whole-surface scope + the round-1 fix notes. **codex** (decisive): no P1 (the round-1 P1s confirmed fixed), 3 P2 + 2 P3. **glm**: mergeable, 1 P2 + 4 P3. **minimax**: TIMED OUT (exit 124) — it spent its 30-min budget running `go test -race ./...` twice instead of reviewing statically; the round-3 prompt forbids running the suite. Adjudicated on ground truth (codex↔glm disagreed on the ordering test — codex was right on the literal code: the test embedded a copied `ORDER BY`). Fixes (this commit):
+
+- **Ordering property → production read path** (codex P2-b; subagent): `TestPropertyOpsReturnedInSeqOrder` now ingests SHUFFLED ops, then reads them back through the REAL presenter handler (`GET /api/sessions/{id}` → `handleSessionDetail` → `loadOps`) instead of a hand-copied `ORDER BY`. The op seq is encoded in the op name (the detail JSON omits seq) and parsed from the returned order. **Mutation-proven**: flipping `loadOps` `ORDER BY … seq ASC→DESC` fails it; production reverted (`internal/presenter` byte-identical).
+- **Fuzz pin → exact set** (codex P2-a / glm P3-2): ci.yml asserts the exact sorted target multiset (not just count=10) — a renamed target now fails per-push, not only nightly.
+- **check-bench.sh reverse warn** (glm P2-1): warns (does not fail) when a current benchmark is absent from the baseline (un-gated until a refresh SOW); self-test 6→7. Unique-name assumption documented (codex P3-e).
+- **baseline SHA restored** (codex P2-c): the header carries the implementing commit SHA again (`39b5bb2`), matching `quality-gates.md` + this SOW.
+- **Top-of-SOW supersede banner** (codex P3-d): the whole original draft body is marked superseded.
+- Gates green (re-verified by master): golangci-lint 0, `go test -race` pass, `check-bench.sh` PASS (5/5 compared), self-tests 8/8 + 7/7, actionlint clean, secret + attribution scans clean.
+- **Next**: re-review round 3 (all 3; minimax with an explicit no-run-tests instruction) → converge → PR → self-merge → close.
+
+### 2026-06-03 — External review round 3 (codex + glm + minimax — full triad) + fixes
+
+All 3 returned (minimax completed — the no-run-tests instruction fixed its round-2 timeout). **codex**: no P1; 1 P2 (doc-contract drift) + 3 P3. **glm**: mergeable; 1 P2 (round-trip `sql.NullString` `.Valid`) + 4 P3. **minimax**: mergeable; the same doc-drift P2 + **a NEW P2 codex missed** (project-testing listed a dead `internal/store/bench_test.go` path) + P3 nits. Trajectory: round-1 P1×3 → round-2 P2×3 → round-3 P2(doc)/P3. Fixes:
+
+- **Doc-drift class swept** (codex P2 + minimax P2-2; commit `fe6cd6e`): reconciled `AGENTS.md` (Go-fuzz + Go-bench table rows + the "all gates in CI" line), `quality-gates.md` + `project-quality-gates` + `project-testing` ("every gate in CI" now notes the local bench gate; the dead store-bench path → the real packages), `testing-strategy.md` (baseline.json + a nonexistent `update-benchmarks.sh` + CI-fails → `baseline.txt` + local `check-bench.sh`), and "5 packages"→"4 packages, 5 benchmarks". Re-grepped the whole class (`baseline.json` / `store/bench_test` / `5 benchmark packages`) → zero active instances.
+- **Ordering test name anti-correlated** (codex P3; subagent, this commit): op names now encode `seqNameBig - opSeq` (higher seq → lower name), so a production bug that orders by `name` instead of `seq` returns the WRONG order and fails. **Mutation-proven for BOTH `seq DESC` and `ORDER BY name`** (the new coverage); presenter reverted byte-identical.
+- **Round-trip `.Valid` assertions** (glm P2-1; subagent): the round-trip now asserts each `sql.NullString` column is `.Valid` before comparing `.String` — catches a NULL-instead-of-value writer regression even if the generator is later relaxed.
+- **BatchInsert comment 1000→530** (codex P3; subagent): corrected to the exact generated event count (5 + 25 + 500).
+- Gates green: golangci-lint 0, `go test -race` (5 property tests pass), `check-bench.sh` PASS, self-tests 8/8 + 8/8, actionlint clean, scans clean.
+- **Next**: re-review round 4 to confirm convergence → on clean, PR → self-merge → close.
+
+### 2026-06-03 — External review round 4 (codex + glm + minimax — full triad) + fixes
+
+**codex** (decisive): no P1; 3 P2 (all doc/gate, no code). **glm**: "merge as-is" (2 cosmetic P3). **minimax**: mergeable; verified everything ground-truth + found one more drift instance codex missed (`bench/baseline.txt:9` "5 benchmark packages"). All findings are doc-drift surfaces my round-3 sweep missed + one gate-robustness gap — the **code is converged** (all 3 verify the property tests, benchmarks, gate, and ordering-blind-spot fix as genuine/non-vacuous; production byte-identical). Fixes (this commit):
+
+- **Fuzz pin → package-qualified** (codex P2): `ci.yml` now compares the exact sorted `(package:target)` set, not bare function names — a same-named target (`FuzzParseCursor`/`FuzzParseLine` repeat across packages) moved between packages no longer evades the per-push check. Verified `got == want` locally.
+- **bench/README.md reconciled** (codex P2): intro (Scan-only / "runs in CI" → 5 benchmarks + local `check-bench.sh` + CI smoke), the `baseline.txt` section (old `BackfillV2_RealCorpus`-in-baseline format → the current benchstat 5-benchmark format; the real-data digest lives in a separate dated `bench/v2-backfill-*.txt`), and the PR-time line → local.
+- **workflow.md:55 + project-workflow:63** (codex P2): "every canonical decoder has a fuzz target" → adapters-only (canonical owns no parser; its invariants are the property tests).
+- **bench/baseline.txt:9** (minimax): "5 benchmark packages" → "4 packages, 5 benchmarks".
+- **Self-test `mkbench` unified** (glm/minimax P3): emits the full `goos/goarch/pkg/cpu` header like the other helpers (cosmetic consistency).
+- **Exhaustive re-grep** of the full drift class (`baseline.json` / `BackfillV2`-in-baseline / `store/bench_test` / `5 benchmark packages` / canonical-decoder-fuzz / bench-in-CI / PR-time) → **zero active instances** across all active docs (done SOWs + the banner-covered SOW-0011 draft excluded). This round closes the doc-drift long tail (rounds 3-4 chased it across AGENTS.md, the specs, the skills, testing-strategy, bench/README, baseline.txt, workflow.md, project-workflow).
+- Gates: no Go touched (golangci-lint/race unchanged from `6ce5b41`); fuzz-pin `got==want`, actionlint clean, check-bench self-test 8/8, scans clean.
+- **Next**: re-review round 5 to confirm convergence → on clean, PR → self-merge → close.
+
+### 2026-06-03 — External review round 5 (codex + glm + minimax) + fixes
+
+**codex** (decisive): no P1; 2 P2 + 1 P3. **glm** + **minimax**: mergeable, cosmetic P3 only — both again MISSED codex's 2 P2s (the pattern across all 5 rounds — codex decisive, glm/minimax lenient/incomplete). codex's findings verified real on ground truth; fixed (this commit):
+- **Fuzz crash-artifact name collision** (codex P2 — a real CI bug, not doc-drift): `fuzz-nightly.yml`'s artifact name was `fuzz-crash-<target>-<runid>`, but `FuzzParseCursor`/`FuzzParseLine` repeat across packages, so two same-named jobs crashing in one run would collide (`upload-artifact@v7` errors / drops a reproducer). Added a `slug` (package basename) per matrix entry → `fuzz-crash-<slug>-<target>-<runid>`, unique per job.
+- **bench/README.md Scan-detail drift** (codex P2): the metrics table said `peak_rss_mb` (code reports `peak_heap_mb`) and claimed the corpus "includes files above the 50 MiB streamer threshold" (the code deliberately stays BELOW it — verified `bench_test.go`). Corrected both — the last spot of the round-3/4 README pass.
+- **SOW Re-scope sub-bullets** (codex P3): annotated the 3 pre-Enumeration bullets (canonical-fuzz-in-scope, 6 benchmarks, per-push 30s) inline as **[SUPERSEDED]** so a grep of the durable memory isn't misled.
+- glm/minimax cosmetic P3s (countRows hardcoded-literal SQL concat; BenchmarkTail/notify informational-metric shape) — verified non-issues, no action.
+- No Go touched; `actionlint` clean, scans clean.
+- **Next**: re-review round 6 to confirm convergence → on clean, PR → self-merge → close.
+
+### 2026-06-03 — External review round 6 (codex + glm + minimax) + fixes
+
+**codex** (decisive): no P1; 2 P2 (both **comment-drift, NO code/logic**) + 1 P3. **glm** + **minimax**: mergeable, fully converged (both re-grepped the drift class → clean). codex explicitly: "the code/test/workflow logic looks converged; the remaining fixes are documentation/comment." Fixes (this commit):
+- **bench_test.go Scan header comment** (codex P2): the header claimed the corpus has "fixtures over the 50 MiB streamer threshold" / "includes three files above [it]" — contradicting the same file's corpus-builder comment + code, which stay BELOW the threshold to measure the fast path. Corrected the header to match (comment-only, zero behavior change; verified against the builder + the code).
+- **SOW Enumeration :27/:30** (codex P2): annotated the two stale activation-snapshot claims (`-count=5`, per-push `-fuzztime=30s`) inline as **[SUPERSEDED]** — they sit inside the banner-authoritative section, so isolating them as old-draft was not enough.
+- **REJECTED codex P3** (`opencode/review_round7_test.go:156` `-count=5`): verified false on ground truth — that is the SOW-0005 same-ms-**stress** test's `-count=5` gate (accurate for that test), not the SOW-0011 bench-count, and it is outside this SOW's scope. A grep collision is not drift.
+- **minimax P3** (an explicit all-baseline-benchmarks-missing self-test case): the behavior is already exercised by the disjoint-config case (both → all-expected-missing → exit 2); noted as an optional self-test-completeness Followup, not added.
+- No production Go touched (the bench_test.go change is comment-only); gofmt clean, scans clean.
+- **Next**: re-review round 7 to confirm convergence → on clean, PR → self-merge → close.
+
+### 2026-06-03 — External review round 7 (codex + glm + minimax) — CONVERGED
+
+**codex** (decisive): no P1/P3; 1 P2 — `testing-strategy.md:30` still listed a canonical "encoding/decoding roundtrip" test (canonical has no encode/decode); fixed (replaced with the `EventBase`/`EventKind` accessor + ingest→store→presenter property-test surface). **glm**: mergeable, drift-class table all-clean. **minimax**: mergeable, "ready to merge", 2 non-actionable P3s. All three confirm the CODE + workflows converged (property tests non-vacuous + production-routed, gate sound, workflows secure, production Go byte-identical). The doc-drift long tail (R3–R7) is fully reconciled — exhaustive re-grep zero. **Convergence reached → PR → self-merge → close.**
+
+## Validation
+
+Final pre-merge run (2026-06-03), all green:
+- `gofmt -l` clean; `go vet ./...` 0; `golangci-lint run` **0 issues**; `go test -race ./...` pass.
+- Coverage gate PASS — every gated `internal/*` package + aggregate ≥ 80% statements (`internal/canonical` 100% incl. the new property tests).
+- `scripts/check-bench.sh` PASS (5/5 benchmarks compared, no significant > 20% sec/op regression); gate self-tests pass — `check-coverage` 8/8, `check-bench` 8/8.
+- `actionlint` clean on `ci.yml` + `fuzz-nightly.yml`; secret + AI-attribution scans clean.
+- Per-push fuzz seed-corpus gate exits 0; the package-qualified fuzz-target pin matches `fuzz-nightly.yml`'s 10-entry matrix.
+- The 5 property tests are mutation-proven non-vacuous (each fails when the production writer / `loadOps` is deliberately broken, then reverted; `internal/presenter` + `writer.go` byte-identical after).
+- External review converged after **7 rounds** (codex decisive + glm + minimax): R1 P1×3 → R2 P2×3 → R3–R7 doc/comment-drift tail + one real CI bug (R5 artifact-name collision), all fixed; R7 clean.
+
+## Outcome
+
+Delivered the SOW-0011 quality-infra layer, re-scoped to measured reality (the repo already had 10 adapter fuzz targets; `internal/canonical` has no decoders):
+- **Property tests** (`internal/canonical/property_test.go`, `pgregory.net/rapid`): 5 invariants, each routed through the REAL ingest→store(→presenter) path — round-trip (sessions row), ops ordering (production `loadOps`), idempotent re-ingest, schema completeness (writer-persisted required columns), µs timestamp fidelity. Mutation-proven.
+- **5 benchmarks** (Scan + Tail in `aiagent_v2`, `worker.flush`, `handleSessionsList`, `Hub.Deliver`) with a `count=6` `bench/baseline.txt` (commit-SHA + `goos/goarch/pkg/cpu` headers).
+- **`scripts/check-bench.sh`** — local/workstation regression gate (benchstat, significant > 20% sec/op, geomean + custom metrics excluded, forward + reverse vacuous-pass guards) + an 8-case self-test. Local because the workstation baseline is not comparable to GitHub-runner hardware; CI runs the bench compile-smoke + the hardware-independent self-test.
+- **CI fuzz wiring**: a per-push DETERMINISTIC seed-corpus gate (`ci.yml`) + a nightly `-fuzz` exploration matrix (`fuzz-nightly.yml`, per-(package,target), collision-safe crash-reproducer artifacts).
+- **Doc reconciliation**: the entire fuzz/property/benchmark quality-gate doc class brought to reality across `AGENTS.md`, `quality-gates.md`, `testing-strategy.md`, `workflow.md`, `project-{quality-gates,testing,workflow}`, `bench/README.md`, `bench/baseline.txt`.
+
+Zero production Go source changed (all Go is `*_test.go`). 10 branch commits; 7 external-review rounds. Deferred (see Followup): runner-baselined CI bench gate, auto-issue-on-fuzz-crash, bench PR sticky comment, `heapSampler` de-dup.
+
+## Lessons Extracted
+
+- **Tautological property tests are the headline trap.** R1 found 4 of 5 property tests asserting their own generators / Go stdlib, not production. A property test must route through a real production transform (here ingest→store→presenter) and be MUTATION-PROVEN (break production, watch it fail, revert).
+- **A "round-trip"/"ordering" test that re-implements the production query is a subtler tautology** (R2/R3): assert against the production read path (the presenter handler / `loadOps`), not a copied `ORDER BY`; and anti-correlate any encoded discriminator with the value under test so "ordered by the wrong column" also fails (R6).
+- **A regression gate must fail closed on "compared nothing"** (R1/R2): benchstat silently compares disjoint groups (missing `goos/pkg/cpu` config lines) or a renamed/dropped benchmark → assert every baseline benchmark produced a real `(p=…)` row, else exit 2.
+- **Sweep the drift CLASS repo-wide, not the cited lines** (R3–R7 — the costly lesson): the fuzz/bench doc-drift spanned ~9 files; fixing only what each round cited cost five review rounds. A reviewer citing N instances means "≥N of a class" — enumerate the whole class with one grep across ALL active docs (and comments + test-file headers), fix all, re-grep to prove zero. My greps were repeatedly too narrow (missed `testing-strategy.md`'s bench section, then its canonical test-kind, then a `bench_test.go` header comment) — broaden the pattern; don't trust a single phrasing.
+- **codex decisive; glm/minimax lenient** (all 7 rounds): glm + minimax called "mergeable" from R3 on and MISSED codex's real P2s every round (incl. a genuine CI artifact-name collision at R5). Never merge on a reviewer's green light; adjudicate every finding on ground truth — accept-real / reject-false-with-evidence (the R6 `opencode:156 -count=5` was a grep collision, not drift).
+- **minimax times out if it runs the suite**: a `read-only` instruction is not enough — explicitly forbid `go test`/build/lint so it reviews statically (R2 timeout → R3+ no-run instruction fixed it).
+
+## Followup
+
+- ~~**Improve `BenchmarkTail_SyntheticAppend` determinism**~~ — **RESOLVED 2026-06-02** (review-fix round): rewritten with fixed append content + `StopTimer`-fenced producer I/O; ~±200% → ~±3%. benchstat now reports a real number (no longer `~`), so the gate can catch a Tail regression. Re-baselined at `-count=6`.
+- **Runner-baselined CI bench-regression gate**: `check-bench.sh` is workstation-local because `bench/baseline.txt` is not comparable to GitHub-runner hardware. A CI regression gate needs a baseline captured ON the CI runner (separate runner-baseline file + higher-variance handling) — deferred.
+- **Auto-file a GitHub issue on a nightly fuzz crash** (orig AC#3) and the **bench-results PR sticky comment** (orig AC#10): deferred reporting niceties (per the Re-scope decisions); job-failure visibility + artifact upload suffice for now.
+- **De-dup `heapSampler` / `heapSamplerIngest`** (glm review P2-1): two near-identical heap-sampling goroutines in `aiagent_v2/bench_test.go` and `ingest/bench_test.go`; a shared `internal/testutil` helper was left out of scope (cross-package churn for a bench-only helper). Minor maintainability.
+- **rapid `.fail` seed files**: a genuine property-test failure makes rapid write a minimized counterexample under `internal/canonical/testdata/rapid/<Test>/` — a regression REPRODUCER (like Go fuzz corpus), to be committed deliberately when a real failure is found. Deliberately NOT gitignored: the project's specific-file `git add` discipline already prevents accidental commits, and a blanket ignore would hide legitimate regression seeds. (The subagent's mutation-test `.fail` artifacts were from a deliberate-and-reverted break and were correctly deleted.)
+
+## Regression Log
+
+None yet.
+
+Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.

@@ -2,13 +2,13 @@
 
 ## Purpose
 
-The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate as a dedicated job; the assistant runs the same gates locally before any commit (today via the individual gate commands — a single `./scripts/gates.sh` aggregator is planned, see §Aggregate Scripts). A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
+The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate as a dedicated job (except the **benchmark regression gate**, which is local/workstation-only — its baseline is not comparable to CI-runner hardware; CI runs the bench compile-smoke + the gate self-test, see §Go — Benchmarks); the assistant runs the same gates locally before any commit (today via the individual gate commands — a single `./scripts/gates.sh` aggregator is planned, see §Aggregate Scripts). A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
 
 The runtime companion to this spec is `.agents/skills/project-quality-gates/SKILL.md` (commands and ergonomics). This spec is the durable truth about *what* is enforced and *at what threshold*.
 
 ## Operating Rules
 
-- Every gate listed here runs locally before any commit and in CI on every push.
+- Every gate listed here runs locally before any commit and in CI on every push — except the benchmark regression gate (`scripts/check-bench.sh`), which is local/workstation-only (its baseline is not comparable to CI-runner hardware; CI runs the bench compile-smoke + the gate self-test).
 - Weakening a gate to land a PR is a contract breach. The remedy is fixing the root cause or splitting the PR.
 - Adding a gate requires updating this spec, the skill, and CI in the same commit.
 - Removing a gate requires an operator-approved SOW with stated replacement coverage.
@@ -68,10 +68,9 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Fuzzing
 
-- Every adapter parser exposes at least one `FuzzXxx` target.
-- Every canonical decoder exposes at least one `FuzzXxx` target.
-- CI: 30 seconds per target per push, 5 minutes per target nightly.
-- Crashes from nightly runs are auto-filed as issues by the CI workflow.
+- Every adapter parser exposes at least one `FuzzXxx` target (10 targets across the 5 adapter packages). `internal/canonical` has **no** fuzz target — it owns no parsers/decoders (pure event types; all untrusted-bytes parsing lives in adapters).
+- **Per-push (deterministic, PR-blocking)**: `go test -run='^Fuzz' ./internal/adapters/...` runs every target's seed corpus (`f.Add` inputs + any committed `testdata/fuzz/` reproducers) as normal subtests. No `-fuzz` exploration runs per push — it is non-deterministic (a crash found in unchanged code would block an unrelated PR, and pass/fail would flip run-to-run).
+- **Nightly (exploration, non-blocking)**: `fuzz-nightly.yml` runs `go test -fuzz=<Target> -fuzztime=5m` per target (matrix, one target per package per invocation). A crash fails that target's job and uploads the reproducer as an artifact; commit it under `testdata/fuzz/<Target>/` so the per-push gate reproduces it deterministically until fixed. Auto-filing a GitHub issue on crash is a deferred follow-up (job-failure visibility + the artifact suffice).
 - Threshold: zero crashes per run.
 
 ### Go — Property-Based Tests
@@ -81,10 +80,10 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Benchmarks
 
-- Marked benchmarks for: adapter `Scan`, adapter `Tail`, canonical event encode/decode, SQLite batch insert, REST query path, SSE fanout.
-- `go test -run=^$ -bench=. -benchmem -count=5 ./... > bench-current.txt`
-- `benchstat bench/baseline.txt bench-current.txt`
-- Threshold: ≤ 20% regression in any metric vs `bench/baseline.txt`. Baseline updates only on explicit SOW approval.
+- Marked benchmarks for the 5 performance-critical paths: adapter `Scan` + adapter `Tail` (`internal/adapters/aiagent_v2`), SQLite batch insert (`internal/ingest` `worker.flush`), REST query path (`internal/presenter` `handleSessionsList`), SSE fanout (`internal/notify` `Hub.Deliver`). There is **no canonical encode/decode** benchmark — canonical events are constructed directly by adapters and never serialized (`internal/canonical` has no encoders/decoders).
+- `scripts/check-bench.sh` runs `go test -run=^$ -bench=. -benchmem -count=6` over the 4 benchmark packages (5 benchmarks; adapter `Scan` + `Tail` share `aiagent_v2`) and compares to `bench/baseline.txt` via `benchstat` (`-count=6` is benchstat's minimum for a 0.95 confidence interval).
+- Threshold: a **statistically-significant > 20% sec/op regression for any individual benchmark** fails the gate. Only **sec/op** is gated — the custom `ReportMetric` values (B/s, events/sec, peak_heap_mb, …) are informational (peak_heap_mb is benchtime-sensitive), and the per-block `geomean` aggregate is excluded (a noisy benchmark moves it without any single benchmark significantly regressing). Self-tested by `scripts/test/check-bench-test.sh`.
+- **`check-bench.sh` is a local/workstation gate**, not a CI gate: `bench/baseline.txt` is workstation-measured and is not comparable to GitHub-runner hardware. CI keeps the bench compile-smoke (`-benchtime=1x`, artifact-uploaded for trend) and runs the hardware-independent gate self-test; a runner-baselined CI regression gate is a deferred follow-up. `bench/baseline.txt` carries the implementing commit SHA and the `goos/goarch/pkg/cpu` config lines (benchstat groups by config — baseline and current must share it). Baseline refresh requires an explicit SOW (no auto-update).
 
 ### Go — Rollup Correctness Diff (SOW-0007)
 

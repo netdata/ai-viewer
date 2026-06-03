@@ -1,0 +1,88 @@
+# Nightly fuzz exploration (SOW-0011).
+#
+# Per-push CI runs the fuzz SEED CORPUS deterministically (ci.yml "Fuzz seed
+# corpus" step: `go test -run='^Fuzz' ./internal/adapters/...`) — that is the
+# PR-blocking regression gate. THIS scheduled job does the non-deterministic
+# `-fuzz` EXPLORATION (mutation-based) that actually discovers new crashes: each
+# adapter fuzz target runs for 5 minutes nightly.
+#
+# `go test -fuzz` runs ONE target per package per invocation, hence the matrix
+# over (package, target) pairs. A crash fails that target's job and uploads the
+# minimized reproducer (written by Go under <pkg>/testdata/fuzz/<Target>/) as an
+# artifact; commit the reproducer so the per-push seed-corpus gate reproduces it
+# deterministically until fixed.
+#
+# `internal/canonical` has NO fuzz target — it owns no parsers/decoders; all
+# untrusted-bytes parsing lives in the adapters.
+#
+# Auto-filing a GitHub issue on crash is a deferred follow-up (SOW-0011 Followup);
+# job-failure visibility + the uploaded reproducer are the signal for now.
+# Local equivalent: go test -run='^$' -fuzz='^<Target>$' -fuzztime=5m ./<pkg>/
+# Authoritative gate: .agents/sow/specs/quality-gates.md "Go — Fuzzing".
+name: fuzz-nightly
+
+on:
+  schedule:
+    # 08:00 UTC daily — off-peak, staggered from race-stress (06:00) and
+    # govulncheck (07:00) nightly jobs.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }} (${{ matrix.pkg }})
+    runs-on: ubuntu-latest
+    # 5m fuzz + checkout/setup/build overhead; generous (house style).
+    timeout-minutes: 15
+    strategy:
+      # One target crashing must not cancel the other targets' exploration.
+      fail-fast: false
+      matrix:
+        # `slug` (package basename) disambiguates the crash-artifact name —
+        # FuzzParseCursor/FuzzParseLine repeat across packages, so a target-only
+        # artifact name would collide if two same-named jobs crash in one run.
+        include:
+          - { pkg: internal/adapters/aiagent_v2, target: FuzzParseSnapshot, slug: aiagent_v2 }
+          - { pkg: internal/adapters/aiagent_v2, target: FuzzParseCursor, slug: aiagent_v2 }
+          - { pkg: internal/adapters/aiagent_v3, target: FuzzParseLine, slug: aiagent_v3 }
+          - { pkg: internal/adapters/aiagent_v3, target: FuzzParseCursor, slug: aiagent_v3 }
+          - { pkg: internal/adapters/claude_code, target: FuzzParseLine, slug: claude_code }
+          - { pkg: internal/adapters/claude_code, target: FuzzParseCursor, slug: claude_code }
+          - { pkg: internal/adapters/codex, target: FuzzParseLine, slug: codex }
+          - { pkg: internal/adapters/codex, target: FuzzParseCursor, slug: codex }
+          - { pkg: internal/adapters/opencode, target: FuzzDecodeMessageData, slug: opencode }
+          - { pkg: internal/adapters/opencode, target: FuzzDecodePartData, slug: opencode }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Fuzz (-fuzztime=5m)
+        # matrix.target/matrix.pkg are static literals defined above (not
+        # untrusted event input), but the env-var idiom avoids the
+        # `${{ }}`-in-run injection class entirely (defense-in-depth).
+        env:
+          TARGET: ${{ matrix.target }}
+          PKG: ${{ matrix.pkg }}
+        run: go test -run='^$' -fuzz="^${TARGET}$" -fuzztime=5m "./${PKG}/"
+
+      # On a crash, `go test -fuzz` writes the minimized reproducer under
+      # <pkg>/testdata/fuzz/<Target>/. Upload it so the reproducer can be
+      # committed as a deterministic per-push regression. Failure-only.
+      - name: Upload crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crash-${{ matrix.slug }}-${{ matrix.target }}-${{ github.run_id }}
+          path: ${{ matrix.pkg }}/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 30

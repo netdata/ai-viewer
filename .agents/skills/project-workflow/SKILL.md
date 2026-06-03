@@ -60,7 +60,7 @@ For each behavior in the updated spec:
 
 1. Identify the test layer (unit / integration / E2E / fuzz / bench). See `project-testing` skill for the pyramid.
 2. Write the failing test. Run it locally; confirm it fails for the right reason (not a typo, not a wiring bug — the actual behavior is missing).
-3. For parsers/decoders/canonical-mapping code: include at least one fuzz target.
+3. For adapter parsers/decoders (untrusted-bytes parsing): include at least one fuzz target. (Canonical mapping has no parser to fuzz — its invariants are covered by `internal/canonical/property_test.go`.)
 4. For performance-critical paths: include a benchmark with a baseline check.
 5. For frontend behavior: include the component test AND the Playwright E2E that exercises it from the user's perspective.
 
