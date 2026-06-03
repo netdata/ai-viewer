@@ -127,7 +127,19 @@ This boundary keeps D3 isolated and testable.
 
 - Every page has a render test (`pages/<Page>/<Page>.test.tsx`) against mocked API responses.
 - Component tests use React Testing Library queries (`getByRole`, `getByText`), never test-id selectors as the primary mechanism.
-- E2E tests live under `frontend/tests/` and use Playwright. One scenario per primary user flow.
+- E2E tests live under `frontend/tests/` and use Playwright. One scenario per primary user flow. They run against the EMBEDDED SPA served by the built `ai-viewer-serve` binary on a deterministically seeded temp DB (`scripts/e2e-serve.sh`), never `vite preview`. Session ids / agent names are derived at runtime from `/api/sessions` (never hardcoded) so specs track the seed.
+
+### E2E scenarios + scripts (SOW-0012)
+
+- The five core flows and their specs: **sessions-list filter** (`tests/sessions-filter.spec.ts`), **session-detail load** (`tests/deep-link.spec.ts`), **sources panel** (`tests/routes.spec.ts`), **deterministic SSE update** (`tests/sse-update.spec.ts`), **theme toggle OS+override** (`tests/theme.spec.ts`).
+- **Deterministic SSE pattern (the server is read-only — no writer):** to drive a live-update assertion deterministically, install a fake `EventSource` via `page.addInitScript` BEFORE app scripts run (it records each instance on `window.__sse` and exposes `dispatchFrame(name, { data })`), wait on `window.__sse` for the `/api/events` stream to open, then dispatch a controlled `session_changed` frame and assert the documented invalidation (`['sessions']` → a fresh `GET /api/sessions`). This exercises the real `SseConnection` listener + TanStack-Query invalidation end-to-end with zero timing-luck. `tests/realtime.spec.ts` / `tests/viz-sse.spec.ts` separately assert the REAL stream opens at the network level.
+- **Timeouts / retries:** `playwright.config.ts` sets `timeout: 15_000` and `retries: 0` (NO blanket retries — a flake elsewhere is a real defect). The SSE flows opt into `test.describe.configure({ retries: 1, timeout: 30_000 })` (the EventSource open is the slowest checkpoint and the one legitimate CI-timing risk). Add a retry ONLY to a genuine connection/timing checkpoint, never broadly.
+- **Quarantine, never `test.skip`:** a genuinely-flaky spec is MOVED to `frontend/tests/quarantine/` with the linked SOW filename in its file header. Two Playwright projects make this automatic: `chromium` is the gating project with `testIgnore: '**/quarantine/**'`; `quarantine` (its own `testDir`) runs only that dir. `npm run e2e` / `npm run e2e:a11y` name `--project=chromium` (gating); `npm run e2e:quarantine` runs `--project=quarantine --pass-with-no-tests` (non-gating, diagnostic). The directory is empty on delivery — policy in `frontend/tests/quarantine/README.md`.
+- **`npm run e2e:a11y`** runs the three axe specs (`a11y`, `viz-a11y`, `stats-a11y`) on the gating project; axe scans **every** route under both themes, including the `/sessions/:id` **logs** tab. Threshold: zero serious/critical.
+
+### viz a11y waivers (SOW-0012)
+
+Each D3/canvas chart has a waiver doc at `frontend/src/viz/<chart>/a11y.md` (`waterfall`, `flamegraph`, `timeline`, `topology`). It records any per-selector axe exclusion (selector + rule id + rationale + owning issue) and any known a11y limitation. **Axe exclusions are per-selector** (`new AxeBuilder({ page }).exclude('<selector>')`), **never** a global `disableRules`. Known tracked limitation (fix deferred to SOW-0012 `## Followup`): the **`WaterfallCanvas` + `FlameGraph` Canvas renderers** (above `SVG_SPAN_CEILING`) have **no focusable-span fallback** → Canvas-mode keyboard span-selection is missing; the lint gate is **blind** to the FlameGraph case (`onClick` on the `<canvas>` element, which jsx-a11y treats as interactive). The Timeline + Topology Canvas renderers DO provide a focusable `<button>` fallback list (`canvasFallbackList`), so they have no gap. axe cannot see inside `<canvas>`, so these limitations are invisible to the axe gate — the waiver docs are their record.
 
 ## Coverage thresholds
 

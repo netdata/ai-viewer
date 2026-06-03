@@ -386,6 +386,57 @@ for the keyboard-fallback gap, not just the lint-flagged lines.
   `lint --max-warnings=0` + `typecheck` green; Chunk-A bundle self-test 8/8;
   `actionlint` clean; secret + AI-attribution scans clean.
 
+### 2026-06-03 — Chunk D: Playwright scenario completeness + axe a11y + viz waivers (delegated)
+
+- AC#4 scenarios — 3 already existed (`deep-link.spec.ts` = session-detail load,
+  `routes.spec.ts` = sources panel, `theme.spec.ts` = theme toggle covering BOTH
+  OS `prefers-color-scheme` AND manual localStorage override). 2 were ADDED:
+  - `tests/sessions-filter.spec.ts` — drives the FilterBar agents input; asserts
+    the list narrows (URL carries `?agents=`, every Agent cell matches), a
+    non-matching term collapses to the empty state, Clear restores the full list.
+    Agent name is runtime-derived from `/api/sessions` (not hard-coded).
+  - `tests/sse-update.spec.ts` — DETERMINISTIC (no timing-luck). The product is
+    read-only with no writer, so a fake `EventSource` is installed via
+    `addInitScript` BEFORE app scripts, captures the `/api/events` instance, and
+    the test dispatches a controlled `session_changed` frame. The real
+    `SseConnection` listener runs the documented `['sessions']` invalidation → a
+    fresh `GET /api/sessions`; the test asserts that second GET fires (request
+    counter) + zero pageerrors. `realtime`/`viz-sse` still prove the real stream
+    opens at the network level.
+- AC#5 axe — added `npm run e2e:a11y` (the 3 axe specs). Closed a REAL gap: the
+  `/sessions/:id` **Logs** tab had NO axe scan; added one (both themes). Axe now
+  covers every route (/, /sessions/:id overview+logs+trace+timeline+topology,
+  /sources, /stats, /topology). Zero serious/critical.
+- Playwright tuning — global `retries: 0` (was `CI?2:0`; blanket retries mask
+  real flakiness) + `timeout: 15_000`; SSE flows opt into `retries: 1` + `30_000`
+  via `test.describe.configure` (scoped to sse-update/realtime/viz-sse only — the
+  EventSource open is the one legitimately-slow checkpoint). Two projects:
+  `chromium` (gating, `testIgnore: **/quarantine/**`) + `quarantine` (own dir).
+  `npm run e2e`/`e2e:a11y` name `--project=chromium` so a bare run never folds
+  quarantine into the gate. Quarantine empty on delivery (`.gitkeep` + README);
+  no `test.skip` anywhere.
+- viz a11y waivers — `src/viz/{waterfall,flamegraph,timeline,topology}/a11y.md`:
+  - waterfall + flamegraph DOCUMENT the real Canvas-mode keyboard gap (above
+    `SVG_SPAN_CEILING`=400 the SVG→Canvas switch drops the focusable-span path;
+    flamegraph also notes the lint gate is blind to it — `onClick` is on the
+    `<canvas>` element itself). The FIX is the `## Followup` item, not this chunk.
+  - timeline + topology: NO gap (Canvas mode has a visually-hidden focusable
+    `<button>`/`<ul>` fallback list) — documented as clean false-positives.
+  - Policy documented: per-selector `AxeBuilder.exclude()` only, never a global
+    `disableRules`. No exclusions are needed today (all routes are axe-clean).
+- Spec sync — `quality-gates.md` (Frontend E2E + Accessibility rows) +
+  `project-frontend` skill (deterministic-SSE pattern, retry/quarantine rules,
+  e2e:a11y, viz-a11y-waiver convention).
+- Orchestrator verification (run myself): read the new specs (sse-update
+  determinism confirmed — drives the client seam + asserts the network refetch,
+  no sleeps) + the config/waiver diffs; `bash scripts/build.sh` BUILD_OK;
+  `npm run e2e` **43 passed**; `npm run e2e:a11y` **21 passed** (zero
+  serious/critical, both themes, incl. the new Logs-tab scan);
+  `npm run e2e:quarantine` boots/seeds/tears-down clean (no tests);
+  `lint --max-warnings=0` + `typecheck` green; per-dir coverage gate (Chunk C)
+  exit 0; Chunk-A bundle self-test 8/8; `actionlint` clean; secret +
+  AI-attribution scans clean (794 tracked files).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

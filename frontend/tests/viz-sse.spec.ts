@@ -29,6 +29,11 @@ async function firstSessionId(request: APIRequestContext): Promise<string> {
 }
 
 test.describe('realtime — viz tabs (AC#6)', () => {
+  // SSE flow tuning (SOW-0012 AC#4 / R3): 30 s per-test timeout (subscription
+  // POST + EventSource open is the slowest checkpoint) + a single retry for
+  // CI-runner timing slack. Scoped to this SSE spec, NOT global.
+  test.describe.configure({ retries: 1, timeout: 30_000 });
+
   test('opening a session Trace tab establishes the SSE subscription + event stream', async ({
     page,
     request,

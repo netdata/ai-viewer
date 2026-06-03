@@ -129,15 +129,22 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Frontend — E2E
 
-- `npm run e2e` (Playwright headless).
-- Coverage: every primary user flow plus error states (network failure, empty list, malformed SSE event).
-- Flaky tests are quarantined into a separate suite linked to a SOW; never marked `test.skip`.
+- `npm run e2e` (Playwright headless) — runs the **gating** `chromium` project against the EMBEDDED SPA served by the built `ai-viewer-serve` binary on a deterministically seeded temp DB (`scripts/e2e-serve.sh`), never a bare `vite preview`.
+- Coverage: every primary user flow plus error states (network failure, empty list, malformed SSE event). The five AC#4 scenarios (SOW-0012) and the spec that covers each:
+  - **sessions-list filter** — `tests/sessions-filter.spec.ts` (FilterBar agents filter narrows the list, URL carries `?agents=`, a non-matching term collapses to the empty state, Clear restores the full list; the agent name is runtime-derived from `/api/sessions`).
+  - **session-detail load** — `tests/deep-link.spec.ts` (hard nav to `/sessions/<id>` renders the detail Overview via the SPA fallback).
+  - **sources panel** — `tests/routes.spec.ts` (`/sources` renders the table + health badge).
+  - **real-time SSE update (deterministic)** — `tests/sse-update.spec.ts` (a controlled `session_changed` frame, injected via a fake `EventSource` installed before app scripts, drives the documented `['sessions']` invalidation → a fresh `GET /api/sessions` refetch — deterministic, not timing-luck; the server is read-only so no writer is needed). `tests/realtime.spec.ts` + `tests/viz-sse.spec.ts` additionally assert the REAL stream opens at the network level.
+  - **theme toggle (OS + override)** — `tests/theme.spec.ts` (explicit Dark/Light persisted to `localStorage.aiViewerTheme` and reapplied after reload; Auto clears the override and follows `prefers-color-scheme` via `emulateMedia`).
+- **Per-test timeout / retries (SOW-0012 AC#4 / R3):** the global config sets `timeout: 15_000` and `retries: 0` (no blanket retries). The SSE flows opt into `test.describe.configure({ retries: 1, timeout: 30_000 })` (the EventSource open is the slowest checkpoint and the one place CI-runner slowness can transiently miss); every other spec stays deterministic with no retries.
+- **Quarantine (never `test.skip`):** a genuinely flaky spec is MOVED to `frontend/tests/quarantine/` with a linked SOW filename in its file header — not silenced. The gating `chromium` project excludes that directory (`testIgnore: '**/quarantine/**'`), so a quarantined spec stops blocking merge automatically; it still RUNS via `npm run e2e:quarantine` (`--project=quarantine`, non-gating, diagnostic). The directory is **empty on delivery** (`.gitkeep` + a `README.md` documenting the policy). Quarantine policy lives in `frontend/tests/quarantine/README.md`.
 - Threshold: all pass.
 
 ### Frontend — Accessibility
 
-- `@axe-core/playwright` runs on every Playwright route.
+- `npm run e2e:a11y` (SOW-0012) runs the axe specs (`tests/a11y.spec.ts`, `tests/viz-a11y.spec.ts`, `tests/stats-a11y.spec.ts`) on the gating `chromium` project; `@axe-core/playwright` runs an axe scan on **every** route under both themes: `/`, `/sessions/:id` (overview + **logs** + trace + topology + timeline tabs), `/sources`, `/stats`, `/topology`. The Logs-tab scan (SOW-0012) closed the one detail tab the prior specs missed. (The full E2E run `npm run e2e` includes these specs too.)
 - Threshold: zero serious/critical violations.
+- **Waivers are per-selector, never global.** A D3/canvas chart that needs an axe exclusion (or has a known a11y limitation) documents it in `frontend/src/viz/<chart>/a11y.md` (`waterfall`, `flamegraph`, `timeline`, `topology`); any exclusion is applied via `new AxeBuilder({ page }).exclude('<selector>')` in the test, never `disableRules` across the whole page. Two charts carry a **documented known limitation** (tracked in SOW-0012 `## Followup`, fix deferred): the `WaterfallCanvas` and `FlameGraph` Canvas renderers (above `SVG_SPAN_CEILING`) have no focusable-span fallback, so Canvas-mode keyboard span-selection is missing — and the lint gate is **blind** to the FlameGraph case because its `onClick` sits on the `<canvas>` element. The Timeline and Topology Canvas renderers DO provide a focusable `<button>` fallback list, so they have no gap. axe cannot see inside `<canvas>`, so neither limitation is caught by the axe gate.
 
 ### Frontend — Bundle Size
 
