@@ -46,6 +46,14 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 - `go test -race -count=1 ./...` → all pass.
 - `-count=1` defeats the test cache so CI always runs fresh.
+- The per-push CI `test` job runs `go test -race -count=1 -timeout=25m ...` and
+  sets the job's `timeout-minutes: 30` (SOW-0038). The default 10m/package was
+  too tight for the slow `internal/ingest` rollup test under `-race` on a CI
+  runner (effectively single-threaded there). **Invariant:** keep the job
+  `timeout-minutes` strictly **above** the Go `-timeout`, so the Go per-package
+  timeout fires first (printing a stack trace) and the GitHub job-kill is only a
+  backstop. (`scripts/test.sh` does not yet pass `-timeout`; tracked as a
+  SOW-0038 Followup.)
 
 ### Go — Coverage
 
