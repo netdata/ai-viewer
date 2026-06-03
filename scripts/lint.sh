@@ -32,10 +32,12 @@
 #   6. npm run typecheck   — tsc --noEmit (strict).
 #   7. bundle-size self-test     — hermetic; verifies the bundle-size GATE LOGIC.
 #   8. coverage-config verifier  — checks the REAL Vitest per-dir floors against
-#                                  the source tree (non-vacuity + lockstep);
+#                                  the source tree (non-vacuity + lockstep +
+#                                  disk-completeness + whole-dir include shape);
 #                                  build-free (node:fs only).
 #   8b. coverage-config self-test — hermetic; verifies the verifier's OWN logic
-#                                   (vacuity / lockstep / broad-glob / .d.ts-only).
+#                                   (vacuity / lockstep / broad-glob / .d.ts-only /
+#                                   disk-completeness / narrow-include rejection).
 #   9. coverage-thresholds self-test — hermetic; verifies the per-dir coverage
 #                                      GATE LOGIC.
 #

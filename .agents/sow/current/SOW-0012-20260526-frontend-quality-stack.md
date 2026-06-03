@@ -657,6 +657,71 @@ spec→test→code (gate fixes extended the gate's self-test FIRST):
 Orchestrator finalization: pending (this entry written by the implementer for the
 orchestrator to review + fold into `## Validation`/`## Reviews`).
 
+### 2026-06-03 — Chunk F round-4 fixes (R5-1..R5-3, delegated)
+
+Three verified round-4 external-review findings on the Chunk F surface, fixed
+spec→test→code (gate fixes extended the gate's self-test FIRST):
+
+- **R5-1 [P2] coverage-config verifier could be fooled by a NARROW per-dir include
+  (sibling escapes)** (`frontend/scripts/check-coverage-config.mjs`). The verifier
+  derived the measured dir from the FIRST SEGMENT of a COVERAGE_INCLUDE entry, then
+  treated the WHOLE dir as accounted-for. A hypothetical narrow include like
+  `src/components/Foo/Foo.tsx` (names a specific file, not the whole dir) would mark
+  `src/components/Foo` measured while a sibling `src/components/Foo/helper.ts`
+  escaped BOTH Vitest's instrumentation (the narrow glob matches only `Foo.tsx`)
+  AND the disk-completeness check. No current instance (every per-dir include is the
+  whole-dir `<root>/<Dir>/**/*.{ts,tsx}` shape), but the verifier now ENFORCES it.
+  Fix: in the per-dir classification, for a normalized entry under a per-dir root
+  whose first segment names a literal dir, if the entry has MORE segments after
+  `<Dir>` the one immediately after it MUST be `**` (the whole-dir glob); anything
+  else (a filename or subpath) pushes a NAMED fail-closed error ("requires a
+  whole-directory include shape `<root>/<Dir>/**/*.{ts,tsx}` so no sibling source
+  escapes measurement"). Preserves the existing working cases: a flat file directly
+  under a root (`src/components/ComingSoon.tsx`), whole-dir `<Dir>/**/...`, and
+  entries not under a per-dir root (src/state, src/lib, src/api, src/viz) are
+  unaffected. The CLI count block mirrors the same skip so its measured-dir count
+  stays equal to the function's `measuredDirs`. New self-test case (k):
+  `src/components/Foo/Foo.tsx` (+ a `Foo` dir on disk with `Foo.tsx` and a sibling
+  `helper.ts`) → named narrow-shape error; all existing cases stay green (13/13).
+  REAL config still PASSES unchanged (13 floors / 13 measured dirs / 6 excluded).
+- **R5-2 [P3] bundle gate silently ignored a non-array `imports`/`dynamicImports`**
+  (`frontend/scripts/check-bundle-size.js`). The closure walker validated
+  `imports[]` ELEMENTS only when `imports` was already an array; a present-but-non-
+  array `imports` (e.g. `imports: "_shared.js"`) was silently ignored → an
+  undercount that could vacuously pass the budget. The gate's policy is fail-closed
+  on manifest-contract violations, so a new up-front pass over EVERY chunk now exits
+  2 (named) when `imports` or `dynamicImports` is present but not an array. New
+  self-test cases (d8) `imports: "_shared.js"` → exit 2 and (d9)
+  `dynamicImports: "src/Route.tsx"` → exit 2; self-test now 17/17. (Per-element
+  non-string `imports` validation stays in the closure walker, where keys resolve;
+  per the finding, no per-target dynamicImport existence validation was added this
+  round.)
+- **R5-3 [P3] durable docs/comments still described older gate behavior.** Swept +
+  fixed (durable memory; a stale model invites regression): (i) `project-frontend`
+  skill (§Bundle Size) now documents the manifest-driven transitive static-import
+  CLOSURE model (entry budget = file + its static-imports closure; de-dup within a
+  closure; `dynamicImports` not followed; shared chunks gated under the importing
+  entry) + the fail-closed contract-violation list. (ii) `scripts/lint.sh` (step
+  8/8b comments) + `.github/workflows/ci.yml` coverage-config step name/comment now
+  say DISK-COMPLETENESS + whole-dir include shape, not just "non-vacuity +
+  lockstep". (iii) The CI Lint step drops the redundant `-- --max-warnings=0` (the
+  `lint` npm script bakes it in) so CI matches `scripts/lint.sh`'s single source of
+  truth; the stale "CI runs `npm run lint -- --max-warnings=0`" wording in
+  `project-frontend` §Lint is corrected. (iv) `quality-gates.md` §Frontend — Lint
+  canonical invocation is now `npm run lint` (the script owns the flag); the same
+  drift class fixed in `project-quality-gates` + `project-delegation` skills.
+
+AC#6 reconciliation (no AC text changed, per the standing rule): AC#6's planning
+wording says the bundle gate "reads `dist/assets/*.js`". The delivered gate is
+MANIFEST-CLOSURE-driven (classifies chunks from `dist/.vite/manifest.json`'s
+`ManifestChunk` flags and budgets each entry's transitive static-import closure),
+taking a dist-DIR arg — the dist-glob→manifest divergence was already reconciled in
+the Chunk A open entry above (2026-06-03, "the gate takes a dist-DIR arg … rather
+than the old `dist/assets/*.js` glob"); recorded here, not by editing AC#6.
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

@@ -120,10 +120,10 @@ For changes to ingest pipeline, SSE hub, or anything with channels/goroutines: r
 ### Frontend — Lint
 
 ```bash
-cd frontend && npm run lint -- --max-warnings=0
+cd frontend && npm run lint   # the `lint` script bakes in --max-warnings=0
 ```
 
-ESLint flat config with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import`. Threshold: zero warnings.
+ESLint flat config with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import`. Threshold: zero warnings (the `lint` npm script owns `--max-warnings=0`; `scripts/lint.sh` and CI run plain `npm run lint`).
 
 ### Frontend — Type Check
 

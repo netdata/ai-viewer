@@ -40,8 +40,9 @@
 // classifies ZERO JS chunks, a manifest with NO main (isEntry) chunk at all (this SPA
 // always emits exactly one — its absence is a broken build), a manifest entry whose
 // file is absent on disk, a static-import graph referencing a missing/invalid chunk
-// key, or a manifest entry whose `imports` array holds a NON-STRING element (a
-// ManifestChunk-contract violation) each EXIT NON-ZERO. The gate never certifies
+// key, a manifest entry whose `imports`/`dynamicImports` is PRESENT BUT NOT AN ARRAY,
+// or a manifest entry whose `imports` array holds a NON-STRING element (both
+// ManifestChunk-contract violations) each EXIT NON-ZERO. The gate never certifies
 // "within budget" without measuring real, classified chunks.
 //
 // Usage:  node scripts/check-bundle-size.js [distDir]   (default: <script>/../dist)
@@ -137,6 +138,31 @@ function main() {
   // `imports`/`dynamicImports` are optional string arrays of OTHER manifest KEYS.
   function isChunk(v) {
     return v !== null && typeof v === 'object' && typeof v.file === 'string';
+  }
+
+  // Fail-closed validation of the ManifestChunk `imports`/`dynamicImports` SHAPE on
+  // EVERY chunk up front. The contract is `imports?: string[]` / `dynamicImports?:
+  // string[]`. A field that is PRESENT but NOT an array (e.g. a bare string) would
+  // be silently ignored downstream — the static-closure walker only follows
+  // `imports` when `Array.isArray(...)`, so a non-array value drops the chunk it
+  // names from the closure, an undercount that could vacuously pass the budget. The
+  // gate's policy is fail-closed on manifest-contract violations, so reject it here
+  // (exit 2) rather than ignore it. (Per-element non-string validation for `imports`
+  // stays in the closure walker, where the import KEYS are resolved.)
+  for (const key of Object.keys(manifest)) {
+    const entry = manifest[key];
+    if (!isChunk(entry)) {
+      continue;
+    }
+    for (const field of ['imports', 'dynamicImports']) {
+      if (entry[field] !== undefined && !Array.isArray(entry[field])) {
+        fatal(
+          `manifest entry ${JSON.stringify(key)} has a non-array \`${field}\` ` +
+            `(${JSON.stringify(entry[field])}) — Vite's ManifestChunk contract is \`${field}?: string[]\`; ` +
+            `a non-array value would be silently ignored and undercount the closure.`,
+        );
+      }
+    }
   }
 
   // Transitive closure of an entry's STATIC imports, returned as the set of

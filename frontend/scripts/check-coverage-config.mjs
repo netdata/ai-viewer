@@ -254,7 +254,14 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
   //     more than one named immediate dir — an unsupported broad shape the lockstep
   //     check cannot derive a single dir from. REJECT (fail closed), naming the
   //     entry, rather than silently ignore it (the prior fail-open hole).
-  //   - otherwise it names an immediate dir -> add to the measured set for (b)/(c).
+  //   - (f) a NARROW per-file include UNDER a dir (e.g. "src/components/Foo/Foo.tsx",
+  //     where the segment after <Dir> is a filename/subpath, not `**`): Vitest would
+  //     instrument ONLY that file while a sibling source (Foo/helper.ts) escapes BOTH
+  //     instrumentation AND the disk-completeness check (which would see <Dir>
+  //     "measured" as a whole). REJECT (fail closed): a measured per-dir include must
+  //     be the WHOLE-DIRECTORY shape `<root>/<Dir>/**/...` so no sibling escapes.
+  //   - otherwise it names an immediate dir (whole-dir glob, or a bare dir) -> add to
+  //     the measured set for (b)/(c).
   const measuredDirs = new Set(); // "src/components/Foo"  (dir include entries)
   const measuredFlatFiles = new Set(); // "src/components/Foo.tsx" (flat include entries)
   for (const entry of include) {
@@ -281,6 +288,23 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
           `The per-dir verifier cannot derive a lockstep-checkable dir from it, so a measured page/component ` +
           `would have NO enforced per-dir floor (a fail-open hole). Replace it with explicit per-dir entries ` +
           `(e.g. "${seg.root}/<Dir>/**/*.{ts,tsx}") so each measured dir has a per-dir floor, or extend this verifier first.`,
+      );
+      continue;
+    }
+    // (f) The first segment names a literal immediate dir. If the entry has MORE
+    // segments after <Dir>, the one immediately after it MUST be the whole-dir glob
+    // `**`. Anything else (a filename like "Foo.tsx" or a subpath like "sub/x.ts")
+    // is a NARROW per-file include: Vitest instruments only that file, yet the
+    // verifier would otherwise mark the whole <Dir> measured — so a sibling source
+    // file escapes BOTH instrumentation and the disk-completeness check. Fail closed.
+    const restSegments = rest.split('/');
+    if (restSegments.length > 1 && restSegments[1] !== '**') {
+      errors.push(
+        `coverage.include entry "${entry}" names a specific file/subpath under "${seg.root}/${seg.first}" ` +
+          `("${restSegments[1]}" after the dir, not "**") — the per-dir verifier requires a whole-directory ` +
+          `include shape ("${seg.root}/${seg.first}/**/*.{ts,tsx}") so no sibling source escapes measurement. ` +
+          `Narrow per-file includes under a measured dir are rejected; measure the whole dir, or list specific ` +
+          `files in COVERAGE_EXCLUDED.`,
       );
       continue;
     }
@@ -379,8 +403,10 @@ if (invokedAsScript) {
     process.exit(1);
   }
   // Count only the lockstep-relevant measured DIRS (those under a per-dir root
-  // whose first segment is a literal dir name — flat-file include entries and any
-  // broad shape would already have been classified/errored inside the function).
+  // whose first segment is a literal dir name AND whose shape is the whole-dir glob
+  // or a bare dir — flat-file include entries, any broad shape, and any narrow
+  // per-file include would already have been classified/errored inside the function;
+  // this block runs only when there were zero errors, so it mirrors measuredDirs).
   let measured = 0;
   for (const entry of COVERAGE_INCLUDE) {
     const norm = normalizeEntry(entry);
@@ -394,6 +420,10 @@ if (invokedAsScript) {
     const rest = norm.value.slice(`${seg.root}/`.length);
     if (!rest.includes('/') && !GLOB_META.test(rest) && isSourceFileName(rest)) {
       continue; // flat-file entry — not a per-dir floor
+    }
+    const restSegments = rest.split('/');
+    if (restSegments.length > 1 && restSegments[1] !== '**') {
+      continue; // narrow per-file include under a dir — errored above, not a floor
     }
     if (seg.first && !GLOB_META.test(seg.first)) {
       measured += 1;

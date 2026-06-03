@@ -27,6 +27,12 @@
 #   (i) NORM-GLOB  — returns broad-shape errors for normalized broad first segments
 #                    (`./src/pages/**/*.{ts,tsx}` and `src/pages/*o/**`).
 #   (j) BAD-SEG    — returns a malformed-entry error for a `.`/`..` path segment.
+#   (k) NARROW-DIR — returns a named error for a per-file include UNDER a measured
+#                    dir (e.g. `src/components/Foo/Foo.tsx`): the segment after the
+#                    dir is not `**`, so Vitest would instrument only that file
+#                    while a sibling (`helper.ts`) escapes BOTH instrumentation and
+#                    the disk-completeness check. The verifier requires the
+#                    whole-dir shape (`<Dir>/**/...`).
 # Mirrors the fail-closed discipline + ANSI/printf style of
 # frontend/scripts/check-bundle-size.test.sh.
 #
@@ -66,13 +72,19 @@ TMP="$(mktemp -d "$FRONTEND_DIR/.coverage-config-selftest.XXXXXX")"; trap 'rm -r
 #   Unlisted/    — has real source; used by the disk-completeness DIR case (when it
 #                  is in NEITHER list -> error) and the EXCLUDED case.
 #   Page/        — a normal measured+gated page dir (has real source).
+#   Foo/         — has TWO real source files (Foo.tsx + a sibling helper.ts); used
+#                  by the narrow-per-file-include rejection case (k): a
+#                  `Foo/Foo.tsx` include names only one file, leaving helper.ts to
+#                  escape both instrumentation and disk-completeness.
 #   flat.tsx     — a FLAT source file directly under src/components/ (no dir); used
 #                  by the flat-file disk-completeness + flat-file-include cases.
-mkdir -p "$TMP/src/components/Good" "$TMP/src/components/OnlyDecl" "$TMP/src/components/OnlyTest" "$TMP/src/components/Unlisted" "$TMP/src/pages/Page"
+mkdir -p "$TMP/src/components/Good" "$TMP/src/components/OnlyDecl" "$TMP/src/components/OnlyTest" "$TMP/src/components/Unlisted" "$TMP/src/components/Foo" "$TMP/src/pages/Page"
 printf 'export const good = 1;\n'                 > "$TMP/src/components/Good/good.ts"
 printf 'export declare const onlyDecl: number;\n' > "$TMP/src/components/OnlyDecl/types.d.ts"
 printf "import { it } from 'vitest'; it('x', () => {});\n" > "$TMP/src/components/OnlyTest/only.test.ts"
 printf 'export const unlisted = 1;\n'             > "$TMP/src/components/Unlisted/unlisted.ts"
+printf 'export const foo = 1;\n'                  > "$TMP/src/components/Foo/Foo.tsx"
+printf 'export const helper = 2;\n'               > "$TMP/src/components/Foo/helper.ts"
 printf 'export const page = 1;\n'                 > "$TMP/src/pages/Page/page.tsx"
 printf 'export const flat = 1;\n'                 > "$TMP/src/components/flat.tsx"
 
@@ -115,7 +127,7 @@ assert() {
 }
 
 # JSON list literals reused below. The enumerated source surface of the fixture
-# tree is: dirs Good, Unlisted, Page and the flat file src/components/flat.tsx
+# tree is: dirs Good, Unlisted, Foo, Page and the flat file src/components/flat.tsx
 # (OnlyDecl/OnlyTest have no measured source and are NOT enumerated). For each
 # case, every enumerated item must be measured (include) OR excluded, else the
 # disk-completeness check fires — so cases not testing disk-completeness EXCLUDE
@@ -124,11 +136,11 @@ CLEAN_INCLUDE='["src/components/Good/**/*.{ts,tsx}","src/pages/Page/**/*.{ts,tsx
 CLEAN_GLOBS='["src/components/Good/**","src/pages/Page/**"]'
 # Everything in the enumerated surface EXCEPT Good+Page (which the clean include
 # measures): used so the CLEAN case is disk-complete.
-CLEAN_EXCLUDED='["src/components/Unlisted","src/components/flat.tsx"]'
+CLEAN_EXCLUDED='["src/components/Unlisted","src/components/Foo","src/components/flat.tsx"]'
 # The full enumerated surface as an excluded list — lets a case that measures
 # nothing-relevant stay disk-complete (used to isolate non-disk-completeness
 # defects). Good+Page included here too where a case does not measure them.
-ALL_EXCLUDED='["src/components/Good","src/components/Unlisted","src/components/flat.tsx","src/pages/Page"]'
+ALL_EXCLUDED='["src/components/Good","src/components/Unlisted","src/components/Foo","src/components/flat.tsx","src/pages/Page"]'
 
 # (e) CLEAN — sound config: every per-dir glob non-vacuous, every measured dir
 #     gated, no broad shapes, every source dir/file measured-or-excluded -> ZERO
@@ -143,7 +155,7 @@ assert 0 "$CLEAN_INCLUDE" "$CLEAN_GLOBS" "$CLEAN_EXCLUDED" "clean fixture config
 assert 2 \
   '["src/components/Good/**/*.{ts,tsx}","src/components/Ghost/**/*.{ts,tsx}"]' \
   '["src/components/Good/**","src/components/Ghost/**"]' \
-  '["src/pages/Page","src/components/Unlisted","src/components/flat.tsx"]' \
+  '["src/pages/Page","src/components/Unlisted","src/components/Foo","src/components/flat.tsx"]' \
   "(a) per-dir glob over a missing dir -> vacuity error" \
   'matches ZERO source files'
 
@@ -153,7 +165,7 @@ assert 2 \
 assert 1 \
   '["src/components/Good/**/*.{ts,tsx}"]' \
   '[]' \
-  '["src/pages/Page","src/components/Unlisted","src/components/flat.tsx"]' \
+  '["src/pages/Page","src/components/Unlisted","src/components/Foo","src/components/flat.tsx"]' \
   "(b) measured dir absent from PER_DIR_GLOBS -> lockstep error" \
   'has NO per-dir line floor'
 
@@ -196,7 +208,7 @@ assert 2 \
 assert 1 \
   "$CLEAN_INCLUDE" \
   "$CLEAN_GLOBS" \
-  '["src/components/flat.tsx"]' \
+  '["src/components/Foo","src/components/flat.tsx"]' \
   "(f) source dir in neither list -> disk-completeness error names it" \
   'Unlisted exists on disk but is in neither COVERAGE_INCLUDE nor COVERAGE_EXCLUDED'
 
@@ -205,7 +217,7 @@ assert 1 \
 assert 1 \
   "$CLEAN_INCLUDE" \
   "$CLEAN_GLOBS" \
-  '["src/components/Unlisted"]' \
+  '["src/components/Unlisted","src/components/Foo"]' \
   "(g) flat source file in neither list -> disk-completeness error names it" \
   'src/components/flat.tsx exists on disk but is in neither COVERAGE_INCLUDE nor COVERAGE_EXCLUDED'
 
@@ -247,6 +259,19 @@ assert 1 \
   "$ALL_EXCLUDED" \
   "(j) entry with a .. path segment -> malformed-entry error" \
   'contains a "\.\." path segment'
+
+# (k) NARROW-DIR — a per-FILE include UNDER a measured dir (Foo/Foo.tsx names one
+#     file, not the whole dir). Vitest would instrument only Foo.tsx, leaving the
+#     sibling Foo/helper.ts to escape BOTH instrumentation and the
+#     disk-completeness check (which would see Foo "measured"). The verifier must
+#     reject it (named) and require the whole-dir shape `Foo/**/...`. (All source
+#     excluded so the narrow-shape rejection is the ONLY error.)
+assert 1 \
+  '["src/components/Foo/Foo.tsx"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(k) per-file include under a measured dir (Foo/Foo.tsx) -> narrow-shape error" \
+  'requires a whole-directory include shape'
 
 echo
 if [ "$fail" -eq 0 ]; then

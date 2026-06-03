@@ -16,7 +16,7 @@ import importPlugin from 'eslint-plugin-import';
 type Plugins = NonNullable<Config['plugins']>;
 
 // Flat config (ESLint v9). The repo enforces a zero-warnings policy
-// (`eslint . --max-warnings 0`), so every rule below is error-level or off;
+// (`eslint . --max-warnings=0`), so every rule below is error-level or off;
 // there are deliberately no "warn" levels. Type-aware linting is enabled via
 // projectService so unsafe-any / floating-promise classes are caught.
 //

@@ -105,9 +105,10 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Frontend — Lint
 
-- `npm run lint -- --max-warnings=0`. Run locally via the build-free
-  `scripts/lint.sh` frontend section (alongside Go lint), or standalone from
-  `frontend/`.
+- `npm run lint` (the `lint` npm script bakes in `--max-warnings=0` — the single
+  source of truth for the flag; neither `scripts/lint.sh` nor the CI Lint step
+  re-passes it). Run locally via the build-free `scripts/lint.sh` frontend section
+  (alongside Go lint), or standalone from `frontend/`.
 - ESLint flat config (`frontend/eslint.config.ts` — `.ts`, not the `.js` some older notes name) with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import` (resolver: `eslint-import-resolver-typescript`).
 - Built with ESLint core's `defineConfig()` + `globalIgnores()` (`eslint/config`), not the `@deprecated` `tseslint.config()` helper. jsx-a11y + import use native flat-config (`flatConfigs.*`) — no `FlatCompat`. import/recommended's three `'warn'` rules are promoted to `'error'`. `jsx-a11y/no-noninteractive-tabindex` allows `role="region"` (scrollable-region pattern). Untyped-plugin friction handled without `any`: an ambient `src/types/eslint-plugin-jsx-a11y.d.ts` shim + a narrow `Plugins[string]` cast for react-hooks + a config-file-scoped relaxation block (details in `project-frontend` skill §Lint).
 - Threshold: zero warnings.

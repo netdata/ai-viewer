@@ -7,9 +7,11 @@
 # on a missing/empty dist, a missing or invalid manifest (object OR array), a
 # manifest with zero JS chunks, a manifest with no MAIN (isEntry) chunk at all, a
 # manifest whose entry `imports` a key that is absent from the manifest (a broken
-# static-import graph), and a manifest whose entry `imports` array holds a
-# NON-STRING element (a ManifestChunk-contract violation). The gate is itself code;
-# it must be correct.
+# static-import graph), a manifest whose entry `imports` array holds a NON-STRING
+# element (a ManifestChunk-contract violation), and a manifest entry whose
+# `imports`/`dynamicImports` is PRESENT BUT NOT AN ARRAY (also a contract
+# violation — silently ignoring it would undercount the closure). The gate is
+# itself code; it must be correct.
 #
 # gzip shrinks low-entropy bytes (zeros, repeats) to almost nothing, so a budget
 # expressed in GZIPPED bytes can only be exercised with HIGH-ENTROPY
@@ -234,6 +236,31 @@ cat > "$T/.vite/manifest.json" <<'JSON'
 { "index.html": { "file": "assets/index-UUUU.js", "name": "index", "src": "index.html", "isEntry": true, "imports": [123] } }
 JSON
 assert 2 "$T" "entry imports array holds a non-string element"
+
+# --- (d8) entry's `imports` is PRESENT but NOT AN ARRAY -> FAIL CLOSED ----------
+# Vite's ManifestChunk contract is `imports?: string[]`. A present-but-non-array
+# `imports` (here a bare string) is a contract violation; the closure walker only
+# follows `imports` when it is already an array, so a non-array value would be
+# SILENTLY IGNORED (the chunk it names never counted) — a fail-open undercount.
+# The gate must fail closed (exit 2) on it (R5-2). Pins the imports-shape guard.
+U="$TMP/u/dist"; mkdir -p "$U/assets" "$U/.vite"
+mkchunk "$U/assets/index-VVVV.js" 120            # main own file fine; imports is a non-array
+cat > "$U/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-VVVV.js", "name": "index", "src": "index.html", "isEntry": true, "imports": "_shared.js" } }
+JSON
+assert 2 "$U" "entry imports is a non-array (bare string)"
+
+# --- (d9) entry's `dynamicImports` is PRESENT but NOT AN ARRAY -> FAIL CLOSED ---
+# Same contract (`dynamicImports?: string[]`). A present-but-non-array value is a
+# manifest-contract violation the gate must reject rather than ignore (R5-2),
+# consistent with the `imports` guard above. (dynamicImports are not followed into
+# the closure, but a malformed manifest is still fail-closed.)
+V="$TMP/v/dist"; mkdir -p "$V/assets" "$V/.vite"
+mkchunk "$V/assets/index-WWWW.js" 120            # main own file fine; dynamicImports is a non-array
+cat > "$V/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-WWWW.js", "name": "index", "src": "index.html", "isEntry": true, "dynamicImports": "src/Route.tsx" } }
+JSON
+assert 2 "$V" "entry dynamicImports is a non-array (bare string)"
 
 echo
 if [ "$fail" -eq 0 ]; then
