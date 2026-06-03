@@ -425,6 +425,16 @@ jobs:
         if: steps.detect.outputs.fe == 'true'
         run: npm run check:coverage-thresholds:selftest
 
+      # Verify the REAL Vitest coverage config (not the fixture the self-test
+      # above uses): every per-dir glob matches >= 1 real source file (an empty
+      # glob group vacuously passes Vitest's threshold) and every measured
+      # component/page dir has a per-dir floor (lockstep). Reads the same shared
+      # lists vitest.config.ts imports, so it checks the gate Vitest enforces.
+      # Build-free (node:fs only), so it does not depend on the build below.
+      - name: Verify coverage config (non-vacuity + lockstep)
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run check:coverage-config
+
       - name: Cache Playwright browsers
         if: steps.detect.outputs.fe == 'true'
         id: pw-cache

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Self-test for frontend/scripts/check-bundle-size.js. Builds synthetic dist
 # fixtures (a hand-written .vite/manifest.json + JS chunk files) and asserts the
-# gate FAILS when a manifest entry chunk exceeds the 500 KB gz main budget or a
-# dynamic-entry chunk exceeds the 200 KB gz lazy budget, PASSES when every gated
-# chunk is within budget, and FAILS CLOSED on a missing/empty dist, a missing or
-# invalid manifest, and a manifest with zero JS chunks. The gate is itself code;
-# it must be correct.
+# gate FAILS when a manifest entry's TRANSITIVE-import-closure gz total exceeds
+# the 500 KB gz main budget or a dynamic-entry's closure exceeds the 200 KB gz
+# lazy budget, PASSES when every gated entry is within budget, and FAILS CLOSED
+# on a missing/empty dist, a missing or invalid manifest (object OR array), a
+# manifest with zero JS chunks, and a manifest with no MAIN (isEntry) chunk at
+# all. The gate is itself code; it must be correct.
 #
 # gzip shrinks low-entropy bytes (zeros, repeats) to almost nothing, so a budget
 # expressed in GZIPPED bytes can only be exercised with HIGH-ENTROPY
@@ -92,6 +93,73 @@ cat > "$C/.vite/manifest.json" <<'JSON'
 JSON
 assert 1 "$C" "lazy chunk 230 KB gz > 200 KB budget"
 
+# --- (c2) lazy entry SMALL on its own but its STATIC import is huge -> FAIL ----
+# The route chunk's OWN file is 50 KB gz (under the 200 KB lazy budget), but it
+# STATICALLY imports a 230 KB gz shared chunk. The browser transfers BOTH when
+# the route loads, so the gate must budget the transitive closure (entry + its
+# static imports), not the entry file alone. Without closure accounting this
+# fixture would PASS (50 < 200) and a fat shared dependency would slip through —
+# the F1 fail-open this case pins shut. The shared chunk is itself neither an
+# entry nor a dynamic-entry (a Rollup-split SHARED chunk), reachable only via the
+# route entry's `imports` array.
+I="$TMP/i/dist"; mkdir -p "$I/assets" "$I/.vite"
+mkchunk "$I/assets/index-IIII.js"   120          # main, under 500
+mkchunk "$I/assets/route-JJJJ.js"    50          # lazy OWN file under 200...
+mkchunk "$I/assets/shared-KKKK.js"  230          # ...but it imports this 230 KB shared chunk
+cat > "$I/.vite/manifest.json" <<'JSON'
+{
+  "index.html":    { "file": "assets/index-IIII.js",  "name": "index",  "src": "index.html",  "isEntry": true },
+  "src/Route.tsx": { "file": "assets/route-JJJJ.js",   "name": "Route",  "src": "src/Route.tsx", "isDynamicEntry": true, "imports": ["_shared-KKKK.js"] },
+  "_shared-KKKK.js": { "file": "assets/shared-KKKK.js", "name": "shared" }
+}
+JSON
+assert 1 "$I" "lazy entry+static-import closure 50+230 KB gz > 200 KB budget"
+
+# --- (c3) main entry SMALL on its own but a SHARED import double-counted once --
+# Two entries (main + lazy) both statically import the SAME shared chunk. The gate
+# must de-duplicate files WITHIN a single entry's closure (a shared chunk reached
+# by two import edges from one entry counts once), but each entry budgets its own
+# closure independently. Here the main entry imports one shared chunk twice (via
+# two intermediate chunks), and the closure must total main(120)+shared(300)=420
+# < 500 -> PASS, proving de-dup (without it the 300 would be counted twice = 600
+# > 500 and falsely FAIL).
+L="$TMP/l/dist"; mkdir -p "$L/assets" "$L/.vite"
+mkchunk "$L/assets/index-LLLL.js"  120           # main own file
+mkchunk "$L/assets/mid1-MMMM.js"    20           # intermediate 1 (imports shared)
+mkchunk "$L/assets/mid2-NNNN.js"    20           # intermediate 2 (imports shared)
+mkchunk "$L/assets/shared-OOOO.js" 300           # shared, reached via BOTH intermediates
+cat > "$L/.vite/manifest.json" <<'JSON'
+{
+  "index.html": { "file": "assets/index-LLLL.js", "name": "index", "src": "index.html", "isEntry": true, "imports": ["_mid1-MMMM.js", "_mid2-NNNN.js"] },
+  "_mid1-MMMM.js": { "file": "assets/mid1-MMMM.js", "name": "mid1", "imports": ["_shared-OOOO.js"] },
+  "_mid2-NNNN.js": { "file": "assets/mid2-NNNN.js", "name": "mid2", "imports": ["_shared-OOOO.js"] },
+  "_shared-OOOO.js": { "file": "assets/shared-OOOO.js", "name": "shared" }
+}
+JSON
+assert 0 "$L" "main closure de-dups a doubly-imported shared chunk (120+20+20+300 < 500)"
+
+# --- (c4) dynamicImports are NOT followed into the main closure ---------------
+# A main entry that DYNAMICALLY imports a huge lazy route must NOT fold that route
+# into its own budget (the lazy chunk is separately budgeted, and the browser does
+# not transfer it on initial load). Main own file 120, its dynamicImports points
+# at a 230 KB lazy chunk that is independently within ITS 200... no, 230 > 200, so
+# to isolate the "dynamicImports not followed into MAIN" behavior we keep the lazy
+# chunk under its own 200 budget (150) and make the MAIN tiny: if dynamicImports
+# were (wrongly) followed, main would be 120+150=270 < 500 and still pass, which
+# would not distinguish. So instead: main own 480, lazy 150. Main alone 480 < 500
+# PASS; lazy alone 150 < 200 PASS. If dynamicImports were folded into main, main
+# would be 480+150=630 > 500 -> FAIL. Expecting PASS proves they are NOT followed.
+P="$TMP/p/dist"; mkdir -p "$P/assets" "$P/.vite"
+mkchunk "$P/assets/index-PPPP.js"  480           # main own file, just under 500
+mkchunk "$P/assets/route-QQQQ.js"  150           # dynamically-imported lazy route, under 200
+cat > "$P/.vite/manifest.json" <<'JSON'
+{
+  "index.html":    { "file": "assets/index-PPPP.js", "name": "index", "src": "index.html", "isEntry": true, "dynamicImports": ["src/Route.tsx"] },
+  "src/Route.tsx": { "file": "assets/route-QQQQ.js",  "name": "Route", "src": "src/Route.tsx", "isDynamicEntry": true }
+}
+JSON
+assert 0 "$P" "main does NOT fold its dynamicImports into its own budget (main 480<500, lazy 150<200)"
+
 # --- (d1) dist dir missing entirely -> FAIL CLOSED ----------------------------
 assert 2 "$TMP/does-not-exist" "missing dist dir"
 
@@ -104,6 +172,26 @@ assert 2 "$E" "empty dist (no manifest)"
 F="$TMP/f/dist"; mkdir -p "$F/assets" "$F/.vite"
 echo '{}' > "$F/.vite/manifest.json"
 assert 2 "$F" "manifest with zero JS chunks"
+
+# --- (d3b) manifest classifies a LAZY chunk but NO MAIN entry -> FAIL CLOSED ---
+# This SPA always emits exactly one isEntry (the index.html script). A manifest
+# with dynamic-entry chunks but ZERO isEntry chunks is a broken/partial build
+# (the HTML entry vanished), so the gate must fail closed (exit 2) rather than
+# certify a pass off the lazy chunks alone. (F2.)
+M="$TMP/m/dist"; mkdir -p "$M/assets" "$M/.vite"
+mkchunk "$M/assets/route-RRRR.js" 150            # lazy, within budget, but no main entry exists
+cat > "$M/.vite/manifest.json" <<'JSON'
+{ "src/Route.tsx": { "file": "assets/route-RRRR.js", "name": "Route", "src": "src/Route.tsx", "isDynamicEntry": true } }
+JSON
+assert 2 "$M" "manifest with a lazy chunk but no main (isEntry) chunk"
+
+# --- (d3c) manifest parses to a JSON ARRAY -> FAIL CLOSED ---------------------
+# A manifest that is valid JSON but not an OBJECT (e.g. `[]`) cannot be a Vite
+# chunk map; the script's Array.isArray guard must fail closed (exit 2). (F10.)
+N="$TMP/n/dist"; mkdir -p "$N/assets" "$N/.vite"
+mkchunk "$N/assets/index-SSSS.js" 120
+echo '[]' > "$N/.vite/manifest.json"
+assert 2 "$N" "manifest is a JSON array, not an object"
 
 # --- (d4) manifest present but malformed JSON -> FAIL CLOSED ------------------
 G="$TMP/g/dist"; mkdir -p "$G/assets" "$G/.vite"

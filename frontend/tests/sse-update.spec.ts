@@ -85,6 +85,11 @@ test.describe('realtime — deterministic SSE update (AC#4)', () => {
 
     // Install the fake EventSource before the app boots so SseConnection.open()
     // constructs ours, not the browser's.
+    // BRITTLENESS NOTE: this fake works only because api/sse.ts looks up
+    // `EventSource` at call time (`new EventSource(url)`). If a refactor hoists or
+    // captures a reference to the global `EventSource` at module top-level (before
+    // this init script runs), the fake is bypassed, no `/api/events` instance
+    // lands on `window.__sse`, and the test times out at the 30 s `__sse` poll.
     await page.addInitScript(installFakeEventSource);
 
     // Count GET /api/sessions calls so we can prove a SECOND one fires after the

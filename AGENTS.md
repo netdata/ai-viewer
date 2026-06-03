@@ -254,11 +254,11 @@ ai-viewer.git/
 ├── testdata/
 ├── docs/
 ├── scripts/
-│   ├── build.sh                 builds frontend, embeds, builds Go binaries
+│   ├── build.sh                 builds frontend (+ bundle-size gate), embeds, builds Go binaries
 │   ├── dev.sh                   dev workflow (vite dev + go run)
 │   ├── lint.sh                  all lint + static analysis, zero warnings
-│   ├── test.sh                  all tests + coverage + race
-│   ├── check-coverage.sh        statement coverage gate (internal/* ≥ 80%)
+│   ├── test.sh                  all tests (Go + frontend) + coverage + race
+│   ├── check-coverage.sh        Go statement coverage gate (internal/* ≥ 80%)
 │   ├── gates.sh                 runs every quality gate listed above (planned, SOW-0013)
 │   ├── spec-drift.sh            spec ↔ code drift detection (planned, SOW-0013)
 │   └── sanitize-fixture.sh      fixture sanitization
@@ -346,11 +346,11 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 (Status: `build.sh`, `dev.sh`, `lint.sh`, `test.sh`, and `check-coverage.sh` exist today. `gates.sh` (SOW-0013) and `spec-drift.sh` (SOW-0013) are planned aggregators — until those land, use the individual gate commands and the per-gate CI jobs. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
 
 ```bash
-./scripts/build.sh          # build frontend + Go binaries
+./scripts/build.sh          # build frontend (+ REAL bundle-size gate on dist/) + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
-./scripts/lint.sh           # build-free static analysis: Go (golangci+gosec+govulncheck) AND frontend (eslint+tsc+bundle/coverage gate self-tests); zero warnings
-./scripts/test.sh           # all tests + coverage + race
-./scripts/check-coverage.sh # statement coverage gate (internal/* ≥ 80%)
+./scripts/lint.sh           # build-free static analysis: Go (golangci+gosec+govulncheck) AND frontend (eslint+tsc+bundle-size self-test+coverage-config verifier+coverage gate self-test); zero warnings
+./scripts/test.sh           # ALL tests + coverage + race: Go, then the frontend Vitest coverage gate (normal mode)
+./scripts/check-coverage.sh # Go statement coverage gate (internal/* ≥ 80%)
 ./scripts/gates.sh          # every quality gate listed above (planned, SOW-0013)
 ./scripts/spec-drift.sh     # spec ↔ code drift detection (planned, SOW-0013)
 go test -race ./...         # Go tests with race

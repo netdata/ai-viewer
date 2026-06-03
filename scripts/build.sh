@@ -30,7 +30,11 @@ run cd "$REPO_ROOT"
 EMBED_DIR="cmd/ai-viewer-serve/frontend_dist"
 
 # 1. Build the frontend. Prefer `npm ci` (reproducible, lockfile-driven);
-#    fall back to `npm install` only when the lockfile is absent.
+#    fall back to `npm install` only when the lockfile is absent. Then enforce
+#    the gzipped bundle-size budget on the just-built dist/ (the manifest exists
+#    post-build): a local build fails fast on a budget violation, the same gate
+#    CI runs after its build — so `scripts/build.sh` enforces the budget, not
+#    just CI (quality-gates.md §Frontend — Bundle Size).
 (
   run cd frontend
   if [[ -f package-lock.json ]]; then
@@ -40,6 +44,7 @@ EMBED_DIR="cmd/ai-viewer-serve/frontend_dist"
     run npm install
   fi
   run npm run build
+  run npm run check:bundle-size
 )
 
 # 2. Sync the WHOLE dist/ tree into the embed dir, keeping only the .gitkeep

@@ -126,8 +126,11 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - Threshold: all pass; **global** aggregate floor (≥ 80% lines/statements/functions, ≥ 75% branches) **plus a per-directory ≥ 80% lines floor** for every measured directory under `src/components/` and `src/pages/`.
 - **Per-directory mechanism = Vitest's NATIVE glob-keyed `coverage.thresholds`** (SOW-0012 Chunk C; Vitest ≥ 4, verified against the installed 4.1.7). `frontend/vitest.config.ts` lists one glob key per measured dir (`'src/components/<Dir>/**': { lines: 80 }`, `'src/pages/<Dir>/**': { lines: 80 }`); Vitest aggregates each glob group's matched files into one coverage map and **fails the run (exit 1)** if a group's lines % is below the floor, emitting `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`. **No wrapper script** — the floor lives in the config the same command already runs. A shared `PER_DIR_LINES` constant keeps the global floor and every per-dir group in lockstep.
 - **Glob keys track the measured dirs only.** A glob group that matches **zero files** has lines pct `"Unknown"`, which **vacuously PASSES** (`"Unknown" < 80` is `false`). So a per-dir key is added **only** for a dir that is in `coverage.include`; placeholder/stub dirs (`ComingSoon`, `Layout`, `StatCard`, `Agents`, `Models`, `Tools`, `NotFound`) are excluded from `include` and intentionally carry **no** per-dir key. Adding a dir's per-dir key without also adding it to `include` is a silent no-op — keep the two lists in lockstep. The global floor still gates every included file in aggregate.
-- The HTML report (`frontend/coverage/`) is produced by the `html` reporter and uploaded as a CI artifact (`frontend-coverage-<run_id>`); the `json` reporter additionally emits `coverage/coverage-final.json` (consumed by the gate self-test).
-- **Gate-wiring self-test:** `frontend/scripts/check-coverage-thresholds.test.sh` (`npm run check:coverage-thresholds:selftest`) runs Vitest on a throwaway fixture project with a known 50%-lines dir and asserts the native per-dir threshold **fails closed** (exit 1, naming the dir) under the floor and passes above it — catching a config edit that drops the glob keys or a Vitest schema change that disables enforcement. Runs as a dedicated CI step in the `frontend` job; mirrors the bundle-size gate self-test.
+- The HTML report (`frontend/coverage/`) is produced by the `html` reporter and uploaded as a CI artifact (`frontend-coverage-<run_id>`); the `json` reporter additionally emits `coverage/coverage-final.json`.
+- **Shared dir lists (SOW-0012 review F3).** `PER_DIR_GLOBS`, `COVERAGE_INCLUDE`, and `PER_DIR_LINES` live in `frontend/vitest.coverage.mjs`; **both** `vitest.config.ts` and the config verifier below import them, so the gate Vitest enforces and the checks against it cannot read different lists. (`.mjs` so the standalone Node verifier needs no TS loader; typed for `vitest.config.ts` via the co-located `vitest.coverage.d.mts`.)
+- **Two independent guards, distinct jobs:**
+  - **Gate-MECHANISM self-test:** `frontend/scripts/check-coverage-thresholds.test.sh` (`npm run check:coverage-thresholds:selftest`) runs Vitest on a **throwaway fixture** project (its own config + a known 50%-lines dir) and asserts the native glob-keyed threshold **fails closed** (exit 1, naming the dir) under the floor and passes above it. It proves the **Vitest mechanism** on the installed version still fails closed — it does **not** read the real config, so it cannot catch a real-config glob that matches zero files or a measured dir with no floor.
+  - **Real-config verifier:** `frontend/scripts/check-coverage-config.mjs` (`npm run check:coverage-config`) reads the REAL shared lists and **fails closed (exit 1, naming the offender)** if (a) any `PER_DIR_GLOBS` glob matches **zero** real source files on disk (the vacuous-`"Unknown"`-pass trap) or (b) any **measured** dir under `src/components/`/`src/pages/` (a `COVERAGE_INCLUDE` entry with ≥ 1 non-test `.ts`/`.tsx`) has **no** per-dir floor. Build-free (`node:fs` only). Runs in `scripts/lint.sh`'s frontend section **and** as a dedicated CI step in the `frontend` job; mirrors the self-test wiring.
 - A dir under the floor is a finding to close with tests (or, if genuinely large, to escalate) — **never** lower the threshold to make a dir pass.
 
 ### Frontend — E2E
@@ -251,13 +254,19 @@ Its frontend section (skipped cleanly when `frontend/` is absent) mirrors the
 build-free static gates of the CI `frontend` job, fail-fast in order: ensure
 deps are present (reusing `scripts/build.sh`'s `npm ci`/`npm install` fallback,
 but only when `node_modules` is missing — this is a fast analysis pass, not a
-build), `npm run lint -- --max-warnings 0`, `npm run typecheck`, then the two
-**hermetic gate-logic self-tests** `npm run check:bundle-size:selftest` and
-`npm run check:coverage-thresholds:selftest`. `scripts/lint.sh` does **not** run
-the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`) or the
-REAL coverage run (`npm run test -- --run --coverage`): those need a build / full
-test run and live in the CI `frontend` job (and `scripts/build.sh` /
-`scripts/test.sh`), not in this build-free entrypoint. CI enforces the Go set via
+build), `npm run lint` (the `lint` npm script bakes in `--max-warnings=0` — the
+single source of truth for the flag; lint.sh does not re-pass it), `npm run
+typecheck`, the bundle-size **gate-logic self-test** (`npm run
+check:bundle-size:selftest`), the **coverage-config verifier** (`npm run
+check:coverage-config` — checks the REAL per-dir floors, see §Frontend —
+Unit/Component), then the per-dir coverage **gate-logic self-test** (`npm run
+check:coverage-thresholds:selftest`). `scripts/lint.sh` does **not** run the REAL
+bundle-size-vs-built-manifest gate (`npm run check:bundle-size`) or the REAL
+coverage run (`npm run test -- --run --coverage`): those need a build / full test
+run and live in the CI `frontend` job — and in `scripts/build.sh` (which runs
+`npm run check:bundle-size` on the just-built `dist/`) / `scripts/test.sh` (which
+runs the frontend `npm run test -- --run --coverage` after the Go suite) — not in
+this build-free entrypoint. CI enforces the Go set via
 the version-pinned `golangci/golangci-lint-action` plus its standalone
 gosec/govulncheck steps (CI keeps the cached action rather than invoking
 `scripts/lint.sh`, to preserve golangci's analysis cache). `scripts/test.sh` (Go

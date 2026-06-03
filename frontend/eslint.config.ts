@@ -43,9 +43,24 @@ export default defineConfig(
   // `scripts/` holds standalone Node build-tooling (e.g. the SOW-0012
   // bundle-size gate) that lives OUTSIDE the app's tsconfig project, so the
   // type-checked rule set has no type info for it; it is exercised by its own
-  // self-test + actionlint, not by app-source ESLint. The other entries are
+  // self-test + actionlint, not by app-source ESLint. `vitest.coverage.mjs` is
+  // the same class — a standalone Node config-data module (string arrays) shared
+  // by vitest.config.ts and scripts/check-coverage-config.mjs; it carries no app
+  // logic, is type-checked via its import in vitest.config.ts, and is not a
+  // `.{ts,tsx}` file so the type-aware parserOptions never attach to it (only the
+  // type-aware RULES would, and they need type info). `**/*.d.mts` are ambient
+  // declaration files with no implementation to lint. The remaining entries are
   // generated/output dirs that must never be linted.
-  globalIgnores(['dist', 'coverage', 'node_modules', 'playwright-report', 'test-results', 'scripts']),
+  globalIgnores([
+    'dist',
+    'coverage',
+    'node_modules',
+    'playwright-report',
+    'test-results',
+    'scripts',
+    'vitest.coverage.mjs',
+    '**/*.d.mts',
+  ]),
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {

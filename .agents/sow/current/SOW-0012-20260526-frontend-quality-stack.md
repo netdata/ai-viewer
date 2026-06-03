@@ -468,6 +468,85 @@ for the keyboard-fallback gap, not just the lint-flagged lines.
   confirmed by the inject-a-failure-then-revert proof (downstream steps did not
   run; the script aborted non-zero).
 
+### 2026-06-03 — Chunk F: external-review findings addressed (F1–F10, delegated)
+
+Ten verified external-review findings on the Chunk A–E surface, fixed
+spec→test→code (gate fixes extended the gate's self-test FIRST):
+
+- **F1 [P1] bundle-size gate fail-open on transitive static imports**
+  (`frontend/scripts/check-bundle-size.js`). The gate budgeted only each entry's
+  own `file`; a Rollup-split SHARED chunk (neither `isEntry` nor
+  `isDynamicEntry`, reachable via an entry's `imports[]`) was swept into
+  "ungated", so a tiny lazy route statically importing a huge shared chunk
+  PASSED. Fix: budget each MAIN/LAZY entry against the gz sum of its file PLUS the
+  transitive closure of its static `imports` (recursive, de-duped within one
+  entry's closure; `dynamicImports` NOT followed). A file pulled into a closure is
+  no longer re-listed as ungated. New self-test cases (`check-bundle-size.test.sh`):
+  closure-over-budget FAILs (50 KB route + 230 KB static import > 200), diamond
+  shared chunk de-dups to one count (PASS), and `dynamicImports` are not folded
+  into the main budget (PASS). All three FAIL against the old gate (verified).
+- **F2 [P2] gate passed with no main entry** (same file). The zero-chunks guard
+  was `main==0 && lazy==0`; a manifest with lazy chunks but no `isEntry` (broken
+  SPA build) passed. Fix: require `mainChunks.length >= 1`, else fail-closed
+  (exit 2). New self-test case: lazy-only manifest → exit 2.
+- **F10 [P3] non-object-manifest case unpinned** (same file). A `[]` manifest is
+  caught by the existing `Array.isArray` guard but had no test; added a case
+  asserting exit 2.
+- **F3 [P2] coverage self-test did not validate the REAL config.** Added a new
+  real-config verifier `frontend/scripts/check-coverage-config.mjs` (+ `npm run
+  check:coverage-config`). The two dir lists (`COVERAGE_INCLUDE`, `PER_DIR_GLOBS`,
+  `PER_DIR_LINES`) were extracted into a shared `frontend/vitest.coverage.mjs`
+  (typed via `vitest.coverage.d.mts`) that BOTH `vitest.config.ts` AND the
+  verifier import — they cannot diverge. The verifier fails closed (exit 1,
+  naming the offender) if (a) any per-dir glob matches ZERO files on disk (the
+  vacuous-`"Unknown"`-pass trap) or (b) any measured component/page dir lacks a
+  per-dir floor. Wired into `scripts/lint.sh`'s frontend section + a dedicated CI
+  `frontend` step. The throwaway self-test is retained and re-described as proving
+  the MECHANISM; specs/skills corrected (it does not read the real config).
+- **F4 [P2] axe did not cover every route.** Added axe scans (both themes) for
+  `/tools`, `/models`, `/agents` (ComingSoon stubs) and `/no-such-route`
+  (NotFound) to `tests/a11y.spec.ts`. After this, every App.tsx route is
+  axe-covered. **The NotFound scan surfaced a REAL serious violation**
+  (`link-in-text-block`, both themes): the "Back to sessions" link sits in muted
+  `--text-secondary` text with global `text-decoration: none`, so it is
+  distinguished only by color at 1.17:1 contrast (< 3:1). Fixed at source
+  (`NotFound.module.css`: persist an underline on the in-note link). e2e:a11y now
+  29/29 (was 27 pass + 2 fail).
+- **F5 [P2] docs claimed build.sh/test.sh run the real gates; they didn't.** Made
+  the claim true: `scripts/build.sh` now runs `npm run check:bundle-size` on the
+  just-built `dist/`; `scripts/test.sh` (normal mode) now runs the frontend
+  `npm run test -- --run --coverage` after the Go suite (reusing build.sh's
+  deps-if-missing pattern; the `--stress` branch stays Go-only). Specs/AGENTS/
+  skills updated to the now-true wiring.
+- **F6 [P2] missing `engines`.** Added `"engines": { "node": ">=20.11.0" }` to
+  `frontend/package.json` (`eslint.config.ts` uses `import.meta.dirname`).
+- **F7 [P3] quarantine README overclaimed "still run".** Reworded: quarantined
+  specs are a manual/diagnostic `npm run e2e:quarantine` (non-gating); CI runs
+  only the gating `e2e` today; a `continue-on-error: true` CI step is to be added
+  when the dir is first populated. No false "runs in CI" claim.
+- **F8 [P3] lint.sh redundant `--max-warnings 0`.** The package.json `lint` script
+  already bakes it in; lint.sh now calls bare `npm run lint` (single source of
+  truth). Unified the spelling to `--max-warnings=0` across specs/skills.
+- **F9 [P3] SSE-test brittleness note.** Added a one-line comment near the
+  `addInitScript` call in `tests/sse-update.spec.ts` warning that hoisting/
+  capturing `EventSource` at module top-level would bypass the fake (no code
+  change).
+
+ESLint friction from the new `.mjs`/`.d.mts` root files (the type-aware rule set
+has no parserOptions for non-`.{ts,tsx}` files): resolved by adding
+`vitest.coverage.mjs` + `**/*.d.mts` to `eslint.config.ts`'s `globalIgnores`
+(same class as the already-ignored `scripts/` Node tooling — config-data, no app
+logic, type-checked via its `vitest.config.ts` import). `tsconfig.json` left
+pristine.
+
+AC reconciliation (no AC text changed, per the standing rule): the verifier and
+shared-list files are `.mjs`/`.d.mts` (not `.js`), in the same documented
+`.js`→`.ts(/.mjs)` tooling-extension class already reconciled at line ~195 for
+`eslint.config.ts`; recorded here, not by editing AC#1/#3.
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

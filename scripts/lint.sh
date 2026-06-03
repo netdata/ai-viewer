@@ -27,10 +27,14 @@
 #   4. ensure deps present — reuse scripts/build.sh's npm ci / npm install
 #                            fallback, but only when node_modules is missing
 #                            (this is a fast static-analysis pass, not a build).
-#   5. npm run lint        — eslint flat config, --max-warnings 0.
+#   5. npm run lint        — eslint flat config (the `lint` npm script bakes in
+#                            --max-warnings=0; not re-passed here).
 #   6. npm run typecheck   — tsc --noEmit (strict).
 #   7. bundle-size self-test     — hermetic; verifies the bundle-size GATE LOGIC.
-#   8. coverage-thresholds self-test — hermetic; verifies the per-dir coverage
+#   8. coverage-config verifier  — checks the REAL Vitest per-dir floors against
+#                                  the source tree (non-vacuity + lockstep);
+#                                  build-free (node:fs only).
+#   9. coverage-thresholds self-test — hermetic; verifies the per-dir coverage
 #                                      GATE LOGIC.
 #
 # Tool versions mirror .github/workflows/ci.yml exactly so local == CI:
@@ -124,7 +128,11 @@ else
     fi
 
     # --- 5. eslint (flat config, zero warnings) -------------------------------
-    run npm run lint -- --max-warnings 0
+    # The package.json `lint` script already bakes in `--max-warnings=0` (single
+    # source of truth), so we do NOT re-pass it here (it would be a redundant
+    # doubled flag). CI's `frontend` job passes it explicitly via `npm run lint --
+    # --max-warnings=0` for legibility; both resolve to the same zero-warnings run.
+    run npm run lint
 
     # --- 6. tsc --noEmit (strict type check) ----------------------------------
     run npm run typecheck
@@ -136,7 +144,15 @@ else
     # synthetic dist fixtures and verifies the gate's logic (all three exit codes).
     run npm run check:bundle-size:selftest
 
-    # --- 8. per-dir coverage GATE-LOGIC self-test (hermetic, build-free) -------
+    # --- 8. coverage-config verifier (REAL config, build-free) ----------------
+    # Verifies the ACTUAL Vitest per-dir floors against the source tree: every
+    # per-dir glob matches >= 1 real file (no vacuous "Unknown" pass) and every
+    # measured component/page dir has a per-dir floor (lockstep). Reads the same
+    # shared lists vitest.config.ts imports, so it checks the gate Vitest enforces.
+    # Distinct from the gate-mechanism self-test below (which uses a fixture).
+    run npm run check:coverage-config
+
+    # --- 9. per-dir coverage GATE-LOGIC self-test (hermetic, build-free) -------
     # The REAL coverage run (npm run test -- --run --coverage, with native
     # per-dir thresholds) needs the full test suite and runs in CI's frontend
     # job; it is intentionally NOT here. This self-test drives the installed
@@ -144,7 +160,7 @@ else
     # fails closed under-floor and passes above.
     run npm run check:coverage-thresholds:selftest
   )
-  echo -e "${GREEN}[ok]${NC} Frontend section: eslint + tsc + bundle-size & coverage gate self-tests all clean." >&2
+  echo -e "${GREEN}[ok]${NC} Frontend section: eslint + tsc + bundle-size self-test + coverage-config verifier + coverage gate self-test all clean." >&2
 fi
 
 echo -e "${GREEN}[ok]${NC} lint.sh: Go + frontend static analysis all clean." >&2

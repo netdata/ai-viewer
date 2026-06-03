@@ -11,17 +11,34 @@
 //     code-splitting without a fragile `index-*.js` name match.
 //       * isEntry        -> MAIN chunk        -> budget MAIN_MAX_GZIP  (500 KB gz)
 //       * isDynamicEntry  -> per-route LAZY chunk -> budget LAZY_MAX_GZIP (200 KB gz)
-//   - Every JS file under <distDir>/assets/ is MEASURED for the report. A file that
-//     the manifest does NOT classify (a `?worker` bundle such as forceWorker-*.js
-//     that is instantiated via `new Worker()` and is absent from the manifest, or a
-//     non-entry shared chunk Rollup split out) is reported as "ungated" — the spec's
-//     two budgets are defined only for HTML-entry and route-lazy chunks. A budget for
-//     worker/shared chunks is a separate SOW.
+//   - The budget for each MAIN/LAZY entry is measured against the gzip sum of the
+//     entry's own file PLUS the TRANSITIVE CLOSURE of its STATIC `imports` (follow
+//     manifest[key].imports recursively; each imported key contributes its `.file`).
+//     This matters because a Rollup-split SHARED chunk is neither isEntry nor
+//     isDynamicEntry — it is reachable only via an entry's `imports` array — yet the
+//     browser TRANSFERS it together with the entry when that route loads. Budgeting
+//     the entry's `.file` alone would let a small lazy route that statically imports
+//     a huge shared chunk pass (the chunk would only show up as "ungated"), a
+//     fail-open. Files are DE-DUPLICATED within a single entry's closure (a shared
+//     chunk reached by two import edges counts once); each entry's closure is summed
+//     independently (a chunk shared by two entries is budgeted under each — that is
+//     the real per-route transfer cost). `dynamicImports` are NOT followed: those
+//     point at separately-budgeted LAZY chunks the browser does not fetch on the
+//     entry's initial load.
+//   - Every JS file under <distDir>/assets/ is MEASURED for the report. A file that is
+//     neither classified as an entry NOR pulled into any entry's static-import closure
+//     (a `?worker` bundle such as forceWorker-*.js instantiated via `new Worker()` and
+//     absent from the manifest, or a chunk only ever reached via dynamicImports) is
+//     reported as "ungated" — the spec's two budgets are defined only for HTML-entry
+//     and route-lazy chunks (and what they statically pull in). A budget for
+//     worker-only chunks is a separate SOW.
 //   - gzipped sizes use Node's zlib.gzipSync at its default level — the same level a
 //     CDN/`gzip -c` uses for the size report; the budget is about transferred bytes.
 //
 // No silent failures (fail-closed): a missing/empty distDir, a missing or invalid
-// .vite/manifest.json, a manifest that classifies ZERO JS chunks, or a manifest entry
+// .vite/manifest.json (including a JSON array rather than an object), a manifest that
+// classifies ZERO JS chunks, a manifest with NO main (isEntry) chunk at all (this SPA
+// always emits exactly one — its absence is a broken build), or a manifest entry
 // whose file is absent on disk each EXIT NON-ZERO. The gate never certifies "within
 // budget" without measuring real, classified chunks.
 //
@@ -97,37 +114,104 @@ function main() {
 
   // Gzipped size of one chunk file, resolved relative to distDir. A manifest
   // entry pointing at a file absent on disk is a stale/broken build — fail
-  // closed rather than skip it (skipping could vacuously pass the gate).
+  // closed rather than skip it (skipping could vacuously pass the gate). Memoized
+  // so a chunk in several entries' closures is read+gzipped once.
+  const gzipCache = new Map(); // relFile -> gz bytes
   function gzipOf(relFile) {
+    const cached = gzipCache.get(relFile);
+    if (cached !== undefined) {
+      return cached;
+    }
     const abs = path.join(distDir, relFile);
     if (!fs.existsSync(abs)) {
       fatal(`manifest references a file that is absent on disk: ${relFile}\n        (stale or incomplete build under ${distDir})`);
     }
-    return zlib.gzipSync(fs.readFileSync(abs)).length;
+    const gz = zlib.gzipSync(fs.readFileSync(abs)).length;
+    gzipCache.set(relFile, gz);
+    return gz;
+  }
+
+  // A well-formed manifest object value. Vite's ManifestChunk has a string `file`;
+  // `imports`/`dynamicImports` are optional string arrays of OTHER manifest KEYS.
+  function isChunk(v) {
+    return v !== null && typeof v === 'object' && typeof v.file === 'string';
+  }
+
+  // Transitive closure of an entry's STATIC imports, returned as the set of
+  // distinct chunk FILES the browser transfers with that entry. We walk
+  // manifest[key].imports recursively (each element is another manifest KEY),
+  // de-duplicating by manifest key so a diamond import graph (shared chunk reached
+  // via two paths) is visited once. dynamicImports are deliberately NOT walked —
+  // they are separately-budgeted LAZY chunks, not part of this entry's initial
+  // transfer. A non-.js chunk in the closure (CSS) is skipped (the budget is the
+  // JS budget). Returns { files: Set<relFile>, gzip: total bytes }.
+  function staticClosure(rootKey) {
+    const seenKeys = new Set();
+    const files = new Set();
+    const stack = [rootKey];
+    while (stack.length > 0) {
+      const key = stack.pop();
+      if (seenKeys.has(key)) {
+        continue;
+      }
+      seenKeys.add(key);
+      const entry = manifest[key];
+      if (!isChunk(entry)) {
+        // A manifest referencing an import key that is missing/!chunk is a broken
+        // build (Vite always emits the imported chunk's entry). Fail closed rather
+        // than silently undercount the closure.
+        fatal(
+          `manifest import graph references a missing/invalid chunk key: ${JSON.stringify(key)}\n` +
+            `        (reachable from entry ${JSON.stringify(rootKey)} in ${manifestPath})`,
+        );
+      }
+      if (entry.file.endsWith('.js')) {
+        files.add(entry.file);
+      }
+      if (Array.isArray(entry.imports)) {
+        for (const imp of entry.imports) {
+          if (typeof imp === 'string') {
+            stack.push(imp);
+          }
+        }
+      }
+    }
+    let gzip = 0;
+    for (const f of files) {
+      gzip += gzipOf(f);
+    }
+    return { files, gzip };
   }
 
   // Classify JS chunks from the manifest. `file` paths are relative to outDir
-  // (e.g. "assets/index-*.js"); only .js chunks carry a size budget.
-  const mainChunks = []; // { file, gzip }  (isEntry)
-  const lazyChunks = []; // { file, gzip }  (isDynamicEntry)
-  const classifiedFiles = new Set();
+  // (e.g. "assets/index-*.js"); only .js chunks carry a size budget. Each
+  // MAIN/LAZY entry's budget is its transitive static-import closure (entry.file
+  // + everything its `imports` reach), so a fat shared chunk a small entry pulls
+  // in is gated, not swept into "ungated".
+  const mainChunks = []; // { file, gzip, files: Set }  (isEntry, closure)
+  const lazyChunks = []; // { file, gzip, files: Set }  (isDynamicEntry, closure)
+  const coveredFiles = new Set(); // every file inside ANY gated entry's closure
   for (const key of Object.keys(manifest)) {
     const entry = manifest[key];
-    if (entry === null || typeof entry !== 'object' || typeof entry.file !== 'string') {
+    if (!isChunk(entry)) {
       continue;
     }
     if (!entry.file.endsWith('.js')) {
       continue; // CSS / asset entries are not part of the JS budget.
     }
-    if (entry.isEntry === true) {
-      mainChunks.push({ file: entry.file, gzip: gzipOf(entry.file) });
-      classifiedFiles.add(entry.file);
-    } else if (entry.isDynamicEntry === true) {
-      lazyChunks.push({ file: entry.file, gzip: gzipOf(entry.file) });
-      classifiedFiles.add(entry.file);
+    const isMain = entry.isEntry === true;
+    const isLazy = entry.isDynamicEntry === true;
+    if (!isMain && !isLazy) {
+      // Non-entry, non-dynamic-entry JS chunks (shared splits) are accounted for
+      // via the closures of the entries that import them, not classified here.
+      continue;
     }
-    // Non-entry, non-dynamic-entry JS chunks (shared splits) are reported in the
-    // "ungated" sweep below alongside worker bundles, so they need no marking here.
+    const closure = staticClosure(key);
+    const chunk = { file: entry.file, gzip: closure.gzip, files: closure.files };
+    (isMain ? mainChunks : lazyChunks).push(chunk);
+    for (const f of closure.files) {
+      coveredFiles.add(f);
+    }
   }
 
   // A manifest that classifies ZERO gated JS chunks must never certify a pass —
@@ -140,10 +224,23 @@ function main() {
     );
   }
 
+  // This SPA always emits exactly one HTML entry (index.html -> isEntry). A
+  // manifest that classifies LAZY chunks but no MAIN entry is a broken/partial
+  // build (the HTML entry vanished); certifying a pass off the lazy chunks alone
+  // would be a fail-open. Fail closed.
+  if (mainChunks.length === 0) {
+    fatal(
+      `manifest classifies no MAIN (isEntry) chunk: ${manifestPath}\n` +
+        `        This SPA must emit exactly one HTML entry — a build without it is invalid.`,
+    );
+  }
+
   // Sweep every JS file actually on disk under assets/ so the report covers
-  // chunks the manifest omits (Vite's ?worker bundles are emitted but NOT listed
-  // in the manifest; non-entry shared chunks are listed only indirectly). These
-  // are reported as "ungated" — visibility without a budget.
+  // chunks NOT inside any gated entry's closure (Vite's ?worker bundles are
+  // emitted but NOT listed in the manifest; a chunk reached only via
+  // dynamicImports without also being a dynamic-entry would land here too). These
+  // are reported as "ungated" — visibility without a budget. A file pulled into a
+  // closure is NOT re-counted here (it is already gated under its entry).
   const ungated = []; // { file, gzip }
   const assetsDir = path.join(distDir, 'assets');
   if (fs.existsSync(assetsDir) && fs.statSync(assetsDir).isDirectory()) {
@@ -152,7 +249,7 @@ function main() {
         continue;
       }
       const rel = path.posix.join('assets', name);
-      if (classifiedFiles.has(rel)) {
+      if (coveredFiles.has(rel)) {
         continue;
       }
       ungated.push({ file: rel, gzip: zlib.gzipSync(fs.readFileSync(path.join(assetsDir, name))).length });
@@ -168,9 +265,14 @@ function main() {
       const over = budget !== null && c.gzip > budget;
       const tag = over ? `${RED}FAIL${NC}` : `${GREEN}ok${NC}`;
       const limit = budget !== null ? ` / ${fmtKB(budget)}` : '';
-      process.stdout.write(`  [${label}] ${tag}  ${fmtKB(c.gzip).padStart(10)} gz${limit}  ${c.file}\n`);
+      // For gated entries c.gzip is the transitive static-import closure total;
+      // note the import count so the number is legible (entry file + N imports).
+      const nImports = c.files ? c.files.size - 1 : 0;
+      const closureNote = nImports > 0 ? ` ${GRAY}(entry +${nImports} import${nImports === 1 ? '' : 's'})${NC}` : '';
+      process.stdout.write(`  [${label}] ${tag}  ${fmtKB(c.gzip).padStart(10)} gz${limit}  ${c.file}${closureNote}\n`);
       if (over) {
-        violations.push(`${c.file} (${label}) is ${fmtKB(c.gzip)} gz, over the ${fmtKB(budget)} budget by ${fmtKB(c.gzip - budget)}`);
+        const detail = nImports > 0 ? ` (entry + ${nImports} static import${nImports === 1 ? '' : 's'})` : '';
+        violations.push(`${c.file} (${label})${detail} is ${fmtKB(c.gzip)} gz, over the ${fmtKB(budget)} budget by ${fmtKB(c.gzip - budget)}`);
       }
     }
   };

@@ -5,6 +5,9 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -19,6 +22,7 @@
     "e2e:quarantine": "playwright test --project=quarantine --pass-with-no-tests",
     "check:bundle-size": "node scripts/check-bundle-size.js",
     "check:bundle-size:selftest": "bash scripts/check-bundle-size.test.sh",
+    "check:coverage-config": "node scripts/check-coverage-config.mjs",
     "check:coverage-thresholds:selftest": "bash scripts/check-coverage-thresholds.test.sh"
   },
   "dependencies": {

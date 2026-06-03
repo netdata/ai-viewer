@@ -9,8 +9,15 @@ to de-flake it is open.
 ## Policy (SOW-0012 AC#4)
 
 - **`test.skip` is forbidden as a way to land.** A flaky test is not silenced —
-  it is quarantined. Quarantined specs **still run** (`npm run e2e:quarantine`),
-  they just **do not gate merge** until their linked SOW resolves.
+  it is quarantined. A quarantined spec is **runnable on demand** via
+  `npm run e2e:quarantine` (a **manual/diagnostic, non-gating** run); it **does
+  not gate merge** until its linked SOW resolves.
+- **CI does not run the quarantine suite today.** The CI `frontend` job runs only
+  the gating `npm run e2e` (the `chromium` project, which excludes this dir). The
+  quarantine project is therefore a local diagnostic until the dir is populated.
+  When a spec is first quarantined, add a dedicated CI step that runs
+  `npm run e2e:quarantine` with **`continue-on-error: true`** (so it is visible in
+  CI but never blocks merge) — do **not** fold it into the gating `e2e` step.
 - The **gating** run (`npm run e2e`, and `npm run e2e:a11y`) **excludes** this
   directory via `playwright.config.ts` (`testIgnore: '**/quarantine/**'`), so a
   spec moved here automatically stops blocking CI without any `test.skip`.
@@ -29,6 +36,9 @@ to de-flake it is open.
 1. File a SOW in `.agents/sow/pending/` describing the flake and the planned
    deterministic fix (fake clock, seeded fixture, controlled event, …).
 2. Move the spec here and add the header note above (with the SOW filename).
+   Add a `continue-on-error: true` CI step running `npm run e2e:quarantine` so it
+   is visible in CI without gating (the dir is empty today, so no such step exists
+   yet).
 3. Verify the gating suite (`npm run e2e`) is green without it.
 4. When the SOW lands the fix, move the spec back under `frontend/tests/` and
    delete its quarantine header. This directory returns to empty.

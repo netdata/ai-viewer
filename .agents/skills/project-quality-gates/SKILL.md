@@ -138,15 +138,18 @@ Threshold: zero errors.
 ### Frontend — Unit/Component Tests
 
 ```bash
-cd frontend && npm run test -- --run --coverage
-cd frontend && npm run check:coverage-thresholds:selftest   # hermetic gate-wiring self-test
+cd frontend && npm run test -- --run --coverage          # REAL gate (run by scripts/test.sh after the Go suite, and in CI)
+cd frontend && npm run check:coverage-config              # verify the REAL per-dir floors (non-vacuity + lockstep)
+cd frontend && npm run check:coverage-thresholds:selftest # hermetic gate-MECHANISM self-test (throwaway fixture)
 ```
 
 Vitest + React Testing Library. Threshold: all pass; global aggregate floor (≥ 80% lines/stmts/funcs, ≥ 75% branches) **plus a per-directory ≥ 80% lines floor** for every measured dir under `src/components/` and `src/pages/`.
 
 - **Per-dir mechanism = Vitest NATIVE glob-keyed `coverage.thresholds`** (SOW-0012; Vitest ≥ 4, verified on 4.1.7) — `vitest.config.ts` has `'src/components/<Dir>/**': { lines: 80 }` per measured dir. A group below 80% lines fails the run (exit 1: `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`). NO wrapper script; a shared `PER_DIR_LINES` const ties the global + per-dir floors together.
-- **Gotcha — empty glob group vacuously PASSES:** an unmatched glob's lines pct is `"Unknown"` and `"Unknown" < 80` is `false`. So add a per-dir key ONLY for a dir in `coverage.include`; stub dirs (ComingSoon/Layout/StatCard/Agents/Models/Tools/NotFound) are excluded and carry NO key. When you implement+test a new component/page dir, add it to BOTH `coverage.include` AND the per-dir glob list (and to `PER_DIR_GLOBS`), else the per-dir gate silently skips it.
-- HTML report at `frontend/coverage/` (CI artifact `frontend-coverage-<run_id>`); `json` reporter also emits `coverage/coverage-final.json` (read by the self-test). The self-test (`scripts/check-coverage-thresholds.test.sh`) proves the per-dir wiring fails closed on a throwaway 50%-lines fixture dir; it is a dedicated CI step (mirrors the bundle-size self-test).
+- **Shared lists (F3):** `PER_DIR_GLOBS`, `COVERAGE_INCLUDE`, `PER_DIR_LINES` live in `frontend/vitest.coverage.mjs`; BOTH `vitest.config.ts` and `check-coverage-config.mjs` import them (no second copy to drift). `.mjs` (no TS loader for the Node verifier) + a co-located `vitest.coverage.d.mts` for the config's typecheck.
+- **Gotcha — empty glob group vacuously PASSES:** an unmatched glob's lines pct is `"Unknown"` and `"Unknown" < 80` is `false`. So add a per-dir key ONLY for a dir in `coverage.include`; stub dirs (ComingSoon/Layout/StatCard/Agents/Models/Tools/NotFound) are excluded and carry NO key. When you implement+test a new component/page dir, add it to BOTH `COVERAGE_INCLUDE` AND `PER_DIR_GLOBS` in `vitest.coverage.mjs`, else the per-dir gate silently skips it. **`npm run check:coverage-config` catches both halves of this trap** (a vacuous glob; a measured dir with no floor) on the REAL lists, failing closed and naming the offender.
+- HTML report at `frontend/coverage/` (CI artifact `frontend-coverage-<run_id>`); `json` reporter also emits `coverage/coverage-final.json`.
+- **Two guards, do not conflate:** the MECHANISM self-test (`scripts/check-coverage-thresholds.test.sh`) proves Vitest's glob-keyed threshold still fails closed on a throwaway 50%-lines fixture — it does NOT read the real config. The real-config verifier (`scripts/check-coverage-config.mjs`) enforces the real lists' non-vacuity + lockstep. Both are dedicated CI `frontend` steps and run in `scripts/lint.sh`.
 - A dir under the floor is a finding to fix with tests — never lower the threshold.
 
 ### Frontend — E2E
@@ -232,13 +235,14 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ## Aggregate Scripts
 
 ```bash
-./scripts/lint.sh         # build-free static analysis: Go (golangci umbrella + standalone gosec + govulncheck, SOW-0009) AND frontend (eslint + tsc + bundle-size & per-dir-coverage gate self-tests, SOW-0012); fail-fast; frontend section skipped when frontend/ is absent
-./scripts/test.sh         # all tests + coverage + race (SOW-0010; EXISTS)
-./scripts/check-coverage.sh  # statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
+./scripts/lint.sh         # build-free static analysis: Go (golangci umbrella + standalone gosec + govulncheck, SOW-0009) AND frontend (eslint + tsc + bundle-size self-test + coverage-config verifier + per-dir-coverage gate self-test, SOW-0012); fail-fast; frontend section skipped when frontend/ is absent
+./scripts/test.sh         # ALL tests: Go (race + coverage profile) then, in normal mode, the frontend Vitest run (real per-dir coverage gate); skips frontend when absent (SOW-0010/0012; EXISTS)
+./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
+./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
 ```
 
-`scripts/lint.sh` is the build-free static-analysis entrypoint: it runs only analysis + the hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job (and `scripts/build.sh` / `scripts/test.sh`). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
+`scripts/lint.sh` is the build-free static-analysis entrypoint: it runs only analysis + the coverage-config verifier + the hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
 Current state: `scripts/lint.sh`, `scripts/test.sh`, and `scripts/check-coverage.sh` exist (SOW-0009/0010; `scripts/lint.sh` gained its frontend section in SOW-0012). The canonical `scripts/gates.sh` aggregator (SOW-0013) is NOT yet present. Until it lands, run `scripts/lint.sh` + `scripts/test.sh` + `scripts/check-coverage.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
 
