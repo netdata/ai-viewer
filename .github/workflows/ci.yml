@@ -180,7 +180,10 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30m (vs 15m on the other jobs): the per-package `go test -timeout=25m`
+    # below must be the binding limit so its timeout fires first with a stack
+    # trace; this outer job ceiling sits just above it as a backstop (SOW-0038).
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -216,7 +219,10 @@ jobs:
       - name: Test with race detector and coverage
         if: steps.detect.outputs.go == 'true'
         run: |
-          go test -race -count=1 \
+          # -timeout=25m: the default 10m/package is too tight for the slow
+          # internal/ingest rollup test under -race on a loaded CI runner
+          # (SOW-0038; the optimization itself is tracked in SOW-0009 Followup).
+          go test -race -count=1 -timeout=25m \
             -coverprofile=coverage.out \
             -covermode=atomic \
             ./...

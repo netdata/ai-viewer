@@ -2,6 +2,12 @@ module github.com/netdata/ai-viewer
 
 go 1.26
 
+// Pin the build toolchain to a patched stdlib release so the govulncheck gate
+// stays green. Bump this as new stdlib advisories land. GOTOOLCHAIN=auto and
+// setup-go's go-version-file both honor this directive. See SOW-0038 for the
+// rationale (go1.26.4 closed GO-2026-5039 + GO-2026-5037).
+toolchain go1.26.4
+
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/go-cmp v0.7.0
