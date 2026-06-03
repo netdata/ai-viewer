@@ -5,3 +5,7 @@ coverage
 .vite
 playwright-report
 test-results
+# throwaway fixture dir created by scripts/check-coverage-thresholds.test.sh
+# (must live under frontend/ so the fixture's `import 'vitest/config'` resolves);
+# the test removes it on exit, this guards against an interrupted run leaking it.
+.coverage-selftest.*

@@ -360,6 +360,32 @@ flagged canvas/static-interaction sites (the four disables) and these unflagged
 canvas-on-`<canvas>` sites; Chunk D must audit FlameGraph + both canvas modes
 for the keyboard-fallback gap, not just the lint-flagged lines.
 
+### 2026-06-03 — Chunk C: per-directory Vitest coverage (delegated)
+
+- Mechanism: **native** Vitest 4.1.7 glob-keyed `coverage.thresholds` (no wrapper
+  script) — verified in the installed source + empirically (a 95% probe on the
+  86.76% `SpanDetailDrawer` dir exits 1 with `ERROR: Coverage for lines …`).
+  `vitest.config.ts` adds `PER_DIR_LINES=80` + `PER_DIR_GLOBS` (13 measured dirs)
+  spread into `thresholds`; the global aggregate floor is unchanged.
+- **Vacuous-pass guardrail:** an empty glob group's lines pct is `"Unknown"` and
+  `"Unknown" < 80` is false → a glob matching zero files vacuously PASSES.
+  Per-dir keys are therefore kept in lockstep with `coverage.include` (measured
+  dirs only); stub/placeholder dirs are in neither. Verified: each of the 13
+  dirs has 2 refs (glob + include); the live run reports real % for each (not
+  `Unknown`).
+- Real finding (fixed, not threshold-lowering): `src/pages/Topology/` had a test
+  (96.7%) but was MISSING from `coverage.include` → unmeasured; added to both
+  `include` and the per-dir gate. All 13 dirs already ≥ 80% lines (no test gaps).
+- New `frontend/scripts/check-coverage-thresholds.test.sh` — hermetic self-test
+  (throwaway ~50%-lines fixture) proving the native gate fails-closed (exit 1 +
+  names the dir) under-floor and passes above; wired as a CI step + a
+  `check:coverage-thresholds:selftest` npm script (mirrors the Chunk-A bundle
+  self-test). `frontend/.gitignore` guards the fixture dir. Specs + skills synced.
+- Orchestrator verification (run myself): self-test 2/2; `npm run test --
+  --run --coverage` exit 0 with per-dir active (623 tests, dirs non-vacuous);
+  `lint --max-warnings=0` + `typecheck` green; Chunk-A bundle self-test 8/8;
+  `actionlint` clean; secret + AI-attribution scans clean.
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

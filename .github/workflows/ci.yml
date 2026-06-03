@@ -395,7 +395,13 @@ jobs:
         if: steps.detect.outputs.fe == 'true'
         run: npm run typecheck
 
-      - name: Unit tests with coverage
+      # Runs the unit/component suite AND enforces coverage thresholds: the global
+      # aggregate floor plus a per-directory >= 80% lines floor for every measured
+      # dir under src/components/ and src/pages/ (vitest.config.ts glob-keyed
+      # `coverage.thresholds`, Vitest's native mechanism — a single under-covered
+      # dir fails this step even when the aggregate stays green). Also writes the
+      # HTML + json coverage reports uploaded below.
+      - name: Unit tests with coverage (+ per-directory thresholds)
         if: steps.detect.outputs.fe == 'true'
         run: npm run test -- --run --coverage
 
@@ -407,6 +413,17 @@ jobs:
           path: frontend/coverage/
           if-no-files-found: error
           retention-days: 14
+
+      # Self-test the per-directory coverage gate's WIRING (hermetic: a throwaway
+      # fixture project with a known 50%-lines dir). Proves the native glob-keyed
+      # thresholds still FAIL closed (exit 1, naming the dir) on an under-covered
+      # dir and PASS on a covered one — catching a future config edit that drops
+      # the glob keys or a Vitest bump that changes the threshold schema, which
+      # would otherwise silently disable per-dir enforcement. Mirrors the
+      # bundle-size gate self-test; independent of the build above.
+      - name: Self-test per-directory coverage gate
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run check:coverage-thresholds:selftest
 
       - name: Cache Playwright browsers
         if: steps.detect.outputs.fe == 'true'

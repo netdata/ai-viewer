@@ -120,7 +120,12 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 - `npm run test -- --run --coverage`.
 - Vitest + React Testing Library.
-- Threshold: all pass, ≥ 80% lines per component directory.
+- Threshold: all pass; **global** aggregate floor (≥ 80% lines/statements/functions, ≥ 75% branches) **plus a per-directory ≥ 80% lines floor** for every measured directory under `src/components/` and `src/pages/`.
+- **Per-directory mechanism = Vitest's NATIVE glob-keyed `coverage.thresholds`** (SOW-0012 Chunk C; Vitest ≥ 4, verified against the installed 4.1.7). `frontend/vitest.config.ts` lists one glob key per measured dir (`'src/components/<Dir>/**': { lines: 80 }`, `'src/pages/<Dir>/**': { lines: 80 }`); Vitest aggregates each glob group's matched files into one coverage map and **fails the run (exit 1)** if a group's lines % is below the floor, emitting `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`. **No wrapper script** — the floor lives in the config the same command already runs. A shared `PER_DIR_LINES` constant keeps the global floor and every per-dir group in lockstep.
+- **Glob keys track the measured dirs only.** A glob group that matches **zero files** has lines pct `"Unknown"`, which **vacuously PASSES** (`"Unknown" < 80` is `false`). So a per-dir key is added **only** for a dir that is in `coverage.include`; placeholder/stub dirs (`ComingSoon`, `Layout`, `StatCard`, `Agents`, `Models`, `Tools`, `NotFound`) are excluded from `include` and intentionally carry **no** per-dir key. Adding a dir's per-dir key without also adding it to `include` is a silent no-op — keep the two lists in lockstep. The global floor still gates every included file in aggregate.
+- The HTML report (`frontend/coverage/`) is produced by the `html` reporter and uploaded as a CI artifact (`frontend-coverage-<run_id>`); the `json` reporter additionally emits `coverage/coverage-final.json` (consumed by the gate self-test).
+- **Gate-wiring self-test:** `frontend/scripts/check-coverage-thresholds.test.sh` (`npm run check:coverage-thresholds:selftest`) runs Vitest on a throwaway fixture project with a known 50%-lines dir and asserts the native per-dir threshold **fails closed** (exit 1, naming the dir) under the floor and passes above it — catching a config edit that drops the glob keys or a Vitest schema change that disables enforcement. Runs as a dedicated CI step in the `frontend` job; mirrors the bundle-size gate self-test.
+- A dir under the floor is a finding to close with tests (or, if genuinely large, to escalate) — **never** lower the threshold to make a dir pass.
 
 ### Frontend — E2E
 

@@ -129,6 +129,15 @@ This boundary keeps D3 isolated and testable.
 - Component tests use React Testing Library queries (`getByRole`, `getByText`), never test-id selectors as the primary mechanism.
 - E2E tests live under `frontend/tests/` and use Playwright. One scenario per primary user flow.
 
+## Coverage thresholds
+
+`vitest.config.ts` enforces a **global** aggregate floor AND a **per-directory ≥ 80% lines** floor for every measured dir under `src/components/` and `src/pages/`, via Vitest's **native glob-keyed `coverage.thresholds`** (SOW-0012 Chunk C — no wrapper script). The same `npm run test -- --run --coverage` command applies both; a single under-covered dir fails the run with `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`.
+
+- **A new implemented + tested component/page dir must be added to THREE places in `vitest.config.ts`:** `coverage.include` (so it is measured), `PER_DIR_GLOBS` (so it gets its own per-dir floor), and — implicitly — it is then covered by the global floor too. The `include` list and `PER_DIR_GLOBS` must stay in lockstep.
+- **Why a per-dir key without `include` is a silent no-op:** an unmatched glob group's lines pct is `"Unknown"`, and `"Unknown" < 80` is `false` in JS — an empty group **vacuously passes**. So placeholder/stub dirs (`ComingSoon`, `Layout`, `StatCard`, `Agents`, `Models`, `Tools`, `NotFound`) are excluded from `include` and deliberately carry NO per-dir key; adding one would falsely imply enforcement.
+- A shared `PER_DIR_LINES` constant ties the global floor and every per-dir group together so they cannot silently diverge. Never lower it to make a dir pass — a dir under the floor is a finding to close with tests.
+- The gate's WIRING is itself self-tested: `scripts/check-coverage-thresholds.test.sh` (`npm run check:coverage-thresholds:selftest`) runs Vitest on a throwaway 50%-lines fixture dir and proves the per-dir threshold fails closed under the floor / passes above it. Reporters: `text`, `text-summary`, `json` (emits `coverage/coverage-final.json`), `html` (the CI-uploaded report).
+
 ## Lint
 
 ESLint flat config (`eslint.config.ts`) with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, and `eslint-plugin-import` (+ `eslint-import-resolver-typescript`). Zero-warnings policy enforced in CI (`eslint . --max-warnings 0`).

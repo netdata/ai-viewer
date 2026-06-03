@@ -139,9 +139,15 @@ Threshold: zero errors.
 
 ```bash
 cd frontend && npm run test -- --run --coverage
+cd frontend && npm run check:coverage-thresholds:selftest   # hermetic gate-wiring self-test
 ```
 
-Vitest + React Testing Library. Threshold: all pass, ≥ 80% lines per component directory.
+Vitest + React Testing Library. Threshold: all pass; global aggregate floor (≥ 80% lines/stmts/funcs, ≥ 75% branches) **plus a per-directory ≥ 80% lines floor** for every measured dir under `src/components/` and `src/pages/`.
+
+- **Per-dir mechanism = Vitest NATIVE glob-keyed `coverage.thresholds`** (SOW-0012; Vitest ≥ 4, verified on 4.1.7) — `vitest.config.ts` has `'src/components/<Dir>/**': { lines: 80 }` per measured dir. A group below 80% lines fails the run (exit 1: `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`). NO wrapper script; a shared `PER_DIR_LINES` const ties the global + per-dir floors together.
+- **Gotcha — empty glob group vacuously PASSES:** an unmatched glob's lines pct is `"Unknown"` and `"Unknown" < 80` is `false`. So add a per-dir key ONLY for a dir in `coverage.include`; stub dirs (ComingSoon/Layout/StatCard/Agents/Models/Tools/NotFound) are excluded and carry NO key. When you implement+test a new component/page dir, add it to BOTH `coverage.include` AND the per-dir glob list (and to `PER_DIR_GLOBS`), else the per-dir gate silently skips it.
+- HTML report at `frontend/coverage/` (CI artifact `frontend-coverage-<run_id>`); `json` reporter also emits `coverage/coverage-final.json` (read by the self-test). The self-test (`scripts/check-coverage-thresholds.test.sh`) proves the per-dir wiring fails closed on a throwaway 50%-lines fixture dir; it is a dedicated CI step (mirrors the bundle-size self-test).
+- A dir under the floor is a finding to fix with tests — never lower the threshold.
 
 ### Frontend — E2E
 
