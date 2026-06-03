@@ -439,7 +439,7 @@ jobs:
       # and every per-dir include is the whole-dir shape so no sibling source escapes.
       # Reads the same shared lists vitest.config.ts imports, so it checks the gate
       # Vitest enforces. Build-free (node:fs only), so it does not depend on the build below.
-      - name: Verify coverage config (non-vacuity + lockstep + disk-completeness)
+      - name: Verify coverage config (non-vacuity + bidirectional lockstep + disk-completeness + exact shape)
         if: steps.detect.outputs.fe == 'true'
         run: npm run check:coverage-config
 
