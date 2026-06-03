@@ -134,8 +134,8 @@ else
     # --- 5. eslint (flat config, zero warnings) -------------------------------
     # The package.json `lint` script already bakes in `--max-warnings=0` (single
     # source of truth), so we do NOT re-pass it here (it would be a redundant
-    # doubled flag). CI's `frontend` job passes it explicitly via `npm run lint --
-    # --max-warnings=0` for legibility; both resolve to the same zero-warnings run.
+    # doubled flag). CI's `frontend` job runs the SAME plain `npm run lint` (ci.yml
+    # Lint step), so the npm script owns the flag in both places — no divergence.
     run npm run lint
 
     # --- 6. tsc --noEmit (strict type check) ----------------------------------

@@ -10,8 +10,12 @@
 # static-import graph), a manifest whose entry `imports` array holds a NON-STRING
 # element (a ManifestChunk-contract violation), and a manifest entry whose
 # `imports`/`dynamicImports` is PRESENT BUT NOT AN ARRAY (also a contract
-# violation — silently ignoring it would undercount the closure). The gate is
-# itself code; it must be correct.
+# violation — silently ignoring it would undercount the closure). It also fails
+# closed on a `dynamicImports` element that is NOT a string, that references a
+# manifest key that does NOT exist, or that references a JS chunk which is NOT
+# `isDynamicEntry` (each a ManifestChunk-contract violation Vite never emits for a
+# valid build — a dynamicImport target is, by contract, a separately-budgeted
+# dynamic-entry chunk). The gate is itself code; it must be correct.
 #
 # gzip shrinks low-entropy bytes (zeros, repeats) to almost nothing, so a budget
 # expressed in GZIPPED bytes can only be exercised with HIGH-ENTROPY
@@ -261,6 +265,47 @@ cat > "$V/.vite/manifest.json" <<'JSON'
 { "index.html": { "file": "assets/index-WWWW.js", "name": "index", "src": "index.html", "isEntry": true, "dynamicImports": "src/Route.tsx" } }
 JSON
 assert 2 "$V" "entry dynamicImports is a non-array (bare string)"
+
+# --- (e1) `dynamicImports` references a MISSING manifest key -> FAIL CLOSED ------
+# A dynamicImport target must, by Vite's ManifestChunk contract, be another manifest
+# chunk key. A dangling key means a broken/stale build; that route JS would sit on
+# disk reported "ungated" instead of budgeted as the lazy chunk it is. The gate
+# validates dynamicImports targets (mirroring the static-import key validation) and
+# must fail closed (exit 2) rather than let the manifest-contract violation pass.
+W="$TMP/w/dist"; mkdir -p "$W/assets" "$W/.vite"
+mkchunk "$W/assets/index-XXXX.js" 120            # main own file fine; its dynamicImport key is dangling
+cat > "$W/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-XXXX.js", "name": "index", "src": "index.html", "isEntry": true, "dynamicImports": ["missing-key"] } }
+JSON
+assert 2 "$W" "dynamicImports references a manifest key that does not exist"
+
+# --- (e2) `dynamicImports` array holds a NON-STRING element -> FAIL CLOSED -------
+# `dynamicImports` is an array of string manifest KEYS. A non-string element (here a
+# number) is a contract violation; consistent with the `imports` non-string guard,
+# the gate must fail closed (exit 2) rather than silently skip it.
+X="$TMP/x/dist"; mkdir -p "$X/assets" "$X/.vite"
+mkchunk "$X/assets/index-YYYY.js" 120            # main own file fine; one dynamicImport element is non-string
+cat > "$X/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-YYYY.js", "name": "index", "src": "index.html", "isEntry": true, "dynamicImports": [42] } }
+JSON
+assert 2 "$X" "dynamicImports array holds a non-string element"
+
+# --- (e3) `dynamicImports` target is JS but NOT isDynamicEntry -> FAIL CLOSED ----
+# A dynamicImport target whose `.file` is `.js` MUST be classified `isDynamicEntry`
+# (that is what `import()` produces). A JS target missing the flag is a manifest-
+# contract violation: it would never be budgeted as a lazy chunk (it is not an
+# entry, not a dynamic-entry, and dynamicImports are not folded into a static
+# closure), so it would slip to "ungated". The gate must fail closed (exit 2).
+Y="$TMP/y/dist"; mkdir -p "$Y/assets" "$Y/.vite"
+mkchunk "$Y/assets/index-ZZZZ.js"  120           # main own file fine...
+mkchunk "$Y/assets/shared-AB12.js"  90           # ...its dynamicImport target is JS but NOT isDynamicEntry
+cat > "$Y/.vite/manifest.json" <<'JSON'
+{
+  "index.html":    { "file": "assets/index-ZZZZ.js",  "name": "index",  "src": "index.html", "isEntry": true, "dynamicImports": ["_shared-AB12.js"] },
+  "_shared-AB12.js": { "file": "assets/shared-AB12.js", "name": "shared" }
+}
+JSON
+assert 2 "$Y" "dynamicImports target is a JS chunk that is not isDynamicEntry"
 
 echo
 if [ "$fail" -eq 0 ]; then

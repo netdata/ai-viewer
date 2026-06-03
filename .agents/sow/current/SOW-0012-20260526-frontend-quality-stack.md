@@ -722,6 +722,77 @@ than the old `dist/assets/*.js` glob"); recorded here, not by editing AC#6.
 Orchestrator finalization: pending (this entry written by the implementer for the
 orchestrator to review + fold into `## Validation`/`## Reviews`).
 
+### 2026-06-03 — Chunk F round-5 fixes (R6-1..R6-3, delegated)
+
+Three verified round-5 external-review findings on the Chunk F surface, fixed
+spec→test→code (gate fixes extended the gate's self-test FIRST). These are
+DEFINITIVE closures of classes prior rounds patched incrementally:
+
+- **R6-1 [P2] coverage verifier: require the EXACT canonical per-dir include shape**
+  (`frontend/scripts/check-coverage-config.mjs`). R5-1 rejected a narrow per-FILE
+  include under a measured dir by requiring the segment immediately after `<Dir>` to
+  be `**`. That still ACCEPTED narrower recursive variants that do NOT measure the
+  whole dir: `src/components/Foo/**/*.tsx` (drops `.ts` siblings), `…/**/Foo.tsx`
+  (narrow filename), and a bare `src/components/Foo` (no glob) — each marked `<Dir>`
+  measured while Vitest instrumented less, so a sibling source escaped BOTH
+  instrumentation AND the disk-completeness check. Definitive fix: for a
+  COVERAGE_INCLUDE entry under a per-dir root whose first segment names a literal DIR
+  (i.e. not the flat-file case handled earlier), the WHOLE normalized entry must
+  EXACTLY equal the canonical `<root>/<Dir>/**/*.{ts,tsx}`; anything else (bare dir,
+  `**/*.tsx`, `**/*.ts`, `**/Foo.tsx`, `<Dir>/Foo.tsx`, deeper subpath) is a NAMED
+  fail-closed error guiding to the canonical shape or COVERAGE_EXCLUDED. An exact
+  match is the tightest possible rule — it cannot be narrowed. (The brace `{ts,tsx}`
+  is a superset that already matches a `.ts`-only dir, so a `**/*.ts`-only per-dir
+  include is never legitimate — rejecting it is correct.) PRESERVED: flat-file
+  includes directly under a root (`src/components/ComingSoon.tsx`) and entries NOT
+  under a per-dir root (src/state, src/lib, src/api, src/viz) are unaffected. The CLI
+  count block mirrors the exact-match rule so its measured-dir count equals the
+  function's `measuredDirs`. New self-test cases (l) `…/**/*.tsx`, (m) `…/**/Foo.tsx`,
+  (n) bare `…/Foo` → NAMED narrow-shape rejection; (o) canonical `Good/**/*.{ts,tsx}`
+  → accepted (0 errors). Existing case (k) flows through the same unified rule; all
+  cases green (17/17). REAL config still PASSES unchanged (13 floors / 13 measured
+  dirs / 6 excluded).
+- **R6-2 [P2] bundle gate: validate `dynamicImports` elements + targets**
+  (`frontend/scripts/check-bundle-size.js`). R5-2 validated only the ARRAY SHAPE of
+  `dynamicImports`; the closure walker validates `imports` element/target keys but
+  deliberately does NOT walk `dynamicImports`, so a `dynamicImports` array with a
+  non-string element, a dangling manifest key, or a target that is JS-but-not-
+  `isDynamicEntry` passed silently — and that route JS would sit on disk reported
+  "ungated" instead of budgeted as the lazy chunk it is. Fix (mirror the static
+  key validation, fail closed): a new up-front pass over every chunk's
+  `dynamicImports` (when an array) exits 2 (named) when an element is non-string,
+  references a missing/`!chunk` manifest key, or references a chunk whose `.file` is
+  `.js` and is NOT `isDynamicEntry` (a non-JS target carries no JS budget, so the
+  flag requirement is `.js`-scoped). Vite guarantees all three for a valid build (and
+  the current build has no `dynamicImports`, so the real gate is a no-op today). New
+  self-test cases (e1) missing-key, (e2) non-string element, (e3) JS-target-not-
+  `isDynamicEntry` → exit 2; existing case (c4) (a VALID dynamicImports target) still
+  PASSES, proving the rule does not over-reject; self-test now 20/20.
+- **R6-3 [P3] complete the durable-doc sweep (no stragglers).** Swept the gate-
+  description class (grep, not just cited lines): (i) `scripts/lint.sh` step-5
+  comment corrected — CI runs the SAME plain `npm run lint` (ci.yml Lint step), the
+  npm script owns `--max-warnings=0` in both places (the stale "CI passes it
+  explicitly via `npm run lint -- --max-warnings=0`" wording removed). (ii) The
+  coverage-verifier description in `quality-gates.md` §Frontend — Unit/Component,
+  `project-frontend` §Coverage thresholds, and `project-quality-gates` (the inline
+  command comment, the THREE-things gotcha, and the two-guards recap) now state the
+  per-dir whole-dir-EXACT-shape requirement (reject any per-dir include that is not
+  the canonical `<root>/<Dir>/**/*.{ts,tsx}`). (iii) The bundle-gate fail-closed case
+  list is now COMPLETE in `project-quality-gates` §Frontend — Bundle Size,
+  `project-frontend` §Bundle Size, and `quality-gates.md` §Frontend — Bundle Size
+  (added: non-array `imports`/`dynamicImports`, non-string `imports`/`dynamicImports`
+  element, missing static-import key, non-string/missing-key/non-`isDynamicEntry`
+  `dynamicImports` target) plus the transitive static-import CLOSURE budget model and
+  the up-front `dynamicImports` validation note. ci.yml was NOT touched this round
+  (out of scope); its coverage-config step already says "non-vacuity + lockstep +
+  disk-completeness" (ci.yml:441). Final grep confirms zero stale gate wording in the
+  editable durable docs (the two remaining `npm run lint -- --max-warnings` hits are
+  AC#6 text and the round-4 log entry quoting the old wording — both intentionally
+  left as historical record).
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

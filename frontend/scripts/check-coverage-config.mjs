@@ -254,14 +254,16 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
   //     more than one named immediate dir — an unsupported broad shape the lockstep
   //     check cannot derive a single dir from. REJECT (fail closed), naming the
   //     entry, rather than silently ignore it (the prior fail-open hole).
-  //   - (f) a NARROW per-file include UNDER a dir (e.g. "src/components/Foo/Foo.tsx",
-  //     where the segment after <Dir> is a filename/subpath, not `**`): Vitest would
-  //     instrument ONLY that file while a sibling source (Foo/helper.ts) escapes BOTH
-  //     instrumentation AND the disk-completeness check (which would see <Dir>
-  //     "measured" as a whole). REJECT (fail closed): a measured per-dir include must
-  //     be the WHOLE-DIRECTORY shape `<root>/<Dir>/**/...` so no sibling escapes.
-  //   - otherwise it names an immediate dir (whole-dir glob, or a bare dir) -> add to
-  //     the measured set for (b)/(c).
+  //   - (f) an include UNDER a literal dir that is NOT the EXACT canonical whole-dir
+  //     shape `<root>/<Dir>/**/*.{ts,tsx}` — a bare dir ("src/components/Foo"), an
+  //     extension-narrowed glob ("Foo/**/*.tsx" / "Foo/**/*.ts"), a narrow filename
+  //     ("Foo/**/Foo.tsx", "Foo/Foo.tsx"), or a deeper subpath: each makes Vitest
+  //     instrument LESS than the whole dir while disk-completeness marks <Dir>
+  //     measured, so a sibling source (Foo/helper.ts) escapes BOTH instrumentation
+  //     AND check (c). REJECT (fail closed): an exact match is the tightest rule —
+  //     it cannot be narrowed.
+  //   - otherwise the entry IS the canonical whole-dir shape -> add the dir to the
+  //     measured set for (b)/(c).
   const measuredDirs = new Set(); // "src/components/Foo"  (dir include entries)
   const measuredFlatFiles = new Set(); // "src/components/Foo.tsx" (flat include entries)
   for (const entry of include) {
@@ -291,20 +293,32 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
       );
       continue;
     }
-    // (f) The first segment names a literal immediate dir. If the entry has MORE
-    // segments after <Dir>, the one immediately after it MUST be the whole-dir glob
-    // `**`. Anything else (a filename like "Foo.tsx" or a subpath like "sub/x.ts")
-    // is a NARROW per-file include: Vitest instruments only that file, yet the
-    // verifier would otherwise mark the whole <Dir> measured — so a sibling source
-    // file escapes BOTH instrumentation and the disk-completeness check. Fail closed.
-    const restSegments = rest.split('/');
-    if (restSegments.length > 1 && restSegments[1] !== '**') {
+    // (f) The first segment names a literal immediate DIR (a flat source file was
+    // handled above). A measured per-dir include MUST be EXACTLY the canonical
+    // whole-dir shape `<root>/<Dir>/**/*.{ts,tsx}`. This is the tightest possible
+    // rule — an exact match cannot be narrowed — and closes every narrow variant
+    // that the old "segment after <Dir> must be `**`" check still let through:
+    //   - bare dir          ("src/components/Foo")            — no glob; Vitest does
+    //     not recursively instrument the whole dir from a bare path.
+    //   - extension-narrowed ("...Foo/**/*.tsx", "...Foo/**/*.ts") — drops sibling
+    //     extensions. The canonical brace `{ts,tsx}` is a SUPERSET that already
+    //     covers a `.ts`-only dir, so a `**/*.ts`-only include is never needed.
+    //   - narrow filename    ("...Foo/**/Foo.tsx", "...Foo/Foo.tsx")  — only one
+    //     filename anywhere under the dir is instrumented.
+    //   - deeper subpath     ("...Foo/sub/x.ts")              — a sub-tree only.
+    // In every rejected case Vitest instruments LESS than the whole dir while the
+    // disk-completeness check would mark <Dir> measured, so a sibling source escapes
+    // BOTH instrumentation and check (c). Fail closed, naming the entry and guiding
+    // to the canonical shape or COVERAGE_EXCLUDED.
+    const canonical = `${seg.root}/${seg.first}/**/*.{ts,tsx}`;
+    if (norm.value !== canonical) {
       errors.push(
-        `coverage.include entry "${entry}" names a specific file/subpath under "${seg.root}/${seg.first}" ` +
-          `("${restSegments[1]}" after the dir, not "**") — the per-dir verifier requires a whole-directory ` +
-          `include shape ("${seg.root}/${seg.first}/**/*.{ts,tsx}") so no sibling source escapes measurement. ` +
-          `Narrow per-file includes under a measured dir are rejected; measure the whole dir, or list specific ` +
-          `files in COVERAGE_EXCLUDED.`,
+        `coverage.include entry "${entry}" is under measured dir "${seg.root}/${seg.first}" but must be the ` +
+          `canonical whole-directory include shape ("${canonical}"), not "${norm.value}". Anything narrower ` +
+          `(a bare dir, an extension-narrowed "**/*.tsx"/"**/*.ts", a narrow filename "**/Foo.tsx", or a deeper ` +
+          `subpath) lets Vitest instrument less than the whole dir while the dir is marked measured, so a sibling ` +
+          `source escapes both instrumentation and the disk-completeness check. Measure the whole dir with the ` +
+          `canonical shape, or list specific files in COVERAGE_EXCLUDED.`,
       );
       continue;
     }
@@ -402,11 +416,11 @@ if (invokedAsScript) {
     }
     process.exit(1);
   }
-  // Count only the lockstep-relevant measured DIRS (those under a per-dir root
-  // whose first segment is a literal dir name AND whose shape is the whole-dir glob
-  // or a bare dir — flat-file include entries, any broad shape, and any narrow
-  // per-file include would already have been classified/errored inside the function;
-  // this block runs only when there were zero errors, so it mirrors measuredDirs).
+  // Count only the lockstep-relevant measured DIRS: those under a per-dir root whose
+  // entry IS the EXACT canonical whole-dir shape `<root>/<Dir>/**/*.{ts,tsx}`.
+  // Flat-file include entries, any broad shape, and any non-canonical narrow variant
+  // would already have been classified/errored inside the function; this block runs
+  // only when there were zero errors, so it mirrors the function's `measuredDirs`.
   let measured = 0;
   for (const entry of COVERAGE_INCLUDE) {
     const norm = normalizeEntry(entry);
@@ -421,12 +435,11 @@ if (invokedAsScript) {
     if (!rest.includes('/') && !GLOB_META.test(rest) && isSourceFileName(rest)) {
       continue; // flat-file entry — not a per-dir floor
     }
-    const restSegments = rest.split('/');
-    if (restSegments.length > 1 && restSegments[1] !== '**') {
-      continue; // narrow per-file include under a dir — errored above, not a floor
+    if (!seg.first || GLOB_META.test(seg.first)) {
+      continue; // broad whole-root glob — errored above, not a single-dir floor
     }
-    if (seg.first && !GLOB_META.test(seg.first)) {
-      measured += 1;
+    if (norm.value === `${seg.root}/${seg.first}/**/*.{ts,tsx}`) {
+      measured += 1; // canonical whole-dir shape — the only per-dir floor shape
     }
   }
   process.stdout.write(

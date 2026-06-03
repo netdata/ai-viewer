@@ -22,9 +22,11 @@
 //     fail-open. Files are DE-DUPLICATED within a single entry's closure (a shared
 //     chunk reached by two import edges counts once); each entry's closure is summed
 //     independently (a chunk shared by two entries is budgeted under each — that is
-//     the real per-route transfer cost). `dynamicImports` are NOT followed: those
-//     point at separately-budgeted LAZY chunks the browser does not fetch on the
-//     entry's initial load.
+//     the real per-route transfer cost). `dynamicImports` are NOT followed into a
+//     closure: those point at separately-budgeted LAZY chunks the browser does not
+//     fetch on the entry's initial load. They ARE validated up front, though
+//     (string element, existing manifest key, JS target ⇒ isDynamicEntry), so a
+//     mis-flagged lazy chunk cannot slip to "ungated" instead of being budgeted.
 //   - Every JS file under <distDir>/assets/ is MEASURED for the report. A file that is
 //     neither classified as an entry NOR pulled into any entry's static-import closure
 //     (a `?worker` bundle such as forceWorker-*.js instantiated via `new Worker()` and
@@ -41,7 +43,10 @@
 // always emits exactly one — its absence is a broken build), a manifest entry whose
 // file is absent on disk, a static-import graph referencing a missing/invalid chunk
 // key, a manifest entry whose `imports`/`dynamicImports` is PRESENT BUT NOT AN ARRAY,
-// or a manifest entry whose `imports` array holds a NON-STRING element (both
+// a manifest entry whose `imports` array holds a NON-STRING element, a manifest
+// entry whose `dynamicImports` array holds a NON-STRING element, a `dynamicImports`
+// element referencing a manifest key that does NOT exist, or a `dynamicImports`
+// element referencing a JS chunk that is NOT `isDynamicEntry` (all
 // ManifestChunk-contract violations) each EXIT NON-ZERO. The gate never certifies
 // "within budget" without measuring real, classified chunks.
 //
@@ -160,6 +165,57 @@ function main() {
           `manifest entry ${JSON.stringify(key)} has a non-array \`${field}\` ` +
             `(${JSON.stringify(entry[field])}) — Vite's ManifestChunk contract is \`${field}?: string[]\`; ` +
             `a non-array value would be silently ignored and undercount the closure.`,
+        );
+      }
+    }
+  }
+
+  // Fail-closed validation of every chunk's `dynamicImports` ELEMENTS + TARGETS, up
+  // front (mirrors the static-import key validation, which lives in the closure
+  // walker because `imports` is the only field that walker follows). dynamicImports
+  // are deliberately NOT walked into any budget closure — they point at separately-
+  // budgeted LAZY chunks — so without this pass a malformed dynamicImports entry
+  // would be invisible: the gate validates only `imports` targets, and the route JS
+  // a dangling/mis-flagged dynamicImport names would sit on disk reported as
+  // "ungated" instead of budgeted as the lazy chunk it is. Lazy chunks are part of
+  // the gate's contract, so a manifest-contract violation here is fail-closed (exit
+  // 2), consistent with the gate's other fail-closed paths. Vite guarantees all of
+  // this for a valid build (and today's build has no dynamicImports, so this is a
+  // no-op on the real gate). For each present `dynamicImports`:
+  //   - each element MUST be a string manifest KEY (non-string → fatal);
+  //   - each element MUST reference an EXISTING manifest chunk (missing/!chunk →
+  //     fatal — a dangling target is a broken/stale build);
+  //   - the referenced chunk, IF its `file` is `.js`, MUST be `isDynamicEntry: true`
+  //     (that is what an `import()` split produces; a JS target without the flag is
+  //     neither entry nor dynamic-entry and is not in any static closure, so it
+  //     would slip to "ungated" instead of being budgeted as a lazy chunk → fatal).
+  //     A non-JS dynamicImport target (e.g. CSS) carries no JS budget, so the
+  //     isDynamicEntry requirement is scoped to `.js` targets.
+  for (const key of Object.keys(manifest)) {
+    const entry = manifest[key];
+    if (!isChunk(entry) || !Array.isArray(entry.dynamicImports)) {
+      continue;
+    }
+    for (const dyn of entry.dynamicImports) {
+      if (typeof dyn !== 'string') {
+        fatal(
+          `manifest entry ${JSON.stringify(key)} has a non-string element in its \`dynamicImports\` array ` +
+            `(${JSON.stringify(dyn)}) — Vite emits string manifest keys; refusing to pass on a contract violation.`,
+        );
+      }
+      const target = manifest[dyn];
+      if (!isChunk(target)) {
+        fatal(
+          `manifest entry ${JSON.stringify(key)} dynamically imports a missing/invalid chunk key: ${JSON.stringify(dyn)}\n` +
+            `        (a dynamicImports target must be another manifest chunk; a dangling key is a stale/broken build in ${manifestPath})`,
+        );
+      }
+      if (target.file.endsWith('.js') && target.isDynamicEntry !== true) {
+        fatal(
+          `manifest entry ${JSON.stringify(key)} dynamically imports ${JSON.stringify(dyn)} ` +
+            `(file ${JSON.stringify(target.file)}) which is a JS chunk NOT marked \`isDynamicEntry\` — ` +
+            `an \`import()\` split is always a dynamic-entry chunk. A JS dynamicImport target without the flag ` +
+            `would be budgeted as neither a main, a lazy, nor a static-closure chunk and would slip to "ungated".`,
         );
       }
     }

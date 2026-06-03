@@ -28,11 +28,26 @@
 #                    (`./src/pages/**/*.{ts,tsx}` and `src/pages/*o/**`).
 #   (j) BAD-SEG    — returns a malformed-entry error for a `.`/`..` path segment.
 #   (k) NARROW-DIR — returns a named error for a per-file include UNDER a measured
-#                    dir (e.g. `src/components/Foo/Foo.tsx`): the segment after the
-#                    dir is not `**`, so Vitest would instrument only that file
+#                    dir (e.g. `src/components/Foo/Foo.tsx`): not the canonical
+#                    whole-dir shape, so Vitest would instrument only that file
 #                    while a sibling (`helper.ts`) escapes BOTH instrumentation and
-#                    the disk-completeness check. The verifier requires the
-#                    whole-dir shape (`<Dir>/**/...`).
+#                    the disk-completeness check. The verifier requires the EXACT
+#                    canonical shape (`<root>/<Dir>/**/*.{ts,tsx}`).
+#   (l) EXT-NARROW — returns a named error for a recursive-but-extension-narrowed
+#                    per-dir include (`src/components/Foo/**/*.tsx`): the `.ts`
+#                    siblings of `Foo` would escape instrumentation while the dir is
+#                    marked measured. Only the canonical `**/*.{ts,tsx}` is accepted.
+#   (m) FILE-NARROW— returns a named error for a recursive narrow-FILENAME per-dir
+#                    include (`src/components/Foo/**/Foo.tsx`): only files named
+#                    `Foo.tsx` anywhere under the dir are instrumented; the sibling
+#                    `helper.ts` escapes. Rejected as not the canonical shape.
+#   (n) BARE-DIR   — returns a named error for a BARE directory include
+#                    (`src/components/Foo`, no glob): Vitest does not recursively
+#                    instrument the whole dir from a bare path; the verifier would
+#                    otherwise mark the dir measured. Rejected as not the canonical
+#                    shape (an exact match cannot be narrowed — the tightest rule).
+#   (o) CANON-OK   — the canonical whole-dir shape (`src/components/Good/**/*.{ts,tsx}`)
+#                    is ACCEPTED with no error (proves the exact rule does not over-reject).
 # Mirrors the fail-closed discipline + ANSI/printf style of
 # frontend/scripts/check-bundle-size.test.sh.
 #
@@ -264,14 +279,57 @@ assert 1 \
 #     file, not the whole dir). Vitest would instrument only Foo.tsx, leaving the
 #     sibling Foo/helper.ts to escape BOTH instrumentation and the
 #     disk-completeness check (which would see Foo "measured"). The verifier must
-#     reject it (named) and require the whole-dir shape `Foo/**/...`. (All source
-#     excluded so the narrow-shape rejection is the ONLY error.)
+#     reject it (named) and require the EXACT canonical shape. (All source excluded
+#     so the narrow-shape rejection is the ONLY error.)
 assert 1 \
   '["src/components/Foo/Foo.tsx"]' \
   '[]' \
   "$ALL_EXCLUDED" \
   "(k) per-file include under a measured dir (Foo/Foo.tsx) -> narrow-shape error" \
-  'requires a whole-directory include shape'
+  'must be the canonical whole-directory include shape'
+
+# (l) EXT-NARROW — a recursive-but-extension-narrowed include: `Foo/**/*.tsx` is the
+#     whole-dir glob but for `.tsx` ONLY, so the sibling `Foo/helper.ts` escapes
+#     Vitest instrumentation while disk-completeness marks Foo measured. The exact
+#     rule rejects anything but the canonical `**/*.{ts,tsx}` (the brace is a
+#     superset that already covers `.ts`-only dirs). (All source excluded.)
+assert 1 \
+  '["src/components/Foo/**/*.tsx"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(l) extension-narrowed include (Foo/**/*.tsx drops .ts siblings) -> narrow-shape error" \
+  'must be the canonical whole-directory include shape'
+
+# (m) FILE-NARROW — a recursive narrow-FILENAME include: `Foo/**/Foo.tsx` instruments
+#     only files named Foo.tsx anywhere under Foo, so `helper.ts` escapes. Rejected
+#     as not the canonical shape. (All source excluded.)
+assert 1 \
+  '["src/components/Foo/**/Foo.tsx"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(m) narrow-filename include (Foo/**/Foo.tsx) -> narrow-shape error" \
+  'must be the canonical whole-directory include shape'
+
+# (n) BARE-DIR — a BARE directory path (`src/components/Foo`, no glob). Vitest does
+#     NOT recursively instrument the whole dir from a bare path, yet the verifier
+#     would otherwise mark Foo measured. Rejected as not the canonical shape (an
+#     exact match is the tightest possible rule). (All source excluded.)
+assert 1 \
+  '["src/components/Foo"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(n) bare dir include (src/components/Foo, no glob) -> narrow-shape error" \
+  'must be the canonical whole-directory include shape'
+
+# (o) CANON-OK — the canonical whole-dir shape is ACCEPTED with ZERO errors (proves
+#     the exact rule does not OVER-reject the one legitimate per-dir include shape).
+#     Good is measured + gated; every other enumerated source item is excluded so
+#     the only thing under test is that the canonical shape passes.
+assert 0 \
+  '["src/components/Good/**/*.{ts,tsx}"]' \
+  '["src/components/Good/**"]' \
+  '["src/components/Unlisted","src/components/Foo","src/components/flat.tsx","src/pages/Page"]' \
+  "(o) canonical whole-dir include (Good/**/*.{ts,tsx}) -> accepted, no error"
 
 echo
 if [ "$fail" -eq 0 ]; then
