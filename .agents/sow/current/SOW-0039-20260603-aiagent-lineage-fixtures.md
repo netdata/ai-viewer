@@ -181,8 +181,27 @@ Findings (all adjudicated on ground truth):
 
 Applied the 2 v3 spec fixes + the 2 test-comment rewords (comment-only;
 `parser.go`/`mapper.go`/`ops.go` remain byte-identical to master). Re-verified:
-3 lineage tests pass under `-race`, gofmt + vet clean. codex re-review:
-recorded on convergence.
+3 lineage tests pass under `-race`, gofmt + vet clean.
+
+codex re-review (R2): runtime/test sound, fixtures byte-identical + PII-clean;
+**one further Low (accepted)** — the `parentOpId` "first-class guarantee" wording
+was overstated. Verified on ground truth: `recordSessionStart()` emits
+`this.options.parentOpId` (`ai-agent@8a0078bc` session-recorder.ts:364-366),
+which is the OPTIONAL `trace?.parentOpId`, and SOW-0030 plan item 3 is explicit
+("write `parentOpId` **when the existing child creation boundary can provide it
+safely**"). So `parentOpId` is best-effort, not unconditional, and can be absent
+even on post-fix snapshots.
+
+### Round 3 — fixes + codex re-review, 2026-06-03
+
+Swept the `parentOpId`-overstatement class in `adapter-aiagent-v3.md` (5 spots —
+the `parentSessionId` + `parentOpId` table rows, §8.1, §8.2, the references
+bullet): `parentSessionId` stays the firm non-root guarantee; `parentOpId` is now
+stated as **best-effort** (written only when the spawning boundary supplies the
+optional `trace?.parentOpId`), absent possible even post-fix, adapter tolerates
+absence. No code/test change — the golden's child fixture carries `parentOpId`,
+so the test is unaffected; `parser.go`/`mapper.go`/`ops.go` still untouched.
+codex re-review: recorded on convergence.
 
 ## Outcome
 
