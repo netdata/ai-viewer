@@ -34,21 +34,25 @@ import (
 // BOTH ledgers present (the steady-state UI sees this); it is the overall
 // lineage golden.
 //
-// Mutation-sensitivity is split across three tests on purpose. With both
-// ledgers present the parent-side synthesizer (mapper.go:229-260)
-// re-supplies parent_session_id / parent_op_id / root_session_id on UPSERT,
-// so it MASKS a wrong child-side mapping here (empirically confirmed during
-// authoring: emptying mapper.go:119 ParentOpKey, or pointing mapper.go:117
-// RootNativeID at the child's own id, still PASSES this combined test).
-// Therefore each path is isolated where it is mutation-sensitive:
+// Mutation-sensitivity is split across three tests on purpose. With BOTH
+// ledgers present the integrated end-state is order-dependent: the parent-side
+// synthesizer (mapper.go:229-260) can re-supply parent_session_id /
+// parent_op_id / root_session_id on UPSERT, so this combined test is NOT a
+// reliable standalone detector of a wrong child-side mapping (whether a given
+// child-side mutation is masked depends on event-arrival order). Each path is
+// therefore isolated in a test where it is UNCONDITIONALLY mutation-sensitive,
+// independent of ingest order:
 //   - child's OWN ledger (i)+(iv): TestE2E_AIAgentLineageGolden_ChildSideOwnLedger
-//     (no parent -> no synthesizer to mask the child-side mapping).
+//     (no parent -> no synthesizer can mask the child-side mapping).
 //   - parent's childSessions[] alone (ii)+(iii):
 //     TestE2E_AIAgentLineageGolden_ParentSideSynthesizer (no child ledger).
 //
-// Each of those FAILS under the corresponding single-field mutation
-// (verified: ParentNativeID flip, ParentOpKey drop, synthesizer
-// child.OriginID flip, llmRequestId drop all turn the relevant test red).
+// Each split test FAILS under its corresponding single-field mutation (verified
+// during authoring: ParentNativeID flip + ParentOpKey drop turn
+// _ChildSideOwnLedger red; synthesizer child.OriginID flip turns
+// _ParentSideSynthesizer red; the llmRequestId drop turns the relevant test
+// red). This combined test is the integration sanity check, not the mutation
+// proof.
 func TestE2E_AIAgentLineageGolden_RealUpstreamFixtures(t *testing.T) {
 	t.Parallel()
 
@@ -135,12 +139,13 @@ func TestE2E_AIAgentLineageGolden_RealUpstreamFixtures(t *testing.T) {
 // root ledger is absent), so the parent-side synthesizer (mapper.go:229-260)
 // CANNOT fire — every lineage signal here originates from the child's own
 // session_start / turn_end. This is what makes the child-side mapping
-// mutation-sensitive: with the parent present (the combined test) the
-// synthesizer re-supplies parentOpKey/parentNativeId/root on UPSERT and
-// MASKS a wrong child-side mapping. Confirmed during authoring: emptying
-// mapper.go:119 ParentOpKey passes the combined test but FAILS the
-// parentOpKey assertion here; pointing mapper.go:118 ParentNativeID at the
-// child's own id FAILS the parentNativeId assertion here.
+// UNCONDITIONALLY mutation-sensitive here: with no parent ledger nothing can
+// re-supply the child-side fields, so a wrong mapping cannot be masked (unlike
+// the combined test, where the synthesizer may re-supply them on UPSERT
+// depending on arrival order). Confirmed during authoring: emptying
+// mapper.go:119 ParentOpKey FAILS the parentOpKey assertion here; pointing
+// mapper.go:118 ParentNativeID at the child's own id FAILS the parentNativeId
+// assertion here.
 //
 // Parent/root rows are absent, so parent_session_id / root_session_id FK
 // columns cannot resolve (writer leaves them at NULL / self and stashes the

@@ -130,7 +130,17 @@ CTO decision (operator delegated scope): do this as a focused fixture + golden +
   `parser.go`/`mapper.go`/`ops.go` UNCHANGED vs HEAD (no decode/map logic touched);
   both fixtures byte-identical to `ai-agent@8a0078bc`; secret + AI-attribution
   scans clean. Spec diffs reviewed for accuracy (drift class swept, not just cited lines).
-- External review (≥3) + completion + PR + self-merge: recorded below as they complete.
+- External review (≥3, codex+glm+minimax): all SOUND / safe-to-merge; see
+  `## Reviews`. R1 findings adjudicated on ground truth — codex 2× Low v3-spec
+  drift (accepted + fixed), minimax 1 prose nit on the combined-test "masking"
+  claim (accepted + reworded), glm clean.
+- R2 fixes (doc/comment only): `adapter-aiagent-v3.md:248` stale "never-emitted"
+  phrase + added `parentOpId` to the `session_start` example; reworded the two
+  golden-test comments to drop the disputed/order-dependent combined-test claim
+  and keep the 3×-validated split-test guarantee. Re-verified (3 lineage tests
+  pass under -race; gofmt + vet clean; `parser.go`/`mapper.go`/`ops.go` still
+  unchanged vs master).
+- codex re-review + completion + PR + self-merge: recorded below on convergence.
 
 ## Validation
 
@@ -138,7 +148,41 @@ Pending.
 
 ## Reviews
 
-Pending.
+Code-producing SOW → 3 reviewers in parallel (codex decisive + glm + minimax),
+static-only (the `internal/ingest` package is ~7min under `-race`; the
+orchestrator ran all gates).
+
+### Round 1 — codex + glm + minimax, 2026-06-03
+
+All three verdicts: **SOUND, safe to merge.** Independently validated: the 3-way
+golden split is mutation-meaningful (not tautological), the adapter decode/map
+logic is untouched vs master, the fixtures are byte-identical to
+`ai-agent@8a0078bc` + PII-clean, the spec edits are the right drift class, no
+unwanted side effects.
+
+Findings (all adjudicated on ground truth):
+
+- **codex — Low ×2 (accepted):** v3 spec drift the subagent's class-sweep missed:
+  `adapter-aiagent-v3.md:248` still called `session_start.parentOpId`
+  "never-emitted" (stale since `8a0078bc`), and the `session_start` example
+  omitted `parentOpId`. Fixed in R2.
+- **minimax — nit (accepted):** the golden's "the combined test masks child-side
+  mutations" prose was over-specific and order-dependent. minimax's static
+  analysis: the combined test would actually CATCH the `parent_session_id` /
+  `root_session_id` column mutations (masking depends on event-arrival order).
+  The **split** tests, not the combined test, are the mutation guarantee — and
+  all three reviewers independently confirmed the split tests are
+  mutation-sensitive. Reworded the two test comments in R2 to drop the disputed
+  combined-test specifics and state the order-dependence + the split-test
+  guarantee. No code-logic change.
+- **glm:** no blocking findings (informational only).
+
+### Round 2 — fixes + codex re-review, 2026-06-03
+
+Applied the 2 v3 spec fixes + the 2 test-comment rewords (comment-only;
+`parser.go`/`mapper.go`/`ops.go` remain byte-identical to master). Re-verified:
+3 lineage tests pass under `-race`, gofmt + vet clean. codex re-review:
+recorded on convergence.
 
 ## Outcome
 

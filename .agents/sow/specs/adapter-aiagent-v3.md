@@ -106,6 +106,7 @@ Observed shape (every session has exactly one, always `seq=1`):
   "agentId": "<agent-name>",
   "callPath": "<colon-separated-call-chain>",
   "parentSessionId": "<parent-uuid>",
+  "parentOpId": "<parent-op-id>",
   "headendId": "<cli|api|web|embed|slack|sub-agent|tool_output|history_compaction>",
   "capturePayloads": true,
   "attributes": {
@@ -245,7 +246,7 @@ Field-by-field:
 | `accounting` | llm-mostly | object | populated when the op contributed to token usage; only LLM ops in observed data (`session-recorder.ts:93-94` filters `entry.type==='llm'`). |
 | `attributes` | de-facto | object | always present in observed data, contains operational metadata. Common keys (observed): `provider`, `model`, `isFinalTurn`, `latency`, `kind` (often `mcp` for tools), `name`, `size`, `error`, `archivedTurn`, `currentTurn`. Treat as extras. |
 | `error` | declared | string | declared at `types.ts:101`, **0 observations**. Op-level errors are surfaced via `turn_end.errors[]` and via `status='failed'`. Adapter must tolerate but not depend on. |
-| `parentOpId` | declared | n/a | the bootstrap sketch listed `parentOpId` on ops, but the producer schema **does not have it** (only `EvidenceChildSessionRef.parentOpId` and the never-emitted `session_start.parentOpId`). Canonical `parent_op_id` is therefore not derivable from v3 for non-session ops in Phase 1; adapter emits `ParentOpSeq=-1` (top-level) for every op. |
+| `parentOpId` | declared | n/a | the bootstrap sketch listed `parentOpId` on ops, but the producer schema **does not have it on ops** — it exists only on `EvidenceChildSessionRef.parentOpId` and (since `ai-agent@8a0078bc`) on `session_start.parentOpId`, both of which are the SESSION→parent-op linkage, not an op's own parent. Canonical `parent_op_id` is therefore not derivable from v3 for non-session ops in Phase 1; adapter emits `ParentOpSeq=-1` (top-level) for every op. |
 
 #### 3.4.2 `accounting` (`EvidenceAccountingSummary`)
 
