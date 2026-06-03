@@ -52,7 +52,7 @@ A future v2 file MAY have an `originId` matching a v3 `sessionId` (the same root
 
 The bootstrap sketch claimed a flat top-level with `originId`, `sessionId`, `createdAt`, `updatedAt`, `agentName`, `model`, `status`, `accounting`, `finalReport`, `pluginMetas`, plus a nested `opTree.turns[].ops[]`. **This is wrong.** The actual shape is:
 
-### Top level (`ai-agent.git/src/persistence.ts:53-57`)
+### Top level (`ai-agent.git/src/persistence.ts:53-66`)
 
 ```json
 {
@@ -62,7 +62,7 @@ The bootstrap sketch claimed a flat top-level with `originId`, `sessionId`, `cre
 }
 ```
 
-Exactly three fields. Nothing else. Verified across 200 random samples and the producer code path:
+These are the three fields the **v2 adapter decodes** (`parser.go:18-44`); the JSON block above is the adapter's view, not the full on-disk envelope. Since `ai-agent@8a0078bc` the on-disk JSON ALSO carries `sessionId, originId, originTxnId, parentId, parentTxnId, timestamp` (see the note after the field list below); the adapter ignores them by design. The three decoded fields were verified across 200 random samples and the producer code path:
 
 - `version`: integer, either `1` or `2`. Distribution on disk (50-sample run): v1 ≈ 60%, v2 ≈ 40%. The producer code at `ai-agent.git/src/ai-agent.ts:394` builds new snapshots with `version: 2`. Older snapshots on disk still carry `version: 1` from before the bump; they were never rewritten because the sessions ended before the change. **The version field gates SHAPE features inside `opTree`:**
   - `version: 1` opTree lacks `steps[]`, `finalReport`, and `pluginMetas`.
@@ -71,7 +71,7 @@ Exactly three fields. Nothing else. Verified across 200 random samples and the p
 - `reason`: snapshot trigger reason, one of `'subagent_finish'` (intermediate, emitted by the parent after a child finishes), `'final'` (terminal, emitted once at session end), or `undefined` (test paths). On disk, **all 50 sampled files carry `reason: "final"`** — because intermediate `subagent_finish` snapshots are overwritten by the terminal `final` snapshot for the same originId.
 - `opTree`: the `SessionNode` from `SessionTreeBuilder.getSession()` at the moment of write.
 
-The wire-level `SessionSnapshotPayload` (`ai-agent.git/src/types.ts:786-793`) ALSO has `sessionId`, `originId`, `timestamp` fields — but these are NOT persisted to disk; `persistence.ts:53-57` strips them before gzip. The adapter must recover `originId` from the filename and `sessionId` and `timestamp` from inside `opTree` (see below).
+The wire-level `SessionSnapshotPayload` (`ai-agent.git/src/types.ts:786-793`) ALSO carries `sessionId`, `originId`, `timestamp`, and (since the lineage fix `ai-agent@8a0078bc`) `originTxnId`, `parentId`, `parentTxnId`. As of that fix the producer **persists** all of them to disk alongside `{version, reason, opTree}` (`persistence.ts:56-61` writes `sessionId, originId, originTxnId, parentId, parentTxnId, timestamp`); they are no longer stripped before gzip. **The v2 adapter ignores these top-level fields by design** — it decodes only `{version, reason, opTree}` (`parser.go:18-44`) and recovers `originId` from the filename and `sessionId`/`timestamp` from inside `opTree` (see below). Reading them is unnecessary for v2's lineage model, which is recursion-based over `opTree.children[]` (`mapper.go:88-93`), so the adapter deliberately does not consume the now-persisted envelope lineage fields.
 
 ### opTree shape
 
@@ -428,13 +428,13 @@ These are v2 concepts that do not fit cleanly into `canonical-events.md` and `da
 - `ai-agent.git/.agents/sow/specs/optree.md` — SessionNode/TurnNode/OperationNode field reference.
 - `ai-agent.git/.agents/sow/specs/accounting.md` — accounting entry semantics, token normalization.
 - `ai-agent.git/src/persistence.ts:19-67` — `getDefaultPersistenceConfig`, `createPersistenceHandlers.handleSnapshot` — the producer write path.
-- `ai-agent.git/src/session-persistence-events.ts:30-65` — `emitSessionSnapshotEvent` — what gets emitted; note disk payload is `{version, reason, opTree}` only.
+- `ai-agent.git/src/session-persistence-events.ts:30-65` — `emitSessionSnapshotEvent` — what gets emitted. Since `ai-agent@8a0078bc` the on-disk payload also carries `sessionId, originId, originTxnId, parentId, parentTxnId, timestamp`; the v2 adapter reads only `{version, reason, opTree}` by design.
 - `ai-agent.git/src/ai-agent.ts:392-403` — `persistSessionSnapshot`; uses `originTxnId` for filename.
 - `ai-agent.git/src/ai-agent.ts:530-544` — `txnId`/`originTxnId` identity model; `SessionTreeBuilder({traceId: txnId, ...})`.
 - `ai-agent.git/src/ai-agent.ts:669-678` — sub-agent dispatch; child inherits `originTxnId`, parent calls `persistSessionSnapshot('subagent_finish')` after child returns.
 - `ai-agent.git/src/ai-agent.ts:1220-1222` — terminal `persistSessionSnapshot('final')` callback site.
 - `ai-agent.git/src/session-tree.ts` — `SessionTreeBuilder`, node shape definitions.
-- `ai-agent.git/src/types.ts:786-793` — `SessionSnapshotPayload` in-memory shape (sessionId, originId, timestamp, snapshot) — note these in-memory fields are NOT persisted.
+- `ai-agent.git/src/types.ts:786-793` — `SessionSnapshotPayload` in-memory shape (sessionId, originId, originTxnId, parentId, parentTxnId, timestamp, snapshot). Since `ai-agent@8a0078bc` these top-level fields ARE persisted to disk (`persistence.ts:56-61`); the v2 adapter ignores them by design and reads only `{version, reason, opTree}`.
 - `ai-agent.git/src/evidence/reader.ts` — payload-ref path validation pattern (`readEvidencePayload`).
 - `ai-viewer.git/.agents/sow/specs/canonical-events.md` — Event types this adapter emits.
 - `ai-viewer.git/.agents/sow/specs/data-model.md` — SQLite schema this adapter's events populate.

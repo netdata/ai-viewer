@@ -112,7 +112,25 @@ CTO decision (operator delegated scope): do this as a focused fixture + golden +
 
 - Branched `sow-0039-aiagent-lineage-fixtures` off master (`bfa8b98`).
 - Cross-repo assessment completed; upstream fixtures inspected + PII-confirmed clean.
-- Implementation (spec fixes + fixtures + golden), gates, review, PR, self-merge: recorded below as they complete.
+- Implementation (delegated): adopted the two upstream fixtures byte-identically
+  (`internal/adapters/aiagent_v3/testdata/sub-agent-with-parent-id/session/{root,child}-session.jsonl`,
+  sha-verified vs `ai-agent@8a0078bc`); added `internal/ingest/e2e_aiagent_lineage_test.go`
+  (3 ingest→store golden tests + a shared `ingestV3Dir` harness); fixed the spec
+  drift in `adapter-aiagent-v2.md` (×4 spots) + `adapter-aiagent-v3.md` (×4 spots).
+- The golden is split into 3 path-isolating tests because the combined two-ledger
+  test is NOT mutation-sensitive to child-side mapping (the parent-side synthesizer
+  re-supplies parent/op/root on UPSERT and masks a wrong child-side field):
+  `_ChildSideOwnLedger` (child ledger only → child-side fast path),
+  `_ParentSideSynthesizer` (root ledger only → `childSessions[]` path),
+  `_RealUpstreamFixtures` (both → integrated end-state). Mutation-sensitivity was
+  proven empirically (ParentNativeID flip, ParentOpKey drop, synthesizer
+  OriginID flip, llmRequestId drop each turn the relevant test RED; code byte-restored).
+- Orchestrator verification (run myself, not the subagent's word): the 3 lineage
+  tests pass under `-race` (1.2s); `aiagent_v3` ok; `go vet` + `gofmt` clean;
+  `parser.go`/`mapper.go`/`ops.go` UNCHANGED vs HEAD (no decode/map logic touched);
+  both fixtures byte-identical to `ai-agent@8a0078bc`; secret + AI-attribution
+  scans clean. Spec diffs reviewed for accuracy (drift class swept, not just cited lines).
+- External review (≥3) + completion + PR + self-merge: recorded below as they complete.
 
 ## Validation
 
