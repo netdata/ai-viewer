@@ -604,6 +604,59 @@ spec→test→code (gate fixes extended the gate's self-test FIRST):
 Orchestrator finalization: pending (this entry written by the implementer for the
 orchestrator to review + fold into `## Validation`/`## Reviews`).
 
+### 2026-06-03 — Chunk F round-3 fixes (R4-1..R4-4, delegated)
+
+Four verified round-3 external-review findings on the Chunk F surface, fixed
+spec→test→code (gate fixes extended the gate's self-test FIRST):
+
+- **R4-1 [P2] coverage gate could pass while shipped source was completely
+  unmeasured** (disk-completeness). Source dirs/flat-files under
+  `src/components/`/`src/pages/` in NEITHER `COVERAGE_INCLUDE` nor a per-dir floor
+  silently escaped ALL coverage AND the verifier (Layout, StatCard, the
+  Agents/Models/Tools stubs, NotFound.tsx, and the flat ComingSoon.tsx). Fixes:
+  (a) `vitest.coverage.mjs` now MEASURES the tested flat file
+  `src/components/ComingSoon.tsx` (it has `ComingSoon.test.tsx`; 100% covered, real
+  coverage stays green); flat files carry no per-dir floor by design.
+  (b) New explicit `export const COVERAGE_EXCLUDED` ledger lists every intentionally
+  unmeasured source dir/flat-file with an honest rationale — `Layout` + `StatCard`
+  as REAL components with Vitest-unit coverage DEFERRED to a tracked follow-up (the
+  orchestrator will file the pending SOW; Playwright exercises them today), the
+  `Agents`/`Models`/`Tools` Phase-3 `<ComingSoon/>` wrappers, and the trivial
+  `NotFound.tsx` 404. (c) The verifier (`check-coverage-config.mjs`, the exported
+  pure fn) gained a DISK-COMPLETENESS check: it enumerates every immediate source
+  dir and every flat `.ts`/`.tsx` file under the two roots and FAILS CLOSED (named
+  error: "<path> exists on disk but is in neither COVERAGE_INCLUDE nor
+  COVERAGE_EXCLUDED …") unless each is measured or excluded; the fn now also imports
+  `COVERAGE_EXCLUDED`. (d) Self-test extended (6→12 cases): a source dir in neither
+  list → named error; a flat source file in neither → error; a dir/file in
+  COVERAGE_EXCLUDED → no error; the clean case still 0 errors. (e) Doc OVERCLAIM
+  fixed in `project-quality-gates`/`project-frontend` skills + `quality-gates.md`:
+  the verifier catches THREE classes (non-vacuity, lockstep-missing-floor,
+  disk-completeness), and Layout/StatCard are described as real components with
+  Vitest-unit coverage deferred — not placeholders.
+- **R4-2 [P3] broad-glob rejection not normalized** (`check-coverage-config.mjs`).
+  COVERAGE_INCLUDE / COVERAGE_EXCLUDED entries are now NORMALIZED before
+  classification (strip a leading `./`, collapse repeated `/`, reject any `.`/`..`
+  path segment → named malformed-entry error), and the first-segment broad-shape
+  rejection is now metachar-based (`* ? [ ] { }`), not only the exact `*`/`**`
+  strings. New self-test cases: `./src/pages/**/*.{ts,tsx}` and `src/pages/*o/**`
+  are both caught as broad/unsupported; a `..`-segment entry is caught as malformed.
+- **R4-3 [Low→fix, minimax] check-bundle-size.js silently dropped non-string
+  imports.** `staticClosure`'s `imports` loop previously skipped a non-string
+  element via `if (typeof imp === 'string')`. Vite always emits string keys, so a
+  non-string element is a ManifestChunk-contract violation — now FAIL CLOSED (fatal,
+  exit 2) rather than silently undercount the closure. New self-test case (d7): an
+  entry whose `imports` holds a number → exit 2. Self-test now 15/15.
+- **R4-4 [P3, minimax] .gitignore the new self-test temp dir + max-warnings
+  spelling.** Added `.coverage-config-selftest.*` to `frontend/.gitignore` (mirrors
+  the `.coverage-selftest.*` guard; confirmed it matches the test's `mktemp`
+  template). Unified the `--max-warnings` spelling: the `frontend/package.json`
+  `lint` script now reads `--max-warnings=0` (matching every doc/skill/spec
+  reference, which already used the `=0` form).
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

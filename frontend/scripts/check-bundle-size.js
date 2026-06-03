@@ -38,9 +38,11 @@
 // No silent failures (fail-closed): a missing/empty distDir, a missing or invalid
 // .vite/manifest.json (including a JSON array rather than an object), a manifest that
 // classifies ZERO JS chunks, a manifest with NO main (isEntry) chunk at all (this SPA
-// always emits exactly one — its absence is a broken build), or a manifest entry
-// whose file is absent on disk each EXIT NON-ZERO. The gate never certifies "within
-// budget" without measuring real, classified chunks.
+// always emits exactly one — its absence is a broken build), a manifest entry whose
+// file is absent on disk, a static-import graph referencing a missing/invalid chunk
+// key, or a manifest entry whose `imports` array holds a NON-STRING element (a
+// ManifestChunk-contract violation) each EXIT NON-ZERO. The gate never certifies
+// "within budget" without measuring real, classified chunks.
 //
 // Usage:  node scripts/check-bundle-size.js [distDir]   (default: <script>/../dist)
 // Exit:   0 = every gated chunk within budget; 1 = a budget violation;
@@ -170,9 +172,18 @@ function main() {
       }
       if (Array.isArray(entry.imports)) {
         for (const imp of entry.imports) {
-          if (typeof imp === 'string') {
-            stack.push(imp);
+          // Vite's ManifestChunk contract is that `imports` is an array of string
+          // manifest KEYS. A non-string element is a manifest-contract violation;
+          // silently skipping it could undercount the closure and vacuously pass
+          // the budget. Fail closed (consistent with the gate's other fail-closed
+          // paths) rather than drop it.
+          if (typeof imp !== 'string') {
+            fatal(
+              `manifest entry ${JSON.stringify(key)} has a non-string element in its \`imports\` array ` +
+                `(${JSON.stringify(imp)}) — Vite emits string manifest keys; refusing to undercount the closure.`,
+            );
           }
+          stack.push(imp);
         }
       }
     }

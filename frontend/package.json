@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint . --max-warnings 0",
+    "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "e2e": "playwright test --project=chromium",
     "e2e:a11y": "playwright test --project=chromium tests/a11y.spec.ts tests/viz-a11y.spec.ts tests/stats-a11y.spec.ts",

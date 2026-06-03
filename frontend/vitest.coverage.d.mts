@@ -6,3 +6,4 @@
 export declare const PER_DIR_LINES: number;
 export declare const COVERAGE_INCLUDE: readonly string[];
 export declare const PER_DIR_GLOBS: readonly string[];
+export declare const COVERAGE_EXCLUDED: readonly string[];

@@ -5,9 +5,11 @@
 # the 500 KB gz main budget or a dynamic-entry's closure exceeds the 200 KB gz
 # lazy budget, PASSES when every gated entry is within budget, and FAILS CLOSED
 # on a missing/empty dist, a missing or invalid manifest (object OR array), a
-# manifest with zero JS chunks, a manifest with no MAIN (isEntry) chunk at all,
-# and a manifest whose entry `imports` a key that is absent from the manifest
-# (a broken static-import graph). The gate is itself code; it must be correct.
+# manifest with zero JS chunks, a manifest with no MAIN (isEntry) chunk at all, a
+# manifest whose entry `imports` a key that is absent from the manifest (a broken
+# static-import graph), and a manifest whose entry `imports` array holds a
+# NON-STRING element (a ManifestChunk-contract violation). The gate is itself code;
+# it must be correct.
 #
 # gzip shrinks low-entropy bytes (zeros, repeats) to almost nothing, so a budget
 # expressed in GZIPPED bytes can only be exercised with HIGH-ENTROPY
@@ -220,6 +222,18 @@ cat > "$O/.vite/manifest.json" <<'JSON'
 { "index.html": { "file": "assets/index-TTTT.js", "name": "index", "src": "index.html", "isEntry": true, "imports": ["missing-key"] } }
 JSON
 assert 2 "$O" "entry imports a manifest key that does not exist"
+
+# --- (d7) entry's `imports` holds a NON-STRING element -> FAIL CLOSED ----------
+# Vite's ManifestChunk contract is `imports: string[]` (arrays of manifest KEYS).
+# A non-string element (here a number) is a contract violation; silently skipping
+# it could undercount the closure and vacuously pass the budget. The closure walker
+# must fail closed (exit 2) on it rather than drop it (R4-3 / minimax).
+T="$TMP/t/dist"; mkdir -p "$T/assets" "$T/.vite"
+mkchunk "$T/assets/index-UUUU.js" 120            # main own file fine; one import is non-string
+cat > "$T/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-UUUU.js", "name": "index", "src": "index.html", "isEntry": true, "imports": [123] } }
+JSON
+assert 2 "$T" "entry imports array holds a non-string element"
 
 echo
 if [ "$fail" -eq 0 ]; then
