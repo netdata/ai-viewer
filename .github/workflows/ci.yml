@@ -216,7 +216,10 @@ jobs:
       - name: Test with race detector and coverage
         if: steps.detect.outputs.go == 'true'
         run: |
-          go test -race -count=1 \
+          # -timeout=25m: the default 10m/package is too tight for the slow
+          # internal/ingest rollup test under -race on a loaded CI runner
+          # (SOW-0038; the optimization itself is tracked in SOW-0009 Followup).
+          go test -race -count=1 -timeout=25m \
             -coverprofile=coverage.out \
             -covermode=atomic \
             ./...
