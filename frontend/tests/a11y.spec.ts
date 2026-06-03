@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 
 // Accessibility coverage (AGENTS.md quality gate: axe, zero serious/critical on
 // every live route). We run axe-core against each live route served by the built

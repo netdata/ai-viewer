@@ -587,6 +587,13 @@ function TimelineCanvas({
   };
 
   return (
+    // The onClick here is a pointer-only pixel hit-test over the <canvas>
+    // (which is one non-focusable image). The keyboard / screen-reader path is
+    // the visually-hidden focusable <button> list rendered below (SOW-0006
+    // AC#5), so every span IS reachable without a pointer. These two jsx-a11y
+    // rules are therefore false positives for this canvas-with-DOM-fallback
+    // pattern. Tracked for the SOW-0012 Chunk D viz/<chart>/a11y.md waiver.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
     <div
       className={styles.vizScroller}
       role="group"

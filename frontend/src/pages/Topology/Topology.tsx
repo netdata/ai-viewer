@@ -17,6 +17,11 @@ import {
 } from '../../viz/topology';
 import { startThemeColorWatch } from '../../viz/color';
 import type { ForceWorkerRequest, ForceWorkerResponse } from '../../viz/forceWorker';
+// Vite's `?worker` suffix is a build-time virtual module whose default export
+// (the Worker constructor) is synthesized by Vite. eslint-plugin-import resolves
+// the suffix-stripped `forceWorker.ts` (named exports only, no default) and so
+// false-positives on import/default; the type side is correct via vite/client.
+// eslint-disable-next-line import/default
 import ForceWorker from '../../viz/forceWorker?worker';
 import { TopologyRenderer } from '../SessionDetail/TopologyTab/TopologyRenderer';
 import { formatNumber } from '../../lib/format';

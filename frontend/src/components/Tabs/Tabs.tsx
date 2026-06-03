@@ -73,6 +73,13 @@ export function Tabs<K extends string>({
   };
 
   return (
+    // WAI-ARIA tabs pattern: the Arrow/Home/End handler lives on the tablist
+    // container (event delegation) while keyboard focus stays on the tab
+    // buttons via roving tabindex (selected=0, others=-1). The tablist is
+    // deliberately not itself a tab stop, so jsx-a11y's interactive-supports-
+    // focus rule (which cannot model roving-tabindex delegation) is a false
+    // positive here.
+    // eslint-disable-next-line jsx-a11y/interactive-supports-focus
     <div
       className={styles.tabs}
       role="tablist"

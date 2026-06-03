@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 
 // SOW-0006 AC#5 — the REAL-BROWSER axe pass on the new viz surfaces (the
 // component-level jest-axe work in chunk "a11y" prepared for this). Runs axe-core

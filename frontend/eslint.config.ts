@@ -1,36 +1,66 @@
 import js from '@eslint/js';
+import { type Config, defineConfig, globalIgnores } from 'eslint/config';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 import react from 'eslint-plugin-react';
 import reactHooks from 'eslint-plugin-react-hooks';
+import jsxA11y from 'eslint-plugin-jsx-a11y';
+import importPlugin from 'eslint-plugin-import';
+
+// eslint-plugin-react-hooks 7.x ships a `configs` shape (`configs.flat.*`) that
+// is structurally NOT assignable to ESLint core's strict `Plugin` type used by
+// `defineConfig()` (the helper that supersedes the deprecated
+// `tseslint.config()`). The plugin works fine at runtime; only its published
+// types are too strict to fit. `Plugins` is `Config['plugins']`'s value type,
+// reused below to register react-hooks without `any`.
+type Plugins = NonNullable<Config['plugins']>;
 
 // Flat config (ESLint v9). The repo enforces a zero-warnings policy
 // (`eslint . --max-warnings 0`), so every rule below is error-level or off;
 // there are deliberately no "warn" levels. Type-aware linting is enabled via
 // projectService so unsafe-any / floating-promise classes are caught.
 //
+// The config builder is ESLint core's `defineConfig()` (from `eslint/config`)
+// rather than `tseslint.config()`: typescript-eslint's helper is `@deprecated`
+// in favour of core `defineConfig()` (see typescript-eslint.io/packages/
+// typescript-eslint/#config-deprecated), so we use the non-deprecated form and
+// keep `tseslint` only for its parser/plugin and shared rule presets.
+//
 // The React and React-Hooks plugins are registered explicitly and their
 // recommended rule sets applied in a single project block. Their published
-// flat-config *wrapper objects* are NOT spread into tseslint.config() because
-// their loosely-typed `plugins` field conflicts with the strict
-// ConfigWithExtends type of the config() helper; pulling the rules out avoids
-// that friction while keeping identical coverage.
-export default tseslint.config(
-  {
-    // `scripts/` holds standalone Node build-tooling (e.g. the SOW-0012
-    // bundle-size gate) that lives OUTSIDE the app's tsconfig project, so the
-    // type-checked rule set has no type info for it; it is exercised by its own
-    // self-test + actionlint, not by app-source ESLint. Mirrors ignoring the
-    // other non-source dirs below.
-    ignores: ['dist', 'coverage', 'node_modules', 'playwright-report', 'test-results', 'scripts'],
-  },
+// flat-config *wrapper objects* are NOT spread into the config builder because
+// their loosely-typed `plugins`/`configs` fields conflict with core's strict
+// `Plugin` type; pulling the rules out avoids that friction while keeping
+// identical coverage.
+//
+// jsx-a11y and eslint-plugin-import both ship native flat-config support at the
+// pinned versions (`jsxA11y.flatConfigs.recommended`,
+// `importPlugin.flatConfigs.recommended` / `.typescript`), so no `FlatCompat`
+// bridge is needed. The import/typescript preset plus the TypeScript resolver
+// (settings below) teach `import/no-unresolved` how to follow `.ts`/`.tsx`
+// paths so it does not false-positive on type-only or extensionless imports.
+export default defineConfig(
+  // `scripts/` holds standalone Node build-tooling (e.g. the SOW-0012
+  // bundle-size gate) that lives OUTSIDE the app's tsconfig project, so the
+  // type-checked rule set has no type info for it; it is exercised by its own
+  // self-test + actionlint, not by app-source ESLint. The other entries are
+  // generated/output dirs that must never be linted.
+  globalIgnores(['dist', 'coverage', 'node_modules', 'playwright-report', 'test-results', 'scripts']),
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
     files: ['**/*.{ts,tsx}'],
+    // import/recommended + import/typescript via `extends` keeps the
+    // resolver-aware rule set scoped to TS/TSX. The typescript preset disables
+    // rules the TS compiler already enforces (e.g. `import/named`) and
+    // registers the `.ts`/`.tsx` parser extensions for resolution.
+    extends: [importPlugin.flatConfigs.recommended, importPlugin.flatConfigs.typescript],
     plugins: {
       react,
-      'react-hooks': reactHooks,
+      // Cast: react-hooks 7.x's self-typed `configs` field is not assignable to
+      // core's `Plugin` (see the Plugins type note at top); runtime shape is
+      // correct. Narrowed to the registry value type, not `any`.
+      'react-hooks': reactHooks as Plugins[string],
     },
     languageOptions: {
       ecmaVersion: 2022,
@@ -42,6 +72,12 @@ export default tseslint.config(
     },
     settings: {
       react: { version: 'detect' },
+      // Resolve imports through the TypeScript resolver so `import/no-unresolved`
+      // follows tsconfig paths and `.ts`/`.tsx`/extensionless specifiers.
+      'import/resolver': {
+        typescript: { project: import.meta.dirname + '/tsconfig.json' },
+        node: true,
+      },
     },
     rules: {
       // `react.configs.flat[...]` is typed as possibly-undefined via its index
@@ -60,6 +96,52 @@ export default tseslint.config(
         'error',
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
+      // import/recommended ships these three as 'warn'; under the zero-warnings
+      // gate a warning fails the build, so promote them to 'error' to make the
+      // intent explicit (no "passing build with warnings" ambiguity).
+      'import/no-named-as-default': 'error',
+      'import/no-named-as-default-member': 'error',
+      'import/no-duplicates': 'error',
+    },
+  },
+  // jsx-a11y's recommended flat config, scoped to the files that contain JSX.
+  // Registered after the shared TS/React block so its rules layer cleanly. The
+  // one rule override lives in THIS object because a flat-config rule must be
+  // set in a config that also registers its plugin (jsx-a11y is registered by
+  // the spread).
+  {
+    ...jsxA11y.flatConfigs.recommended,
+    files: ['**/*.tsx'],
+    rules: {
+      ...jsxA11y.flatConfigs.recommended.rules,
+      // Scrollable `role="region"` containers carry `tabIndex={0}` so keyboard-
+      // only users can focus and arrow-scroll an overflow area (WAI-ARIA APG
+      // scrollable-region pattern). Extend the rule's default allow-list with
+      // `region` while preserving recommended's other options (`tags: []`,
+      // `allowExpressionValues: true`); the rule stays active everywhere else.
+      'jsx-a11y/no-noninteractive-tabindex': [
+        'error',
+        { tags: [], roles: ['tabpanel', 'region'], allowExpressionValues: true },
+      ],
+    },
+  },
+  // This flat-config file is itself in the lint set. It legitimately consumes
+  // plugin objects that ship no (or `any`-typed) declarations — both
+  // `eslint-plugin-import`'s `flatConfigs` and `eslint-plugin-jsx-a11y`'s
+  // `flatConfigs` are typed `any`, so accessing/spreading them is unsafe
+  // member-access / argument / assignment — and `tseslint.configs` trips the
+  // import plugin's named-vs-default-member heuristic (a false positive:
+  // `tseslint` exposes `configs` as a real namespace member). These rules are
+  // off for THIS FILE ONLY; every app-source file keeps full coverage. This
+  // block is last so it overrides the type-checked + import blocks above for
+  // the config file.
+  {
+    files: ['eslint.config.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      'import/no-named-as-default-member': 'off',
     },
   },
 );

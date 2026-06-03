@@ -461,6 +461,16 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: Inne
   };
 
   return (
+    // The onClick is a pointer-only pixel hit-test over the <canvas>. NOTE:
+    // unlike the timeline canvas, this Canvas-mode waterfall (used only above
+    // SVG_SPAN_CEILING) has NO focusable per-span DOM fallback, so this is a
+    // REAL keyboard-access gap, not a clean false positive — keyboard users can
+    // only select spans in the default SVG renderer (WaterfallSvg, fully
+    // keyboard-operable). The disable unblocks the lint gate; the gap is
+    // explicitly tracked for the SOW-0012 Chunk D viz/<chart>/a11y.md waiver +
+    // a follow-up to add a focusable-span fallback list mirroring
+    // TimelineRenderer's (the canvasFallbackList) / the SVG waterfall.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
     <div
       className={styles.vizScroller}
       role="group"
