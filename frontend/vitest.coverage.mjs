@@ -17,16 +17,32 @@
 //   itself lives only here; the `.d.mts` declares only its shapes, so there is no
 //   value to drift.
 //
-// LOCKSTEP INVARIANT (also enforced by check-coverage-config.mjs):
+// LOCKSTEP INVARIANT (BIDIRECTIONAL — also enforced by check-coverage-config.mjs):
 //   A per-dir glob group that matches ZERO files has lines pct "Unknown", and
 //   `"Unknown" < 80` is `false` in JS, so an empty group VACUOUSLY PASSES. Two
-//   rules keep that trap shut:
-//     1. A per-dir glob is added ONLY for a dir that is also in COVERAGE_INCLUDE
-//        (i.e. measured). Dirs that are intentionally NOT measured are listed in
-//        COVERAGE_EXCLUDED below (with a per-entry rationale), in NEITHER the
-//        include set nor PER_DIR_GLOBS.
-//     2. Every MEASURED dir under src/components/ and src/pages/ HAS a per-dir glob.
-//   The verifier fails closed if either rule is broken.
+//   rules keep that trap shut, and together they force PER_DIR_GLOBS dirs ===
+//   measured component/page dirs (the sets are EQUAL, not merely one-way subset):
+//     1. gated ⊆ measured: a per-dir glob is added ONLY for a dir that is also in
+//        COVERAGE_INCLUDE (i.e. measured). A floor for a dir that is NOT measured
+//        (in COVERAGE_EXCLUDED, or absent from COVERAGE_INCLUDE) is a threshold group
+//        over a dir Vitest never instruments — a vacuous no-op that can never fire.
+//        Dirs that are intentionally NOT measured are listed in COVERAGE_EXCLUDED
+//        below (with a per-entry rationale), in NEITHER the include set nor PER_DIR_GLOBS.
+//     2. measured ⊆ gated: every MEASURED dir under src/components/ and src/pages/
+//        HAS a per-dir glob.
+//   The verifier fails closed if either direction is broken.
+//
+// RAW-EXACT INVARIANT (also enforced by check-coverage-config.mjs):
+//   vitest.config.ts hands the RAW strings in these lists to Vitest: a PER_DIR_GLOBS
+//   entry becomes a `coverage.thresholds` KEY matched by picomatch against clean
+//   `relative(root,file)` paths, and a COVERAGE_INCLUDE entry feeds the tinyglobby
+//   `coverage.include` selector. So every per-dir-root entry must be EXACTLY canonical
+//   as written — PER_DIR_GLOBS: `<root>/<Dir>/**`; per-dir COVERAGE_INCLUDE:
+//   `<root>/<Dir>/**/*.{ts,tsx}` — with NO leading "./", NO repeated "//", and NO
+//   trailing "/". A string that is canonical only after normalization is laundered:
+//   a "//" or trailing "/" threshold key matches NOTHING (its floor passes vacuously),
+//   and the "./"-tolerant form is fragile across picomatch/tinyglobby versions. The
+//   verifier compares the RAW string and fails closed on any non-canonical form.
 //
 // DISK-COMPLETENESS INVARIANT (also enforced by check-coverage-config.mjs):
 //   Every immediate directory under src/components/ and src/pages/ that holds

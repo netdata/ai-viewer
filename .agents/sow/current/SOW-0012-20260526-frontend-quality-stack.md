@@ -860,6 +860,68 @@ up-front sweep (R7-3); the coverage-verifier description in `quality-gates.md`
 Orchestrator finalization: pending (this entry written by the implementer for the
 orchestrator to review + fold into `## Validation`/`## Reviews`).
 
+### 2026-06-03 — Chunk F round-7 fixes (R8-1, R8-2, delegated)
+
+Two verifier-completion findings on the coverage-config verifier
+(`frontend/scripts/check-coverage-config.mjs`) — the final closers that make the
+exact-shape rule honest about WHAT Vitest actually consumes and make the lockstep
+total. Fixed spec→test→code (the self-test was extended FIRST):
+
+- **R8-1 [P2] verifier validated the NORMALIZED string, but Vitest consumes the RAW
+  string.** Checks (a) `PER_DIR_GLOBS` and (f) per-dir `COVERAGE_INCLUDE` compared
+  `normalizeEntry(entry).value` against the canonical shape; but `vitest.config.ts`
+  hands the RAW strings to Vitest, so a raw entry that is canonical only AFTER
+  normalization (a leading `./`, a repeated `//`, or a trailing `/`) was LAUNDERED
+  into passing the verifier while Vitest received the non-canonical raw string.
+  Empirically (verified against the installed Vitest 4.1.7 chunk
+  `coverage.DM_a_rWm.js:825-826`, which does `pm(glob)` on the raw threshold KEY and
+  matches it against clean `relative(root,file)` paths): for `PER_DIR_GLOBS`, a `//`
+  or trailing-`/` raw key matches NOTHING → its per-dir floor passes VACUOUSLY (the
+  R7-1/R6-1 vacuity class, defeated by laundering); a leading `./` is tolerated by
+  picomatch today but is non-canonical + fragile. For `COVERAGE_INCLUDE` (tinyglobby
+  selector) all three forms still instrument today, but relying on that incidental
+  tolerance is fragile. Fix: after the existing normalized-shape check, BOTH lists now
+  ALSO require `String(entry) === <canonical>` (the RAW string) — `PER_DIR_GLOBS`:
+  `<root>/<Dir>/**`; per-dir `COVERAGE_INCLUDE`: `<root>/<Dir>/**/*.{ts,tsx}`. A raw
+  string that only becomes canonical after normalization is a NAMED fail-closed
+  rejection. Normalization is still used to DETECT `.`/`..` and to DERIVE the dir, but
+  no longer launders the shape check. The two checks never double-fire (a genuinely
+  non-canonical normalized shape hits the first check and `continue`s; only a
+  normalized-canonical-but-raw-noisy entry reaches the new raw-exact check). Six new
+  self-test cases (q/r/s for `PER_DIR_GLOBS`, t/u/v for `COVERAGE_INCLUDE`: `./`, `//`,
+  trailing `/` each) → one NAMED rejection apiece.
+- **R8-2 [P3] lockstep enforced only measured⊆gated; added the reverse gated⊆measured.**
+  The forward lockstep proved every MEASURED dir has a per-dir floor, but not that
+  every per-dir floor gates a MEASURED dir — so an escaping config (`Layout` in
+  `COVERAGE_EXCLUDED` + `Layout/**` in `PER_DIR_GLOBS` + omitted from
+  `COVERAGE_INCLUDE`) would satisfy disk-completeness via the exclusion while the
+  Vitest threshold group is a no-op (the dir is not in the coverage map). Fix: a new
+  check (b2) after `measuredDirs`/`gatedDirs` are built requires every `gatedDirs`
+  entry to be in `measuredDirs` — a floor for a dir that is excluded or absent from
+  include is a NAMED fail-closed error (distinguishing the two `why` causes). Combined
+  with the forward check, this makes `gatedDirs === measuredDirs`. New self-test case
+  (w): a `src/components/Unlisted/**` floor for a dir in `COVERAGE_EXCLUDED` and not in
+  `COVERAGE_INCLUDE` → one NAMED reverse-lockstep rejection.
+
+Self-test now 25/25 (was 18; +7: q,r,s,t,u,v,w). The 6 raw-non-canonical cases each
+produce exactly 1 named error and the reverse-lockstep case 1; the existing
+narrow-shape cases (k/l/m/n) still produce exactly 1 (no double-fire). REAL config
+PASSES unchanged (all 13 entries are raw-canonical; `gatedDirs === measuredDirs == 13`;
+6 excluded).
+
+Durable-doc sync (specs in lockstep with code): the coverage-verifier description in
+`quality-gates.md` §Frontend — Unit/Component (check (a) raw-exact clause + check (b)
+made bidirectional + the real-config-verifier paragraph), `project-quality-gates`
+(the THREE-things gotcha + the two-guards summary + the command comment), and
+`project-frontend` §Coverage (the both-lists + lockstep bullets + the two-guards
+summary) now state that per-dir-root include/threshold entries must be EXACTLY
+canonical as the RAW string (no `./`/`//`/trailing-`/` laundering) and that lockstep
+is BIDIRECTIONAL (`gatedDirs === measuredDirs`). The LOCKSTEP INVARIANT block and a
+new RAW-EXACT INVARIANT block in `frontend/vitest.coverage.mjs` document the same.
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

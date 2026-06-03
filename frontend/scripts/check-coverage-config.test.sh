@@ -58,6 +58,41 @@
 #                    lockstep check reports the dir ungated — 2 errors, defense-in-depth
 #                    (parallel to case (a)). The verifier requires the EXACT threshold
 #                    shape `<root>/<Dir>/**` for every PER_DIR_GLOBS entry.
+#   (q) FLOOR-DOTSLASH / (r) FLOOR-DBLSLASH / (s) FLOOR-TRAILSLASH (R8-1) — a
+#                    PER_DIR_GLOBS entry that is canonical only AFTER normalization:
+#                    a leading `./` (`./src/components/Foo/**`), a repeated `//`
+#                    (`src/components//Foo/**`), or a trailing `/`
+#                    (`src/components/Foo/**/`). vitest.config.ts passes the RAW
+#                    threshold key to Vitest, and Vitest's picomatch matcher runs on
+#                    that RAW key against clean `relative(root,file)` paths — `//` and
+#                    a trailing `/` match NOTHING (vacuous floor), and even the
+#                    `./`-tolerant case is non-canonical + fragile across
+#                    picomatch/tinyglobby versions. So the verifier must compare the
+#                    RAW string, requiring `String(entry) === "<root>/<Dir>/**"`, and
+#                    REJECT a string that only becomes canonical after normalization
+#                    (normalization is still used to DETECT `.`/`..` and to derive the
+#                    dir, but must not LAUNDER a raw entry into passing). Each → a
+#                    named floor-shape rejection (the dir is excluded + unmeasured, so
+#                    the rejection is the ONLY error).
+#   (t) INC-DOTSLASH / (u) INC-DBLSLASH / (v) INC-TRAILSLASH (R8-1) — the same three
+#                    non-canonical forms on a COVERAGE_INCLUDE whole-dir entry
+#                    (`./src/components/Foo/**/*.{ts,tsx}`, `src/components//Foo/...`,
+#                    `src/components/Foo/**/*.{ts,tsx}/`). coverage.include is consumed
+#                    RAW by Vitest's tinyglobby selector; relying on its incidental
+#                    tolerance of `./`//`//`/trailing-`/` is fragile, so the verifier
+#                    requires the RAW include string to be EXACTLY the canonical
+#                    whole-dir shape `<root>/<Dir>/**/*.{ts,tsx}`. Each → a named
+#                    whole-dir-shape rejection (Foo excluded, no floor, so the
+#                    rejection is the ONLY error).
+#   (w) REV-LOCKSTEP (R8-2) — a PER_DIR_GLOBS floor for a dir that is NOT measured:
+#                    the dir is in COVERAGE_EXCLUDED and has a canonical
+#                    `<dir>/**` floor but NO COVERAGE_INCLUDE entry. The floor passes
+#                    shape + non-vacuity (the dir has source) so it enters `gatedDirs`,
+#                    but its Vitest threshold group is a no-op because the dir is not
+#                    instrumented (absent from the coverage map). The forward lockstep
+#                    (measured⊆gated) cannot catch this; the REVERSE lockstep
+#                    (gated⊆measured) must — making gatedDirs === measuredDirs. → a
+#                    named "floor for an unmeasured dir" rejection (the ONLY error).
 # Mirrors the fail-closed discipline + ANSI/printf style of
 # frontend/scripts/check-bundle-size.test.sh.
 #
@@ -356,6 +391,74 @@ assert 2 \
   '["src/components/Good","src/components/Unlisted","src/components/flat.tsx","src/pages/Page"]' \
   "(p) bare-dir PER_DIR_GLOBS floor (src/components/Foo, no /**) -> vacuous-floor error" \
   'must be the canonical per-dir threshold shape'
+
+# (q/r/s) RAW-NON-CANONICAL PER_DIR_GLOBS floors (R8-1) — each floor is canonical
+#     only AFTER normalization. vitest.config.ts hands the RAW key to Vitest, whose
+#     picomatch matcher runs on the RAW string: `//` and a trailing `/` match NOTHING
+#     (vacuous floor); the `./`-tolerant form is still non-canonical + fragile. The
+#     verifier must compare the RAW string and reject anything that only canonicalizes
+#     after normalization. Foo is EXCLUDED and NOT measured (empty include), so the
+#     floor-shape rejection is the ONLY error in each case (no lockstep, no vacuity:
+#     check (a) rejects on shape before the hasSource probe). Empirically (picomatch
+#     vs `src/components/Foo/good.tsx`): `./…` matches=true but `//…`/`…/**/` match=false.
+assert 1 \
+  '[]' \
+  '["./src/components/Foo/**"]' \
+  "$ALL_EXCLUDED" \
+  "(q) raw leading-./ PER_DIR_GLOBS floor (./src/components/Foo/**) -> raw-canonical floor error" \
+  'must be the canonical per-dir threshold shape'
+assert 1 \
+  '[]' \
+  '["src/components//Foo/**"]' \
+  "$ALL_EXCLUDED" \
+  "(r) raw repeated-// PER_DIR_GLOBS floor (src/components//Foo/**) -> raw-canonical floor error" \
+  'must be the canonical per-dir threshold shape'
+assert 1 \
+  '[]' \
+  '["src/components/Foo/**/"]' \
+  "$ALL_EXCLUDED" \
+  "(s) raw trailing-/ PER_DIR_GLOBS floor (src/components/Foo/**/) -> raw-canonical floor error" \
+  'must be the canonical per-dir threshold shape'
+
+# (t/u/v) RAW-NON-CANONICAL COVERAGE_INCLUDE whole-dir entries (R8-1) — same three
+#     forms on an include entry. coverage.include is consumed RAW by Vitest's
+#     tinyglobby selector; relying on its incidental tolerance of these forms is
+#     fragile, so the verifier requires the RAW include to be EXACTLY the canonical
+#     whole-dir shape `<root>/<Dir>/**/*.{ts,tsx}`. Foo is EXCLUDED with NO floor, so
+#     the whole-dir-shape rejection is the ONLY error (rejected include never enters
+#     measuredDirs; empty PER_DIR_GLOBS means no reverse-lockstep).
+assert 1 \
+  '["./src/components/Foo/**/*.{ts,tsx}"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(t) raw leading-./ COVERAGE_INCLUDE (./src/components/Foo/**/*.{ts,tsx}) -> raw-canonical include error" \
+  'must be the canonical whole-directory include shape'
+assert 1 \
+  '["src/components//Foo/**/*.{ts,tsx}"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(u) raw repeated-// COVERAGE_INCLUDE (src/components//Foo/**/*.{ts,tsx}) -> raw-canonical include error" \
+  'must be the canonical whole-directory include shape'
+assert 1 \
+  '["src/components/Foo/**/*.{ts,tsx}/"]' \
+  '[]' \
+  "$ALL_EXCLUDED" \
+  "(v) raw trailing-/ COVERAGE_INCLUDE (src/components/Foo/**/*.{ts,tsx}/) -> raw-canonical include error" \
+  'must be the canonical whole-directory include shape'
+
+# (w) REVERSE-LOCKSTEP (R8-2) — a canonical per-dir floor for a dir that is NOT
+#     measured. Unlisted has real source and a `src/components/Unlisted/**` floor (so
+#     it passes shape + non-vacuity and enters gatedDirs), is in COVERAGE_EXCLUDED,
+#     and has NO COVERAGE_INCLUDE entry — so its Vitest threshold group is a no-op
+#     (the dir is not instrumented). The forward lockstep (measured⊆gated) cannot see
+#     it; the reverse lockstep (gated⊆measured) must flag it, making gatedDirs ===
+#     measuredDirs. (All other source items excluded -> this is the ONLY error.)
+assert 1 \
+  '[]' \
+  '["src/components/Unlisted/**"]' \
+  "$ALL_EXCLUDED" \
+  "(w) per-dir floor for an excluded/unmeasured dir (Unlisted) -> reverse-lockstep error" \
+  'has a per-dir floor for "src/components/Unlisted" but that dir is not measured'
 
 echo
 if [ "$fail" -eq 0 ]; then

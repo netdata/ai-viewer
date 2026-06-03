@@ -16,17 +16,29 @@
 //   (a) PER-DIR FLOOR SHAPE + NON-VACUITY: every PER_DIR_GLOBS entry must be the
 //       EXACT canonical Vitest-threshold shape `<root>/<Dir>/**` (root a per-dir
 //       root, <Dir> a literal segment, ending in exactly "/**") AND match >= 1 real
-//       source file on disk. A Vitest threshold KEY must end in "/**" to match file
-//       paths: a bare dir ("src/components/Foo") matches NOTHING (lines pct "Unknown",
-//       "Unknown" < 80 is false) so its floor VACUOUSLY PASSES, and a deeper/narrower
-//       glob does not gate the whole dir while lockstep (b) marks it gated. A glob over
-//       a deleted/renamed/empty dir is likewise a vacuous pass. Both are defects, not
-//       passes — only a canonical, non-empty entry gates its dir.
-//   (b) LOCKSTEP: every immediate directory under src/components/ and src/pages/
-//       that is MEASURED (matched by a COVERAGE_INCLUDE entry AND containing >= 1
-//       non-test .ts/.tsx file) must have a corresponding PER_DIR_GLOBS key. A
-//       measured component/page dir with no per-dir floor is only gated by the
-//       weaker global aggregate — a silent coverage hole.
+//       source file on disk. The shape is checked against the RAW string, NOT a
+//       normalized one (R8-1): vitest.config.ts hands the RAW threshold key to Vitest,
+//       whose picomatch matcher runs on that raw key against clean "relative(root,file)"
+//       paths, so a key that is canonical only AFTER normalization (a leading "./", a
+//       repeated "//", or a trailing "/") matches NOTHING ("//"/trailing "/") or is
+//       version-fragile ("./") — its floor VACUOUSLY PASSES. Normalization is still
+//       used to DETECT `.`/`..` segments and to DERIVE the dir, but it must NOT launder
+//       a raw entry into passing. A Vitest threshold KEY must also end in "/**" to match
+//       file paths: a bare dir ("src/components/Foo") matches NOTHING (lines pct
+//       "Unknown", "Unknown" < 80 is false) so its floor VACUOUSLY PASSES, and a
+//       deeper/narrower glob does not gate the whole dir while lockstep (b) marks it
+//       gated. A glob over a deleted/renamed/empty dir is likewise a vacuous pass. All
+//       are defects, not passes — only a RAW-canonical, non-empty entry gates its dir.
+//   (b) LOCKSTEP (BIDIRECTIONAL): every immediate directory under src/components/ and
+//       src/pages/ that is MEASURED (matched by a COVERAGE_INCLUDE entry AND containing
+//       >= 1 non-test .ts/.tsx file) must have a corresponding PER_DIR_GLOBS key
+//       (measured ⊆ gated), AND every PER_DIR_GLOBS floor must gate a MEASURED dir
+//       (gated ⊆ measured, check (b2) — R8-2). Together these force gatedDirs ===
+//       measuredDirs. A measured component/page dir with no per-dir floor is only gated
+//       by the weaker global aggregate (a silent coverage hole); conversely a per-dir
+//       floor whose dir is NOT measured (it is in COVERAGE_EXCLUDED, or absent from
+//       COVERAGE_INCLUDE) is a threshold group over a dir Vitest never instruments — a
+//       vacuous no-op (a floor that can never fire). Both are rejected (named).
 //   (c) DISK-COMPLETENESS: every immediate directory under src/components/ and
 //       src/pages/ that holds source, and every flat .ts/.tsx file directly under
 //       those two roots, must be EITHER covered by a COVERAGE_INCLUDE entry OR
@@ -268,6 +280,24 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
       );
       continue;
     }
+    // RAW-EXACT (R8-1): the NORMALIZED value is canonical, but vitest.config.ts hands
+    // the RAW string to Vitest, whose picomatch threshold matcher runs on that RAW
+    // key. A leading "./", a repeated "//", or a trailing "/" only becomes canonical
+    // AFTER normalization — Vitest sees the raw form and (for "//" / trailing "/")
+    // matches NOTHING, so the floor passes VACUOUSLY (and even the "./"-tolerant form
+    // is fragile across picomatch/tinyglobby versions). Normalization is used to
+    // DETECT ./..` segments and to DERIVE the dir, but it must not LAUNDER a raw entry
+    // into passing — require the RAW string to already equal the canonical key.
+    if (String(glob) !== canonical) {
+      errors.push(
+        `PER_DIR_GLOBS entry "${glob}" must be the canonical per-dir threshold shape "${canonical}" as the RAW ` +
+          `string (no leading "./", no repeated "//", no trailing "/"). Vitest matches the RAW threshold key with ` +
+          `picomatch against clean "relative(root, file)" paths, so a key that is canonical only after normalization ` +
+          `matches NOTHING ("//"/trailing "/") or is version-fragile ("./") — its floor passes VACUOUSLY. Write the ` +
+          `key exactly as "${canonical}".`,
+      );
+      continue;
+    }
     const dir = dirGlobToDir(norm.value);
     gatedDirs.add(dir);
     if (!hasSource(dir)) {
@@ -296,9 +326,13 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
   //     instrument LESS than the whole dir while disk-completeness marks <Dir>
   //     measured, so a sibling source (Foo/helper.ts) escapes BOTH instrumentation
   //     AND check (c). REJECT (fail closed): an exact match is the tightest rule —
-  //     it cannot be narrowed.
-  //   - otherwise the entry IS the canonical whole-dir shape -> add the dir to the
-  //     measured set for (b)/(c).
+  //     it cannot be narrowed. The exactness is checked FIRST on the normalized value,
+  //     THEN on the RAW string (R8-1): a leading "./", repeated "//", or trailing "/"
+  //     that is canonical only after normalization is rejected too, because Vitest
+  //     consumes the RAW include string (tinyglobby) and relying on its incidental
+  //     tolerance of those forms is version-fragile.
+  //   - otherwise the entry IS the canonical whole-dir shape (raw) -> add the dir to
+  //     the measured set for (b)/(c).
   const measuredDirs = new Set(); // "src/components/Foo"  (dir include entries)
   const measuredFlatFiles = new Set(); // "src/components/Foo.tsx" (flat include entries)
   for (const entry of include) {
@@ -357,6 +391,21 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
       );
       continue;
     }
+    // RAW-EXACT (R8-1): the NORMALIZED value is the canonical whole-dir shape, but
+    // vitest.config.ts hands the RAW string to Vitest's tinyglobby `coverage.include`
+    // selector. A leading "./", repeated "//", or trailing "/" only becomes canonical
+    // AFTER normalization; relying on tinyglobby's incidental tolerance of those forms
+    // is fragile, so require the RAW include to already be the canonical whole-dir
+    // shape (the same raw-not-laundered rule as the PER_DIR_GLOBS floors above).
+    if (String(entry) !== canonical) {
+      errors.push(
+        `coverage.include entry "${entry}" is under measured dir "${seg.root}/${seg.first}" but must be the ` +
+          `canonical whole-directory include shape "${canonical}" as the RAW string (no leading "./", no repeated ` +
+          `"//", no trailing "/"). Vitest consumes the RAW include string; a string that is canonical only after ` +
+          `normalization is version-fragile. Write the entry exactly as "${canonical}".`,
+      );
+      continue;
+    }
     measuredDirs.add(`${seg.root}/${seg.first}`);
   }
 
@@ -390,6 +439,28 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
       errors.push(
         `measured component/page dir "${dir}" has NO per-dir line floor (missing from PER_DIR_GLOBS) — ` +
           `it is gated only by the weaker global aggregate. Add "${dir}/**" to PER_DIR_GLOBS in vitest.coverage.mjs.`,
+      );
+    }
+  }
+
+  // --- (b2) reverse lockstep: every per-dir floor gates a MEASURED dir --------
+  // The forward lockstep (b) proves measured ⊆ gated; this proves gated ⊆ measured,
+  // so together gatedDirs === measuredDirs. A PER_DIR_GLOBS floor whose dir is NOT in
+  // measuredDirs (it is in COVERAGE_EXCLUDED, or simply absent from COVERAGE_INCLUDE)
+  // is a Vitest threshold group over a dir that is never instrumented — the coverage
+  // map has no files for it, so the group is a vacuous no-op (a floor that can never
+  // fire). The forward check cannot see this (it only walks measuredDirs); without the
+  // reverse check, a floor could silently gate nothing. Fail closed, naming the dir.
+  for (const dir of gatedDirs) {
+    if (!measuredDirs.has(dir)) {
+      const why = excludedSet.has(dir)
+        ? `it is in COVERAGE_EXCLUDED`
+        : `it is absent from COVERAGE_INCLUDE`;
+      errors.push(
+        `PER_DIR_GLOBS has a per-dir floor for "${dir}" but that dir is not measured (${why}) — ` +
+          `a Vitest threshold group for an unmeasured dir has no files in the coverage map, so it is a vacuous ` +
+          `no-op (a floor that can never fire). Remove the "${dir}/**" floor, or measure the dir with a ` +
+          `"${dir}/**/*.{ts,tsx}" COVERAGE_INCLUDE entry.`,
       );
     }
   }
@@ -473,13 +544,16 @@ if (invokedAsScript) {
     if (!seg.first || GLOB_META.test(seg.first)) {
       continue; // broad whole-root glob — errored above, not a single-dir floor
     }
+    // Raw-exact is guaranteed here (this block runs only with zero errors, so the
+    // function already validated String(entry) === canonical), hence the normalized
+    // comparison is equivalent to the raw one for the count.
     if (norm.value === `${seg.root}/${seg.first}/**/*.{ts,tsx}`) {
       measured += 1; // canonical whole-dir shape — the only per-dir floor shape
     }
   }
   process.stdout.write(
-    `${GREEN}COVERAGE CONFIG: PASS${NC} (${PER_DIR_GLOBS.length} per-dir floors, all non-vacuous; ` +
-      `${measured} measured component/page dirs, all with a per-dir floor; disk-complete: ` +
+    `${GREEN}COVERAGE CONFIG: PASS${NC} (${PER_DIR_GLOBS.length} per-dir floors, all RAW-canonical + non-vacuous; ` +
+      `${measured} measured component/page dirs, bidirectional lockstep (gated === measured); disk-complete: ` +
       `${COVERAGE_EXCLUDED.length} dir(s)/file(s) explicitly excluded)\n`,
   );
 }
