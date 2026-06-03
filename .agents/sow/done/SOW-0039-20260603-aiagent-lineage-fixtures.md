@@ -2,9 +2,14 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: opened 2026-06-03 under the operator's standing backlog mandate (no open decisions need operator input). Driven by the operator report that ai-agent session snapshots were not linked to parents/origins, now fixed upstream. A read-only cross-repo assessment confirmed ai-viewer's v3 adapter ALREADY consumes the lineage correctly — so this SOW is test + spec hardening (adopt the real upstream fixtures + an end-to-end lineage golden + fix 2 stale spec lines), NOT an adapter rewrite.
+Sub-state: delivered. ai-viewer's v3 adapter already consumed the ai-agent
+lineage fix (`8a0078bc`) correctly; this SOW proved it with the real upstream
+fixtures + a 3-way mutation-proven golden (ingest→store) and swept the v3 spec
+drift the producer change created. 3 external reviewers converged over 3 rounds
+(R3: findings none). No adapter decode/map logic changed. Self-merged to master
+after CI green (see Execution Log / Outcome).
 
 ## Requirements
 
@@ -144,7 +149,26 @@ CTO decision (operator delegated scope): do this as a focused fixture + golden +
 
 ## Validation
 
-Pending.
+Acceptance criteria evidence:
+
+- **AC1 (fixtures verbatim):** `internal/adapters/aiagent_v3/testdata/sub-agent-with-parent-id/session/{root,child}-session.jsonl` byte-identical to `ai-agent@8a0078bc` (`diff`/sha256 confirmed), PII-clean.
+- **AC2 (end-to-end lineage golden):** `internal/ingest/e2e_aiagent_lineage_test.go` — 3 ingest→store tests assert child `parent_session_id`/`parentOpKey`, the parent-side synthesizer path, `root_session_id` origin chaining, and `attr.llmRequestId == "chatcmpl-fixture"`. Split 3 ways so each mapping path is unconditionally mutation-sensitive; each verified RED under its cited single-field mutation.
+- **AC3 (spec drift fixed):** `adapter-aiagent-v2.md` (envelope fields now persisted, still ignored by design) + `adapter-aiagent-v3.md` (`parentSessionId` firm guarantee, `parentOpId` best-effort, example + `:248` corrected).
+- **AC4 (no adapter logic change):** `git diff master...HEAD` on `aiagent_v3/{parser,mapper,ops}.go` is empty — verified.
+- **AC5:** gates + review + merge below.
+
+Tests / gates (orchestrator-run): 3 lineage tests pass under `-race`; `aiagent_v3` + `internal/ingest` green; `go vet` + `gofmt` clean; secret + AI-attribution scans clean. The PR's CI is the final proof (recorded on merge).
+
+Reviewer findings: 3 reviewers (codex + glm + minimax), all SOUND from R1; converged over 3 rounds — see `## Reviews`.
+
+Sensitive data gate: fixtures synthetic (root-session/child-session/root-agent/chatcmpl-fixture); no PII/secrets; scans pass.
+
+Artifact maintenance gate:
+- AGENTS.md / runtime skills: no change (no gate semantics change).
+- Specs: `adapter-aiagent-v2.md` + `adapter-aiagent-v3.md` updated (drift).
+- SOW lifecycle: `Status: completed` + move to `done/` committed with the work.
+
+Follow-up mapping: the two follow-ups (`llmRequestId` first-class; v2 generic-attr capture) tracked in `## Followup` — out of scope here.
 
 ## Reviews
 
@@ -201,15 +225,45 @@ stated as **best-effort** (written only when the spawning boundary supplies the
 optional `trace?.parentOpId`), absent possible even post-fix, adapter tolerates
 absence. No code/test change — the golden's child fixture carries `parentOpId`,
 so the test is unaffected; `parser.go`/`mapper.go`/`ops.go` still untouched.
-codex re-review: recorded on convergence.
+codex re-review (R3): **findings: none — "sound, spec-accurate, and safe to
+merge as-is."** Confirmed no residual `parentOpId` overstatement, `parentSessionId`
+still the firm guarantee, internal consistency across the table rows / §8.1 /
+§8.2 / references, and adapter logic unchanged vs master. **Converged** (R1: 2 Low
++ 1 nit → R2: 1 Low → R3: 0 — the degrade-to-clean convergence signal).
 
 ## Outcome
 
-Pending.
+Delivered: ai-viewer's correct consumption of ai-agent's session-lineage fix
+(`8a0078bc`) is now PROVEN against the producer's real wire format — two
+byte-identical upstream fixtures + a 3-way mutation-proven ingest→store golden
+pinning child→parent (`parent_session_id` / `parentOpKey`), the parent-side
+`childSessions[]` synthesizer path, origin chaining (`root_session_id`), and the
+new `attr.llmRequestId`. The v3/v2 adapter specs are corrected (envelope fields
+now persisted-but-ignored-by-design; `parentSessionId` firm guarantee,
+`parentOpId` best-effort). No adapter decode/map logic changed. 3 external
+reviewers converged R1→R3 (findings → none). Self-merged to master after CI
+green.
 
 ## Lessons Extracted
 
-Pending.
+- **Distinguish FIRM guarantees from BEST-EFFORT fields when a producer makes
+  something "first-class."** The fix made `parentSessionId` a guarantee but
+  `parentOpId` only best-effort (optional `trace?.parentOpId`; SOW-0030 "when the
+  boundary can provide it safely"). The first spec draft overstated both as
+  guaranteed — caught on re-review. Read the producer code + its SOW caveats;
+  don't infer "first-class" == "always present".
+- **An integration/combined golden can MASK single-field mutations.** With both
+  parent + child ledgers present, the parent-side synthesizer re-supplies
+  child-side fields on UPSERT (order-dependent), so a wrong child-side mapping
+  can still pass the combined test. Isolate each mapping path in its own test
+  (parent-only / child-only) where it is unconditionally mutation-sensitive, and
+  prove each RED under a single-field mutation. A passing combined test is not a
+  mutation proof. (Same class as the far-future-clock lesson: a test that does
+  not actually exercise the path it claims.)
+- **Sweep the spec-drift class repo-wide, not the cited lines.** A producer
+  contract change touched the same claim in ~8 spots across two specs; fixing
+  only the obvious rows left re-flaggable drift (the `:248` "never-emitted"
+  mention; the `parentOpId` overstatement) for later review rounds.
 
 ## Followup
 
