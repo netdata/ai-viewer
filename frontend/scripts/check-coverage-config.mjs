@@ -13,11 +13,15 @@
 //   no second copy to fall out of sync.
 //
 // Checks, all FAIL CLOSED (a returned error message → exit 1, naming the offender):
-//   (a) NON-VACUITY: every PER_DIR_GLOBS entry must match >= 1 real source file
-//       on disk. A per-dir glob matching ZERO files has lines pct "Unknown" in
-//       Vitest, and "Unknown" < 80 is false, so an empty group VACUOUSLY PASSES —
-//       silently disabling that dir's floor. A glob over a deleted/renamed/empty
-//       dir is therefore a defect, not a pass.
+//   (a) PER-DIR FLOOR SHAPE + NON-VACUITY: every PER_DIR_GLOBS entry must be the
+//       EXACT canonical Vitest-threshold shape `<root>/<Dir>/**` (root a per-dir
+//       root, <Dir> a literal segment, ending in exactly "/**") AND match >= 1 real
+//       source file on disk. A Vitest threshold KEY must end in "/**" to match file
+//       paths: a bare dir ("src/components/Foo") matches NOTHING (lines pct "Unknown",
+//       "Unknown" < 80 is false) so its floor VACUOUSLY PASSES, and a deeper/narrower
+//       glob does not gate the whole dir while lockstep (b) marks it gated. A glob over
+//       a deleted/renamed/empty dir is likewise a vacuous pass. Both are defects, not
+//       passes — only a canonical, non-empty entry gates its dir.
 //   (b) LOCKSTEP: every immediate directory under src/components/ and src/pages/
 //       that is MEASURED (matched by a COVERAGE_INCLUDE entry AND containing >= 1
 //       non-test .ts/.tsx file) must have a corresponding PER_DIR_GLOBS key. A
@@ -76,9 +80,10 @@ const NC = '\x1b[0m';
 // per-dir floor by design.
 const PER_DIR_ROOTS = ['src/components', 'src/pages'];
 
-/** dirGlobToDir maps a per-dir glob ("src/components/FilterBar/**") to its
- *  directory ("src/components/FilterBar") by stripping a trailing "/**" (and any
- *  trailing slash). Pure string work — no glob engine. */
+/** dirGlobToDir maps a CANONICAL per-dir glob ("src/components/FilterBar/**") to its
+ *  directory ("src/components/FilterBar") by stripping the trailing "/**" (and any
+ *  trailing slash). Pure string work — no glob engine. Applied only AFTER the entry's
+ *  shape is validated as canonical (see check (a)), so the trailing "/**" is present. */
 function dirGlobToDir(glob) {
   return glob.replace(/\/\*\*$/, '').replace(/\/$/, '');
 }
@@ -230,10 +235,40 @@ export function checkCoverageConfig({ include, perDirGlobs, excluded = [], front
   // arg so it stays pure across fixture roots).
   const hasSource = (relDir) => hasSourceFile(frontendDir, relDir);
 
-  // --- (a) non-vacuity: every per-dir glob matches >= 1 real source file ------
+  // --- (a) per-dir floors: EXACT canonical threshold shape + non-vacuity -------
+  // A PER_DIR_GLOBS entry IS a Vitest `coverage.thresholds` KEY. Vitest matches a
+  // threshold key against absolute file paths, so the key MUST end in "/**" to match
+  // any file under the dir: a bare-dir key ("src/components/Foo", no "/**") matches
+  // NOTHING, its lines pct is "Unknown", and "Unknown" < 80 is false — so that floor
+  // VACUOUSLY PASSES (the same vacuous-floor trap as a stale include, on the threshold
+  // list). A deeper/narrower glob ("…/Foo/**/*.tsx", "…/Foo/bar/**") would likewise
+  // not gate the whole dir while lockstep marks it gated. So every entry must be
+  // EXACTLY the canonical threshold shape `<root>/<Dir>/**` (root ∈ PER_DIR_ROOTS,
+  // <Dir> a literal segment with no glob metachar, ending in exactly "/**"). The
+  // shape is validated FIRST (reusing normalizeEntry for `.`/`..` rejection), and only
+  // a canonical entry contributes its derived dir to `gatedDirs` (via dirGlobToDir) —
+  // a malformed entry is errored, not silently treated as gating its dir.
   const gatedDirs = new Set();
   for (const glob of perDirGlobs) {
-    const dir = dirGlobToDir(glob);
+    const norm = normalizeEntry(glob);
+    if (norm.error) {
+      errors.push(norm.error);
+      continue;
+    }
+    const seg = firstSegmentUnderRoot(norm.value);
+    const canonical = seg && seg.first ? `${seg.root}/${seg.first}/**` : null;
+    if (seg === null || !seg.first || GLOB_META.test(seg.first) || norm.value !== canonical) {
+      errors.push(
+        `PER_DIR_GLOBS entry "${glob}" must be the canonical per-dir threshold shape ` +
+          `("${PER_DIR_ROOTS[0]}/<Dir>/**" or "${PER_DIR_ROOTS[1]}/<Dir>/**", a literal dir under a per-dir root, ` +
+          `ending in exactly "/**"), not "${norm.value}". A Vitest threshold key must end in "/**" to match file ` +
+          `paths; a bare dir matches NOTHING (lines pct "Unknown", "Unknown" < 80 is false) so its floor VACUOUSLY ` +
+          `PASSES, and a deeper/narrower glob does not gate the whole dir while lockstep marks it gated. Use the ` +
+          `canonical shape, or remove the key (and its coverage.include entry).`,
+      );
+      continue;
+    }
+    const dir = dirGlobToDir(norm.value);
     gatedDirs.add(dir);
     if (!hasSource(dir)) {
       errors.push(

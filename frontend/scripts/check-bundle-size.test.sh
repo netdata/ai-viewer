@@ -15,7 +15,12 @@
 # manifest key that does NOT exist, or that references a JS chunk which is NOT
 # `isDynamicEntry` (each a ManifestChunk-contract violation Vite never emits for a
 # valid build — a dynamicImport target is, by contract, a separately-budgeted
-# dynamic-entry chunk). The gate is itself code; it must be correct.
+# dynamic-entry chunk). It also fails closed on a JS chunk flagged BOTH `isEntry`
+# AND `isDynamicEntry` (mutually-exclusive flags — a both-flagged route chunk would
+# be under-budgeted as MAIN), and on ANY manifest entry (JS or non-JS, e.g. a CSS
+# chunk) whose `.file` is absent on disk (an up-front sweep so the missing-file
+# fail-closed promise covers non-JS entries too). The gate is itself code; it must
+# be correct.
 #
 # gzip shrinks low-entropy bytes (zeros, repeats) to almost nothing, so a budget
 # expressed in GZIPPED bytes can only be exercised with HIGH-ENTROPY
@@ -306,6 +311,38 @@ cat > "$Y/.vite/manifest.json" <<'JSON'
 }
 JSON
 assert 2 "$Y" "dynamicImports target is a JS chunk that is not isDynamicEntry"
+
+# --- (f1) a JS chunk flagged BOTH isEntry AND isDynamicEntry -> FAIL CLOSED ------
+# `isEntry` and `isDynamicEntry` are MUTUALLY EXCLUSIVE in any valid Vite manifest.
+# A chunk carrying both is an ambiguous classification: the gate buckets a JS chunk
+# as MAIN (`isEntry ? mainChunks : lazyChunks`), so a both-flagged route chunk would
+# be budgeted at the looser 500 KB MAIN budget instead of the 200 KB LAZY budget — a
+# malformed manifest could thus under-budget a route chunk. The gate must fail closed
+# (exit 2) on the contract violation, up front, before classification. (R7-2.)
+Z="$TMP/z/dist"; mkdir -p "$Z/assets" "$Z/.vite"
+mkchunk "$Z/assets/index-BOTH.js" 120            # main own file fine; the flags conflict
+cat > "$Z/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-BOTH.js", "name": "index", "src": "index.html", "isEntry": true, "isDynamicEntry": true } }
+JSON
+assert 2 "$Z" "JS chunk flagged BOTH isEntry and isDynamicEntry"
+
+# --- (f2) a NON-JS manifest entry whose .file is absent on disk -> FAIL CLOSED ---
+# The per-closure gzipOf existence guard only fires for JS files inside a gated
+# closure, so a missing CSS/asset manifest entry would otherwise pass. An up-front
+# sweep asserts EVERY isChunk entry's `.file` exists on disk (JS and non-JS alike),
+# making the docs' "a manifest entry whose .file is absent on disk fails closed"
+# promise true for every entry. Here the manifest references a CSS chunk that is NOT
+# on disk while the JS main IS present (so only the missing-CSS sweep is under test).
+# (R7-3.)
+AA="$TMP/aa/dist"; mkdir -p "$AA/assets" "$AA/.vite"
+mkchunk "$AA/assets/index-CSS1.js" 120           # main JS present...
+cat > "$AA/.vite/manifest.json" <<'JSON'
+{
+  "index.html":  { "file": "assets/index-CSS1.js", "name": "index", "src": "index.html", "isEntry": true },
+  "style.css":   { "file": "assets/style-MISSING.css", "name": "style", "src": "style.css" }
+}
+JSON
+assert 2 "$AA" "non-JS (CSS) manifest entry whose file is absent on disk"
 
 echo
 if [ "$fail" -eq 0 ]; then

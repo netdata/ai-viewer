@@ -57,7 +57,8 @@
 #                  axe a11y on EVERY App.tsx route (zero serious/critical, the
 #                  E2E step); and the coverage-config verifier
 #                  (frontend/scripts/check-coverage-config.mjs — real-config
-#                  non-vacuity + lockstep) plus its hermetic self-test.
+#                  non-vacuity + lockstep + disk-completeness + exact canonical
+#                  include/threshold shape) plus its hermetic self-test.
 #     - SOW-0013 — scripts/{gates,spec-drift}.sh + CodeQL workflow +
 #                  Dependabot config
 #   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its

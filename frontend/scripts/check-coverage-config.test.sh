@@ -48,6 +48,16 @@
 #                    shape (an exact match cannot be narrowed — the tightest rule).
 #   (o) CANON-OK   — the canonical whole-dir shape (`src/components/Good/**/*.{ts,tsx}`)
 #                    is ACCEPTED with no error (proves the exact rule does not over-reject).
+#   (p) BARE-FLOOR — returns a named error for a PER_DIR_GLOBS entry that is a BARE
+#                    dir (`src/components/Foo`, no trailing `/**`): Vitest's threshold
+#                    KEY must be `<Dir>/**` to match any file path, so a bare-dir key
+#                    matches NOTHING and that per-dir floor is VACUOUS (parallel to the
+#                    vacuous-include class, on the threshold list). The dir is on disk
+#                    with a canonical COVERAGE_INCLUDE; the verifier rejects the floor
+#                    shape AND (since a rejected entry never enters `gatedDirs`) the
+#                    lockstep check reports the dir ungated — 2 errors, defense-in-depth
+#                    (parallel to case (a)). The verifier requires the EXACT threshold
+#                    shape `<root>/<Dir>/**` for every PER_DIR_GLOBS entry.
 # Mirrors the fail-closed discipline + ANSI/printf style of
 # frontend/scripts/check-bundle-size.test.sh.
 #
@@ -330,6 +340,22 @@ assert 0 \
   '["src/components/Good/**"]' \
   '["src/components/Unlisted","src/components/Foo","src/components/flat.tsx","src/pages/Page"]' \
   "(o) canonical whole-dir include (Good/**/*.{ts,tsx}) -> accepted, no error"
+
+# (p) BARE-FLOOR — a PER_DIR_GLOBS entry that is a BARE dir (`src/components/Foo`,
+#     no trailing `/**`). Vitest's threshold KEY must end in `/**` to match file
+#     paths, so a bare-dir key matches NOTHING -> that per-dir floor is VACUOUS.
+#     Foo is on disk and has its canonical COVERAGE_INCLUDE entry. BOTH checks fire
+#     (2 errors, defense-in-depth, parallel to case (a)): the (a) floor-shape error
+#     rejects the bare-dir key AND — because a rejected entry is NOT added to
+#     `gatedDirs` — the (b) lockstep error reports Foo as measured-but-ungated. We
+#     pin the floor-shape wording (the primary defect under test). (Every other
+#     enumerated source item is excluded so these are the ONLY errors.)
+assert 2 \
+  '["src/components/Foo/**/*.{ts,tsx}"]' \
+  '["src/components/Foo"]' \
+  '["src/components/Good","src/components/Unlisted","src/components/flat.tsx","src/pages/Page"]' \
+  "(p) bare-dir PER_DIR_GLOBS floor (src/components/Foo, no /**) -> vacuous-floor error" \
+  'must be the canonical per-dir threshold shape'
 
 echo
 if [ "$fail" -eq 0 ]; then

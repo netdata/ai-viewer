@@ -793,6 +793,73 @@ DEFINITIVE closures of classes prior rounds patched incrementally:
 Orchestrator finalization: pending (this entry written by the implementer for the
 orchestrator to review + fold into `## Validation`/`## Reviews`).
 
+### 2026-06-03 — Chunk F round-6 fixes (R7-1..R7-4, delegated)
+
+Four verified round-6 external-review findings on the Chunk F surface — the FINAL
+closers that complete the exact-shape/classification rules earlier rounds started.
+Fixed spec→test→code (the two gate self-tests were extended FIRST):
+
+- **R7-1 [P2] coverage verifier: require the EXACT canonical PER_DIR_GLOBS threshold
+  shape** (`frontend/scripts/check-coverage-config.mjs`). R6-1 enforced the exact
+  canonical shape on `COVERAGE_INCLUDE`, but `PER_DIR_GLOBS` (the Vitest threshold
+  keys) was NOT shape-checked: a bare-dir entry like `src/components/Foo` (no `/**`)
+  passed — `dirGlobToDir` stripped a trailing `/**` it did not have, `hasSource` was
+  true, lockstep saw the dir gated — yet a Vitest threshold KEY must end in `/**` to
+  match file paths, so `src/components/Foo` matched NO file and that floor was VACUOUS
+  (the same vacuous-floor class as R6-1, on the threshold list). Fix: check (a) now
+  validates every `PER_DIR_GLOBS` entry is EXACTLY the canonical threshold shape
+  `<root>/<Dir>/**` (root ∈ {`src/components`, `src/pages`}, `<Dir>` a literal segment
+  with no glob metachar, ending in exactly `/**`) — reusing `normalizeEntry` for
+  `.`/`..` rejection — and `gatedDirs` is derived (via `dirGlobToDir`) ONLY from a
+  canonical entry; a bare dir, a deeper/narrower glob, or any non-canonical shape is a
+  NAMED fail-closed error. A rejected entry never enters `gatedDirs`, so the lockstep
+  check additionally reports the (now-ungated) measured dir — defense-in-depth,
+  parallel to the existing vacuity case. New self-test case (p): a bare
+  `src/components/Foo` in `PER_DIR_GLOBS` (Foo on disk + a canonical
+  `COVERAGE_INCLUDE` for it) → NAMED rejection (`must be the canonical per-dir
+  threshold shape`, 2 errors). All existing cases kept; self-test now 18/18. REAL
+  config PASSES unchanged (all 13 `PER_DIR_GLOBS` are `<Dir>/**`; 13 floors / 13
+  measured dirs / 6 excluded).
+- **R7-2 [P2] bundle gate: fail closed on a chunk flagged BOTH `isEntry` AND
+  `isDynamicEntry`** (`frontend/scripts/check-bundle-size.js`). The
+  `isMain ? mainChunks : lazyChunks` classification meant a JS chunk flagged BOTH
+  `isEntry:true` AND `isDynamicEntry:true` was budgeted as MAIN (500 KB) instead of
+  LAZY (200 KB) — a malformed manifest could thus under-budget a route chunk (the
+  flags are mutually exclusive in any valid Vite manifest). Fix: a new up-front
+  validation pass (alongside the imports/dynamicImports shape checks, BEFORE
+  classification) exits 2 (named) when a JS chunk has both flags. New self-test case
+  (f1): a chunk with both flags → exit 2; the normal `isEntry`-only main and
+  `isDynamicEntry`-only lazy cases still PASS.
+- **R7-3 [P3] bundle gate: missing-file fail-closed now covers non-JS entries**
+  (`frontend/scripts/check-bundle-size.js`). The docs promised "a manifest entry whose
+  `.file` is absent on disk" fails closed, but the existence check (`gzipOf`) ran only
+  for JS files inside gated closures — a missing CSS/asset manifest entry passed. Fix
+  (make the doc true): a new up-front sweep over every `isChunk(entry)` asserts
+  `path.join(distDir, entry.file)` exists (fatal exit 2, named, "manifest entry <key>
+  references a file absent on disk: <file>"), BEFORE JS classification — covering JS
+  and non-JS alike. The per-closure `gzipOf` existence guard is kept (the up-front
+  sweep is additional). New self-test case (f2): a CSS chunk whose file is absent on
+  disk → exit 2. Bundle self-test now 22/22; existing cases unchanged. REAL gate
+  PASSES unchanged (all real chunks present on disk).
+- **R7-4 [P3] stale CI comment** (`.github/workflows/ci.yml`). The high-level
+  SOW-0012 status comment described the coverage verifier as only "real-config
+  non-vacuity + lockstep"; updated to "non-vacuity + lockstep + disk-completeness +
+  exact canonical include/threshold shape" to match the current verifier surface and
+  the coverage-config step comment lower in the file. `actionlint .github/workflows/ci.yml`
+  stays exit 0.
+
+Durable-doc sync (per "specs in lockstep with code"): the bundle-gate fail-closed
+case list in `quality-gates.md` §Frontend — Bundle Size, `project-quality-gates`
+§Frontend — Bundle Size, and `project-frontend` §Bundle Size now include the
+both-`isEntry`-and-`isDynamicEntry` case (R7-2) and the JS-or-non-JS absent-`.file`
+up-front sweep (R7-3); the coverage-verifier description in `quality-gates.md`
+§Frontend — Unit/Component (check (a) + the shape clause), `project-quality-gates`
+(the THREE-things gotcha), and `project-frontend` §Coverage now state the
+`PER_DIR_GLOBS` exact-threshold-shape requirement (R7-1).
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

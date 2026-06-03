@@ -40,15 +40,17 @@
 // No silent failures (fail-closed): a missing/empty distDir, a missing or invalid
 // .vite/manifest.json (including a JSON array rather than an object), a manifest that
 // classifies ZERO JS chunks, a manifest with NO main (isEntry) chunk at all (this SPA
-// always emits exactly one — its absence is a broken build), a manifest entry whose
-// file is absent on disk, a static-import graph referencing a missing/invalid chunk
-// key, a manifest entry whose `imports`/`dynamicImports` is PRESENT BUT NOT AN ARRAY,
-// a manifest entry whose `imports` array holds a NON-STRING element, a manifest
-// entry whose `dynamicImports` array holds a NON-STRING element, a `dynamicImports`
-// element referencing a manifest key that does NOT exist, or a `dynamicImports`
-// element referencing a JS chunk that is NOT `isDynamicEntry` (all
-// ManifestChunk-contract violations) each EXIT NON-ZERO. The gate never certifies
-// "within budget" without measuring real, classified chunks.
+// always emits exactly one — its absence is a broken build), a manifest entry (JS OR
+// non-JS, e.g. CSS) whose file is absent on disk (checked up front for EVERY chunk,
+// not just gated JS), a JS chunk flagged BOTH `isEntry` AND `isDynamicEntry` (mutually
+// exclusive — a both-flagged route chunk would be under-budgeted as MAIN), a
+// static-import graph referencing a missing/invalid chunk key, a manifest entry whose
+// `imports`/`dynamicImports` is PRESENT BUT NOT AN ARRAY, a manifest entry whose
+// `imports` array holds a NON-STRING element, a manifest entry whose `dynamicImports`
+// array holds a NON-STRING element, a `dynamicImports` element referencing a manifest
+// key that does NOT exist, or a `dynamicImports` element referencing a JS chunk that
+// is NOT `isDynamicEntry` (all ManifestChunk-contract violations) each EXIT NON-ZERO.
+// The gate never certifies "within budget" without measuring real, classified chunks.
 //
 // Usage:  node scripts/check-bundle-size.js [distDir]   (default: <script>/../dist)
 // Exit:   0 = every gated chunk within budget; 1 = a budget violation;
@@ -143,6 +145,47 @@ function main() {
   // `imports`/`dynamicImports` are optional string arrays of OTHER manifest KEYS.
   function isChunk(v) {
     return v !== null && typeof v === 'object' && typeof v.file === 'string';
+  }
+
+  // Fail-closed, up-front: EVERY manifest chunk's `.file` must exist on disk — JS AND
+  // non-JS (CSS/asset) alike. The per-closure gzipOf guard below only fires for JS
+  // files INSIDE a gated entry's static closure, so a missing CSS/asset (or a JS chunk
+  // never pulled into a closure) would otherwise slip past — yet a manifest naming a
+  // file absent on disk is a stale/incomplete build either way. This sweep makes the
+  // gate's documented "a manifest entry whose `.file` is absent on disk fails closed"
+  // promise true for every entry, not just gated JS. Runs BEFORE classification.
+  for (const key of Object.keys(manifest)) {
+    const entry = manifest[key];
+    if (!isChunk(entry)) {
+      continue;
+    }
+    if (!fs.existsSync(path.join(distDir, entry.file))) {
+      fatal(
+        `manifest entry ${JSON.stringify(key)} references a file absent on disk: ${entry.file}\n` +
+          `        (stale or incomplete build under ${distDir})`,
+      );
+    }
+  }
+
+  // Fail-closed, up-front: a JS chunk must NOT be flagged BOTH `isEntry` AND
+  // `isDynamicEntry` — the two are mutually exclusive in any valid Vite manifest. The
+  // classifier buckets a JS chunk as MAIN via `isEntry ? mainChunks : lazyChunks`, so a
+  // both-flagged route chunk would be budgeted at the looser 500 KB MAIN budget instead
+  // of the 200 KB LAZY budget — a malformed manifest could thus under-budget a route
+  // chunk. Reject the ambiguous classification here (exit 2), before classification.
+  for (const key of Object.keys(manifest)) {
+    const entry = manifest[key];
+    if (!isChunk(entry) || !entry.file.endsWith('.js')) {
+      continue;
+    }
+    if (entry.isEntry === true && entry.isDynamicEntry === true) {
+      fatal(
+        `manifest entry ${JSON.stringify(key)} (file ${JSON.stringify(entry.file)}) is flagged BOTH ` +
+          `\`isEntry\` AND \`isDynamicEntry\` — these are mutually exclusive in a valid Vite manifest. ` +
+          `The classifier would budget it as a MAIN chunk (500 KB) instead of a per-route LAZY chunk (200 KB), ` +
+          `under-budgeting it; refusing to pass on the ambiguous classification.`,
+      );
+    }
   }
 
   // Fail-closed validation of the ManifestChunk `imports`/`dynamicImports` SHAPE on
