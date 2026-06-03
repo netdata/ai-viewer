@@ -106,6 +106,7 @@ Observed shape (every session has exactly one, always `seq=1`):
   "agentId": "<agent-name>",
   "callPath": "<colon-separated-call-chain>",
   "parentSessionId": "<parent-uuid>",
+  "parentOpId": "<parent-op-id>",
   "headendId": "<cli|api|web|embed|slack|sub-agent|tool_output|history_compaction>",
   "capturePayloads": true,
   "attributes": {
@@ -125,8 +126,8 @@ Field-by-field:
 |---|---|---|---|
 | `agentId` | yes (de-facto) | string | declared optional in producer types (`types.ts:36`); always present in observed data. Equals the agent module name as registered with ai-agent (e.g. `bigquery`, `web-fetch`, `feed-enrichment`, `history_compaction.turn_summarizer`, `parent`, `spawn-parent`). Maps to canonical `agent_name`. |
 | `callPath` | yes (de-facto) | string | colon-separated chain of agent invocations rooted at the originating headend (e.g. `feed-enrichment:web-search:web-fetch`). Useful UX hint; surface as part of `extras_json`. |
-| `parentSessionId` | optional | string | **Present on 76% of observed sessions; 96.8% of `headendId=='sub-agent'` sessions, 100% of `history_compaction` and `tool_output` sessions, 0% of root headends (`cli`, `api`, `web`, `embed`, `slack`).** The remaining 3.2% of sub-agent sessions without it are early-format leftovers. The adapter SHOULD use this when present as the immediate-parent linkage fast path. (Producer code path: `session-recorder.ts:364`.) |
-| `parentOpId` | not yet | string | declared in `EvidenceSessionStartBody` per the existing TypeScript types but **NOT** written by the current `recordSessionStart()` implementation, and observed in **0/500** sampled sessions. `ai-agent.git/.agents/sow/pending/SOW-0029` proposes adding it explicitly; the v3 adapter MUST tolerate its presence without depending on it. |
+| `parentSessionId` | yes (sub-agents) | string | **A first-class producer guarantee since the lineage fix `ai-agent@8a0078bc`**: `recordSessionStart()` now always writes `parentSessionId` onto the child's `session_start` (`session-recorder.ts:364-366`), superseding the prior "present on ~76% of sessions / remaining ~3.2% early-format leftovers" observation. Set on every non-root session (sub-agent, `history_compaction`, `tool_output`); absent on root headends (`cli`, `api`, `web`, `embed`, `slack`) by definition. Pre-fix snapshots on disk may still omit it, so the adapter treats it as the immediate-parent linkage fast path and keeps the parent-side `childSessions[]` synthesizer (§8.1) as the two-path safety net. Maps to canonical `ParentNativeID` (`mapper.go:118`). |
+| `parentOpId` | best-effort (sub-agents) | string | Added by the lineage fix `ai-agent@8a0078bc`, but written **best-effort**, not unconditionally: `recordSessionStart()` emits `this.options.parentOpId` (`session-recorder.ts:364-366`), which is the OPTIONAL `trace?.parentOpId` threaded from the spawning op — SOW-0030 plan item 3 is explicit ("write `parentOpId` **when the existing child creation boundary can provide it safely**"). So it can be absent even on post-fix snapshots. Also carried on parent-side `childSessions[]` refs (`session-tree.ts`). Identifies the parent op that spawned the child. Maps to canonical `ParentOpKey` (`mapper.go:119`), persisted into `sessions.extras_json.aiViewer.parentOpKey`. The adapter MUST tolerate its absence. |
 | `headendId` | yes (de-facto) | string | which entry-point launched the session. Observed distribution (1000 random session_starts): `cli=23.5%`, `sub-agent=62.2%`, `tool_output=9.6%`, `web=1.5%`, `api=1.2%`, `history_compaction=1.0%`, `slack=0.4%`, `embed=0.6%`. The adapter maps `cli|api|web|embed|slack` → canonical `Kind='root'`; `sub-agent|history_compaction` → `Kind='sub_agent'`; `tool_output` → `Kind='tool_internal'`. |
 | `capturePayloads` | yes | bool | `true` when raw payloads were captured to disk; `false` when the run used `--no-capture-payloads` (still records refs with `captured:false`). |
 | `attributes.ledgerPath` | yes | string | always `"session/<sessionId>.jsonl"`. Self-referential; the adapter does not need it. Producer writes it at `session-recorder.ts:369-370`. |
@@ -245,7 +246,7 @@ Field-by-field:
 | `accounting` | llm-mostly | object | populated when the op contributed to token usage; only LLM ops in observed data (`session-recorder.ts:93-94` filters `entry.type==='llm'`). |
 | `attributes` | de-facto | object | always present in observed data, contains operational metadata. Common keys (observed): `provider`, `model`, `isFinalTurn`, `latency`, `kind` (often `mcp` for tools), `name`, `size`, `error`, `archivedTurn`, `currentTurn`. Treat as extras. |
 | `error` | declared | string | declared at `types.ts:101`, **0 observations**. Op-level errors are surfaced via `turn_end.errors[]` and via `status='failed'`. Adapter must tolerate but not depend on. |
-| `parentOpId` | declared | n/a | the bootstrap sketch listed `parentOpId` on ops, but the producer schema **does not have it** (only `EvidenceChildSessionRef.parentOpId` and the never-emitted `session_start.parentOpId`). Canonical `parent_op_id` is therefore not derivable from v3 for non-session ops in Phase 1; adapter emits `ParentOpSeq=-1` (top-level) for every op. |
+| `parentOpId` | declared | n/a | the bootstrap sketch listed `parentOpId` on ops, but the producer schema **does not have it on ops** — it exists only on `EvidenceChildSessionRef.parentOpId` and (since `ai-agent@8a0078bc`) on `session_start.parentOpId`, both of which are the SESSION→parent-op linkage, not an op's own parent. Canonical `parent_op_id` is therefore not derivable from v3 for non-session ops in Phase 1; adapter emits `ParentOpSeq=-1` (top-level) for every op. |
 
 #### 3.4.2 `accounting` (`EvidenceAccountingSummary`)
 
@@ -585,14 +586,14 @@ Cursor is durable because:
 
 Two independent mechanisms exist; the adapter uses the FIRST one that is present and consistent:
 
-1. **Child-side fast path** (preferred when present): `session_start.parentSessionId` is set on the child's own ledger. Observed in 76% of total sessions and 96.8% of `headendId='sub-agent'` sessions. When the adapter sees this, it can immediately emit `SessionStartedEvent.ParentNativeID = parentSessionId` and rely on the ingester to attach. **No parent file required.** This was undocumented in the ai-viewer bootstrap sketch (which said v3 lacked child-side parent linkage); empirically the field IS already written by `ai-agent.git/src/evidence/session-recorder.ts:364` and is in `EvidenceSessionStartBody.parentSessionId` (`types.ts:37`).
-2. **Parent-side canonical path**: when the parent's `turn_end.ops[].childSessions[*]` lists this child, the adapter learns linkage from the parent. This works for the 24% of sessions whose own `session_start` lacks `parentSessionId`.
+1. **Child-side fast path** (preferred when present): `session_start.parentSessionId` is set on the child's own ledger. **Since the lineage fix `ai-agent@8a0078bc`, `parentSessionId` is a first-class producer guarantee** on every non-root session (`recordSessionStart()`, `session-recorder.ts:364-366`); `parentOpId` is written alongside it **best-effort** — only when the spawning boundary supplies the optional `trace?.parentOpId` (SOW-0030 plan item 3) — so it can be absent even on post-fix snapshots. When the adapter sees `parentSessionId`, it immediately emits `SessionStartedEvent.ParentNativeID = parentSessionId` (and `ParentOpKey = parentOpId` when present) and relies on the ingester to attach. **No parent file required.**
+2. **Parent-side canonical path** (safety net): when the parent's `turn_end.ops[].childSessions[*]` lists this child, the adapter learns linkage from the parent (synthesized `SessionStartedEvent`, `mapper.go:229-260`). This covers pre-fix snapshots on disk whose own `session_start` predates the guarantee and still lacks `parentSessionId`.
 
 Out-of-order arrival: a child may be ingested before its parent's `turn_end` lands, OR vice versa. Both orderings are handled because canonical `SessionStartedEvent` is upserted by `NativeID`; the ingester reconciles parent/child as evidence accumulates.
 
-### 8.2 Future (explicit `parentOpId` on child)
+### 8.2 Landed (explicit `parentOpId` on child)
 
-`ai-agent.git/.agents/sow/pending/SOW-0029-20260526-evidence-explicit-parent-id-on-child.md` proposes adding **`parentOpId`** (and clarifying `parentSessionId`) to `session_start`. When that SOW lands, the child→parent-op linkage becomes resolvable from the child alone, removing dependency on the parent's `turn_end` for op-level attribution. The v3 adapter MUST tolerate both shapes (present and absent) and prefer the explicit field when present.
+The ai-agent SOW `evidence-explicit-parent-id-on-child` **landed as `ai-agent@8a0078bc`** ("Add session lineage and LLM request id evidence"): `recordSessionStart()` now writes `parentSessionId` on the child's own `session_start` (a firm guarantee for non-root sessions) and `parentOpId` **best-effort** when the child-creation boundary supplies it (SOW-0030 plan item 3 — "when the existing child creation boundary can provide it safely"). When `parentOpId` IS present, the child→parent-op linkage is resolvable from the child alone, without depending on the parent's `turn_end` for op-level attribution; when it is absent (best-effort), the parent-side `childSessions[]` synthesizer (§8.1) remains the source. The v3 adapter consumes both (`mapper.go:118-119`), tolerating the absence of `parentOpId` (and, on pre-fix snapshots, `parentSessionId`) and preferring the explicit fields when present.
 
 ### 8.3 `originId` is the root
 
@@ -704,7 +705,7 @@ Upstream source (commit-pinned at the time of writing, branch `main` of `ai-agen
 - `ai-agent.git/src/persistence.ts:24,36,48-49` — `sessionsDir` defaults
 - `ai-agent.git/.agents/sow/specs/snapshots.md` — authoritative format spec (the v3 producer side)
 - `ai-agent.git/.agents/sow/done/SOW-0002-20260428-memory-review-reduction.md` — the SOW that introduced v3
-- `ai-agent.git/.agents/sow/pending/SOW-0029-20260526-evidence-explicit-parent-id-on-child.md` — proposed enhancement to make `parentSessionId`/`parentOpId` first-class documented fields on `session_start`
+- `ai-agent.git/.agents/sow/done/SOW-0030-20260526-evidence-explicit-parent-id-on-child.md` — the (now completed) SOW that made `parentSessionId` a first-class guarantee and added best-effort `parentOpId` on `session_start`, shipped as `ai-agent@8a0078bc`
 
 ai-viewer canonical specs cited:
 
