@@ -1,0 +1,4 @@
+{"version":3,"recordType":"session_start","seq":1,"ts":"2026-06-03T00:00:01.500Z","originId":"root-session","sessionId":"child-session","agentId":"child-agent","callPath":"root-agent:child-agent","parentSessionId":"root-session","parentOpId":"parent-op-1","capturePayloads":true}
+{"version":3,"recordType":"turn_start","seq":2,"ts":"2026-06-03T00:00:01.600Z","originId":"root-session","sessionId":"child-session","turn":1}
+{"version":3,"recordType":"turn_end","seq":3,"ts":"2026-06-03T00:00:01.700Z","originId":"root-session","sessionId":"child-session","turn":1,"status":"ok","ops":[{"opId":"child-llm-1","opIndex":1,"kind":"llm","status":"ok","attributes":{"provider":"test","model":"model","llmRequestId":"chatcmpl-fixture"},"payloadRefs":[]}]}
+{"version":3,"recordType":"session_summary","seq":4,"ts":"2026-06-03T00:00:01.800Z","originId":"root-session","sessionId":"child-session","status":"ok"}
