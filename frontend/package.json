@@ -23,6 +23,7 @@
     "check:bundle-size": "node scripts/check-bundle-size.js",
     "check:bundle-size:selftest": "bash scripts/check-bundle-size.test.sh",
     "check:coverage-config": "node scripts/check-coverage-config.mjs",
+    "check:coverage-config:selftest": "bash scripts/check-coverage-config.test.sh",
     "check:coverage-thresholds:selftest": "bash scripts/check-coverage-thresholds.test.sh"
   },
   "dependencies": {

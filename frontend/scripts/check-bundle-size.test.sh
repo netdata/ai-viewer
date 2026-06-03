@@ -5,8 +5,9 @@
 # the 500 KB gz main budget or a dynamic-entry's closure exceeds the 200 KB gz
 # lazy budget, PASSES when every gated entry is within budget, and FAILS CLOSED
 # on a missing/empty dist, a missing or invalid manifest (object OR array), a
-# manifest with zero JS chunks, and a manifest with no MAIN (isEntry) chunk at
-# all. The gate is itself code; it must be correct.
+# manifest with zero JS chunks, a manifest with no MAIN (isEntry) chunk at all,
+# and a manifest whose entry `imports` a key that is absent from the manifest
+# (a broken static-import graph). The gate is itself code; it must be correct.
 #
 # gzip shrinks low-entropy bytes (zeros, repeats) to almost nothing, so a budget
 # expressed in GZIPPED bytes can only be exercised with HIGH-ENTROPY
@@ -206,6 +207,19 @@ cat > "$H/.vite/manifest.json" <<'JSON'
 { "index.html": { "file": "assets/index-MISSING.js", "name": "index", "src": "index.html", "isEntry": true } }
 JSON
 assert 2 "$H" "manifest entry file absent on disk"
+
+# --- (d6) entry's `imports` references a key MISSING from the manifest -> FAIL -
+# The static-closure walker (staticClosure) follows manifest[key].imports
+# recursively; if an imported key has no manifest entry (or is not a chunk), the
+# import graph is broken (Vite always emits the imported chunk's entry). The gate
+# must fail closed (exit 2) rather than silently undercount the closure and
+# vacuously pass. Pins the closure walker's missing-import-key guard (R3-5).
+O="$TMP/o/dist"; mkdir -p "$O/assets" "$O/.vite"
+mkchunk "$O/assets/index-TTTT.js" 120            # main own file fine; its import is dangling
+cat > "$O/.vite/manifest.json" <<'JSON'
+{ "index.html": { "file": "assets/index-TTTT.js", "name": "index", "src": "index.html", "isEntry": true, "imports": ["missing-key"] } }
+JSON
+assert 2 "$O" "entry imports a manifest key that does not exist"
 
 echo
 if [ "$fail" -eq 0 ]; then

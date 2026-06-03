@@ -34,6 +34,8 @@
 #   8. coverage-config verifier  — checks the REAL Vitest per-dir floors against
 #                                  the source tree (non-vacuity + lockstep);
 #                                  build-free (node:fs only).
+#   8b. coverage-config self-test — hermetic; verifies the verifier's OWN logic
+#                                   (vacuity / lockstep / broad-glob / .d.ts-only).
 #   9. coverage-thresholds self-test — hermetic; verifies the per-dir coverage
 #                                      GATE LOGIC.
 #
@@ -152,6 +154,12 @@ else
     # Distinct from the gate-mechanism self-test below (which uses a fixture).
     run npm run check:coverage-config
 
+    # --- 8b. coverage-config verifier SELF-TEST (hermetic, build-free) --------
+    # Proves the verifier's decision LOGIC still fires (vacuity / lockstep /
+    # unsupported broad-glob / .d.ts-only) against a throwaway fixture tree, so a
+    # regression in the verifier is caught even though the real config is sound.
+    run npm run check:coverage-config:selftest
+
     # --- 9. per-dir coverage GATE-LOGIC self-test (hermetic, build-free) -------
     # The REAL coverage run (npm run test -- --run --coverage, with native
     # per-dir thresholds) needs the full test suite and runs in CI's frontend
@@ -160,7 +168,7 @@ else
     # fails closed under-floor and passes above.
     run npm run check:coverage-thresholds:selftest
   )
-  echo -e "${GREEN}[ok]${NC} Frontend section: eslint + tsc + bundle-size self-test + coverage-config verifier + coverage gate self-test all clean." >&2
+  echo -e "${GREEN}[ok]${NC} Frontend section: eslint + tsc + bundle-size self-test + coverage-config verifier + coverage-config self-test + coverage gate self-test all clean." >&2
 fi
 
 echo -e "${GREEN}[ok]${NC} lint.sh: Go + frontend static analysis all clean." >&2

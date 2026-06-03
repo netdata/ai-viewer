@@ -547,6 +547,63 @@ shared-list files are `.mjs`/`.d.mts` (not `.js`), in the same documented
 Orchestrator finalization: pending (this entry written by the implementer for the
 orchestrator to review + fold into `## Validation`/`## Reviews`).
 
+### 2026-06-03 — Chunk F round-2 fixes (R3-1..R3-5, delegated)
+
+Five verified round-2 external-review findings on the Chunk F surface, fixed
+spec→test→code (gate fixes extended the gate's self-test FIRST):
+
+- **R3-1 [P2] coverage-config verifier fail-open on a broad include glob, and it
+  was not self-tested** (`frontend/scripts/check-coverage-config.mjs`). The old
+  `includeEntryToDir` returned `null` for an include entry under a per-dir root
+  whose first segment was `*`/`**` (e.g. a future `src/pages/**/*.{ts,tsx}`),
+  silently ignoring it — so the lockstep check derived ZERO dirs from it while
+  Vitest would MEASURE the page files, a missing-floor hole undetectable by the
+  verifier. Fixes: (i) the check logic is now the EXPORTED PURE function
+  `checkCoverageConfig({ include, perDirGlobs, frontendDir, perDirRoots })` →
+  `string[]` (the CLI block imports the REAL lists from `vitest.coverage.mjs`,
+  calls it with the real frontend dir, prints errors, exits 1 if any — real-config
+  behavior unchanged, still PASS: 13 floors / 13 measured dirs). (ii) FAIL CLOSED
+  on the unsupported broad shape — an include entry under `src/components/` or
+  `src/pages/` with a `*`/`**` first segment now returns a named error (replace
+  with explicit per-dir entries, or extend the verifier) instead of being ignored.
+  (iii) `hasSourceFile` no longer counts `*.d.ts` as source (`&& !n.endsWith('.d.ts')`),
+  so a dir whose only `.ts` is a declaration is correctly flagged vacuous. (iv) New
+  hermetic self-test `frontend/scripts/check-coverage-config.test.sh` (+ `npm run
+  check:coverage-config:selftest`) drives the exported function against a throwaway
+  fixture tree under `frontend/` and asserts errors for vacuity, lockstep, the broad
+  `src/pages/**` shape, and a `.d.ts`-only dir (and a `*.test.ts`-only dir), and NO
+  errors for a clean config — 6/6 assertions pass. Wired into `scripts/lint.sh`
+  (step 8b) + a dedicated CI `frontend` step ("Self-test coverage-config verifier").
+- **R3-2 [P2] bundle-size spec/skill described the OLD pre-F1 model.** Both
+  `.agents/sow/specs/quality-gates.md` (§Frontend — Bundle Size) and
+  `.agents/skills/project-quality-gates/SKILL.md` said shared chunks are "reported
+  but not gated". Corrected to the F1 closure model: a MAIN/LAZY entry's budget is
+  the gz sum of its `.file` PLUS the transitive closure of its static `imports`
+  (deduped within one closure; `dynamicImports` not followed); only JS neither
+  classified nor inside any gated closure (e.g. a `?worker` bundle absent from the
+  manifest) is "ungated". Durable-memory wording made precise so a future cleanup
+  cannot reintroduce the fail-open.
+- **R3-3 [P3] a11y doc route-list + CI comment drift.**
+  `.agents/sow/specs/quality-gates.md` (§Frontend — Accessibility) now lists every
+  `App.tsx` route axe-scans (added `/tools`, `/models`, `/agents`, and the NotFound
+  catch-all on an unknown path), states "every route declared in `App.tsx` is
+  axe-covered", and notes `tests/a11y.spec.ts` carries the stub + NotFound scans.
+  `.github/workflows/ci.yml` SOW-0012 deferred-note updated: bundle-size gate +
+  axe-every-route + the coverage-config verifier are LANDED (was "axe … remaining");
+  the SOW-0013 line is unchanged.
+- **R3-4 [P3 / AC#2] `tsconfig.json` missing `noImplicitOverride`.** Added
+  `"noImplicitOverride": true` to `frontend/tsconfig.json` compilerOptions (SOW-0012
+  AC#2 requires it). `npm run typecheck` exits 0 — no subclass-override violation
+  surfaced (the frontend has no class-override source), so the flag is added without
+  a source change.
+- **R3-5 [P3] staticClosure missing-import-key fail-closed path unpinned.** Added
+  self-test case (d6) to `frontend/scripts/check-bundle-size.test.sh`: a manifest
+  whose isEntry entry `imports: ["missing-key"]` (no such manifest entry) → gate
+  exits 2 (the closure walker's broken-import-graph guard). Self-test now 14/14.
+
+Orchestrator finalization: pending (this entry written by the implementer for the
+orchestrator to review + fold into `## Validation`/`## Reviews`).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)
