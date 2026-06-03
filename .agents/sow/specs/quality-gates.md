@@ -135,9 +135,16 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Frontend — Bundle Size
 
-- After `vite build`, `scripts/check-bundle-size.js` measures gzipped bundle.
-- Thresholds: main chunk ≤ 500 KB gzipped; per-route lazy chunks ≤ 200 KB gzipped.
-- Exceeding requires a SOW with justification.
+- After `vite build`, `frontend/scripts/check-bundle-size.js` measures the gzipped size of every emitted JS chunk and gates it (SOW-0012). It is an enforced gate, not a report.
+- **Chunk classification is manifest-driven, not filename-heuristic.** `vite.config.ts` sets `build.manifest: true`, so Vite emits `dist/.vite/manifest.json` with a per-chunk `isEntry` / `isDynamicEntry` flag (Vite's documented `ManifestChunk` contract). The gate reads that manifest:
+  - **Main chunk** = a JS chunk with `isEntry: true` (the HTML `<script type="module">` entry). Budget: ≤ 500 KB gzipped.
+  - **Per-route lazy chunk** = a JS chunk with `isDynamicEntry: true` (emitted by a `React.lazy`/dynamic `import()` route split). Budget: ≤ 200 KB gzipped each.
+  - **Other JS** (non-entry shared chunks split out by Rollup, and `?worker` bundles such as `forceWorker-*.js` that are instantiated via `new Worker()` and are not referenced from `index.html`) is **measured and reported for visibility but not gated** — the two budgets above are defined only for HTML entry and route-lazy chunks. A future budget for worker/shared chunks is a separate SOW.
+- Invocation: `node frontend/scripts/check-bundle-size.js [distDir]` (default `distDir` = `frontend/dist`). The optional arg lets the self-test point the gate at a synthetic fixture dir. Thresholds are named constants in the script.
+- **Fail-closed (no silent pass):** a missing or empty `distDir`, a missing/invalid `.vite/manifest.json`, or zero JS chunks in the manifest each exit non-zero. The gate never certifies "within budget" without measuring real chunks.
+- Self-tested by `frontend/scripts/check-bundle-size.test.sh` (synthetic fixture dirs with high-entropy/incompressible JS so the gzipped budgets are actually exercised): a main chunk over 500 KB gz fails, a lazy chunk over 200 KB gz fails, all-under-budget passes, and a missing/empty dist fails.
+- CI runs the gate in the `frontend` job after the build (failing the job on a violation) and still uploads the gzipped/raw size report artifact; a dedicated self-test step keeps the gate script itself from silently rotting.
+- Exceeding a budget requires a SOW with justification — never raise the threshold to land a chunk.
 
 ### Secrets + Operator-PII Scan
 

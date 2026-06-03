@@ -132,3 +132,7 @@ This boundary keeps D3 isolated and testable.
 ## Lint
 
 ESLint flat config with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`. Zero warnings policy enforced in CI.
+
+## Bundle Size
+
+`vite.config.ts` sets `build.manifest: true` so Vite emits `dist/.vite/manifest.json`. The bundle-size gate (`scripts/check-bundle-size.js`, SOW-0012) classifies chunks from that manifest's `ManifestChunk` flags rather than from filenames: `isEntry` ⇒ main chunk (≤ 500 KB gz), `isDynamicEntry` ⇒ per-route lazy chunk (≤ 200 KB gz each). Keep `build.manifest` enabled — the gate fails closed without the manifest. A `?worker` bundle (e.g. `viz/forceWorker.ts` imported as `?worker`) is emitted as its own chunk that is neither `isEntry` nor `isDynamicEntry`; it is reported but not gated. When you add a route split, do it via `React.lazy` + dynamic `import()` so the split chunk is marked `isDynamicEntry` and falls under the 200 KB lazy budget.

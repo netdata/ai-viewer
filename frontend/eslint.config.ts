@@ -17,7 +17,12 @@ import reactHooks from 'eslint-plugin-react-hooks';
 // that friction while keeping identical coverage.
 export default tseslint.config(
   {
-    ignores: ['dist', 'coverage', 'node_modules', 'playwright-report', 'test-results'],
+    // `scripts/` holds standalone Node build-tooling (e.g. the SOW-0012
+    // bundle-size gate) that lives OUTSIDE the app's tsconfig project, so the
+    // type-checked rule set has no type info for it; it is exercised by its own
+    // self-test + actionlint, not by app-source ESLint. Mirrors ignoring the
+    // other non-source dirs below.
+    ignores: ['dist', 'coverage', 'node_modules', 'playwright-report', 'test-results', 'scripts'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

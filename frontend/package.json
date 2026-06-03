@@ -14,7 +14,9 @@
     "test:coverage": "vitest run --coverage",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "check:bundle-size": "node scripts/check-bundle-size.js",
+    "check:bundle-size:selftest": "bash scripts/check-bundle-size.test.sh"
   },
   "dependencies": {
     "@tanstack/react-query": "5.100.14",

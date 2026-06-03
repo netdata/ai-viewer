@@ -165,10 +165,11 @@ axe-core runs on every Playwright route. Threshold: zero serious or critical vio
 
 ```bash
 cd frontend && npm run build
-node scripts/check-bundle-size.js dist/assets/*.js
+npm run check:bundle-size            # node scripts/check-bundle-size.js (defaults to ./dist)
+npm run check:bundle-size:selftest   # synthetic-fixture self-test of the gate
 ```
 
-Threshold: main chunk ≤ 500 KB gzipped. Per-route lazy chunks ≤ 200 KB gzipped each. Exceeding requires a SOW.
+Enforced gate (SOW-0012), not a report. Classification is **manifest-driven**: `vite.config.ts` sets `build.manifest: true`; the gate reads `dist/.vite/manifest.json` and gates by Vite's `ManifestChunk` flags — `isEntry` chunks are the **main chunk** (≤ 500 KB gz), `isDynamicEntry` chunks are **per-route lazy chunks** (≤ 200 KB gz each). Other JS (non-entry shared chunks, `?worker` bundles like `forceWorker-*.js` not referenced from `index.html`) is reported but not gated. The script takes an optional dist-dir arg (default `./dist`) so the self-test can point it at a fixture. **Fail-closed:** a missing/empty dist, a missing/invalid manifest, or zero JS chunks exits non-zero — never a silent pass. Thresholds are named constants in the script. Exceeding a budget requires a SOW — never raise the threshold.
 
 ### Secrets Scan
 

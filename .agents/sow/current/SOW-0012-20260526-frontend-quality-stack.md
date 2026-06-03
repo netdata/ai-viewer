@@ -219,6 +219,35 @@ Remaining chunks (revised from the greenfield 12-chunk plan):
 
 (Per-chunk commit refs + evidence appended below as work proceeds.)
 
+### 2026-06-03 — Chunk A: bundle-size REPORT → enforced GATE (delegated)
+
+- `frontend/scripts/check-bundle-size.js` (new): manifest-driven gate. Reads
+  `dist/.vite/manifest.json`; `isEntry` ⇒ main (≤ 500 KB gz), `isDynamicEntry`
+  ⇒ per-route lazy (≤ 200 KB gz). Non-entry / `?worker` chunks are reported but
+  not gated. Fail-closed (exit 2) on missing/empty dist, missing/invalid
+  manifest, zero classified chunks, or a manifest file absent on disk; exit 1 on
+  a budget violation; exit 0 within budget.
+- `frontend/scripts/check-bundle-size.test.sh` (new): 8-assertion self-test with
+  high-entropy (incompressible) fixtures so the gzipped budgets are genuinely
+  exercised; covers all three exit codes.
+- `frontend/vite.config.ts`: `build.manifest: true`. `frontend/package.json`:
+  `check:bundle-size` + `check:bundle-size:selftest` scripts.
+- `frontend/eslint.config.ts`: ignore `scripts/` (standalone Node tooling
+  outside the app tsconfig project; exercised by its own self-test).
+- `.github/workflows/ci.yml` `frontend` job: hermetic self-test step + the size
+  report uploaded BEFORE the enforcing gate (retained on failure) + the gate.
+- Specs synced: `quality-gates.md` §Frontend — Bundle Size, `project-quality-
+  gates` + `project-frontend` skills (manifest classification, fail-closed,
+  dist-dir arg, "never raise the threshold").
+
+Verified locally (orchestrator-run, not the subagent's word): self-test 8/8;
+real-build gate PASS (main 131.5 KB gz / 500; worker 6.0 KB ungated; no lazy
+chunks yet); `npm run lint --max-warnings=0` + `npm run typecheck` green;
+`actionlint` clean; secret + AI-attribution scans clean. Spec-divergence
+recorded: the gate takes a dist-DIR arg (fail-closed on empty) rather than the
+old `dist/assets/*.js` glob. The `tseslint.config` LSP deprecation in
+eslint.config.ts is pre-existing + non-gating (folded into Chunk B).
+
 ## Validation
 
 (Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)

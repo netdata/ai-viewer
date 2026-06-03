@@ -50,8 +50,11 @@
 #                  comparable to runner hardware), so the benchtime=1x smoke
 #                  below STAYS as the per-push bench signal and the gate's
 #                  hardware-independent self-test runs (scripts/test/check-bench-test.sh).
-#     - SOW-0012 — scripts/check-bundle-size.js + axe a11y threshold
-#                  enforcement (replaces bundle-size report below)
+#     - SOW-0012 — bundle-size GATE (frontend/scripts/check-bundle-size.js,
+#                  manifest-classified, fail-on-violation) is LANDED in the
+#                  frontend job, alongside the still-uploaded size report and a
+#                  gate self-test. The axe a11y threshold enforcement is the
+#                  remaining SOW-0012 item.
 #     - SOW-0013 — scripts/{gates,spec-drift}.sh + CodeQL workflow +
 #                  Dependabot config
 #   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its
@@ -442,6 +445,15 @@ jobs:
         if: steps.detect.outputs.fe == 'true' && steps.pw.outputs.present == 'true'
         run: npm run e2e
 
+      # Self-test the bundle-size gate script itself (synthetic high-entropy
+      # fixtures) so a regression in scripts/check-bundle-size.js is caught in
+      # CI, not just locally — mirrors the test job's coverage/bench self-tests.
+      # Hermetic (builds its own temp dist), so it does not depend on the build
+      # above.
+      - name: Self-test bundle-size gate
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run check:bundle-size:selftest
+
       - name: Bundle size report
         if: steps.detect.outputs.fe == 'true'
         shell: bash
@@ -460,6 +472,9 @@ jobs:
             exit 1
           fi
 
+      # Upload the report BEFORE the enforcing gate below, so the size artifact
+      # is always retained for diagnosis even when the gate fails the job
+      # (mirrors the test job uploading coverage.out before the coverage gate).
       - name: Upload bundle-size report
         if: steps.detect.outputs.fe == 'true'
         uses: actions/upload-artifact@v7
@@ -468,6 +483,15 @@ jobs:
           path: bundle-report/
           if-no-files-found: error
           retention-days: 14
+
+      # Enforced bundle-size GATE (SOW-0012): classify chunks from
+      # dist/.vite/manifest.json and FAIL the job if an isEntry chunk exceeds
+      # 500 KB gz or an isDynamicEntry chunk exceeds 200 KB gz. Runs against the
+      # dist/ produced by the build step above (scripts/build.sh leaves it in
+      # place). Replaces the old report-only behavior.
+      - name: Bundle size gate (enforce)
+        if: steps.detect.outputs.fe == 'true'
+        run: npm run check:bundle-size
 
   embed-smoke:
     # Proves the SOW-0001 Chunk 17 milestone: scripts/build.sh produces a
