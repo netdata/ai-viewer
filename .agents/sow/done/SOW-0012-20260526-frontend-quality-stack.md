@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: opened 2026-06-03 under the operator's standing backlog mandate (blanket sign-off; the SOW has no open decisions requiring operator input — see "Open decisions"). The SOW-0001 Chunk 14 dependency is LANDED (the `frontend/` scaffolding exists). Drafted greenfield, but the frontend now exists with partial config, so the real scope is the GAPS — reconciled in the Execution Log (2026-06-03). Lands the frontend half of `quality-gates.md` so every Frontend gate is enforced locally + in CI.
+Sub-state: completed 2026-06-03 — all chunks (A–F) delivered; 8 external-review rounds (codex/glm/minimax) converged; finalized to done/ and merged via PR #40. Follow-ups filed: SOW-0040 (Layout/StatCard Vitest coverage), SOW-0041 (canvas-mode keyboard a11y), SOW-0042 (eslint shim LSP-resolvability). Originally opened 2026-06-03 under the operator's standing backlog mandate (blanket sign-off; the SOW has no open decisions requiring operator input — see "Open decisions"). The SOW-0001 Chunk 14 dependency is LANDED (the `frontend/` scaffolding exists). Drafted greenfield, but the frontend now exists with partial config, so the real scope is the GAPS — reconciled in the Execution Log (2026-06-03). Lands the frontend half of `quality-gates.md` so every Frontend gate is enforced locally + in CI.
 
 ## Requirements
 
@@ -544,8 +544,7 @@ shared-list files are `.mjs`/`.d.mts` (not `.js`), in the same documented
 `.js`→`.ts(/.mjs)` tooling-extension class already reconciled at line ~195 for
 `eslint.config.ts`; recorded here, not by editing AC#1/#3.
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ### 2026-06-03 — Chunk F round-2 fixes (R3-1..R3-5, delegated)
 
@@ -601,8 +600,7 @@ spec→test→code (gate fixes extended the gate's self-test FIRST):
   whose isEntry entry `imports: ["missing-key"]` (no such manifest entry) → gate
   exits 2 (the closure walker's broken-import-graph guard). Self-test now 14/14.
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ### 2026-06-03 — Chunk F round-3 fixes (R4-1..R4-4, delegated)
 
@@ -654,8 +652,7 @@ spec→test→code (gate fixes extended the gate's self-test FIRST):
   `lint` script now reads `--max-warnings=0` (matching every doc/skill/spec
   reference, which already used the `=0` form).
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ### 2026-06-03 — Chunk F round-4 fixes (R5-1..R5-3, delegated)
 
@@ -719,8 +716,7 @@ taking a dist-DIR arg — the dist-glob→manifest divergence was already reconc
 the Chunk A open entry above (2026-06-03, "the gate takes a dist-DIR arg … rather
 than the old `dist/assets/*.js` glob"); recorded here, not by editing AC#6.
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ### 2026-06-03 — Chunk F round-5 fixes (R6-1..R6-3, delegated)
 
@@ -790,8 +786,7 @@ DEFINITIVE closures of classes prior rounds patched incrementally:
   AC#6 text and the round-4 log entry quoting the old wording — both intentionally
   left as historical record).
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ### 2026-06-03 — Chunk F round-6 fixes (R7-1..R7-4, delegated)
 
@@ -857,8 +852,7 @@ up-front sweep (R7-3); the coverage-verifier description in `quality-gates.md`
 (the THREE-things gotcha), and `project-frontend` §Coverage now state the
 `PER_DIR_GLOBS` exact-threshold-shape requirement (R7-1).
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ### 2026-06-03 — Chunk F round-7 fixes (R8-1, R8-2, delegated)
 
@@ -919,16 +913,46 @@ canonical as the RAW string (no `./`/`//`/trailing-`/` laundering) and that lock
 is BIDIRECTIONAL (`gatedDirs === measuredDirs`). The LOCKSTEP INVARIANT block and a
 new RAW-EXACT INVARIANT block in `frontend/vitest.coverage.mjs` document the same.
 
-Orchestrator finalization: pending (this entry written by the implementer for the
-orchestrator to review + fold into `## Validation`/`## Reviews`).
+Orchestrator finalization: reviewed + folded into `## Validation` / `## Reviews` at SOW close (2026-06-03).
 
 ## Validation
 
-(Filled at SOW close. Each acceptance criterion gets evidence: command + output summary, CI run URL, reviewer finding summary.)
+Acceptance criteria evidence (all run by the orchestrator on the delivery branch; CI run = PR #40):
+
+- **AC#1 ESLint flat config (jsx-a11y + import, zero-warning)** — `frontend/eslint.config.ts` (defineConfig + globalIgnores, jsx-a11y + import flat configs, TS-resolver). `npm run lint` (`eslint . --max-warnings=0`) exit 0, local + CI `frontend` job. AC named `eslint.config.js`; delivered `.ts` (reconciled in the Execution Log).
+- **AC#2 strict TS** — `frontend/tsconfig.json` sets `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride` (added R3-4), `noFallthroughCasesInSwitch`, `noUnusedLocals`, `noUnusedParameters`. `npm run typecheck` (`tsc --noEmit`) exit 0.
+- **AC#3 per-directory Vitest coverage ≥ 80% lines** — native glob-keyed `coverage.thresholds` in `frontend/vitest.config.ts` (lists shared via `frontend/vitest.coverage.mjs`). `npm run test -- --run --coverage` exit 0: 48 files / 623 tests, every per-dir floor met (94.69% lines). Backed by the real-config verifier `frontend/scripts/check-coverage-config.mjs` enforcing non-vacuity + bidirectional lockstep + disk-completeness + exact-canonical RAW include/threshold shape + malformed-entry, all fail-closed; self-test `check-coverage-config.test.sh` 25/25.
+- **AC#4 Playwright scenarios** — sessions-list filter (`sessions-filter.spec.ts`), session-detail load (`deep-link.spec.ts`), sources (`routes.spec.ts`), deterministic real-time SSE (`sse-update.spec.ts`, fake EventSource → controlled `session_changed` frame → `['sessions']` refetch), theme OS-match + localStorage override (`theme.spec.ts`). `npm run e2e` 43 passed; `frontend/tests/quarantine/` empty (no `test.skip`).
+- **AC#5 axe on every route, zero serious/critical** — `npm run e2e:a11y` 29 passed, both themes, covering every `App.tsx` route incl. `/tools`, `/models`, `/agents`, NotFound, and the `/sessions/:id` Logs tab (a gap closed in Chunk D). Per-selector waiver docs at `frontend/src/viz/{waterfall,flamegraph,timeline,topology}/a11y.md`; the two real Canvas-mode keyboard gaps are tracked in SOW-0041. A real NotFound link-contrast violation surfaced by the new scan was fixed at source.
+- **AC#6 bundle-size gate** — `frontend/scripts/check-bundle-size.js` (manifest-driven; budget = each entry's transitive static-import CLOSURE; main ≤ 500 KB gz, lazy ≤ 200 KB gz; extensive fail-closed manifest validation). Self-test `check-bundle-size.test.sh` 22/22. Runs in CI `frontend` job after the build + in `scripts/build.sh`.
+- **AC#7 `scripts/lint.sh` frontend section** — build-free, fail-fast: eslint + tsc + the bundle-size self-test + the coverage-config verifier + the coverage-config self-test + the coverage-threshold self-test. `bash scripts/lint.sh` exit 0 (Go static stack + frontend).
+
+Tests / equivalent validation: orchestrator-run gate batch each round — `scripts/lint.sh` exit 0; coverage-config self-test 25/25; bundle self-test 22/22; `vitest --coverage` 623 passing; `tsc --noEmit` 0; `actionlint ci.yml` 0; `npm run e2e` 43; `npm run e2e:a11y` 29. CI: PR #40 (`ci` workflow — lint, test, frontend, embed-smoke, gates).
+
+Real-use evidence: quality-tooling SOW (no product/runtime behavior change beyond one a11y-driven NotFound CSS underline). The gates are exercised by their own hermetic self-tests and by the full Playwright suite against the embedded single-binary build.
+
+Sensitive data gate: `scripts/scan-secrets.sh` + `scripts/scan-ai-attribution.sh` clean on every commit (809 tracked files at close).
+
+Artifact maintenance gate:
+- AGENTS.md: Build/Test/Run `lint.sh` one-liner updated (build-free Go + frontend).
+- Runtime project skills: `project-frontend`, `project-quality-gates`, `project-delegation` synced (bundle closure model, per-dir mechanism + verifier's 5 fail-closed classes, e2e/quarantine/a11y conventions, `--max-warnings=0`).
+- Specs: `quality-gates.md` Frontend rows (Lint, Type Check, Unit/Component + verifier, E2E, Accessibility, Bundle Size) all updated.
+- SOW lifecycle: `Status: completed` + move to `done/` committed with the work; follow-ups SOW-0040/0041/0042 filed in `pending/`.
 
 ## Reviews
 
-(Filled as external reviewers run. One sub-section per round.)
+Eight external-review rounds, each with codex (decisive) + glm + minimax in parallel (static-only, reviewers forbidden from running tests/builds). Every codex P1/P2 was verified on ground truth before fixing; never merged on glm/minimax green alone. Key signal: **every codex finding across all rounds was a latent fail-open in the quality-gate tooling itself (the bundle-size gate + the coverage-config verifier) — never a live product/runtime bug.** The current frontend config + product surface were fully gated throughout (confirmed by all three reviewers each round). Convergence trajectory (codex severity, trending to zero):
+
+- **Round 1** — codex: 1 **P1** (bundle gate budgeted only `entry.file`; a lazy entry importing a large shared chunk passed, the shared chunk swept "ungated") + 4 **P2** (no-main-entry manifest passed; coverage self-test validated a throwaway config not the real one; "axe every route" missed the stub routes + NotFound + Logs tab; docs claimed `build.sh`/`test.sh` ran the real gates). glm + minimax said "safe" but missed all of codex's — why codex is decisive. → all fixed.
+- **Round 2** — P1 resolved. codex: 2 **P2** (verifier broad-glob fail-open; bundle-size spec still on the pre-closure model) + P3s. minimax independently caught a real AC#2 gap (`noImplicitOverride` missing from tsconfig) codex + glm missed. → all fixed.
+- **Round 3** — codex: 1 **P2** (verifier checked list-consistency but not disk-completeness — real unmeasured shipping code: `Layout`, `StatCard`, tested-but-unmeasured `ComingSoon.tsx`) + P3. → fixed: measured ComingSoon, explicit `COVERAGE_EXCLUDED` ledger, disk-completeness check, follow-up SOW-0040 filed for Layout/StatCard.
+- **Round 4** — codex: 1 **P2** (narrow per-dir include left a sibling unmeasured) + P3s. → fixed (whole-dir-shape requirement).
+- **Round 5** — codex: 2 **P2** (recursive-narrow include `<Dir>/**/*.tsx`; `dynamicImports` targets unvalidated) + P3. → fixed (exact canonical shape; dynamicImports element/target validation).
+- **Round 6** — codex: 2 **P2** (bare-dir `PER_DIR_GLOBS` → vacuous Vitest floor; chunk flagged both `isEntry`+`isDynamicEntry` under-budgeted) + P3s. → fixed (exact threshold shape; both-flags fail-closed; all-entries existence sweep).
+- **Round 7** — codex: 1 **P2** (verifier validated the normalized string but Vitest consumes the raw one — `//`/trailing-`/` launders to a vacuous floor) + 1 P3 (one-way lockstep) + 1 P3 (deferred debt only in `## Followup`, not pending SOWs). → fixed: RAW-exact validation on both lists, bidirectional lockstep (`gatedDirs === measuredDirs`), pending SOW-0041 (canvas keyboard) + SOW-0042 (eslint shim LSP) filed.
+- **Round 8 (final)** — codex, glm, and minimax **all "safe to merge"**: no P1, no live bug, no fail-open, no security issue, no unwanted side-effect; R8-1/R8-2/R8-3 confirmed resolved; the three debts tracked as pending SOWs. Residual was P3-only (durable-doc pointers to name SOW-0041; a cosmetic CI step name) — fixed in this close commit.
+
+Outcome: converged. Reviewer logs were retained per round during the cycle; this section is the durable summary.
 
 ## Outcome
 
