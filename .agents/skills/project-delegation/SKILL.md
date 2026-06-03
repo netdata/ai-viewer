@@ -83,7 +83,7 @@ You are implementing a slice of ai-viewer per SOW `<path>`.
 [ACCEPTANCE]
 - All listed failing tests pass.
 - `go test -race ./...` clean (or `npm test -- --run`).
-- `golangci-lint run` clean (or `npm run lint -- --max-warnings=0`).
+- `golangci-lint run` clean (or `npm run lint`).
 - All other gates in project-quality-gates skill green.
 - No new TODO/FIXME without a linked SOW.
 - No weakening of existing tests, no skip, no nolint suppression.

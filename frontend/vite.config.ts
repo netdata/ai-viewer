@@ -21,5 +21,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // Emit dist/.vite/manifest.json so the bundle-size gate
+    // (scripts/check-bundle-size.js, SOW-0012) classifies chunks by Vite's
+    // ManifestChunk flags (isEntry / isDynamicEntry) instead of fragile
+    // filename heuristics. The Go binary embeds dist/ and serves index.html
+    // (Vite still generates it); the extra manifest file is harmless static
+    // output and is not referenced by the served HTML.
+    manifest: true,
   },
 });

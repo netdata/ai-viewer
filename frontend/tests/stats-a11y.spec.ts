@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 
 // SOW-0007 Chunk 11 — the REAL-BROWSER axe pass on the /stats analytics
 // dashboard (the Chunk 9–10 page; its component-level a11y was unit-asserted in

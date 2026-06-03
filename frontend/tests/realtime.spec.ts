@@ -15,6 +15,12 @@ import { test, expect, type Request } from '@playwright/test';
 // truth for "the SSE subscription connected".
 
 test.describe('realtime', () => {
+  // SSE flow tuning (SOW-0012 AC#4 / R3): 30 s per-test timeout (the
+  // subscription POST + EventSource open against the built binary is the
+  // slowest checkpoint) and a single retry for CI-runner timing slack. Scoped
+  // here, NOT global — every non-SSE spec stays deterministic with no retries.
+  test.describe.configure({ retries: 1, timeout: 30_000 });
+
   test('opening / establishes the SSE subscription and event stream', async ({ page }) => {
     const pageErrors: Error[] = [];
     page.on('pageerror', (e) => pageErrors.push(e));

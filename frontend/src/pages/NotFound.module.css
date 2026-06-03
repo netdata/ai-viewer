@@ -1,3 +1,13 @@
 .note {
   color: var(--text-secondary);
 }
+
+/* The "Back to sessions" link sits inside muted (--text-secondary) body text.
+ * Globally `a { text-decoration: none }` (global.css), so at rest the link is
+ * distinguished from the surrounding text ONLY by color — and the accent-vs-muted
+ * contrast is below 3:1, an axe `link-in-text-block` serious violation (the
+ * a11y.spec NotFound scan). Persist an underline so the link is distinguishable
+ * without relying on color (the canonical remedy for a link in a text block). */
+.note a {
+  text-decoration: underline;
+}

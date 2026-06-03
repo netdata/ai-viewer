@@ -105,13 +105,18 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Frontend — Lint
 
-- `npm run lint -- --max-warnings=0`.
-- ESLint flat config with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import`.
+- `npm run lint` (the `lint` npm script bakes in `--max-warnings=0` — the single
+  source of truth for the flag; neither `scripts/lint.sh` nor the CI Lint step
+  re-passes it). Run locally via the build-free `scripts/lint.sh` frontend section
+  (alongside Go lint), or standalone from `frontend/`.
+- ESLint flat config (`frontend/eslint.config.ts` — `.ts`, not the `.js` some older notes name) with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import` (resolver: `eslint-import-resolver-typescript`).
+- Built with ESLint core's `defineConfig()` + `globalIgnores()` (`eslint/config`), not the `@deprecated` `tseslint.config()` helper. jsx-a11y + import use native flat-config (`flatConfigs.*`) — no `FlatCompat`. import/recommended's three `'warn'` rules are promoted to `'error'`. `jsx-a11y/no-noninteractive-tabindex` allows `role="region"` (scrollable-region pattern). Untyped-plugin friction handled without `any`: an ambient `src/types/eslint-plugin-jsx-a11y.d.ts` shim + a narrow `Plugins[string]` cast for react-hooks + a config-file-scoped relaxation block (details in `project-frontend` skill §Lint).
 - Threshold: zero warnings.
 
 ### Frontend — Type Check
 
-- `npm run typecheck` (invokes `tsc --noEmit`).
+- `npm run typecheck` (invokes `tsc --noEmit`). Also run locally by the
+  `scripts/lint.sh` frontend section (build-free).
 - `tsconfig.json` enforces `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noFallthroughCasesInSwitch`, `noUnusedLocals`, `noUnusedParameters`.
 - Threshold: zero errors.
 
@@ -119,25 +124,49 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 - `npm run test -- --run --coverage`.
 - Vitest + React Testing Library.
-- Threshold: all pass, ≥ 80% lines per component directory.
+- Threshold: all pass; **global** aggregate floor (≥ 80% lines/statements/functions, ≥ 75% branches) **plus a per-directory ≥ 80% lines floor** for every measured directory under `src/components/` and `src/pages/`.
+- **Per-directory mechanism = Vitest's NATIVE glob-keyed `coverage.thresholds`** (SOW-0012 Chunk C; Vitest ≥ 4, verified against the installed 4.1.7). `frontend/vitest.config.ts` lists one glob key per measured dir (`'src/components/<Dir>/**': { lines: 80 }`, `'src/pages/<Dir>/**': { lines: 80 }`); Vitest aggregates each glob group's matched files into one coverage map and **fails the run (exit 1)** if a group's lines % is below the floor, emitting `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`. **No wrapper script** — the floor lives in the config the same command already runs. A shared `PER_DIR_LINES` constant keeps the global floor and every per-dir group in lockstep.
+- **Glob keys track the measured dirs only — lockstep is BIDIRECTIONAL.** A glob group that matches **zero files** has lines pct `"Unknown"`, which **vacuously PASSES** (`"Unknown" < 80` is `false`). So a per-dir key is added **only** for a dir that is in `coverage.include`, **and** every measured component/page dir has a per-dir key — i.e. the gated set and the measured set are **EQUAL** (`gatedDirs === measuredDirs`), enforced both ways by the verifier (R8-2). Adding a per-dir key for a dir that is **not** measured (excluded, or absent from `include`) is a no-op floor that can never fire; omitting a measured dir's key leaves it gated only by the weaker global aggregate. The global floor still gates every included file in aggregate.
+- **Intentional non-measurement is an explicit ledger, not an omission.** Source dirs/files under `src/components/`/`src/pages/` that are deliberately not measured live in `COVERAGE_EXCLUDED` (in `vitest.coverage.mjs`) **with a per-entry rationale**. Today: `Layout` + `StatCard` are **real** components whose dedicated Vitest **unit** coverage is **deferred** to a tracked follow-up (Playwright E2E exercises them on every route / on `/stats` respectively — they are **not** placeholders); the `Agents`/`Models`/`Tools` pages are bare Phase-3 `<ComingSoon/>` wrappers (no logic of their own); `NotFound.tsx` is the trivial 404 (axe-covered via E2E). The shared `ComingSoon.tsx` component itself **is measured** (it has a unit test) and carries no per-dir floor because it is a flat file, not a dir.
+- The HTML report (`frontend/coverage/`) is produced by the `html` reporter and uploaded as a CI artifact (`frontend-coverage-<run_id>`); the `json` reporter additionally emits `coverage/coverage-final.json`.
+- **Shared dir lists (SOW-0012 review F3).** `PER_DIR_GLOBS`, `COVERAGE_INCLUDE`, `COVERAGE_EXCLUDED`, and `PER_DIR_LINES` live in `frontend/vitest.coverage.mjs`; `vitest.config.ts` imports the measuring lists and the config verifier below imports all of them, so the gate Vitest enforces and the checks against it cannot read different lists. (`.mjs` so the standalone Node verifier needs no TS loader; typed for `vitest.config.ts` via the co-located `vitest.coverage.d.mts`.)
+- **Two independent guards, distinct jobs:**
+  - **Gate-MECHANISM self-test:** `frontend/scripts/check-coverage-thresholds.test.sh` (`npm run check:coverage-thresholds:selftest`) runs Vitest on a **throwaway fixture** project (its own config + a known 50%-lines dir) and asserts the native glob-keyed threshold **fails closed** (exit 1, naming the dir) under the floor and passes above it. It proves the **Vitest mechanism** on the installed version still fails closed — it does **not** read the real config, so it cannot catch a real-config glob that matches zero files or a measured dir with no floor.
+  - **Real-config verifier:** `frontend/scripts/check-coverage-config.mjs` (`npm run check:coverage-config`) reads the REAL shared lists and **fails closed (exit 1, naming the offender)** on **three** classes of defect: **(a) per-dir floor shape + non-vacuity** — a `PER_DIR_GLOBS` entry that is not the EXACT canonical threshold shape `<root>/<Dir>/**` (detailed below) or, if canonical, matches **zero** real source files on disk (the vacuous-`"Unknown"`-pass trap); **(b) lockstep (BIDIRECTIONAL)** — a **measured** dir under `src/components/`/`src/pages/` (a `COVERAGE_INCLUDE` entry with ≥ 1 non-test `.ts`/`.tsx`) with **no** per-dir floor (measured ⊄ gated), **and** (R8-2) a `PER_DIR_GLOBS` floor whose dir is **not** measured (it is in `COVERAGE_EXCLUDED`, or absent from `COVERAGE_INCLUDE`) — a threshold group over a dir Vitest never instruments is a vacuous no-op that can never fire (gated ⊄ measured); together these force `gatedDirs === measuredDirs`; **(c) disk-completeness** — a source dir, or a flat `.ts`/`.tsx` file, under either root that is in **neither** `COVERAGE_INCLUDE` **nor** `COVERAGE_EXCLUDED` (so shipped source cannot silently escape both coverage **and** checks (a)/(b)). It also fails closed on an unsupported broad whole-root include glob (a first segment containing a glob metachar, e.g. `src/pages/**/*.{ts,tsx}` or `src/pages/*o/**`), on a per-dir include that is **not the EXACT canonical whole-dir shape** `<root>/<Dir>/**/*.{ts,tsx}` (a bare dir, an extension-narrowed `**/*.tsx`/`**/*.ts`, a narrow filename `**/Foo.tsx`, or a deeper subpath — each would let Vitest instrument **less** than the whole dir while disk-completeness marks `<Dir>` measured, so a sibling source escapes; an exact match is the tightest rule, it cannot be narrowed), on a `PER_DIR_GLOBS` entry that is **not the EXACT canonical threshold shape** `<root>/<Dir>/**` (a bare dir like `src/components/Foo`, or a deeper/narrower glob — a Vitest threshold KEY must end in `/**` to match file paths, so a bare-dir key matches **nothing** and that floor **vacuously passes**; only a canonical entry contributes its dir to the gated set, so a malformed floor cannot masquerade as gating its dir), and on a malformed entry with a `.`/`..` path segment. **The per-dir-root shape checks (both `PER_DIR_GLOBS` and per-dir `COVERAGE_INCLUDE`) compare the RAW string, not a normalized one (R8-1):** `vitest.config.ts` hands the RAW strings to Vitest — `PER_DIR_GLOBS` keys are matched by **picomatch** against clean `relative(root,file)` paths and `COVERAGE_INCLUDE` feeds the **tinyglobby** selector — so a string that is canonical only **after** normalization (a leading `./`, a repeated `//`, or a trailing `/`) is rejected: a `//`/trailing-`/` threshold key matches **nothing** (its floor vacuously passes) and the `./`-tolerant form is fragile across picomatch/tinyglobby versions. Build-free (`node:fs` only); normalization is still used to **detect** `.`/`..` segments and to **derive** the dir, but it must **not launder** a raw entry into passing the shape check. Its own decision logic has a hermetic self-test (`frontend/scripts/check-coverage-config.test.sh`, `npm run check:coverage-config:selftest`). Runs in `scripts/lint.sh`'s frontend section **and** as a dedicated CI step in the `frontend` job; mirrors the self-test wiring.
+- A dir under the floor is a finding to close with tests (or, if genuinely large, to escalate) — **never** lower the threshold to make a dir pass.
 
 ### Frontend — E2E
 
-- `npm run e2e` (Playwright headless).
-- Coverage: every primary user flow plus error states (network failure, empty list, malformed SSE event).
-- Flaky tests are quarantined into a separate suite linked to a SOW; never marked `test.skip`.
+- `npm run e2e` (Playwright headless) — runs the **gating** `chromium` project against the EMBEDDED SPA served by the built `ai-viewer-serve` binary on a deterministically seeded temp DB (`scripts/e2e-serve.sh`), never a bare `vite preview`.
+- Coverage: every primary user flow plus error states (network failure, empty list, malformed SSE event). The five AC#4 scenarios (SOW-0012) and the spec that covers each:
+  - **sessions-list filter** — `tests/sessions-filter.spec.ts` (FilterBar agents filter narrows the list, URL carries `?agents=`, a non-matching term collapses to the empty state, Clear restores the full list; the agent name is runtime-derived from `/api/sessions`).
+  - **session-detail load** — `tests/deep-link.spec.ts` (hard nav to `/sessions/<id>` renders the detail Overview via the SPA fallback).
+  - **sources panel** — `tests/routes.spec.ts` (`/sources` renders the table + health badge).
+  - **real-time SSE update (deterministic)** — `tests/sse-update.spec.ts` (a controlled `session_changed` frame, injected via a fake `EventSource` installed before app scripts, drives the documented `['sessions']` invalidation → a fresh `GET /api/sessions` refetch — deterministic, not timing-luck; the server is read-only so no writer is needed). `tests/realtime.spec.ts` + `tests/viz-sse.spec.ts` additionally assert the REAL stream opens at the network level.
+  - **theme toggle (OS + override)** — `tests/theme.spec.ts` (explicit Dark/Light persisted to `localStorage.aiViewerTheme` and reapplied after reload; Auto clears the override and follows `prefers-color-scheme` via `emulateMedia`).
+- **Per-test timeout / retries (SOW-0012 AC#4 / R3):** the global config sets `timeout: 15_000` and `retries: 0` (no blanket retries). The SSE flows opt into `test.describe.configure({ retries: 1, timeout: 30_000 })` (the EventSource open is the slowest checkpoint and the one place CI-runner slowness can transiently miss); every other spec stays deterministic with no retries.
+- **Quarantine (never `test.skip`):** a genuinely flaky spec is MOVED to `frontend/tests/quarantine/` with a linked SOW filename in its file header — not silenced. The gating `chromium` project excludes that directory (`testIgnore: '**/quarantine/**'`), so a quarantined spec stops blocking merge automatically; it still RUNS via `npm run e2e:quarantine` (`--project=quarantine`, non-gating, diagnostic). The directory is **empty on delivery** (`.gitkeep` + a `README.md` documenting the policy). Quarantine policy lives in `frontend/tests/quarantine/README.md`.
 - Threshold: all pass.
 
 ### Frontend — Accessibility
 
-- `@axe-core/playwright` runs on every Playwright route.
+- `npm run e2e:a11y` (SOW-0012) runs the axe specs (`tests/a11y.spec.ts`, `tests/viz-a11y.spec.ts`, `tests/stats-a11y.spec.ts`) on the gating `chromium` project; `@axe-core/playwright` runs an axe scan on **every `App.tsx` route** under both themes: `/`, `/sessions/:id` (overview + **logs** + trace + topology + timeline tabs), `/sources`, `/stats`, `/topology`, the Phase-3 ComingSoon stub routes `/tools`, `/models`, `/agents`, and the NotFound catch-all (an unknown path, e.g. `/no-such-route`, that the `*` route renders). The stub + NotFound scans (both themes) live in `tests/a11y.spec.ts`; the Logs-tab scan (SOW-0012) closed the one detail tab the prior specs missed. After SOW-0012, every route declared in `App.tsx` is axe-covered. (The full E2E run `npm run e2e` includes these specs too.)
 - Threshold: zero serious/critical violations.
+- **Waivers are per-selector, never global.** A D3/canvas chart that needs an axe exclusion (or has a known a11y limitation) documents it in `frontend/src/viz/<chart>/a11y.md` (`waterfall`, `flamegraph`, `timeline`, `topology`); any exclusion is applied via `new AxeBuilder({ page }).exclude('<selector>')` in the test, never `disableRules` across the whole page. Two charts carry a **documented known limitation** (tracked in **SOW-0041** (pending); originally noted in SOW-0012 `## Followup`, fix deferred): the `WaterfallCanvas` and `FlameGraph` Canvas renderers (above `SVG_SPAN_CEILING`) have no focusable-span fallback, so Canvas-mode keyboard span-selection is missing — and the lint gate is **blind** to the FlameGraph case because its `onClick` sits on the `<canvas>` element. The Timeline and Topology Canvas renderers DO provide a focusable `<button>` fallback list, so they have no gap. axe cannot see inside `<canvas>`, so neither limitation is caught by the axe gate.
 
 ### Frontend — Bundle Size
 
-- After `vite build`, `scripts/check-bundle-size.js` measures gzipped bundle.
-- Thresholds: main chunk ≤ 500 KB gzipped; per-route lazy chunks ≤ 200 KB gzipped.
-- Exceeding requires a SOW with justification.
+- After `vite build`, `frontend/scripts/check-bundle-size.js` measures the gzipped size of every emitted JS chunk and gates it (SOW-0012). It is an enforced gate, not a report.
+- **Chunk classification is manifest-driven, not filename-heuristic.** `vite.config.ts` sets `build.manifest: true`, so Vite emits `dist/.vite/manifest.json` with a per-chunk `isEntry` / `isDynamicEntry` flag (Vite's documented `ManifestChunk` contract). The gate reads that manifest:
+  - **Main chunk** = a JS chunk with `isEntry: true` (the HTML `<script type="module">` entry). Budget: ≤ 500 KB gzipped.
+  - **Per-route lazy chunk** = a JS chunk with `isDynamicEntry: true` (emitted by a `React.lazy`/dynamic `import()` route split). Budget: ≤ 200 KB gzipped each.
+  - **A MAIN/LAZY entry's budget is its transitive static-import CLOSURE, not its `file` alone.** The gate sums the gzipped size of the entry's own `.file` PLUS the transitive closure of its static `imports` (walk `manifest[key].imports` recursively; each reached key contributes its `.file`; files are de-duplicated *within* one entry's closure so a diamond import graph counts a shared chunk once; each entry's closure is summed independently, so a chunk shared by two entries is budgeted under each — that is the real per-route transfer cost). `dynamicImports` are **not** followed into a closure: they point at separately-budgeted lazy chunks the browser does not fetch on the entry's initial load. They ARE validated up front, though (see Fail-closed below), so a mis-flagged lazy chunk cannot slip to "ungated" instead of being budgeted. This is why a Rollup-split SHARED chunk (neither `isEntry` nor `isDynamicEntry`, reachable only via an entry's `imports[]`) **is** gated under the entry that pulls it in — a tiny lazy route that statically imports a huge shared chunk cannot slip through as "ungated" (the SOW-0012 F1 fail-open this closure model closed).
+  - **Only genuinely un-classified, un-reached JS is "ungated".** A JS file under `dist/assets/` that is neither classified as an entry NOR inside any gated entry's static-import closure (e.g. a `?worker` bundle such as `forceWorker-*.js` instantiated via `new Worker()` and absent from the manifest, or a chunk only ever reached via `dynamicImports`) is **measured and reported for visibility but not gated** — the two budgets above are defined only for HTML-entry and route-lazy chunks and what they statically pull in. A future budget for worker-only chunks is a separate SOW.
+- Invocation: `node frontend/scripts/check-bundle-size.js [distDir]` (default `distDir` = `frontend/dist`). The optional arg lets the self-test point the gate at a synthetic fixture dir. Thresholds are named constants in the script.
+- **Fail-closed (no silent pass) — complete case list:** each of the following exits non-zero — a missing or empty `distDir`; a missing/invalid/non-object `.vite/manifest.json` (including a JSON array); zero classified JS chunks; no MAIN (`isEntry`) chunk; **any** manifest entry (JS **or** non-JS, e.g. a CSS chunk) whose `.file` is absent on disk (an up-front sweep over every chunk, not just gated JS); a JS chunk flagged **both** `isEntry` **and** `isDynamicEntry` (mutually exclusive — a both-flagged route chunk would be under-budgeted as MAIN); a static-import graph referencing a missing/invalid chunk key; an `imports`/`dynamicImports` present but **not an array**; a **non-string** element in an `imports` array; a **non-string** element in a `dynamicImports` array; a `dynamicImports` element referencing a **missing** manifest key; and a `dynamicImports` element referencing a **JS** chunk that is **not** `isDynamicEntry`. (The `dynamicImports` element/target checks close the lazy-chunk half of the contract — a mis-flagged or dangling target would otherwise slip to "ungated" instead of being budgeted as the lazy chunk it is.) The gate never certifies "within budget" without measuring real chunks.
+- Self-tested by `frontend/scripts/check-bundle-size.test.sh` (synthetic fixture dirs with high-entropy/incompressible JS so the gzipped budgets are actually exercised): a main chunk (and a main+static-import closure) over 500 KB gz fails, a lazy chunk (and a lazy+static-import closure) over 200 KB gz fails, a closure de-dups a doubly-imported shared chunk, `dynamicImports` are not folded into the importing entry's budget, all-under-budget passes, and every fail-closed case above (missing/empty dist, bad/array manifest, zero JS chunks, no main entry, a JS-or-non-JS entry whose `.file` is absent on disk, a both-`isEntry`-and-`isDynamicEntry` JS chunk, missing static-import key, non-string `imports` element, non-array `imports`/`dynamicImports`, non-string/missing-key/non-`isDynamicEntry` `dynamicImports` target) exits non-zero.
+- CI runs the gate in the `frontend` job after the build (failing the job on a violation) and still uploads the gzipped/raw size report artifact; a dedicated self-test step keeps the gate script itself from silently rotting.
+- Exceeding a budget requires a SOW with justification — never raise the threshold to land a chunk.
 
 ### Secrets + Operator-PII Scan
 
@@ -219,11 +248,29 @@ CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
 `scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
 
-`scripts/lint.sh` (SOW-0009) **is present**: it is the local mirror of the
-CI Go lint + security gates — `golangci-lint run` (the umbrella, driven by
-`.golangci.yml` at the version pinned in `.golangci-lint-version`) then
-standalone `gosec` and `govulncheck`. CI enforces the same set via the
-version-pinned `golangci/golangci-lint-action` plus its standalone
+`scripts/lint.sh` (SOW-0009; frontend section added SOW-0012) **is present**: it
+is the local, **build-free** static-analysis entrypoint mirroring CI's
+static-analysis gates. Its Go section mirrors the CI `lint` job —
+`golangci-lint run` (the umbrella, driven by `.golangci.yml` at the version
+pinned in `.golangci-lint-version`) then standalone `gosec` and `govulncheck`.
+Its frontend section (skipped cleanly when `frontend/` is absent) mirrors the
+build-free static gates of the CI `frontend` job, fail-fast in order: ensure
+deps are present (reusing `scripts/build.sh`'s `npm ci`/`npm install` fallback,
+but only when `node_modules` is missing — this is a fast analysis pass, not a
+build), `npm run lint` (the `lint` npm script bakes in `--max-warnings=0` — the
+single source of truth for the flag; lint.sh does not re-pass it), `npm run
+typecheck`, the bundle-size **gate-logic self-test** (`npm run
+check:bundle-size:selftest`), the **coverage-config verifier** (`npm run
+check:coverage-config` — checks the REAL per-dir floors, see §Frontend —
+Unit/Component), then the per-dir coverage **gate-logic self-test** (`npm run
+check:coverage-thresholds:selftest`). `scripts/lint.sh` does **not** run the REAL
+bundle-size-vs-built-manifest gate (`npm run check:bundle-size`) or the REAL
+coverage run (`npm run test -- --run --coverage`): those need a build / full test
+run and live in the CI `frontend` job — and in `scripts/build.sh` (which runs
+`npm run check:bundle-size` on the just-built `dist/`) / `scripts/test.sh` (which
+runs the frontend `npm run test -- --run --coverage` after the Go suite) — not in
+this build-free entrypoint. CI enforces the Go set via
+the version-pinned `golangci/golangci-lint-action` plus its standalone
 gosec/govulncheck steps (CI keeps the cached action rather than invoking
 `scripts/lint.sh`, to preserve golangci's analysis cache). `scripts/test.sh` (Go
 tests + coverage profile) and `scripts/check-coverage.sh` (the statement

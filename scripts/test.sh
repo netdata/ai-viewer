@@ -49,4 +49,35 @@ esac
 run go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
 echo -e "${GRAY}coverage profile written: coverage.out${NC}" >&2
 run go tool cover -func=coverage.out | tail -1
-echo -e "${GREEN}[ok]${NC} tests pass (race-clean); enforce thresholds with scripts/check-coverage.sh." >&2
+echo -e "${GREEN}[ok]${NC} Go tests pass (race-clean); enforce thresholds with scripts/check-coverage.sh." >&2
+
+# === Frontend unit + coverage section (normal mode only) =====================
+# test.sh runs ALL tests, as its name implies — Go above, frontend here. The
+# REAL Vitest run enforces the global aggregate floor AND the native per-dir
+# line floors (quality-gates.md §Frontend — Unit/Component); the build-free
+# scripts/lint.sh runs only the gate-LOGIC self-test, so this is where the real
+# coverage numbers are gated locally. Skipped cleanly when frontend/ is absent
+# (spec-first commits); the --stress branch above exits before here, so the
+# slow frontend run never piggybacks on a Go race-stress invocation.
+if [[ ! -f frontend/package.json ]]; then
+  echo -e "${GRAY}no frontend/package.json — skipping frontend tests.${NC}" >&2
+else
+  (
+    run cd frontend
+    # Ensure deps are present, reusing scripts/build.sh's npm ci / npm install
+    # fallback, but only when node_modules is MISSING (a warm tree stays fast).
+    if [[ ! -d node_modules ]]; then
+      if [[ -f package-lock.json ]]; then
+        run npm ci
+      else
+        echo -e "${YELLOW}[warn]${NC} frontend/package-lock.json missing; using 'npm install'" >&2
+        run npm install
+      fi
+    fi
+    # Unit/component suite + coverage, enforcing the global + per-dir thresholds.
+    run npm run test -- --run --coverage
+  )
+  echo -e "${GREEN}[ok]${NC} Frontend unit tests pass (coverage thresholds enforced)." >&2
+fi
+
+echo -e "${GREEN}[ok]${NC} test.sh: Go + frontend tests all pass." >&2

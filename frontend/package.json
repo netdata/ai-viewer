@@ -5,6 +5,9 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -12,9 +15,16 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint . --max-warnings 0",
+    "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "e2e": "playwright test"
+    "e2e": "playwright test --project=chromium",
+    "e2e:a11y": "playwright test --project=chromium tests/a11y.spec.ts tests/viz-a11y.spec.ts tests/stats-a11y.spec.ts",
+    "e2e:quarantine": "playwright test --project=quarantine --pass-with-no-tests",
+    "check:bundle-size": "node scripts/check-bundle-size.js",
+    "check:bundle-size:selftest": "bash scripts/check-bundle-size.test.sh",
+    "check:coverage-config": "node scripts/check-coverage-config.mjs",
+    "check:coverage-config:selftest": "bash scripts/check-coverage-config.test.sh",
+    "check:coverage-thresholds:selftest": "bash scripts/check-coverage-thresholds.test.sh"
   },
   "dependencies": {
     "@tanstack/react-query": "5.100.14",
@@ -48,6 +58,9 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitest/coverage-v8": "4.1.7",
     "eslint": "9.39.4",
+    "eslint-import-resolver-typescript": "4.4.5",
+    "eslint-plugin-import": "2.32.0",
+    "eslint-plugin-jsx-a11y": "6.10.2",
     "eslint-plugin-react": "7.37.5",
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.6.0",

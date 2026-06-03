@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 
 // SOW-0006 AC#5 — the REAL-BROWSER axe pass on the new viz surfaces (the
 // component-level jest-axe work in chunk "a11y" prepared for this). Runs axe-core
@@ -125,6 +125,37 @@ test.describe('a11y — viz surfaces (AC#5)', () => {
       expect(
         blocking,
         `serious/critical violations on /topology (${theme} theme)`,
+      ).toEqual([]);
+    });
+
+    // AC#5 requires axe on EVERY route, including the session-detail LOGS tab —
+    // the one detail tab the other a11y specs (overview here-adjacent
+    // a11y.spec.ts; trace/topology/timeline above) did NOT cover. The seeded
+    // ops may or may not carry log entries, so the ready-gate accepts EITHER the
+    // accessible "Session logs" region (rows present) OR the "No log entries"
+    // empty state; the always-present Severity fieldset legend proves the tab
+    // mounted either way (LogsTab.tsx). This keeps the scan seed-robust, like
+    // stats-a11y.spec.ts's either/or gate.
+    test(`Logs tab has no serious/critical axe violations (${theme})`, async ({ page }) => {
+      const id = await firstSessionId(page);
+      const blocking = await axeRoute(
+        page,
+        theme,
+        `/sessions/${encodeURIComponent(id)}?tab=logs`,
+        async (p) => {
+          // The Severity filter fieldset is always rendered on the Logs tab.
+          await expect(p.getByRole('group', { name: 'Severity' })).toBeVisible();
+          // Body settles to the logs region (rows) OR the empty-state copy.
+          await expect(
+            p
+              .getByRole('region', { name: 'Session logs' })
+              .or(p.getByText('No log entries for this session.')),
+          ).toBeVisible();
+        },
+      );
+      expect(
+        blocking,
+        `serious/critical violations on Logs tab (${theme} theme)`,
       ).toEqual([]);
     });
   }

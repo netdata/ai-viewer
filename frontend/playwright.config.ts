@@ -11,14 +11,46 @@ export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // No GLOBAL retries (SOW-0012 AC#4 + Chunk-B handoff). A blanket `retries: 2`
+  // masks real flakiness across the whole suite. Retries are opt-in PER SCENARIO
+  // via `test.describe.configure({ retries: 1 })` and are scoped to the SSE flows
+  // only (tests/sse-update.spec.ts, tests/realtime.spec.ts, tests/viz-sse.spec.ts)
+  // — the connection handshake / EventSource timing is the one place CI-runner
+  // slowness can legitimately cause a transient miss. Everything else must be
+  // deterministic, so a failure there is a real defect, not retried away.
+  retries: 0,
+  // Per-test timeout budget (AC#4 / R3). 15 s is generous for the deterministic
+  // DOM/network assertions on slower CI runners; the SSE flows raise this to 30 s
+  // locally via `test.describe.configure({ timeout: 30_000 })` because the
+  // subscription POST + EventSource open is the slowest checkpoint.
+  timeout: 15_000,
   reporter: 'list',
   use: {
     baseURL: 'http://127.0.0.1:7710',
     trace: 'on-first-retry',
   },
+  // Two projects (SOW-0012 AC#4):
+  //   - `chromium` is the GATING suite. Its `testIgnore` excludes
+  //     tests/quarantine/, so a genuinely flaky spec MOVED there (never
+  //     `test.skip`-ed, always with a linked SOW in its header) stops blocking
+  //     merge automatically. `npm run e2e` / `npm run e2e:a11y` run this project.
+  //   - `quarantine` runs ONLY tests/quarantine/ (its own `testDir`), so
+  //     quarantined specs still RUN (`npm run e2e:quarantine` →
+  //     `--project=quarantine`) for diagnosis without gating. It is empty on
+  //     delivery, so this is a forward-looking guard, not an active exclusion.
+  // `npm run e2e` names the gating project explicitly so a bare `playwright
+  // test` does not silently fold the non-gating quarantine project into the gate.
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      name: 'chromium',
+      testIgnore: '**/quarantine/**',
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'quarantine',
+      testDir: './tests/quarantine',
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
   // Boot the PRE-BUILT single binary (scripts/build.sh must have run first) with
   // seeded data. cwd is frontend/, so the script path is repo-relative. The

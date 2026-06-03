@@ -120,10 +120,10 @@ For changes to ingest pipeline, SSE hub, or anything with channels/goroutines: r
 ### Frontend — Lint
 
 ```bash
-cd frontend && npm run lint -- --max-warnings=0
+cd frontend && npm run lint   # the `lint` script bakes in --max-warnings=0
 ```
 
-ESLint flat config with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import`. Threshold: zero warnings.
+ESLint flat config with `@typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y`, `eslint-plugin-import`. Threshold: zero warnings (the `lint` npm script owns `--max-warnings=0`; `scripts/lint.sh` and CI run plain `npm run lint`).
 
 ### Frontend — Type Check
 
@@ -138,10 +138,19 @@ Threshold: zero errors.
 ### Frontend — Unit/Component Tests
 
 ```bash
-cd frontend && npm run test -- --run --coverage
+cd frontend && npm run test -- --run --coverage          # REAL gate (run by scripts/test.sh after the Go suite, and in CI)
+cd frontend && npm run check:coverage-config              # verify the REAL per-dir floors (RAW-canonical shape + non-vacuity + BIDIRECTIONAL lockstep + disk-completeness + whole-dir include shape)
+cd frontend && npm run check:coverage-thresholds:selftest # hermetic gate-MECHANISM self-test (throwaway fixture)
 ```
 
-Vitest + React Testing Library. Threshold: all pass, ≥ 80% lines per component directory.
+Vitest + React Testing Library. Threshold: all pass; global aggregate floor (≥ 80% lines/stmts/funcs, ≥ 75% branches) **plus a per-directory ≥ 80% lines floor** for every measured dir under `src/components/` and `src/pages/`.
+
+- **Per-dir mechanism = Vitest NATIVE glob-keyed `coverage.thresholds`** (SOW-0012; Vitest ≥ 4, verified on 4.1.7) — `vitest.config.ts` has `'src/components/<Dir>/**': { lines: 80 }` per measured dir. A group below 80% lines fails the run (exit 1: `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`). NO wrapper script; a shared `PER_DIR_LINES` const ties the global + per-dir floors together.
+- **Shared lists (F3):** `PER_DIR_GLOBS`, `COVERAGE_INCLUDE`, `COVERAGE_EXCLUDED`, `PER_DIR_LINES` live in `frontend/vitest.coverage.mjs`; `vitest.config.ts` imports the measuring lists and `check-coverage-config.mjs` imports all of them (no second copy to drift). `.mjs` (no TS loader for the Node verifier) + a co-located `vitest.coverage.d.mts` for the config's typecheck.
+- **Gotcha — empty glob group vacuously PASSES:** an unmatched glob's lines pct is `"Unknown"` and `"Unknown" < 80` is `false`. So add a per-dir key ONLY for a dir in `coverage.include`, AND every measured component/page dir MUST have a per-dir key — the gated set and the measured set are EQUAL (`gatedDirs === measuredDirs`), enforced both ways. When you implement+test a new component/page dir, add it to BOTH `COVERAGE_INCLUDE` AND `PER_DIR_GLOBS` in `vitest.coverage.mjs`, else the per-dir gate silently skips it (or, the reverse, a floor for an unmeasured/excluded dir is a no-op that can never fire). Dirs/files that are intentionally NOT measured go in `COVERAGE_EXCLUDED` (in `vitest.coverage.mjs`) with a per-entry rationale: `Layout` + `StatCard` are REAL components whose dedicated Vitest unit coverage is deferred (Playwright exercises them today) — NOT placeholders; the `Agents`/`Models`/`Tools` Phase-3 stubs are bare `<ComingSoon/>` wrappers; `NotFound.tsx` is the trivial 404. (`ComingSoon.tsx` itself IS measured — it has a unit test.) **`npm run check:coverage-config` catches THREE things** on the REAL lists, failing closed and naming the offender: (1) **non-vacuity** — a per-dir glob matching zero source files; (2) **BIDIRECTIONAL lockstep** — a measured dir with no per-dir floor (measured ⊄ gated) AND a per-dir floor whose dir is not measured (excluded or absent from include; gated ⊄ measured — a no-op threshold group, R8-2); (3) **disk-completeness** — a source dir/flat-file under `src/components/`/`src/pages/` in NEITHER `COVERAGE_INCLUDE` nor `COVERAGE_EXCLUDED` (so shipped source cannot silently escape both coverage and the verifier). It also fails closed on a broad whole-root include glob (e.g. `src/pages/**/*.{ts,tsx}`), on a per-dir include that is **not the EXACT canonical whole-dir shape** `<root>/<Dir>/**/*.{ts,tsx}` (a bare dir, an extension-narrowed `**/*.tsx`/`**/*.ts`, a narrow filename, or a deeper subpath — all reject, so a sibling source cannot escape a "measured" dir), on a **`PER_DIR_GLOBS` entry that is not the EXACT canonical threshold shape `<root>/<Dir>/**`** (a bare dir like `src/components/Foo`, or a deeper/narrower glob — a Vitest threshold KEY must end in `/**` to match file paths, so a bare-dir key matches nothing and that floor vacuously passes; only a canonical entry contributes its dir to the gated set), and on a malformed `.`/`..` path segment. **Both per-dir-root shape checks compare the RAW string, not a normalized one (R8-1):** `vitest.config.ts` hands the RAW strings to Vitest (`PER_DIR_GLOBS` → picomatch threshold keys vs clean `relative(root,file)` paths; `COVERAGE_INCLUDE` → tinyglobby selector), so an entry that is canonical only AFTER normalization (a leading `./`, a repeated `//`, or a trailing `/`) is REJECTED — a `//`/trailing-`/` key matches nothing (vacuous floor) and the `./` form is version-fragile. So write per-dir-root entries EXACTLY canonical: `src/components/<Dir>/**` and `src/components/<Dir>/**/*.{ts,tsx}` — no `./`, no `//`, no trailing `/`.
+- HTML report at `frontend/coverage/` (CI artifact `frontend-coverage-<run_id>`); `json` reporter also emits `coverage/coverage-final.json`.
+- **Two guards, do not conflate:** the MECHANISM self-test (`scripts/check-coverage-thresholds.test.sh`) proves Vitest's glob-keyed threshold still fails closed on a throwaway 50%-lines fixture — it does NOT read the real config. The real-config verifier (`scripts/check-coverage-config.mjs`) enforces the real lists' non-vacuity + BIDIRECTIONAL lockstep (`gatedDirs === measuredDirs`) + disk-completeness + RAW-canonical per-dir-root shapes (per-dir include exactly `<root>/<Dir>/**/*.{ts,tsx}`, per-dir floor exactly `<root>/<Dir>/**`, both as the RAW string — no `./`/`//`/trailing-`/` laundering); its OWN decision logic has a hermetic self-test (`scripts/check-coverage-config.test.sh`, `npm run check:coverage-config:selftest`). All are dedicated CI `frontend` steps and run in `scripts/lint.sh`.
+- A dir under the floor is a finding to fix with tests — never lower the threshold.
 
 ### Frontend — E2E
 
@@ -165,10 +174,11 @@ axe-core runs on every Playwright route. Threshold: zero serious or critical vio
 
 ```bash
 cd frontend && npm run build
-node scripts/check-bundle-size.js dist/assets/*.js
+npm run check:bundle-size            # node scripts/check-bundle-size.js (defaults to ./dist)
+npm run check:bundle-size:selftest   # synthetic-fixture self-test of the gate
 ```
 
-Threshold: main chunk ≤ 500 KB gzipped. Per-route lazy chunks ≤ 200 KB gzipped each. Exceeding requires a SOW.
+Enforced gate (SOW-0012), not a report. Classification is **manifest-driven**: `vite.config.ts` sets `build.manifest: true`; the gate reads `dist/.vite/manifest.json` and gates by Vite's `ManifestChunk` flags — `isEntry` chunks are the **main chunk** (≤ 500 KB gz), `isDynamicEntry` chunks are **per-route lazy chunks** (≤ 200 KB gz each). **Each MAIN/LAZY entry's budget is its transitive static-import CLOSURE** — the gz sum of the entry's `.file` PLUS the transitive closure of its static `imports` (deduped within one entry's closure; `dynamicImports` are separately-budgeted lazy chunks and are NOT followed). So a Rollup-split shared chunk (neither `isEntry` nor `isDynamicEntry`, reachable only via an entry's `imports[]`) IS gated under the entry that pulls it in (the F1 fail-open this closed). Only JS that is neither classified nor inside any gated entry's closure (e.g. a `?worker` bundle like `forceWorker-*.js` absent from the manifest) is reported "ungated", never gated. The script takes an optional dist-dir arg (default `./dist`) so the self-test can point it at a fixture. **Fail-closed — the complete case list (each exits non-zero, never a silent pass):** a missing/empty dist; a missing/invalid/non-object manifest (including a JSON array); zero JS chunks; no MAIN (`isEntry`) entry; **any** manifest entry (JS **or** non-JS, e.g. CSS) whose `file` is absent on disk (an up-front sweep over every chunk); a JS chunk flagged **both** `isEntry` **and** `isDynamicEntry` (mutually exclusive — a both-flagged route chunk would be under-budgeted as MAIN); a non-array `imports` **or** `dynamicImports`; a non-string element in an `imports` array; a static `imports` element referencing a missing/invalid manifest key; a non-string element in a `dynamicImports` array; a `dynamicImports` element referencing a missing manifest key; and a `dynamicImports` element referencing a **JS** chunk that is **not** `isDynamicEntry`. (The last three close the lazy-chunk half of the contract: a mis-flagged/dangling dynamicImport target would otherwise slip to "ungated" instead of being budgeted as the lazy chunk it is.) Thresholds are named constants in the script. Exceeding a budget requires a SOW — never raise the threshold.
 
 ### Secrets Scan
 
@@ -225,13 +235,16 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ## Aggregate Scripts
 
 ```bash
-./scripts/lint.sh         # Go: golangci umbrella + standalone gosec + govulncheck (SOW-0009; EXISTS)
-./scripts/test.sh         # all tests + coverage + race (SOW-0010; EXISTS)
-./scripts/check-coverage.sh  # statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
+./scripts/lint.sh         # build-free static analysis: Go (golangci umbrella + standalone gosec + govulncheck, SOW-0009) AND frontend (eslint + tsc + bundle-size self-test + coverage-config verifier + per-dir-coverage gate self-test, SOW-0012); fail-fast; frontend section skipped when frontend/ is absent
+./scripts/test.sh         # ALL tests: Go (race + coverage profile) then, in normal mode, the frontend Vitest run (real per-dir coverage gate); skips frontend when absent (SOW-0010/0012; EXISTS)
+./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
+./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
 ```
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, and `scripts/check-coverage.sh` exist (SOW-0009/0010). The canonical `scripts/gates.sh` aggregator (SOW-0013) is NOT yet present. Until it lands, run `scripts/lint.sh` + `scripts/test.sh` + `scripts/check-coverage.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
+`scripts/lint.sh` is the build-free static-analysis entrypoint: it runs only analysis + the coverage-config verifier + the hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
+
+Current state: `scripts/lint.sh`, `scripts/test.sh`, and `scripts/check-coverage.sh` exist (SOW-0009/0010; `scripts/lint.sh` gained its frontend section in SOW-0012). The canonical `scripts/gates.sh` aggregator (SOW-0013) is NOT yet present. Until it lands, run `scripts/lint.sh` + `scripts/test.sh` + `scripts/check-coverage.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
 
 ## When a Gate Fails
 

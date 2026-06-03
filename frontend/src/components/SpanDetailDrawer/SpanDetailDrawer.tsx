@@ -167,11 +167,21 @@ export function SpanDetailDrawer({ detail, onClose }: SpanDetailDrawerProps) {
   const header = headerOf(detail);
 
   return (
+    // The backdrop onMouseDown is a pointer-only "click-outside-to-dismiss"
+    // convenience; keyboard users dismiss via Escape (handled on the dialog
+    // below). The dialog has a complete keyboard path (Escape + Tab/Shift+Tab
+    // focus trap + a real close button), so the backdrop needs no key handler.
+    // eslint-disable-next-line jsx-a11y/no-static-element-interactions
     <div
       className={styles.overlay}
       data-testid="drawer-overlay"
       onMouseDown={onOverlayMouseDown}
     >
+      {/* onKeyDown here is the dialog's Escape-to-close + focus-trap handler —
+          the canonical modal keyboard contract. jsx-a11y classifies the
+          `dialog` role as non-interactive, so its no-noninteractive-element-
+          interactions rule false-positives on this required handler. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <div
         ref={panelRef}
         className={styles.panel}
