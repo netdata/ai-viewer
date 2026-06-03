@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: drafted 2026-05-26; awaiting operator approval before move to `current/`. Depends on SOW-0001 Chunk 14 (frontend scaffolding: Vite + React + TS app, theme tokens, layout) being delivered first. Lands the complete frontend half of `quality-gates.md` so every Frontend row in the gate catalog is enforced both locally and in CI.
+Sub-state: opened 2026-06-03 under the operator's standing backlog mandate (blanket sign-off; the SOW has no open decisions requiring operator input — see "Open decisions"). The SOW-0001 Chunk 14 dependency is LANDED (the `frontend/` scaffolding exists). Drafted greenfield, but the frontend now exists with partial config, so the real scope is the GAPS — reconciled in the Execution Log (2026-06-03). Lands the frontend half of `quality-gates.md` so every Frontend gate is enforced locally + in CI.
 
 ## Requirements
 
@@ -82,7 +82,7 @@ Risks:
 
 ## Pre-Implementation Gate
 
-Status: blocked (awaiting SOW-0001 Chunk 14 completion + operator approval to move to `current/`)
+Status: ready (SOW-0001 Chunk 14 landed; opened under the operator's standing backlog mandate). Current-state reconciliation + revised remaining-chunk plan in the Execution Log (2026-06-03).
 
 Problem / root-cause model:
 
@@ -180,7 +180,44 @@ See `Pre-Implementation Gate / Implementation plan` above. Twelve chunks, expect
 
 ## Execution Log
 
-(Filled per chunk as work proceeds. One sub-section per chunk: commit refs, evidence, deviations.)
+### 2026-06-03 — Open + current-state reconciliation
+
+Opened under the operator's standing backlog mandate (blanket sign-off for the
+whole pending backlog; SOW-0008 stays last). The SOW was drafted greenfield
+("no frontend/ directory yet"), but the frontend scaffolding (SOW-0001 Chunk 14)
+plus later SOWs (0006 trace UI, 0007 stats) have since landed, so several gates
+already exist. Verified current state on master (`bfa8b98`):
+
+- **LANDED (no work):** `frontend/tsconfig.json` strict flags (`strict`,
+  `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, …); `npm run
+  typecheck` exists. The per-push CI `frontend` job already runs lint, typecheck,
+  unit+coverage, Playwright+axe, and a bundle-size REPORT.
+- **PARTIAL:** `frontend/eslint.config.ts` (note: `.ts`, not the `.js` the AC
+  names — a divergence to record in the spec/skill) exists with the
+  typescript-eslint + react + react-hooks stack but is MISSING
+  `eslint-plugin-jsx-a11y` + `eslint-plugin-import`. `frontend/vitest.config.ts`
+  has aggregate coverage thresholds but not per-directory. `playwright.config.ts`
+  + axe tests exist; the 5 AC scenarios + per-test SSE timeout/`retries:1`
+  tuning + an `e2e:a11y` script need confirming/adding.
+- **NOT-STARTED:** `frontend/scripts/check-bundle-size.js` (gzip-budget GATE; CI
+  has only a report today); the `scripts/lint.sh` frontend section (Go-only).
+
+Remaining chunks (revised from the greenfield 12-chunk plan):
+- A. `frontend/scripts/check-bundle-size.js` + self-test; upgrade the CI
+  bundle-size report → enforced gate. Self-contained; mirrors
+  `scripts/check-coverage.sh` + `scripts/test/check-coverage-test.sh`.
+- B. Add `eslint-plugin-jsx-a11y` + `eslint-plugin-import` (verify flat-config
+  support; pin); fix every new warning at the source.
+- C. Per-directory Vitest coverage (native per-dir `thresholds`, else a
+  `frontend/scripts/check-coverage.js` wrapper).
+- D. Confirm/complete the 5 Playwright scenarios; add `e2e:a11y`; tune the SSE
+  test timeout/`retries:1`; document `src/viz/<chart>/a11y.md` waivers.
+- E. Extend `scripts/lint.sh` with a frontend section (lint + typecheck +
+  bundle-size), fail-fast.
+- F. Spec sync (eslint.config `.ts` vs `.js`); all gates; ≥3 external reviewers
+  to convergence; PR; self-merge.
+
+(Per-chunk commit refs + evidence appended below as work proceeds.)
 
 ## Validation
 
