@@ -56,4 +56,4 @@ This directory contains the **living specifications** of ai-viewer: what it does
 - Specs do not duplicate code; they explain WHY a contract exists, the invariants, the edge cases that motivated the design.
 - Specs MUST NOT contain raw sensitive data or the operator's personal name. See AGENTS.md for the redaction rules.
 - `TBD`, `N/A`, "to be confirmed later" are invalid unless the spec explains why the item truly does not apply.
-- A `scripts/spec-drift.sh` automated drift detector (to be invoked by `scripts/gates.sh`) is planned (SOW-0013); until it lands, spec↔code synchrony is maintained manually (see the `project-specs-sync` skill).
+- `scripts/spec-drift.sh` is the automated structural drift detector and is invoked by `scripts/gates.sh`; manual spec↔code audit still applies for prose that the detector cannot prove.

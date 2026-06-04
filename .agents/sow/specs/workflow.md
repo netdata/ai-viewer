@@ -71,7 +71,7 @@ The master assistant does **not** Edit/Write production source files itself. Per
 
 ### Gates
 
-All gates listed in `quality-gates.md` run locally before reporting any work done. CI enforces each gate as a dedicated job (the single-aggregate-script mirror, where CI and local invoke the same `scripts/*.sh`, is SOW-0013 scope). Local-pass + CI-fail divergence is investigated as a defect.
+All gates listed in `quality-gates.md` run locally before reporting any work done. Local execution uses the full `scripts/gates.sh` aggregate; CI enforces the same gate contract through dedicated parallel jobs plus the cross-cutting `gates` job, with deliberate differences documented in `quality-gates.md`. Local-pass + CI-fail divergence outside those documented differences is investigated as a defect.
 
 Weakening a gate to make it pass is a contract breach. Fix the root cause.
 

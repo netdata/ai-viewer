@@ -82,7 +82,7 @@ func TestAutoDiscover_CodexProbe(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME / CODEX_HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CODEX_HOME", "")
+	clearOtherAdapterEnv(t)
 	sessions := filepath.Join(tmp, ".codex", "sessions")
 	plantCodexLayout(t, sessions, 2, 3)
 
@@ -119,6 +119,7 @@ func TestAutoDiscover_CodexHomeOverride(t *testing.T) {
 	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp) // no ~/.codex here
+	clearOtherAdapterEnv(t)
 	codexHome := filepath.Join(tmp, "custom-codex")
 	t.Setenv("CODEX_HOME", codexHome)
 	sessions := filepath.Join(codexHome, "sessions")
@@ -145,7 +146,7 @@ func TestAutoDiscover_NoCodexWhenAbsent(t *testing.T) {
 	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CODEX_HOME", "")
+	clearOtherAdapterEnv(t)
 
 	got, err := resolveSources(nil, silentLogger())
 	if err != nil {
@@ -166,7 +167,7 @@ func TestAutoDiscover_CodexProbeLogsBothCountsSeparately(t *testing.T) {
 	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CODEX_HOME", "")
+	clearOtherAdapterEnv(t)
 	sessions := filepath.Join(tmp, ".codex", "sessions")
 	plantCodexLayout(t, sessions, 2, 3)
 

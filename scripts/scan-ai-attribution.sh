@@ -21,10 +21,18 @@
 # script takes no arguments and contains no secrets.
 set -euo pipefail
 
-# Colors for transparent command tracing.
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; GRAY='\033[0;90m'; NC='\033[0m'
+# Colors for transparent command tracing. Collapse to empty when stderr is not
+# a TTY so CI logs and captured output stay plain.
+if [[ -t 2 ]]; then
+  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; GRAY=$'\033[0;90m'; NC=$'\033[0m'
+else
+  RED=""; GREEN=""; YELLOW=""; GRAY=""; NC=""
+fi
 run() {
-  printf >&2 "${GRAY}$(pwd) >${NC} "; printf >&2 "${YELLOW}"; printf >&2 "%q " "$@"; printf >&2 "${NC}\n"
+  printf >&2 '%b%s >%b ' "$GRAY" "$(pwd)" "$NC"
+  printf >&2 '%b' "$YELLOW"
+  printf >&2 "%q " "$@"
+  printf >&2 '%b\n' "$NC"
   # Capture the command's own exit code directly (NOT via `if ! "$@"`, which
   # would make $? the negated-expression status — always 0 — and silently mask
   # failures under `set -e`).
@@ -52,10 +60,34 @@ PATTERN="(${NAMES})[ -]?(iter|P)[ -]?[0-9]"
 PATTERN="${PATTERN}|(per|pins) (${NAMES})"
 PATTERN="${PATTERN}|(${NAMES}) (flagged|caught|noted|found|suggested|wants|requires|review)"
 
+SCAN_ROOTS=(cmd internal scripts frontend/src frontend/tests)
+missing=0
+for root in "${SCAN_ROOTS[@]}"; do
+  if [[ ! -d "$root" ]]; then
+    echo -e "${RED}[FAIL]${NC} required AI-attribution scan root is absent: $root" >&2
+    missing=1
+  fi
+done
+if [[ "$missing" -ne 0 ]]; then
+  exit 1
+fi
+
 # Scan only the shipped source trees. -I skips binary files; tests are
 # intentionally included. This script is excluded so its own pattern
 # definition (which must list the reviewer names) is not a self-hit.
-hits="$(grep -rniIE --exclude=scan-ai-attribution.sh "$PATTERN" cmd internal scripts frontend/src frontend/tests || true)"
+set +e
+hits="$(grep -rniIE --exclude=scan-ai-attribution.sh "$PATTERN" "${SCAN_ROOTS[@]}")"
+grep_ec=$?
+set -e
+
+case "$grep_ec" in
+  0) ;;
+  1) hits="" ;;
+  *)
+    echo -e "${RED}[FAIL]${NC} AI-reviewer attribution scan failed with grep exit ${grep_ec}." >&2
+    exit "$grep_ec"
+    ;;
+esac
 
 if [[ -n "$hits" ]]; then
   echo -e "${RED}[FAIL]${NC} AI-reviewer attribution comments found in shipped source:" >&2
