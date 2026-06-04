@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: in-progress
 
-Sub-state: drafted 2026-05-26; awaiting operator approval before move to `current/`. Depends on SOWs 0009 (Go quality stack), 0010 (Go security + fuzzing), 0011 (Go benchmarks + race stress), and 0012 (frontend quality stack) being delivered first OR landing in the same PR series. This SOW is the **integration** of all four — it produces the canonical `scripts/gates.sh`, the canonical `.github/workflows/ci.yml`, plus the cross-cutting gates (secrets scan, spec drift) and the supporting infrastructure (branch protection, Dependabot, CodeQL).
+Sub-state: opened 2026-06-04 under the operator's standing backlog mandate ("proceed"). Predecessor SOWs 0009/0010/0011 (Go quality/security/bench) and 0012 (frontend quality stack) are ALL delivered, so the dependency is satisfied. Drafted greenfield 2026-05-26, but two artifacts already landed via those SOWs (`scripts/scan-secrets.sh` — SOW-0009/0017; `.github/workflows/ci.yml` with 5 jobs lint/test/frontend/embed-smoke/gates — SOW-0009..0012), so the real scope is the GAPS (reconciled in the Execution Log 2026-06-04): `spec-drift.sh`, `gates.sh`, `codeql.yml`+config, `dependabot.yml`, `workflows-checks.yaml`, registering required status checks, + the doc invariants. Depends on SOWs 0009 (Go quality stack), 0010 (Go security + fuzzing), 0011 (Go benchmarks + race stress), and 0012 (frontend quality stack) being delivered first OR landing in the same PR series. This SOW is the **integration** of all four — it produces the canonical `scripts/gates.sh`, the canonical `.github/workflows/ci.yml`, plus the cross-cutting gates (secrets scan, spec drift) and the supporting infrastructure (branch protection, Dependabot, CodeQL).
 
 ## Requirements
 
@@ -87,7 +87,7 @@ Risks:
 
 ## Pre-Implementation Gate
 
-Status: blocked (awaiting SOWs 0009–0012 completion + operator approval to move to `current/`)
+Status: ready (SOWs 0009–0012 delivered; opened under the operator's standing backlog mandate + "proceed". Current-state reconciled 2026-06-04 — see Execution Log.)
 
 Problem / root-cause model:
 
@@ -197,7 +197,16 @@ See `Pre-Implementation Gate / Implementation plan` above. Thirteen chunks, expe
 
 ## Execution Log
 
-(Filled per chunk as work proceeds. One sub-section per chunk: commit refs, evidence, deviations.)
+### 2026-06-04 — Open + current-state reconciliation
+
+Opened under the operator's standing backlog mandate ("proceed"); predecessor SOWs 0009/0010/0011/0012 are all in `done/`, so the Pre-Implementation Gate dependency is satisfied. Reconciled the drafted plan (which assumed a greenfield repo) against the current `master` (`0e3ffc1`):
+
+- **Already landed (no work):** `scripts/scan-secrets.sh` (SOW-0009/0017 — the secret + operator-PII scanner; the AC#1 patterns + allow-list exist and the gate is wired into CI's `gates` job); `.github/workflows/ci.yml` (canonical CI; jobs `lint`, `test`, `frontend`, `embed-smoke`, `gates` — note FIVE jobs, not the 4 the draft assumed: `embed-smoke` was added in SOW-0001 Chunk 17). AC#1 + AC#4 are substantially met; this SOW verifies them and fills the rest.
+- **Remaining gaps (this SOW):** `scripts/spec-drift.sh` (AC#2 — 5 indicators), `scripts/gates.sh` (AC#3 — aggregate orchestrator), `.github/workflows/codeql.yml` + `.github/codeql/config.yml` (AC#8), `.github/dependabot.yml` (AC#7), `.github/workflows-checks.yaml` (AC#6), register required status checks on `master` (AC#5 — currently NONE; this also retires the project-wide "no required checks / self-merge-past-non-required-Codacy" posture), and the doc invariants (AC#9/#10). README CI/CodeQL badges.
+- **Required-check names to register (AC#5/#6):** the five `ci.yml` job names — `lint`, `test`, `frontend`, `embed-smoke`, `gates` (+ the CodeQL job once `codeql.yml` lands, if it is to be required).
+- **Ordering note:** the one-time branch-protection `gh api -X PATCH` (chunk 9) runs AFTER `ci.yml`+`codeql.yml` are green on `master`, as its own post-merge step — registering a not-yet-present check name would block all PRs.
+
+(Subsequent chunk entries appended below as work proceeds.)
 
 ## Validation
 
