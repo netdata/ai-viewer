@@ -8,41 +8,48 @@
 # companion: .agents/skills/project-quality-gates/SKILL.md.
 #
 # This is the BUILD-FREE static-analysis entrypoint: nothing here compiles a
-# shippable artifact (no `go build`, no `vite build`). Both the Go section and
-# the frontend section run only analysis + the gate-logic self-tests. The REAL
-# bundle-size-vs-built-manifest gate (`npm run check:bundle-size`) and the REAL
-# coverage run (`npm run test -- --run --coverage`) need a build / full test run
-# and therefore live in CI's `frontend` job + scripts/{build,test}.sh, NOT here;
-# this script runs their hermetic SELF-TESTS, which verify the gate LOGIC.
+# shippable artifact (no `go build`, no `vite build`). The Go section verifies
+# module tidiness, formatting, vet, lint, and security; the frontend section runs
+# static checks plus gate-logic self-tests. The REAL bundle-size-vs-built-manifest
+# gate (`npm run check:bundle-size`) and the REAL coverage run
+# (`npm run test -- --run --coverage`) need a build / full test run and therefore
+# live in CI's `frontend` job + scripts/{build,test}.sh, NOT here; this script
+# runs their hermetic SELF-TESTS, which verify the gate LOGIC.
 #
 # Runs, fail-fast, in this order:
 #   Go section:
-#   1. golangci-lint run   — the umbrella gate (with formatters enabled it also
+#   1. go mod tidy         — module graph normalization.
+#   2. git diff go.mod/go.sum — zero module-file diffs.
+#   3. gofmt tracked Go    — standalone formatter parity with CI.
+#   4. goimports tracked Go — standalone import formatter parity with CI.
+#   5. go vet ./...        — standalone vet parity with CI.
+#   6. golangci-lint run   — the umbrella gate (with formatters enabled it also
 #                            enforces Go — Format, and `govet` covers Go — Vet),
 #                            driven by .golangci.yml.
-#   2. gosec               — standalone (a newer build than golangci's bundled
+#   7. gosec               — standalone (a newer build than golangci's bundled
 #                            copy; G-series analyzers), -severity/-confidence medium.
-#   3. govulncheck         — known-CVE scan of the module + its call graph.
+#   8. govulncheck         — known-CVE scan of the module + its call graph.
 #   Frontend section (build-free; skipped if frontend/ is absent):
-#   4. ensure deps present — reuse scripts/build.sh's npm ci / npm install
+#   9. ensure deps present — reuse scripts/build.sh's npm ci / npm install
 #                            fallback, but only when node_modules is missing
 #                            (this is a fast static-analysis pass, not a build).
-#   5. npm run lint        — eslint flat config (the `lint` npm script bakes in
+#   10. npm run lint       — eslint flat config (the `lint` npm script bakes in
 #                            --max-warnings=0; not re-passed here).
-#   6. npm run typecheck   — tsc --noEmit (strict).
-#   7. bundle-size self-test     — hermetic; verifies the bundle-size GATE LOGIC.
-#   8. coverage-config verifier  — checks the REAL Vitest per-dir floors against
+#   11. npm run typecheck  — tsc --noEmit (strict).
+#   12. bundle-size self-test    — hermetic; verifies the bundle-size GATE LOGIC.
+#   13. coverage-config verifier — checks the REAL Vitest per-dir floors against
 #                                  the source tree (non-vacuity + lockstep +
 #                                  disk-completeness + whole-dir include shape);
 #                                  build-free (node:fs only).
-#   8b. coverage-config self-test — hermetic; verifies the verifier's OWN logic
+#   13b. coverage-config self-test — hermetic; verifies the verifier's OWN logic
 #                                   (vacuity / lockstep / broad-glob / .d.ts-only /
 #                                   disk-completeness / narrow-include rejection).
-#   9. coverage-thresholds self-test — hermetic; verifies the per-dir coverage
-#                                      GATE LOGIC.
+#   14. coverage-thresholds self-test — hermetic; verifies the per-dir coverage
+#                                       GATE LOGIC.
 #
 # Tool versions mirror .github/workflows/ci.yml exactly so local == CI:
 #   - golangci-lint: pinned in .golangci-lint-version (single source).
+#   - goimports: latest (matches CI).
 #   - gosec: v2.26.1 (the version CI installs).
 #   - govulncheck: latest (matches CI).
 #
@@ -50,9 +57,10 @@
 set -euo pipefail
 
 # Colors for transparent command tracing.
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; GRAY='\033[0;90m'; NC='\033[0m'
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; GRAY=$'\033[0;90m'; NC=$'\033[0m'
 run() {
-  printf >&2 "${GRAY}$(pwd) >${NC} "; printf >&2 "${YELLOW}"; printf >&2 "%q " "$@"; printf >&2 "${NC}\n"
+  printf >&2 '%s%s >%s ' "$GRAY" "$(pwd)" "$NC"
+  printf >&2 '%s' "$YELLOW"; printf >&2 '%q ' "$@"; printf >&2 '%s\n' "$NC"
   # Capture the command's own exit code directly (NOT via `if ! "$@"`, which
   # would make $? the negated-expression status — always 0 — and silently mask
   # failures under `set -e`).
@@ -69,27 +77,97 @@ GOSEC_VERSION="v2.26.1"
 # developer has GOBIN set elsewhere.
 GOBIN="$(go env GOBIN)"; [ -n "$GOBIN" ] || GOBIN="$(go env GOPATH)/bin"
 
-# --- 1. golangci-lint (umbrella: fmt + vet + all enabled linters) -----------
+TRACKED_GO_FILES=()
+
+load_tracked_go_files() {
+  local f
+  while IFS= read -r -d '' f; do
+    TRACKED_GO_FILES+=("./$f")
+  done < <(git ls-files -z -- '*.go')
+
+  if [[ "${#TRACKED_GO_FILES[@]}" -eq 0 ]]; then
+    echo -e "${RED}[ERROR]${NC} no tracked Go files found; Go formatter gates are fail-closed." >&2
+    exit 1
+  fi
+}
+
+run_go_formatter_list() {
+  local label="$1"
+  shift
+  local bad=()
+  local f out ec
+
+  printf >&2 '%s%s >%s %s%s -l <tracked Go files: %d>%s\n' \
+    "$GRAY" "$(pwd)" "$NC" "$YELLOW" "$label" "${#TRACKED_GO_FILES[@]}" "$NC"
+
+  for f in "${TRACKED_GO_FILES[@]}"; do
+    ec=0
+    out="$("$@" "$f" 2>&1)" || ec=$?
+    if [[ "$ec" -ne 0 ]]; then
+      printf >&2 '%s[ERROR]%s %s failed for %q with exit %s:\n%s\n' \
+        "$RED" "$NC" "$label" "${f#./}" "$ec" "$out"
+      exit "$ec"
+    fi
+    if [[ -n "$out" ]]; then
+      bad+=("${f#./}")
+    fi
+  done
+
+  if [[ "${#bad[@]}" -gt 0 ]]; then
+    echo -e "${RED}[ERROR]${NC} ${label} reported unformatted tracked Go file(s):" >&2
+    printf >&2 '  %q\n' "${bad[@]}"
+    exit 1
+  fi
+}
+
+# --- 1. Go module tidiness --------------------------------------------------
+run go mod tidy
+run git diff --exit-code go.mod go.sum
+load_tracked_go_files
+
+# --- 2. gofmt (standalone, CI parity) ---------------------------------------
+run_go_formatter_list "gofmt" gofmt -l
+
+# --- 3. goimports (standalone, latest, CI parity) ---------------------------
+echo -e "${GRAY}installing goimports (latest)...${NC}" >&2
+run go install golang.org/x/tools/cmd/goimports@latest
+run_go_formatter_list "goimports" "${GOBIN}/goimports" -l
+
+# --- 4. go vet (standalone, CI parity) --------------------------------------
+run go vet ./...
+
+# --- 5. golangci-lint (umbrella: fmt + vet + all enabled linters) -----------
 PINNED_VERSION="$(tr -d '[:space:]' < .golangci-lint-version)"
 if ! command -v golangci-lint >/dev/null 2>&1; then
   echo -e "${RED}[ERROR]${NC} golangci-lint not found on PATH." >&2
   echo -e "        Install the pinned version: ${YELLOW}go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${PINNED_VERSION}${NC}" >&2
   exit 1
 fi
-HAVE_VERSION="$(golangci-lint version 2>/dev/null | grep -oE 'version v?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+HAVE_VERSION_RAW="$(golangci-lint version 2>/dev/null || true)"
+HAVE_VERSION="$(
+  printf '%s\n' "$HAVE_VERSION_RAW" \
+    | grep -oE 'version v?[0-9]+\.[0-9]+\.[0-9]+' \
+    | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' \
+    | head -1 \
+    || true
+)"
+if [[ -z "$HAVE_VERSION" ]]; then
+  echo -e "${RED}[ERROR]${NC} could not parse golangci-lint version from local binary output." >&2
+  printf >&2 '        Output: %s\n' "$HAVE_VERSION_RAW"
+  printf >&2 '        Expected pinned version from .golangci-lint-version: %s\n' "$PINNED_VERSION"
+  exit 1
+fi
 # Normalize both to a leading 'v' for comparison.
 [[ "$HAVE_VERSION" == v* ]] || HAVE_VERSION="v${HAVE_VERSION}"
 WANT_VERSION="$PINNED_VERSION"; [[ "$WANT_VERSION" == v* ]] || WANT_VERSION="v${WANT_VERSION}"
-# Intentional WARN (not auto-install): golangci-lint is the developer's own
-# primary tool and is heavy to reinstall over; CI enforces the exact pin
-# authoritatively via golangci-lint-action. gosec/govulncheck below ARE
-# auto-(re)installed at the pin because lint.sh manages them and they are cheap.
 if [[ "$HAVE_VERSION" != "$WANT_VERSION" ]]; then
-  echo -e "${YELLOW}[warn]${NC} golangci-lint ${HAVE_VERSION} != pinned ${WANT_VERSION} (.golangci-lint-version); CI enforces the pin via golangci-lint-action — re-pin locally if results differ." >&2
+  echo -e "${RED}[ERROR]${NC} golangci-lint version mismatch: installed ${HAVE_VERSION}, pinned ${WANT_VERSION} (.golangci-lint-version)." >&2
+  echo -e "        Install the pinned version: ${YELLOW}go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${PINNED_VERSION}${NC}" >&2
+  exit 1
 fi
 run golangci-lint run --timeout=5m
 
-# --- 2. gosec (standalone, pinned) ------------------------------------------
+# --- 6. gosec (standalone, pinned) ------------------------------------------
 # Always (re)install the pinned version — exactly as CI does. A `go install`d
 # gosec self-reports "dev" (release version ldflags are not injected), so the
 # binary's version cannot be verified after the fact; pinning at install time
@@ -99,14 +177,14 @@ echo -e "${GRAY}installing pinned gosec ${GOSEC_VERSION}...${NC}" >&2
 run go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
 run "${GOBIN}/gosec" -severity medium -confidence medium ./...
 
-# --- 3. govulncheck (latest, as CI) -----------------------------------------
+# --- 7. govulncheck (latest, as CI) -----------------------------------------
 # Always install latest — the CVE database tooling should be current, and CI
 # does the same. Idempotent + fast when cached.
 echo -e "${GRAY}installing govulncheck (latest)...${NC}" >&2
 run go install golang.org/x/vuln/cmd/govulncheck@latest
 run "${GOBIN}/govulncheck" ./...
 
-echo -e "${GREEN}[ok]${NC} Go section: golangci-lint + gosec + govulncheck all clean." >&2
+echo -e "${GREEN}[ok]${NC} Go section: module tidy + gofmt + goimports + go vet + golangci-lint + gosec + govulncheck all clean." >&2
 
 # === Frontend static-analysis section (build-free, fail-fast) ===============
 # Spec-first repos may not have a frontend on every commit; skip cleanly when

@@ -1,0 +1,51 @@
+# Required status checks on `master` — operator-readable record (SOW-0013, AC#6).
+#
+# THIS FILE IS NOT CONSUMED BY GITHUB ACTIONS. It documents the CI job names
+# that branch protection on `master` registers as REQUIRED status checks, so a
+# job rename cannot silently disable a gate.
+#
+# Why this file exists
+#   Branch protection's required-checks list is keyed by JOB NAME. Renaming a
+#   CI job without updating the protection rule silently drops the check — PRs
+#   then merge without that gate ever running. This file is the durable,
+#   reviewable record of what SHOULD be registered, so the drift is visible in
+#   a diff.
+#
+# The contract (quality-gates.md §"Renaming a CI Job"; SKILL §"Renaming a CI
+# Job"): any change that renames a CI job MUST, in the SAME commit:
+#   1. rename the job in the workflow file (below),
+#   2. update the matching entry here, and
+#   3. re-run the branch-protection PUT that registers the new name
+#      (documented in docs/setup.md):
+#        gh api -X PUT /repos/netdata/ai-viewer/branches/master/protection ...
+#
+# Verify the live state matches this file:
+#   gh api /repos/netdata/ai-viewer/branches/master/protection \
+#     --jq '.required_status_checks.contexts'
+
+repository: netdata/ai-viewer
+branch: master
+
+required_status_checks:
+  # From .github/workflows/ci.yml — the job IDs (== the `name:` of each job).
+  - workflow: ci.yml
+    jobs:
+      - lint          # gofmt/goimports/vet + golangci-lint umbrella + gosec + govulncheck
+      - test          # go test -race + coverage gate + fuzz seed corpus + bench smoke/self-tests
+      - frontend      # eslint + tsc + Vitest(+per-dir coverage) + Playwright E2E + axe + bundle-size gate
+      - embed-smoke   # build the single binary and assert it serves the REAL built UI + /api/health
+      - gates         # cross-cutting: secrets + spec-drift + AI-attribution fail-closed, gates.sh syntax, optional systemd when present
+
+  # From .github/workflows/codeql.yml — the analyze job runs once per matrix
+  # language, with an explicit per-language job name. Static security analysis
+  # is required before merge, so register every matrix context alongside ci.yml.
+  - workflow: codeql.yml
+    jobs:
+      - CodeQL (go)
+      - CodeQL (javascript-typescript)
+      - CodeQL (actions)
+
+# NOT required (run, but do not block merge):
+#   - the nightly workflows (fuzz-nightly, race-stress-nightly, govulncheck-nightly):
+#     scheduled, not per-PR — their findings are surfaced on a cadence, not as a
+#     merge gate.

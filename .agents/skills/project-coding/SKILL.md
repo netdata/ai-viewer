@@ -47,7 +47,7 @@ These are non-negotiable across all code:
 
 ## Quality Gates
 
-Before any commit: run the gates locally and confirm green (`./scripts/lint.sh` for Go lint/security; the per-gate commands for the rest — the single `./scripts/gates.sh` aggregator is SOW-0013 scope). The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
+Before any commit: run the full local aggregate and confirm green (`./scripts/gates.sh`). Use focused commands (`./scripts/lint.sh`, `./scripts/test.sh`, `scripts/spec-drift.sh`, frontend commands, etc.) for diagnosis while iterating, but the commit gate is the aggregate. The full catalog with commands and thresholds lives in `project-quality-gates`. Summary of the non-negotiables:
 
 - All Go lints (golangci-lint, gosec, govulncheck) zero warnings.
 - `go test -race -count=1 ./...` passes.
@@ -57,7 +57,7 @@ Before any commit: run the gates locally and confirm green (`./scripts/lint.sh` 
 - Frontend lint, typecheck, vitest with coverage, Playwright E2E, axe a11y all green.
 - Bundle size within budget.
 - Secrets scan clean.
-- Spec↔code drift audited clean (manual audit; the `scripts/spec-drift.sh` detector is SOW-0013).
+- Spec↔code drift audited clean (`scripts/spec-drift.sh` for structural indicators, manual audit for prose).
 - `./scripts/build.sh` succeeds.
 - Affected specs updated in the same commit.
 - External review converged for non-trivial SOWs.

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate as a dedicated job (except the **benchmark regression gate**, which is local/workstation-only — its baseline is not comparable to CI-runner hardware; CI runs the bench compile-smoke + the gate self-test, see §Go — Benchmarks); the assistant runs the same gates locally before any commit (today via the individual gate commands — a single `./scripts/gates.sh` aggregator is planned, see §Aggregate Scripts). A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
+The authoritative catalog of every automated gate enforced in ai-viewer's CI and local pre-commit. CI runs every gate as dedicated parallel jobs or cross-cutting steps (except the **benchmark regression gate**, which is local/workstation-only — its baseline is not comparable to CI-runner hardware; CI runs the bench compile-smoke + the gate self-test, see §Go — Benchmarks); the assistant runs the full local workstation aggregate (`./scripts/gates.sh`) before any commit. A gate failure is a defect, not a stylistic suggestion: fix the root cause, never weaken the gate.
 
 The runtime companion to this spec is `.agents/skills/project-quality-gates/SKILL.md` (commands and ergonomics). This spec is the durable truth about *what* is enforced and *at what threshold*.
 
@@ -16,11 +16,32 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ## Gate Catalog
 
+### Go — Module Tidiness
+
+- `go mod tidy` followed by `git diff --exit-code go.mod go.sum` → zero
+  module-file diffs.
+- `scripts/lint.sh` and the CI `lint` job both run this before
+  formatter/linter/security checks, so stale `go.mod`/`go.sum` cannot pass
+  locally and fail only in CI.
+
 ### Go — Format
 
-- `gofmt -l .` → zero output.
-- `goimports -l .` → zero output.
+- `gofmt -l` over the tracked Go file list (`git ls-files -z -- '*.go'`) →
+  zero unformatted tracked files.
+- `goimports -l` over the same tracked Go file list → zero unformatted tracked
+  files.
 - Threshold: zero diffs.
+- `scripts/lint.sh` mirrors CI's explicit standalone `gofmt` and
+  `goimports@latest` checks before `golangci-lint`; both surfaces use tracked
+  Go files only, so ignored/untracked local files such as
+  `frontend/node_modules/**` cannot create local-only formatter failures. An
+  empty tracked Go file list is fail-closed. The golangci formatters are defense
+  in depth, not the only local formatter surface.
+- `scripts/test/lint-test.sh` is the hermetic gate self-test for this contract:
+  it plants an ignored/untracked malformed Go file in a temporary git repo and
+  proves the formatter input set still comes only from
+  `git ls-files -z -- '*.go'`. A regression back to `gofmt -l .` /
+  `goimports -l .` must fail the self-test.
 
 ### Go — Vet
 
@@ -28,13 +49,16 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Lint
 
-- `golangci-lint run --timeout=5m` is the umbrella gate: with the formatters enabled it also enforces Go — Format, and the `govet` linter covers Go — Vet, so this single command is the authoritative lint surface. `scripts/lint.sh` runs it (then the standalone security tools); CI runs it via the version-pinned `golangci/golangci-lint-action`.
+- `golangci-lint run --timeout=5m` is the umbrella gate: with the formatters enabled it also enforces Go — Format, and the `govet` linter covers Go — Vet, so this single command is the authoritative lint surface. `scripts/lint.sh` runs it after the module-tidiness, standalone `gofmt`, standalone `goimports@latest`, and `go vet` checks that mirror the CI `lint` job; CI runs it via the version-pinned `golangci/golangci-lint-action`.
 - golangci-lint is **v2**; `.golangci.yml` declares `version: "2"`. `gosimple` is NOT enabled — golangci v2 merged it into `staticcheck`. `gosec` is NOT a golangci linter here — it runs standalone (Go — Security) to avoid duplicate analysis.
 - `.golangci.yml` enables linters: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `errorlint`, `gocritic`, `revive`, `gocyclo`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`, `bodyclose`, `noctx`; formatters: `gofmt`, `goimports`, `gofumpt`.
 - `gocyclo` uses `min-complexity: 25` (not 15): the stream parsers/scanners/tailers and the SOW-0007-hardened ingest event loop sit legitimately at 16–24 cyclomatic, so complexity-15 produced ~23 false-positive-class findings on heavily-reviewed, hot-path code. 25 flags genuinely-egregious complexity (the one production outlier, `pricing.validateDoc`, was refactored under it) while preventing future creep.
 - `_test.go` is excluded from the style/complexity linters (`gocyclo`, `noctx`, `unparam`, `prealloc`, `revive`, `gocritic`): table-driven tests are intentionally branchy, test setup uses context-less DB calls, and test helpers carry call-site-specific params. The bug-finders (`errcheck`, `staticcheck`, `govet`, `ineffassign`, `unused`, `nilerr`, `errorlint`, `bodyclose`) stay active on tests.
 - `frontend/node_modules` is path-excluded (a transitive npm dependency ships a Go reference file that is not project code).
-- Version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`).
+- Version is pinned in `.golangci-lint-version` (single source for CI +
+  `scripts/lint.sh`). CI installs that exact pin through
+  `golangci/golangci-lint-action`; local `scripts/lint.sh` fails when the
+  installed `golangci-lint` binary cannot be parsed or differs from the pin.
 - Threshold: zero warnings.
 
 ### Go — Security
@@ -179,11 +203,19 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
    **derived at runtime from the repository's own git author metadata** — `git log`
    author emails + names, unioned with `git config user.email`/`user.name`; home
    stems from each email local-part, each name, and `$HOME` — so **no operator
-   literal is committed in the scanner**. The scan is **fail-closed**: if no
-   identity can be derived (and, when the repo has commits, if `git log` fails
-   unexpectedly) it exits non-zero rather than running with Rule 1 disabled or on a
-   partial ban-list. Name matching is word-bounded so unrelated tokens (e.g.
-   `cost_usd`) never match.
+   literal is committed in the scanner**. Synthetic placeholder commit identities
+   used only to avoid personal commit metadata (currently the exact values `user`
+   and `user@example.invalid`, matched case-insensitively) are ignored while
+   deriving the Rule-1 ban-list. The exact neutral home stem `user` is also
+   ignored when it comes only from `$HOME`, so committed placeholder paths such
+   as `/home/user/...` stay portable across generic dev VMs. Filtering is
+   intentionally narrow and applies only to derivation inputs, not to tracked
+   file content; real derived operator identities are never allow-listed. The
+   scan is **fail-closed**: if no non-placeholder identity can be derived after
+   filtering (and, when the repo has commits, if `git log` fails unexpectedly)
+   it exits non-zero rather than running with Rule 1 disabled or on a partial
+   ban-list. Name matching is word-bounded so unrelated tokens (e.g. `cost_usd`)
+   never match.
 2. **Generic secret shapes.** `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys),
    `xox[bpas]-…` (Slack), `AKIA[0-9A-Z]{16}` (AWS), `Bearer <high-entropy>`
    tokens, and VCS PATs (`ghp_…`, `github_pat_…`, `glpat-…`). (Public provider
@@ -204,10 +236,19 @@ is scanned raw and its decompression failure reported (never silently skipped).
 Tracked symlinks are scanned by their target-path string, not the dereferenced
 target.
 
+Diagnostics are intentionally redacted: failures report the repo path, line
+number, rule label, and a redacted/summary marker only. The scanner never prints
+the raw matched operator identity, raw offending line, or raw secret token into
+local or CI logs.
+
 - **Threshold:** zero hits.
 - **Fail-closed in CI.** The `gates` job runs the scanner and **fails when the
-  script is absent** — a missing scanner is a missing gate, not a pass. (Only the
-  genuinely-optional aggregate `scripts/gates.sh` may be skipped when absent.)
+  scanner or its self-test is absent** — a missing scanner is a missing gate, not
+  a pass. Required gate infrastructure (`scripts/spec-drift.sh`,
+  `scripts/test/spec-drift-test.sh`, `scripts/scan-ai-attribution.sh`, and the
+  local aggregate `scripts/gates.sh`) is also presence-checked fail-closed in
+  the same job; only optional helper gates such as systemd lint may skip when
+  absent.
 - **Negative self-test.** The scanner ships with a test that plants an
   operator-identity string in a temp file and asserts the scan flags it, so the
   enforcement itself cannot silently rot.
@@ -220,13 +261,79 @@ target.
 
 ### Spec Drift
 
-- `scripts/spec-drift.sh` (planned, SOW-0013; manual spec↔code audit until it lands) will lint common drift indicators:
-  - REST endpoints registered in `internal/presenter/` vs. `specs/rest-api.md`.
-  - SSE event types in `internal/presenter/sse.go` vs. `specs/sse-protocol.md`.
-  - SQLite columns in `internal/store/migrations/` vs. `specs/data-model.md`.
-  - Canonical event fields in `internal/canonical/events.go` vs. `specs/canonical-events.md`.
-  - Adapter probes in `internal/ingest/discover.go` vs. `specs/adapter-<name>.md`.
-- Threshold: zero drift.
+`scripts/spec-drift.sh` lints five spec↔code drift indicators and **exits
+non-zero on any drift, naming the offending indicator + the specific
+code/spec token**. Each indicator is **bidirectional** (code-not-in-spec AND
+spec-not-in-code) except where an intentional one-direction exemption is
+documented below. It is grep/awk-based (the code and spec surfaces are
+line-oriented and regular — route literals, `case "<kind>"` strings,
+`EventKind = "<value>"` consts, SQL `CREATE TABLE`/`ALTER … ADD COLUMN`, and
+`format: "<name>"` discovery structs; no `go/ast` parse is required). The five
+indicators and their authoritative code/spec locations:
+
+- **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` registrations in
+  `internal/presenter/presenter.go`, plus each handler's `r.Method` guard in the
+  presenter package, vs. `### <VERB> /api/…` headings in
+  `.agents/sow/specs/rest-api.md`.
+  The compared token is **`<VERB> <normalized-path>`**, not path alone, so a
+  handler accepting `GET` while the spec says `POST` is drift. `HEAD` is treated
+  as implicit parity for handlers that support `GET`, matching the REST spec and
+  Go handler behavior. Path wildcards are normalized (`{id}` ↔ `:id`,
+  single-value `:ref` ↔ `:id`, `{tools,models,agents}` ↔ the catalog group).
+  **One-direction exemption:** a spec-only endpoint whose section is explicitly
+  marked **not registered / Phase 2 / not implemented** (today
+  `GET /api/catalog/{…}` and `GET /api/payloads/:ref`) is NOT drift — a viewer
+  must not advertise a route it does not serve, so documenting a future route
+  ahead of its handler is allowed. Every *registered* route+verb pair MUST be
+  documented (code→spec is unconditional).
+- **SSE event types** — the wire kinds in `internal/presenter/events_sse.go`
+  (the `eventPayload` `case "<kind>"` arms, the `event: <kind>` writes, and the
+  `event: resync` / `: keepalive` control frames; `stats_invalidated` is the
+  `default` arm and is sourced from `subscription_filter.go`) vs. the event-type
+  headings in `.agents/sow/specs/sse-protocol.md`. `resync` is a reconnect-control frame
+  documented under §Reconnect Behavior rather than a §Event-Types heading; the
+  indicator treats it as a known control frame.
+- **SQLite columns** — every **`table.column`** pair from
+  `internal/store/migrations/*.sql` (`CREATE TABLE` columns, `CREATE VIRTUAL
+  TABLE … USING fts5(…)` tokens, and `ALTER TABLE … ADD COLUMN`) plus every
+  table name, vs. `.agents/sow/specs/data-model.md`. Direction: **code→spec** — every
+  migration table + column pair MUST be documented in the corresponding SQL
+  schema block for that table in `data-model.md` (the direction that catches the
+  real "added a column to a table, forgot to document it" drift). A global
+  mention of the same column name under another table is not enough. Table names
+  are checked bidirectionally from two spec surfaces: `CREATE [VIRTUAL] TABLE`
+  names extracted from SQL schema blocks, and any `### <table>` schema heading.
+  Therefore a spec-only SQL table declared under a prose heading (for example an
+  FTS table in a shared "Full-text search" section) is still drift if no
+  migration creates it. Column spec→code is not enforced as drift because the
+  spec legitimately names many column identifiers in prose.
+- **Canonical event kinds** — the `EvXxx EventKind = "<value>"` discriminator
+  constants in `internal/canonical/events.go` vs. the identical fenced block in
+  `.agents/sow/specs/canonical-events.md`. Bidirectional and exact (the value set must match
+  byte-for-byte).
+- **Adapter discovery probes** — the `format: "<name>"` probe structs in
+  `cmd/ai-viewer-ingest/sources.go` (the auto-discovery probe list) vs. the
+  existence of the corresponding `.agents/sow/specs/adapter-<name>.md` and that spec
+  mentioning the adapter's default probe path. Format→spec-file name maps
+  underscore→hyphen (`aiagent_v3` → `adapter-aiagent-v3.md`, `claude-code` →
+  `adapter-claude-code.md`).
+
+- **Fail-closed in CI.** The `gates` job fails if `scripts/spec-drift.sh` or
+  `scripts/test/spec-drift-test.sh` is absent, then runs the self-test **before**
+  the live detector. A detector that cannot catch planted drift is a failed gate,
+  not an all-clear.
+- **Self-test:** `scripts/test/spec-drift-test.sh` plants synthetic mismatches in
+  a throwaway copy of the repo. It covers every one-direction indicator and both
+  sides of each bidirectional indicator (REST path and REST method, SSE,
+  data-model table names and table-scoped column pairs, canonical event kinds,
+  adapter probe files/anchors), then asserts the clean copy exits 0 — so the
+  detector itself cannot silently rot. Fixture creation is fail-closed: if
+  required migration SQL or adapter spec inputs are absent, the self-test fails
+  instead of building a vacuous copy. (Mirrors the `scan-secrets`/coverage gate
+  self-test discipline.)
+- **Threshold:** zero drift. Exit 0 must come from genuine spec↔code agreement,
+  never from weakening an indicator. Real drift found on the live tree is
+  reported and adjudicated (fix the spec or the code), not masked.
 
 ### Build
 
@@ -240,19 +347,25 @@ target.
 
 ## Aggregate Scripts
 
-CI enforces every gate above as a **dedicated job** (`lint`, `test`, `frontend`,
-`embed-smoke`, `gates`) that invokes the tools directly — see
+CI enforces the gate catalog as **dedicated parallel jobs** (`lint`, `test`,
+`frontend`, `embed-smoke`) plus the cross-cutting `gates` job — see
 `.github/workflows/ci.yml`. The implemented helper scripts today are
 `scripts/build.sh` (frontend + embed + both binaries), `scripts/dev.sh`,
 `scripts/embed-smoke.sh`, `scripts/e2e-serve.sh`, `scripts/sanitize-fixture.sh`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
-`scripts/scan-ai-attribution.sh`, and `scripts/install-systemd-user.sh`.
+`scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh`
+(+ `scripts/test/spec-drift-test.sh`), `scripts/test/lint-test.sh`,
+`scripts/gates.sh`,
+`scripts/check-bench.sh`, and `scripts/install-systemd-user.sh`.
 
 `scripts/lint.sh` (SOW-0009; frontend section added SOW-0012) **is present**: it
-is the local, **build-free** static-analysis entrypoint mirroring CI's
-static-analysis gates. Its Go section mirrors the CI `lint` job —
+is the local, **build-free** module/static-analysis entrypoint mirroring CI's
+static gates. Its Go section mirrors the CI `lint` job — `go mod tidy`
+followed by `git diff --exit-code go.mod go.sum`, standalone `gofmt` and
+standalone `goimports@latest` over the tracked Go file list, `go vet`,
 `golangci-lint run` (the umbrella, driven by `.golangci.yml` at the version
-pinned in `.golangci-lint-version`) then standalone `gosec` and `govulncheck`.
+pinned in `.golangci-lint-version`, with local pin mismatch treated as a hard
+failure), then standalone `gosec` and `govulncheck`.
 Its frontend section (skipped cleanly when `frontend/` is absent) mirrors the
 build-free static gates of the CI `frontend` job, fail-fast in order: ensure
 deps are present (reusing `scripts/build.sh`'s `npm ci`/`npm install` fallback,
@@ -274,20 +387,83 @@ the version-pinned `golangci/golangci-lint-action` plus its standalone
 gosec/govulncheck steps (CI keeps the cached action rather than invoking
 `scripts/lint.sh`, to preserve golangci's analysis cache). `scripts/test.sh` (Go
 tests + coverage profile) and `scripts/check-coverage.sh` (the statement
-coverage gate) exist (SOW-0010). The single-command aggregator `scripts/gates.sh`
-(runs *every* gate, fail-fast) is a planned convenience (SOW-0013) and is **not
-yet present**. Until it lands, run the individual scripts/gates (or rely on the
-per-gate CI jobs). The `gates` CI job detects `scripts/gates.sh` and skips it
-gracefully when absent. The one exception is the security scanner: it is
-**fail-closed** (§Secrets + Operator-PII Scan) — CI fails the `gates` job if
-`scripts/scan-secrets.sh` or its self-test is missing, never skips it.
+coverage gate) exist (SOW-0010).
+
+`scripts/gates.sh` (SOW-0013) **is present**: the single-command local
+workstation aggregate that runs *every local gate* in order, **fail-fast**, with
+a section header and per-section wall-clock timing per gate and a final timed
+summary. It composes existing scripts and commands — `scripts/lint.sh` (Go +
+frontend static analysis), `scripts/scan-secrets.sh` + its self-test,
+`scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh` + its self-test,
+`scripts/test/systemd-units-test.sh` when present, `scripts/build.sh` (build +
+real bundle-size gate + embed + both binaries), `scripts/test.sh` +
+`scripts/check-coverage.sh` (Go race suite + coverage + frontend Vitest), the
+deterministic adapter fuzz seed corpus + target-set lock, frontend Playwright
+E2E (including the axe a11y specs), and the local benchmark gate self-test +
+`scripts/check-bench.sh`. The **slow gates run last** so a fast
+static-analysis/spec/security failure surfaces early.
+
+The CI `gates` job does **not** run the full serial `scripts/gates.sh`
+aggregate. CI keeps the expensive gates parallel in their dedicated jobs and
+uses the `gates` job for cross-cutting repo scans and required gate
+infrastructure checks: secrets + scanner self-test (fail-closed), lint
+formatter-scope self-test (fail-closed), spec drift + detector self-test
+(fail-closed, self-test first), AI-attribution scan (fail-closed),
+`scripts/gates.sh` presence + syntax check, and systemd unit lint when present.
+
+The mature required jobs fail closed on their prerequisites. `lint` and `test`
+require the Go module files and the gate scripts they execute; `frontend`
+requires the frontend package files, Go module files, `scripts/build.sh`, and
+the `e2e` npm script; `embed-smoke` requires the Go/frontend package files plus
+the build, smoke, and seed-marker scripts. A PR that removes a required gate
+surface fails the corresponding required job; it never turns the job into a
+green no-op. Optional helper-only checks (currently systemd unit lint) are the
+only checks that may skip when their helper script is absent.
+
+## CI Workflow Mirror Invariant
+
+`.github/workflows/ci.yml` and local `scripts/gates.sh` enforce the **same gate
+contract**, but not through one identical serial command. Local `gates.sh` is
+the full workstation aggregate; CI runs equivalent commands as parallel jobs so
+wall-clock stays bounded by the longest job instead of the serial sum. The
+deliberate divergences are documented and narrow: CI's `lint` job uses the
+version-pinned `golangci/golangci-lint-action` (to preserve its analysis cache)
+rather than shelling `scripts/lint.sh`, but at the **same** pinned version
+(`.golangci-lint-version`); the **benchmark regression gate** is local-only
+(workstation baseline, see §Go — Benchmarks) while CI runs the bench
+compile-smoke + gate self-test; and CI runs the local aggregate's cross-cutting
+scan subset plus required-script presence/syntax checks in the dedicated `gates`
+job rather than re-running the full serial aggregate. When local and CI disagree
+outside those documented differences, the cause is environment (Go/Node version,
+OS), test isolation (stale cache, leftover state), or timing — debuggable from
+the asymmetric input, never papered over by re-running CI.
+
+**Renaming a CI Job.** The job IDs in `ci.yml` (`lint`, `test`, `frontend`,
+`embed-smoke`, `gates`) plus each explicit CodeQL matrix job name (`CodeQL (go)`,
+`CodeQL (javascript-typescript)`, `CodeQL (actions)`) are the contract for the
+branch-protection **required status checks**. The current required-check names
+are recorded in `.github/workflows-checks.yaml` (operator-readable, NOT consumed
+by Actions). Renaming a job silently disables its required check (protection
+keys by job name). Therefore any SOW that renames a CI job MUST, in the **same
+commit**: (1) rename the job in `ci.yml` or `codeql.yml`, (2) update
+`.github/workflows-checks.yaml`, and (3) re-run the branch-protection `gh api -X
+PUT …/branches/master/protection` full-rule update that registers the new name
+(the invocation is documented in `docs/setup.md`). GitHub's status-check-only
+endpoint uses `PATCH …/protection/required_status_checks`; the full protection
+rule endpoint does not.
 
 ## Performance Target
 
-When the `scripts/gates.sh` aggregator lands, a full local run should complete in
-under 5 minutes on the operator's workstation; if it exceeds, profile and
-parallelize before adding more gates. Today the equivalent is the set of CI jobs,
-which run in parallel.
+A full local `scripts/gates.sh` run **targets** under 5 minutes on the
+operator's workstation. **Measured reality (SOW-0013):** the Go `-race` suite
+alone (`scripts/test.sh`, dominated by `internal/ingest`) is the long pole and
+pushes the full aggregate **above** the 5-minute target. The gate is kept
+**correct and complete** — no gate is dropped or weakened to hit the target.
+The measured total + the long pole are recorded in the `scripts/gates.sh`
+header and the SOW-0013 Execution Log; a `gates.sh --fast` profile and/or
+internal parallelization is a tracked follow-up SOW (`.agents/sow/pending/`),
+never a reason to lower the bar. CI runs the equivalent gates as parallel jobs,
+so CI wall-clock is the longest single job, not the serial sum.
 
 ## When a Gate Fails
 
@@ -300,7 +476,7 @@ which run in parallel.
 
 ## Adding or Removing Gates
 
-- **Add**: when a class of bug or risk would not have been caught by existing gates, design a new gate. Update this spec + the runtime skill + CI (and `scripts/gates.sh` once that aggregator exists) in the same commit. Update `AGENTS.md` if it adds a top-level commitment.
+- **Add**: when a class of bug or risk would not have been caught by existing gates, design a new gate. Update this spec + the runtime skill + CI + `scripts/gates.sh` in the same commit. Update `AGENTS.md` if it adds a top-level commitment.
 - **Remove**: requires an operator-approved SOW with: evidence the gate is wrong or obsolete, what replaces it, what risk class is now unprotected.
 
 ## Why These Specific Gates

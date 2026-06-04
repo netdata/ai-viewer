@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: filed 2026-06-02 from a defect found during SOW-0010 review. The acute instance (the coverage gate) was fixed in SOW-0010; this SOW closes the rest of the class. Awaiting operator approval.
+Sub-state: filed 2026-06-02 from a defect found during SOW-0010 review. The acute instance (the coverage gate) was fixed in SOW-0010; SOW-0013 later fixed standalone formatter walks by using tracked Go files only. This SOW closes the remaining package-level `./...` gate class. Awaiting operator approval.
 
 ## Requirements
 
@@ -14,7 +14,8 @@ Vendored Go that a frontend npm dependency ships (e.g. `flatted` ships a Go port
 
 - `golangci-lint` already excludes it (`.golangci.yml` `linters.exclusions.paths: frontend/node_modules`) — verified clean.
 - SOW-0010's coverage gate now excludes it (`scripts/check-coverage.sh` gates only `/internal/`, not `/cmd/`).
-- **Still walking it:** `gosec ./...` and `govulncheck ./...` (`scripts/lint.sh`), and any standalone `go vet ./...`.
+- **Fixed in SOW-0013:** standalone `gofmt` and `goimports` use `git ls-files -z -- '*.go'`, so ignored/untracked `frontend/node_modules/**` files cannot create local-only formatter failures.
+- **Still walking it:** package-level gates that use `./...`, including `go vet ./...`, `gosec ./...`, `govulncheck ./...`, and `go test ./...`.
 
 These are **currently clean** only because `flatted` is a trivial serialization helper. A future vendored Go file with a gosec finding (e.g. an unhandled error, weak RNG) or a vuln would spuriously fail our gates, forcing us to pollute our own config with third-party suppressions. Close the class: route every `./...` gate through one "core packages only" list that excludes `node_modules`, so no third-party vendored Go can ever trip our gates.
 
@@ -26,7 +27,7 @@ These are **currently clean** only because `flatted` is a trivial serialization 
 
 ### Acceptance Criteria
 
-1. A single source of the "core" package set (a tiny helper, e.g. `go list ./... | grep -v '/node_modules/'`, or `gosec -exclude-dir`) is used by `gosec` and `govulncheck` in `scripts/lint.sh` and CI instead of bare `./...`. `golangci-lint` already excludes `node_modules` (verify, keep).
+1. A single source of the "core" package set (a tiny helper, e.g. `go list ./... | grep -v '/node_modules/'`, or `gosec -exclude-dir`) is used by package-level gates in `scripts/lint.sh` and CI instead of bare `./...` where the tool would otherwise include vendored npm Go. `golangci-lint` already excludes `node_modules` (verify, keep), and standalone `gofmt`/`goimports` are already fixed in SOW-0013 via tracked Go files.
 2. Determine whether `go vet` runs standalone anywhere (vs only via golangci-lint's `govet`, which is already excluded); if standalone, scope it the same way.
 3. **Verification**: a deliberately gosec-trippable construct planted under a vendored-style path is NOT flagged (excluded), while the same construct under `internal/` IS flagged — proving the scoping excludes only vendored code, not our own.
 4. `scripts/lint.sh` + `.github/workflows/ci.yml` updated; `quality-gates.md` documents the unified "exclude `node_modules` from every `./...` gate" principle; spec-drift clean.

@@ -202,7 +202,7 @@ func TestResolveSources_AutoDiscoveryWhenNoFlags(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CLAUDE_CONFIG_DIR", "") // hermetic: no claude-code source here
+	clearOtherAdapterEnv(t)
 	if err := os.MkdirAll(filepath.Join(tmp, ".ai-agent", "sessions", "session"), 0o755); err != nil {
 		t.Fatalf("plant home: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestResolveSources_AutoDiscoveryEmptyOnMissingTree(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CLAUDE_CONFIG_DIR", "") // hermetic
+	clearOtherAdapterEnv(t)
 	got, err := resolveSources(nil, silentLogger())
 	if err != nil {
 		t.Fatalf("resolveSources: %v", err)
@@ -255,7 +255,7 @@ func TestAutoDiscover_ClaudeCodeProbe(t *testing.T) {
 	// Not parallel: t.Setenv mutates process-wide HOME / CLAUDE_CONFIG_DIR.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	clearOtherAdapterEnv(t)
 	projects := filepath.Join(tmp, ".claude", "projects", "-home-user-x")
 	if err := os.MkdirAll(projects, 0o755); err != nil {
 		t.Fatalf("plant claude projects: %v", err)
@@ -290,6 +290,7 @@ func TestAutoDiscover_ClaudeConfigDirOverride(t *testing.T) {
 	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp) // no ~/.claude here
+	clearOtherAdapterEnv(t)
 	cfg := filepath.Join(tmp, "custom-claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
 	projects := filepath.Join(cfg, "projects", "-home-user-y")
@@ -319,7 +320,7 @@ func TestAutoDiscover_NoClaudeCodeWhenAbsent(t *testing.T) {
 	// Not parallel: mutates process-wide env.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	clearOtherAdapterEnv(t)
 
 	got, err := resolveSources(nil, silentLogger())
 	if err != nil {

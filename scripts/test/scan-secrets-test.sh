@@ -17,6 +17,11 @@
 #   - a tracked symlink is scanned by its target PATH STRING, not dereferenced
 #   - an UNEXPECTED git-log failure on a repo WITH commits aborts the scan
 #     (fail-closed) instead of silently scanning with a partial Rule-1 ban-list
+#   - exact placeholder git identities (user / user@example.invalid), including
+#     mixed-case metadata, are ignored only while deriving Rule 1, and
+#     placeholder-only repos fail closed
+#   - failure diagnostics keep path/line/rule evidence but redact raw matched
+#     operator identity and secret-token values
 #   - a fully clean tree (only sanctioned placeholders) passes (exit 0)
 #   - sanctioned placeholders ([REDACTED_*], *.example.invalid, example.com,
 #     EXAMPLE-marked secret shapes) never trip a hit
@@ -80,6 +85,12 @@ SYNTH_NAME_NEARMISS="${SYNTH_NAME_WORD}ner"   # e.g. "Scanner" vs banned "Scan"
 # Mixed-/upper-case synthetic email (Rule 1, case-insensitive): an upper-cased
 # form must still be flagged because the scanner matches Rule 1 case-insensitively.
 SYNTH_EMAIL_MIXED="$(printf '%s' "$SYNTH_EMAIL" | tr '[:lower:]' '[:upper:]')"
+PLACEHOLDER_NAME="user"
+PLACEHOLDER_EMAIL="user@example.invalid"
+PLACEHOLDER_HOME="/home/user"
+PLACEHOLDER_NAME_MIXED="UsEr"
+PLACEHOLDER_EMAIL_MIXED="UsEr@Example.Invalid"
+PLACEHOLDER_HOME_MIXED="/home/UsEr"
 # A real-looking Anthropic key shape (Rule 2). NOT EXAMPLE-marked, so it must be
 # flagged EVERYWHERE — including under INPUT/.
 SECRET_KEY="sk-""ant-api03-DeadBeefDeadBeefDeadBeef1234567890"
@@ -96,11 +107,12 @@ GITLAB_PAT="glpat-""AbCdEf0123456789xyz"
 
 # --- helpers ----------------------------------------------------------------
 
-# new_repo <name> -> prints an initialized empty git repo path under TMP_ROOT
-# with scan-secrets.sh copied into scripts/ so the scanner resolves its repo
-# root to this throwaway tree.
-new_repo() {
+# new_repo_with_identity <name> <email> <display-name> -> prints an initialized
+# empty git repo path under TMP_ROOT with scan-secrets.sh copied into scripts/.
+new_repo_with_identity() {
   local name="$1"
+  local email="$2"
+  local display_name="$3"
   local dir="${TMP_ROOT}/${name}"
   mkdir -p "$dir/scripts"
   cp "$SCANNER" "$dir/scripts/scan-secrets.sh"
@@ -113,11 +125,18 @@ new_repo() {
     # They are obviously synthetic (RFC-2606 .example TLD + sentinel name) and
     # never the real operator's, so the Rule-1 detection cases can plant them
     # in tracked content and assert they are flagged.
-    git config user.email "$SYNTH_EMAIL"
-    git config user.name "$SYNTH_NAME"
+    git config user.email "$email"
+    git config user.name "$display_name"
     git config commit.gpgsign false
   )
   printf '%s' "$dir"
+}
+
+# new_repo <name> -> prints an initialized empty git repo path under TMP_ROOT
+# with scan-secrets.sh copied into scripts/ so the scanner resolves its repo
+# root to this throwaway tree.
+new_repo() {
+  new_repo_with_identity "$1" "$SYNTH_EMAIL" "$SYNTH_NAME"
 }
 
 # commit_all <repo> <message> — stage everything already added and make a real
@@ -168,6 +187,14 @@ run_scanner() {
   local repo="$1"
   RC=0
   OUT="$( ( cd "$repo" && ./scripts/scan-secrets.sh ) 2>&1 )" || RC=$?
+}
+
+# run_scanner_with_home <repo> <home> -> sets RC and OUT while overriding HOME.
+run_scanner_with_home() {
+  local repo="$1"
+  local home="$2"
+  RC=0
+  OUT="$( ( cd "$repo" && HOME="$home" ./scripts/scan-secrets.sh ) 2>&1 )" || RC=$?
 }
 
 # --- cases ------------------------------------------------------------------
@@ -354,11 +381,13 @@ case_clean_tree_passes() {
   local name="clean::placeholders_pass"
   local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
   {
-    printf 'email: user@example.invalid\n'
+    printf 'account: %s\n' "$PLACEHOLDER_NAME"
+    printf 'email: %s\n' "$PLACEHOLDER_EMAIL"
     printf 'host: https://api.example.invalid/anthropic/v1\n'
     printf 'token: Bearer [REDACTED_SECRET]\n'
     printf 'docs ref: see example.com and example.org\n'
-    printf 'home: <HOME>/src/project\n'
+    printf 'home: %s/src/project\n' "$PLACEHOLDER_HOME"
+    printf 'home placeholder: <HOME>/src/project\n'
     printf 'metric: cost_usd accounting\n'
   } | track "$repo" "README.md"
   # A clean INPUT fixture with a sanctioned synthetic placeholder.
@@ -371,6 +400,74 @@ $OUT"; return
   fi
   if ! printf '%s' "$OUT" | grep -q '\[PASS\]'; then
     fail_case "$name" "clean tree exited 0 but printed no [PASS] summary:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 8b. The neutral placeholder home stem "user" is ignored only when it comes
+#     from HOME derivation, so portable /home/user examples stay clean.
+case_clean_placeholder_home_passes_with_home_user() {
+  local name="clean::placeholder_home_passes_with_home_user"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  {
+    printf 'account: %s\n' "$PLACEHOLDER_NAME"
+    printf 'email: %s\n' "$PLACEHOLDER_EMAIL"
+    printf 'home: %s/src/project\n' "$PLACEHOLDER_HOME"
+    printf 'home encoded: %%2Fhome%%2Fuser%%2Fsrc%%2Fproject\n'
+    printf 'token: Bearer [REDACTED_SECRET]\n'
+  } | track "$repo" "README.md"
+  run_scanner_with_home "$repo" "$PLACEHOLDER_HOME"
+  if [ "$RC" -ne 0 ]; then
+    fail_case "$name" "HOME=/home/user made portable placeholder /home/user content fail Rule 1:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 8c. A repo with a real synthetic sentinel identity plus an additional
+#     mixed-case placeholder-authored commit must ignore the placeholder identity
+#     ONLY as a Rule-1 derivation input. The same mixed-case placeholder strings
+#     in tracked content are not allow-listed; they pass here only because
+#     sentinel identity is the real ban-list and it is absent from content.
+case_mixed_case_placeholder_metadata_ignored_with_real_identity() {
+  local name="clean::mixed_case_placeholder_metadata_ignored_with_real_identity"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  printf 'initial tracked file\n' | track "$repo" "README.md"
+  commit_all "$repo" "initial commit by synthetic author"
+  {
+    printf 'generic account: %s\n' "$PLACEHOLDER_NAME_MIXED"
+    printf 'generic email: %s\n' "$PLACEHOLDER_EMAIL_MIXED"
+    printf 'generic home: %s/src/project\n' "$PLACEHOLDER_HOME_MIXED"
+  } | track "$repo" "docs/placeholders.md"
+  (
+    cd "$repo"
+    git -c "user.email=${PLACEHOLDER_EMAIL_MIXED}" -c "user.name=${PLACEHOLDER_NAME_MIXED}" \
+      commit -q -m "placeholder authored content"
+  )
+  run_scanner_with_home "$repo" "${repo}/home/scan-test-runner"
+  if [ "$RC" -ne 0 ]; then
+    fail_case "$name" "mixed-case placeholder metadata was treated as Rule-1 identity instead of being ignored during derivation:
+$OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 8d. Mixed-case placeholder-only identity must fail closed after filtering. A
+#     scanner that drops placeholders but then proceeds with no non-placeholder
+#     git identity has silently disabled Rule 1.
+case_mixed_case_placeholder_only_identity_fails_closed() {
+  local name="failclosed::mixed_case_placeholder_only_identity_empty_rule1"
+  local repo; repo="$(new_repo_with_identity "${name//[^A-Za-z0-9]/_}" "$PLACEHOLDER_EMAIL_MIXED" "$PLACEHOLDER_NAME_MIXED")"
+  printf 'clean file with no derived identity leak\n' | track "$repo" "README.md"
+  commit_all "$repo" "mixed-case placeholder-only commit"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "mixed-case placeholder-only metadata left Rule 1 disabled but scanner exited 0:
+$OUT"; return
+  fi
+  if ! printf '%s' "$OUT" | grep -q 'Rule 1 ban-list is empty'; then
+    fail_case "$name" "scanner exited non-zero but not with the empty Rule-1 fail-closed message:
 $OUT"; return
   fi
   pass_case "$name"
@@ -426,6 +523,39 @@ $OUT"; return
   if ! printf '%s' "$OUT" | grep -q 'config/keys.json'; then
     fail_case "$name" "non-zero exit but report did not name the offending file:
 $OUT"; return
+  fi
+  pass_case "$name"
+}
+
+# 11b. Failure diagnostics must keep enough evidence (path/line/rule) without
+#      echoing the raw operator identity or raw secret token into CI logs.
+case_diagnostics_redact_raw_values() {
+  local name="redact::diagnostics_hide_raw_values"
+  local repo; repo="$(new_repo "${name//[^A-Za-z0-9]/_}")"
+  {
+    printf 'contact: %s\n' "$SYNTH_EMAIL"
+    printf 'home: %s/private\n' "$SYNTH_HOME"
+    printf 'key: %s\n' "$SECRET_KEY"
+  } | track "$repo" "docs/leak.txt"
+  run_scanner "$repo"
+  if [ "$RC" -eq 0 ]; then
+    fail_case "$name" "scanner passed but should have flagged synthetic operator identity and secret values"; return
+  fi
+  for expected in \
+    'docs/leak.txt:1 [operator-email]' \
+    'docs/leak.txt:2 [operator-home]' \
+    'docs/leak.txt:3 [secret-sk]'; do
+    if ! printf '%s' "$OUT" | grep -Fq "$expected"; then
+      fail_case "$name" "diagnostic did not include expected path/line/rule evidence: $expected"; return
+    fi
+  done
+  for raw in "$SYNTH_EMAIL" "$SYNTH_HOME" "$SECRET_KEY"; do
+    if printf '%s' "$OUT" | grep -Fq "$raw"; then
+      fail_case "$name" "diagnostic echoed a raw matched value instead of redacting it"; return
+    fi
+  done
+  if ! printf '%s' "$OUT" | grep -Fq 'redacted'; then
+    fail_case "$name" "diagnostic did not mark matched content as redacted"; return
   fi
   pass_case "$name"
 }
@@ -630,9 +760,13 @@ main() {
   case_example_marked_shape_exempt_everywhere
   case_detect_secret_in_gz
   case_clean_tree_passes
+  case_clean_placeholder_home_passes_with_home_user
+  case_mixed_case_placeholder_metadata_ignored_with_real_identity
+  case_mixed_case_placeholder_only_identity_fails_closed
   case_scanner_self_excludes
   case_rule1_not_allowlisted_on_shared_line
   case_rule2_per_match_on_shared_line
+  case_diagnostics_redact_raw_values
   case_rule2_placeholder_token_still_exempt
   case_detect_operator_email_mixed_case
   case_detect_github_pat

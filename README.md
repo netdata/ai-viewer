@@ -1,5 +1,8 @@
 # ai-viewer
 
+[![CI](https://github.com/netdata/ai-viewer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/netdata/ai-viewer/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/netdata/ai-viewer/actions/workflows/codeql.yml/badge.svg?branch=master)](https://github.com/netdata/ai-viewer/actions/workflows/codeql.yml)
+
 A read-only, real-time explorer for AI coding-agent session snapshots.
 
 Watches your local session storage for `ai-agent`, `claude-code`, `codex`, and `opencode`, normalizes everything into a canonical model, and serves a modern web UI with tracing, topology, timeline, and statistics views.

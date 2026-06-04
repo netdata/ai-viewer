@@ -3,19 +3,18 @@
 # Role
 #   This workflow is the substrate for every automated quality gate
 #   enumerated in .agents/sow/specs/quality-gates.md. Each gate in that
-#   spec maps to a step inside one of the four jobs below. The workflow
-#   itself does not invent gates; it executes the commands defined by
-#   the project skills and aggregate scripts (scripts/lint.sh,
-#   scripts/test.sh, scripts/gates.sh) once they exist.
+#   spec maps to a step inside one of the jobs below. The workflow itself
+#   does not invent gates; it executes the commands defined by the project
+#   skills and local gate scripts.
 #
 # Conditional-skip pattern
-#   The repository is bootstrapped spec-first. On any given commit a job
-#   may have no source code to act on (no go.mod, no frontend, no
-#   gates.sh). Each job opens with a presence check; if the relevant
-#   tree is absent, the job emits a no-op marker and exits green. As
-#   each future SOW lands the relevant tree, the job's body runs end to
-#   end without any workflow edit. This keeps the contract stable while
-#   the project grows.
+#   The repository was bootstrapped spec-first. Go/frontend jobs still use
+#   presence checks while their source trees are absent, then run end to end
+#   once the relevant tree lands. SOW-0013 is different: cross-cutting gate
+#   files are mandatory once introduced, so the gates job fails when
+#   scripts/test/lint-test.sh, scripts/spec-drift.sh,
+#   scripts/scan-ai-attribution.sh, or scripts/gates.sh are absent. Only
+#   optional helpers such as systemd lint skip by presence.
 #
 # Job-name contract
 #   The job IDs below (lint, test, frontend, embed-smoke, gates) are the
@@ -24,15 +23,14 @@
 #   API. Renaming a job is a breaking change to that contract and
 #   requires a SOW. `embed-smoke` (SOW-0001 Chunk 17) is the new
 #   top-level concern that proves the single binary serves the built UI;
-#   SOW-0013 registers it alongside the original four.
+#   SOW-0013 registers it alongside the other required CI checks.
 #
 # Extending
 #   Future quality SOWs (SOW-0009 onwards) extend this workflow by
-#   adding steps to the relevant existing job. A new job is added only
-#   when a new top-level concern emerges (e.g. a release job, a
-#   benchmarks-only nightly schedule). New job names follow the same
-#   contract rule: register them in branch protection in the same SOW
-#   that introduces them.
+#   adding steps to the relevant existing job. A new job is added only when
+#   a new top-level concern emerges (e.g. a release job). New job names
+#   follow the same contract rule: register them in branch protection in
+#   the same SOW that introduces them.
 #
 # Deferred to subsequent SOWs
 #   Gate landing status (.agents/sow/specs/quality-gates.md):
@@ -59,20 +57,19 @@
 #                  (frontend/scripts/check-coverage-config.mjs — real-config
 #                  non-vacuity + lockstep + disk-completeness + exact canonical
 #                  include/threshold shape) plus its hermetic self-test.
-#     - SOW-0013 — scripts/{gates,spec-drift}.sh + CodeQL workflow +
+#     - SOW-0013 (LANDING) — scripts/{gates,spec-drift}.sh + CodeQL workflow +
 #                  Dependabot config
 #   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its
 #   negative self-test (scripts/test/scan-secrets-test.sh) are already
 #   implemented and run as REQUIRED, fail-closed steps in the gates job
 #   below; they are not deferred.
 #   Each of those SOWs adds steps to existing jobs OR adds new jobs.
-#   They do not require renaming the four current jobs.
+#   They do not require renaming the current jobs.
 #
 # Out of scope here
-#   Dependabot config, CodeQL workflow, deployment and release
-#   pipelines, and nightly schedules all land in their own SOWs and
-#   their own workflow files. This file covers push and pull-request
-#   CI only.
+#   Dependabot config, CodeQL workflow, deployment and release pipelines,
+#   and nightly schedules live in their own files. This file covers push
+#   and pull-request CI only.
 
 name: ci
 
@@ -103,24 +100,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect Go module
+      - name: Require Go lint prerequisites (fail-closed)
         id: detect
         shell: bash
         run: |
-          if [[ -f go.mod ]]; then
-            echo "go=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "go=false" >> "$GITHUB_OUTPUT"
+          missing=0
+          for f in go.mod go.sum .golangci-lint-version; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error file=$f::required Go lint prerequisite is absent"
+              missing=1
+            fi
+          done
+          if [[ ! -f .golangci.yml && ! -f .golangci.yaml ]]; then
+            echo "::error::.golangci.yml or .golangci.yaml is required"
+            missing=1
           fi
-          if [[ -f .golangci.yml || -f .golangci.yaml ]]; then
-            echo "golangci=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "golangci=false" >> "$GITHUB_OUTPUT"
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Go lint is fail-closed: missing module or lint config files fail this required job." >&2
+            exit 1
           fi
-
-      - name: Skip notice (no Go module yet)
-        if: steps.detect.outputs.go != 'true'
-        run: echo "No go.mod present; lint job is a no-op on this commit."
+          echo "go=true" >> "$GITHUB_OUTPUT"
+          echo "golangci=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         if: steps.detect.outputs.go == 'true'
@@ -138,22 +138,58 @@ jobs:
 
       - name: gofmt
         if: steps.detect.outputs.go == 'true'
+        shell: bash
         run: |
-          diff=$(gofmt -l .)
-          if [[ -n "$diff" ]]; then
-            echo "gofmt diff in:"
-            echo "$diff"
+          mapfile -d '' go_files < <(git ls-files -z -- '*.go')
+          if [[ "${#go_files[@]}" -eq 0 ]]; then
+            echo "::error::no tracked Go files found; gofmt gate is fail-closed"
+            exit 1
+          fi
+          bad=()
+          for f in "${go_files[@]}"; do
+            out="$(gofmt -l "./$f" 2>&1)" || {
+              echo "::error::gofmt failed for a tracked Go file"
+              printf 'tracked Go file: %q\n' "$f" >&2
+              printf '%s\n' "$out" >&2
+              exit 1
+            }
+            if [[ -n "$out" ]]; then
+              bad+=("$f")
+            fi
+          done
+          if [[ "${#bad[@]}" -gt 0 ]]; then
+            echo "::error::gofmt reported unformatted tracked Go file(s)"
+            printf 'gofmt diff in tracked Go files:\n' >&2
+            printf '  %q\n' "${bad[@]}" >&2
             exit 1
           fi
 
       - name: goimports
         if: steps.detect.outputs.go == 'true'
+        shell: bash
         run: |
           go install golang.org/x/tools/cmd/goimports@latest
-          diff=$(goimports -l .)
-          if [[ -n "$diff" ]]; then
-            echo "goimports diff in:"
-            echo "$diff"
+          mapfile -d '' go_files < <(git ls-files -z -- '*.go')
+          if [[ "${#go_files[@]}" -eq 0 ]]; then
+            echo "::error::no tracked Go files found; goimports gate is fail-closed"
+            exit 1
+          fi
+          bad=()
+          for f in "${go_files[@]}"; do
+            out="$(goimports -l "./$f" 2>&1)" || {
+              echo "::error::goimports failed for a tracked Go file"
+              printf 'tracked Go file: %q\n' "$f" >&2
+              printf '%s\n' "$out" >&2
+              exit 1
+            }
+            if [[ -n "$out" ]]; then
+              bad+=("$f")
+            fi
+          done
+          if [[ "${#bad[@]}" -gt 0 ]]; then
+            echo "::error::goimports reported unformatted tracked Go file(s)"
+            printf 'goimports diff in tracked Go files:\n' >&2
+            printf '  %q\n' "${bad[@]}" >&2
             exit 1
           fi
 
@@ -202,19 +238,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect Go module
+      - name: Require Go test prerequisites (fail-closed)
         id: detect
         shell: bash
         run: |
-          if [[ -f go.mod ]]; then
-            echo "go=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "go=false" >> "$GITHUB_OUTPUT"
+          missing=0
+          for f in go.mod go.sum bench/baseline.txt scripts/check-coverage.sh scripts/test/check-coverage-test.sh scripts/check-bench.sh scripts/test/check-bench-test.sh; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error file=$f::required Go test prerequisite is absent"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Go test is fail-closed: missing module or test gate files fail this required job." >&2
+            exit 1
           fi
-
-      - name: Skip notice (no Go module yet)
-        if: steps.detect.outputs.go != 'true'
-        run: echo "No go.mod present; test job is a no-op on this commit."
+          echo "go=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         if: steps.detect.outputs.go == 'true'
@@ -312,16 +351,57 @@ jobs:
           chmod +x scripts/check-coverage.sh
           ./scripts/check-coverage.sh coverage.out
 
-      - name: Detect benchmarks
+      - name: Require benchmarks
         if: steps.detect.outputs.go == 'true'
         id: bench
         shell: bash
         run: |
-          if grep -rEq '^func Benchmark[A-Z]' --include='*_test.go' . ; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+          set +e
+          required="$(
+            grep -E '^Benchmark[A-Za-z0-9_]+-[0-9]+' bench/baseline.txt \
+              | awk '{print $1}' \
+              | sed -E 's/-[0-9]+$//' \
+              | sort -u
+          )"
+          required_ec=$?
+          set -e
+          if [[ "$required_ec" -ne 0 && "$required_ec" -ne 1 ]]; then
+            echo "::error file=bench/baseline.txt::failed to extract benchmark names from bench/baseline.txt"
+            exit "$required_ec"
           fi
+          if [[ -z "$required" ]]; then
+            echo "::error file=bench/baseline.txt::no required benchmark names found in bench/baseline.txt"
+            exit 1
+          fi
+          required_count="$(printf '%s\n' "$required" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+          if [[ "$required_count" -ne 5 ]]; then
+            echo "::error file=bench/baseline.txt::expected exactly 5 required benchmark names in bench/baseline.txt; got ${required_count}"
+            printf 'Required benchmark names found:\n%s\n' "$required" >&2
+            exit 1
+          fi
+          set +e
+          actual="$(
+            grep -RhoE '^func Benchmark[A-Za-z0-9_]+' \
+              --include='*_test.go' \
+              --exclude-dir=.git \
+              --exclude-dir=frontend/node_modules \
+              . \
+              | awk '{print $2}' \
+              | sort -u
+          )"
+          actual_ec=$?
+          set -e
+          if [[ "$actual_ec" -ne 0 && "$actual_ec" -ne 1 ]]; then
+            echo "::error::failed to scan Go benchmark functions"
+            exit "$actual_ec"
+          fi
+          missing="$(comm -23 <(printf '%s\n' "$required") <(printf '%s\n' "$actual"))"
+          if [[ -n "$missing" ]]; then
+            echo "::error::required benchmark function(s) from bench/baseline.txt are missing from the Go test tree"
+            printf 'Missing benchmark function(s):\n%s\n' "$missing" >&2
+            exit 1
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
 
       - name: Run benchmarks (smoke)
         if: steps.detect.outputs.go == 'true' && steps.bench.outputs.present == 'true'
@@ -351,21 +431,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect frontend
+      - name: Require frontend prerequisites (fail-closed)
         id: detect
         working-directory: ${{ github.workspace }}
         shell: bash
         run: |
-          if [[ -f frontend/package.json ]]; then
-            echo "fe=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "fe=false" >> "$GITHUB_OUTPUT"
+          missing=0
+          for f in go.mod go.sum scripts/build.sh frontend/package.json frontend/package-lock.json; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error file=$f::required frontend prerequisite is absent"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Frontend gates are fail-closed: missing frontend or build prerequisites fail this required job." >&2
+            exit 1
           fi
-
-      - name: Skip notice (no frontend yet)
-        if: steps.detect.outputs.fe != 'true'
-        working-directory: ${{ github.workspace }}
-        run: echo "No frontend/package.json present; frontend job is a no-op on this commit."
+          echo "fe=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
         if: steps.detect.outputs.fe == 'true'
@@ -459,7 +541,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
 
-      - name: Detect Playwright
+      - name: Require Playwright E2E script
         if: steps.detect.outputs.fe == 'true'
         id: pw
         shell: bash
@@ -467,7 +549,8 @@ jobs:
           if node -e "const p=require('./package.json'); process.exit((p.scripts && p.scripts.e2e) ? 0 : 1)"; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error file=frontend/package.json::required npm script is absent: e2e"
+            exit 1
           fi
 
       - name: Install Playwright (browsers + OS deps)
@@ -553,19 +636,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect build prerequisites
+      - name: Require embed-smoke prerequisites (fail-closed)
         id: detect
         shell: bash
         run: |
-          if [[ -f go.mod && -f frontend/package.json && -f scripts/build.sh ]]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
+          missing=0
+          for f in go.mod go.sum scripts/build.sh scripts/embed-smoke.sh scripts/test/embed-smoke-seed-marker-test.sh frontend/package.json frontend/package-lock.json; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error file=$f::required embed-smoke prerequisite is absent"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Embed-smoke is fail-closed: missing build, smoke, or frontend prerequisites fail this required job." >&2
+            exit 1
           fi
-
-      - name: Skip notice (build pipeline not present yet)
-        if: steps.detect.outputs.ready != 'true'
-        run: echo "go.mod, frontend/package.json, or scripts/build.sh absent; embed-smoke is a no-op on this commit."
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         if: steps.detect.outputs.ready == 'true'
@@ -630,47 +716,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect aggregate scripts
-        id: detect
-        shell: bash
-        run: |
-          # scan-secrets is intentionally NOT in this list: it is fail-closed
-          # (a dedicated required step below errors if it is absent), so it
-          # must never participate in the "all optional scripts absent -> skip"
-          # decision. Only the genuinely-optional helpers are detected here.
-          for s in gates spec-drift scan-ai-attribution; do
-            f="scripts/${s}.sh"
-            if [[ -f "$f" ]]; then
-              echo "${s//-/_}=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "${s//-/_}=false" >> "$GITHUB_OUTPUT"
-            fi
-          done
-
-      - name: Skip notice (no optional aggregate scripts yet)
-        if: steps.detect.outputs.gates != 'true' && steps.detect.outputs.spec_drift != 'true' && steps.detect.outputs.scan_ai_attribution != 'true'
-        run: echo "No optional scripts/gates.sh, scripts/spec-drift.sh, or scripts/scan-ai-attribution.sh present; only the required secrets scan runs on this commit."
-
-      - name: Set up Go (for gates that shell out to go tools)
-        if: hashFiles('go.mod') != ''
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          check-latest: true
-          cache: true
-
-      - name: Set up Node (for gates that shell out to node tools)
-        if: hashFiles('frontend/package.json') != ''
-        uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
       # Fail-closed: the secrets + operator-PII scanner is a mandatory gate.
       # A missing scanner is a MISSING GATE, not a pass, so this step errors
       # when either the scanner or its negative self-test is absent. (Contrast
-      # with the optional aggregate scripts above, which may be skipped.)
+      # with optional helper scripts such as systemd lint, which may be skipped.)
       - name: Require secrets scanner present (fail-closed)
         shell: bash
         run: |
@@ -687,6 +736,39 @@ jobs:
           fi
           echo "secrets scanner and self-test present."
 
+      # Fail-closed: lint-test, spec-drift, AI-attribution, and gates.sh are
+      # mandatory gate infrastructure. Missing files are missing gates, not passes.
+      - name: Require cross-cutting gates present (fail-closed)
+        shell: bash
+        run: |
+          missing=0
+          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::required gate file is absent: $f"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "The lint self-test, spec-drift detector, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
+            exit 1
+          fi
+          echo "lint self-test, spec-drift detector, self-test, AI-attribution scanner, and local aggregate present."
+
+      - name: Local aggregate syntax check
+        run: bash -n scripts/gates.sh
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Lint formatter-scope self-test
+        run: |
+          chmod +x scripts/test/lint-test.sh
+          ./scripts/test/lint-test.sh
+
       # Self-test first: prove the scanner still detects (a gate that cannot
       # detect has silently rotted) before trusting its all-clear on the tree.
       - name: Secrets scanner self-test
@@ -699,14 +781,19 @@ jobs:
           chmod +x scripts/scan-secrets.sh
           ./scripts/scan-secrets.sh
 
+      # Same fail-closed ordering as the secrets scanner: prove the detector
+      # still catches planted drift before trusting its all-clear on the tree.
+      - name: Spec drift self-test
+        run: |
+          chmod +x scripts/test/spec-drift-test.sh
+          ./scripts/test/spec-drift-test.sh
+
       - name: Spec drift
-        if: steps.detect.outputs.spec_drift == 'true'
         run: |
           chmod +x scripts/spec-drift.sh
           ./scripts/spec-drift.sh
 
       - name: Scan AI attribution
-        if: steps.detect.outputs.scan_ai_attribution == 'true'
         run: |
           chmod +x scripts/scan-ai-attribution.sh
           ./scripts/scan-ai-attribution.sh
@@ -716,9 +803,3 @@ jobs:
         run: |
           chmod +x scripts/test/systemd-units-test.sh
           ./scripts/test/systemd-units-test.sh
-
-      - name: Aggregate gates
-        if: steps.detect.outputs.gates == 'true'
-        run: |
-          chmod +x scripts/gates.sh
-          ./scripts/gates.sh

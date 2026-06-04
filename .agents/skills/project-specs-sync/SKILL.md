@@ -73,10 +73,22 @@ Before marking SOW completed:
 1. Read every spec listed in `Spec Deltas`.
 2. Confirm it reflects the **final** code (the spec may have iterated during implementation).
 3. Refresh examples that became stale.
-4. Do the manual spec↔code drift audit (the `scripts/spec-drift.sh` detector is future work — see "Spec Drift Detection" below).
+4. Run `scripts/spec-drift.sh` (the automated detector — see "Spec Drift Detection" below) and do a manual audit of any spec it does not cover.
 5. Bump dated notes only where the spec explicitly versions itself.
 
-## Spec Drift Detection (manual until automated)
+## Spec Drift Detection
+
+`scripts/spec-drift.sh` (SOW-0013) is the automated detector. It is grep/awk-based, **fail-closed** (exits non-zero naming the offending indicator + token), runs in the CI `gates` job, and ships with a hermetic self-test (`scripts/test/spec-drift-test.sh`). It lints five spec↔code indicators against the **actual** code/spec locations:
+
+| Indicator | Code surface | Spec |
+|---|---|---|
+| REST endpoints | `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus the handler's `r.Method` guard in the presenter package | `### <VERB> /api/…` in `rest-api.md`; compared as `<VERB> <normalized-path>` with Phase-2/"not registered" sections exempt spec→code |
+| SSE event types | `eventPayload` `case "<kind>"` + control frames in `internal/presenter/events_sse.go` (+ `subscription_filter.go`) | Event-type headings in `sse-protocol.md` (`resync` = §Reconnect control frame) |
+| SQLite columns | `internal/store/migrations/*.sql` (`CREATE TABLE`/`CREATE VIRTUAL TABLE fts5`/`ALTER … ADD COLUMN`) | `data-model.md` (column dir = code→spec; table names bidirectional) |
+| Canonical event kinds | `EvXxx EventKind = "<value>"` in `internal/canonical/events.go` | identical fenced block in `canonical-events.md` (bidirectional, exact) |
+| Adapter discovery probes | `format: "<name>"` structs in `cmd/ai-viewer-ingest/sources.go` | `adapter-<name>.md` exists + names the probe path (underscore→hyphen) |
+
+`scripts/spec-drift.sh` covers the **structural** indicators above; it does NOT prove prose accuracy. So a manual audit still applies for everything else:
 
 Periodic audit during retrospection:
 
@@ -84,8 +96,6 @@ Periodic audit during retrospection:
 - Read it.
 - Read the corresponding code.
 - Note any divergence as a new SOW under `pending/`.
-
-Future work (Phase 2+): a `scripts/spec-drift.sh` that lints common drift indicators (e.g. spec mentions a field, code does not; spec lists endpoints, server registers a different set).
 
 ## What Goes In A Spec
 

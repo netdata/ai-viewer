@@ -1,0 +1,66 @@
+# Dependabot configuration (SOW-0013, AC#7).
+#
+# Keeps the three ecosystems ai-viewer depends on current: Go modules (root
+# go.mod), npm (frontend/), and the GitHub Actions used by the workflows.
+# Weekly cadence is the standard balance between freshness and PR noise.
+#
+# PR-noise control: minor + patch updates are GROUPED into one PR per ecosystem
+# (a single "weekly bump" PR rather than one PR per dependency). Major updates
+# stay individual PRs — per AGENTS.md library-version policy a major bump may
+# need its own SOW, so it must be reviewable on its own.
+#
+# Version-tag policy mirror: AGENTS.md "Library version policy" — pin to latest
+# stable; Dependabot enabled; major bumps reviewed individually.
+version: 2
+
+updates:
+  # --- Go modules (root go.mod / go.sum) -------------------------------------
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "go"
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- npm (frontend) --------------------------------------------------------
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "npm"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- GitHub Actions (workflow `uses:` pins) --------------------------------
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

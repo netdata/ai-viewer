@@ -118,8 +118,8 @@ All gates run in CI on every push and must be green before merge — **except th
 | Frontend E2E | `playwright test` | all pass |
 | Frontend a11y | axe checks on every Playwright route | zero serious/critical violations |
 | Frontend bundle | `vite build` size budget | ≤ 500 KB gzipped main chunk |
-| Secrets scan | grep `testdata/` and committed source for common secret patterns | zero hits |
-| Spec drift | `scripts/spec-drift.sh` (planned, SOW-0013; manual spec↔code audit until then) | zero drift on listed indicators |
+| Secrets scan | `scripts/scan-secrets.sh` scans every tracked file for secrets and operator identity | zero hits |
+| Spec drift | `scripts/spec-drift.sh` + `scripts/test/spec-drift-test.sh` | zero drift on listed indicators |
 
 The authoritative gate catalog with exact commands lives at `.agents/sow/specs/quality-gates.md` (durable) and `.agents/skills/project-quality-gates/SKILL.md` (runtime).
 
@@ -259,8 +259,8 @@ ai-viewer.git/
 │   ├── lint.sh                  all lint + static analysis, zero warnings
 │   ├── test.sh                  all tests (Go + frontend) + coverage + race
 │   ├── check-coverage.sh        Go statement coverage gate (internal/* ≥ 80%)
-│   ├── gates.sh                 runs every quality gate listed above (planned, SOW-0013)
-│   ├── spec-drift.sh            spec ↔ code drift detection (planned, SOW-0013)
+│   ├── gates.sh                 local full workstation gate aggregate
+│   ├── spec-drift.sh            spec ↔ code drift detection
 │   └── sanitize-fixture.sh      fixture sanitization
 └── .github/
     └── workflows/               CI: every gate above on every push
@@ -292,7 +292,7 @@ For fixture files (real snapshot samples committed under `testdata/`):
 - Replace model API keys with `[REDACTED_SECRET]`.
 - Keep schema shape, timing, and token counts intact — that's what tests verify.
 
-The secret scanner (`scripts/scan-secrets.sh`, wired as a dedicated CI `gates` step and, once SOW-0013 lands it, invoked by `scripts/gates.sh`) is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
+The secret scanner (`scripts/scan-secrets.sh`, wired as a dedicated CI `gates` step and invoked by `scripts/gates.sh`) is the automated safety net, not the only one. The assistant sanitizes before the scanner sees the file.
 
 ## Open-Source Reference Evidence
 
@@ -328,7 +328,7 @@ The canonical branch protection on `master` for this repo (and any new operator 
 - `allow_force_pushes: false`
 - `allow_deletions: false`
 - `required_pull_request_reviews: null` — **NO** manual-approval gate. The operator does not review PRs.
-- `required_status_checks: null` initially; populated with CI job names once SOW-0013 lands.
+- `required_status_checks` populated with the CI job names recorded in `.github/workflows-checks.yaml` once the SOW-0013 post-merge setup runs.
 
 The merge workflow:
 
@@ -343,16 +343,16 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 
 ## Build, Test, Run
 
-(Status: `build.sh`, `dev.sh`, `lint.sh`, `test.sh`, and `check-coverage.sh` exist today. `gates.sh` (SOW-0013) and `spec-drift.sh` (SOW-0013) are planned aggregators — until those land, use the individual gate commands and the per-gate CI jobs. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
+(Status: `build.sh`, `dev.sh`, `lint.sh`, `test.sh`, `check-coverage.sh`, `gates.sh`, and `spec-drift.sh` exist. `gates.sh` is the full local workstation aggregate; CI runs equivalent gates as dedicated parallel jobs plus the cross-cutting `gates` job. SOW-0001 — Phase 1 — is in `.agents/sow/done/`.)
 
 ```bash
 ./scripts/build.sh          # build frontend (+ REAL bundle-size gate on dist/) + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
-./scripts/lint.sh           # build-free static analysis: Go (golangci+gosec+govulncheck) AND frontend (eslint+tsc+bundle-size self-test+coverage-config verifier+coverage gate self-test); zero warnings
+./scripts/lint.sh           # build-free module/static analysis: Go tidy+format+vet+lint+security AND frontend static/gate self-tests; zero warnings
 ./scripts/test.sh           # ALL tests + coverage + race: Go, then the frontend Vitest coverage gate (normal mode)
 ./scripts/check-coverage.sh # Go statement coverage gate (internal/* ≥ 80%)
-./scripts/gates.sh          # every quality gate listed above (planned, SOW-0013)
-./scripts/spec-drift.sh     # spec ↔ code drift detection (planned, SOW-0013)
+./scripts/gates.sh          # full local workstation gate aggregate
+./scripts/spec-drift.sh     # spec ↔ code drift detection
 go test -race ./...         # Go tests with race
 cd frontend && npm test     # frontend tests
 ```

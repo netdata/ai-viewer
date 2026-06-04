@@ -75,7 +75,7 @@ The delegation prompt to a subagent contains, at minimum:
 - The SOW reference (file path).
 - The relevant spec excerpt the implementation must honor (quote verbatim).
 - The failing tests the implementation must make pass (file paths, test names).
-- The quality gates the change must satisfy (`./scripts/gates.sh` once it exists).
+- The quality gates the change must satisfy (`./scripts/gates.sh`).
 - The forbidden patterns from `project-coding` skill.
 - An explicit instruction to not weaken or skip tests.
 

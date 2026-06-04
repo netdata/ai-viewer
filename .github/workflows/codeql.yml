@@ -1,0 +1,92 @@
+# CodeQL static security analysis (SOW-0013, AC#8).
+#
+# Runs GitHub's CodeQL queries over the repo's two code languages plus the
+# workflow definitions:
+#   - go                       (the backend; build-mode: autobuild)
+#   - javascript-typescript    (the frontend; build-mode: none — no compile)
+#   - actions                  (the workflow YAML; build-mode: none)
+#
+# Triggers: every push to master + every PR to master (so a regression is caught
+# before merge) AND a weekly schedule (to pick up newly-published queries on
+# unchanged code). Results upload to the repo's Security tab as SARIF.
+#
+# Suppressions: none today. If a cross-stack false positive appears (e.g. an
+# untrusted-input query firing on a test-fixture loader), the fix is a
+# per-query/per-path entry in .github/codeql/config.yml WITH a linked tracking
+# issue (AGENTS.md / quality-gates.md R2) — never an inline `// codeql[...]`
+# without an issue. config.yml is added only when the first real suppression is
+# needed; until then the default query suite runs unfiltered.
+#
+# Conditional-skip: mirrors ci.yml — a job is meaningful only when the relevant
+# tree exists, so the Go setup step is gated on go.mod. (The CodeQL init for
+# javascript-typescript/actions needs no language toolchain.)
+name: codeql
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly, Monday 07:00 UTC — after Dependabot's 06:00 run, to scan any
+    # freshly-bumped dependency surface and pick up new CodeQL queries.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+# Cancel superseded PR runs; never cancel master/schedule runs (audit trail).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # CodeQL's recommended ceiling for large analyses; ai-viewer is small, so
+    # this is a generous backstop, not the expected runtime.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      # Required to upload SARIF results to the Security tab.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Go toolchain only for the Go analysis (autobuild compiles the module).
+      # go-version-file resolves relative to the repo root. cache:false — CodeQL
+      # autobuild does a clean build; the module cache offers little here and
+      # CodeQL manages its own database.
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

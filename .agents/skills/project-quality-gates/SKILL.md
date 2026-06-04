@@ -10,6 +10,7 @@ description: Catalog of every automated quality gate ai-viewer enforces — comm
 Every gate listed here runs in CI on every push — except the benchmark regression gate (`scripts/check-bench.sh`), which is a local/workstation gate (its baseline is not comparable to CI-runner hardware; CI runs the bench compile-smoke + the gate's hardware-independent self-test). The assistant runs them all locally before reporting work done. If a gate fails: fix the root cause. **Never weaken a gate to make it pass.** Lowering a threshold or marking a test skipped to land a PR is a contract breach.
 
 **nolint policy** (two cases, both require a reason — never a bare `//nolint`):
+
 - **Deferred-fix suppression** (the finding is real but fixing it now is out of scope): forbidden unless the active SOW justifies it AND the directive links the tracking issue/SOW — `//nolint:rule // <reason>; see SOW-XXXX`.
 - **Permanent-architectural suppression** (the finding is a verified false-positive for a deliberate, durable pattern — e.g. `nilerr` on a `return nil` that intentionally lets a stricter downstream check win, or on poll-loop rotation-tolerance): allowed with a `//nolint:rule // <reason>` stating *why the pattern is correct*. No tracking link is required because there is nothing to fix later. The reason must be specific; "false positive" alone is not enough. Prefer a config-level exclusion (with a YAML rationale comment) when a whole file or rule class is involved. Bare/unexplained `//nolint` is always a contract breach.
 
@@ -17,14 +18,33 @@ When a new pattern emerges that warrants enforcement, add it here AND to `.agent
 
 ## Gate Catalog
 
+### Go — Module Tidiness
+
+```bash
+go mod tidy
+git diff --exit-code go.mod go.sum
+```
+
+Threshold: zero diffs. `scripts/lint.sh` mirrors the CI `lint` job and runs
+this before formatter/linter/security checks. A stale module graph is a local
+gate failure, not a CI-only surprise.
+
 ### Go — Formatting
 
 ```bash
-gofmt -l .                          # zero output expected
-goimports -l .                      # zero output expected
+gofmt -l <tracked Go files>         # zero unformatted tracked files expected
+goimports -l <tracked Go files>     # zero unformatted tracked files expected
 ```
 
-Threshold: zero diffs. Auto-fix locally with `gofmt -w` and `goimports -w` before commit.
+Threshold: zero diffs. `scripts/lint.sh` runs standalone `gofmt` and
+`goimports@latest` exactly like CI before `golangci-lint`; both surfaces derive
+the input set from `git ls-files -z -- '*.go'`, so ignored/untracked local files
+such as `frontend/node_modules/**` cannot cause local-only formatter failures.
+An empty tracked Go file list is fail-closed. Golangci's formatters are defense
+in depth. Auto-fix locally with `gofmt -w` and `goimports -w` before commit.
+`scripts/test/lint-test.sh` is the hermetic self-test for the tracked-file
+formatter contract; it plants ignored/untracked malformed Go and must fail if
+the formatter gate regresses to walking `.`.
 
 ### Go — Vet
 
@@ -40,7 +60,7 @@ Threshold: zero warnings.
 golangci-lint run --timeout=5m      # umbrella: also enforces fmt + vet
 ```
 
-golangci-lint is **v2** (`.golangci.yml` has `version: "2"`). `golangci-lint run` is the umbrella gate — with the formatters enabled it enforces Go — Format, and the `govet` linter covers Go — Vet, so a clean `run` means fmt+vet+lint all pass. (In golangci-lint v2, `golangci-lint run` REPORTS formatter violations — gofmt/goimports/gofumpt — as failures; `golangci-lint fmt` is the separate auto-fix path. `run` enforces formatting; it is not merely a linter-only pass. Note: `--enable-only <formatter>` is rejected because formatters are configured under `formatters:`, not enabled as linters — this does not mean `run` skips them.) Run it locally via `./scripts/lint.sh` (which then runs the standalone security tools). The version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`); CI runs it via `golangci/golangci-lint-action` at that pinned version.
+golangci-lint is **v2** (`.golangci.yml` has `version: "2"`). `golangci-lint run` is the umbrella gate — with the formatters enabled it enforces Go — Format, and the `govet` linter covers Go — Vet, so a clean `run` means fmt+vet+lint all pass. (In golangci-lint v2, `golangci-lint run` REPORTS formatter violations — gofmt/goimports/gofumpt — as failures; `golangci-lint fmt` is the separate auto-fix path. `run` enforces formatting; it is not merely a linter-only pass. Note: `--enable-only <formatter>` is rejected because formatters are configured under `formatters:`, not enabled as linters — this does not mean `run` skips them.) Run it locally via `./scripts/lint.sh` after the module-tidiness, standalone `gofmt`, standalone `goimports@latest`, and `go vet` checks that mirror the CI `lint` job. The version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`); CI runs it via `golangci/golangci-lint-action` at that pinned version, and local `scripts/lint.sh` fails when the installed binary cannot be parsed or differs from the pin.
 
 `.golangci.yml` enables linters: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `errorlint`, `gocritic`, `revive`, `gocyclo`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`, `bodyclose`, `noctx`; formatters: `gofmt`, `goimports`, `gofumpt`. NOT enabled: `gosimple` (v2 merged it into `staticcheck`) and `gosec` (runs standalone — see Go — Security — to avoid duplicate analysis).
 
@@ -63,7 +83,7 @@ Threshold: zero high/critical findings from gosec; zero known vulnerabilities fr
 
 ## Verifying CI Before Merge (do not trust `--watch` exit code)
 
-Branch protection on this repo has `required_status_checks: null` (no *required* checks — see AGENTS.md). Consequence: **`gh pr checks <pr> --watch` can exit 0 even when a check FAILED**, because it only fails on *required* checks. Never gate a merge on the `--watch` exit code alone. Before `gh pr merge`, run `gh pr checks <pr>` and confirm EVERY row reads `pass` (no `fail`/`pending`). A green-looking `--watch` exit with a red `lint`/`gosec` is exactly how a failing build reaches master here.
+Before SOW-0013's post-merge setup runs, branch protection may still have no required status checks. After setup, the required contexts are recorded in `.github/workflows-checks.yaml` and `docs/setup.md`. In both states, never gate a merge on `gh pr checks <pr> --watch` alone: it fails only on required checks, so a non-required red row can still leave `--watch` green. Before `gh pr merge`, run `gh pr checks <pr>` and confirm EVERY row reads `pass` (no `fail`/`pending`).
 
 ### Go — Tests
 
@@ -183,10 +203,32 @@ Enforced gate (SOW-0012), not a report. Classification is **manifest-driven**: `
 ### Secrets Scan
 
 ```bash
-scripts/scan-secrets.sh             # grep over testdata/ and src for common patterns
+scripts/scan-secrets.sh             # scans every tracked file for secrets/operator identity
+scripts/test/scan-secrets-test.sh   # hermetic self-test for rule classes + fail-closed paths
 ```
 
-Patterns checked: `[A-Za-z0-9_-]{32,}` near keywords `key|token|secret|password|bearer`; `sk-[A-Za-z0-9]+` (OpenAI); `xox[bpas]-[A-Za-z0-9-]+` (Slack); `AKIA[0-9A-Z]{16}` (AWS); plus a configurable allow-list for obvious test placeholders like `[REDACTED_SECRET]`.
+Patterns checked:
+
+- Operator identity, derived at runtime from git/user metadata and `$HOME`; no
+  literal operator identity is committed in the scanner. Synthetic placeholder
+  commit identities used only to avoid personal commit metadata (currently exact
+  `user` and `user@example.invalid`, case-insensitive) are ignored as Rule-1
+  derivation inputs. The exact neutral home stem `user` is also ignored when it
+  comes only from `$HOME`, so committed placeholder paths such as
+  `/home/user/...` stay portable across generic dev VMs. Tracked content is
+  still scanned normally; real derived operator identities are never
+  allow-listed. After placeholder filtering, an empty Rule-1 ban-list is a
+  fail-closed error. This rule is never allow-listed.
+- Generic secret shapes: `sk-…` / `sk-ant-…`, Slack `xox…`, AWS `AKIA…`,
+  bearer tokens, GitHub PATs, GitHub fine-grained PATs, and GitLab PATs.
+  Secret-shape tokens are flagged in every tracked file, including fixtures; the
+  only exemption is a per-token synthetic `EXAMPLE` marker used by dirty
+  sanitizer fixtures.
+- `.gz` archives are decompressed and scanned; malformed archives are scanned
+  raw and reported. Tracked symlinks are scanned as target-path strings.
+- Diagnostics are redacted: failure output reports path, line, rule, and a
+  redacted/summary marker only; it never prints the raw matched operator
+  identity, offending line, or secret token.
 
 Threshold: zero hits.
 
@@ -196,25 +238,43 @@ Threshold: zero hits.
 scripts/scan-ai-attribution.sh
 ```
 
-Greps `cmd/`, `internal/`, `scripts/` (tests included) for comments that attribute code to an external AI reviewer by name — a reviewer name adjacent to an iteration/priority tag (`<name> iter-N`, `<name> P<digit>`) or an attribution verb (`per`/`pins <name>`, `<name> flagged/…`). The pattern REQUIRES a reviewer name, so legitimate domain terms (priced model names like `gemini-2.5-pro`, the `codex`/`opencode` session formats the tool ingests, the deepseek redaction rule) never match; the script self-excludes (it enumerates the names in its own pattern). Enforces the no-AI-attribution rule on the public repo — the work stands on its own. Runs in the CI `gates` job.
+Greps `cmd/`, `internal/`, `scripts/`, `frontend/src/`, and `frontend/tests/`
+for comments that attribute code to an external AI reviewer by name — a reviewer
+name adjacent to an iteration/priority tag (`<name> iter-N`, `<name> P<digit>`)
+or an attribution verb (`per`/`pins <name>`, `<name> flagged/…`). The pattern
+REQUIRES a reviewer name, so bare domain terms usually do not match; the script
+self-excludes (it enumerates the names in its own pattern). Enforces the
+no-AI-attribution rule on the public repo — the work stands on its own. Runs
+fail-closed in local `scripts/gates.sh` and the CI `gates` job: required scan
+roots must exist, grep exit 0/1 are handled explicitly, and grep exit >1 fails.
 
 Threshold: zero hits.
 
 ### Spec Drift
 
 ```bash
-scripts/spec-drift.sh    # planned (SOW-0013); manual spec↔code audit until it lands
+scripts/spec-drift.sh              # the 5 spec↔code drift indicators; exit 0 = no drift
+scripts/test/spec-drift-test.sh    # hermetic self-test: plants each drift class + a clean case
 ```
 
-Lints common drift indicators:
+grep/awk-based (no `go/ast` — the surfaces are line-oriented), **fail-closed**
+(exits non-zero naming the offending indicator + token). Five indicators, the
+**actual** code/spec locations (the old skill named stale paths —
+`internal/presenter/sse.go`, `internal/ingest/discover.go` — neither exists):
 
-- REST endpoints registered in `internal/presenter/` vs. endpoints listed in `specs/rest-api.md`.
-- SSE event types in `internal/presenter/sse.go` vs. `specs/sse-protocol.md`.
-- SQLite columns in `internal/store/migrations/` vs. `specs/data-model.md`.
-- Canonical event fields in `internal/canonical/events.go` vs. `specs/canonical-events.md`.
-- Adapter probes in `internal/ingest/discover.go` vs. `specs/adapter-<name>.md`.
+- **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus each handler's `r.Method` guard in the presenter package, vs. `### <VERB> /api/…` headings in `.agents/sow/specs/rest-api.md`. The compared token is `<VERB> <normalized-path>`, not path alone; `{id}`↔`:id`, single-value `:ref`↔`:id`, and catalog groups are normalized. `HEAD` is implicit parity for `GET`. **Exemption:** a spec endpoint whose section is marked *not registered / Phase 2 / not implemented* (`/api/catalog/{…}`, `/api/payloads/:ref`) is NOT drift — documenting a future route ahead of its handler is allowed; every *registered* route+verb pair must be documented (code→spec unconditional).
+- **SSE event types** — the wire kinds in `internal/presenter/events_sse.go` (`eventPayload` `case "<kind>"` arms + `event:`/control frames; `stats_invalidated` is the `default` arm, sourced from `subscription_filter.go`) vs. the event-type headings in `.agents/sow/specs/sse-protocol.md`. `resync` is a reconnect-control frame (spec §Reconnect Behavior), treated as known.
+- **SQLite columns** — every `table.column` pair from `internal/store/migrations/*.sql` (`CREATE TABLE`, `CREATE VIRTUAL TABLE … fts5(…)`, `ALTER … ADD COLUMN`) vs. SQL schema blocks in `.agents/sow/specs/data-model.md`. Column direction is **code→spec** and table-scoped: a global mention of the same column name under another table is not enough. Table names are bidirectional.
+- **Canonical event kinds** — `EvXxx EventKind = "<value>"` in `internal/canonical/events.go` vs. the identical fenced block in `.agents/sow/specs/canonical-events.md`. Bidirectional, exact.
+- **Adapter discovery probes** — `format: "<name>"` probe structs in `cmd/ai-viewer-ingest/sources.go` vs. the matching `.agents/sow/specs/adapter-<name>.md` (underscore→hyphen) and that spec mentioning the default probe path.
 
-Threshold: zero drift.
+Threshold: zero drift — via genuine agreement, never by weakening an indicator. Real drift on the live tree is reported + adjudicated (fix spec or code), not masked.
+
+CI fail-closed rule: `.github/workflows/ci.yml` must fail if
+`scripts/spec-drift.sh` or `scripts/test/spec-drift-test.sh` is absent. The
+`gates` job runs the self-test **before** the live detector, matching
+`scripts/gates.sh`; a detector that cannot catch planted drift is a failed gate,
+not an all-clear.
 
 ### Build
 
@@ -235,16 +295,33 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ## Aggregate Scripts
 
 ```bash
-./scripts/lint.sh         # build-free static analysis: Go (golangci umbrella + standalone gosec + govulncheck, SOW-0009) AND frontend (eslint + tsc + bundle-size self-test + coverage-config verifier + per-dir-coverage gate self-test, SOW-0012); fail-fast; frontend section skipped when frontend/ is absent
+./scripts/lint.sh         # build-free module/static analysis: Go module tidy + tracked-file formatters + vet + golangci + gosec + govulncheck AND frontend eslint/tsc/bundle-size/coverage self-tests; fail-fast; frontend section skipped when frontend/ is absent
 ./scripts/test.sh         # ALL tests: Go (race + coverage profile) then, in normal mode, the frontend Vitest run (real per-dir coverage gate); skips frontend when absent (SOW-0010/0012; EXISTS)
 ./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
 ./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
-./scripts/gates.sh        # every gate above, in order, fail-fast (SOW-0013; PLANNED)
+./scripts/spec-drift.sh   # the 5 spec↔code drift indicators, fail-closed (SOW-0013; EXISTS)
+./scripts/gates.sh        # every gate above, in order, fail-fast, per-section timing (SOW-0013; EXISTS)
 ```
 
-`scripts/lint.sh` is the build-free static-analysis entrypoint: it runs only analysis + the coverage-config verifier + the hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
+`scripts/lint.sh` is the build-free module/static-analysis entrypoint: it runs Go module tidiness, tracked-file Go formatter checks, Go vet/lint/security checks, frontend static checks, the coverage-config verifier, and hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, and `scripts/check-coverage.sh` exist (SOW-0009/0010; `scripts/lint.sh` gained its frontend section in SOW-0012). The canonical `scripts/gates.sh` aggregator (SOW-0013) is NOT yet present. Until it lands, run `scripts/lint.sh` + `scripts/test.sh` + `scripts/check-coverage.sh` plus the individual gate commands from this catalog before every commit. CI today enforces each gate as a dedicated job (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`, `gates`); SOW-0013 will make a single `gates.sh` and CI invoke the same underlying steps so local and CI behavior cannot diverge.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/test/lint-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, slow gates last, and complete coverage of the local gate catalog including the lint formatter-scope self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
+
+Required CI jobs are **not** bootstrap probes anymore. They fail closed when
+their mature repo prerequisites disappear: `lint`/`test` require Go module files
+and their gate scripts; `frontend` requires frontend package files, Go module
+files, `scripts/build.sh`, and the `e2e` npm script; `embed-smoke` requires the
+build/smoke/seed-marker scripts plus Go/frontend package files. Do not re-add
+green "skip notice" paths for these gates. Only optional helper checks such as
+systemd unit lint may skip when their helper file is absent.
+
+## Local Pass + CI Fail Invariant
+
+`scripts/gates.sh` and `.github/workflows/ci.yml` enforce the **same gate contract**, but CI keeps expensive gates parallel instead of re-running the full local serial aggregate. So a green local `gates.sh` followed by a red CI is an *investigatable defect*, never accepted drift and never "just re-run CI". The deliberate, documented divergences are narrow: CI's `lint` job uses the version-pinned `golangci/golangci-lint-action` (cache) at the **same** pin as `scripts/lint.sh` (`.golangci-lint-version`); the benchmark regression gate is local-only (workstation baseline) while CI runs only bench compile-smoke + gate self-test; and the CI `gates` job runs the cross-cutting scans plus required-script presence/syntax checks rather than the full aggregate. Anything else that disagrees is environment (Go/Node version, OS), test isolation (stale cache, leftover state), or timing — debug from the asymmetric input. Before merge, also confirm EVERY CI row reads `pass` (see "Verifying CI Before Merge" — `--watch` can exit 0 on a failed non-required check).
+
+## Renaming a CI Job
+
+The `ci.yml` job IDs (`lint`, `test`, `frontend`, `embed-smoke`, `gates`, plus each explicit CodeQL matrix job name: `CodeQL (go)`, `CodeQL (javascript-typescript)`, `CodeQL (actions)`) are the branch-protection **required-status-check** contract. The current names are recorded in `.github/workflows-checks.yaml` (operator-readable, NOT consumed by Actions). Renaming a job silently disables its required check (protection keys by name). So any SOW that renames a job MUST, in the **same commit**: (1) rename it in `ci.yml` or `codeql.yml`, (2) update `.github/workflows-checks.yaml`, and (3) re-run the full branch-protection `gh api -X PUT …/branches/master/protection` invocation documented in `docs/setup.md`. GitHub's `PATCH` endpoint is only for the nested `/protection/required_status_checks` update, not the full protection rule. This is the §"Adding a New Gate" rule's sibling for renames.
 
 ## When a Gate Fails
 
@@ -262,7 +339,7 @@ When a new class of bug or risk is discovered:
 1. Determine whether existing gates would have caught it. If yes, the gate has a hole — fix the hole.
 2. If no existing gate covers it, design a new one. Specify command, threshold, scope.
 3. Add it to this skill, to `.agents/sow/specs/quality-gates.md`, and to CI in the same commit.
-4. Wire it into CI as a dedicated job, and into `scripts/gates.sh` once that aggregator lands (SOW-0013).
+4. Wire it into CI as a dedicated job, and into `scripts/gates.sh` (the aggregate), in the same commit.
 5. Update `AGENTS.md` if the gate adds a top-level commitment.
 
 ## Removing a Gate
@@ -271,7 +348,7 @@ Removing a gate requires a SOW with: evidence the gate is wrong or obsolete, wha
 
 ## Performance Note
 
-Local full-gate runs should complete in under 5 minutes on the operator's workstation. Once the aggregate `scripts/gates.sh` lands (SOW-0013), if it exceeds that, profile and parallelize before adding more gates.
+Local full `scripts/gates.sh` runs **target** under 5 minutes. Measured reality (SOW-0013): the Go `-race` suite (`scripts/test.sh`, dominated by `internal/ingest`) is the long pole and pushes the full aggregate above 5 min. The gate stays correct and complete — never drop or weaken a gate to hit the target. The measured total + long pole are in the `gates.sh` header; a `--fast` profile / internal parallelization is a tracked follow-up SOW.
 
 ## Cross-References
 
