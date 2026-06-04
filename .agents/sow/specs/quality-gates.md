@@ -288,10 +288,10 @@ indicators and their authoritative code/spec locations:
 - **SSE event types** — the wire kinds in `internal/presenter/events_sse.go`
   (the `eventPayload` `case "<kind>"` arms, the `event: <kind>` writes, and the
   `event: resync` / `: keepalive` control frames; `stats_invalidated` is the
-  `default` arm and is sourced from `subscription_filter.go`) vs. the
-  `### \`<type>\`` headings in `specs/sse-protocol.md`. `resync` is a
-  reconnect-control frame documented under §Reconnect Behavior rather than a
-  §Event-Types heading; the indicator treats it as a known control frame.
+  `default` arm and is sourced from `subscription_filter.go`) vs. the event-type
+  headings in `specs/sse-protocol.md`. `resync` is a reconnect-control frame
+  documented under §Reconnect Behavior rather than a §Event-Types heading; the
+  indicator treats it as a known control frame.
 - **SQLite columns** — every **`table.column`** pair from
   `internal/store/migrations/*.sql` (`CREATE TABLE` columns, `CREATE VIRTUAL
   TABLE … USING fts5(…)` tokens, and `ALTER TABLE … ADD COLUMN`) plus every

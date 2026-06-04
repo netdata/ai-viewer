@@ -213,15 +213,18 @@ Opened under the operator's standing backlog mandate ("proceed"); predecessor SO
 Implemented the remaining gaps. Spec→test→code ordering honored: spec deltas landed first, then the detector self-test fixtures + the detector, then the aggregate.
 
 **Chunk 1 — spec deltas (AC#9/#10).**
+
 - `quality-gates.md`: rewrote §Spec Drift to describe `scripts/spec-drift.sh` as LANDED with the 5 indicators + their ACTUAL code/spec locations (the drafted refs `internal/presenter/sse.go` and `internal/ingest/discover.go` were STALE — neither exists; SSE kinds live in `internal/presenter/events_sse.go`, adapter probes in `cmd/ai-viewer-ingest/sources.go`). Added the REST Phase-2/"not registered" exemption, the SQLite column code→spec direction rationale, and the self-test note. Updated §Aggregate Scripts (gates.sh + spec-drift.sh LANDED, gates.sh composition + slow-last ordering). Added §"CI Workflow Mirror Invariant" + a "Renaming a CI Job" subsection. Revised §Performance Target to the MEASURED reality (test.sh long pole > 5 min; gate kept complete; follow-up SOW tracks --fast/parallelize).
 - `project-quality-gates/SKILL.md`: rewrote §Spec Drift (real locations + the stale-path note), flipped the Aggregate-Scripts current-state to "all exist", added "Local Pass + CI Fail Invariant" + "Renaming a CI Job" sections, fixed the "once that aggregator lands" stale note, updated the Performance Note to measured reality.
 - `project-specs-sync/SKILL.md`: replaced the "Future work … `scripts/spec-drift.sh`" note with the real reference + an indicator table; kept the manual-audit fallback for prose.
 
 **Chunk 3 — `scripts/spec-drift.sh` (AC#2)** + `scripts/test/spec-drift-test.sh`. grep/awk for all 5 indicators (CTO decision: the surfaces are line-oriented + regular — mux.HandleFunc literals joined to handler method guards, `case "<kind>"` strings, `EventKind = "<value>"` consts, SQL CREATE/ALTER, `format: "<name>"` structs — so no `go/ast`; documented inline). Bidirectional per indicator except the two documented one-direction exemptions (REST Phase-2 spec→code; data-model column spec→code prose). Fail-closed (exit non-zero, names indicator + token). Self-test plants every unidirectional indicator and both sides of every bidirectional indicator in a throwaway repo copy + asserts the clean copy passes + proves the REST Phase-2 exemption is both conditional (unmarked→drift) and effective (marked→exempt). After review and parser/extractor-hardening fixes, REST drift is checked as **verb+path**, not path-only, method extraction failures fail closed, data-model column drift is table-scoped via `table.column` pairs, optional no-match extractors preserve indicator-specific diagnostics, and extractor-empty drift cases are pinned: **25/25 cases pass**.
-  - **Live-repo result: exit 0 — ZERO real drift across all 5 indicators.** Validated against the real tree: migration table names and table-scoped SQL column pairs are documented in data-model.md; canonical kinds byte-identical; every registered route+verb pair is documented (2 spec-only endpoints both carry the Phase-2/"not registered" marker); SSE kinds match (resync = §Reconnect control frame); all 5 discovery formats have an `adapter-<name>.md` naming the probe path.
+
+- **Live-repo result: exit 0 — ZERO real drift across all 5 indicators.** Validated against the real tree: migration table names and table-scoped SQL column pairs are documented in data-model.md; canonical kinds byte-identical; every registered route+verb pair is documented (2 spec-only endpoints both carry the Phase-2/"not registered" marker); SSE kinds match (resync = §Reconnect control frame); all 5 discovery formats have an `adapter-<name>.md` naming the probe path.
 
 **Chunk 4 — `scripts/gates.sh` (AC#3).** Composes the existing scripts, fail-fast, section headers + per-section wall-clock + a final timed summary, slow gates LAST (lint.sh → scan-secrets+self-test → scan-ai-attribution → spec-drift+self-test → systemd unit lint when present → build.sh → test.sh+check-coverage.sh → adapter fuzz seed corpus → frontend E2E/axe → benchmark self-test + local regression gate).
-  - **CTO decision on the < 5 min target (AC#3 / R1):** MEASURED `scripts/test.sh` alone = **6m38s** (Go `-race` long pole: `aiagent_v2` ≈123 s, `internal/canonical` ≈62 s), so the full `gates.sh` ≈ 7–8 min — ABOVE the 5-min target. Per the SOW mandate, NO gate was dropped or weakened; the measured total + long pole are documented in the SOW validation record and Performance-Target spec, and a `--fast`/parallelize follow-up is filed as **SOW-0043** (`.agents/sow/pending/`). The full measured `gates.sh` total is in the Validation section.
+
+- **CTO decision on the < 5 min target (AC#3 / R1):** MEASURED `scripts/test.sh` alone = **6m38s** (Go `-race` long pole: `aiagent_v2` ≈123 s, `internal/canonical` ≈62 s), so the full `gates.sh` ≈ 7–8 min — ABOVE the 5-min target. Per the SOW mandate, NO gate was dropped or weakened; the measured total + long pole are documented in the SOW validation record and Performance-Target spec, and a `--fast`/parallelize follow-up is filed as **SOW-0043** (`.agents/sow/pending/`). The full measured `gates.sh` total is in the Validation section.
 
 **Chunk 6 — `.github/dependabot.yml` (AC#7).** gomod (`/`), npm (`/frontend`), github-actions (`/`); weekly Monday 06:00 UTC; minor+patch grouped per ecosystem; major bumps individual (AGENTS.md library-version policy).
 
@@ -1348,6 +1351,36 @@ Resolution after round 17:
   run URL, confirm every CI row passes, merge, register branch-protection
   required checks, and then fill `Outcome`/`Lessons Extracted` before moving this
   SOW to completed.
+
+### 2026-06-05 — Codacy PR gate cleanup
+
+After commit `bfb49a9`, GitHub reported a failing `Codacy Static Code Analysis`
+row for PR #42. Codacy Cloud was queried for the PR head commit and reported:
+
+- Quality gate failed because the PR introduced 11 new `markdownlint` info
+  issues while the issue threshold is 0.
+- The findings were all documentation/SOW/skill Markdown style issues:
+  `MD007`, `MD032`, `MD033`, and `MD038`.
+- No Go, Shell, YAML, security, complexity, duplication, or coverage blocker was
+  reported by Codacy for this cleanup.
+- Local `codacy-analysis analyze --pr` could not run because this repository does
+  not yet have `.codacy/codacy.config.json`; SOW-0044 owns the full Codacy local
+  analysis/configuration layer.
+
+Resolution:
+
+- Removed the nested code-span wording for event-type headings from
+  `quality-gates.md`, `project-quality-gates`, and `project-specs-sync`.
+- Normalized the SOW implementation-log list blank lines and indentation around
+  the chunk entries Codacy flagged.
+- Added the missing blank line before the `nolint` policy bullet list in
+  `project-quality-gates`.
+
+Focused validation:
+
+- Targeted local markdownlint for Codacy's failing rule classes passed:
+  `MD007`, `MD032`, `MD033`, and `MD038` returned 0 errors across the four
+  touched Markdown files.
 
 ## Outcome
 

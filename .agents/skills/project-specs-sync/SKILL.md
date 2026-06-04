@@ -83,7 +83,7 @@ Before marking SOW completed:
 | Indicator | Code surface | Spec |
 |---|---|---|
 | REST endpoints | `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus the handler's `r.Method` guard in the presenter package | `### <VERB> /api/…` in `rest-api.md`; compared as `<VERB> <normalized-path>` with Phase-2/"not registered" sections exempt spec→code |
-| SSE event types | `eventPayload` `case "<kind>"` + control frames in `internal/presenter/events_sse.go` (+ `subscription_filter.go`) | `### \`<type>\`` in `sse-protocol.md` (`resync` = §Reconnect control frame) |
+| SSE event types | `eventPayload` `case "<kind>"` + control frames in `internal/presenter/events_sse.go` (+ `subscription_filter.go`) | Event-type headings in `sse-protocol.md` (`resync` = §Reconnect control frame) |
 | SQLite columns | `internal/store/migrations/*.sql` (`CREATE TABLE`/`CREATE VIRTUAL TABLE fts5`/`ALTER … ADD COLUMN`) | `data-model.md` (column dir = code→spec; table names bidirectional) |
 | Canonical event kinds | `EvXxx EventKind = "<value>"` in `internal/canonical/events.go` | identical fenced block in `canonical-events.md` (bidirectional, exact) |
 | Adapter discovery probes | `format: "<name>"` structs in `cmd/ai-viewer-ingest/sources.go` | `adapter-<name>.md` exists + names the probe path (underscore→hyphen) |
