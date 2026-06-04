@@ -22,7 +22,7 @@ Facts:
 
 - `quality-gates.md` lists `scripts/gates.sh` as the full local workstation aggregate. CI enforces the same gate contract through dedicated parallel jobs plus the cross-cutting `gates` job, not by re-running the full serial aggregate.
 - Cross-cutting gates documented in `quality-gates.md`: Secrets Scan (`scripts/scan-secrets.sh`) and Spec Drift (`scripts/spec-drift.sh`). The secrets scanner already exists; this SOW lands spec-drift, the local aggregate, and the CI fail-closed wiring around both.
-- `project-specs-sync/SKILL.md` lists drift indicators that `scripts/spec-drift.sh` must lint: REST endpoints registered vs. `specs/rest-api.md`; SSE event types vs. `specs/sse-protocol.md`; SQLite columns in migrations vs. `specs/data-model.md`; canonical event fields vs. `specs/canonical-events.md`; adapter probes in discovery code vs. `specs/adapter-<name>.md`.
+- `project-specs-sync/SKILL.md` lists drift indicators that `scripts/spec-drift.sh` must lint: REST endpoints registered vs. `.agents/sow/specs/rest-api.md`; SSE event types vs. `.agents/sow/specs/sse-protocol.md`; SQLite columns in migrations vs. `.agents/sow/specs/data-model.md`; canonical event fields vs. `.agents/sow/specs/canonical-events.md`; adapter probes in discovery code vs. `.agents/sow/specs/adapter-<name>.md`.
 - Repo is `netdata/ai-viewer`, public on GitHub from day one (recorded as decision in SOW-0001). GitHub Actions is the CI platform (also recorded in SOW-0001).
 - GitHub's branch protection API updates the full protection rule via `PUT /repos/{owner}/{repo}/branches/{branch}/protection`; the nested status-check-only endpoint uses `PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`. The required-checks list is keyed by job name; renaming a job without updating protection silently disables the check.
 - Dependabot config (`.github/dependabot.yml`) supports Go modules, npm, and GitHub Actions ecosystems. Weekly cadence is the standard balance between freshness and noise.
@@ -150,7 +150,7 @@ Implementation plan (ordered chunks):
 7. **Land `.github/workflows/codeql.yml` + `.github/codeql/config.yml` (if suppression needed)**: Go + JavaScript/TypeScript, per-push + weekly schedule.
 8. **Land `.github/workflows-checks.yaml`**: operator-readable file documenting current required check names. Lists the five job names from `ci.yml` plus the CodeQL matrix job names that should also be required.
 9. **One-time branch protection setup**: after `ci.yml` is green on master, run `gh api -X PUT /repos/netdata/ai-viewer/branches/master/protection` to register required checks via the full protection rule. Verify via `gh api /repos/netdata/ai-viewer/branches/master/protection`. Capture the invocation in `## Validation` and in `docs/setup.md`.
-10. **Synthetic drift test**: plant a temporary mismatch (e.g. an endpoint in `internal/presenter/` not in `specs/rest-api.md`); verify `spec-drift.sh` catches it; remove the planted mismatch before committing the SOW close.
+10. **Synthetic drift test**: plant a temporary mismatch (e.g. an endpoint in `internal/presenter/` not in `.agents/sow/specs/rest-api.md`); verify `spec-drift.sh` catches it; remove the planted mismatch before committing the SOW close.
 11. **Measure CI total wall-clock** on a representative PR and capture in `## Validation`.
 12. **External review round**: at least three reviewers (per `project-second-opinions/SKILL.md`), prompt = "review SOW-0013 changes for: gate completeness, CI workflow correctness, branch protection coverage, spec drift indicator coverage, secret scanner false-positive risk, unwanted side effects". Iterate until convergence.
 13. **Mark SOW completed and move to `done/`** in the same commit as the final implementation.
@@ -249,7 +249,7 @@ CTO decisions and fixes:
 - `scripts/gates.sh` is now the **full local workstation aggregate**: lint; secrets self-test + scan; AI-attribution scan; spec-drift self-test + live detector; systemd unit lint when present; build; test; coverage; deterministic adapter fuzz seed corpus + exact target-set lock; frontend Playwright E2E (which includes axe specs); benchmark gate self-test + `scripts/check-bench.sh`.
 - CI keeps expensive gates parallel. The CI `gates` job is now cross-cutting only: secrets + scanner self-test (fail-closed), spec-drift + detector self-test (fail-closed, self-test first), local `scripts/gates.sh` presence + syntax check, AI-attribution scan when present, and systemd unit lint when present. It no longer runs full `scripts/gates.sh`.
 - CodeQL matrix jobs now have explicit required-check names (`CodeQL (go)`, `CodeQL (javascript-typescript)`, `CodeQL (actions)`) instead of one ambiguous matrix context. `.github/workflows-checks.yaml` and `docs/setup.md` record all three.
-- `AGENTS.md`, `quality-gates.md`, `specs/index.md`, `project-quality-gates`, and `project-testing` were swept for stale SOW-0013 planned text and updated to the landed-state wording.
+- `AGENTS.md`, `quality-gates.md`, `.agents/sow/specs/index.md`, `project-quality-gates`, and `project-testing` were swept for stale SOW-0013 planned text and updated to the landed-state wording.
 - Filed follow-up **SOW-0044** (`.agents/sow/pending/SOW-0044-20260604-code-scanning-defense-layer.md`) for the requested post-SOW-0013 CodeQL + Codacy defence layer. It is intentionally separate from this SOW so Codacy configuration, coverage upload, CodeQL policy hardening, and noise tuning get their own evidence and acceptance criteria.
 - First full local `scripts/gates.sh` rerun exposed one deterministic-test defect: `cmd/ai-viewer-ingest/main_test.go` isolated `HOME` and `CLAUDE_CONFIG_DIR`, but not the newer `CODEX_HOME`, `OPENCODE_DB`, and `XDG_DATA_HOME` discovery inputs. Fixed the auto-discovery tests to reuse the existing helper that clears every discovery override before asserting implicit source counts.
 - First external review round found stale SOW acceptance text, optional CI spec-drift wiring, reversed CI spec-drift self-test order, stale `workflows-checks.yaml` wording, and incomplete self-test direction coverage. Fixed by making spec-drift + local aggregate required in CI, running spec-drift self-test before live drift detection, updating required-check wording, removing dead REST normalization in the detector, expanding the self-test to 13 cases, and amending this SOW to the measured complete-gate reality.
@@ -1381,6 +1381,26 @@ Focused validation:
 - Targeted local markdownlint for Codacy's failing rule classes passed:
   `MD007`, `MD032`, `MD033`, and `MD038` returned 0 errors across the four
   touched Markdown files.
+
+### 2026-06-05 — PR reviewer spec-path cleanup
+
+A PR review reported that the Spec Drift documentation used root-relative
+`specs/...` shorthand for files that actually live under `.agents/sow/specs/`.
+The finding was valid: the shorthand could lead a future maintainer to create a
+top-level `specs/` tree or update the wrong file.
+
+Resolution:
+
+- Replaced the shorthand paths in `.agents/sow/specs/quality-gates.md` with the
+  exact `.agents/sow/specs/...` paths for REST, SSE, data-model, canonical-event,
+  and adapter specs.
+- Mirrored the same exact paths in `project-quality-gates`.
+- Fixed the current SOW references and the comment in `scripts/spec-drift.sh`.
+
+Focused validation:
+
+- Targeted ripgrep for the reviewer-reported root-relative spec paths across the
+  touched SOW/spec/skill/script files no longer reports misleading paths.
 
 ## Outcome
 

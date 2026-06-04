@@ -818,7 +818,7 @@ check_canonical() {
 #
 # CODE: the `format: "<name>"` probe structs in the autoDiscoverSources probe
 #   list (sources.go). Each is an adapter the binary auto-discovers.
-# SPEC: a `specs/adapter-<name>.md` must EXIST (format→file maps '_' → '-':
+# SPEC: a `.agents/sow/specs/adapter-<name>.md` must EXIST (format→file maps '_' → '-':
 #   aiagent_v3 → adapter-aiagent-v3.md, claude-code → adapter-claude-code.md)
 #   AND that spec must mention the adapter's default probe path (a basename
 #   anchor derived per format) so the documented default cannot silently drift

@@ -273,7 +273,8 @@ indicators and their authoritative code/spec locations:
 
 - **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` registrations in
   `internal/presenter/presenter.go`, plus each handler's `r.Method` guard in the
-  presenter package, vs. `### <VERB> /api/…` headings in `specs/rest-api.md`.
+  presenter package, vs. `### <VERB> /api/…` headings in
+  `.agents/sow/specs/rest-api.md`.
   The compared token is **`<VERB> <normalized-path>`**, not path alone, so a
   handler accepting `GET` while the spec says `POST` is drift. `HEAD` is treated
   as implicit parity for handlers that support `GET`, matching the REST spec and
@@ -289,13 +290,13 @@ indicators and their authoritative code/spec locations:
   (the `eventPayload` `case "<kind>"` arms, the `event: <kind>` writes, and the
   `event: resync` / `: keepalive` control frames; `stats_invalidated` is the
   `default` arm and is sourced from `subscription_filter.go`) vs. the event-type
-  headings in `specs/sse-protocol.md`. `resync` is a reconnect-control frame
+  headings in `.agents/sow/specs/sse-protocol.md`. `resync` is a reconnect-control frame
   documented under §Reconnect Behavior rather than a §Event-Types heading; the
   indicator treats it as a known control frame.
 - **SQLite columns** — every **`table.column`** pair from
   `internal/store/migrations/*.sql` (`CREATE TABLE` columns, `CREATE VIRTUAL
   TABLE … USING fts5(…)` tokens, and `ALTER TABLE … ADD COLUMN`) plus every
-  table name, vs. `specs/data-model.md`. Direction: **code→spec** — every
+  table name, vs. `.agents/sow/specs/data-model.md`. Direction: **code→spec** — every
   migration table + column pair MUST be documented in the corresponding SQL
   schema block for that table in `data-model.md` (the direction that catches the
   real "added a column to a table, forgot to document it" drift). A global
@@ -308,11 +309,11 @@ indicators and their authoritative code/spec locations:
   spec legitimately names many column identifiers in prose.
 - **Canonical event kinds** — the `EvXxx EventKind = "<value>"` discriminator
   constants in `internal/canonical/events.go` vs. the identical fenced block in
-  `specs/canonical-events.md`. Bidirectional and exact (the value set must match
+  `.agents/sow/specs/canonical-events.md`. Bidirectional and exact (the value set must match
   byte-for-byte).
 - **Adapter discovery probes** — the `format: "<name>"` probe structs in
   `cmd/ai-viewer-ingest/sources.go` (the auto-discovery probe list) vs. the
-  existence of the corresponding `specs/adapter-<name>.md` and that spec
+  existence of the corresponding `.agents/sow/specs/adapter-<name>.md` and that spec
   mentioning the adapter's default probe path. Format→spec-file name maps
   underscore→hyphen (`aiagent_v3` → `adapter-aiagent-v3.md`, `claude-code` →
   `adapter-claude-code.md`).
