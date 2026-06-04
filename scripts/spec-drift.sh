@@ -583,6 +583,129 @@ extract_sql_column_pairs() {
   ' "$@" | sort -u
 }
 
+extract_sql_table_names() {
+  local fenced_only="$1"
+  shift
+  awk -v fenced_only="$fenced_only" '
+    function trim(s) {
+      gsub(/\r/, "", s)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function strip_comment(s) {
+      sub(/--.*/, "", s)
+      return s
+    }
+    function fail(msg) {
+      printf "spec-drift SQL table extractor: %s:%s: %s\n", stmt_file, stmt_line, msg > "/dev/stderr"
+      failed=1
+    }
+    function emit_create_table(stmt,    fields, header) {
+      stmt=trim(stmt)
+      gsub(/[[:space:]]+/, " ", stmt)
+      if (stmt == "") {
+        return
+      }
+      if (stmt ~ /^CREATE VIRTUAL TABLE /) {
+        if (stmt !~ /^CREATE VIRTUAL TABLE [a-z_][a-z_0-9]*[[:space:]]+USING[[:space:]]+fts5[[:space:]]*\(/) {
+          fail("unsupported or malformed CREATE VIRTUAL TABLE statement")
+          return
+        }
+        header=stmt
+        sub(/^CREATE VIRTUAL TABLE /, "", header)
+        sub(/[[:space:]]+USING.*/, "", header)
+      } else if (stmt ~ /^CREATE TABLE /) {
+        if (stmt !~ /^CREATE TABLE [a-z_][a-z_0-9]*[[:space:]]*\(/) {
+          fail("unsupported or malformed CREATE TABLE statement")
+          return
+        }
+        header=stmt
+        sub(/^CREATE TABLE /, "", header)
+        sub(/[[:space:]]*\(.*/, "", header)
+      } else {
+        return
+      }
+      split(header, fields, /[[:space:]]+/)
+      if (fields[1] !~ /^[a-z_][a-z_0-9]*$/) {
+        fail("could not extract table name from CREATE statement")
+        return
+      }
+      print fields[1]
+    }
+    function starts_tracked_statement(stmt) {
+      stmt=trim(stmt)
+      return stmt ~ /^(CREATE (VIRTUAL )?TABLE|ALTER TABLE)[[:space:]]/
+    }
+    function append_sql(line,    pos, part) {
+      if (stmt == "") {
+        stmt_file=FILENAME
+        stmt_line=FNR
+      }
+      stmt=stmt (stmt == "" ? "" : " ") line
+      while ((pos = index(stmt, ";")) > 0) {
+        part=substr(stmt, 1, pos - 1)
+        emit_create_table(part)
+        stmt=trim(substr(stmt, pos + 1))
+        if (stmt != "") {
+          stmt_file=FILENAME
+          stmt_line=FNR
+        }
+      }
+    }
+    function close_file_state() {
+      if (stmt != "") {
+        if (starts_tracked_statement(stmt)) {
+          fail("unterminated tracked SQL statement")
+        }
+        stmt=""
+      }
+      if (fenced_only == "1" && in_sql) {
+        fail("unterminated sql fence")
+        in_sql=0
+      }
+    }
+    {
+      if (current_file != FILENAME) {
+        if (current_file != "") {
+          close_file_state()
+        }
+        current_file=FILENAME
+        stmt=""
+        in_sql=0
+      }
+      raw=$0
+      if (fenced_only == "1") {
+        if (raw ~ /^```sql[[:space:]]*$/) {
+          in_sql=1
+          next
+        }
+        if (in_sql && raw ~ /^```[[:space:]]*$/) {
+          if (stmt != "") {
+            if (starts_tracked_statement(stmt)) {
+              fail("unterminated tracked SQL statement before closing sql fence")
+            }
+            stmt=""
+          }
+          in_sql=0
+          next
+        }
+        if (!in_sql) {
+          next
+        }
+      }
+      line=trim(strip_comment(raw))
+      if (line == "") {
+        next
+      }
+      append_sql(line)
+    }
+    END {
+      close_file_state()
+      exit failed
+    }
+  ' "$@" | sort -u
+}
+
 check_data_model() {
   local ind="data-model-columns"
   require_file "$DATA_SPEC" "$ind" || return 0
@@ -598,23 +721,31 @@ check_data_model() {
 
   # Table names (CREATE [VIRTUAL] TABLE <name>).
   local mig_tables
-  mig_tables="$(grep_o_or_empty 'CREATE (VIRTUAL )?TABLE [a-z_][a-z_0-9]*' "${migration_files[@]}" \
-    | awk '{print $NF}' | sort -u)"
+  mig_tables="$(extract_sql_table_names 0 "${migration_files[@]}")"
   if [[ -z "$mig_tables" ]]; then
     note_drift "${ind}: no CREATE TABLE statements found in ${MIGRATIONS_DIR}/ (extraction failed — investigate)"
     return 0
   fi
 
-  local mig_column_pairs spec_column_pairs
+  local mig_column_pairs spec_column_pairs spec_heading_tables spec_sql_tables spec_tables
   mig_column_pairs="$(extract_sql_column_pairs 0 "${migration_files[@]}")"
   spec_column_pairs="$(extract_sql_column_pairs 1 "$DATA_SPEC")"
+  spec_heading_tables="$(grep_o_or_empty '^### [a-z_][a-z_0-9]+[[:space:]]*$' "$DATA_SPEC" | awk '{print $2}' | sort -u)"
+  spec_sql_tables="$(extract_sql_table_names 1 "$DATA_SPEC")"
+  spec_tables="$({
+    printf '%s\n' "$spec_heading_tables"
+    printf '%s\n' "$spec_sql_tables"
+  } | sed '/^$/d' | sort -u)"
+  if [[ -z "$spec_sql_tables" ]]; then
+    note_drift "${ind}: no CREATE TABLE statements found in ${DATA_SPEC##*/} SQL schema blocks (extraction failed — investigate)"
+  fi
 
   # Table names → bidirectional.
   local t
   while IFS= read -r t; do
     [[ -z "$t" ]] && continue
-    if ! grep -qw "$t" "$DATA_SPEC"; then
-      note_drift "${ind}: table '${t}' created in ${MIGRATIONS_DIR}/ but not mentioned in ${DATA_SPEC##*/} (code→spec)"
+    if ! contains_line "$spec_tables" "$t"; then
+      note_drift "${ind}: table '${t}' created in ${MIGRATIONS_DIR}/ but not documented as a SQL schema block or schema heading in ${DATA_SPEC##*/} (code→spec)"
     fi
   done <<< "$mig_tables"
   # Spec → code for table NAMES: a `### <name>` schema heading whose name is a
@@ -625,7 +756,16 @@ check_data_model() {
     if ! contains_line "$mig_tables" "$h"; then
       note_drift "${ind}: '### ${h}' schema heading in ${DATA_SPEC##*/} has no matching CREATE TABLE in ${MIGRATIONS_DIR}/ (spec→code)"
     fi
-  done <<< "$(grep_o_or_empty '^### [a-z_][a-z_0-9]+[[:space:]]*$' "$DATA_SPEC" | awk '{print $2}' | sort -u)"
+  done <<< "$spec_heading_tables"
+  # Spec → code for SQL schema block table names. This catches a table declared
+  # under a prose heading such as "### Full-text search" even when there is no
+  # `### <table>` schema heading to compare.
+  while IFS= read -r t; do
+    [[ -z "$t" ]] && continue
+    if ! contains_line "$mig_tables" "$t"; then
+      note_drift "${ind}: SQL schema block creates table '${t}' in ${DATA_SPEC##*/} but no matching CREATE TABLE exists in ${MIGRATIONS_DIR}/ (spec→code)"
+    fi
+  done <<< "$spec_sql_tables"
 
   # Columns → code→spec only, scoped by owning table.
   local pair

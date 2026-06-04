@@ -16,11 +16,32 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ## Gate Catalog
 
+### Go — Module Tidiness
+
+- `go mod tidy` followed by `git diff --exit-code go.mod go.sum` → zero
+  module-file diffs.
+- `scripts/lint.sh` and the CI `lint` job both run this before
+  formatter/linter/security checks, so stale `go.mod`/`go.sum` cannot pass
+  locally and fail only in CI.
+
 ### Go — Format
 
-- `gofmt -l .` → zero output.
-- `goimports -l .` → zero output.
+- `gofmt -l` over the tracked Go file list (`git ls-files -z -- '*.go'`) →
+  zero unformatted tracked files.
+- `goimports -l` over the same tracked Go file list → zero unformatted tracked
+  files.
 - Threshold: zero diffs.
+- `scripts/lint.sh` mirrors CI's explicit standalone `gofmt` and
+  `goimports@latest` checks before `golangci-lint`; both surfaces use tracked
+  Go files only, so ignored/untracked local files such as
+  `frontend/node_modules/**` cannot create local-only formatter failures. An
+  empty tracked Go file list is fail-closed. The golangci formatters are defense
+  in depth, not the only local formatter surface.
+- `scripts/test/lint-test.sh` is the hermetic gate self-test for this contract:
+  it plants an ignored/untracked malformed Go file in a temporary git repo and
+  proves the formatter input set still comes only from
+  `git ls-files -z -- '*.go'`. A regression back to `gofmt -l .` /
+  `goimports -l .` must fail the self-test.
 
 ### Go — Vet
 
@@ -28,13 +49,16 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 
 ### Go — Lint
 
-- `golangci-lint run --timeout=5m` is the umbrella gate: with the formatters enabled it also enforces Go — Format, and the `govet` linter covers Go — Vet, so this single command is the authoritative lint surface. `scripts/lint.sh` runs it (then the standalone security tools); CI runs it via the version-pinned `golangci/golangci-lint-action`.
+- `golangci-lint run --timeout=5m` is the umbrella gate: with the formatters enabled it also enforces Go — Format, and the `govet` linter covers Go — Vet, so this single command is the authoritative lint surface. `scripts/lint.sh` runs it after the module-tidiness, standalone `gofmt`, standalone `goimports@latest`, and `go vet` checks that mirror the CI `lint` job; CI runs it via the version-pinned `golangci/golangci-lint-action`.
 - golangci-lint is **v2**; `.golangci.yml` declares `version: "2"`. `gosimple` is NOT enabled — golangci v2 merged it into `staticcheck`. `gosec` is NOT a golangci linter here — it runs standalone (Go — Security) to avoid duplicate analysis.
 - `.golangci.yml` enables linters: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `errorlint`, `gocritic`, `revive`, `gocyclo`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`, `bodyclose`, `noctx`; formatters: `gofmt`, `goimports`, `gofumpt`.
 - `gocyclo` uses `min-complexity: 25` (not 15): the stream parsers/scanners/tailers and the SOW-0007-hardened ingest event loop sit legitimately at 16–24 cyclomatic, so complexity-15 produced ~23 false-positive-class findings on heavily-reviewed, hot-path code. 25 flags genuinely-egregious complexity (the one production outlier, `pricing.validateDoc`, was refactored under it) while preventing future creep.
 - `_test.go` is excluded from the style/complexity linters (`gocyclo`, `noctx`, `unparam`, `prealloc`, `revive`, `gocritic`): table-driven tests are intentionally branchy, test setup uses context-less DB calls, and test helpers carry call-site-specific params. The bug-finders (`errcheck`, `staticcheck`, `govet`, `ineffassign`, `unused`, `nilerr`, `errorlint`, `bodyclose`) stay active on tests.
 - `frontend/node_modules` is path-excluded (a transitive npm dependency ships a Go reference file that is not project code).
-- Version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`).
+- Version is pinned in `.golangci-lint-version` (single source for CI +
+  `scripts/lint.sh`). CI installs that exact pin through
+  `golangci/golangci-lint-action`; local `scripts/lint.sh` fails when the
+  installed `golangci-lint` binary cannot be parsed or differs from the pin.
 - Threshold: zero warnings.
 
 ### Go — Security
@@ -179,11 +203,19 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
    **derived at runtime from the repository's own git author metadata** — `git log`
    author emails + names, unioned with `git config user.email`/`user.name`; home
    stems from each email local-part, each name, and `$HOME` — so **no operator
-   literal is committed in the scanner**. The scan is **fail-closed**: if no
-   identity can be derived (and, when the repo has commits, if `git log` fails
-   unexpectedly) it exits non-zero rather than running with Rule 1 disabled or on a
-   partial ban-list. Name matching is word-bounded so unrelated tokens (e.g.
-   `cost_usd`) never match.
+   literal is committed in the scanner**. Synthetic placeholder commit identities
+   used only to avoid personal commit metadata (currently the exact values `user`
+   and `user@example.invalid`, matched case-insensitively) are ignored while
+   deriving the Rule-1 ban-list. The exact neutral home stem `user` is also
+   ignored when it comes only from `$HOME`, so committed placeholder paths such
+   as `/home/user/...` stay portable across generic dev VMs. Filtering is
+   intentionally narrow and applies only to derivation inputs, not to tracked
+   file content; real derived operator identities are never allow-listed. The
+   scan is **fail-closed**: if no non-placeholder identity can be derived after
+   filtering (and, when the repo has commits, if `git log` fails unexpectedly)
+   it exits non-zero rather than running with Rule 1 disabled or on a partial
+   ban-list. Name matching is word-bounded so unrelated tokens (e.g. `cost_usd`)
+   never match.
 2. **Generic secret shapes.** `sk-…` / `sk-ant-…` (OpenAI/Anthropic keys),
    `xox[bpas]-…` (Slack), `AKIA[0-9A-Z]{16}` (AWS), `Bearer <high-entropy>`
    tokens, and VCS PATs (`ghp_…`, `github_pat_…`, `glpat-…`). (Public provider
@@ -203,6 +235,11 @@ circumstances. `.gz` archives are decompressed and scanned; a malformed archive
 is scanned raw and its decompression failure reported (never silently skipped).
 Tracked symlinks are scanned by their target-path string, not the dereferenced
 target.
+
+Diagnostics are intentionally redacted: failures report the repo path, line
+number, rule label, and a redacted/summary marker only. The scanner never prints
+the raw matched operator identity, raw offending line, or raw secret token into
+local or CI logs.
 
 - **Threshold:** zero hits.
 - **Fail-closed in CI.** The `gates` job runs the scanner and **fails when the
@@ -263,8 +300,11 @@ indicators and their authoritative code/spec locations:
   schema block for that table in `data-model.md` (the direction that catches the
   real "added a column to a table, forgot to document it" drift). A global
   mention of the same column name under another table is not enough. Table names
-  are also checked spec→code (a `### <table>` schema heading must correspond to a
-  real migration table). Column spec→code is not enforced as drift because the
+  are checked bidirectionally from two spec surfaces: `CREATE [VIRTUAL] TABLE`
+  names extracted from SQL schema blocks, and any `### <table>` schema heading.
+  Therefore a spec-only SQL table declared under a prose heading (for example an
+  FTS table in a shared "Full-text search" section) is still drift if no
+  migration creates it. Column spec→code is not enforced as drift because the
   spec legitimately names many column identifiers in prose.
 - **Canonical event kinds** — the `EvXxx EventKind = "<value>"` discriminator
   constants in `internal/canonical/events.go` vs. the identical fenced block in
@@ -313,14 +353,18 @@ CI enforces the gate catalog as **dedicated parallel jobs** (`lint`, `test`,
 `scripts/embed-smoke.sh`, `scripts/e2e-serve.sh`, `scripts/sanitize-fixture.sh`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
 `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh`
-(+ `scripts/test/spec-drift-test.sh`), `scripts/gates.sh`,
+(+ `scripts/test/spec-drift-test.sh`), `scripts/test/lint-test.sh`,
+`scripts/gates.sh`,
 `scripts/check-bench.sh`, and `scripts/install-systemd-user.sh`.
 
 `scripts/lint.sh` (SOW-0009; frontend section added SOW-0012) **is present**: it
-is the local, **build-free** static-analysis entrypoint mirroring CI's
-static-analysis gates. Its Go section mirrors the CI `lint` job —
+is the local, **build-free** module/static-analysis entrypoint mirroring CI's
+static gates. Its Go section mirrors the CI `lint` job — `go mod tidy`
+followed by `git diff --exit-code go.mod go.sum`, standalone `gofmt` and
+standalone `goimports@latest` over the tracked Go file list, `go vet`,
 `golangci-lint run` (the umbrella, driven by `.golangci.yml` at the version
-pinned in `.golangci-lint-version`) then standalone `gosec` and `govulncheck`.
+pinned in `.golangci-lint-version`, with local pin mismatch treated as a hard
+failure), then standalone `gosec` and `govulncheck`.
 Its frontend section (skipped cleanly when `frontend/` is absent) mirrors the
 build-free static gates of the CI `frontend` job, fail-fast in order: ensure
 deps are present (reusing `scripts/build.sh`'s `npm ci`/`npm install` fallback,
@@ -361,10 +405,10 @@ static-analysis/spec/security failure surfaces early.
 The CI `gates` job does **not** run the full serial `scripts/gates.sh`
 aggregate. CI keeps the expensive gates parallel in their dedicated jobs and
 uses the `gates` job for cross-cutting repo scans and required gate
-infrastructure checks: secrets + scanner self-test (fail-closed), spec drift +
-detector self-test (fail-closed, self-test first), AI-attribution scan
-(fail-closed), `scripts/gates.sh` presence + syntax check, and systemd unit lint
-when present.
+infrastructure checks: secrets + scanner self-test (fail-closed), lint
+formatter-scope self-test (fail-closed), spec drift + detector self-test
+(fail-closed, self-test first), AI-attribution scan (fail-closed),
+`scripts/gates.sh` presence + syntax check, and systemd unit lint when present.
 
 The mature required jobs fail closed on their prerequisites. `lint` and `test`
 require the Go module files and the gate scripts they execute; `frontend`

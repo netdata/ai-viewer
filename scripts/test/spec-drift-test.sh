@@ -411,6 +411,27 @@ EOF
   assert_drift "$name" "$fix" "phantom_table"
 }
 
+# (c''') data-model: document a bogus CREATE TABLE inside a SQL fenced block
+#        under a prose/non-table heading. A heading-only table detector misses
+#        this; SQL-block table extraction must report the table name.
+case_data_model_sql_block_table_under_prose_heading_not_in_code() {
+  local name="data-model::sql_block_table_under_prose_heading_not_in_migrations"
+  local fix; fix="$(new_fixture)"
+  cat >> "$fix/.agents/sow/specs/data-model.md" <<'EOF'
+
+### Synthetic prose section
+
+This section is prose, not a `### <table>` schema heading.
+
+```sql
+CREATE TABLE sql_block_only_phantom (
+    id TEXT PRIMARY KEY NOT NULL
+);
+```
+EOF
+  assert_drift "$name" "$fix" "sql_block_only_phantom"
+}
+
 # (d) canonical: add an EventKind const in code that the spec block lacks ->
 #     code→spec drift on canonical-event-kinds.
 case_canonical_kind_not_in_spec() {
@@ -510,6 +531,7 @@ main() {
   case_data_model_future_sql_type_column
   case_data_model_table_not_in_spec
   case_data_model_spec_table_not_in_code
+  case_data_model_sql_block_table_under_prose_heading_not_in_code
   case_canonical_kind_not_in_spec
   case_canonical_spec_kind_not_in_code
   case_canonical_code_extractor_empty

@@ -12,8 +12,9 @@
 #   presence checks while their source trees are absent, then run end to end
 #   once the relevant tree lands. SOW-0013 is different: cross-cutting gate
 #   files are mandatory once introduced, so the gates job fails when
-#   scripts/spec-drift.sh, scripts/scan-ai-attribution.sh, or scripts/gates.sh
-#   are absent. Only optional helpers such as systemd lint skip by presence.
+#   scripts/test/lint-test.sh, scripts/spec-drift.sh,
+#   scripts/scan-ai-attribution.sh, or scripts/gates.sh are absent. Only
+#   optional helpers such as systemd lint skip by presence.
 #
 # Job-name contract
 #   The job IDs below (lint, test, frontend, embed-smoke, gates) are the
@@ -137,22 +138,58 @@ jobs:
 
       - name: gofmt
         if: steps.detect.outputs.go == 'true'
+        shell: bash
         run: |
-          diff=$(gofmt -l .)
-          if [[ -n "$diff" ]]; then
-            echo "gofmt diff in:"
-            echo "$diff"
+          mapfile -d '' go_files < <(git ls-files -z -- '*.go')
+          if [[ "${#go_files[@]}" -eq 0 ]]; then
+            echo "::error::no tracked Go files found; gofmt gate is fail-closed"
+            exit 1
+          fi
+          bad=()
+          for f in "${go_files[@]}"; do
+            out="$(gofmt -l "./$f" 2>&1)" || {
+              echo "::error::gofmt failed for a tracked Go file"
+              printf 'tracked Go file: %q\n' "$f" >&2
+              printf '%s\n' "$out" >&2
+              exit 1
+            }
+            if [[ -n "$out" ]]; then
+              bad+=("$f")
+            fi
+          done
+          if [[ "${#bad[@]}" -gt 0 ]]; then
+            echo "::error::gofmt reported unformatted tracked Go file(s)"
+            printf 'gofmt diff in tracked Go files:\n' >&2
+            printf '  %q\n' "${bad[@]}" >&2
             exit 1
           fi
 
       - name: goimports
         if: steps.detect.outputs.go == 'true'
+        shell: bash
         run: |
           go install golang.org/x/tools/cmd/goimports@latest
-          diff=$(goimports -l .)
-          if [[ -n "$diff" ]]; then
-            echo "goimports diff in:"
-            echo "$diff"
+          mapfile -d '' go_files < <(git ls-files -z -- '*.go')
+          if [[ "${#go_files[@]}" -eq 0 ]]; then
+            echo "::error::no tracked Go files found; goimports gate is fail-closed"
+            exit 1
+          fi
+          bad=()
+          for f in "${go_files[@]}"; do
+            out="$(goimports -l "./$f" 2>&1)" || {
+              echo "::error::goimports failed for a tracked Go file"
+              printf 'tracked Go file: %q\n' "$f" >&2
+              printf '%s\n' "$out" >&2
+              exit 1
+            }
+            if [[ -n "$out" ]]; then
+              bad+=("$f")
+            fi
+          done
+          if [[ "${#bad[@]}" -gt 0 ]]; then
+            echo "::error::goimports reported unformatted tracked Go file(s)"
+            printf 'goimports diff in tracked Go files:\n' >&2
+            printf '  %q\n' "${bad[@]}" >&2
             exit 1
           fi
 
@@ -699,26 +736,38 @@ jobs:
           fi
           echo "secrets scanner and self-test present."
 
-      # Fail-closed: spec-drift, AI-attribution, and gates.sh are mandatory gate
-      # infrastructure. Missing files are missing gates, not passes.
+      # Fail-closed: lint-test, spec-drift, AI-attribution, and gates.sh are
+      # mandatory gate infrastructure. Missing files are missing gates, not passes.
       - name: Require cross-cutting gates present (fail-closed)
         shell: bash
         run: |
           missing=0
-          for f in scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
+          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
             if [[ ! -f "$f" ]]; then
               echo "::error::required gate file is absent: $f"
               missing=1
             fi
           done
           if [[ "$missing" -ne 0 ]]; then
-            echo "The spec-drift detector, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
+            echo "The lint self-test, spec-drift detector, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
             exit 1
           fi
-          echo "spec-drift detector, self-test, AI-attribution scanner, and local aggregate present."
+          echo "lint self-test, spec-drift detector, self-test, AI-attribution scanner, and local aggregate present."
 
       - name: Local aggregate syntax check
         run: bash -n scripts/gates.sh
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Lint formatter-scope self-test
+        run: |
+          chmod +x scripts/test/lint-test.sh
+          ./scripts/test/lint-test.sh
 
       # Self-test first: prove the scanner still detects (a gate that cannot
       # detect has silently rotted) before trusting its all-clear on the tree.

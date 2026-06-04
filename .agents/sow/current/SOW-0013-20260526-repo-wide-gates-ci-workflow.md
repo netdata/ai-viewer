@@ -359,10 +359,13 @@ Pending validation before closing:
 
 - CI run URL after push.
 - Branch protection state after post-merge required-check registration.
-- External reviewer convergence. **Done:** round 10 had no actionable code
-  findings; only close-out validation/staging/CI/branch-protection remained.
-- Final full `bash scripts/gates.sh` run after review convergence. **Done:** pass
-  at 505 s.
+- External reviewer convergence. **Done:** round 17 found no blocking code,
+  security, spec-sync, artifact, or local/CI parity defects. Remaining notes are
+  close-out bookkeeping items below.
+- Final full `bash scripts/gates.sh` run after the latest fixes. **Done:** pass
+  at 508 s.
+- Outcome and lessons sections remain pending until CI passes and branch
+  protection is registered.
 
 ## Reviews
 
@@ -772,6 +775,579 @@ Resolution:
 Reviewer convergence status: no new actionable code changes requested in round
 10. Remaining items are close-out validation/staging/CI/branch-protection steps
 already required by this SOW.
+
+### 2026-06-04 — PR CI failure: placeholder commit identity
+
+After the first push of PR #42, the CI `gates` job failed in
+`scripts/scan-secrets.sh` while the local full aggregate had passed before the
+commit. Evidence:
+
+- GitHub Actions job `79601453311` (`gates`) failed after 1m6s.
+- The failing step was the live secrets scan.
+- The current delivery commit intentionally used neutral placeholder metadata
+  (`user <user@example.invalid>`) to avoid writing personal commit metadata into
+  the repository.
+- The scanner derived Rule-1 identity from `git log --format='%ae%n%an'` and
+  treated that placeholder identity as an operator identity, producing broad
+  false positives on normal generic text such as `user` and `/home/user`.
+
+Root cause:
+
+- Rule 1 correctly derives real operator identity from repository history and
+  local git metadata, but it did not distinguish real identity from synthetic
+  placeholder identities used only as neutral commit metadata.
+- This made a privacy-preserving commit identity become a ban-list token.
+
+Spec delta before the fix:
+
+- `.agents/sow/specs/quality-gates.md` now states that exact synthetic
+  placeholder identities (`user`, `user@example.invalid`, case-insensitive) are
+  ignored only while deriving the Rule-1 ban-list.
+- `.agents/skills/project-quality-gates/SKILL.md` mirrors the runtime rule.
+- The scanner must still fail closed if no non-placeholder identity remains
+  after filtering, and Rule 1 remains never allow-listed for tracked content.
+
+Validation plan for the fix:
+
+- Add scanner self-tests proving a repo with both a real synthetic sentinel
+  identity and placeholder commit metadata passes when tracked files contain
+  normal `user` and `/home/user` text.
+- Add a scanner self-test proving a repo with only placeholder commit metadata
+  fails closed because Rule 1 would otherwise be disabled.
+- Run focused shell syntax/lint/tests, the live scanner, the full local
+  `scripts/gates.sh`, and another external review round before the follow-up
+  commit.
+
+Resolution:
+
+- `scripts/scan-secrets.sh` now filters only exact placeholder metadata values
+  (`user`, `user@example.invalid`, case-insensitive) before partitioning Rule-1
+  derivation inputs into emails and names.
+- The filter is derivation-only; tracked file content is still scanned by the
+  normal Rule-1/Rule-2 matchers.
+- Empty Rule-1 ban-list detection remains fail-closed and now runs after
+  placeholder filtering.
+- `scripts/test/scan-secrets-test.sh` now has 23 cases, adding:
+  - `clean::mixed_case_placeholder_metadata_ignored_with_real_identity`
+  - `failclosed::mixed_case_placeholder_only_identity_empty_rule1`
+
+Focused validation after the fix:
+
+- `bash -n scripts/scan-secrets.sh scripts/test/scan-secrets-test.sh` — PASS.
+- `shellcheck -x scripts/scan-secrets.sh scripts/test/scan-secrets-test.sh` —
+  PASS.
+- `bash scripts/test/scan-secrets-test.sh` — PASS; 23 passed, 0 failed.
+- `bash scripts/scan-secrets.sh` — PASS; 819 tracked files scanned, 16 `.gz`
+  archives decompressed.
+- `git diff --check HEAD` — PASS.
+
+Full local aggregate after the fix:
+
+- `bash scripts/gates.sh` — PASS; total 517s.
+- Section timings: lint 23s, scan-secrets self-test 1s, live scan 14s,
+  AI-attribution 0s, spec-drift self-test 26s, live spec-drift 1s, systemd 0s,
+  build 6s, `test.sh` 377s, Go coverage gate 0s, adapter fuzz seed 1s,
+  frontend E2E+axe 6s, benchmark regression gate 62s.
+- Go coverage gate: internal aggregate 90.6%; all gated internal packages >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-04 — External review round 11
+
+Reviewers run in parallel with the same broad, read-only scope as prior rounds,
+plus the placeholder-identity CI-fix note and the full local `gates.sh` evidence:
+
+- `glm`: no blocking findings. Confirmed the placeholder fix is narrow,
+  derivation-only, fail-closed, and covered by the mixed real+placeholder and
+  placeholder-only tests. Low notes: the placeholder filter is intentionally
+  hardcoded, checkout-depth optimization remains tracked, and long scripts remain
+  follow-up maintenance work.
+- `deepseek`: no blocking findings. Confirmed the placeholder fix, 23 scanner
+  cases, spec/skill sync, and no Rule-2 or content allow-list side effects. Low
+  note: add explicit mixed-case placeholder metadata coverage.
+- `codex`: actionable findings:
+  1. CI/local mirror invariant was still false because CI `lint` ran
+     `go mod tidy`, standalone `gofmt`, standalone `goimports@latest`, and
+     `go vet`, while local `scripts/lint.sh` only relied on `golangci-lint` for
+     fmt/vet and did not run module tidiness.
+  2. Branch protection is not active yet (`required_status_checks: null`), which
+     is expected while this SOW is in progress but remains a close-out blocker.
+  3. Data-model spec-drift spec→code table-name coverage was narrower than the
+     spec advertised: `scripts/spec-drift.sh` checked only `### <table>` schema
+     headings, not table names declared inside SQL schema blocks under prose
+     headings.
+  4. Placeholder identity filtering needs explicit mixed-case metadata coverage.
+
+Resolution plan before the next review round:
+
+- Update `scripts/lint.sh` so the local static-analysis entrypoint mirrors the
+  CI `lint` job's module-tidiness, standalone `gofmt`, standalone
+  `goimports@latest`, and `go vet` steps before `golangci-lint`.
+- Update `scripts/spec-drift.sh` so data-model spec→code table-name checking
+  includes table names extracted from SQL schema blocks, not only schema
+  headings.
+- Add self-tests for the SQL-block-only spec table drift and mixed-case
+  placeholder metadata handling.
+- Keep branch-protection registration as the required post-merge close-out step.
+
+Resolution after the round-11 fixes:
+
+- `scripts/lint.sh` now mirrors the CI `lint` job's Go preflight before
+  `golangci-lint`: `go mod tidy`, `git diff --exit-code go.mod go.sum`,
+  standalone `gofmt -l .`, standalone `goimports@latest -l .`, and
+  `go vet ./...`.
+- `.agents/sow/specs/quality-gates.md` and
+  `.agents/skills/project-quality-gates/SKILL.md` now document module
+  tidiness and the local/CI formatter/vet parity contract.
+- `scripts/spec-drift.sh` now extracts table names from both data-model schema
+  headings and fenced SQL `CREATE TABLE` / `CREATE VIRTUAL TABLE` statements,
+  so a spec-only SQL table under a prose heading cannot escape the spec→code
+  drift check.
+- `scripts/test/spec-drift-test.sh` now includes
+  `data-model::sql_block_table_under_prose_heading_not_in_migrations`; the
+  current self-test suite is **26/26 cases**.
+- `scripts/test/scan-secrets-test.sh` now uses mixed-case placeholder metadata
+  in the real+placeholder and placeholder-only cases; the current self-test
+  suite is **23/23 cases**.
+- Branch-protection registration remains the post-merge close-out blocker
+  because the required check names must exist on `master` before they can be
+  registered safely.
+
+Focused validation after the round-11 fixes:
+
+- `bash -n scripts/lint.sh scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/spec-drift-test.sh scripts/test/scan-secrets-test.sh` — PASS.
+- `shellcheck -x scripts/lint.sh scripts/scan-secrets.sh
+  scripts/spec-drift.sh scripts/test/spec-drift-test.sh
+  scripts/test/scan-secrets-test.sh` — PASS.
+- `git diff --check HEAD` — PASS.
+- `bash scripts/test/spec-drift-test.sh` — PASS; 26 passed, 0 failed.
+- `bash scripts/test/scan-secrets-test.sh` — PASS; 23 passed, 0 failed.
+- `bash scripts/spec-drift.sh` — PASS; no drift across REST, SSE,
+  data-model, canonical, adapter-probes.
+- `bash scripts/scan-secrets.sh` — PASS; 819 tracked files scanned, 16 `.gz`
+  archives decompressed.
+- `bash scripts/lint.sh` — PASS, including module tidiness, standalone
+  `gofmt`, standalone `goimports`, `go vet`, `golangci-lint`, standalone
+  `gosec`, `govulncheck`, and frontend static checks.
+
+Full local aggregate after the round-11 fixes:
+
+- `bash scripts/gates.sh` — PASS; total 519s.
+- Section timings: lint 31s, scan-secrets self-test 2s, live scan 14s,
+  AI-attribution 0s, spec-drift self-test 29s, live spec-drift 1s, systemd 0s,
+  build 6s, `test.sh` 370s, Go coverage gate 0s, adapter fuzz seed 1s,
+  frontend E2E+axe 7s, benchmark regression gate 58s.
+- Go coverage gate: internal aggregate 90.5%; all gated internal packages
+  >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-04 — External review round 12
+
+Reviewers run in parallel with the same broad, read-only scope as prior rounds,
+plus notes about the round-11 fixes, the 26-case spec-drift self-test, the
+23-case scanner self-test, and the 519s full local aggregate evidence:
+
+- `glm`: no blocking findings. Confirmed the SOW-0013 implementation is
+  fail-closed, well-tested, and internally consistent. Close-out notes:
+  post-merge branch protection still pending, `Outcome`/`Lessons` still
+  pending, and follow-up SOWs must be staged explicitly.
+- `deepseek`: no blocking correctness or security findings. Medium
+  maintainability notes remain tracked follow-ups: duplicated SQL awk
+  infrastructure and fuzz target list triple-bookkeeping. Low close-out notes:
+  update a stale `gates.sh` comment, keep SOW close-out pending until CI and
+  branch protection are recorded.
+- `codex`: actionable findings:
+  1. Local/CI standalone formatter parity still allowed local-only false
+     positives because `gofmt -l .` and `goimports -l .` walked ignored and
+     untracked local files, while CI checks out only tracked files.
+  2. Local `scripts/lint.sh` warned on a `golangci-lint` version mismatch
+     instead of failing, so local and CI could run different lint engines.
+  3. `scripts/scan-secrets.sh` reported raw offending lines and raw secret
+     tokens on failure, which would make CI logs a secondary leak surface.
+  4. SOW-0037 still described formatter walks as part of the open vendored-Go
+     problem even though this slice fixes standalone formatters in SOW-0013.
+
+Resolution after the round-12 fixes:
+
+- `scripts/lint.sh` now derives a NUL-delimited tracked Go file list with
+  `git ls-files -z -- '*.go'` and runs standalone `gofmt`/`goimports` only on
+  that list. The gate fails closed when the tracked Go file list is empty or
+  when a formatter fails for any file.
+- The CI `lint` job uses the same tracked Go file list for standalone
+  `gofmt`/`goimports`, so ignored/untracked local files such as
+  `frontend/node_modules/**` cannot create local-only formatter failures.
+- `scripts/lint.sh` now fails when the installed `golangci-lint` version cannot
+  be parsed or differs from `.golangci-lint-version`. The local version in this
+  run matched the pin (`v2.11.4`).
+- `scripts/scan-secrets.sh` now reports path, line, rule, and a redacted
+  summary marker only. It never prints the raw matched operator identity, raw
+  offending line, or raw secret token.
+- `scripts/test/scan-secrets-test.sh` now has
+  `redact::diagnostics_hide_raw_values`, proving diagnostics keep
+  path/line/rule evidence while not echoing raw synthetic identity or secret
+  values.
+- `.agents/sow/specs/quality-gates.md` and
+  `.agents/skills/project-quality-gates/SKILL.md` document the tracked-file
+  formatter contract, hard local `golangci-lint` pin enforcement, and redacted
+  scanner diagnostics.
+- `.agents/sow/pending/SOW-0037-20260602-exclude-vendored-go-from-gates.md`
+  now records that standalone formatters are fixed in SOW-0013 and that the
+  remaining work is package-level `./...` gate scoping.
+
+Focused validation after the round-12 fixes:
+
+- `bash -n scripts/lint.sh scripts/scan-secrets.sh
+  scripts/test/scan-secrets-test.sh` — PASS.
+- `shellcheck -x scripts/lint.sh scripts/scan-secrets.sh
+  scripts/test/scan-secrets-test.sh` — PASS.
+- `actionlint .github/workflows/ci.yml` — PASS.
+- `git diff --check HEAD` — PASS.
+- `bash scripts/test/scan-secrets-test.sh` — PASS; 24 passed, 0 failed.
+- `bash scripts/scan-secrets.sh` — PASS; 819 tracked files scanned, 16 `.gz`
+  archives decompressed.
+- `bash scripts/lint.sh` — PASS, including module tidiness, standalone
+  tracked-file `gofmt` over 346 Go files, standalone tracked-file `goimports`
+  over 346 Go files, `go vet`, pinned-version `golangci-lint`, standalone
+  `gosec`, `govulncheck`, and frontend static checks.
+
+Full local aggregate after the round-12 fixes:
+
+- `bash scripts/gates.sh` — PASS; total 516s.
+- Section timings: lint 28s, scan-secrets self-test 1s, live scan 14s,
+  AI-attribution 0s, spec-drift self-test 28s, live spec-drift 1s, systemd 0s,
+  build 6s, `test.sh` 373s, Go coverage gate 0s, adapter fuzz seed 1s,
+  frontend E2E+axe 6s, benchmark regression gate 58s.
+- Go coverage gate: internal aggregate 90.5%; all gated internal packages
+  >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-05 — External review round 13
+
+Reviewers run in parallel with the same broad, read-only scope as prior rounds,
+plus notes about the round-12 fixes, the 24-case scanner self-test, the
+26-case spec-drift self-test, and the 516s full local aggregate evidence:
+
+- `glm`: no blocking correctness, security, spec/code, or local/CI parity
+  findings. Low non-blocking notes: grep error-suppression in the scanner is a
+  theoretical edge; duplicated SQL parsing remains maintainability debt already
+  tracked; redacted secret diagnostics intentionally expose only match length.
+- `deepseek`: no correctness or security blockers. Low notes: a latent
+  `pipefail` edge in the spec-drift failure reporter, the remaining `go vet
+  ./...` vendored-Go scope already covered by SOW-0037, and close-out evidence
+  still pending.
+- `codex`: one actionable gap and two close-out notes:
+  1. The tracked-file formatter behavior lacked a hermetic regression self-test
+     that plants ignored/untracked malformed Go files.
+  2. Short comments still described `scripts/lint.sh` as only
+     `golangci`/`gosec`/`govulncheck`, not the full module tidy + formatter +
+     vet + lint + security surface.
+  3. CI URL, branch protection, `Outcome`, and `Lessons Extracted` are correctly
+     still pending and must not be marked complete before they exist.
+
+Resolution after the round-13 fixes:
+
+- Added `scripts/test/lint-test.sh`, a hermetic self-test that creates a
+  temporary git repo, tracks a valid Go file, plants ignored and untracked
+  malformed Go files, proves `gofmt -l .` would fail, then proves formatter
+  checks over `git ls-files -z -- '*.go'` pass.
+- The self-test statically fails if `scripts/lint.sh` or `.github/workflows/ci.yml`
+  regress to exact-dot formatter walks (`gofmt -l .`, `gofmt -l "."`,
+  `goimports -l .`, or `goimports -l '.'`) or stop deriving formatter inputs
+  from `git ls-files -z -- '*.go'`. It still allows the current per-file
+  `./$f` form.
+- Wired `scripts/test/lint-test.sh` into `scripts/gates.sh` as the first fast
+  section, before `scripts/lint.sh`, so formatter-scope regressions fail with a
+  narrow diagnostic.
+- Wired the same self-test into the CI `gates` job with fail-closed presence
+  checks.
+- Updated `scripts/gates.sh`, `AGENTS.md`,
+  `.agents/sow/specs/quality-gates.md`, and
+  `.agents/skills/project-quality-gates/SKILL.md` so short descriptions match
+  the current `scripts/lint.sh` contract.
+
+Focused validation after the round-13 fixes:
+
+- `bash -n scripts/test/lint-test.sh scripts/gates.sh scripts/lint.sh
+  scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/scan-secrets-test.sh scripts/test/spec-drift-test.sh` — PASS.
+- `shellcheck -x scripts/test/lint-test.sh scripts/gates.sh scripts/lint.sh
+  scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/scan-secrets-test.sh scripts/test/spec-drift-test.sh` — PASS.
+- `bash scripts/test/lint-test.sh` — PASS; 3 passed, 0 failed.
+- `actionlint .github/workflows/ci.yml .github/workflows/codeql.yml` — PASS.
+- `git diff --check HEAD` — PASS.
+
+Full local aggregate after the round-13 fixes:
+
+- `bash scripts/gates.sh` — PASS; total 519s.
+- Section timings: lint formatter-scope self-test 0s, lint 28s,
+  scan-secrets self-test 1s, live scan 14s, AI-attribution 0s,
+  spec-drift self-test 27s, live spec-drift 1s, systemd 0s, build 6s,
+  `test.sh` 374s, Go coverage gate 0s, adapter fuzz seed 1s,
+  frontend E2E+axe 6s, benchmark regression gate 61s.
+- Go coverage gate: internal aggregate 90.5%; all gated internal packages
+  >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-05 — External review round 14
+
+Reviewers run in parallel with the same broad, read-only scope as prior rounds,
+plus notes about the round-13 fixes, the new formatter-scope self-test, the
+24-case scanner self-test, the 26-case spec-drift self-test, and the 519s full
+local aggregate evidence:
+
+- `codex`: actionable findings:
+  1. The CI `gates` job ran `scripts/test/lint-test.sh` after checkout without
+     an explicit Go setup step, so the self-test depended on the runner image's
+     incidental `gofmt` availability.
+  2. `scripts/test/lint-test.sh` was still untracked before staging, so the live
+     scanner's `git ls-files` surface did not yet include it.
+  3. The self-test's static detector caught exact-dot formatter walks but not
+     equivalent directory walks such as `gofmt -l ./` or `gofmt -l ./...`.
+- `deepseek`: no blocking correctness or security findings. Medium close-out
+  note: ensure `scripts/test/lint-test.sh` is explicitly staged so the
+  fail-closed CI presence check can succeed.
+- `glm`: no blocking correctness, security, spec/code, or local/CI parity
+  findings. One proposed medium issue claimed bare command-substitution
+  assignments lose the command status under `set -e`; local Bash evidence
+  rejected that as a false positive (`x=$(false)` exits non-zero, while
+  `local x=$(false)` masks the status; the script uses the bare form).
+
+Resolution after the round-14 fixes:
+
+- `.github/workflows/ci.yml` now sets up Go with `actions/setup-go@v6` and
+  `go-version-file: go.mod` before running the `gates` job's formatter-scope
+  self-test. The gate no longer relies on whatever `ubuntu-latest` happens to
+  preinstall.
+- `scripts/test/lint-test.sh` now flags formatter directory walks using `.`,
+  `./`, and `./...`, including quoted variants. It still allows the production
+  per-file form `gofmt -l "./$f"` / `goimports -l "./$f"`.
+- The SOW-0013 file set was staged explicitly by path, including
+  `scripts/test/lint-test.sh`. The live scanner then covered 820 tracked files,
+  confirming the new self-test is inside the tracked scan surface.
+- The Bash assignment finding was not changed in code because the actual shell
+  behavior contradicts the finding for the bare assignment form used here.
+
+Focused validation after the round-14 fixes:
+
+- `bash -n scripts/test/lint-test.sh scripts/gates.sh scripts/lint.sh
+  scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/scan-secrets-test.sh scripts/test/spec-drift-test.sh` — PASS.
+- `shellcheck -x scripts/test/lint-test.sh scripts/gates.sh scripts/lint.sh
+  scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/scan-secrets-test.sh scripts/test/spec-drift-test.sh` — PASS.
+- `bash scripts/test/lint-test.sh` — PASS; 3 passed, 0 failed.
+- `actionlint .github/workflows/ci.yml .github/workflows/codeql.yml` — PASS.
+- `git diff --check HEAD` — PASS.
+- Bash assignment behavior check — PASS; `bash -lc 'set -e; x=$(false)'`
+  exited 1, while the `local x=$(false)` control case masked the status.
+
+Full local aggregate after the round-14 fixes:
+
+- First staged `bash scripts/gates.sh` run passed every section through
+  frontend E2E/axe, then failed only at the final local benchmark regression
+  gate while the workstation load average was 20.92 / 15.15 / 11.55. A
+  standalone `scripts/check-bench.sh` rerun passed immediately after, confirming
+  transient benchmark noise rather than a SOW-0013 runtime regression.
+- Second staged `bash scripts/gates.sh` run — PASS; total 539s.
+- Section timings: lint formatter-scope self-test 0s, lint 36s,
+  scan-secrets self-test 1s, live scan 16s, AI-attribution 0s,
+  spec-drift self-test 34s, live spec-drift 1s, systemd 0s, build 6s,
+  `test.sh` 374s, Go coverage gate 0s, adapter fuzz seed 1s,
+  frontend E2E+axe 6s, benchmark regression gate 64s.
+- Go coverage gate: internal aggregate 90.5%; all gated internal packages
+  >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-05 — External review round 15
+
+Reviewers were run with the same broad, read-only scope as prior rounds, plus
+notes about the round-14 fixes, the staged scanner coverage of
+`scripts/test/lint-test.sh`, and the 539s full local aggregate evidence:
+
+- `codex`: actionable findings:
+  1. `scripts/test/lint-test.sh` still allowed the `goimports` behavioral proof
+     to skip when `goimports` was absent. The CI `gates` job now sets up Go, but
+     that job runs the self-test before `scripts/lint.sh` installs `goimports`,
+     so the self-test needed to resolve or install `goimports` fail-closed.
+  2. `scripts/lint.sh` failed closed on unparsable `golangci-lint version`
+     output, but the intended custom diagnostic was unreachable because the
+     parse pipeline exited under `set -euo pipefail` before the empty-version
+     branch.
+- `glm`: no blocking correctness, security, spec/code, or local/CI parity
+  findings. Low/info notes were accepted as non-actionable: placeholder content
+  in a scanner fixture, duplicated formatter-loop structure between production
+  and test, Linux-only `/dev/stderr`, and SQL block-comment drift outside the
+  project migration style.
+- `deepseek`: the process handle disappeared before a final review message was
+  captured. This is not counted as convergence evidence; the next round must
+  include a fresh reviewer run.
+
+Resolution after the round-15 fixes:
+
+- `scripts/test/lint-test.sh` no longer skips the `goimports` behavioral proof.
+  It first uses an existing `goimports`, then falls back to the Go install path,
+  then installs `golang.org/x/tools/cmd/goimports@latest` fail-closed if needed.
+  The behavior test now proves both broad `gofmt -l .` and broad
+  `goimports -l .` trip on malformed ignored/untracked local Go files before
+  proving tracked-file formatter calls pass.
+- `scripts/lint.sh` now guards only the `golangci-lint version` parse pipeline
+  with `|| true`, preserving hard failure while making the intended custom
+  unparsable-version diagnostic reachable.
+- Generated coverage-report PNGs were removed from `frontend/coverage/`. The
+  verification left dependency PNG assets under `frontend/node_modules/` alone
+  and found no tracked PNGs and no project PNGs outside dependencies.
+
+Focused validation after the round-15 fixes:
+
+- `bash -n scripts/test/lint-test.sh scripts/lint.sh scripts/gates.sh
+  scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/scan-secrets-test.sh scripts/test/spec-drift-test.sh` — PASS.
+- `shellcheck -x scripts/test/lint-test.sh scripts/lint.sh scripts/gates.sh
+  scripts/scan-secrets.sh scripts/spec-drift.sh
+  scripts/test/scan-secrets-test.sh scripts/test/spec-drift-test.sh` — PASS.
+- `bash scripts/test/lint-test.sh` — PASS; 3 passed, 0 failed.
+- PNG cleanup verification — PASS; `git ls-files '*.png' '*.PNG'` found no
+  tracked PNGs, and `find . -name '*.png' -not -path './.git/*' -not -path
+  './frontend/node_modules/*'` found no project PNGs outside dependencies.
+- `bash scripts/lint.sh` — PASS, including module tidiness, standalone
+  tracked-file `gofmt` over 346 Go files, standalone tracked-file `goimports`
+  over 346 Go files, `go vet`, pinned-version `golangci-lint`, standalone
+  `gosec`, `govulncheck`, and frontend static checks.
+
+Full local aggregate after the round-15 fixes:
+
+- `bash scripts/gates.sh` — PASS; total 502s.
+- Section timings: lint formatter-scope self-test 0s, lint 27s,
+  scan-secrets self-test 2s, live scan 13s, AI-attribution 0s,
+  spec-drift self-test 26s, live spec-drift 1s, systemd 0s, build 6s,
+  `test.sh` 362s, Go coverage gate 0s, adapter fuzz seed 1s,
+  frontend E2E+axe 5s, benchmark regression gate 59s.
+- Go race/coverage: PASS. The long pole was `internal/ingest` under race at
+  352s.
+- Go coverage gate: internal aggregate 90.5%; all gated internal packages
+  >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-05 — External review round 16
+
+Reviewers were run with the same broad, read-only scope as prior rounds, plus
+notes about the round-15 fixes, the PNG cleanup, and the 502s full local
+aggregate evidence:
+
+- `codex`: actionable finding — `scripts/scan-secrets.sh` filtered exact
+  placeholder commit metadata, but still added `basename "$HOME")` to the
+  Rule-1 home-stem ban-list unconditionally. On a generic runner where
+  `HOME=/home/user`, committed placeholder paths such as `/home/user/...` would
+  be flagged as operator-home leaks even though they are intentionally portable
+  fixture/documentation placeholders.
+- `glm`: no blocking findings. Low notes were accepted as non-blocking:
+  `CREATE TABLE IF NOT EXISTS` extraction is not needed by current migrations
+  and remains fail-closed if drift appears; exact placeholder identity handling
+  is intentionally narrow.
+- `deepseek`: no blocking findings. Low notes were accepted as close-out
+  housekeeping: tracked follow-up SOW artifacts must remain staged, historical
+  self-test counts in prior review entries are not rewritten, and outcome/lesson
+  sections remain pending until completion.
+
+Spec delta before the fix:
+
+- `.agents/sow/specs/quality-gates.md` now states that the exact neutral home
+  stem `user` is ignored when it comes only from `$HOME`, so placeholder paths
+  like `/home/user/...` stay portable across generic dev VMs.
+- `.agents/skills/project-quality-gates/SKILL.md` mirrors the runtime rule.
+- The rule remains derivation-only: tracked content is still scanned normally,
+  real derived operator identities are never allow-listed, and an empty Rule-1
+  ban-list remains a fail-closed error.
+
+Resolution after the round-16 fix:
+
+- `scripts/test/scan-secrets-test.sh` added
+  `clean::placeholder_home_passes_with_home_user`, which runs the scanner with
+  `HOME=/home/user` and tracks both `/home/user/...` and URL-encoded
+  `%2Fhome%2Fuser%2F...` placeholder content.
+- The new scanner self-test failed before the implementation fix, proving the
+  reviewer finding was real: 24 scanner cases passed and the new case failed on
+  the placeholder home examples.
+- `scripts/scan-secrets.sh` now skips only the exact neutral `$HOME` stem
+  `user` when it is derived from HOME. Non-placeholder git-derived `user` stems
+  still remain Rule-1 inputs, so this is not a broad allow-list.
+- Generated coverage-report PNGs were removed again after the full gate
+  regenerated them. The verification left dependency PNG assets under
+  `frontend/node_modules/` alone and found no tracked PNGs and no project PNGs
+  outside dependencies.
+
+Focused validation after the round-16 fix:
+
+- `bash -n scripts/scan-secrets.sh scripts/test/scan-secrets-test.sh` — PASS.
+- `shellcheck -x scripts/scan-secrets.sh scripts/test/scan-secrets-test.sh` —
+  PASS.
+- `bash scripts/test/scan-secrets-test.sh` — PASS; 25 passed, 0 failed.
+- `bash scripts/scan-secrets.sh` — PASS; 820 tracked files scanned, 16 `.gz`
+  archives decompressed.
+
+Full local aggregate after the round-16 fix:
+
+- `bash scripts/gates.sh` — PASS; total 508s.
+- Section timings: lint formatter-scope self-test 0s, lint 29s,
+  scan-secrets self-test 1s, live scan 13s, AI-attribution 0s,
+  spec-drift self-test 27s, live spec-drift 1s, systemd units 0s, build 5s,
+  `test.sh` 369s, Go coverage gate 1s, adapter fuzz seed 0s,
+  frontend E2E+axe 7s, benchmark regression gate 55s.
+- Go race/coverage: PASS. The long pole was `internal/ingest` under race at
+  357s.
+- Go coverage gate: internal aggregate 90.5%; all gated internal packages
+  >=80%.
+- Frontend Vitest: 623 tests passed; line coverage 94.69%.
+- Playwright E2E+axe: 51 tests passed.
+- Benchmark gate: PASS; no significant `sec/op` regression >20%.
+
+### 2026-06-05 — External review round 17
+
+Reviewers were run with the same broad, read-only scope as prior rounds, plus
+notes about the round-16 HOME-placeholder fix, the 25-case scanner self-test, the
+PNG cleanup, and the 508s full local aggregate evidence:
+
+- `codex`: no blocking code, security, local/CI parity, generated-artifact, or
+  unwanted-side-effect findings. It verified the scanner HOME-placeholder change
+  is derivation-only, empty Rule 1 remains fail-closed, the repository history
+  has non-placeholder identity inputs for CI, setup-go provides the Go install
+  bin path for `goimports`, and no staged/tracked image artifacts exist. Only
+  close-out note: update this SOW so reviewer convergence is no longer marked
+  pending.
+- `glm`: no blocking findings. It verified scanner 25/25, spec-drift 26/26,
+  lint self-test 3/3, live scan/spec-drift, shellcheck, actionlint, diff-check,
+  no PNGs, scanner HOME placeholder safety, spec/skill sync, SOW-0037
+  cross-reference accuracy, and no unrelated production source changes. Only
+  close-out note: update this SOW's pending-validation section after convergence.
+- `deepseek`: no blocking findings. It verified scanner HOME placeholder safety,
+  diagnostic redaction, local/CI formatter parity, spec/code synchronization,
+  no generated artifacts, and SOW-0037 scope. One non-blocking CI style note was
+  accepted as no-op: the `gates` job's Go setup is unconditional, which is fine
+  because this repository requires `go.mod` for mature gates and other jobs fail
+  closed on missing Go module prerequisites.
+
+Resolution after round 17:
+
+- No code, script, workflow, spec, or skill changes were required.
+- This SOW's pending-validation summary was updated to mark external reviewer
+  convergence done.
+- Remaining close-out work is outside the staged code delta: push, record the CI
+  run URL, confirm every CI row passes, merge, register branch-protection
+  required checks, and then fill `Outcome`/`Lessons Extracted` before moving this
+  SOW to completed.
 
 ## Outcome
 

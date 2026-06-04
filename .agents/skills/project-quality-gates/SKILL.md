@@ -17,14 +17,33 @@ When a new pattern emerges that warrants enforcement, add it here AND to `.agent
 
 ## Gate Catalog
 
+### Go — Module Tidiness
+
+```bash
+go mod tidy
+git diff --exit-code go.mod go.sum
+```
+
+Threshold: zero diffs. `scripts/lint.sh` mirrors the CI `lint` job and runs
+this before formatter/linter/security checks. A stale module graph is a local
+gate failure, not a CI-only surprise.
+
 ### Go — Formatting
 
 ```bash
-gofmt -l .                          # zero output expected
-goimports -l .                      # zero output expected
+gofmt -l <tracked Go files>         # zero unformatted tracked files expected
+goimports -l <tracked Go files>     # zero unformatted tracked files expected
 ```
 
-Threshold: zero diffs. Auto-fix locally with `gofmt -w` and `goimports -w` before commit.
+Threshold: zero diffs. `scripts/lint.sh` runs standalone `gofmt` and
+`goimports@latest` exactly like CI before `golangci-lint`; both surfaces derive
+the input set from `git ls-files -z -- '*.go'`, so ignored/untracked local files
+such as `frontend/node_modules/**` cannot cause local-only formatter failures.
+An empty tracked Go file list is fail-closed. Golangci's formatters are defense
+in depth. Auto-fix locally with `gofmt -w` and `goimports -w` before commit.
+`scripts/test/lint-test.sh` is the hermetic self-test for the tracked-file
+formatter contract; it plants ignored/untracked malformed Go and must fail if
+the formatter gate regresses to walking `.`.
 
 ### Go — Vet
 
@@ -40,7 +59,7 @@ Threshold: zero warnings.
 golangci-lint run --timeout=5m      # umbrella: also enforces fmt + vet
 ```
 
-golangci-lint is **v2** (`.golangci.yml` has `version: "2"`). `golangci-lint run` is the umbrella gate — with the formatters enabled it enforces Go — Format, and the `govet` linter covers Go — Vet, so a clean `run` means fmt+vet+lint all pass. (In golangci-lint v2, `golangci-lint run` REPORTS formatter violations — gofmt/goimports/gofumpt — as failures; `golangci-lint fmt` is the separate auto-fix path. `run` enforces formatting; it is not merely a linter-only pass. Note: `--enable-only <formatter>` is rejected because formatters are configured under `formatters:`, not enabled as linters — this does not mean `run` skips them.) Run it locally via `./scripts/lint.sh` (which then runs the standalone security tools). The version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`); CI runs it via `golangci/golangci-lint-action` at that pinned version.
+golangci-lint is **v2** (`.golangci.yml` has `version: "2"`). `golangci-lint run` is the umbrella gate — with the formatters enabled it enforces Go — Format, and the `govet` linter covers Go — Vet, so a clean `run` means fmt+vet+lint all pass. (In golangci-lint v2, `golangci-lint run` REPORTS formatter violations — gofmt/goimports/gofumpt — as failures; `golangci-lint fmt` is the separate auto-fix path. `run` enforces formatting; it is not merely a linter-only pass. Note: `--enable-only <formatter>` is rejected because formatters are configured under `formatters:`, not enabled as linters — this does not mean `run` skips them.) Run it locally via `./scripts/lint.sh` after the module-tidiness, standalone `gofmt`, standalone `goimports@latest`, and `go vet` checks that mirror the CI `lint` job. The version is pinned in `.golangci-lint-version` (single source for CI + `scripts/lint.sh`); CI runs it via `golangci/golangci-lint-action` at that pinned version, and local `scripts/lint.sh` fails when the installed binary cannot be parsed or differs from the pin.
 
 `.golangci.yml` enables linters: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`, `errorlint`, `gocritic`, `revive`, `gocyclo`, `misspell`, `nilerr`, `prealloc`, `unconvert`, `unparam`, `whitespace`, `bodyclose`, `noctx`; formatters: `gofmt`, `goimports`, `gofumpt`. NOT enabled: `gosimple` (v2 merged it into `staticcheck`) and `gosec` (runs standalone — see Go — Security — to avoid duplicate analysis).
 
@@ -190,8 +209,15 @@ scripts/test/scan-secrets-test.sh   # hermetic self-test for rule classes + fail
 Patterns checked:
 
 - Operator identity, derived at runtime from git/user metadata and `$HOME`; no
-  literal operator identity is committed in the scanner. This rule is never
-  allow-listed.
+  literal operator identity is committed in the scanner. Synthetic placeholder
+  commit identities used only to avoid personal commit metadata (currently exact
+  `user` and `user@example.invalid`, case-insensitive) are ignored as Rule-1
+  derivation inputs. The exact neutral home stem `user` is also ignored when it
+  comes only from `$HOME`, so committed placeholder paths such as
+  `/home/user/...` stay portable across generic dev VMs. Tracked content is
+  still scanned normally; real derived operator identities are never
+  allow-listed. After placeholder filtering, an empty Rule-1 ban-list is a
+  fail-closed error. This rule is never allow-listed.
 - Generic secret shapes: `sk-…` / `sk-ant-…`, Slack `xox…`, AWS `AKIA…`,
   bearer tokens, GitHub PATs, GitHub fine-grained PATs, and GitLab PATs.
   Secret-shape tokens are flagged in every tracked file, including fixtures; the
@@ -199,6 +225,9 @@ Patterns checked:
   sanitizer fixtures.
 - `.gz` archives are decompressed and scanned; malformed archives are scanned
   raw and reported. Tracked symlinks are scanned as target-path strings.
+- Diagnostics are redacted: failure output reports path, line, rule, and a
+  redacted/summary marker only; it never prints the raw matched operator
+  identity, offending line, or secret token.
 
 Threshold: zero hits.
 
@@ -265,7 +294,7 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ## Aggregate Scripts
 
 ```bash
-./scripts/lint.sh         # build-free static analysis: Go (golangci umbrella + standalone gosec + govulncheck, SOW-0009) AND frontend (eslint + tsc + bundle-size self-test + coverage-config verifier + per-dir-coverage gate self-test, SOW-0012); fail-fast; frontend section skipped when frontend/ is absent
+./scripts/lint.sh         # build-free module/static analysis: Go module tidy + tracked-file formatters + vet + golangci + gosec + govulncheck AND frontend eslint/tsc/bundle-size/coverage self-tests; fail-fast; frontend section skipped when frontend/ is absent
 ./scripts/test.sh         # ALL tests: Go (race + coverage profile) then, in normal mode, the frontend Vitest run (real per-dir coverage gate); skips frontend when absent (SOW-0010/0012; EXISTS)
 ./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
 ./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
@@ -273,9 +302,9 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ./scripts/gates.sh        # every gate above, in order, fail-fast, per-section timing (SOW-0013; EXISTS)
 ```
 
-`scripts/lint.sh` is the build-free static-analysis entrypoint: it runs only analysis + the coverage-config verifier + the hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
+`scripts/lint.sh` is the build-free module/static-analysis entrypoint: it runs Go module tidiness, tracked-file Go formatter checks, Go vet/lint/security checks, frontend static checks, the coverage-config verifier, and hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, slow gates last, and complete coverage of the local gate catalog including fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the pinned `golangci-lint-action` + standalone gosec/govulncheck, `test`, `frontend`, `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/test/lint-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, slow gates last, and complete coverage of the local gate catalog including the lint formatter-scope self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
 
 Required CI jobs are **not** bootstrap probes anymore. They fail closed when
 their mature repo prerequisites disappear: `lint`/`test` require Go module files

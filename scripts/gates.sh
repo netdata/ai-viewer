@@ -9,20 +9,21 @@
 #
 # It composes the existing per-gate scripts rather than re-implementing them, so
 # there is one source of truth per gate:
-#   1. scripts/lint.sh                  Go (golangci umbrella + gosec + govulncheck)
-#                                       + frontend static analysis (eslint, tsc,
-#                                       bundle-size/coverage gate self-tests).
-#   2. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
-#   3. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
-#   4. scripts/spec-drift.sh + its self-test     the 5 spec↔code drift indicators.
-#   5. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
-#   6. scripts/build.sh                 frontend build + REAL bundle-size gate +
+#   1. scripts/test/lint-test.sh        tracked-file formatter-scope self-test.
+#   2. scripts/lint.sh                  Go module tidy + tracked formatters +
+#                                       vet + golangci-lint + gosec +
+#                                       govulncheck, plus frontend static checks.
+#   3. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
+#   4. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
+#   5. scripts/spec-drift.sh + its self-test     the 5 spec↔code drift indicators.
+#   6. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
+#   7. scripts/build.sh                 frontend build + REAL bundle-size gate +
 #                                       embed + both Go binaries.
-#   7. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
+#   8. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
 #                                       coverage gate + frontend Vitest.
-#   8. deterministic adapter fuzz seed corpus + target-set lock.
-#   9. frontend Playwright E2E (includes axe a11y specs) against the built binary.
-#  10. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
+#   9. deterministic adapter fuzz seed corpus + target-set lock.
+#  10. frontend Playwright E2E (includes axe a11y specs) against the built binary.
+#  11. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
 #                                       gate self-test + local regression gate.
 #
 # ORDERING: fast static gates first so a quick failure surfaces early; the SLOW
@@ -149,49 +150,53 @@ run_bench_gate() {
 
 # --- fast static gates first -------------------------------------------------
 
-# 1. Static analysis (Go + frontend, build-free).
+# 1. Formatter-scope self-test. Run before lint.sh so a regression to walking
+#    local ignored/untracked Go fails with the narrow diagnostic first.
+section "lint formatter-scope self-test" bash scripts/test/lint-test.sh
+
+# 2. Static analysis (Go + frontend, build-free).
 section "lint.sh (Go + frontend static analysis)" bash scripts/lint.sh
 
-# 2. Secrets + operator-PII scan. Self-test first (prove the scanner still
+# 3. Secrets + operator-PII scan. Self-test first (prove the scanner still
 #    detects), then the scan itself. Both fail-closed (the files must exist).
 section "scan-secrets self-test" bash scripts/test/scan-secrets-test.sh
 section "scan-secrets" bash scripts/scan-secrets.sh
 
-# 3. No-AI-attribution scan. Required fail-closed gate.
+# 4. No-AI-attribution scan. Required fail-closed gate.
 section "scan-ai-attribution" bash scripts/scan-ai-attribution.sh
 
-# 4. Spec ↔ code drift. Self-test first, then the detector on the live tree.
+# 5. Spec ↔ code drift. Self-test first, then the detector on the live tree.
 section "spec-drift self-test" bash scripts/test/spec-drift-test.sh
 section "spec-drift" bash scripts/spec-drift.sh
 
-# 5. systemd unit static lint (present in this repo; skip cleanly if removed).
+# 6. systemd unit static lint (present in this repo; skip cleanly if removed).
 if [[ -f scripts/test/systemd-units-test.sh ]]; then
   section "systemd units" bash scripts/test/systemd-units-test.sh
 fi
 
 # --- slow gates last ---------------------------------------------------------
 
-# 6. Full build + the REAL bundle-size gate on the built dist/ + embed + both
+# 7. Full build + the REAL bundle-size gate on the built dist/ + embed + both
 #    binaries. (Slower than the static gates; faster than the -race suite.)
 section "build.sh (frontend build + bundle-size gate + embed + binaries)" bash scripts/build.sh
 
-# 7. The long pole: Go -race suite + statement-coverage gate, then (inside
+# 8. The long pole: Go -race suite + statement-coverage gate, then (inside
 #    test.sh) the frontend Vitest run. check-coverage.sh consumes the
 #    coverage.out test.sh writes.
 section "test.sh (Go -race + coverage + frontend Vitest)" bash scripts/test.sh
 section "check-coverage.sh (Go statement coverage gate)" bash scripts/check-coverage.sh coverage.out
 
-# 8. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
+# 9. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
 #    exercises seeds too, but this named section makes the gate visible and pins
 #    the package:target matrix against fuzz-nightly.yml.
 section "adapter fuzz seed corpus" run_fuzz_seed_gate
 
-# 9. Playwright E2E against the built embedded binary. The gating chromium
+# 10. Playwright E2E against the built embedded binary. The gating chromium
 #    project includes the axe a11y specs, so this covers Frontend — E2E and
 #    Frontend — Accessibility without a duplicate second Playwright run.
 section "frontend E2E + axe" run_frontend_e2e
 
-# 10. Benchmark gate self-test + local workstation regression gate. This is not
+# 11. Benchmark gate self-test + local workstation regression gate. This is not
 #     comparable on CI hardware, but it is a required local/workstation gate.
 section "benchmark regression gate" run_bench_gate
 

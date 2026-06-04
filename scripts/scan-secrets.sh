@@ -112,11 +112,25 @@ SELF_REL="scripts/scan-secrets.sh"
 # Self-exclusion (SELF_REL skip below) stops a self-hit on the scanner, but the
 # real protection is that nothing identity-bearing is committed here at all.
 #
-# derive_rule1 — populate R1_EMAIL / R1_HOME / R1_NAME from git metadata.
-# FAIL-CLOSED: if no email AND no name can be derived, Rule 1 has no ban-list
-# and must NOT run silently — print an error and exit non-zero.
 ere_escape() { printf '%s' "$1" | sed -E 's/[][(){}.^$*+?|\\]/\\&/g'; }
 
+# Exact placeholder commit identities are not operator identity. This filter is
+# intentionally derivation-only; tracked file content is never allow-listed.
+is_placeholder_identity_line() {
+  local folded
+  folded="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$folded" == "user" || "$folded" == "user@example.invalid" ]]
+}
+
+is_neutral_placeholder_home_stem() {
+  local folded
+  folded="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$folded" == "user" ]]
+}
+
+# derive_rule1 — populate R1_EMAIL / R1_HOME / R1_NAME from git metadata.
+# FAIL-CLOSED: if no non-placeholder email/name can be derived, Rule 1 has no
+# ban-list and must NOT run silently — print an error and exit non-zero.
 derive_rule1() {
   local emails=() names=()
   local v
@@ -149,6 +163,7 @@ derive_rule1() {
   local email_seen="" name_seen=""
   while IFS= read -r v; do
     [[ -z "$v" ]] && continue
+    is_placeholder_identity_line "$v" && continue
     if [[ "$v" == *@* ]]; then
       case "$email_seen" in *$'\n'"$v"$'\n'*) continue ;; esac
       email_seen="${email_seen}"$'\n'"$v"$'\n'
@@ -162,13 +177,13 @@ derive_rule1() {
 
   # Fail-closed: an empty ban-list means Rule 1 would silently pass everything.
   if [[ "${#emails[@]}" -eq 0 && "${#names[@]}" -eq 0 ]]; then
-    printf >&2 '%s[FAIL]%s Rule 1 ban-list is empty: no git author (git log) and no git config user.email/user.name could be derived. Rule 1 (operator identity) must always run with a real ban-list; refusing to scan with Rule 1 disabled.\n' "$RED" "$NC"
+    printf >&2 '%s[FAIL]%s Rule 1 ban-list is empty: no non-placeholder git author (git log) and no non-placeholder git config user.email/user.name could be derived. Rule 1 (operator identity) must always run with a real ban-list; refusing to scan with Rule 1 disabled.\n' "$RED" "$NC"
     exit 2
   fi
 
   # Collect the home-path stems <X>: email local-parts, space-stripped lowercase
   # names, and the basename of $HOME (for the local runner).
-  local stems=() s stem_seen=""
+  local stems=() s stem_seen="" home_stem
   add_stem() {
     local x="$1"
     [[ -z "$x" ]] && return 0
@@ -180,7 +195,12 @@ derive_rule1() {
   for v in "${names[@]}"; do
     add_stem "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
   done
-  add_stem "$(basename "$HOME")"
+  home_stem="$(basename "$HOME")"
+  # HOME=/home/user is a portable placeholder on generic VMs. Skip only this
+  # HOME-derived stem; non-placeholder git-derived "user" stems still remain Rule-1 inputs.
+  if ! is_neutral_placeholder_home_stem "$home_stem"; then
+    add_stem "$home_stem"
+  fi
 
   # Collect name words (each whitespace-separated token of each derived name).
   local words=() w word_seen=""
@@ -300,7 +320,9 @@ scan_text() {
   [[ -z "$text" ]] && return 0
 
   # emit_raw — Rule 1 reporter. Matches <regex> against the RAW text (no
-  # allow-list filtering, ever) and reports the whole offending line.
+  # allow-list filtering, ever) and reports only file/line/rule. Never echo the
+  # matched line: it contains the operator identity this scanner exists to keep
+  # out of durable logs.
   # Args: <regex> <rule-label> <grep-iflag>.
   #
   # An EMPTY regex is skipped: `grep -E ''` matches EVERY line, which would
@@ -314,7 +336,7 @@ scan_text() {
     out="$(printf '%s' "$text" | grep -nE ${iflag:+-i} "$re" || true)"
     if [[ -n "$out" ]]; then
       while IFS= read -r line; do
-        printf '%s:%s [%s] %s\n' "$label" "${line%%:*}" "$rule" "${line#*:}"
+        printf '%s:%s [%s] redacted operator identity match\n' "$label" "${line%%:*}" "$rule"
       done <<< "$out"
       hits=1
     fi
@@ -323,7 +345,8 @@ scan_text() {
   # emit_tokens — Rule 2 reporter. Extracts each matched secret-shape TOKEN with
   # its line number (grep -noE), then reports only tokens that are NOT marked
   # synthetic. The exemption is per token, so a real secret on a line that also
-  # carries a synthetic placeholder is still flagged.
+  # carries a synthetic placeholder is still flagged. Never echo the matched
+  # token: CI logs are durable and must not become the leak surface.
   # Args: <regex> <rule-label>.
   emit_tokens() {
     local re="$1" rule="$2" out lineno token
@@ -342,7 +365,8 @@ scan_text() {
       if printf '%s' "$token" | grep -qF "$SECRET_MARKER"; then
         continue
       fi
-      printf '%s:%s [%s] %s\n' "$label" "$lineno" "$rule" "$token"
+      printf '%s:%s [%s] redacted secret token match (match_length=%d)\n' \
+        "$label" "$lineno" "$rule" "${#token}"
       hits=1
     done <<< "$out"
   }

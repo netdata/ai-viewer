@@ -348,7 +348,7 @@ Asking the operator to approve a PR is forbidden. The operator's approval gate i
 ```bash
 ./scripts/build.sh          # build frontend (+ REAL bundle-size gate on dist/) + Go binaries
 ./scripts/dev.sh            # dev workflow with hot reload
-./scripts/lint.sh           # build-free static analysis: Go (golangci+gosec+govulncheck) AND frontend (eslint+tsc+bundle-size self-test+coverage-config verifier+coverage gate self-test); zero warnings
+./scripts/lint.sh           # build-free module/static analysis: Go tidy+format+vet+lint+security AND frontend static/gate self-tests; zero warnings
 ./scripts/test.sh           # ALL tests + coverage + race: Go, then the frontend Vitest coverage gate (normal mode)
 ./scripts/check-coverage.sh # Go statement coverage gate (internal/* ≥ 80%)
 ./scripts/gates.sh          # full local workstation gate aggregate
