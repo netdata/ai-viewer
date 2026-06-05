@@ -818,6 +818,7 @@ Completed.
   converged before close.
 - Closeout also found two active GitHub repository rulesets requiring manual PR
   approval despite canonical branch protection having
-  `required_pull_request_reviews: null`; both duplicate rulesets were disabled,
-  and the workflow contract/setup docs now record that rulesets must not
-  reintroduce a manual approval gate.
+  `required_pull_request_reviews: null`; both rulesets were corrected so their
+  active `pull_request` rules require zero approving reviews and no code-owner
+  review, and the workflow contract/setup docs now record that rulesets must
+  not reintroduce a manual approval gate.

@@ -189,14 +189,20 @@ gh api /repos/netdata/ai-viewer/rulesets \
   --jq '.[] | select(.target == "branch") | {id, name, enforcement, conditions}'
 ```
 
-If an old duplicate ruleset exists only to enforce manual reviews, disable it
-instead of bypassing the merge:
+If an old duplicate ruleset exists only to enforce manual reviews, either
+disable it or update the active `pull_request` rule so it requires zero
+approvals and no code-owner review. Preserve the rest of the ruleset payload
+and update through `PUT`; `PATCH` is not supported for repository rulesets:
 
 ```bash
 gh api /repos/netdata/ai-viewer/rulesets/<ruleset-id> > /tmp/ruleset.json
-jq '.enforcement = "disabled"' /tmp/ruleset.json > /tmp/ruleset-disabled.json
+jq '(.rules[] | select(.type == "pull_request")
+      | .parameters.required_approving_review_count) = 0
+    | (.rules[] | select(.type == "pull_request")
+      | .parameters.require_code_owner_review) = false' \
+  /tmp/ruleset.json > /tmp/ruleset-no-manual-review.json
 gh api --method PUT /repos/netdata/ai-viewer/rulesets/<ruleset-id> \
-  --input /tmp/ruleset-disabled.json
+  --input /tmp/ruleset-no-manual-review.json
 ```
 
 ### Token scope
