@@ -168,7 +168,10 @@ Vitest + React Testing Library. Threshold: all pass; global aggregate floor (≥
 - **Per-dir mechanism = Vitest NATIVE glob-keyed `coverage.thresholds`** (SOW-0012; Vitest ≥ 4, verified on 4.1.7) — `vitest.config.ts` has `'src/components/<Dir>/**': { lines: 80 }` per measured dir. A group below 80% lines fails the run (exit 1: `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`). NO wrapper script; a shared `PER_DIR_LINES` const ties the global + per-dir floors together.
 - **Shared lists (F3):** `PER_DIR_GLOBS`, `COVERAGE_INCLUDE`, `COVERAGE_EXCLUDED`, `PER_DIR_LINES` live in `frontend/vitest.coverage.mjs`; `vitest.config.ts` imports the measuring lists and `check-coverage-config.mjs` imports all of them (no second copy to drift). `.mjs` (no TS loader for the Node verifier) + a co-located `vitest.coverage.d.mts` for the config's typecheck.
 - **Gotcha — empty glob group vacuously PASSES:** an unmatched glob's lines pct is `"Unknown"` and `"Unknown" < 80` is `false`. So add a per-dir key ONLY for a dir in `coverage.include`, AND every measured component/page dir MUST have a per-dir key — the gated set and the measured set are EQUAL (`gatedDirs === measuredDirs`), enforced both ways. When you implement+test a new component/page dir, add it to BOTH `COVERAGE_INCLUDE` AND `PER_DIR_GLOBS` in `vitest.coverage.mjs`, else the per-dir gate silently skips it (or, the reverse, a floor for an unmeasured/excluded dir is a no-op that can never fire). Dirs/files that are intentionally NOT measured go in `COVERAGE_EXCLUDED` (in `vitest.coverage.mjs`) with a per-entry rationale: `Layout` + `StatCard` are REAL components whose dedicated Vitest unit coverage is deferred (Playwright exercises them today) — NOT placeholders; the `Agents`/`Models`/`Tools` Phase-3 stubs are bare `<ComingSoon/>` wrappers; `NotFound.tsx` is the trivial 404. (`ComingSoon.tsx` itself IS measured — it has a unit test.) **`npm run check:coverage-config` catches THREE things** on the REAL lists, failing closed and naming the offender: (1) **non-vacuity** — a per-dir glob matching zero source files; (2) **BIDIRECTIONAL lockstep** — a measured dir with no per-dir floor (measured ⊄ gated) AND a per-dir floor whose dir is not measured (excluded or absent from include; gated ⊄ measured — a no-op threshold group, R8-2); (3) **disk-completeness** — a source dir/flat-file under `src/components/`/`src/pages/` in NEITHER `COVERAGE_INCLUDE` nor `COVERAGE_EXCLUDED` (so shipped source cannot silently escape both coverage and the verifier). It also fails closed on a broad whole-root include glob (e.g. `src/pages/**/*.{ts,tsx}`), on a per-dir include that is **not the EXACT canonical whole-dir shape** `<root>/<Dir>/**/*.{ts,tsx}` (a bare dir, an extension-narrowed `**/*.tsx`/`**/*.ts`, a narrow filename, or a deeper subpath — all reject, so a sibling source cannot escape a "measured" dir), on a **`PER_DIR_GLOBS` entry that is not the EXACT canonical threshold shape `<root>/<Dir>/**`** (a bare dir like `src/components/Foo`, or a deeper/narrower glob — a Vitest threshold KEY must end in `/**` to match file paths, so a bare-dir key matches nothing and that floor vacuously passes; only a canonical entry contributes its dir to the gated set), and on a malformed `.`/`..` path segment. **Both per-dir-root shape checks compare the RAW string, not a normalized one (R8-1):** `vitest.config.ts` hands the RAW strings to Vitest (`PER_DIR_GLOBS` → picomatch threshold keys vs clean `relative(root,file)` paths; `COVERAGE_INCLUDE` → tinyglobby selector), so an entry that is canonical only AFTER normalization (a leading `./`, a repeated `//`, or a trailing `/`) is REJECTED — a `//`/trailing-`/` key matches nothing (vacuous floor) and the `./` form is version-fragile. So write per-dir-root entries EXACTLY canonical: `src/components/<Dir>/**` and `src/components/<Dir>/**/*.{ts,tsx}` — no `./`, no `//`, no trailing `/`.
-- HTML report at `frontend/coverage/` (CI artifact `frontend-coverage-<run_id>`); `json` reporter also emits `coverage/coverage-final.json`.
+- HTML report at `frontend/coverage/` (CI artifact
+  `frontend-coverage-<run_id>`); `json` reporter emits
+  `coverage/coverage-final.json`; `lcov` reporter emits `coverage/lcov.info`
+  for Codacy coverage upload.
 - **Two guards, do not conflate:** the MECHANISM self-test (`scripts/check-coverage-thresholds.test.sh`) proves Vitest's glob-keyed threshold still fails closed on a throwaway 50%-lines fixture — it does NOT read the real config. The real-config verifier (`scripts/check-coverage-config.mjs`) enforces the real lists' non-vacuity + BIDIRECTIONAL lockstep (`gatedDirs === measuredDirs`) + disk-completeness + RAW-canonical per-dir-root shapes (per-dir include exactly `<root>/<Dir>/**/*.{ts,tsx}`, per-dir floor exactly `<root>/<Dir>/**`, both as the RAW string — no `./`/`//`/trailing-`/` laundering); its OWN decision logic has a hermetic self-test (`scripts/check-coverage-config.test.sh`, `npm run check:coverage-config:selftest`). All are dedicated CI `frontend` steps and run in `scripts/lint.sh`.
 - A dir under the floor is a finding to fix with tests — never lower the threshold.
 
@@ -305,7 +308,7 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 
 `scripts/lint.sh` is the build-free module/static-analysis entrypoint: it runs Go module tidiness, tracked-file Go formatter checks, Go vet/lint/security checks, frontend static checks, the coverage-config verifier, and hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/test/lint-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, slow gates last, and complete coverage of the local gate catalog including the lint formatter-scope self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, slow gates last, and complete coverage of the local gate catalog including the lint formatter-scope self-test, Codacy coverage-upload self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/Codacy coverage-upload self-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
 
 Required CI jobs are **not** bootstrap probes anymore. They fail closed when
 their mature repo prerequisites disappear: `lint`/`test` require Go module files
@@ -322,6 +325,97 @@ systemd unit lint may skip when their helper file is absent.
 ## Renaming a CI Job
 
 The `ci.yml` job IDs (`lint`, `test`, `frontend`, `embed-smoke`, `gates`, plus each explicit CodeQL matrix job name: `CodeQL (go)`, `CodeQL (javascript-typescript)`, `CodeQL (actions)`) are the branch-protection **required-status-check** contract. The current names are recorded in `.github/workflows-checks.yaml` (operator-readable, NOT consumed by Actions). Renaming a job silently disables its required check (protection keys by name). So any SOW that renames a job MUST, in the **same commit**: (1) rename it in `ci.yml` or `codeql.yml`, (2) update `.github/workflows-checks.yaml`, and (3) re-run the full branch-protection `gh api -X PUT …/branches/master/protection` invocation documented in `docs/setup.md`. GitHub's `PATCH` endpoint is only for the nested `/protection/required_status_checks` update, not the full protection rule. This is the §"Adding a New Gate" rule's sibling for renames.
+
+## Code Scanning Defence Layer
+
+### CodeQL
+
+Runtime checks:
+
+```bash
+actionlint .github/workflows/codeql.yml
+gh run list --workflow codeql --branch master --limit 5
+gh api /repos/netdata/ai-viewer/code-scanning/alerts --jq 'map(select(.state=="open")) | length'
+```
+
+Policy:
+
+- Required contexts are `CodeQL (go)`, `CodeQL (javascript-typescript)`, and
+  `CodeQL (actions)`.
+- CodeQL config lives under `.github/codeql/` once SOW-0044 lands. Query-suite
+  changes are SOW changes, not drive-by workflow edits.
+- Suppressions are query/path scoped in the config file with a SOW/issue
+  rationale. Inline `// codeql[...]` suppressions require explicit SOW evidence.
+- Critical/high alerts are fixed, proven false-positive, or tracked before a SOW
+  closes.
+
+### Codacy
+
+Runtime checks:
+
+```bash
+codacy repository gh netdata ai-viewer --output json
+codacy tools gh netdata ai-viewer --output json
+codacy issues gh netdata ai-viewer --overview --output json
+codacy findings gh netdata ai-viewer --severities Critical,High --output json
+codacy-analysis discover --output-format json --output /tmp/ai-viewer-codacy-discover.json
+codacy-analysis analyze --inspect --output-format json
+codacy-analysis analyze --install-dependencies --output-format json --output /tmp/ai-viewer-codacy-analysis.json
+```
+
+Policy:
+
+- Codacy starts as a measured reporting/tuning surface unless an active SOW
+  explicitly promotes a tuned context to branch protection.
+- Local config under `.codacy/` may be committed as a measured reporting/tuning
+  baseline before it is high-signal, but it must not become a required context
+  until critical/high findings and noisy patterns are triaged. Generated tool
+  material under `.codacy/generated/` stays ignored.
+- Cloud import through `codacy tools gh netdata ai-viewer --import -y` is allowed
+  only after before/after tool and issue summaries are captured. If organization
+  coding standards block changes, record the exact blocker in the SOW.
+- Coverage upload reuses existing Go/frontend reports. Use GitHub secret names
+  only (`CODACY_PROJECT_TOKEN` or account-token mode variables); never write
+  token values to disk.
+- Coverage upload belongs in the non-required `codacy-coverage` job, fed from
+  the existing `go-coverage-<run_id>` and `frontend-coverage-<run_id>`
+  artifacts. Do not put Codacy upload steps inside the required `test` or
+  `frontend` jobs while Codacy is reporting-only.
+- Coverage upload token behavior is fail-open while reporting-only, but Codacy
+  secrets are never passed to `pull_request` execution of repository code. The
+  workflow skips the entire `codacy-coverage` job on `pull_request` events
+  before checkout, artifact download, secret injection, or repository scripts
+  can run. With no token on a non-PR event, CI logs a skip; with
+  `CODACY_PROJECT_TOKEN` or `CODACY_API_TOKEN` present, missing artifacts,
+  missing or empty coverage reports, reporter download failures, invalid
+  bootstrap files, and upload failures emit annotations and exit successfully.
+  If both token secrets exist, `CODACY_PROJECT_TOKEN` wins and account-token
+  variables are unset before the reporter runs. The upload script also refuses
+  all Codacy coverage upload on `pull_request` events before token-mode
+  selection as defense in depth. PR coverage upload stays disabled until a
+  future SOW designs a safe path. These become hard failures only after a future
+  SOW promotes Codacy coverage to a required branch-protection context.
+- The upload logic lives in `scripts/codacy-coverage-upload.sh`; do not grow an
+  inline workflow shell state machine. Run
+  `scripts/test/codacy-coverage-upload-test.sh` after any change to the upload
+  script or the `codacy-coverage` job wiring. The self-test is part of local
+  `scripts/gates.sh` and the CI `gates` job, so it must stay hermetic and fast.
+- Upload each present non-empty Go/frontend coverage report as a partial report.
+  A missing or empty Go report does not block uploading frontend LCOV, and a
+  missing or empty frontend LCOV report does not block uploading Go coverage. If
+  both reports are missing or empty, annotate and exit successfully before
+  downloading the reporter. If at least one partial upload is attempted, send
+  Codacy's required `final` notification after the partial upload attempts even
+  if one partial command fails. Normalize frontend LCOV source paths from
+  frontend-local `src/...` to repository-root `frontend/src/...` before upload.
+- Do not use `bash <(curl -Ls https://coverage.codacy.com/get.sh) ...` in CI.
+  Download the reporter bootstrap with `curl -fsSL --retry ... -o "$(mktemp)"`
+  verify the file is a non-empty shell script, run `bash -n`, and execute the
+  temporary file. Process substitution can turn a failed download into an empty
+  script that exits successfully. Codacy's documented reporter checksum
+  validation is upstream behavior, not a local guarantee from this workflow.
+- Disable tools/patterns only with evidence. Broad "too noisy" disables without
+  path/category counts are not acceptable.
 
 ## When a Gate Fails
 
