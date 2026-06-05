@@ -2,9 +2,26 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: opened 2026-06-04 under the operator's standing backlog mandate ("proceed"). Predecessor SOWs 0009/0010/0011 (Go quality/security/bench) and 0012 (frontend quality stack) are ALL delivered, so the dependency is satisfied. Drafted greenfield 2026-05-26, but two artifacts already landed via those SOWs (`scripts/scan-secrets.sh` — SOW-0009/0017; `.github/workflows/ci.yml` with 5 jobs lint/test/frontend/embed-smoke/gates — SOW-0009..0012), so the real scope is the GAPS (reconciled in the Execution Log 2026-06-04): `spec-drift.sh`, `gates.sh`, `codeql.yml`+config, `dependabot.yml`, `workflows-checks.yaml`, registering required status checks, + the doc invariants. Depends on SOWs 0009 (Go quality stack), 0010 (Go security + fuzzing), 0011 (Go benchmarks + race stress), and 0012 (frontend quality stack) being delivered first OR landing in the same PR series. This SOW is the **integration** of all four — it produces the canonical `scripts/gates.sh`, the canonical `.github/workflows/ci.yml`, plus the cross-cutting gates (secrets scan, spec drift) and the supporting infrastructure (branch protection, Dependabot, CodeQL).
+Sub-state: completed 2026-06-05. PR #42 merged at `dcec347`; post-merge `ci`
+and `codeql` runs passed on `master`; branch protection now requires the five
+canonical CI jobs plus the three explicit CodeQL matrix jobs with strict status
+checks enabled. Opened 2026-06-04 under the operator's standing backlog mandate
+("proceed"). Predecessor SOWs 0009/0010/0011 (Go quality/security/bench) and
+0012 (frontend quality stack) are ALL delivered, so the dependency is satisfied.
+Drafted greenfield 2026-05-26, but two artifacts already landed via those SOWs
+(`scripts/scan-secrets.sh` — SOW-0009/0017; `.github/workflows/ci.yml` with 5
+jobs lint/test/frontend/embed-smoke/gates — SOW-0009..0012), so the real scope
+is the GAPS (reconciled in the Execution Log 2026-06-04): `spec-drift.sh`,
+`gates.sh`, `codeql.yml`+config, `dependabot.yml`, `workflows-checks.yaml`,
+registering required status checks, + the doc invariants. Depends on SOWs 0009
+(Go quality stack), 0010 (Go security + fuzzing), 0011 (Go benchmarks + race
+stress), and 0012 (frontend quality stack) being delivered first OR landing in
+the same PR series. This SOW is the **integration** of all four — it produces
+the canonical `scripts/gates.sh`, the canonical `.github/workflows/ci.yml`, plus
+the cross-cutting gates (secrets scan, spec drift) and the supporting
+infrastructure (branch protection, Dependabot, CodeQL).
 
 ## Requirements
 
@@ -358,17 +375,33 @@ Commands and evidence after review-round-2 fixes:
   regression > 20%). The complete gate remains above the original 5-minute
   target; no gate was weakened, and SOW-0043 owns fast/parallel feedback.
 
-Pending validation before closing:
+Close-out validation:
 
-- CI run URL after push.
-- Branch protection state after post-merge required-check registration.
-- External reviewer convergence. **Done:** round 17 found no blocking code,
-  security, spec-sync, artifact, or local/CI parity defects. Remaining notes are
-  close-out bookkeeping items below.
-- Final full `bash scripts/gates.sh` run after the latest fixes. **Done:** pass
-  at 508 s.
-- Outcome and lessons sections remain pending until CI passes and branch
-  protection is registered.
+- Latest PR #42 head `f0a5e14`: all rows passed before merge. Evidence:
+  `ci` run `https://github.com/netdata/ai-viewer/actions/runs/26985756749`
+  (`lint`, `test`, `frontend`, `embed-smoke`, `gates` all passed); `codeql` run
+  `https://github.com/netdata/ai-viewer/actions/runs/26985756747` (`CodeQL (go)`,
+  `CodeQL (javascript-typescript)`, `CodeQL (actions)` all passed); Codacy Static
+  Code Analysis passed with 0 new issues; PR reviewer re-run passed with no
+  issues across 32 files.
+- PR #42 merged to `master` at `dcec34795ef02ec985d267a910f9739b14f2ad5c`.
+- Post-merge `master` validation passed before branch protection registration:
+  `ci` run `https://github.com/netdata/ai-viewer/actions/runs/26986628316`
+  completed successfully (`lint`, `test`, `frontend`, `embed-smoke`, `gates`);
+  `codeql` run `https://github.com/netdata/ai-viewer/actions/runs/26986628299`
+  completed successfully.
+- Branch protection registration succeeded through
+  `gh api -X PUT /repos/netdata/ai-viewer/branches/master/protection`.
+  Verification output:
+  `strict=true`, contexts `lint`, `test`, `frontend`, `embed-smoke`, `gates`,
+  `CodeQL (go)`, `CodeQL (javascript-typescript)`, `CodeQL (actions)`;
+  `enforce_admins=true`; `required_pull_request_reviews=null`;
+  `restrictions=null`; `allow_force_pushes=false`; `allow_deletions=false`.
+- External reviewer convergence completed. Round 17 found no blocking code,
+  security, spec-sync, artifact, or local/CI parity defects. The later PR
+  reviewer path finding was valid, fixed in `f0a5e14`, and re-reviewed clean.
+- Final full local `bash scripts/gates.sh` run after the latest runtime fixes
+  passed at 508 s; no gate was weakened.
 
 ## Reviews
 
@@ -1404,11 +1437,39 @@ Focused validation:
 
 ## Outcome
 
-Pending.
+Completed.
+
+Delivered repo-wide quality enforcement:
+
+- `scripts/gates.sh` is the canonical full local aggregate.
+- `scripts/spec-drift.sh` enforces REST, SSE, data-model, canonical-event, and
+  adapter-probe drift indicators.
+- CI enforces `lint`, `test`, `frontend`, `embed-smoke`, and cross-cutting
+  `gates` jobs.
+- CodeQL runs for Go, JavaScript/TypeScript, and GitHub Actions.
+- Dependabot is configured for Go modules, npm, and GitHub Actions.
+- `.github/workflows-checks.yaml` records the required-check contexts.
+- `master` branch protection now requires the eight documented contexts with
+  strict status checks and admin enforcement.
+- Follow-up SOWs exist for known non-blocking work: SOW-0043 (`gates.sh --fast`
+  / parallel profile), SOW-0044 (CodeQL + Codacy defense layer), and SOW-0045
+  (gate-contract hardening follow-ups).
 
 ## Lessons Extracted
 
-Pending.
+- The complete local gate is intentionally slower than the original 5-minute
+  target. The correct quality decision was to keep the full gate complete,
+  measure the long pole, and file SOW-0043 for a fast/parallel profile instead
+  of weakening coverage.
+- Spec-drift documentation must use exact `.agents/sow/specs/...` paths, not
+  shorthand paths, because shorthand can cause future maintainers to update or
+  create the wrong files.
+- CI/local parity needs executable self-tests for tool discovery, formatter
+  scope, and diagnostic redaction. Review rounds found real parity gaps that
+  prose alone would not have caught.
+- Branch-protection required checks are repository state, not committed state.
+  The workflow must merge first, pass on `master`, then register and verify the
+  protection rule through the GitHub API.
 
 ## Followup
 
