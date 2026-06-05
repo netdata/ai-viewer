@@ -23,9 +23,9 @@ visibility into low complexity, maintainability, and security.
 
 Facts:
 
-- SOW-0046 local Codacy analysis on 2026-06-05 found 610 remaining Lizard
+- SOW-0046 final local Codacy analysis on 2026-06-05 found 608 remaining Lizard
   complexity findings after critical/high security triage.
-- The grouped backlog is 196 production-code findings in 85 files, 407
+- The refreshed grouped backlog is 195 production-code findings in 84 files, 406
   test-file findings in 143 files, 7 frontend tooling-script findings in 2
   files, and 0 docs/spec findings.
 - The largest production buckets are `internal/adapters/aiagent_v2/mapper.go`
@@ -63,12 +63,13 @@ Unknowns:
 Sources checked:
 
 - `.agents/sow/current/SOW-0046-20260605-codacy-critical-high-triage.md`
-- `/tmp/ai-viewer-sow0046-codacy-final-r3.json` local Codacy result
-- `/tmp/ai-viewer-sow0046-complexity-summary.tsv` grouped summary
+- `/tmp/ai-viewer-sow0046-codacy-final-r6.json` final local Codacy result
+- Refreshed grouping computed from
+  `/tmp/ai-viewer-sow0046-codacy-final-r6.json`
 
 Current state:
 
-- Codacy/Lizard reports 196 production complexity findings across 85 files.
+- Codacy/Lizard reports 195 production complexity findings across 84 files.
 - Test complexity is larger by count, but tests are lower priority unless they
   block maintainability or hide production regressions.
 
@@ -91,9 +92,9 @@ Problem / root-cause model:
 
 Evidence reviewed:
 
-- SOW-0046 Codacy result summary:
-  - production: 196 findings, 85 files
-  - tests: 407 findings, 143 files
+- SOW-0046 final Codacy result summary:
+  - production: 195 findings, 84 files
+  - tests: 406 findings, 143 files
   - scripts/tooling: 7 findings, 2 files
   - docs/specs: 0 findings
 
@@ -174,6 +175,9 @@ Open decisions:
 ### 2026-06-05
 
 - Created from SOW-0046 local Codacy complexity grouping.
+- Refreshed from the final SOW-0046 local Codacy export after post-Cloud-fix
+  cleanup: 608 total complexity findings, including 195 production findings in
+  84 files.
 
 ## Validation
 

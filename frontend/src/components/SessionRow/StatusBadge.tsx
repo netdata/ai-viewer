@@ -40,6 +40,8 @@ function classFromStyles(key: StatusClassName, classes: StatusStyles): string | 
     case 'failed':
       return classes.failed;
   }
+  const exhaustive: never = key;
+  return exhaustive;
 }
 
 /**

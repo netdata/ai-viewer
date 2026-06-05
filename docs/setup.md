@@ -84,12 +84,12 @@ Codacy Analysis CLI does not consume `.codacy.yml`, so root YAML
 `exclude_paths` are mirrored in the JSON top-level `exclude` list. Those root
 exclusions are limited to non-runtime SOW work-ledger files, duplicate
 instruction symlinks, generated artifacts, dependencies, coverage/build output,
-and local test output. Tool-scoped YAML exclusions are mirrored only into the
-same tool's JSON `exclude` array. Frontend tests/test support and standalone
-frontend scripts have different replacement gates: tests/test support are
-covered by native frontend test/static gates, while standalone scripts rely on
-their dedicated self-tests/build integration plus repository-wide
-secrets/spec-drift checks.
+local binary output, and local test output. Tool-scoped YAML exclusions are
+mirrored only into the same tool's JSON `exclude` array. Frontend tests/test
+support and standalone frontend scripts have different replacement gates:
+tests/test support are covered by native frontend test/static gates, while
+standalone scripts rely on their dedicated self-tests/build integration plus
+repository-wide secrets/spec-drift checks.
 After editing either file, run the hermetic config guard before importing
 anything into Codacy Cloud:
 

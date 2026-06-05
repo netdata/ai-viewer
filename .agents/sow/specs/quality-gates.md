@@ -400,6 +400,7 @@ summary. It composes existing scripts and commands — `scripts/lint.sh` (Go +
 frontend static analysis), `scripts/scan-secrets.sh` + its self-test,
 `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh` + its self-test,
 `scripts/test/codacy-coverage-upload-test.sh`,
+`scripts/test/codacy-config-test.sh`,
 `scripts/test/systemd-units-test.sh` when present, `scripts/build.sh` (build +
 real bundle-size gate + embed + both binaries), `scripts/test.sh` +
 `scripts/check-coverage.sh` (Go race suite + coverage + frontend Vitest), the
@@ -417,7 +418,9 @@ uses the `gates` job for cross-cutting repo scans and required gate
 infrastructure checks: secrets + scanner self-test (fail-closed), lint
 formatter-scope self-test (fail-closed), spec drift + detector self-test
 (fail-closed, self-test first), AI-attribution scan (fail-closed),
-Codacy coverage-upload self-test, `scripts/gates.sh` presence + syntax check,
+Codacy coverage-upload self-test, Codacy config self-test, `scripts/gates.sh`
+presence + syntax check, `scripts/test/codacy-config-test.sh` presence +
+syntax check,
 and systemd unit lint when present.
 
 The mature required jobs fail closed on their prerequisites. `lint` and `test`
@@ -495,10 +498,10 @@ The project maintains three Codacy surfaces:
   analysis and machine-readable before/after summaries. The local CLI consumes
   `.codacy/codacy.config.json`. Its top-level `exclude` list is limited to the
   repository-wide non-runtime SOW work-ledger, duplicate instruction symlink,
-  generated artifact, dependency, coverage, build-output, and local test-output
-  exclusions also present in `.codacy.yml`; any test/tooling path exclusion is
-  scoped to the specific local tool entry, not hidden globally from Semgrep,
-  Trivy, Lizard, or other tools.
+  generated artifact, dependency, coverage, build-output, local binary-output,
+  and local test-output exclusions also present in `.codacy.yml`; any
+  test/tooling path exclusion is scoped to the specific local tool entry, not
+  hidden globally from Semgrep, Trivy, Lizard, or other tools.
 - Codacy Cloud configuration, imported/verified through the Codacy Cloud CLI
   when credentials and organization policy allow it. The Cloud import consumes
   `.codacy/codacy.config.json` for tool/pattern settings.
@@ -506,8 +509,9 @@ The project maintains three Codacy surfaces:
   path-scope policy surface documented by Codacy. Because Codacy ignores UI
   ignored-file settings when this file exists, repository-wide non-runtime
   SOW work-ledger files, duplicate instruction symlinks, generated artifacts,
-  dependencies, coverage/build output, and local test output must be listed
-  explicitly under root `exclude_paths`. Tool-scoped Cloud ignores, such as
+  dependencies, coverage/build output, local binary output, and local test
+  output must be listed explicitly under root `exclude_paths`. Tool-scoped
+  Cloud ignores, such as
   `engines.eslint-8.exclude_paths`, are mirrored only into that same tool's JSON
   `exclude` array for local CLI parity.
 

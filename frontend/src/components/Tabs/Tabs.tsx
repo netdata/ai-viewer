@@ -19,14 +19,14 @@ export interface TabSpec<K extends string> {
 }
 
 export interface TabsProps<K extends string> {
-  tabs: ReadonlyArray<TabSpec<K>>;
+  tabs: readonly TabSpec<K>[];
   active: K;
   onSelect: (key: K) => void;
   ariaLabel: string;
 }
 
 function tabAt<K extends string>(
-  tabs: ReadonlyArray<TabSpec<K>>,
+  tabs: readonly TabSpec<K>[],
   index: number,
 ): TabSpec<K> | undefined {
   if (!Number.isInteger(index) || index < 0 || index >= tabs.length) {

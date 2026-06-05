@@ -100,10 +100,10 @@ gates. Their security findings are not cosmetic.
   `.codacy/codacy.config.json`. The local Analysis CLI does not consume
   `.codacy.yml`, so repository-wide non-runtime SOW work-ledger, duplicate
   instruction symlink, generated artifact, dependency, coverage, build-output,
-  and local test-output path exclusions are mirrored in the JSON top-level
-  `exclude` list, while approved tool-specific test/tooling path exclusions are
-  mirrored only into that same tool's JSON `exclude` array. Both surfaces are
-  kept in parity by the config self-test.
+  local binary-output, and local test-output path exclusions are mirrored in the
+  JSON top-level `exclude` list, while approved tool-specific test/tooling path
+  exclusions are mirrored only into that same tool's JSON `exclude` array. Both
+  surfaces are kept in parity by the config self-test.
   Cloud-only findings (for example a tool unavailable or deliberately removed
   from the local config) are either restored locally with evidence, removed from
   Cloud by importing the tuned config, or recorded as Cloud-only follow-up work.

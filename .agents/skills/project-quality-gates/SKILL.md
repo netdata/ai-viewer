@@ -379,10 +379,10 @@ Policy:
   `.codacy/codacy.config.json`. Because Codacy ignores UI ignored-file settings
   when `.codacy.yml` exists, root `exclude_paths` must carry the repository-wide
   non-runtime SOW work-ledger, duplicate instruction symlink, generated artifact,
-  dependency, coverage, build-output, and local test-output exclusions
-  explicitly. The local Analysis CLI consumes the JSON config but not
-  `.codacy.yml`, so root YAML exclusions are mirrored only in the JSON top-level
-  `exclude` list; tool-scoped YAML exclusions such as
+  dependency, coverage, build-output, local binary-output, and local
+  test-output exclusions explicitly. The local Analysis CLI consumes the JSON
+  config but not `.codacy.yml`, so root YAML exclusions are mirrored only in the
+  JSON top-level `exclude` list; tool-scoped YAML exclusions such as
   `engines.eslint-8.exclude_paths` are mirrored only into that tool's JSON
   `exclude` array.
 - Codacy exclusion rationale must name the actual replacement gates. Frontend

@@ -249,16 +249,41 @@ func TestStats_MaliciousFilterValuesStayBound(t *testing.T) {
 
 func assertStatsEmpty(t *testing.T, body statsBody) {
 	t.Helper()
-	if body.Totals.SessionCount != 0 || body.Totals.TurnCount != 0 ||
-		body.Totals.OpCount != 0 || body.Totals.Failures != 0 ||
-		body.Totals.TokensIn != 0 || body.Totals.TokensOut != 0 ||
-		body.Totals.DurationUS != 0 {
-		t.Fatalf("malicious filter broadened stats totals: %+v", body.Totals)
+	assertStatsTotalInt(t, "session_count", body.Totals.SessionCount)
+	assertStatsTotalInt(t, "turn_count", body.Totals.TurnCount)
+	assertStatsTotalInt(t, "op_count", body.Totals.OpCount)
+	assertStatsTotalInt(t, "tokens_in", body.Totals.TokensIn)
+	assertStatsTotalInt(t, "tokens_out", body.Totals.TokensOut)
+	assertStatsTotalInt(t, "tokens_cache_read", body.Totals.TokensCacheRead)
+	assertStatsTotalInt(t, "tokens_cache_write", body.Totals.TokensCacheWrite)
+	assertStatsTotalFloat(t, "cost_usd", body.Totals.CostUSD)
+	assertStatsTotalInt(t, "failures", body.Totals.Failures)
+	assertStatsTotalInt(t, "duration_us", body.Totals.DurationUS)
+	assertStatsBreakdownEmpty(t, "by_model", len(body.ByModel))
+	assertStatsBreakdownEmpty(t, "by_tool", len(body.ByTool))
+	assertStatsBreakdownEmpty(t, "by_agent", len(body.ByAgent))
+	assertStatsBreakdownEmpty(t, "by_status", len(body.ByStatus))
+	assertStatsBreakdownEmpty(t, "by_source", len(body.BySource))
+}
+
+func assertStatsTotalInt(t *testing.T, name string, got int64) {
+	t.Helper()
+	if got != 0 {
+		t.Errorf("malicious filter broadened stats total %s: %d", name, got)
 	}
-	if len(body.ByModel) != 0 || len(body.ByTool) != 0 || len(body.ByAgent) != 0 ||
-		len(body.ByStatus) != 0 || len(body.BySource) != 0 {
-		t.Fatalf("malicious filter broadened stats breakdowns: models=%+v tools=%+v agents=%+v status=%+v source=%+v",
-			body.ByModel, body.ByTool, body.ByAgent, body.ByStatus, body.BySource)
+}
+
+func assertStatsTotalFloat(t *testing.T, name string, got float64) {
+	t.Helper()
+	if got != 0 {
+		t.Errorf("malicious filter broadened stats total %s: %f", name, got)
+	}
+}
+
+func assertStatsBreakdownEmpty(t *testing.T, name string, got int) {
+	t.Helper()
+	if got != 0 {
+		t.Errorf("malicious filter broadened stats breakdown %s: %d rows", name, got)
 	}
 }
 

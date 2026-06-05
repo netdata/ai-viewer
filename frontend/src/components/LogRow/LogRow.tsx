@@ -6,20 +6,16 @@ import styles from './LogRow.module.css';
 // severity (color + text — never color alone, per a11y), source, op id, message.
 // Presentational; the LogsTab owns fetching/pagination.
 
+const SEVERITY_CLASSES = new Map<LogSeverity, string | undefined>([
+  ['ERR', styles.sevErr],
+  ['WRN', styles.sevWrn],
+  ['INF', styles.sevInf],
+  ['DBG', styles.sevDbg],
+]);
+
 /** severityClass maps a severity to its CSS-module class (neutral if unknown). */
 function severityClass(severity: LogSeverity): string {
-  switch (severity) {
-    case 'ERR':
-      return styles.sevErr ?? '';
-    case 'WRN':
-      return styles.sevWrn ?? '';
-    case 'INF':
-      return styles.sevInf ?? '';
-    case 'DBG':
-      return styles.sevDbg ?? '';
-    default:
-      return '';
-  }
+  return SEVERITY_CLASSES.get(severity) ?? '';
 }
 
 export function LogRow({ entry }: { entry: LogItem }) {
