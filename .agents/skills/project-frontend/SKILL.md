@@ -23,6 +23,12 @@ Always the latest stable: React, TypeScript, Vite, TanStack Query, React Router,
 - `exactOptionalPropertyTypes: true`.
 - No `any`. Use `unknown` and narrow.
 - API response types live in `src/api/types.ts` and mirror the Go types.
+- Prefer `interface` for plain object shapes in frontend TypeScript. Use `type`
+  aliases for unions, intersections, mapped/conditional types, and utility-type
+  expressions where an interface cannot express the shape cleanly. Codacy Cloud
+  enforces `@typescript-eslint/consistent-type-definitions`, so local helper
+  object shapes should follow the same convention even when project-native
+  ESLint does not report it locally.
 
 ## Hooks Patterns
 

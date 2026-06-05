@@ -89,6 +89,43 @@ frontend/
 - **UI state** (open tab, hover state, modal open) is per-component `useState`.
 - **No global app state library.** If we ever need it, Zustand goes in; not before.
 
+### URL Filter Contract
+
+`state/filters.ts` is the single frontend boundary for translating browser
+query parameters into component-facing filters and SSE subscription filters.
+React Router's `useSearchParams()` is the only route-state primitive used for
+this surface; components must not mirror filters in local state.
+
+Filter dimensions:
+
+- Array dimensions are exactly `agents`, `models`, `tools`, `status`, and
+  `sources`, defined by `ARRAY_FILTER_KEYS` and serialized as one comma-joined
+  query parameter per dimension.
+- `from` and `to` are strict safe-integer UNIX microsecond bounds. Invalid,
+  fractional, trailing-garbage, empty, or unsafe-integer values are treated as
+  absent rather than coerced.
+- `q` is free-text agent-name search. Whitespace-only `q` is treated as absent;
+  non-empty text is preserved as provided.
+
+Mutation rules:
+
+- `applyPatch(current, patch)` copies the current `URLSearchParams`, writes only
+  keys present in `patch`, and preserves unrelated query parameters.
+- Empty arrays delete their array query parameter. Explicit `undefined` scalar
+  patches delete `from`, `to`, or `q`. Fields absent from `patch` are left
+  unchanged.
+- `clearFilters()` deletes all filter keys and preserves non-filter query
+  parameters.
+
+SSE subscription mapping:
+
+- `filtersToSubscription(filters)` emits only non-empty structured dimensions.
+  It never sends present-but-empty arrays.
+- `time_range` is emitted only when at least one of `from` or `to` is set, and
+  contains only the bounds that are present.
+- `q` is deliberately dropped because the SSE subscription contract has no
+  free-text filter; list refetches still apply `q`.
+
 ## SSE Integration
 
 ```ts
