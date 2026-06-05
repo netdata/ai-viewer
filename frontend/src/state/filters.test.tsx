@@ -16,12 +16,14 @@ import {
 describe('readFilters', () => {
   it('decodes comma-joined arrays, numbers, and q', () => {
     const params = new URLSearchParams(
-      'agents=nedi,neda&models=claude-opus-4-7&status=failed,running&from=100&to=200&q=hello',
+      'agents=nedi,neda&models=claude-opus-4-7&tools=tool-a,tool-b&status=failed,running&sources=source-a&from=100&to=200&q=hello',
     );
     const f = readFilters(params);
     expect(f.agents).toEqual(['nedi', 'neda']);
     expect(f.models).toEqual(['claude-opus-4-7']);
+    expect(f.tools).toEqual(['tool-a', 'tool-b']);
     expect(f.status).toEqual(['failed', 'running']);
+    expect(f.sources).toEqual(['source-a']);
     expect(f.from).toBe(100);
     expect(f.to).toBe(200);
     expect(f.q).toBe('hello');
@@ -69,6 +71,29 @@ describe('readFilters', () => {
 });
 
 describe('applyPatch', () => {
+  it('sets every filter dimension in one patch', () => {
+    const next = applyPatch(new URLSearchParams('view=list'), {
+      agents: ['nedi', 'neda'],
+      models: ['claude-opus-4-7'],
+      tools: ['mcp__slack__send_message'],
+      status: ['failed', 'running'],
+      sources: ['source-a', 'source-b'],
+      from: 100,
+      to: 200,
+      q: 'session search',
+    });
+
+    expect(next.get('agents')).toBe('nedi,neda');
+    expect(next.get('models')).toBe('claude-opus-4-7');
+    expect(next.get('tools')).toBe('mcp__slack__send_message');
+    expect(next.get('status')).toBe('failed,running');
+    expect(next.get('sources')).toBe('source-a,source-b');
+    expect(next.get('from')).toBe('100');
+    expect(next.get('to')).toBe('200');
+    expect(next.get('q')).toBe('session search');
+    expect(next.get('view')).toBe('list');
+  });
+
   it('sets and clears array params', () => {
     const start = new URLSearchParams('agents=a,b');
     const set = applyPatch(start, { models: ['m1', 'm2'] });
@@ -89,8 +114,41 @@ describe('applyPatch', () => {
 
   it('deletes q when patched with empty/whitespace', () => {
     const start = new URLSearchParams('q=hi');
+    expect(applyPatch(start, { q: '' }).get('q')).toBeNull();
     expect(applyPatch(start, { q: '   ' }).get('q')).toBeNull();
     expect(applyPatch(start, { q: undefined }).get('q')).toBeNull();
+  });
+
+  it('preserves whitespace-padded non-empty q values as provided', () => {
+    const next = applyPatch(new URLSearchParams('q=old'), { q: '  hello  ' });
+    expect(next.get('q')).toBe('  hello  ');
+  });
+
+  it('clears every filter key while preserving unrelated query params', () => {
+    const start = new URLSearchParams(
+      'view=list&agents=a&models=m&tools=t&status=failed&sources=s&from=100&to=200&q=hello',
+    );
+
+    const next = applyPatch(start, {
+      agents: [],
+      models: [],
+      tools: [],
+      status: [],
+      sources: [],
+      from: undefined,
+      to: undefined,
+      q: undefined,
+    });
+
+    expect(next.get('view')).toBe('list');
+    expect(next.get('agents')).toBeNull();
+    expect(next.get('models')).toBeNull();
+    expect(next.get('tools')).toBeNull();
+    expect(next.get('status')).toBeNull();
+    expect(next.get('sources')).toBeNull();
+    expect(next.get('from')).toBeNull();
+    expect(next.get('to')).toBeNull();
+    expect(next.get('q')).toBeNull();
   });
 
   it('leaves keys absent from the patch untouched', () => {
@@ -144,16 +202,35 @@ describe('useFilters', () => {
   });
 
   it('clearFilters removes every filter param', () => {
-    const { result } = renderHook(() => useFilters(), {
-      wrapper: wrapperFor('/?agents=a&models=m&from=1&q=x'),
-    });
+    const { result } = renderHook(
+      () => ({ filters: useFilters(), loc: useLocation() }),
+      {
+        wrapper: wrapperFor(
+          '/?view=list&agents=a&models=m&tools=t&status=failed&sources=s&from=1&to=2&q=x',
+        ),
+      },
+    );
     act(() => {
-      result.current.clearFilters();
+      result.current.filters.clearFilters();
     });
-    expect(result.current.filters.agents).toEqual([]);
-    expect(result.current.filters.models).toEqual([]);
-    expect(result.current.filters.from).toBeUndefined();
-    expect(result.current.filters.q).toBeUndefined();
+    const params = new URLSearchParams(result.current.loc.search);
+    expect(params.get('view')).toBe('list');
+    expect(params.get('agents')).toBeNull();
+    expect(params.get('models')).toBeNull();
+    expect(params.get('tools')).toBeNull();
+    expect(params.get('status')).toBeNull();
+    expect(params.get('sources')).toBeNull();
+    expect(params.get('from')).toBeNull();
+    expect(params.get('to')).toBeNull();
+    expect(params.get('q')).toBeNull();
+    expect(result.current.filters.filters.agents).toEqual([]);
+    expect(result.current.filters.filters.models).toEqual([]);
+    expect(result.current.filters.filters.tools).toEqual([]);
+    expect(result.current.filters.filters.status).toEqual([]);
+    expect(result.current.filters.filters.sources).toEqual([]);
+    expect(result.current.filters.filters.from).toBeUndefined();
+    expect(result.current.filters.filters.to).toBeUndefined();
+    expect(result.current.filters.filters.q).toBeUndefined();
   });
 });
 
@@ -197,5 +274,28 @@ describe('filtersToSubscription', () => {
   it('drops q (the SSE filter has no free-text field)', () => {
     const sub = filtersToSubscription({ ...EMPTY, q: 'nedi', agents: ['a'] });
     expect(sub).toEqual({ agents: ['a'] });
+  });
+
+  it('maps all non-empty structured dimensions, time range, and omits q', () => {
+    const sub = filtersToSubscription({
+      agents: ['nedi'],
+      models: ['claude-opus-4-7'],
+      tools: ['mcp__slack__send_message'],
+      status: ['failed'],
+      sources: ['source-a'],
+      from: 100,
+      to: 200,
+      q: 'ignored by sse',
+    });
+
+    expect(sub).toEqual({
+      agents: ['nedi'],
+      models: ['claude-opus-4-7'],
+      tools: ['mcp__slack__send_message'],
+      status: ['failed'],
+      sources: ['source-a'],
+      time_range: { from: 100, to: 200 },
+    });
+    expect('q' in sub).toBe(false);
   });
 });

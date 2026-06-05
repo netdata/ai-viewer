@@ -57,7 +57,7 @@ export interface FilterPatch {
 }
 
 /** parseList splits a comma-joined param into a trimmed, non-empty list. */
-function parseList(raw: string | null): string[] {
+const parseList = (raw: string | null): string[] => {
   if (raw === null || raw === '') {
     return [];
   }
@@ -65,7 +65,7 @@ function parseList(raw: string | null): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-}
+};
 
 /**
  * parseNumber strictly parses an integer microsecond param, or undefined when
@@ -74,13 +74,13 @@ function parseList(raw: string | null): string[] {
  * integer microsecond value (rest-api.md §Conventions), so anything that is
  * not a whole, safe integer is ignored rather than silently coerced.
  */
-function parseNumber(raw: string | null): number | undefined {
+const parseNumber = (raw: string | null): number | undefined => {
   if (raw === null || !/^-?\d+$/.test(raw)) {
     return undefined;
   }
   const n = Number(raw);
   return Number.isSafeInteger(n) ? n : undefined;
-}
+};
 
 /** readFilters decodes a URLSearchParams into the typed Filters shape. */
 export function readFilters(params: URLSearchParams): Filters {
@@ -106,41 +106,15 @@ export function readFilters(params: URLSearchParams): Filters {
   return filters;
 }
 
-/**
- * applyPatch produces the next URLSearchParams from the current params and a
- * patch. Each provided key is written; empty arrays / undefined scalars delete
- * the param so the URL stays clean (an absent key means "no constraint", which
- * is exactly the REST contract). Keys absent from the patch are left untouched.
- */
-export function applyPatch(
-  current: URLSearchParams,
-  patch: FilterPatch,
-): URLSearchParams {
-  const next = new URLSearchParams(current);
-  for (const key of ARRAY_FILTER_KEYS) {
-    applyArrayPatch(next, key, arrayPatchValue(patch, key));
-  }
-  if ('from' in patch) {
-    setOrDeleteNumber(next, 'from', patch.from);
-  }
-  if ('to' in patch) {
-    setOrDeleteNumber(next, 'to', patch.to);
-  }
-  if ('q' in patch) {
-    const q = patch.q;
-    if (q === undefined || q.trim().length === 0) {
-      next.delete('q');
-    } else {
-      next.set('q', q);
-    }
-  }
-  return next;
-}
+type BuiltSubscriptionTimeRange = {
+  from?: number;
+  to?: number;
+};
 
-function arrayPatchValue(
+const arrayPatchValue = (
   patch: FilterPatch,
   key: ArrayFilterKey,
-): string[] | undefined {
+): string[] | undefined => {
   switch (key) {
     case 'agents':
       return patch.agents;
@@ -156,13 +130,40 @@ function arrayPatchValue(
 
   const exhaustive: never = key;
   return exhaustive;
-}
+};
 
-function applyArrayPatch(
+const filterArrayValue = (filters: Filters, key: ArrayFilterKey): string[] => {
+  switch (key) {
+    case 'agents':
+      return filters.agents;
+    case 'models':
+      return filters.models;
+    case 'tools':
+      return filters.tools;
+    case 'status':
+      return filters.status;
+    case 'sources':
+      return filters.sources;
+  }
+
+  const exhaustive: never = key;
+  return exhaustive;
+};
+
+const applyArrayPatches = (
+  params: URLSearchParams,
+  patch: FilterPatch,
+): void => {
+  for (const key of ARRAY_FILTER_KEYS) {
+    applyArrayPatch(params, key, arrayPatchValue(patch, key));
+  }
+};
+
+const applyArrayPatch = (
   params: URLSearchParams,
   key: ArrayFilterKey,
   value: string[] | undefined,
-): void {
+): void => {
   if (value === undefined) {
     return;
   }
@@ -171,18 +172,131 @@ function applyArrayPatch(
   } else {
     params.set(key, value.join(','));
   }
-}
+};
 
-function setOrDeleteNumber(
+const setOrDeleteNumber = (
   params: URLSearchParams,
-  key: string,
+  key: 'from' | 'to',
   value: number | undefined,
-): void {
+): void => {
   if (value === undefined) {
     params.delete(key);
   } else {
     params.set(key, String(value));
   }
+};
+
+const setOrDeleteText = (
+  params: URLSearchParams,
+  key: 'q',
+  value: string | undefined,
+): void => {
+  if (value === undefined || value.trim().length === 0) {
+    params.delete(key);
+  } else {
+    params.set(key, value);
+  }
+};
+
+const applyScalarPatches = (
+  params: URLSearchParams,
+  patch: FilterPatch,
+): void => {
+  if ('from' in patch) {
+    setOrDeleteNumber(params, 'from', patch.from);
+  }
+  if ('to' in patch) {
+    setOrDeleteNumber(params, 'to', patch.to);
+  }
+  if ('q' in patch) {
+    setOrDeleteText(params, 'q', patch.q);
+  }
+};
+
+const addSubscriptionArrays = (
+  sub: SubscriptionFilterRequest,
+  filters: Filters,
+): void => {
+  for (const key of ARRAY_FILTER_KEYS) {
+    addSubscriptionArray(sub, key, filterArrayValue(filters, key));
+  }
+};
+
+const addSubscriptionArray = (
+  sub: SubscriptionFilterRequest,
+  key: ArrayFilterKey,
+  value: string[],
+): void => {
+  if (value.length === 0) {
+    return;
+  }
+
+  switch (key) {
+    case 'agents':
+      sub.agents = value;
+      return;
+    case 'models':
+      sub.models = value;
+      return;
+    case 'tools':
+      sub.tools = value;
+      return;
+    case 'status':
+      sub.status = value;
+      return;
+    case 'sources':
+      sub.sources = value;
+      return;
+  }
+
+  const exhaustive: never = key;
+  return exhaustive;
+};
+
+const subscriptionTimeRange = (
+  filters: Filters,
+): BuiltSubscriptionTimeRange | undefined => {
+  const from = filters.from;
+  const to = filters.to;
+
+  if (from === undefined && to === undefined) {
+    return undefined;
+  }
+
+  const range: BuiltSubscriptionTimeRange = {};
+  if (from !== undefined) {
+    range.from = from;
+  }
+  if (to !== undefined) {
+    range.to = to;
+  }
+  return range;
+};
+
+const addSubscriptionTimeRange = (
+  sub: SubscriptionFilterRequest,
+  filters: Filters,
+): void => {
+  const timeRange = subscriptionTimeRange(filters);
+  if (timeRange !== undefined) {
+    sub.time_range = timeRange;
+  }
+};
+
+/**
+ * applyPatch produces the next URLSearchParams from the current params and a
+ * patch. Each provided key is written; empty arrays / undefined scalars delete
+ * the param so the URL stays clean (an absent key means "no constraint", which
+ * is exactly the REST contract). Keys absent from the patch are left untouched.
+ */
+export function applyPatch(
+  current: URLSearchParams,
+  patch: FilterPatch,
+): URLSearchParams {
+  const next = new URLSearchParams(current);
+  applyArrayPatches(next, patch);
+  applyScalarPatches(next, patch);
+  return next;
 }
 
 /**
@@ -196,27 +310,8 @@ function setOrDeleteNumber(
  */
 export function filtersToSubscription(filters: Filters): SubscriptionFilterRequest {
   const sub: SubscriptionFilterRequest = {};
-  if (filters.agents.length > 0) {
-    sub.agents = filters.agents;
-  }
-  if (filters.models.length > 0) {
-    sub.models = filters.models;
-  }
-  if (filters.tools.length > 0) {
-    sub.tools = filters.tools;
-  }
-  if (filters.status.length > 0) {
-    sub.status = filters.status;
-  }
-  if (filters.sources.length > 0) {
-    sub.sources = filters.sources;
-  }
-  if (filters.from !== undefined || filters.to !== undefined) {
-    const range: { from?: number; to?: number } = {};
-    if (filters.from !== undefined) range.from = filters.from;
-    if (filters.to !== undefined) range.to = filters.to;
-    sub.time_range = range;
-  }
+  addSubscriptionArrays(sub, filters);
+  addSubscriptionTimeRange(sub, filters);
   return sub;
 }
 
