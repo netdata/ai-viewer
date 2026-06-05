@@ -86,6 +86,29 @@ export interface SpanDetailDrawerProps {
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
 
+interface FocusableBounds {
+  firstFocusable: HTMLElement;
+  lastFocusable: HTMLElement;
+}
+
+function focusableBounds(panel: HTMLElement): FocusableBounds | null {
+  let firstFocusable: HTMLElement | null = null;
+  let lastFocusable: HTMLElement | null = null;
+
+  for (const element of panel.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    if (element.offsetParent === null && element !== document.activeElement) {
+      continue;
+    }
+    firstFocusable ??= element;
+    lastFocusable = element;
+  }
+
+  if (firstFocusable === null || lastFocusable === null) {
+    return null;
+  }
+  return { firstFocusable, lastFocusable };
+}
+
 export function SpanDetailDrawer({ detail, onClose }: SpanDetailDrawerProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -127,26 +150,22 @@ export function SpanDetailDrawer({ detail, onClose }: SpanDetailDrawerProps) {
       if (!panel) {
         return;
       }
-      const focusables = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-        (el) => el.offsetParent !== null || el === document.activeElement,
-      );
-      if (focusables.length === 0) {
+      const bounds = focusableBounds(panel);
+      if (bounds === null) {
         e.preventDefault();
         return;
       }
-      const first = focusables[0] as HTMLElement;
-      const last = focusables[focusables.length - 1] as HTMLElement;
       const active = document.activeElement;
-      if (e.shiftKey && active === first) {
+      if (e.shiftKey && active === bounds.firstFocusable) {
         e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
+        bounds.lastFocusable.focus();
+      } else if (!e.shiftKey && active === bounds.lastFocusable) {
         e.preventDefault();
-        first.focus();
+        bounds.firstFocusable.focus();
       } else if (active !== null && !panel.contains(active)) {
         // Focus somehow escaped — pull it back to the first focusable.
         e.preventDefault();
-        first.focus();
+        bounds.firstFocusable.focus();
       }
     },
     [onClose],

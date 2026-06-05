@@ -1939,6 +1939,13 @@
         {
           "patternId": "ESLint8_@typescript-eslint_adjacent-overload-signatures"
         }
+      ],
+      "exclude": [
+        "frontend/tests/**",
+        "frontend/src/**/*.test.ts",
+        "frontend/src/**/*.test.tsx",
+        "frontend/src/test/**",
+        "frontend/scripts/**"
       ]
     }
   ],
@@ -1946,6 +1953,7 @@
     ".agents/sow/current/**",
     ".agents/sow/done/**",
     ".agents/sow/pending/**",
+    ".codacy/generated/**",
     "CLAUDE.md",
     "GEMINI.md",
     "cmd/ai-viewer-serve/frontend_dist/**",

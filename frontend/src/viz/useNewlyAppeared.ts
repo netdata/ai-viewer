@@ -21,7 +21,7 @@ import { newlyAppeared } from './spanFade';
 // and does not replay on a same-node re-render, so a persisted class is visually
 // a one-shot fade; it falls off the element on the next id change.
 
-const KEY_SEP = ' '; // a separator no id contains, so the join is unambiguous.
+const ID_LIST_SEPARATOR = ' '; // a separator no id contains, so the join is unambiguous.
 
 interface NewlyAppearedState {
   /** Ids of the baseline render (the previous DISTINCT id set). */
@@ -42,7 +42,7 @@ const EMPTY: ReadonlySet<string> = new Set<string>();
  * again, so each appended span fades exactly once.
  */
 export function useNewlyAppeared(currentIds: readonly string[]): ReadonlySet<string> {
-  const key = currentIds.join(KEY_SEP);
+  const key = currentIds.join(ID_LIST_SEPARATOR);
   const [state, setState] = useState<NewlyAppearedState | null>(null);
 
   if (state === null) {

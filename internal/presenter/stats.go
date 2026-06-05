@@ -95,7 +95,8 @@ func (p *Presenter) handleStats(w http.ResponseWriter, r *http.Request) {
 	// sessionSet selects the ids of the matching sessions; the ops-based
 	// breakdowns join against it so only ops belonging to the filtered
 	// sessions are counted.
-	sessionSet := "SELECT s.id FROM sessions s WHERE " + where
+	// SOW-0046: whereClause returns static SQL plus bound placeholders; TestStats_MaliciousFilterValuesStayBound proves attacker-looking values remain parameters.
+	sessionSet := "SELECT s.id FROM sessions s WHERE " + where // nosemgrep: go.lang.security.injection.tainted-sql-string.tainted-sql-string
 
 	resp := statsResponse{
 		ByModel:  []statModelRow{},

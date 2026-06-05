@@ -25,6 +25,16 @@ export interface TabsProps<K extends string> {
   ariaLabel: string;
 }
 
+function tabAt<K extends string>(
+  tabs: ReadonlyArray<TabSpec<K>>,
+  index: number,
+): TabSpec<K> | undefined {
+  if (!Number.isInteger(index) || index < 0 || index >= tabs.length) {
+    return undefined;
+  }
+  return tabs.at(index);
+}
+
 export function Tabs<K extends string>({
   tabs,
   active,
@@ -37,8 +47,8 @@ export function Tabs<K extends string>({
   // to it, so keyboard navigation lands the user on the newly-selected tab even
   // though selection is driven by the controlled parent re-render.
   const selectIndex = (index: number): void => {
-    const target = tabs[index];
-    if (!target) {
+    const target = tabAt(tabs, index);
+    if (target === undefined) {
       return;
     }
     onSelect(target.key);

@@ -453,9 +453,8 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: Inne
     }
     const bounds = target.getBoundingClientRect();
     const yInContent = e.clientY - bounds.top + scrollTop;
-    const idx = Math.floor(yInContent / ROW_HEIGHT);
-    const row = rows[idx];
-    if (row) {
+    const row = rowAtContentY(rows, yInContent);
+    if (row !== null) {
       onSelect(row.node);
     }
   };
@@ -495,4 +494,12 @@ function WaterfallCanvas({ rows, ticks, onSelect, selectedId, boundaries }: Inne
       </div>
     </div>
   );
+}
+
+function rowAtContentY(rows: readonly WaterfallRow[], yInContent: number): WaterfallRow | null {
+  const targetIndex = Math.floor(yInContent / ROW_HEIGHT);
+  if (!Number.isFinite(yInContent) || targetIndex < 0 || targetIndex >= rows.length) {
+    return null;
+  }
+  return rows.at(targetIndex) ?? null;
 }

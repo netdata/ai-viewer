@@ -35,6 +35,16 @@ describe('LogRow', () => {
     expect(screen.getByText('something happened')).toBeInTheDocument();
   });
 
+  it.each([
+    ['ERR', /sevErr/],
+    ['WRN', /sevWrn/],
+    ['INF', /sevInf/],
+    ['DBG', /sevDbg/],
+  ] as const)('maps %s severity to its visual class', (severity, className) => {
+    renderRow({ ...BASE, severity });
+    expect(screen.getByText(severity).className).toMatch(className);
+  });
+
   it('renders an em dash for a null op_id', () => {
     renderRow({ ...BASE, op_id: null });
     // The message cell still renders; the op-id cell shows the dash.

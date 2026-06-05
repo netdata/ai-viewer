@@ -163,16 +163,14 @@ function turnBoundaries(detail: SessionDetailResponse): ReadonlySet<string> {
     if (index === 0 || turn.ops.length === 0) {
       return;
     }
-    let firstId = turn.ops[0]?.id;
-    let firstStart = turn.ops[0]?.start_ts ?? 0;
+    let earliest: { id: string; start_ts: number } | null = null;
     for (const op of turn.ops) {
-      if (op.start_ts < firstStart) {
-        firstStart = op.start_ts;
-        firstId = op.id;
+      if (earliest === null || op.start_ts < earliest.start_ts) {
+        earliest = { id: op.id, start_ts: op.start_ts };
       }
     }
-    if (firstId !== undefined) {
-      ids.add(firstId);
+    if (earliest !== null) {
+      ids.add(earliest.id);
     }
   });
   return ids;

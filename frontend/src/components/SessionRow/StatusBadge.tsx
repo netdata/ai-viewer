@@ -9,19 +9,38 @@ import styles from './SessionRow.module.css';
 
 /** StatusStyles is the subset of CSS-module keys the badge maps onto. The CSS
  *  module satisfies this; tests inject a plain object to exercise the mapper. */
-type StatusStyles = Partial<Record<string, string>>;
+interface StatusStyles {
+  badge?: string;
+  completed?: string;
+  running?: string;
+  failed?: string;
+  unknown?: string;
+}
 
 // Known statuses → CSS-module key. Exhaustive over the canonical closed set
 // (canonical-events.go SessionStatus); interrupted/abandoned share the failed
 // style. A new canonical status added without an entry here renders neutral —
 // caught by the StatusBadge test that enumerates the known set.
-const STATUS_TO_KEY: Record<string, string> = {
-  completed: 'completed',
-  running: 'running',
-  failed: 'failed',
-  interrupted: 'failed',
-  abandoned: 'failed',
-};
+type StatusClassName = 'completed' | 'running' | 'failed';
+
+const STATUS_CLASS_BY_STATUS = new Map<string, StatusClassName>([
+  ['completed', 'completed'],
+  ['running', 'running'],
+  ['failed', 'failed'],
+  ['interrupted', 'failed'],
+  ['abandoned', 'failed'],
+]);
+
+function classFromStyles(key: StatusClassName, classes: StatusStyles): string | undefined {
+  switch (key) {
+    case 'completed':
+      return classes.completed;
+    case 'running':
+      return classes.running;
+    case 'failed':
+      return classes.failed;
+  }
+}
 
 /**
  * resolveStatusClass maps a status to its CSS-module class. Known statuses use
@@ -34,12 +53,12 @@ export function resolveStatusClass(
   status: SessionStatus,
   classes: StatusStyles,
 ): string {
-  const key = STATUS_TO_KEY[status];
+  const key = STATUS_CLASS_BY_STATUS.get(status);
   if (key === undefined) {
     // Unknown/future status: neutral style, not an error.
-    return classes['unknown'] ?? '';
+    return classes.unknown ?? '';
   }
-  const cls = classes[key];
+  const cls = classFromStyles(key, classes);
   if (cls === undefined) {
     if (import.meta.env.DEV) {
       console.error(
@@ -52,6 +71,7 @@ export function resolveStatusClass(
 }
 
 export function StatusBadge({ status }: { status: SessionStatus }) {
-  const cls = resolveStatusClass(status, styles);
-  return <span className={`${styles.badge ?? ''} ${cls}`}>{status}</span>;
+  const statusStyles: StatusStyles = styles;
+  const cls = resolveStatusClass(status, statusStyles);
+  return <span className={`${statusStyles.badge ?? ''} ${cls}`}>{status}</span>;
 }

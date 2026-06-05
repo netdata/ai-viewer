@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -200,6 +201,64 @@ func TestStats_FilterStatus(t *testing.T) {
 	}
 	if body.Totals.Failures != 1 {
 		t.Fatalf("failures = %d, want 1", body.Totals.Failures)
+	}
+}
+
+// TestStats_MaliciousFilterValuesStayBound pins the SQL-construction
+// false-positive disposition for SOW-0046: filter values that look like SQL
+// remain literal bound parameters and cannot widen the stats session set.
+func TestStats_MaliciousFilterValuesStayBound(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedGraph(t, db, base)
+
+	code, broad, _ := getStats(t, p, "group=all")
+	if code != http.StatusOK {
+		t.Fatalf("baseline status = %d", code)
+	}
+	if broad.Totals.SessionCount != 3 || broad.Totals.OpCount != 6 {
+		t.Fatalf("baseline totals = sessions:%d ops:%d, want sessions:3 ops:6",
+			broad.Totals.SessionCount, broad.Totals.OpCount)
+	}
+
+	sqlOR := "failed') OR 1=1 --"
+	sqlLike := "%' OR 1=1 --"
+	cases := []struct {
+		name  string
+		query url.Values
+	}{
+		{"status", url.Values{"group": {"all"}, "status": {sqlOR}}},
+		{"agents", url.Values{"group": {"all"}, "agents": {"worker') OR 1=1 --"}}},
+		{"models", url.Values{"group": {"all"}, "models": {"gpt-5') OR 1=1 --"}}},
+		{"sources", url.Values{"group": {"all"}, "sources": {"src1') OR 1=1 --"}}},
+		{"tools", url.Values{"group": {"all"}, "tools": {"Read') OR 1=1 --"}}},
+		{"q", url.Values{"group": {"all"}, "q": {sqlLike}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body, env := getStats(t, p, tc.query.Encode())
+			if code != http.StatusOK {
+				t.Fatalf("status = %d, env=%+v", code, env)
+			}
+			assertStatsEmpty(t, body)
+		})
+	}
+}
+
+func assertStatsEmpty(t *testing.T, body statsBody) {
+	t.Helper()
+	if body.Totals.SessionCount != 0 || body.Totals.TurnCount != 0 ||
+		body.Totals.OpCount != 0 || body.Totals.Failures != 0 ||
+		body.Totals.TokensIn != 0 || body.Totals.TokensOut != 0 ||
+		body.Totals.DurationUS != 0 {
+		t.Fatalf("malicious filter broadened stats totals: %+v", body.Totals)
+	}
+	if len(body.ByModel) != 0 || len(body.ByTool) != 0 || len(body.ByAgent) != 0 ||
+		len(body.ByStatus) != 0 || len(body.BySource) != 0 {
+		t.Fatalf("malicious filter broadened stats breakdowns: models=%+v tools=%+v agents=%+v status=%+v source=%+v",
+			body.ByModel, body.ByTool, body.ByAgent, body.ByStatus, body.BySource)
 	}
 }
 

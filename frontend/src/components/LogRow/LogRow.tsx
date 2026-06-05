@@ -6,17 +6,20 @@ import styles from './LogRow.module.css';
 // severity (color + text — never color alone, per a11y), source, op id, message.
 // Presentational; the LogsTab owns fetching/pagination.
 
-const SEVERITY_TO_CLASS: Record<string, string> = {
-  ERR: 'sevErr',
-  WRN: 'sevWrn',
-  INF: 'sevInf',
-  DBG: 'sevDbg',
-};
-
 /** severityClass maps a severity to its CSS-module class (neutral if unknown). */
-function severityClass(severity: LogSeverity, classes: Partial<Record<string, string>>): string {
-  const key = SEVERITY_TO_CLASS[severity];
-  return (key !== undefined ? classes[key] : undefined) ?? '';
+function severityClass(severity: LogSeverity): string {
+  switch (severity) {
+    case 'ERR':
+      return styles.sevErr ?? '';
+    case 'WRN':
+      return styles.sevWrn ?? '';
+    case 'INF':
+      return styles.sevInf ?? '';
+    case 'DBG':
+      return styles.sevDbg ?? '';
+    default:
+      return '';
+  }
 }
 
 export function LogRow({ entry }: { entry: LogItem }) {
@@ -24,7 +27,7 @@ export function LogRow({ entry }: { entry: LogItem }) {
     <tr className={styles.row}>
       <td className={styles.ts}>{formatTimestamp(entry.ts)}</td>
       <td>
-        <span className={`${styles.sev} ${severityClass(entry.severity, styles)}`}>
+        <span className={`${styles.sev} ${severityClass(entry.severity)}`}>
           {entry.severity}
         </span>
       </td>

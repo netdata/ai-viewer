@@ -36,6 +36,13 @@ const ctx = self as unknown as {
   postMessage: (message: ForceWorkerResponse) => void;
 };
 
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return String(err);
+}
+
 ctx.onmessage = (e: MessageEvent<ForceWorkerRequest>): void => {
   // Always post a reply: on success the positions, on failure an error string.
   // If runForceLayout threw and we posted nothing, the consumer's onmessage
@@ -45,6 +52,6 @@ ctx.onmessage = (e: MessageEvent<ForceWorkerRequest>): void => {
     const positioned = runForceLayout(nodes, edges, opts, seeded);
     ctx.postMessage({ positioned });
   } catch (err) {
-    ctx.postMessage({ error: String((err as Error)?.message ?? err) });
+    ctx.postMessage({ error: errorMessage(err) });
   }
 };

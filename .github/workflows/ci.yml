@@ -15,6 +15,7 @@
 #   scripts/test/lint-test.sh, scripts/spec-drift.sh,
 #   scripts/test/spec-drift-test.sh, scripts/codacy-coverage-upload.sh,
 #   scripts/test/codacy-coverage-upload-test.sh,
+#   scripts/test/codacy-config-test.sh,
 #   scripts/scan-ai-attribution.sh, or scripts/gates.sh are absent. Only
 #   optional helpers such as systemd lint skip by presence.
 #
@@ -63,6 +64,8 @@
 #     - SOW-0044 (LANDING) — codacy-coverage reporting job, fed only from the
 #                  existing Go/frontend coverage artifacts; not required in
 #                  branch protection until SOW-0046 triages the findings.
+#     - SOW-0046 (LANDING) — Codacy config self-test for tool/pattern and
+#                  path-exclusion policy; Codacy remains reporting-only.
 #   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its
 #   negative self-test (scripts/test/scan-secrets-test.sh) are already
 #   implemented and run as REQUIRED, fail-closed steps in the gates job
@@ -209,7 +212,9 @@ jobs:
 
       - name: golangci-lint
         if: steps.detect.outputs.go == 'true' && steps.detect.outputs.golangci == 'true'
-        uses: golangci/golangci-lint-action@v9
+        # SHA-pinned for supply-chain integrity; the golangci-lint binary
+        # version still comes from .golangci-lint-version via the input below.
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee
         with:
           # Single source of truth: .golangci-lint-version (SOW-0009). A version
           # bump is an intentional, reviewable one-line diff. The action also
@@ -785,27 +790,29 @@ jobs:
           fi
           echo "secrets scanner and self-test present."
 
-      # Fail-closed: lint-test, spec-drift, Codacy coverage upload self-test,
+      # Fail-closed: lint-test, spec-drift, Codacy coverage/config self-tests,
       # AI-attribution, and gates.sh are mandatory gate infrastructure. Missing
       # files are missing gates, not passes.
       - name: Require cross-cutting gates present (fail-closed)
         shell: bash
         run: |
           missing=0
-          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/codacy-coverage-upload.sh scripts/test/codacy-coverage-upload-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
+          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/codacy-coverage-upload.sh scripts/test/codacy-coverage-upload-test.sh .codacy/codacy.config.json .codacy.yml scripts/test/codacy-config-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
             if [[ ! -f "$f" ]]; then
               echo "::error::required gate file is absent: $f"
               missing=1
             fi
           done
           if [[ "$missing" -ne 0 ]]; then
-            echo "The lint self-test, spec-drift detector, Codacy coverage upload self-test, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
+            echo "The lint self-test, spec-drift detector, Codacy self-tests, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
             exit 1
           fi
-          echo "lint self-test, spec-drift detector, Codacy coverage upload self-test, AI-attribution scanner, and local aggregate present."
+          echo "lint self-test, spec-drift detector, Codacy self-tests, AI-attribution scanner, and local aggregate present."
 
       - name: Local aggregate syntax check
-        run: bash -n scripts/gates.sh
+        run: |
+          bash -n scripts/gates.sh
+          bash -n scripts/test/codacy-config-test.sh
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -847,6 +854,11 @@ jobs:
         run: |
           chmod +x scripts/test/codacy-coverage-upload-test.sh
           ./scripts/test/codacy-coverage-upload-test.sh
+
+      - name: Codacy config self-test
+        run: |
+          chmod +x scripts/test/codacy-config-test.sh
+          ./scripts/test/codacy-config-test.sh
 
       - name: Scan AI attribution
         run: |

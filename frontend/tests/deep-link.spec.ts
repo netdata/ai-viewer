@@ -25,7 +25,7 @@ test.describe('deep link', () => {
 
     // The detail heading echoes the id in a <code> (src/pages/SessionDetail).
     await expect(
-      page.getByRole('heading', { name: new RegExp(`Session\\b`), level: 1 }),
+      page.getByRole('heading', { name: /Session\b/, level: 1 }),
     ).toBeVisible();
     await expect(page.getByText(id, { exact: false }).first()).toBeVisible();
 

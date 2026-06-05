@@ -48,14 +48,28 @@ export interface Point {
  * sole differentiator — every series/bar is also labelled with text — so a
  * cycling palette for many series is acceptable (the legend disambiguates).
  */
-const SERIES_TOKENS = [
-  '--accent',
-  '--success',
-  '--warning',
-  '--error',
-  '--info',
-  '--text-secondary',
-] as const;
+const SERIES_TOKEN_COUNT = 6;
+
+function normalizedSeriesTokenIndex(index: number): number {
+  return ((index % SERIES_TOKEN_COUNT) + SERIES_TOKEN_COUNT) % SERIES_TOKEN_COUNT;
+}
+
+function seriesTokenAt(index: number): string {
+  switch (normalizedSeriesTokenIndex(index)) {
+    case 0:
+      return '--accent';
+    case 1:
+      return '--success';
+    case 2:
+      return '--warning';
+    case 3:
+      return '--error';
+    case 4:
+      return '--info';
+    default:
+      return '--text-secondary';
+  }
+}
 
 /**
  * seriesColorVar returns the var() reference for the i-th series, cycling the
@@ -63,11 +77,7 @@ const SERIES_TOKENS = [
  * Deterministic: the same index always yields the same color.
  */
 export function seriesColorVar(index: number): string {
-  // index can exceed the palette length; modulo cycles it. noUncheckedIndexedAccess
-  // still types the lookup as possibly-undefined, so fall back to the first token
-  // (provably present) — never an undefined var().
-  const token = SERIES_TOKENS[((index % SERIES_TOKENS.length) + SERIES_TOKENS.length) % SERIES_TOKENS.length];
-  return `var(${token ?? SERIES_TOKENS[0]})`;
+  return `var(${seriesTokenAt(index)})`;
 }
 
 // ── Axis ticks ───────────────────────────────────────────────────────────────
@@ -222,13 +232,11 @@ export function linePath(points: Point[]): string {
   if (points.length === 0) {
     return '';
   }
-  const [head, ...rest] = points;
-  if (head === undefined) {
-    return '';
-  }
-  let d = `M${head.x},${head.y}`;
-  for (const p of rest) {
-    d += `L${p.x},${p.y}`;
+  let d = '';
+  let prefix = 'M';
+  for (const p of points) {
+    d += `${prefix}${p.x},${p.y}`;
+    prefix = 'L';
   }
   return d;
 }
