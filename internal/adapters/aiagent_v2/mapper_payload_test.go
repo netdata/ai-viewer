@@ -220,7 +220,8 @@ func TestExtractPayloadRef_VariousShapes(t *testing.T) {
 		{name: "array scalar", in: `[1,2,3]`},
 		{name: "object no ref/path", in: `{"messages":[]}`},
 		{name: "legacy ref-only", in: `{"ref":"a/b/c.gz"}`, ok: true, want: payloadRef{Ref: "a/b/c.gz", Path: "a/b/c.gz"}},
-		{name: "legacy path-only", in: `{"path":"x/y/z.json"}`, ok: true, want: payloadRef{Path: "x/y/z.json"}},
+		{name: "bare path-only inline object", in: `{"path":"x/y/z.json"}`},
+		{name: "legacy path with evidence metadata", in: `{"path":"x/y/z.json","format":"json","captured":true}`, ok: true, want: payloadRef{Path: "x/y/z.json", Format: "json", Captured: boolPtr(true)}},
 		{name: "legacy both prefers path", in: `{"ref":"X","path":"Y"}`, ok: true, want: payloadRef{Ref: "X", Path: "Y"}},
 		{name: "producer ref wrapper", in: `{"ref":{"path":"payloads/req.http.gz","format":"http","compression":"gzip","originalBytes":1500,"compressedBytes":420,"sha256":"abc","captured":true}}`, ok: true, want: payloadRef{Path: "payloads/req.http.gz", Format: "http", Compression: "gzip", OriginalBytes: 1500, StoredBytes: 420, SHA256: "abc", Captured: boolPtr(true)}},
 		{name: "sdk ref wrapper", in: `{"sdk":{"ref":{"path":"payloads/sdk-req.json.gz","format":"json","compression":"gzip","originalBytes":80,"compressedBytes":33,"captured":true}}}`, ok: true, want: payloadRef{Path: "payloads/sdk-req.json.gz", Format: "json", Compression: "gzip", OriginalBytes: 80, StoredBytes: 33, Captured: boolPtr(true), SDK: true}},
@@ -324,7 +325,7 @@ func assertPayloadPathResolvesUnderRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("legit ref: %v", err)
 	}
-	if !strings.HasPrefix(uri, "file:///tmp/payloads/x/y.bin") && uri != "file:///tmp/payloads/x/y.bin" {
+	if uri != "file:///tmp/payloads/x/y.bin" {
 		t.Fatalf("uri = %q, want file:///tmp/payloads/x/y.bin", uri)
 	}
 }

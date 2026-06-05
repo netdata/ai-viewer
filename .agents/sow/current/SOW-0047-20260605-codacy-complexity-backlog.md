@@ -327,8 +327,9 @@ Spec deltas landed before tests/code:
   - totals, final report, and plugin metadata are kept in session extras.
   - `reasoning.final` is carried on the nested reasoning op extras; no extra
     reasoning log row is emitted.
-  - legacy inline payloads are deliberately skipped; only `payload.ref` and
-    `payload.sdk.ref` descriptors produce `PayloadRefEvent` rows.
+  - legacy inline payloads are deliberately skipped; producer-shaped
+    `payload.ref` and `payload.sdk.ref` descriptors produce `PayloadRefEvent`
+    rows, with constrained compatibility for legacy flat ref descriptors.
   - reasoning spans get their own deterministic synthetic op sequence values so
     they cannot overwrite the parent LLM op in storage.
   - a request/response side may carry both regular and SDK payload refs; both
@@ -600,6 +601,21 @@ Second slice focused validation:
   90.6%, `internal/adapters/aiagent_v2` coverage 92.7%, frontend Vitest
   coverage with 631 passing tests, frontend E2E/axe with 51 passing tests, and
   no benchmark `sec/op` regression over the 20% gate.
+- PR review follow-up focused validation passed after Round 10 fixes:
+  `go test ./internal/adapters/aiagent_v2 -run 'TestExtractPayloadRef_VariousShapes|TestExtractPayloadRefs_MultipleAndMixedShapes|TestResolvePayloadPath_RootHandling' -count=1`,
+  and `go test ./internal/adapters/aiagent_v2 -count=1`. These tests pin the
+  exact resolved payload URI, skip bare path-only inline objects, preserve
+  evidence-shaped legacy flat refs, and keep regular-plus-SDK payload refs
+  independently emitted.
+- Fresh final `./scripts/gates.sh` passed after the Round 10 follow-up and
+  reviewer rerun in 505s: lint/static/security/vulnerability checks, secrets,
+  attribution, spec drift, Codacy config/coverage self-tests, systemd, build +
+  bundle-size, benchmark regression gate, Go race+coverage, frontend Vitest
+  coverage, Go coverage threshold gate, adapter fuzz seed corpus, and
+  Playwright/axe. The run reported Go total coverage 85.2%, gated `internal/*`
+  aggregate coverage 90.6%, `internal/adapters/aiagent_v2` coverage 92.6%,
+  frontend Vitest coverage with 631 passing tests, frontend E2E/axe with 51
+  passing tests, and no benchmark `sec/op` regression over the 20% gate.
 
 ## Reviews
 
@@ -902,6 +918,74 @@ Resolution:
   string-ref compatibility coverage.
 - Accepted pre-existing duplicate `callPath` storage and source-fidelity
   `original_kind` extras as preserved behavior, not regressions.
+- External review converged with no actionable findings remaining.
+
+### Round 10 - 2026-06-05
+
+Scope: PR-level review of the pushed `ca34e96` state for the same broad SOW
+slice before merge.
+
+Findings:
+
+- `mapper_payload_test.go` had a weak URI assertion in
+  `assertPayloadPathResolvesUnderRoot`: the prefix check could allow an
+  unexpected suffix such as `file:///tmp/payloads/x/y.bin/extra`.
+- `adapter-aiagent-v2.md` documented root `SessionFinalizedEvent` status as a
+  binary completed/failed mapping, while the mapper and existing tests map
+  `endedAt` with absent `success` to `interrupted`.
+- `adapter-aiagent-v2.md` described only producer-shaped `payload.ref` and
+  `payload.sdk.ref` descriptors, while the mapper intentionally still accepts
+  constrained legacy flat ref descriptors for older helper-shaped snapshots and
+  tests.
+
+Resolution:
+
+- Hardened `TestResolvePayloadPath_RootHandling` to require the exact expected
+  `file:///tmp/payloads/x/y.bin` URI.
+- Corrected the session-finalized spec row to state completed, failed, and
+  interrupted terminal mappings explicitly.
+- Corrected the payload-gap prose to distinguish skipped inline payloads,
+  producer-shaped ref descriptors, and retained constrained legacy flat
+  descriptor compatibility.
+- Follow-up review found two additional issues before merge: bare top-level
+  `path` compatibility could misclassify inline payloads as refs, and the spec
+  gap section still carried stale "decision needed"/"proposed" language.
+  The code now skips bare path-only inline payload objects, keeps explicit
+  legacy flat ref descriptors, and the spec now records settled behavior and
+  exact extras keys. The same broad review scope was rerun in Round 11 before
+  merge.
+
+### Round 11 - 2026-06-05
+
+Scope: same broad SOW file, `adapter-aiagent-v2.md`, aiagent_v2 mapper
+decomposition, and staged PR follow-up diff, with the Round 10 fixes and the
+bare path-only discriminator fix included in the reviewed state.
+
+Reviewers:
+
+- `codex`: no blocking correctness, race, security, or spec-drift findings.
+  Noted a non-blocking evidence gap that the SOW should record the broader
+  payload-shape tests, because the staged fix changes legacy payload-ref
+  classification as well as URI assertion strength.
+- `glm`: no blocking correctness, security, race, idempotency, spec drift, or
+  sensitive-data finding. Noted only low-risk observations: a tiny repeated
+  scan of `env.Ref` in the discriminator and a pre-existing emission-table
+  summary that does not list every session extra key.
+- `mimo`: no blocking correctness, security, separation-of-concerns, coverage,
+  performance, race, or unwanted-side-effect finding. Noted the same
+  non-blocking repeated `env.Ref` probe and that the SOW is long because it
+  preserves the review audit trail.
+
+Resolution:
+
+- Recorded the broader focused payload tests and fresh full-gate result in the
+  validation section above.
+- Accepted the repeated `env.Ref` probe as non-blocking: payload-ref raw
+  messages are tiny, the mapper remains pure, and the extra scan is not visible
+  in the benchmark gate.
+- Accepted the emission-table extras summary and long SOW audit trail as
+  non-blocking documentation style; neither changes runtime behavior or merge
+  readiness.
 - External review converged with no actionable findings remaining.
 
 ## Outcome

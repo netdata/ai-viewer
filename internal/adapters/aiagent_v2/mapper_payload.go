@@ -78,19 +78,31 @@ func extractPayloadRefs(raw json.RawMessage) []payloadRef {
 }
 
 func regularPayloadRef(env payloadRefEnvelope) (payloadRef, bool) {
-	if hasLegacyPayloadFields(env) && !rawPayloadRefIsObject(env.Ref) {
+	if legacyPayloadRefCandidate(env) && !rawPayloadRefIsObject(env.Ref) {
 		return legacyPayloadRef(env)
 	}
 	return decodeWrappedPayloadRef(env.Ref, false)
 }
 
-func hasLegacyPayloadFields(env payloadRefEnvelope) bool {
-	return env.Path != "" || env.Captured != nil || hasLegacyPayloadMetadata(env)
+func legacyPayloadRefCandidate(env payloadRefEnvelope) bool {
+	if stringPayloadRef(env.Ref) != "" {
+		return true
+	}
+	return !rawPayloadRefPresent(env.Ref) && env.Path != "" && hasLegacyPayloadEvidence(env)
+}
+
+func hasLegacyPayloadEvidence(env payloadRefEnvelope) bool {
+	return env.Captured != nil || hasLegacyPayloadMetadata(env)
 }
 
 func hasLegacyPayloadMetadata(env payloadRefEnvelope) bool {
 	return env.Format != "" || env.Compression != "" || env.OriginalBytes != 0 ||
 		env.StoredBytes != 0 || env.CompressedBytes != 0 || env.SHA256 != ""
+}
+
+func rawPayloadRefPresent(raw json.RawMessage) bool {
+	_, ok := firstNonSpaceByte(raw)
+	return ok
 }
 
 func rawPayloadRefIsObject(raw json.RawMessage) bool {
