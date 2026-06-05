@@ -5,9 +5,10 @@
 Status: open
 
 Sub-state: active 2026-06-05. First production slice
-`frontend/src/state/filters.ts` is merged. Second production slice selected:
-`internal/adapters/aiagent_v2/mapper.go`; implementation may proceed only for
-this slice under the Pre-Implementation Gate below.
+`frontend/src/state/filters.ts` is merged. Second production slice
+`internal/adapters/aiagent_v2/mapper.go` is merged. Third production slice
+selected: `internal/ingest/writer.go` `applyOpFinalized`; implementation may
+proceed only for this slice under the Pre-Implementation Gate below.
 
 ## Requirements
 
@@ -420,6 +421,157 @@ Open decisions:
 
 - None for the operator. Technical sequencing belongs to the assistant.
 
+### Third Slice Gate - ingest writer applyOpFinalized
+
+Status: ready for implementation after this SOW update.
+
+Selected third slice:
+
+- `internal/ingest/writer.go` `applyOpFinalized` decomposition.
+- Goal: reduce Codacy/Lizard maintainability findings in the ingest writer's
+  op-finalization path while preserving all persisted-row, catalog, rollup,
+  FTS, pricing, duration, and dirty-set behavior exactly.
+- Explicit non-goal: do not change SQLite schema or migrations, cursor/high-water
+  behavior, rollup algorithms, `applyOpStarted`, extras grafting,
+  payload/log idempotency, adapter scanner/tailer behavior, REST/SSE contracts,
+  or frontend presentation in this slice.
+
+Problem / root-cause model:
+
+- `applyOpFinalized` currently performs several distinct jobs in one function:
+  session/turn/op identity resolution, prior terminal-total capture, persisted
+  op lookup, priceable-op gating, computed-cost resolution, end/duration
+  validity gating, ops-row update, dirty-set marking, FTS invalidation, and
+  catalog delta forwarding.
+- The complexity is a maintainability defect in a hot write path, not a behavior
+  defect. The correct fix is narrow extraction into named helper functions and
+  small local value structs while keeping SQL statements, bind ordering, and
+  side-effect order stable.
+
+Evidence reviewed:
+
+- Direct Lizard on current `master` reported the selected hotspot:
+  `applyOpFinalized` at `internal/ingest/writer.go:917-1046`, 74 NLOC, CCN 17,
+  130 physical lines.
+- The same triage also found higher-blast-radius Claude adapter hotspots:
+  `internal/adapters/claude_code/scanner.go` `streamLines` / `scanAll` and
+  `internal/adapters/claude_code/tailer.go` `tailLoop` / `flushDirty`.
+  Those touch scanner/tailer state machines, filesystem streaming, and restart
+  behavior, so they are deferred until this narrower ingest-writer slice is
+  completed.
+- Existing focused tests already cover the sensitive op-finalize contracts:
+  persisted-start duration computation, orphan finalize no-op behavior,
+  null/skewed end preservation, pricer skip/call/miss behavior, computed-cost
+  catalog forwarding, catalog re-finalize idempotency, FTS refresh, and
+  start-bucket rollup refresh.
+
+Affected contracts and surfaces:
+
+- SQLite `ops` row updates for `OpFinalizedEvent`.
+- Catalog provider/model/tool totals and idempotent `(now - prior)` delta
+  behavior.
+- Time-bucket dirty marking for the op's persisted start bucket.
+- FTS dirty-op invalidation for finalized op error text.
+- Pricing-miss observability and computed-cost forwarding into catalog rollups.
+- No public API, schema, source-format adapter, frontend, or operator-facing
+  behavior change is expected.
+
+Spec deltas before tests/code:
+
+- No spec file delta is required for this slice because it is a pure
+  behavior-preserving refactor. `.agents/sow/specs/ingester.md` already
+  documents the target behavior:
+  - `OpFinalizedEvent` applies a `(now - prior)` delta to catalog totals.
+  - `duration_us` is computed from persisted `ops.start_ts`, never from
+    `OpFinalizedEvent.Ts`, and orphan/invalid-end finalizes do not fabricate or
+    clobber duration.
+  - zero-cost priceable LLM ops are priced with the op start timestamp and the
+    resolved cost is the value persisted and accumulated.
+- If implementation reveals a real spec/code drift, stop the slice, update the
+  relevant spec first, then resume tests and production refactor.
+
+Existing patterns to reuse:
+
+- Small unexported helpers on `writer` for one database or side-effect job.
+- Local value structs for grouped SQL lookup/update state rather than passing
+  long primitive parameter lists.
+- Existing `opPriorTotals`, `priceOp`, `isPriceableOp`, dirty-set helpers, and
+  catalog writer contracts.
+- Focused ingest tests plus the full package race suite and benchmark gate.
+
+Risk and blast radius:
+
+- Medium: this is a hot ingest write path and a regression could silently affect
+  persisted costs, durations, catalog totals, FTS, or rollups.
+- Low schema/API risk: the intended change is internal decomposition only.
+- Performance risk exists because the path runs for every finalized op; the
+  benchmark regression gate is mandatory.
+
+Sensitive data handling plan:
+
+- No real session data or snapshot content is written to durable artifacts.
+  Tests must use synthetic events and existing sanitized fixtures only. Any
+  temporary Codacy, Lizard, or benchmark output stays under `/tmp`.
+
+Implementation plan:
+
+1. Delegate a test audit and add characterization coverage only for real gaps
+   around `applyOpFinalized` helper-boundary invariants.
+2. Delegate the production refactor of `applyOpFinalized` into narrow helpers:
+   persisted op lookup, price resolution, end/duration resolution, ops finalize
+   update, dirty-set marking, and catalog forwarding.
+3. Keep SQL text/bind semantics and side-effect order stable unless a focused
+   test proves the current order is irrelevant.
+4. Run focused ingest tests, package race tests, direct Lizard, local Codacy
+   analysis, benchmark gate, full gates, and external second-opinion review.
+5. Merge only after reviewers converge and PR checks are green.
+
+Validation plan:
+
+- `go test ./internal/ingest -run 'TestApplyOpFinalized|TestWriter_Pricer|TestWriter_Priceable|TestWriter_PricingMiss|TestWriter_ApplyOpFinalized|TestWriter_PricerComputedCostFlowsToCatalog|TestCatalog_Re|TestRefreshRollups_OpFinalized|TestWriter_ReasoningOpDoesNotOverwriteParentLLM' -count=1`
+- `go test -race -count=1 ./internal/ingest`
+- `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/ingest/writer.go -l go`
+- Local Codacy file analysis for `internal/ingest/writer.go`.
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- Full `./scripts/gates.sh`.
+- PR checks must all pass before merge; `codacy-coverage` may skip on PRs by
+  design, but every other row must be green.
+
+Test-order note:
+
+- This third slice is a behavior-preserving refactor. Existing tests and any
+  added characterization tests may pass before implementation. The failing
+  signal is the stricter Codacy/Lizard maintainability report listed above.
+
+Benchmarks:
+
+- Required. `applyOpFinalized` is part of the SQLite batch-insert hot path.
+  `./scripts/gates.sh` must include `scripts/check-bench.sh`; any significant
+  >20% `sec/op` regression blocks the slice.
+
+Artifact impact plan:
+
+- Specs: no expected spec file update for this behavior-preserving slice unless
+  implementation reveals real drift.
+- Runtime project skills: no expected change unless a new ingest-writer
+  decomposition convention emerges.
+- End-user docs: no expected change.
+- SOW lifecycle: remains active until the selected slice is merged and enough
+  production complexity backlog is reduced or explicitly split into narrower
+  follow-up SOWs.
+
+Open-source reference evidence:
+
+- This is an internal behavior-preserving ingest-writer decomposition against
+  already-specified canonical/store contracts. No new source-format or protocol
+  claim is introduced, so no additional upstream clone/mirror research is
+  required for this slice.
+
+Open decisions:
+
+- None for the operator. Technical sequencing belongs to the assistant.
+
 ## Plan
 
 1. Triage production hotspots and choose the first low-risk/high-value slice.
@@ -616,6 +768,114 @@ Second slice focused validation:
   aggregate coverage 90.6%, `internal/adapters/aiagent_v2` coverage 92.6%,
   frontend Vitest coverage with 631 passing tests, frontend E2E/axe with 51
   passing tests, and no benchmark `sec/op` regression over the 20% gate.
+- PR #51 was merged, local `master` was fast-forwarded, and post-merge
+  `./scripts/gates.sh` passed in 503s on the merged state: lint/static/security/
+  vulnerability checks, secrets, attribution, spec drift, Codacy config/coverage
+  self-tests, systemd, build + bundle-size, benchmark regression gate, Go
+  race+coverage, frontend Vitest coverage, Go coverage threshold gate, adapter
+  fuzz seed corpus, and Playwright/axe. The run reported Go total coverage
+  85.2%, gated `internal/*` aggregate coverage 90.5%,
+  `internal/adapters/aiagent_v2` coverage 92.5%, frontend Vitest coverage with
+  631 passing tests, frontend E2E/axe with 51 passing tests, and no benchmark
+  `sec/op` regression over the 20% gate.
+
+Third slice focused validation:
+
+- Added `TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles`, a
+  characterization test proving the persisted op lookup treats only
+  `sql.ErrNoRows` as a non-fatal orphan finalize and bubbles schema/transaction
+  lookup errors instead of silently skipping pricing or duration work.
+- Refactored `internal/ingest/writer.go` `applyOpFinalized` into helpers for
+  persisted op lookup, cost resolution, timing resolution, ops-row update,
+  dirty-set marking, and catalog forwarding. The side-effect order remains
+  `requireSessionID` -> `opPriorTotals` -> lookup -> cost -> timing -> update
+  -> dirty marks -> catalog.
+- Focused ingest validation passed:
+  `go test ./internal/ingest -run 'TestApplyOpFinalized|TestWriter_Pricer|TestWriter_Priceable|TestWriter_PricingMiss|TestWriter_ApplyOpFinalized|TestWriter_PricerComputedCostFlowsToCatalog|TestCatalog_Re|TestRefreshRollups_OpFinalized|TestWriter_ReasoningOpDoesNotOverwriteParentLLM|TestFTS' -count=1`
+  in 0.280s.
+- Package validation passed: `go test ./internal/ingest -count=1` in 8.750s.
+- Package race validation passed:
+  `go test -race -count=1 ./internal/ingest` in 332.579s.
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh` passed. The
+  secret scan covered 837 tracked files.
+- Direct Lizard on `internal/ingest/writer.go` and
+  `internal/ingest/writer_test.go` reported zero default-threshold warnings.
+  The selected hotspot changed from `applyOpFinalized` 74 NLOC / CCN 17 /
+  130 physical lines to 26 NLOC / CCN 6 / 27 physical lines.
+- Local Codacy file analysis for `internal/ingest/writer.go` still reported six
+  residual Lizard findings, all outside the selected `applyOpFinalized` hotspot:
+  `apply` at line 420 CCN 13, the anonymous handler at line 639 CCN 10, the
+  anonymous handler at line 754 NLOC 76 and CCN 11, the handler at line 1290
+  CCN 12, and file-level NLOC 925. These remain backlog for later slices.
+- Quick benchmark smoke passed:
+  `go test ./internal/ingest -run '^BenchmarkBatchInsert$' -bench '^BenchmarkBatchInsert$' -benchmem -count=3`
+  with runs at 123.951 ms/op, 119.172 ms/op, and 121.325 ms/op.
+- Full `./scripts/gates.sh` passed after Round 12 reviewer fixes in 594s:
+  lint/static/security/vulnerability checks, secrets, attribution, spec drift,
+  Codacy config/coverage self-tests, systemd, build + bundle-size, benchmark
+  regression gate, Go race+coverage, frontend Vitest coverage, Go coverage
+  threshold gate, adapter fuzz seed corpus, and Playwright/axe. The benchmark
+  gate reported no `sec/op` regression over the 20% threshold; `BatchInsert`
+  was neutral at 115.5 ms/op vs 123.5 ms/op baseline. The run reported Go total
+  coverage 85.2%, gated `internal/*` aggregate coverage 90.6%,
+  `internal/ingest` coverage 85.9%, frontend Vitest coverage with 631 passing
+  tests, and frontend E2E/axe with 51 passing tests.
+- Round 13 test-hardening follow-up passed:
+  `go test ./internal/ingest -run 'TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles|TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles' -count=1`
+  in 0.016s, and the broader focused apply-finalize suite listed above in
+  0.335s.
+- Package validation after the Round 13 test-hardening follow-up passed:
+  `go test ./internal/ingest -count=1` in 9.396s.
+- Direct Lizard after the Round 13 test-hardening follow-up still reported zero
+  default-threshold warnings across `internal/ingest/writer.go` and
+  `internal/ingest/writer_test.go`. `applyOpFinalized` remained 26 NLOC /
+  CCN 6 / 27 physical lines.
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh` passed after
+  the Round 13 test-hardening follow-up. The secret scan covered 837 tracked
+  files.
+- Full `./scripts/gates.sh` passed after the Round 13 test-hardening follow-up
+  in 504s: lint/static/security/vulnerability checks, secrets, attribution,
+  spec drift, Codacy config/coverage self-tests, systemd, build + bundle-size,
+  benchmark regression gate, Go race+coverage, frontend Vitest coverage, Go
+  coverage threshold gate, adapter fuzz seed corpus, and Playwright/axe. The
+  benchmark gate reported no `sec/op` regression over the 20% threshold;
+  `BatchInsert` improved to 113.3 ms/op vs 123.5 ms/op baseline. The run
+  reported Go total coverage 85.2%, gated `internal/*` aggregate coverage
+  90.6%, `internal/ingest` coverage 85.9%, frontend Vitest coverage with 631
+  passing tests, and frontend E2E/axe with 51 passing tests.
+- Round 14 test/comment follow-up passed:
+  `go test ./internal/ingest -run 'TestResolveFinalizedOpTiming|TestResolveFinalizedOpCost|TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles|TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles' -count=1`
+  in 0.018s.
+- After the first Round 14 full-gate attempt, `golangci-lint` correctly failed
+  on staticcheck `SA1012` because the new nil-pricer helper test passed a nil
+  `context.Context`. The test-only follow-up changed that argument to
+  `context.Background()` while preserving the nil transaction/pricer guard
+  coverage. The focused nil-pricer test passed in 0.017s, and
+  `golangci-lint run --timeout=5m ./internal/ingest` passed with zero issues.
+- Direct Lizard after the Round 14 test/comment follow-up still reported zero
+  default-threshold warnings across `internal/ingest/writer.go` and
+  `internal/ingest/writer_test.go`. `applyOpFinalized` remained 26 NLOC /
+  CCN 6 / 27 physical lines.
+- `git diff --check` passed after the Round 14 test/comment follow-up.
+- One full-gate attempt later failed in the global `go test -race ./...` stage
+  on `internal/adapters/aiagent_v3`
+  `TestTail_HoldsBackPartialLineThenCompletes` with no touched adapter code.
+  Targeted follow-up evidence showed the failure was transient under full
+  workstation load: the exact test passed 20 non-race iterations and 10 race
+  iterations, and the full `internal/adapters/aiagent_v3` package then passed
+  `go test -race ./internal/adapters/aiagent_v3 -count=5`.
+- Final full `./scripts/gates.sh` rerun passed in 520s: lint/static/security/
+  vulnerability checks, secrets, attribution, spec drift, Codacy config/coverage
+  self-tests, systemd, build + bundle-size, benchmark regression gate, Go
+  race+coverage, frontend Vitest coverage, Go coverage threshold gate, adapter
+  fuzz seed corpus, and Playwright/axe. The benchmark gate reported no `sec/op`
+  regression over the 20% threshold; `BatchInsert` improved to 118.7 ms/op vs
+  123.5 ms/op baseline. The run reported Go total coverage 85.2%, gated
+  `internal/*` aggregate coverage 90.6%, `internal/ingest` coverage 85.9%,
+  frontend Vitest coverage with 631 passing tests, and frontend E2E/axe with 51
+  passing tests.
 
 ## Reviews
 
@@ -986,6 +1246,149 @@ Resolution:
 - Accepted the emission-table extras summary and long SOW audit trail as
   non-blocking documentation style; neither changes runtime behavior or merge
   readiness.
+- External review converged with no actionable findings remaining.
+
+### Round 12 - 2026-06-05
+
+Scope: SOW file and current uncommitted diff for the third SOW-0047 production
+slice, `internal/ingest/writer.go` `applyOpFinalized` decomposition and
+`internal/ingest/writer_test.go` coverage.
+
+Reviewers:
+
+- `codex`: no blocking correctness, race, security, behavior, or performance
+  finding. Findings: harden the new lookup-error test by checking setup errors,
+  and record third-slice validation/review evidence in this SOW.
+- `mimo`: no blocking correctness, security, race, behavior, or performance
+  finding. Findings: preserve concise helper-boundary comments for the pricing,
+  timing, dirty-set, and catalog invariants that were previously inline in the
+  monolithic function.
+- `kimi`: no blocking correctness, security, race, behavior, or performance
+  finding. Findings: record the third-slice execution log, add concise helper
+  contract comments, and optionally note why the column-rename test forces the
+  schema-error path.
+
+Resolution:
+
+- Delegated reviewer fixes for the production/test files: added concise
+  helper-boundary comments around orphan-finalize lookup behavior, temporal
+  pricing, timing preservation via COALESCE, start-bucket/FTS dirty semantics,
+  and computed-cost catalog forwarding.
+- Hardened `TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles` so
+  `ensureSourceRowDirect`, `db.BeginTx`, and seed `w.apply` setup failures now
+  fail the test explicitly.
+- Added a one-line test comment documenting the column rename as a deliberate
+  schema-error trigger for the persisted-op lookup.
+- Recorded third-slice validation evidence above.
+- Review remains open until the same broad scope is rerun on the integrated
+  Round 12 fixes.
+
+### Round 13 - 2026-06-05
+
+Scope: same broad SOW file and current uncommitted diff review for the third
+SOW-0047 production slice, with the Round 12 helper comments, test setup
+hardening, and validation ledger included.
+
+Reviewers:
+
+- `codex`: no blocking correctness, race, security, separation-of-concerns,
+  unwanted-side-effect, performance, or SOW/spec-drift finding. Verified
+  side-effect order, lookup error handling, pricing and timing gates, the new
+  setup-error-hardened test, and SOW validation evidence.
+- `glm`: no blocking correctness, race, security, behavior, or performance
+  finding. Findings: a pre-existing sibling lookup-error test still ignored
+  setup errors, and Round 12's "review remains open" note needed to be closed by
+  a follow-up review entry before merge.
+- `mimo`: no blocking finding. Verified SQL/bind ordering, side-effect order,
+  schema-error test behavior, focused tests, and catalog/dirty semantics. Noted
+  only non-blocking comment-density tradeoff observations.
+- `qwen`: no blocking finding. Verified functional equivalence, security,
+  performance, test coverage, SOW/spec hygiene, and unaffected code paths. Noted
+  only non-blocking comment-density and package-local-type observations.
+
+Resolution:
+
+- Accepted the helper comment-density observations as non-blocking: Round 12
+  restored the important helper-boundary invariants, while detailed behavior
+  remains in `.agents/sow/specs/ingester.md` and focused tests.
+- Delegated a test-only follow-up for the sibling
+  `TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles` setup path. The test
+  now fails explicitly on `ensureSourceRowDirect`, seed `BeginTx`, seed
+  `w.apply`, seed `Commit`, second `BeginTx`, and rollback failures while
+  preserving the intended closed-transaction assertion.
+- Recorded the post-follow-up validation evidence above.
+- Review remains open until the same broad scope is rerun on the integrated
+  Round 13 fixes.
+
+### Round 14 - 2026-06-05
+
+Scope: same broad SOW file and current uncommitted diff review for the third
+SOW-0047 production slice, with the Round 13 sibling-test hardening included.
+
+Reviewers:
+
+- `codex`: no blocking production correctness, security, race, performance, or
+  spec-drift finding. Finding: the comment above
+  `TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles` still described an
+  outdated persisted-op lookup path, while the test actually proves
+  closed-transaction error propagation.
+- `glm`: no actionable finding. Verified behavior-preserving decomposition,
+  side-effect order, SQL/bind equivalence, security, race safety, performance,
+  and SOW hygiene.
+- `mimo`: no actionable finding. Verified side-effect order, branch
+  equivalence, security, race safety, performance, tests, and SOW/spec hygiene.
+  Noted only non-blocking comment-density and SOW citation-style observations.
+- `qwen`: no blocking correctness, security, race, performance, or
+  separation-of-concerns finding. Findings: add direct focused coverage for
+  `resolveFinalizedOpTiming` guard cases and the nil-pricer branch in
+  `resolveFinalizedOpCost`.
+
+Resolution:
+
+- Delegated a test-only follow-up in `internal/ingest/writer_test.go`.
+- Corrected the stale closed-transaction test comment so it no longer claims to
+  reach the persisted-op lookup or references old source line numbers.
+- Added `TestResolveFinalizedOpTiming`, a table-driven unit test covering zero
+  end timestamp, invalid start timestamp, non-positive start timestamp,
+  end-before-start clock skew, and the valid duration case.
+- Added `TestResolveFinalizedOpCostNilPricerReturnsEventCost`, proving the
+  nil-pricer guard returns before transaction/pricer use when the op would
+  otherwise be priceable.
+- Recorded the focused validation evidence above.
+- Review remains open until the same broad scope is rerun on the integrated
+  Round 14 fixes.
+
+### Round 15 - 2026-06-05
+
+Scope: same broad SOW file and current uncommitted diff review for the third
+SOW-0047 production slice, with the Round 14 comment/test fixes, staticcheck
+fix, final gate evidence, and transient unrelated tailer-test investigation
+included.
+
+Reviewers:
+
+- `codex`: no findings. Verified side-effect order, SQL/bind equivalence,
+  orphan-finalize lookup handling, Round 14 timing and nil-pricer tests, and
+  SOW validation/review ledger consistency.
+- `glm`: no blocking correctness, security, race, performance, behavior-change,
+  or SOW/spec finding. Noted only non-actionable observations: the nil
+  transaction in the nil-pricer helper test is safe because the guard returns
+  before transaction use, and the transient `aiagent_v3` tailer-test entry is
+  correctly documented.
+- `mimo`: no blocking correctness, security, race, performance, behavior, test
+  coverage, separation-of-concerns, or SOW/spec finding. Noted only
+  non-actionable comment-density and equivalent-guard observations.
+- `qwen`: no correctness, security, race, performance, behavior, coverage, or
+  SOW/spec finding. Noted only non-actionable test-style observations about
+  nested `t.Parallel()` and the pure helper being package-level.
+
+Resolution:
+
+- Accepted the nil-transaction test observation as non-actionable: the test is
+  deliberately proving the nil-pricer early return before transaction/pricer
+  use, and production has a single caller that always passes a real transaction.
+- Accepted the test-style observations as non-actionable: the current table test
+  is valid, lint-clean, and focused on the helper guard conditions.
 - External review converged with no actionable findings remaining.
 
 ## Outcome

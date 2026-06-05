@@ -914,6 +914,18 @@ SELECT kind, name, tool_namespace, model, provider, provider_alias,
 	return p, nil
 }
 
+type finalizedOpLookup struct {
+	provider sql.NullString
+	model    sql.NullString
+	kind     sql.NullString
+	startTs  sql.NullInt64
+}
+
+type finalizedOpTiming struct {
+	endTsArg sql.NullInt64
+	durUS    sql.NullInt64
+}
+
 func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.OpFinalizedEvent) error {
 	sessionID, err := w.requireSessionID(ctx, tx, ev.SessionNativeID, ev.Ts)
 	if err != nil {
@@ -921,70 +933,65 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	opID := canonicalOpID(turnID, ev.Seq)
-	// Capture the op's persisted terminal contribution BEFORE the UPDATE below
-	// overwrites it, so the catalog can move its rollups by the (new − prior)
-	// delta and stay idempotent under a re-emitted / corrected OpFinalized on the
-	// same (turn,seq) (SOW-0004 H1a). Absent row ⇒ first finalize ⇒ zero prior ⇒
-	// delta equals the full new contribution (unchanged single-emission path).
+
 	prior, err := w.opPriorTotals(ctx, tx, opID)
 	if err != nil {
 		return err
 	}
-	// Resolve provider/model/kind and start_ts from the row recorded by the
-	// matching OpStartedEvent (or absent until it arrives). Read ONCE here,
-	// unconditionally: both the pricer (temporal tier selection) AND the
-	// duration computation below need the persisted start_ts. The kind column
-	// gates the pricer call (only kind='llm' ops carry priceable tokens).
-	// sql.ErrNoRows is expected — the op start may have been ingested in a
-	// prior batch or not yet arrived in this scan (orphan finalize); all
-	// columns then scan to their zero value (startTs invalid), which is
-	// non-fatal. Any OTHER error means the database is unhealthy and silently
-	// continuing would violate the "no silent failures" invariant in AGENTS.md.
-	var provider, model, kind sql.NullString
-	var startTs sql.NullInt64
-	if lookupErr := tx.QueryRowContext(ctx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
-		Scan(&provider, &model, &kind, &startTs); lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
-		return fmt.Errorf("ingest writer: lookup op %s: %w", opID, lookupErr)
+	persisted, err := w.lookupFinalizedOp(ctx, tx, opID)
+	if err != nil {
+		return err
 	}
-	cost := ev.CostUSD
-	if cost == 0 && w.pricer != nil {
-		// Skip pricing for non-LLM ops (kind != 'llm') and for ops
-		// without a provider/model pair — pricing those produces noisy
-		// "unknown pricing for provider \"\" model \"\"" warnings that
-		// are not actionable. Non-LLM ops legitimately have zero cost
-		// (they did not consume tokens). When the OpStarted row is
-		// missing entirely (sql.ErrNoRows), all four columns scan to
-		// their zero value and isPriceableOp returns false, so we
-		// never reach priceOp without a real (provider, model).
-		if isPriceableOp(kind, provider, model) {
-			// start_ts drives the temporal tier selection so an op
-			// straddling a price-change date is priced against the tier
-			// in effect when the op STARTED, not ended (the finalize
-			// event timestamp). ops.start_ts is NOT NULL per the schema;
-			// the guard against zero is defence-in-depth in case a future
-			// migration relaxes the constraint, and to match pricing.md.
-			pricingTs := ev.Ts
-			if startTs.Valid && startTs.Int64 > 0 {
-				pricingTs = startTs.Int64
-			}
-			cost = w.priceOp(ctx, tx, provider.String, model.String, pricingTs, ev)
+	cost := w.resolveFinalizedOpCost(ctx, tx, ev, persisted)
+	timing := resolveFinalizedOpTiming(ev, persisted.startTs)
+	if err := w.updateFinalizedOp(ctx, tx, opID, ev, timing, cost); err != nil {
+		return err
+	}
+	w.markOpFinalizedDirty(turnID, sessionID, opID, persisted.startTs)
+	if err := w.catalogOpFinalized(ctx, tx, opID, ev, cost, prior); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *writer) lookupFinalizedOp(ctx context.Context, tx *sql.Tx, opID string) (finalizedOpLookup, error) {
+	var op finalizedOpLookup
+	if err := tx.QueryRowContext(ctx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
+		Scan(&op.provider, &op.model, &op.kind, &op.startTs); err != nil {
+		// Missing op rows are valid orphan finalizes; schema/tx errors must bubble.
+		if errors.Is(err, sql.ErrNoRows) {
+			return finalizedOpLookup{}, nil
 		}
+		return finalizedOpLookup{}, fmt.Errorf("ingest writer: lookup op %s: %w", opID, err)
 	}
-	// Compute end_ts and duration_us TOGETHER from one validity gate so the two
-	// columns can never disagree (data-model.md §ops: duration_us = end_ts - start_ts).
-	// A zero or clock-skewed (EndTs < start_ts) incoming end is NOT trusted: both
-	// columns are preserved via COALESCE rather than clobbering a previously-recorded
-	// good end_ts (e.g. a corrective re-finalize that carries EndTs=0). Duration
-	// derives from the PERSISTED start_ts, never ev.Ts (the finalize Ts ≈ the end:
-	// a finalize sorts AFTER its OpStarted, so EndTs-ev.Ts ≈ 0). An orphan finalize
-	// (start_ts unknown) likewise leaves both invalid → COALESCE preserves the
-	// existing values rather than fabricating a duration.
-	endTsArg := sql.NullInt64{}
-	durUS := sql.NullInt64{}
-	if ev.EndTs > 0 && startTs.Valid && startTs.Int64 > 0 && ev.EndTs >= startTs.Int64 {
-		endTsArg = sql.NullInt64{Int64: ev.EndTs, Valid: true}
-		durUS = sql.NullInt64{Int64: ev.EndTs - startTs.Int64, Valid: true}
+	return op, nil
+}
+
+func (w *writer) resolveFinalizedOpCost(ctx context.Context, tx *sql.Tx, ev canonical.OpFinalizedEvent, op finalizedOpLookup) float64 {
+	cost := ev.CostUSD
+	if cost != 0 || w.pricer == nil || !isPriceableOp(op.kind, op.provider, op.model) {
+		return cost
 	}
+	// Temporal pricing follows the persisted op start, not the finalize event.
+	pricingTs := ev.Ts
+	if op.startTs.Valid && op.startTs.Int64 > 0 {
+		pricingTs = op.startTs.Int64
+	}
+	return w.priceOp(ctx, tx, op.provider.String, op.model.String, pricingTs, ev)
+}
+
+func resolveFinalizedOpTiming(ev canonical.OpFinalizedEvent, startTs sql.NullInt64) finalizedOpTiming {
+	// Returning NULL args lets the UPDATE COALESCE preserve stored timing.
+	if ev.EndTs <= 0 || !startTs.Valid || startTs.Int64 <= 0 || ev.EndTs < startTs.Int64 {
+		return finalizedOpTiming{}
+	}
+	return finalizedOpTiming{
+		endTsArg: sql.NullInt64{Int64: ev.EndTs, Valid: true},
+		durUS:    sql.NullInt64{Int64: ev.EndTs - startTs.Int64, Valid: true},
+	}
+}
+
+func (w *writer) updateFinalizedOp(ctx context.Context, tx *sql.Tx, opID string, ev canonical.OpFinalizedEvent, timing finalizedOpTiming, cost float64) error {
 	if _, err := tx.ExecContext(ctx, `
 UPDATE ops SET
     end_ts             = COALESCE(?, end_ts),
@@ -1005,7 +1012,7 @@ UPDATE ops SET
     ctx_max            = NULLIF(?, 0)
 WHERE id = ?
 `,
-		endTsArg, durUS, nonEmpty(ev.Status, string(canonical.StatusCompleted)),
+		timing.endTsArg, timing.durUS, nonEmpty(ev.Status, string(canonical.StatusCompleted)),
 		ev.ErrorClass, ev.ErrorMessage,
 		ev.TokensIn, ev.TokensOut, ev.TokensCacheRead, ev.TokensCacheWrite, cost,
 		ev.BytesIn, ev.BytesOut, ev.CharsIn, ev.CharsOut, ev.CtxUsed, ev.CtxMax,
@@ -1013,36 +1020,24 @@ WHERE id = ?
 	); err != nil {
 		return fmt.Errorf("writer: finalize op: %w", err)
 	}
+	return nil
+}
+
+func (w *writer) markOpFinalizedDirty(turnID, sessionID, opID string, startTs sql.NullInt64) {
 	w.markDirtyTurn(turnID)
 	w.markDirtySession(sessionID)
-	// Mark the op's START-hour bucket dirty, NOT ev.Ts (which is the END).
-	// Finalize changes the op's duration/status/tokens, all of which roll up
-	// into the op's START bucket, so that hour must be recomputed. startTs is
-	// the PERSISTED ops.start_ts read above; it is invalid only for an orphan
-	// finalize whose OpStarted never landed — in which case the UPDATE matched
-	// no row and there is no rollup contribution to refresh.
+	// Rollups repair the start bucket; FTS repairs by op id.
 	if startTs.Valid {
 		w.markDirtyRollupBucket(startTs.Int64)
 	}
-	// Finalize sets the op's error_class/error_message (and may change its
-	// status); refreshFTS rebuilds the op's fts_ops row (incl. error_text) from
-	// the now-persisted columns at flush time. Marked unconditionally — even an
-	// orphan finalize (no OpStarted row) is harmless: refreshFTS's DELETE
-	// matches nothing and the row-read returns no row, so no fts_ops row is
-	// inserted for a non-existent op.
 	w.markDirtyOp(opID)
-	// Forward the RESOLVED cost (post-pricer) to the catalog rollups so
-	// catalog_providers.total_cost_usd / catalog_models.total_cost_usd
-	// stay in sync with ops.cost_usd. The pricer mutates `cost` in this
-	// function but does NOT touch ev.CostUSD; passing the unmodified ev
-	// to onOpFinalized would silently undercount catalog rollups for
-	// every op whose cost was computed.
+}
+
+func (w *writer) catalogOpFinalized(ctx context.Context, tx *sql.Tx, opID string, ev canonical.OpFinalizedEvent, cost float64, prior opPriorTotals) error {
+	// Catalog totals must see the computed cost that was persisted on ops.
 	evForCatalog := ev
 	evForCatalog.CostUSD = cost
-	if err := w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog, prior); err != nil {
-		return err
-	}
-	return nil
+	return w.catalog.onOpFinalized(ctx, tx, opID, evForCatalog, prior)
 }
 
 // opPriorTotals reads an op's persisted terminal contribution (status + the
