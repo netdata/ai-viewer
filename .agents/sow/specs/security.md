@@ -73,8 +73,12 @@ that plants an operator-identity string and asserts detection.
 ## Dependency Hygiene
 
 - `dependabot.yml` enables security updates for Go modules and npm.
-- `golangci-lint` runs `gosec` linters as part of the standard config.
-- `npm audit --audit-level=high` runs in CI; high/critical vulns fail the build.
+- Standalone pinned `gosec` runs in CI and `scripts/lint.sh`; `gosec` is not
+  enabled inside `golangci-lint` because the standalone gate has newer analyzers
+  and avoids duplicate reporting.
+- `govulncheck` runs in CI and on schedule. npm dependency security is currently
+  covered by Dependabot and scanner visibility; `npm audit` is not a required CI
+  gate unless a future SOW adds it explicitly.
 
 ## Code Scanning Triage
 
@@ -92,6 +96,24 @@ gates. Their security findings are not cosmetic.
   are treated as supply-chain security work. If a mitigation conflicts with
   Dependabot freshness or action major-version updates, the SOW records the
   tradeoff and the chosen policy.
+- **Remote CI bootstraps:** executable downloads in CI require HTTP failure
+  checking, retries where supported, temporary-file execution, and an explicit
+  SOW/spec rationale. The Codacy coverage reporter bootstrap is allowed because
+  it is Codacy's documented coverage path, the workflow verifies the downloaded
+  bootstrap is a non-empty shell script and passes `bash -n` before execution,
+  and Codacy documents that the bootstrap validates the downloaded reporter
+  binary checksum. That checksum validation is Codacy's upstream behavior, not a
+  local guarantee added by this workflow. It is still treated as a supply-chain
+  surface and must not be generalized to unrelated CI steps.
+- **Codacy coverage tokens:** Codacy secrets are never passed to
+  `pull_request` execution of repository code. The non-required
+  `codacy-coverage` job is skipped at the workflow job boundary on
+  `pull_request` events, before checkout, artifact download, secret injection,
+  or repository scripts can run. Account-scoped Codacy tokens are broader than a
+  repository project token; the upload script also refuses all Codacy coverage
+  upload on `pull_request` events before token-mode selection as defense in
+  depth. PR coverage upload stays disabled until a future SOW designs a safe
+  path that does not expose secrets to PR-controlled scripts.
 - **Coverage and quality metrics:** Codacy coverage/complexity trends are
   signals for maintainability, not a substitute for the enforced local coverage
   and lint gates.

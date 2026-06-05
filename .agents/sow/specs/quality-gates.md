@@ -152,7 +152,10 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - **Per-directory mechanism = Vitest's NATIVE glob-keyed `coverage.thresholds`** (SOW-0012 Chunk C; Vitest ≥ 4, verified against the installed 4.1.7). `frontend/vitest.config.ts` lists one glob key per measured dir (`'src/components/<Dir>/**': { lines: 80 }`, `'src/pages/<Dir>/**': { lines: 80 }`); Vitest aggregates each glob group's matched files into one coverage map and **fails the run (exit 1)** if a group's lines % is below the floor, emitting `ERROR: Coverage for lines (NN%) does not meet "<glob>" threshold (80%)`. **No wrapper script** — the floor lives in the config the same command already runs. A shared `PER_DIR_LINES` constant keeps the global floor and every per-dir group in lockstep.
 - **Glob keys track the measured dirs only — lockstep is BIDIRECTIONAL.** A glob group that matches **zero files** has lines pct `"Unknown"`, which **vacuously PASSES** (`"Unknown" < 80` is `false`). So a per-dir key is added **only** for a dir that is in `coverage.include`, **and** every measured component/page dir has a per-dir key — i.e. the gated set and the measured set are **EQUAL** (`gatedDirs === measuredDirs`), enforced both ways by the verifier (R8-2). Adding a per-dir key for a dir that is **not** measured (excluded, or absent from `include`) is a no-op floor that can never fire; omitting a measured dir's key leaves it gated only by the weaker global aggregate. The global floor still gates every included file in aggregate.
 - **Intentional non-measurement is an explicit ledger, not an omission.** Source dirs/files under `src/components/`/`src/pages/` that are deliberately not measured live in `COVERAGE_EXCLUDED` (in `vitest.coverage.mjs`) **with a per-entry rationale**. Today: `Layout` + `StatCard` are **real** components whose dedicated Vitest **unit** coverage is **deferred** to a tracked follow-up (Playwright E2E exercises them on every route / on `/stats` respectively — they are **not** placeholders); the `Agents`/`Models`/`Tools` pages are bare Phase-3 `<ComingSoon/>` wrappers (no logic of their own); `NotFound.tsx` is the trivial 404 (axe-covered via E2E). The shared `ComingSoon.tsx` component itself **is measured** (it has a unit test) and carries no per-dir floor because it is a flat file, not a dir.
-- The HTML report (`frontend/coverage/`) is produced by the `html` reporter and uploaded as a CI artifact (`frontend-coverage-<run_id>`); the `json` reporter additionally emits `coverage/coverage-final.json`.
+- The HTML report (`frontend/coverage/`) is produced by the `html` reporter and
+  uploaded as a CI artifact (`frontend-coverage-<run_id>`); the `json` reporter
+  emits `coverage/coverage-final.json`; the `lcov` reporter emits
+  `coverage/lcov.info` for Codacy coverage upload.
 - **Shared dir lists (SOW-0012 review F3).** `PER_DIR_GLOBS`, `COVERAGE_INCLUDE`, `COVERAGE_EXCLUDED`, and `PER_DIR_LINES` live in `frontend/vitest.coverage.mjs`; `vitest.config.ts` imports the measuring lists and the config verifier below imports all of them, so the gate Vitest enforces and the checks against it cannot read different lists. (`.mjs` so the standalone Node verifier needs no TS loader; typed for `vitest.config.ts` via the co-located `vitest.coverage.d.mts`.)
 - **Two independent guards, distinct jobs:**
   - **Gate-MECHANISM self-test:** `frontend/scripts/check-coverage-thresholds.test.sh` (`npm run check:coverage-thresholds:selftest`) runs Vitest on a **throwaway fixture** project (its own config + a known 50%-lines dir) and asserts the native glob-keyed threshold **fails closed** (exit 1, naming the dir) under the floor and passes above it. It proves the **Vitest mechanism** on the installed version still fails closed — it does **not** read the real config, so it cannot catch a real-config glob that matches zero files or a measured dir with no floor.
@@ -355,7 +358,8 @@ CI enforces the gate catalog as **dedicated parallel jobs** (`lint`, `test`,
 `scripts/scan-secrets.sh` (+ `scripts/test/scan-secrets-test.sh`),
 `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh`
 (+ `scripts/test/spec-drift-test.sh`), `scripts/test/lint-test.sh`,
-`scripts/gates.sh`,
+`scripts/codacy-coverage-upload.sh`
+(+ `scripts/test/codacy-coverage-upload-test.sh`), `scripts/gates.sh`,
 `scripts/check-bench.sh`, and `scripts/install-systemd-user.sh`.
 
 `scripts/lint.sh` (SOW-0009; frontend section added SOW-0012) **is present**: it
@@ -395,6 +399,7 @@ a section header and per-section wall-clock timing per gate and a final timed
 summary. It composes existing scripts and commands — `scripts/lint.sh` (Go +
 frontend static analysis), `scripts/scan-secrets.sh` + its self-test,
 `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh` + its self-test,
+`scripts/test/codacy-coverage-upload-test.sh`,
 `scripts/test/systemd-units-test.sh` when present, `scripts/build.sh` (build +
 real bundle-size gate + embed + both binaries), `scripts/test.sh` +
 `scripts/check-coverage.sh` (Go race suite + coverage + frontend Vitest), the
@@ -409,7 +414,8 @@ uses the `gates` job for cross-cutting repo scans and required gate
 infrastructure checks: secrets + scanner self-test (fail-closed), lint
 formatter-scope self-test (fail-closed), spec drift + detector self-test
 (fail-closed, self-test first), AI-attribution scan (fail-closed),
-`scripts/gates.sh` presence + syntax check, and systemd unit lint when present.
+Codacy coverage-upload self-test, `scripts/gates.sh` presence + syntax check,
+and systemd unit lint when present.
 
 The mature required jobs fail closed on their prerequisites. `lint` and `test`
 require the Go module files and the gate scripts they execute; `frontend`
@@ -504,6 +510,51 @@ Tuning rules:
   fixed, proven false-positive, or tracked.
 - Coverage upload reuses existing Go and frontend coverage reports; it does not
   run a second test path.
+- Coverage upload lives in the non-required `codacy-coverage` job. The required
+  `test` and `frontend` jobs only generate and upload artifacts; they never call
+  Codacy directly.
+- Coverage upload accepts either `CODACY_PROJECT_TOKEN` repository-token mode or
+  `CODACY_API_TOKEN` account-token mode, but the workflow skips the entire
+  `codacy-coverage` job on `pull_request` events before checkout, artifact
+  download, secret injection, or repository scripts can run. This prevents
+  PR-controlled code from reading Codacy secrets. If both secrets exist,
+  `CODACY_PROJECT_TOKEN` wins and account-token variables are unset before the
+  reporter runs. The upload script also refuses all Codacy coverage upload on
+  `pull_request` events before token-mode selection as defense in depth. PR
+  coverage upload remains disabled until a future SOW designs a safe path. With
+  no usable token,
+  `codacy-coverage` logs a skip. With a usable token present on a non-PR event,
+  missing artifacts, missing or empty reports, reporter download failures, and
+  Codacy upload failures emit GitHub annotations and exit successfully. The job
+  is configured fail-soft until Codacy is explicitly promoted to a required
+  branch-protection context.
+- Coverage upload orchestration lives in `scripts/codacy-coverage-upload.sh`,
+  and `scripts/test/codacy-coverage-upload-test.sh` is the hermetic self-test
+  for the workflow state machine. The test covers token-mode selection, missing
+  or empty report combinations, partial/final sequencing, reporter bootstrap
+  validation, and LCOV path normalization; actionlint/YAML parsing alone is not
+  sufficient validation for this job. The self-test runs in local
+  `scripts/gates.sh` and in the CI `gates` job.
+- The `codacy-coverage` job uploads each present non-empty Go/frontend coverage
+  report as a partial report. A missing or empty Go report does not block
+  uploading frontend LCOV, and a missing or empty frontend LCOV report does not
+  block uploading Go coverage. If both reports are missing or empty, the job
+  emits annotations and exits successfully without downloading the reporter. If
+  at least one partial upload is attempted, the job sends Codacy's required
+  `final` notification after the partial upload attempts even if one partial
+  command fails. Frontend LCOV is normalized to repository-root paths
+  (`frontend/src/...`) before upload because Vitest emits frontend-local
+  `src/...` paths.
+- Codacy's recommended coverage reporter path is a remote bootstrap script. The
+  workflow downloads it with HTTP failure checking and retries into a temporary
+  file, verifies the file is a non-empty shell script, runs `bash -n`, and only
+  then executes it; process substitution such as `bash <(curl -Ls ...)` is
+  forbidden because a failed download can become an empty successful script.
+  Codacy documents that the bootstrap script validates the downloaded reporter
+  binary checksum; that checksum validation is Codacy's upstream behavior, not a
+  local guarantee added by this workflow. The residual remote-bootstrap
+  supply-chain risk is accepted only for coverage upload, and the local gates
+  remain the authoritative merge blockers until Codacy is explicitly promoted.
 
 **Renaming a CI Job.** The job IDs in `ci.yml` (`lint`, `test`, `frontend`,
 `embed-smoke`, `gates`) plus each explicit CodeQL matrix job name (`CodeQL (go)`,

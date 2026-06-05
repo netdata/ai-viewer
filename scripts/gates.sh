@@ -16,14 +16,15 @@
 #   3. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
 #   4. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
 #   5. scripts/spec-drift.sh + its self-test     the 5 spec↔code drift indicators.
-#   6. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
-#   7. scripts/build.sh                 frontend build + REAL bundle-size gate +
+#   6. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
+#   7. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
+#   8. scripts/build.sh                 frontend build + REAL bundle-size gate +
 #                                       embed + both Go binaries.
-#   8. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
+#   9. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
 #                                       coverage gate + frontend Vitest.
-#   9. deterministic adapter fuzz seed corpus + target-set lock.
-#  10. frontend Playwright E2E (includes axe a11y specs) against the built binary.
-#  11. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
+#  10. deterministic adapter fuzz seed corpus + target-set lock.
+#  11. frontend Playwright E2E (includes axe a11y specs) against the built binary.
+#  12. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
 #                                       gate self-test + local regression gate.
 #
 # ORDERING: fast static gates first so a quick failure surfaces early; the SLOW
@@ -169,34 +170,38 @@ section "scan-ai-attribution" bash scripts/scan-ai-attribution.sh
 section "spec-drift self-test" bash scripts/test/spec-drift-test.sh
 section "spec-drift" bash scripts/spec-drift.sh
 
-# 6. systemd unit static lint (present in this repo; skip cleanly if removed).
+# 6. Codacy coverage upload state-machine self-test. Fast hermetic gate for the
+#    reporting-only upload orchestration script.
+section "codacy coverage upload self-test" bash scripts/test/codacy-coverage-upload-test.sh
+
+# 7. systemd unit static lint (present in this repo; skip cleanly if removed).
 if [[ -f scripts/test/systemd-units-test.sh ]]; then
   section "systemd units" bash scripts/test/systemd-units-test.sh
 fi
 
 # --- slow gates last ---------------------------------------------------------
 
-# 7. Full build + the REAL bundle-size gate on the built dist/ + embed + both
+# 8. Full build + the REAL bundle-size gate on the built dist/ + embed + both
 #    binaries. (Slower than the static gates; faster than the -race suite.)
 section "build.sh (frontend build + bundle-size gate + embed + binaries)" bash scripts/build.sh
 
-# 8. The long pole: Go -race suite + statement-coverage gate, then (inside
+# 9. The long pole: Go -race suite + statement-coverage gate, then (inside
 #    test.sh) the frontend Vitest run. check-coverage.sh consumes the
 #    coverage.out test.sh writes.
 section "test.sh (Go -race + coverage + frontend Vitest)" bash scripts/test.sh
 section "check-coverage.sh (Go statement coverage gate)" bash scripts/check-coverage.sh coverage.out
 
-# 9. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
+# 10. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
 #    exercises seeds too, but this named section makes the gate visible and pins
 #    the package:target matrix against fuzz-nightly.yml.
 section "adapter fuzz seed corpus" run_fuzz_seed_gate
 
-# 10. Playwright E2E against the built embedded binary. The gating chromium
+# 11. Playwright E2E against the built embedded binary. The gating chromium
 #    project includes the axe a11y specs, so this covers Frontend — E2E and
 #    Frontend — Accessibility without a duplicate second Playwright run.
 section "frontend E2E + axe" run_frontend_e2e
 
-# 11. Benchmark gate self-test + local workstation regression gate. This is not
+# 12. Benchmark gate self-test + local workstation regression gate. This is not
 #     comparable on CI hardware, but it is a required local/workstation gate.
 section "benchmark regression gate" run_bench_gate
 

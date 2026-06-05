@@ -14,13 +14,66 @@ committed workflow file.
 These run automatically once merged to `master`:
 
 | Workflow | File | What it gates |
-|---|---|---|
+| --- | --- | --- |
 | `ci` | `.github/workflows/ci.yml` | lint, test, frontend, embed-smoke, gates |
-| `codeql` | `.github/workflows/codeql.yml` | Go + JS/TS + Actions static security analysis |
-| nightly | `fuzz-nightly.yml`, `race-stress-nightly.yml`, `govulncheck-nightly.yml` | scheduled exploration / CVE refresh (not merge gates) |
+| `codeql` | `.github/workflows/codeql.yml` | Go + JS/TS + Actions static security |
+| nightly | nightly workflow files | scheduled exploration / CVE refresh |
 
 Dependency freshness is automated by `.github/dependabot.yml` (Go modules, npm,
 GitHub Actions; weekly; minor/patch grouped).
+
+CodeQL uses the built-in `security-extended` query suite in addition to the
+default queries. Suppressions must be scoped in `.github/codeql/codeql-config.yml`
+and backed by a tracking SOW/issue; inline suppressions without tracked rationale
+are not allowed.
+The current policy file contains only the `security-extended` query-suite
+selection and no suppressions.
+
+## Codacy coverage reporting
+
+The non-required `codacy-coverage` job uploads existing coverage reports to
+Codacy when either GitHub secret `CODACY_PROJECT_TOKEN` or `CODACY_API_TOKEN` is
+configured. The required `test` and `frontend` jobs only generate and upload
+artifacts:
+
+- Go: `coverage.out`, uploaded with Codacy's Go parser.
+- Frontend: `frontend/coverage/lcov.info`, normalized from frontend-local
+  `src/...` paths to repository-root `frontend/src/...` paths and uploaded with
+  Codacy's LCOV parser.
+
+`CODACY_PROJECT_TOKEN` uses Codacy repository-token mode. `CODACY_API_TOKEN`
+uses account-token mode with repository metadata only:
+`CODACY_ORGANIZATION_PROVIDER=gh`, `CODACY_USERNAME=netdata`, and
+`CODACY_PROJECT_NAME=ai-viewer`. If both token secrets exist, repository-token
+mode wins and account-token variables are unset before the reporter runs. If
+neither token is present, CI logs a skip message and continues. The whole
+`codacy-coverage` job is skipped on `pull_request` events before checkout,
+artifact download, secret injection, or repository scripts can run, so PR
+coverage upload is intentionally disabled until a future SOW designs a safe
+path.
+
+While Codacy is reporting-only, missing artifacts, missing or empty coverage
+files, reporter download failures, invalid bootstrap files, and Codacy upload
+failures emit GitHub annotations and exit successfully so they do not fail the
+PR. The job uploads each present non-empty Go/frontend coverage report as a
+partial report. A missing or empty report is annotated but does not block
+uploading the other report. If at least one partial upload is attempted, the job
+sends Codacy's required `final` notification after the partial attempts even if
+one partial command fails. A future SOW must explicitly promote Codacy to branch
+protection before these become merge blockers.
+
+The workflow downloads Codacy's recommended coverage reporter bootstrap script
+with `curl -fsSL --retry` into a temporary file before execution, so download or
+HTTP errors do not produce an empty no-op script. The workflow also verifies the
+bootstrap file is a non-empty shell script and passes `bash -n` before
+execution. The Codacy bootstrap script is still a remote execution surface;
+Codacy documents it as the recommended path and documents that it validates the
+downloaded reporter binary checksum. That checksum validation is Codacy's
+upstream behavior, not a local guarantee added by this workflow.
+
+Codacy is intentionally not a required branch-protection status yet. SOW-0044
+landed it as a visibility layer; SOW-0046 tracks the critical/high and
+complexity triage required before promoting Codacy to a merge blocker.
 
 ## Local gate prerequisites
 

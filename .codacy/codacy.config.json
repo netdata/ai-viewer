@@ -1,0 +1,1959 @@
+{
+  "version": 1,
+  "metadata": {
+    "source": "remote",
+    "provider": "gh",
+    "organization": "netdata",
+    "repositoryName": "ai-viewer",
+    "createdAt": "2026-06-05T01:09:58.549Z",
+    "updatedAt": "2026-06-05T01:09:58.549Z",
+    "languages": [
+      "CSS",
+      "Go",
+      "HTML",
+      "Javascript",
+      "JSON",
+      "Markdown",
+      "Shell",
+      "SQL",
+      "TypeScript",
+      "YAML"
+    ]
+  },
+  "tools": [
+    {
+      "toolId": "Trivy",
+      "patterns": [
+        {
+          "patternId": "Trivy_malicious_packages"
+        },
+        {
+          "patternId": "Trivy_vulnerability_high"
+        },
+        {
+          "patternId": "Trivy_vulnerability_critical"
+        },
+        {
+          "patternId": "Trivy_vulnerability_minor"
+        },
+        {
+          "patternId": "Trivy_vulnerability_medium"
+        },
+        {
+          "patternId": "Trivy_secret"
+        }
+      ]
+    },
+    {
+      "toolId": "jackson",
+      "patterns": [
+        {
+          "patternId": "jackson_duplicate-keys"
+        },
+        {
+          "patternId": "jackson_parse-error"
+        }
+      ]
+    },
+    {
+      "toolId": "Semgrep",
+      "patterns": [
+        {
+          "patternId": "Semgrep_javascript.node-crypto.security.create-de-cipher-no-iv.create-de-cipher-no-iv"
+        },
+        {
+          "patternId": "Semgrep_javascript.node-crypto.security.gcm-no-tag-length.gcm-no-tag-length"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.reverseproxy-director.reverseproxy-director"
+        },
+        {
+          "patternId": "Semgrep_yaml.openapi.security.openai-consequential-action-false.openai-consequential-action-false"
+        },
+        {
+          "patternId": "Semgrep_javascript.node-crypto.security.aead-no-final.aead-no-final"
+        },
+        {
+          "patternId": "Semgrep_generic.secrets.security.detected-onfido-live-api-token.detected-onfido-live-api-token"
+        },
+        {
+          "patternId": "Semgrep_codacy.bash.security.hard-coded-password"
+        },
+        {
+          "patternId": "Semgrep_codacy.k8s.ingress.nginx.retirement.ingress-resource"
+        },
+        {
+          "patternId": "Semgrep_codacy.k8s.ingress.nginx.retirement.ingress-class"
+        },
+        {
+          "patternId": "Semgrep_codacy.k8s.ingress.nginx.retirement.workload"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.security.detect-invisible-unicode"
+        },
+        {
+          "patternId": "Semgrep_yaml_spring_rule-SpringActuatorFullyEnabled"
+        },
+        {
+          "patternId": "Semgrep_codacy.javascript.security.hard-coded-password"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.plsql.resource-injection"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.plsql.find-all-passwords"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.plsql.empty-strings"
+        },
+        {
+          "patternId": "Semgrep_yaml.openapi.security.use-of-basic-authentication.use-of-basic-authentication"
+        },
+        {
+          "patternId": "Semgrep_go.gorilla.security.audit.session-cookie-samesitenone.session-cookie-samesitenone"
+        },
+        {
+          "patternId": "Semgrep_javascript.jwt-simple.security.jwt-simple-noverify.jwt-simple-noverify"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.injection.open-redirect.open-redirect"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.skip-tls-verify-service.skip-tls-verify-service"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.skip-tls-verify-cluster.skip-tls-verify-cluster"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.secrets-in-config-file.secrets-in-config-file"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.seccomp-confinement-disabled.seccomp-confinement-disabled"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.run-as-non-root-unsafe-value.run-as-non-root-unsafe-value"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.privileged-container.privileged-container"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.legacy-api-clusterrole-excessive-permissions.legacy-api-clusterrole-excessive-permissions"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.exposing-docker-socket-hostpath.exposing-docker-socket-hostpath"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.allow-privilege-escalation.allow-privilege-escalation"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.allow-privilege-escalation-true.allow-privilege-escalation-true"
+        },
+        {
+          "patternId": "Semgrep_yaml.kubernetes.security.allow-privilege-escalation-no-securitycontext.allow-privilege-escalation-no-securitycontext"
+        },
+        {
+          "patternId": "Semgrep_yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout"
+        },
+        {
+          "patternId": "Semgrep_yaml.github-actions.security.third-party-action-not-pinned-to-commit-sha.third-party-action-not-pinned-to-commit-sha"
+        },
+        {
+          "patternId": "Semgrep_yaml.github-actions.security.run-shell-injection.run-shell-injection"
+        },
+        {
+          "patternId": "Semgrep_yaml.github-actions.security.github-script-injection.github-script-injection"
+        },
+        {
+          "patternId": "Semgrep_yaml.github-actions.security.allowed-unsecure-commands.allowed-unsecure-commands"
+        },
+        {
+          "patternId": "Semgrep_yaml.docker-compose.security.privileged-service.privileged-service"
+        },
+        {
+          "patternId": "Semgrep_yaml.argo.security.argo-workflow-parameter-command-injection.argo-workflow-parameter-command-injection"
+        },
+        {
+          "patternId": "Semgrep_typescript.react.security.react-insecure-request.react-insecure-request"
+        },
+        {
+          "patternId": "Semgrep_typescript.react.security.audit.react-unsanitized-property.react-unsanitized-property"
+        },
+        {
+          "patternId": "Semgrep_typescript.react.security.audit.react-unsanitized-method.react-unsanitized-method"
+        },
+        {
+          "patternId": "Semgrep_typescript.react.security.audit.react-dangerouslysetinnerhtml.react-dangerouslysetinnerhtml"
+        },
+        {
+          "patternId": "Semgrep_typescript.aws-cdk.security.awscdk-codebuild-project-public.awscdk-codebuild-project-public"
+        },
+        {
+          "patternId": "Semgrep_typescript.aws-cdk.security.awscdk-bucket-grantpublicaccessmethod.awscdk-bucket-grantpublicaccessmethod"
+        },
+        {
+          "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-sqs-unencryptedqueue.awscdk-sqs-unencryptedqueue"
+        },
+        {
+          "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-bucket-enforcessl.aws-cdk-bucket-enforcessl"
+        },
+        {
+          "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-bucket-encryption.awscdk-bucket-encryption"
+        },
+        {
+          "patternId": "Semgrep_typescript.angular.security.audit.angular-domsanitizer.angular-bypasssecuritytrust"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.telnet-request.telnet-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.rest-http-client-support.rest-http-client-support"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.http-request.http-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.ftp-request.ftp-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.disallow-old-tls-versions2.disallow-old-tls-versions2"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.disallow-old-tls-versions1.disallow-old-tls-versions1"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.js-node.bypass-tls-verification.bypass-tls-verification"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.telnet-request.telnet-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.sling-http-request.sling-http-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.http-request.http-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.http-customized-request.http-customized-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.grequests-http-request.grequests-http-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.gorequest-http-request.gorequest-http-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.ftp-request.ftp-request"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.disallow-old-tls-versions.disallow-old-tls-versions"
+        },
+        {
+          "patternId": "Semgrep_problem-based-packs.insecure-transport.go-stdlib.bypass-tls-verification.bypass-tls-verification"
+        },
+        {
+          "patternId": "Semgrep_json.aws.security.wildcard-assume-role.wildcard-assume-role"
+        },
+        {
+          "patternId": "Semgrep_json.aws.security.public-s3-policy-statement.public-s3-policy-statement"
+        },
+        {
+          "patternId": "Semgrep_json.aws.security.public-s3-bucket.public-s3-bucket"
+        },
+        {
+          "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.passport-jwt.security.passport-hardcode.hardcoded-passport-secret"
+        },
+        {
+          "patternId": "Semgrep_javascript.lang.security.detect-eval-with-expression.detect-eval-with-expression"
+        },
+        {
+          "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-knex-sqli.node-knex-sqli"
+        },
+        {
+          "patternId": "Semgrep_javascript.lang.security.audit.code-string-concat.code-string-concat"
+        },
+        {
+          "patternId": "Semgrep_javascript.jsonwebtoken.security.jwt-none-alg.jwt-none-alg"
+        },
+        {
+          "patternId": "Semgrep_javascript.jsonwebtoken.security.jwt-hardcode.hardcoded-jwt-secret"
+        },
+        {
+          "patternId": "Semgrep_javascript.jose.security.jwt-none-alg.jwt-none-alg"
+        },
+        {
+          "patternId": "Semgrep_javascript.jose.security.jwt-hardcode.hardcoded-jwt-secret"
+        },
+        {
+          "patternId": "Semgrep_javascript.intercom.security.audit.intercom-settings-user-identifier-without-user-hash.intercom-settings-user-identifier-without-user-hash"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.x-frame-options-misconfiguration.x-frame-options-misconfiguration"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.require-request.require-request"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.injection.tainted-sql-string.tainted-sql-string"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.injection.raw-html-format.raw-html-format"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-xml2json-xxe.express-xml2json-xxe"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-vm2-injection.express-vm2-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-vm-injection.express-vm-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-sandbox-injection.express-sandbox-code-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-puppeteer-injection.express-puppeteer-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-phantom-injection.express-phantom-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-jwt-hardcoded-secret.express-jwt-hardcoded-secret"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-insecure-template-usage.express-insecure-template-usage"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.express-expat-xxe.express-expat-xxe"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.cors-misconfiguration.cors-misconfiguration"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.xss.direct-response-write.direct-response-write"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.res-render-injection.res-render-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-xml2json-xxe-event.express-xml2json-xxe-event"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-third-party-object-deserialization.express-third-party-object-deserialization"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-ssrf.express-ssrf"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-session-hardcoded-secret.express-session-hardcoded-secret"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-res-sendfile.express-res-sendfile"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-path-join-resolve-traversal.express-path-join-resolve-traversal"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-open-redirect.express-open-redirect"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-libxml-noent.express-libxml-noent"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-jwt-not-revoked.express-jwt-not-revoked"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-cookie-settings.express-cookie-session-no-secure"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-cookie-settings.express-cookie-session-no-path"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-cookie-settings.express-cookie-session-no-httponly"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-cookie-settings.express-cookie-session-no-expires"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-cookie-settings.express-cookie-session-no-domain"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-cookie-settings.express-cookie-session-default-name"
+        },
+        {
+          "patternId": "Semgrep_javascript.express.security.audit.express-check-directory-listing.express-check-directory-listing"
+        },
+        {
+          "patternId": "Semgrep_javascript.deno.security.audit.deno-dangerous-run.deno-dangerous-run"
+        },
+        {
+          "patternId": "Semgrep_javascript.chrome-remote-interface.security.audit.chrome-remote-interface-compilescript-injection.chrome-remote-interface-compilescript-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration"
+        },
+        {
+          "patternId": "Semgrep_javascript.browser.security.raw-html-concat.raw-html-concat"
+        },
+        {
+          "patternId": "Semgrep_javascript.browser.security.open-redirect.js-open-redirect"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.vm-runincontext-injection.vm-runincontext-injection"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.tainted-html-string.tainted-html-string"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.tainted-html-response.tainted-html-response"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.sequelize-sqli.sequelize-sqli"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.pg-sqli.pg-sqli"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.mysql-sqli.mysql-sqli"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.knex-sqli.knex-sqli"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.dynamodb-request-object.dynamodb-request-object"
+        },
+        {
+          "patternId": "Semgrep_javascript.aws-lambda.security.detect-child-process.detect-child-process"
+        },
+        {
+          "patternId": "Semgrep_javascript.argon2.security.unsafe-argon2-config.unsafe-argon2-config"
+        },
+        {
+          "patternId": "Semgrep_javascript.angular.security.detect-angular-trust-as-method.detect-angular-trust-as-method"
+        },
+        {
+          "patternId": "Semgrep_javascript.angular.security.detect-angular-sce-disabled.detect-angular-sce-disabled"
+        },
+        {
+          "patternId": "Semgrep_javascript.angular.security.detect-angular-element-taint.detect-angular-element-taint"
+        },
+        {
+          "patternId": "Semgrep_go.template.security.ssti.go-ssti"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.injection.tainted-url-host.tainted-url-host"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.injection.tainted-sql-string.tainted-sql-string"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.injection.raw-html-format.raw-html-format"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.filepath-clean-misuse.filepath-clean-misuse"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.wip-xss-using-responsewriter-and-printf.wip-xss-using-responsewriter-and-printf"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.use-tls.use-tls"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.fs-directory-listing.fs-directory-listing"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.formatted-template-string.formatted-template-string"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.dynamic-httptrace-clienttrace.dynamic-httptrace-clienttrace"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.cookie-missing-httponly.cookie-missing-httponly"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.net.bind_all.avoid-bind-to-all-interfaces"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.md5-used-as-password.md5-used-as-password"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.dangerous-exec-cmd.dangerous-exec-cmd"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.use_of_weak_rsa_key.use-of-weak-rsa-key"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.use_of_weak_crypto.use-of-des"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.tls.tls-with-insecure-cipher"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.ssl.ssl-v3-is-insecure"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.missing-ssl-minversion.missing-ssl-minversion"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.math_random.math-random-used"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.insecure_ssh.avoid-ssh-insecure-ignore-host-key"
+        },
+        {
+          "patternId": "Semgrep_go.lang.security.audit.crypto.bad_imports.insecure-module-used"
+        },
+        {
+          "patternId": "Semgrep_go.jwt-go.security.jwt.hardcoded-jwt-key"
+        },
+        {
+          "patternId": "Semgrep_go.jwt-go.security.jwt-none-alg.jwt-go-none-algorithm"
+        },
+        {
+          "patternId": "Semgrep_go.jwt-go.security.audit.jwt-parse-unverified.jwt-go-parse-unverified"
+        },
+        {
+          "patternId": "Semgrep_go.grpc.security.grpc-server-insecure-connection.grpc-server-insecure-connection"
+        },
+        {
+          "patternId": "Semgrep_go.grpc.security.grpc-client-insecure-connection.grpc-client-insecure-connection"
+        },
+        {
+          "patternId": "Semgrep_go.gorm.security.audit.gorm-dangerous-methods-usage.gorm-dangerous-method-usage"
+        },
+        {
+          "patternId": "Semgrep_go.gorilla.security.audit.websocket-missing-origin-check.websocket-missing-origin-check"
+        },
+        {
+          "patternId": "Semgrep_go.gorilla.security.audit.session-cookie-missing-secure.session-cookie-missing-secure"
+        },
+        {
+          "patternId": "Semgrep_go.gorilla.security.audit.session-cookie-missing-httponly.session-cookie-missing-httponly"
+        },
+        {
+          "patternId": "Semgrep_go.gorilla.security.audit.handler-assignment-from-multiple-sources.handler-assignment-from-multiple-sources"
+        },
+        {
+          "patternId": "Semgrep_go.aws-lambda.security.tainted-sql-string.tainted-sql-string"
+        },
+        {
+          "patternId": "Semgrep_go.aws-lambda.security.database-sqli.database-sqli"
+        },
+        {
+          "patternId": "Semgrep_generic.visualforce.security.ncino.xml.visualforceapiversion.visualforce-page-api-version"
+        },
+        {
+          "patternId": "Semgrep_generic.visualforce.security.ncino.xml.cspheaderattribute.csp-header-attribute"
+        },
+        {
+          "patternId": "Semgrep_generic.visualforce.security.ncino.vf.xssfromunescapedurlparam.xss-from-unescaped-url-param"
+        },
+        {
+          "patternId": "Semgrep_generic.visualforce.security.ncino.html.usesriforcdns.use-sri-for-cdns"
+        },
+        {
+          "patternId": "Semgrep_generic.secrets.security.google-maps-apikeyleak.google-maps-apikeyleak"
+        },
+        {
+          "patternId": "Semgrep_generic.secrets.security.detected-username-and-password-in-uri.detected-username-and-password-in-uri"
+        },
+        {
+          "patternId": "Semgrep_generic.secrets.security.detected-stripe-restricted-api-key.detected-stripe-restricted-api-key"
+        },
+        {
+          "patternId": "Semgrep_bash.curl.security.curl-eval.curl-eval"
+        }
+      ]
+    },
+    {
+      "toolId": "shellcheck",
+      "patterns": [
+        {
+          "patternId": "shellcheck_SC2035"
+        },
+        {
+          "patternId": "shellcheck_SC2086"
+        },
+        {
+          "patternId": "shellcheck_SC2025"
+        },
+        {
+          "patternId": "shellcheck_SC2148"
+        },
+        {
+          "patternId": "shellcheck_SC2029"
+        },
+        {
+          "patternId": "shellcheck_SC2006"
+        },
+        {
+          "patternId": "shellcheck_SC2016"
+        },
+        {
+          "patternId": "shellcheck_SC2001"
+        },
+        {
+          "patternId": "shellcheck_SC2024"
+        },
+        {
+          "patternId": "shellcheck_SC2028"
+        },
+        {
+          "patternId": "shellcheck_SC2004"
+        },
+        {
+          "patternId": "shellcheck_SC2002"
+        },
+        {
+          "patternId": "shellcheck_SC2026"
+        },
+        {
+          "patternId": "shellcheck_SC2033"
+        },
+        {
+          "patternId": "shellcheck_SC2015"
+        },
+        {
+          "patternId": "shellcheck_SC2034"
+        },
+        {
+          "patternId": "shellcheck_SC2020"
+        },
+        {
+          "patternId": "shellcheck_SC2027"
+        },
+        {
+          "patternId": "shellcheck_SC2036"
+        },
+        {
+          "patternId": "shellcheck_SC2003"
+        },
+        {
+          "patternId": "shellcheck_SC2031"
+        },
+        {
+          "patternId": "shellcheck_SC2022"
+        }
+      ]
+    },
+    {
+      "toolId": "Agentlinter",
+      "patterns": [
+        {
+          "patternId": "Agentlinter_token-budget_under-150-tokens"
+        },
+        {
+          "patternId": "Agentlinter_token-budget_total-tokens"
+        },
+        {
+          "patternId": "Agentlinter_token-budget_section-weight"
+        },
+        {
+          "patternId": "Agentlinter_token-budget_compressible-padding"
+        },
+        {
+          "patternId": "Agentlinter_structure_position-risk-warning"
+        },
+        {
+          "patternId": "Agentlinter_structure_no-empty-sections"
+        },
+        {
+          "patternId": "Agentlinter_structure_modular-files"
+        },
+        {
+          "patternId": "Agentlinter_structure_heading-hierarchy"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-version-or-update-date"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-sections"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-main-file"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-file-map"
+        },
+        {
+          "patternId": "Agentlinter_structure_file-size"
+        },
+        {
+          "patternId": "Agentlinter_structure_dead-import"
+        },
+        {
+          "patternId": "Agentlinter_structure_circular-import"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_skill-name-match-dir"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_skill-description-when-to-use"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_sensitive-paths"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_injection-vectors"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_has-metadata"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_excessive-permissions"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_data-exfiltration"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_dangerous-commands"
+        },
+        {
+          "patternId": "Agentlinter_security_prompt-injection-vulnerability"
+        },
+        {
+          "patternId": "Agentlinter_security_no-secrets"
+        },
+        {
+          "patternId": "Agentlinter_security_no-pii-exposure"
+        },
+        {
+          "patternId": "Agentlinter_security_no-injection-defense"
+        },
+        {
+          "patternId": "Agentlinter_security_has-permission-boundaries"
+        },
+        {
+          "patternId": "Agentlinter_security_has-injection-defense"
+        },
+        {
+          "patternId": "Agentlinter_security_env-var-references"
+        },
+        {
+          "patternId": "Agentlinter_security_api-key-exposure"
+        },
+        {
+          "patternId": "Agentlinter_runtime_token-strength"
+        },
+        {
+          "patternId": "Agentlinter_runtime_group-policy"
+        },
+        {
+          "patternId": "Agentlinter_runtime_gateway-bind"
+        },
+        {
+          "patternId": "Agentlinter_runtime_dm-policy"
+        },
+        {
+          "patternId": "Agentlinter_runtime_config-secrets"
+        },
+        {
+          "patternId": "Agentlinter_runtime_config-exists"
+        },
+        {
+          "patternId": "Agentlinter_runtime_auth-mode"
+        },
+        {
+          "patternId": "Agentlinter_remote-ready_workspace-path-specified"
+        },
+        {
+          "patternId": "Agentlinter_remote-ready_model-settings-specified"
+        },
+        {
+          "patternId": "Agentlinter_remote-ready_env-vars-documented"
+        },
+        {
+          "patternId": "Agentlinter_memory_no-mental-notes"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-state-tracking"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-memory-strategy"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-learning-loop"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-handoff-protocol"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-file-based-notes"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-context-window-awareness"
+        },
+        {
+          "patternId": "Agentlinter_consistency_tone-voice-alignment"
+        },
+        {
+          "patternId": "Agentlinter_consistency_timezone-locale-drift"
+        },
+        {
+          "patternId": "Agentlinter_consistency_stale-package-reference"
+        },
+        {
+          "patternId": "Agentlinter_consistency_stale-file-reference"
+        },
+        {
+          "patternId": "Agentlinter_consistency_stale-date"
+        },
+        {
+          "patternId": "Agentlinter_consistency_priority-conflict"
+        },
+        {
+          "patternId": "Agentlinter_consistency_permission-conflict"
+        },
+        {
+          "patternId": "Agentlinter_consistency_outdated-cross-references"
+        },
+        {
+          "patternId": "Agentlinter_consistency_no-duplicate-instructions"
+        },
+        {
+          "patternId": "Agentlinter_consistency_naming-convention"
+        },
+        {
+          "patternId": "Agentlinter_consistency_language-mixing"
+        },
+        {
+          "patternId": "Agentlinter_consistency_identity-alignment"
+        },
+        {
+          "patternId": "Agentlinter_consistency_circular-dependency"
+        },
+        {
+          "patternId": "Agentlinter_completeness_verification-criteria-required"
+        },
+        {
+          "patternId": "Agentlinter_completeness_session-learning-hooks"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-workflow"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-user-context"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-tools"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-priorities"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-output-format"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-identity"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-error-handling"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-boundaries"
+        },
+        {
+          "patternId": "Agentlinter_completeness_freshness-file-paths"
+        },
+        {
+          "patternId": "Agentlinter_completeness_command-coverage"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_skills-vs-commands"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_relevance-trap"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_progressive-disclosure"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_instruction-count"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_hooks-structure"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_descriptive-ratio"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_agent-focus"
+        },
+        {
+          "patternId": "Agentlinter_clarity_undefined-term"
+        },
+        {
+          "patternId": "Agentlinter_clarity_token-efficiency-score"
+        },
+        {
+          "patternId": "Agentlinter_clarity_token-budget-range"
+        },
+        {
+          "patternId": "Agentlinter_clarity_sentence-complexity"
+        },
+        {
+          "patternId": "Agentlinter_clarity_priority-signal-missing"
+        },
+        {
+          "patternId": "Agentlinter_clarity_obvious-statements"
+        },
+        {
+          "patternId": "Agentlinter_consistency_referenced-files-exist"
+        },
+        {
+          "patternId": "Agentlinter_clarity_no-vague-instructions"
+        },
+        {
+          "patternId": "Agentlinter_clarity_no-contradictions"
+        },
+        {
+          "patternId": "Agentlinter_clarity_naked-conditional"
+        },
+        {
+          "patternId": "Agentlinter_clarity_instruction-density"
+        },
+        {
+          "patternId": "Agentlinter_clarity_has-examples"
+        },
+        {
+          "patternId": "Agentlinter_clarity_escape-hatch-missing"
+        },
+        {
+          "patternId": "Agentlinter_clarity_english-config-files"
+        },
+        {
+          "patternId": "Agentlinter_clarity_duplicate-content"
+        },
+        {
+          "patternId": "Agentlinter_clarity_compound-instruction"
+        },
+        {
+          "patternId": "Agentlinter_clarity_ambiguous-pronoun"
+        },
+        {
+          "patternId": "Agentlinter_clarity_action-without-context"
+        },
+        {
+          "patternId": "Agentlinter_clarity_actionable-instructions"
+        },
+        {
+          "patternId": "Agentlinter_blueprint_identity-defined"
+        },
+        {
+          "patternId": "Agentlinter_blueprint_coverage"
+        },
+        {
+          "patternId": "Agentlinter_blueprint_constraints-defined"
+        }
+      ]
+    },
+    {
+      "toolId": "Lizard",
+      "patterns": [
+        {
+          "patternId": "Lizard_file-nloc-medium"
+        },
+        {
+          "patternId": "Lizard_parameter-count-medium"
+        },
+        {
+          "patternId": "Lizard_nloc-medium"
+        },
+        {
+          "patternId": "Lizard_ccn-medium"
+        }
+      ]
+    },
+    {
+      "toolId": "Stylelint",
+      "patterns": [
+        {
+          "patternId": "Stylelint_scss_function-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_media-feature-name-unit-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_media-feature-range-notation"
+        },
+        {
+          "patternId": "Stylelint_declaration-property-max-values"
+        },
+        {
+          "patternId": "Stylelint_keyframe-selector-notation"
+        },
+        {
+          "patternId": "Stylelint_import-notation"
+        },
+        {
+          "patternId": "Stylelint_selector-not-notation"
+        },
+        {
+          "patternId": "Stylelint_rule-selector-property-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_color-hex-alpha"
+        },
+        {
+          "patternId": "Stylelint_selector-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-attribute-name-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_comment-pattern"
+        },
+        {
+          "patternId": "Stylelint_unit-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_unit-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-pseudo-element-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-pseudo-element-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-pseudo-class-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-pseudo-class-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-combinator-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-combinator-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-attribute-operator-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_selector-attribute-operator-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_property-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_property-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_media-feature-name-value-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_media-feature-name-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_media-feature-name-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_function-url-scheme-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_function-url-scheme-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_function-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_function-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_declaration-property-value-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_declaration-property-unit-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_declaration-property-unit-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_comment-word-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_at-rule-property-required-list"
+        },
+        {
+          "patternId": "Stylelint_at-rule-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_at-rule-allowed-list"
+        },
+        {
+          "patternId": "Stylelint_declaration-property-value-disallowed-list"
+        },
+        {
+          "patternId": "Stylelint_color-function-notation"
+        },
+        {
+          "patternId": "Stylelint_alpha-value-notation"
+        },
+        {
+          "patternId": "Stylelint_hue-degree-notation"
+        },
+        {
+          "patternId": "Stylelint_selector-max-id"
+        },
+        {
+          "patternId": "Stylelint_selector-max-combinators"
+        },
+        {
+          "patternId": "Stylelint_custom-property-pattern"
+        },
+        {
+          "patternId": "Stylelint_selector-max-universal"
+        },
+        {
+          "patternId": "Stylelint_custom-media-pattern"
+        },
+        {
+          "patternId": "Stylelint_selector-max-pseudo-class"
+        },
+        {
+          "patternId": "Stylelint_selector-id-pattern"
+        },
+        {
+          "patternId": "Stylelint_selector-max-attribute"
+        },
+        {
+          "patternId": "Stylelint_selector-nested-pattern"
+        },
+        {
+          "patternId": "Stylelint_selector-max-class"
+        },
+        {
+          "patternId": "Stylelint_keyframes-name-pattern"
+        },
+        {
+          "patternId": "Stylelint_selector-max-type"
+        },
+        {
+          "patternId": "Stylelint_function-url-no-scheme-relative"
+        },
+        {
+          "patternId": "Stylelint_color-no-hex"
+        },
+        {
+          "patternId": "Stylelint_number-max-precision"
+        },
+        {
+          "patternId": "Stylelint_selector-class-pattern"
+        },
+        {
+          "patternId": "Stylelint_selector-attribute-quotes"
+        },
+        {
+          "patternId": "Stylelint_font-family-name-quotes"
+        },
+        {
+          "patternId": "Stylelint_selector-no-qualifying-type"
+        },
+        {
+          "patternId": "Stylelint_time-min-milliseconds"
+        },
+        {
+          "patternId": "Stylelint_media-feature-name-no-vendor-prefix"
+        },
+        {
+          "patternId": "Stylelint_at-rule-no-vendor-prefix"
+        },
+        {
+          "patternId": "Stylelint_selector-max-compound-selectors"
+        },
+        {
+          "patternId": "Stylelint_selector-max-specificity"
+        },
+        {
+          "patternId": "Stylelint_rule-empty-line-before"
+        },
+        {
+          "patternId": "Stylelint_custom-property-empty-line-before"
+        },
+        {
+          "patternId": "Stylelint_value-no-vendor-prefix"
+        },
+        {
+          "patternId": "Stylelint_selector-type-case"
+        },
+        {
+          "patternId": "Stylelint_function-url-quotes"
+        },
+        {
+          "patternId": "Stylelint_property-no-vendor-prefix"
+        },
+        {
+          "patternId": "Stylelint_selector-no-vendor-prefix"
+        },
+        {
+          "patternId": "Stylelint_max-nesting-depth"
+        },
+        {
+          "patternId": "Stylelint_declaration-block-no-redundant-longhand-properties"
+        },
+        {
+          "patternId": "Stylelint_length-zero-no-unit"
+        },
+        {
+          "patternId": "Stylelint_color-hex-length"
+        },
+        {
+          "patternId": "Stylelint_color-named"
+        },
+        {
+          "patternId": "Stylelint_declaration-no-important"
+        },
+        {
+          "patternId": "Stylelint_shorthand-property-no-redundant-values"
+        },
+        {
+          "patternId": "Stylelint_font-weight-notation"
+        },
+        {
+          "patternId": "Stylelint_value-keyword-case"
+        },
+        {
+          "patternId": "Stylelint_declaration-block-single-line-max-declarations"
+        },
+        {
+          "patternId": "Stylelint_at-rule-empty-line-before"
+        },
+        {
+          "patternId": "Stylelint_comment-whitespace-inside"
+        },
+        {
+          "patternId": "Stylelint_function-name-case"
+        },
+        {
+          "patternId": "Stylelint_comment-empty-line-before"
+        },
+        {
+          "patternId": "Stylelint_declaration-empty-line-before"
+        },
+        {
+          "patternId": "Stylelint_selector-pseudo-element-colon-notation"
+        }
+      ]
+    },
+    {
+      "toolId": "markdownlint",
+      "patterns": [
+        {
+          "patternId": "markdownlint_MD056"
+        },
+        {
+          "patternId": "markdownlint_MD055"
+        },
+        {
+          "patternId": "markdownlint_MD054"
+        },
+        {
+          "patternId": "markdownlint_MD053"
+        },
+        {
+          "patternId": "markdownlint_MD052"
+        },
+        {
+          "patternId": "markdownlint_MD051"
+        },
+        {
+          "patternId": "markdownlint_MD050"
+        },
+        {
+          "patternId": "markdownlint_MD049"
+        },
+        {
+          "patternId": "markdownlint_MD048"
+        },
+        {
+          "patternId": "markdownlint_MD046"
+        },
+        {
+          "patternId": "markdownlint_MD045"
+        },
+        {
+          "patternId": "markdownlint_MD044"
+        },
+        {
+          "patternId": "markdownlint_MD042"
+        },
+        {
+          "patternId": "markdownlint_MD039"
+        },
+        {
+          "patternId": "markdownlint_MD038"
+        },
+        {
+          "patternId": "markdownlint_MD037"
+        },
+        {
+          "patternId": "markdownlint_MD036"
+        },
+        {
+          "patternId": "markdownlint_MD035"
+        },
+        {
+          "patternId": "markdownlint_MD034"
+        },
+        {
+          "patternId": "markdownlint_MD033"
+        },
+        {
+          "patternId": "markdownlint_MD032"
+        },
+        {
+          "patternId": "markdownlint_MD030"
+        },
+        {
+          "patternId": "markdownlint_MD029"
+        },
+        {
+          "patternId": "markdownlint_MD028"
+        },
+        {
+          "patternId": "markdownlint_MD027"
+        },
+        {
+          "patternId": "markdownlint_MD026"
+        },
+        {
+          "patternId": "markdownlint_MD025"
+        },
+        {
+          "patternId": "markdownlint_MD024"
+        },
+        {
+          "patternId": "markdownlint_MD023"
+        },
+        {
+          "patternId": "markdownlint_MD022"
+        },
+        {
+          "patternId": "markdownlint_MD021"
+        },
+        {
+          "patternId": "markdownlint_MD020"
+        },
+        {
+          "patternId": "markdownlint_MD019"
+        },
+        {
+          "patternId": "markdownlint_MD018"
+        },
+        {
+          "patternId": "markdownlint_MD014"
+        },
+        {
+          "patternId": "markdownlint_MD012"
+        },
+        {
+          "patternId": "markdownlint_MD011"
+        },
+        {
+          "patternId": "markdownlint_MD010"
+        },
+        {
+          "patternId": "markdownlint_MD007"
+        },
+        {
+          "patternId": "markdownlint_MD005"
+        },
+        {
+          "patternId": "markdownlint_MD004"
+        },
+        {
+          "patternId": "markdownlint_MD003"
+        },
+        {
+          "patternId": "markdownlint_MD001"
+        }
+      ]
+    },
+    {
+      "toolId": "ESLint8",
+      "patterns": [
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unnecessary-template-expression"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_only-throw-error"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_use-unknown-in-catch-callback-variable"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-promise-reject-errors"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-array-delete"
+        },
+        {
+          "patternId": "ESLint8_security-node_non-literal-reg-expr"
+        },
+        {
+          "patternId": "ESLint8_security-node_disable-ssl-across-node-server"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-unhandled-event-errors"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-unhandled-async-errors"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-security-missconfiguration-cookie"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-possible-timing-attacks"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-option-unsafe-in-serialize-javascript-npm-package"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-option-rejectunauthorized-in-nodejs-httpsrequest"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-nosql-injection"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-non-literal-require-calls"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-html-injection"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-eval-with-expr"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-dangerous-redirects"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-child-process"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-absence-of-name-option-in-exrpress-session"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_require-meta-type"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_require-meta-schema"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_require-meta-has-suggestions"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_require-meta-fixable"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_prefer-output-null"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_prefer-object-rule"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_prefer-message-ids"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-useless-token-range"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-unused-placeholders"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-unused-message-ids"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-only-tests"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-missing-placeholders"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-missing-message-ids"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-identical-tests"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-deprecated-report-api"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_no-deprecated-context-methods"
+        },
+        {
+          "patternId": "ESLint8_eslint-plugin_fixer-return"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-mixed-enums"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-duplicate-type-constituents"
+        },
+        {
+          "patternId": "ESLint8_security_detect-bidi-characters"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_consistent-generic-constructors"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-option-multiplestatements-in-mysql"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-duplicate-enum-values"
+        },
+        {
+          "patternId": "ESLint8_security-node_detect-improper-exception-handling"
+        },
+        {
+          "patternId": "ESLint8_xss_no-mixed-html"
+        },
+        {
+          "patternId": "ESLint8_xss_no-location-href-assign"
+        },
+        {
+          "patternId": "ESLint8_valid-typeof"
+        },
+        {
+          "patternId": "ESLint8_use-isnan"
+        },
+        {
+          "patternId": "ESLint8_security_detect-unsafe-regex"
+        },
+        {
+          "patternId": "ESLint8_security_detect-pseudoRandomBytes"
+        },
+        {
+          "patternId": "ESLint8_security_detect-possible-timing-attacks"
+        },
+        {
+          "patternId": "ESLint8_security_detect-object-injection"
+        },
+        {
+          "patternId": "ESLint8_security_detect-non-literal-require"
+        },
+        {
+          "patternId": "ESLint8_security_detect-non-literal-regexp"
+        },
+        {
+          "patternId": "ESLint8_security_detect-non-literal-fs-filename"
+        },
+        {
+          "patternId": "ESLint8_security_detect-no-csrf-before-method-override"
+        },
+        {
+          "patternId": "ESLint8_security_detect-new-buffer"
+        },
+        {
+          "patternId": "ESLint8_security_detect-eval-with-expression"
+        },
+        {
+          "patternId": "ESLint8_security_detect-disable-mustache-escape"
+        },
+        {
+          "patternId": "ESLint8_security_detect-child-process"
+        },
+        {
+          "patternId": "ESLint8_security_detect-buffer-noassert"
+        },
+        {
+          "patternId": "ESLint8_require-yield"
+        },
+        {
+          "patternId": "ESLint8_no-with"
+        },
+        {
+          "patternId": "ESLint8_no-useless-escape"
+        },
+        {
+          "patternId": "ESLint8_no-useless-catch"
+        },
+        {
+          "patternId": "ESLint8_no-useless-backreference"
+        },
+        {
+          "patternId": "ESLint8_no-unused-vars"
+        },
+        {
+          "patternId": "ESLint8_no-unused-labels"
+        },
+        {
+          "patternId": "ESLint8_no-unsanitized_property"
+        },
+        {
+          "patternId": "ESLint8_no-unsanitized_method"
+        },
+        {
+          "patternId": "ESLint8_no-unsafe-optional-chaining"
+        },
+        {
+          "patternId": "ESLint8_no-unsafe-negation"
+        },
+        {
+          "patternId": "ESLint8_no-unsafe-finally"
+        },
+        {
+          "patternId": "ESLint8_no-unreachable"
+        },
+        {
+          "patternId": "ESLint8_no-unexpected-multiline"
+        },
+        {
+          "patternId": "ESLint8_no-undef"
+        },
+        {
+          "patternId": "ESLint8_no-this-before-super"
+        },
+        {
+          "patternId": "ESLint8_no-sparse-arrays"
+        },
+        {
+          "patternId": "ESLint8_no-shadow-restricted-names"
+        },
+        {
+          "patternId": "ESLint8_no-setter-return"
+        },
+        {
+          "patternId": "ESLint8_no-self-assign"
+        },
+        {
+          "patternId": "ESLint8_no-regex-spaces"
+        },
+        {
+          "patternId": "ESLint8_no-redeclare"
+        },
+        {
+          "patternId": "ESLint8_no-prototype-builtins"
+        },
+        {
+          "patternId": "ESLint8_no-octal"
+        },
+        {
+          "patternId": "ESLint8_no-obj-calls"
+        },
+        {
+          "patternId": "ESLint8_no-nonoctal-decimal-escape"
+        },
+        {
+          "patternId": "ESLint8_no-new-symbol"
+        },
+        {
+          "patternId": "ESLint8_no-mixed-spaces-and-tabs"
+        },
+        {
+          "patternId": "ESLint8_no-misleading-character-class"
+        },
+        {
+          "patternId": "ESLint8_no-loss-of-precision"
+        },
+        {
+          "patternId": "ESLint8_no-irregular-whitespace"
+        },
+        {
+          "patternId": "ESLint8_no-invalid-regexp"
+        },
+        {
+          "patternId": "ESLint8_no-inner-declarations"
+        },
+        {
+          "patternId": "ESLint8_no-import-assign"
+        },
+        {
+          "patternId": "ESLint8_no-global-assign"
+        },
+        {
+          "patternId": "ESLint8_no-func-assign"
+        },
+        {
+          "patternId": "ESLint8_no-fallthrough"
+        },
+        {
+          "patternId": "ESLint8_no-extra-semi"
+        },
+        {
+          "patternId": "ESLint8_no-extra-boolean-cast"
+        },
+        {
+          "patternId": "ESLint8_no-ex-assign"
+        },
+        {
+          "patternId": "ESLint8_no-empty-pattern"
+        },
+        {
+          "patternId": "ESLint8_no-empty-character-class"
+        },
+        {
+          "patternId": "ESLint8_no-empty"
+        },
+        {
+          "patternId": "ESLint8_no-duplicate-case"
+        },
+        {
+          "patternId": "ESLint8_no-dupe-keys"
+        },
+        {
+          "patternId": "ESLint8_no-dupe-else-if"
+        },
+        {
+          "patternId": "ESLint8_no-dupe-class-members"
+        },
+        {
+          "patternId": "ESLint8_no-dupe-args"
+        },
+        {
+          "patternId": "ESLint8_no-delete-var"
+        },
+        {
+          "patternId": "ESLint8_no-debugger"
+        },
+        {
+          "patternId": "ESLint8_no-control-regex"
+        },
+        {
+          "patternId": "ESLint8_no-constant-condition"
+        },
+        {
+          "patternId": "ESLint8_no-const-assign"
+        },
+        {
+          "patternId": "ESLint8_no-cond-assign"
+        },
+        {
+          "patternId": "ESLint8_no-compare-neg-zero"
+        },
+        {
+          "patternId": "ESLint8_no-class-assign"
+        },
+        {
+          "patternId": "ESLint8_no-case-declarations"
+        },
+        {
+          "patternId": "ESLint8_no-async-promise-executor"
+        },
+        {
+          "patternId": "ESLint8_getter-return"
+        },
+        {
+          "patternId": "ESLint8_for-direction"
+        },
+        {
+          "patternId": "ESLint8_constructor-super"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_unified-signatures"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_unbound-method"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_triple-slash-reference"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_restrict-template-expressions"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_restrict-plus-operands"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_require-await"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-string-starts-ends-with"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-return-this-type"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-reduce-type-parameter"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-optional-chain"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-nullish-coalescing"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-namespace-keyword"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-literal-enum-member"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-includes"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-function-type"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-for-of"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_prefer-as-const"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_non-nullable-type-assertion-style"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-var-requires"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-useless-constructor"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unused-vars"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unnecessary-type-constraint"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unnecessary-type-assertion"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unnecessary-type-arguments"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unnecessary-condition"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-unnecessary-boolean-literal-compare"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-this-alias"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-redundant-type-constituents"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-non-null-assertion"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-non-null-asserted-optional-chain"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-non-null-asserted-nullish-coalescing"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-namespace"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-misused-promises"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-misused-new"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-meaningless-void-operator"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-loss-of-precision"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-invalid-void-type"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-inferrable-types"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-implied-eval"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-for-in-array"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-floating-promises"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-extraneous-class"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-extra-non-null-assertion"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-explicit-any"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-empty-interface"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-empty-function"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-dynamic-delete"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-confusing-void-expression"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-confusing-non-null-assertion"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-base-to-string"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_no-array-constructor"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_dot-notation"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_consistent-type-definitions"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_consistent-type-assertions"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_consistent-indexed-object-style"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_class-literal-property-style"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_ban-types"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_ban-tslint-comment"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_ban-ts-comment"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_await-thenable"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_array-type"
+        },
+        {
+          "patternId": "ESLint8_@typescript-eslint_adjacent-overload-signatures"
+        }
+      ]
+    }
+  ],
+  "exclude": [
+    ".agents/sow/current/**",
+    ".agents/sow/done/**",
+    ".agents/sow/pending/**",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "cmd/ai-viewer-serve/frontend_dist/**",
+    "frontend/node_modules/**",
+    "frontend/coverage/**",
+    "frontend/dist/**",
+    "frontend/playwright-report/**",
+    "frontend/test-results/**",
+    "bin/**"
+  ]
+}

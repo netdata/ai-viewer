@@ -13,17 +13,18 @@
 #   once the relevant tree lands. SOW-0013 is different: cross-cutting gate
 #   files are mandatory once introduced, so the gates job fails when
 #   scripts/test/lint-test.sh, scripts/spec-drift.sh,
+#   scripts/test/spec-drift-test.sh, scripts/codacy-coverage-upload.sh,
+#   scripts/test/codacy-coverage-upload-test.sh,
 #   scripts/scan-ai-attribution.sh, or scripts/gates.sh are absent. Only
 #   optional helpers such as systemd lint skip by presence.
 #
 # Job-name contract
 #   The job IDs below (lint, test, frontend, embed-smoke, gates) are the
 #   contract for branch-protection required status checks. SOW-0013
-#   will register these exact names via the GitHub branch-protection
-#   API. Renaming a job is a breaking change to that contract and
-#   requires a SOW. `embed-smoke` (SOW-0001 Chunk 17) is the new
-#   top-level concern that proves the single binary serves the built UI;
-#   SOW-0013 registers it alongside the other required CI checks.
+#   registered these exact names via the GitHub branch-protection API.
+#   Renaming a job is a breaking change to that contract and requires a SOW.
+#   `codacy-coverage` is deliberately not part of this contract while Codacy is
+#   still a reporting/tuning layer.
 #
 # Extending
 #   Future quality SOWs (SOW-0009 onwards) extend this workflow by
@@ -59,6 +60,9 @@
 #                  include/threshold shape) plus its hermetic self-test.
 #     - SOW-0013 (LANDING) — scripts/{gates,spec-drift}.sh + CodeQL workflow +
 #                  Dependabot config
+#     - SOW-0044 (LANDING) — codacy-coverage reporting job, fed only from the
+#                  existing Go/frontend coverage artifacts; not required in
+#                  branch protection until SOW-0046 triages the findings.
 #   The secrets + operator-PII scanner (scripts/scan-secrets.sh) and its
 #   negative self-test (scripts/test/scan-secrets-test.sh) are already
 #   implemented and run as REQUIRED, fail-closed steps in the gates job
@@ -619,6 +623,51 @@ jobs:
         if: steps.detect.outputs.fe == 'true'
         run: npm run check:bundle-size
 
+  codacy-coverage:
+    # Reporting-only while Codacy findings are being tuned. Required jobs above
+    # remain the authoritative merge gates; this job consumes their artifacts
+    # and uploads coverage only when a Codacy token exists.
+    name: codacy-coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [test, frontend]
+    # `always()` keeps needs.*.result readable after upstream jobs fail/skip; the
+    # explicit success checks below still prevent checkout/secrets/script work.
+    if: ${{ always() && github.event_name != 'pull_request' && needs.test.result == 'success' && needs.frontend.result == 'success' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download Go coverage
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: go-coverage-${{ github.run_id }}
+          path: .codacy-coverage/go
+
+      - name: Download frontend coverage
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: frontend-coverage-${{ github.run_id }}
+          path: .codacy-coverage/frontend
+
+      - name: Upload coverage to Codacy
+        # Codacy is reporting-only during SOW-0044. Expected upload problems
+        # emit annotations and exit zero; unexpected script failures should stay
+        # visible because this implementation is still maintained code.
+        shell: bash
+        env:
+          CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          CODACY_API_TOKEN: ${{ secrets.CODACY_API_TOKEN }}
+          CODACY_ORGANIZATION_PROVIDER: gh
+          CODACY_USERNAME: netdata
+          CODACY_PROJECT_NAME: ai-viewer
+        run: bash scripts/codacy-coverage-upload.sh
+
   embed-smoke:
     # Proves the SOW-0001 Chunk 17 milestone: scripts/build.sh produces a
     # single ai-viewer-serve binary that serves the REAL built UI
@@ -736,23 +785,24 @@ jobs:
           fi
           echo "secrets scanner and self-test present."
 
-      # Fail-closed: lint-test, spec-drift, AI-attribution, and gates.sh are
-      # mandatory gate infrastructure. Missing files are missing gates, not passes.
+      # Fail-closed: lint-test, spec-drift, Codacy coverage upload self-test,
+      # AI-attribution, and gates.sh are mandatory gate infrastructure. Missing
+      # files are missing gates, not passes.
       - name: Require cross-cutting gates present (fail-closed)
         shell: bash
         run: |
           missing=0
-          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
+          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/codacy-coverage-upload.sh scripts/test/codacy-coverage-upload-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
             if [[ ! -f "$f" ]]; then
               echo "::error::required gate file is absent: $f"
               missing=1
             fi
           done
           if [[ "$missing" -ne 0 ]]; then
-            echo "The lint self-test, spec-drift detector, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
+            echo "The lint self-test, spec-drift detector, Codacy coverage upload self-test, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
             exit 1
           fi
-          echo "lint self-test, spec-drift detector, self-test, AI-attribution scanner, and local aggregate present."
+          echo "lint self-test, spec-drift detector, Codacy coverage upload self-test, AI-attribution scanner, and local aggregate present."
 
       - name: Local aggregate syntax check
         run: bash -n scripts/gates.sh
@@ -792,6 +842,11 @@ jobs:
         run: |
           chmod +x scripts/spec-drift.sh
           ./scripts/spec-drift.sh
+
+      - name: Codacy coverage upload self-test
+        run: |
+          chmod +x scripts/test/codacy-coverage-upload-test.sh
+          ./scripts/test/codacy-coverage-upload-test.sh
 
       - name: Scan AI attribution
         run: |

@@ -40,12 +40,13 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       // `html` is the human report CI uploads (quality-gates.md §Frontend —
-      // Unit/Component: "CI artifact contains the HTML report"). `json` emits
+      // Unit/Component: "CI artifact contains the HTML report"). `lcov` is the
+      // Codacy-compatible JS/TS coverage report. `json` emits
       // coverage/coverage-final.json so per-dir line% is inspectable/diffable
       // outside the text table (the dir-level rollup the text reporter collapses);
       // the threshold self-test runs its own fixture, so it does not depend on
       // this file.
-      reporter: ['text', 'text-summary', 'json', 'html'],
+      reporter: ['text', 'text-summary', 'json', 'html', 'lcov'],
       // Measured set — shared with the config verifier (vitest.coverage.mjs).
       // `include` wants a mutable array; the shared constant is readonly, so copy.
       include: [...COVERAGE_INCLUDE],
