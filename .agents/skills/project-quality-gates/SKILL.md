@@ -303,12 +303,13 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
 ./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
 ./scripts/spec-drift.sh   # the 5 spec↔code drift indicators, fail-closed (SOW-0013; EXISTS)
+./scripts/test/codacy-config-test.sh  # Codacy tool/pattern + path policy self-test (SOW-0046; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast, per-section timing (SOW-0013; EXISTS)
 ```
 
 `scripts/lint.sh` is the build-free module/static-analysis entrypoint: it runs Go module tidiness, tracked-file Go formatter checks, Go vet/lint/security checks, frontend static checks, the coverage-config verifier, and hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, slow gates last, and complete coverage of the local gate catalog including the lint formatter-scope self-test, Codacy coverage-upload self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/Codacy coverage-upload self-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, `scripts/test/codacy-config-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044/0046). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, and complete coverage of the local gate catalog including the lint formatter-scope self-test, Codacy coverage-upload self-test, Codacy config self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. The benchmark regression gate runs after build and before the long CPU-heavy `-race` and Playwright sections so the local workstation benchmark measures code behavior, not residual thermal/load state created by the aggregate itself. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/Codacy coverage-upload self-test/Codacy config self-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
 
 Required CI jobs are **not** bootstrap probes anymore. They fail closed when
 their mature repo prerequisites disappear: `lint`/`test` require Go module files
@@ -358,9 +359,11 @@ codacy repository gh netdata ai-viewer --output json
 codacy tools gh netdata ai-viewer --output json
 codacy issues gh netdata ai-viewer --overview --output json
 codacy findings gh netdata ai-viewer --severities Critical,High --output json
+codacy issues gh netdata ai-viewer --branch master --severities Critical,High --output json
 codacy-analysis discover --output-format json --output /tmp/ai-viewer-codacy-discover.json
 codacy-analysis analyze --inspect --output-format json
 codacy-analysis analyze --install-dependencies --output-format json --output /tmp/ai-viewer-codacy-analysis.json
+scripts/test/codacy-config-test.sh
 ```
 
 Policy:
@@ -371,9 +374,36 @@ Policy:
   baseline before it is high-signal, but it must not become a required context
   until critical/high findings and noisy patterns are triaged. Generated tool
   material under `.codacy/generated/` stays ignored.
+- Codacy Cloud path exclusions live in repository-root `.codacy.yml`. Keep that
+  surface separate from the Cloud-imported tool/pattern config in
+  `.codacy/codacy.config.json`. Because Codacy ignores UI ignored-file settings
+  when `.codacy.yml` exists, root `exclude_paths` must carry the repository-wide
+  non-runtime SOW work-ledger, duplicate instruction symlink, generated artifact,
+  dependency, coverage, build-output, local binary-output, and local
+  test-output exclusions explicitly. The local Analysis CLI consumes the JSON
+  config but not `.codacy.yml`, so root YAML exclusions are mirrored only in the
+  JSON top-level `exclude` list; tool-scoped YAML exclusions such as
+  `engines.eslint-8.exclude_paths` are mirrored only into that tool's JSON
+  `exclude` array.
+- Codacy exclusion rationale must name the actual replacement gates. Frontend
+  tests and test support may cite native ESLint/TypeScript/Vitest/Playwright
+  where applicable; standalone frontend scripts may cite their dedicated
+  self-tests/build integration and repository-wide secrets/spec-drift gates when
+  the frontend ESLint/TypeScript configs intentionally ignore `scripts/`.
 - Cloud import through `codacy tools gh netdata ai-viewer --import -y` is allowed
   only after before/after tool and issue summaries are captured. If organization
   coding standards block changes, record the exact blocker in the SOW.
+- Treat local Analysis CLI and Cloud data as separate sources until Cloud
+  reanalysis completes after import. Local config changes do not affect Codacy
+  Cloud by being committed; the import step is the only sync path.
+- Run `scripts/test/codacy-config-test.sh` after any `.codacy/codacy.config.json`
+  or `.codacy.yml` change. The self-test must stay hermetic: it validates
+  JSON/YAML shape, keeps repository-wide non-runtime SOW work-ledger, duplicate
+  instruction symlink, generated/local artifact exclusions separate from
+  tool-scoped test/tooling exclusions, forbids accidental broad runtime-source
+  exclusions, proves retained high-signal security patterns remain enabled, and
+  requires documented rationale for local-only Cloud-noise removals such as
+  PMD/SQLint and for any path-scoped tool exclusion.
 - Coverage upload reuses existing Go/frontend reports. Use GitHub secret names
   only (`CODACY_PROJECT_TOKEN` or account-token mode variables); never write
   token values to disk.
@@ -416,6 +446,10 @@ Policy:
   validation is upstream behavior, not a local guarantee from this workflow.
 - Disable tools/patterns only with evidence. Broad "too noisy" disables without
   path/category counts are not acceptable.
+- Test/tooling path exclusions must cite the stronger project-native gate that
+  still covers those files. Runtime source paths are not excluded merely because
+  a scanner pattern is noisy; prefer a code fix or a line/rule suppression with
+  executable evidence.
 
 ## When a Gate Fails
 

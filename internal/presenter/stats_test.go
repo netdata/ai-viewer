@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -200,6 +201,89 @@ func TestStats_FilterStatus(t *testing.T) {
 	}
 	if body.Totals.Failures != 1 {
 		t.Fatalf("failures = %d, want 1", body.Totals.Failures)
+	}
+}
+
+// TestStats_MaliciousFilterValuesStayBound pins the SQL-construction
+// false-positive disposition for SOW-0046: filter values that look like SQL
+// remain literal bound parameters and cannot widen the stats session set.
+func TestStats_MaliciousFilterValuesStayBound(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedGraph(t, db, base)
+
+	code, broad, _ := getStats(t, p, "group=all")
+	if code != http.StatusOK {
+		t.Fatalf("baseline status = %d", code)
+	}
+	if broad.Totals.SessionCount != 3 || broad.Totals.OpCount != 6 {
+		t.Fatalf("baseline totals = sessions:%d ops:%d, want sessions:3 ops:6",
+			broad.Totals.SessionCount, broad.Totals.OpCount)
+	}
+
+	sqlOR := "failed') OR 1=1 --"
+	sqlLike := "%' OR 1=1 --"
+	cases := []struct {
+		name  string
+		query url.Values
+	}{
+		{"status", url.Values{"group": {"all"}, "status": {sqlOR}}},
+		{"agents", url.Values{"group": {"all"}, "agents": {"worker') OR 1=1 --"}}},
+		{"models", url.Values{"group": {"all"}, "models": {"gpt-5') OR 1=1 --"}}},
+		{"sources", url.Values{"group": {"all"}, "sources": {"src1') OR 1=1 --"}}},
+		{"tools", url.Values{"group": {"all"}, "tools": {"Read') OR 1=1 --"}}},
+		{"q", url.Values{"group": {"all"}, "q": {sqlLike}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body, env := getStats(t, p, tc.query.Encode())
+			if code != http.StatusOK {
+				t.Fatalf("status = %d, env=%+v", code, env)
+			}
+			assertStatsEmpty(t, body)
+		})
+	}
+}
+
+func assertStatsEmpty(t *testing.T, body statsBody) {
+	t.Helper()
+	assertStatsTotalInt(t, "session_count", body.Totals.SessionCount)
+	assertStatsTotalInt(t, "turn_count", body.Totals.TurnCount)
+	assertStatsTotalInt(t, "op_count", body.Totals.OpCount)
+	assertStatsTotalInt(t, "tokens_in", body.Totals.TokensIn)
+	assertStatsTotalInt(t, "tokens_out", body.Totals.TokensOut)
+	assertStatsTotalInt(t, "tokens_cache_read", body.Totals.TokensCacheRead)
+	assertStatsTotalInt(t, "tokens_cache_write", body.Totals.TokensCacheWrite)
+	assertStatsTotalFloat(t, "cost_usd", body.Totals.CostUSD)
+	assertStatsTotalInt(t, "failures", body.Totals.Failures)
+	assertStatsTotalInt(t, "duration_us", body.Totals.DurationUS)
+	assertStatsBreakdownEmpty(t, "by_model", len(body.ByModel))
+	assertStatsBreakdownEmpty(t, "by_tool", len(body.ByTool))
+	assertStatsBreakdownEmpty(t, "by_agent", len(body.ByAgent))
+	assertStatsBreakdownEmpty(t, "by_status", len(body.ByStatus))
+	assertStatsBreakdownEmpty(t, "by_source", len(body.BySource))
+}
+
+func assertStatsTotalInt(t *testing.T, name string, got int64) {
+	t.Helper()
+	if got != 0 {
+		t.Errorf("malicious filter broadened stats total %s: %d", name, got)
+	}
+}
+
+func assertStatsTotalFloat(t *testing.T, name string, got float64) {
+	t.Helper()
+	if got != 0 {
+		t.Errorf("malicious filter broadened stats total %s: %f", name, got)
+	}
+}
+
+func assertStatsBreakdownEmpty(t *testing.T, name string, got int) {
+	t.Helper()
+	if got != 0 {
+		t.Errorf("malicious filter broadened stats breakdown %s: %d rows", name, got)
 	}
 }
 

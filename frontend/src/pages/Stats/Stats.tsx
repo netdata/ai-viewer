@@ -4,7 +4,15 @@ import { useFilters, filtersToSubscription } from '../../state/filters';
 import { useAggregate, useTop } from '../../api/stats';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
 import { LoadingState, ErrorState } from '../../components/StatusViews';
-import type { StatsBucket, StatsMetric, TopDimension } from '../../api/types';
+import type {
+  AggregateBucket,
+  AggregateResponse,
+  StatsBucket,
+  StatsMetric,
+  TopDimension,
+  TopItem,
+  TopResponse,
+} from '../../api/types';
 import { LineChart } from './charts/LineChart';
 import { BarChart } from './charts/BarChart';
 import { SearchBox } from './SearchBox';
@@ -167,7 +175,7 @@ export function Stats() {
           <ErrorState error={aggregate.error} title="Failed to load trends" />
         ) : (
           <LineChart
-            buckets={aggregate.data?.buckets ?? []}
+            buckets={aggregateBucketsFrom(aggregate.data)}
             metric={trendMetric}
             bucket={bucket}
           />
@@ -218,7 +226,7 @@ export function Stats() {
           <ErrorState error={ranking.error} title="Failed to load breakdown" />
         ) : (
           <BarChart
-            items={ranking.data?.items ?? []}
+            items={topItemsFrom(ranking.data)}
             dimension={topDimension}
             metric={topMetric}
           />
@@ -234,4 +242,14 @@ export function Stats() {
       </section>
     </section>
   );
+}
+
+function aggregateBucketsFrom(data: AggregateResponse | undefined): AggregateBucket[] {
+  const buckets = data?.buckets;
+  return Array.isArray(buckets) ? buckets : [];
+}
+
+function topItemsFrom(data: TopResponse | undefined): TopItem[] {
+  const items = data?.items;
+  return Array.isArray(items) ? items : [];
 }

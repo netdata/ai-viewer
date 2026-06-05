@@ -3,7 +3,6 @@ package opencode
 import (
 	"database/sql"
 	"fmt"
-	"math/rand"
 	"os"
 	"strings"
 	"testing"
@@ -132,10 +131,20 @@ type ssState struct {
 	mutated         bool
 }
 
+// deterministicTestPRNG is a tiny test-only LCG used to vary stress schedules
+// without importing math/rand for deterministic, non-security randomness.
+type deterministicTestPRNG struct {
+	state uint64
+}
+
+func (r *deterministicTestPRNG) intn(n int) int {
+	r.state = r.state*6364136223846793005 + 1442695040888963407
+	return int((r.state >> 32) % uint64(n))
+}
+
 // TestP1_R7_SameMsStress is the property/stress guard against a 5th same-ms case.
-// It seeds a synthetic DB, then across multiple poll cycles applies RANDOM (but
-// DETERMINISTICALLY seeded — math/rand, varied by the iteration index) interleavings
-// of:
+// It seeds a synthetic DB, then across multiple poll cycles applies deterministic
+// pseudo-random interleavings from a tiny test-only PRNG of:
 //   - in-place UPDATEs of an arbitrary EXISTING low-id row re-stamped to the CURRENT
 //     boundary ms T (the same-ms boundary case — invisible to the cheap MAX(id) path
 //     and excluded by the forward delta tie-break, so only the boundary re-scan can
@@ -153,8 +162,8 @@ type ssState struct {
 // 5th same-ms variant (or a regression of this fix) is caught. Verified to FAIL
 // against the pre-round-7 probed-gated trigger.
 //
-// Run with -count=5 (per the SOW gate) to shake out nondeterminism; the seed is
-// derived from a fixed constant so each run is reproducible.
+// Run with -count=5 (per the SOW gate) to shake out nondeterminism; the schedule
+// seed is fixed so each run is reproducible.
 func TestP1_R7_SameMsStress(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -201,9 +210,9 @@ func TestP1_R7_SameMsStress(t *testing.T) {
 	// final assertion can verify the LAST state was emitted (zero gaps).
 	expect := map[string]*ssState{}
 
-	rng := rand.New(rand.NewSource(0xC0DE57)) //nolint:gosec // deterministic test PRNG, not security-sensitive
-	insertSeq := 0                            // strictly-increasing id/ms counter for new INSERTs
-	curBoundaryMs := startMs                  // the ms in-place updates target (the cursor boundary)
+	rng := deterministicTestPRNG{state: 0xC0DE57}
+	insertSeq := 0           // strictly-increasing id/ms counter for new INSERTs
+	curBoundaryMs := startMs // the ms in-place updates target (the cursor boundary)
 	lastCursor := cur
 
 	out := make(chan canonical.Event, 8192)
@@ -213,11 +222,11 @@ func TestP1_R7_SameMsStress(t *testing.T) {
 		// case). Most cycles ALSO do a co-occurring INSERT at T+1 — the strand setup:
 		// the INSERT advances the cursor past T, so the in-place update at T is below
 		// the new watermark unless the boundary re-scan runs against pre-advance T.
-		doInsert := rng.Intn(4) != 0 // ~3/4 cycles co-occur an INSERT (the strand case)
-		missedWAL := rng.Intn(3) == 0
+		doInsert := rng.intn(4) != 0 // ~3/4 cycles co-occur an INSERT (the strand case)
+		missedWAL := rng.intn(3) == 0
 
 		// In-place UPDATE of an arbitrary existing seed session's part, re-stamped to T.
-		victim := fmt.Sprintf("ses_%03d", rng.Intn(seedN))
+		victim := fmt.Sprintf("ses_%03d", rng.intn(seedN))
 		if _, uerr := rw2.Exec(`UPDATE part SET time_updated = ? WHERE session_id = ?`, curBoundaryMs, victim); uerr != nil {
 			t.Fatalf("cycle %d in-place update of %s: %v", c, victim, uerr)
 		}

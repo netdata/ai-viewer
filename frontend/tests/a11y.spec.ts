@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
+import { THEME_PREFERENCE_STORAGE_NAME as THEME_STORAGE_SLOT } from '../src/state/theme';
 
 // Accessibility coverage (AGENTS.md quality gate: axe, zero serious/critical on
 // every live route). We run axe-core against each live route served by the built
@@ -16,7 +17,6 @@ import { AxeBuilder } from '@axe-core/playwright';
 
 const IMPACTS = new Set(['serious', 'critical']);
 const THEMES = ['dark', 'light'] as const;
-const THEME_STORAGE_KEY = 'aiViewerTheme';
 
 /** seriousOrCritical filters an axe run to only the blocking-impact violations.
  *  axe's `impact` is optional (`ImpactValue | undefined | null`), so we coerce a
@@ -31,10 +31,10 @@ function seriousOrCritical(
  *  BEFORE any page script runs (so the no-flash IIFE reads it on first paint). */
 async function lockTheme(page: Page, theme: (typeof THEMES)[number]): Promise<void> {
   await page.addInitScript(
-    ([key, value]) => {
-      window.localStorage.setItem(key, value);
+    ([storageSlot, value]) => {
+      window.localStorage.setItem(storageSlot, value);
     },
-    [THEME_STORAGE_KEY, theme] as const,
+    [THEME_STORAGE_SLOT, theme] as const,
   );
 }
 

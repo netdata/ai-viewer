@@ -400,13 +400,17 @@ summary. It composes existing scripts and commands — `scripts/lint.sh` (Go +
 frontend static analysis), `scripts/scan-secrets.sh` + its self-test,
 `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh` + its self-test,
 `scripts/test/codacy-coverage-upload-test.sh`,
+`scripts/test/codacy-config-test.sh`,
 `scripts/test/systemd-units-test.sh` when present, `scripts/build.sh` (build +
 real bundle-size gate + embed + both binaries), `scripts/test.sh` +
 `scripts/check-coverage.sh` (Go race suite + coverage + frontend Vitest), the
 deterministic adapter fuzz seed corpus + target-set lock, frontend Playwright
 E2E (including the axe a11y specs), and the local benchmark gate self-test +
-`scripts/check-bench.sh`. The **slow gates run last** so a fast
-static-analysis/spec/security failure surfaces early.
+`scripts/check-bench.sh`. Fast static-analysis/spec/security gates still run
+first so quick failures surface early; the local benchmark regression gate runs
+after the build and before the long CPU-heavy `-race` and Playwright sections so
+the workstation benchmark measures code behavior rather than residual thermal or
+load state created by the aggregate itself.
 
 The CI `gates` job does **not** run the full serial `scripts/gates.sh`
 aggregate. CI keeps the expensive gates parallel in their dedicated jobs and
@@ -414,7 +418,9 @@ uses the `gates` job for cross-cutting repo scans and required gate
 infrastructure checks: secrets + scanner self-test (fail-closed), lint
 formatter-scope self-test (fail-closed), spec drift + detector self-test
 (fail-closed, self-test first), AI-attribution scan (fail-closed),
-Codacy coverage-upload self-test, `scripts/gates.sh` presence + syntax check,
+Codacy coverage-upload self-test, Codacy config self-test, `scripts/gates.sh`
+presence + syntax check, `scripts/test/codacy-config-test.sh` presence +
+syntax check,
 and systemd unit lint when present.
 
 The mature required jobs fail closed on their prerequisites. `lint` and `test`
@@ -486,12 +492,35 @@ coverage visibility. It must be tuned from measured findings; a noisy Codacy
 configuration is treated as a defect because it trains maintainers to ignore the
 signal.
 
-The project maintains two Codacy surfaces:
+The project maintains three Codacy surfaces:
 
 - Local Analysis CLI configuration under `.codacy/` for reproducible local
-  analysis and machine-readable before/after summaries.
+  analysis and machine-readable before/after summaries. The local CLI consumes
+  `.codacy/codacy.config.json`. Its top-level `exclude` list is limited to the
+  repository-wide non-runtime SOW work-ledger, duplicate instruction symlink,
+  generated artifact, dependency, coverage, build-output, local binary-output,
+  and local test-output exclusions also present in `.codacy.yml`; any
+  test/tooling path exclusion is scoped to the specific local tool entry, not
+  hidden globally from Semgrep, Trivy, Lizard, or other tools.
 - Codacy Cloud configuration, imported/verified through the Codacy Cloud CLI
-  when credentials and organization policy allow it.
+  when credentials and organization policy allow it. The Cloud import consumes
+  `.codacy/codacy.config.json` for tool/pattern settings.
+- `.codacy.yml` at repository root for Codacy path exclusions. This is the
+  path-scope policy surface documented by Codacy. Because Codacy ignores UI
+  ignored-file settings when this file exists, repository-wide non-runtime
+  SOW work-ledger files, duplicate instruction symlinks, generated artifacts,
+  dependencies, coverage/build output, local binary output, and local test
+  output must be listed explicitly under root `exclude_paths`. Tool-scoped
+  Cloud ignores, such as
+  `engines.eslint-8.exclude_paths`, are mirrored only into that same tool's JSON
+  `exclude` array for local CLI parity.
+
+Approved Codacy path exclusions must record the actual replacement coverage,
+not a generic "covered elsewhere" claim. Frontend tests and test support remain
+under native ESLint/TypeScript/Vitest/Playwright gates where applicable.
+Standalone frontend scripts are covered by their dedicated script self-tests,
+build integration, and repository-wide secrets/spec-drift gates when the
+frontend ESLint/TypeScript configs intentionally ignore them.
 
 Codacy is **not** automatically a hard required branch-protection gate merely
 because the Cloud check exists. It becomes a required context only after the
@@ -508,6 +537,22 @@ Tuning rules:
   may be excluded only when the exclusion is narrower than the relevant risk.
 - Security findings are triaged under `security.md`; critical/high findings are
   fixed, proven false-positive, or tracked.
+- Codacy triage records local Analysis CLI and Cloud data separately. Local
+  results are reproducible from `.codacy/codacy.config.json`; Cloud results are
+  authoritative for the external dashboard only after the tuned config is
+  imported and reanalysis completes.
+- The Codacy config is a maintained gate surface. The repository carries a
+  hermetic config self-test that validates JSON/YAML shape, keeps
+  repository-wide non-runtime SOW work-ledger, duplicate instruction symlink,
+  generated/local artifact exclusions separate from tool-scoped test/tooling
+  exclusions, proves the high-signal security patterns remain enabled, and fails
+  if local-only removals such as PMD/SQLint or path-scoped tool exclusions lose
+  their documented rationale. That self-test runs in `scripts/gates.sh` and the
+  CI `gates` job.
+- Test and tooling paths may be excluded from a Codacy tool only when the active
+  SOW records a stronger project-native gate for those paths. Runtime frontend
+  and Go source paths stay analyzable unless a line-level or rule/path-scoped
+  false-positive disposition is recorded.
 - Coverage upload reuses existing Go and frontend coverage reports; it does not
   run a second test path.
 - Coverage upload lives in the non-required `codacy-coverage` job. The required

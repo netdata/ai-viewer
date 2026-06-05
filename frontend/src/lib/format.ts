@@ -58,7 +58,22 @@ function trimZero(n: number): string {
   return s.endsWith('.0') ? s.slice(0, -2) : s;
 }
 
-const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
+const MAX_BYTE_UNIT = 4;
+
+function byteUnitLabel(unit: number): string {
+  switch (unit) {
+    case 0:
+      return 'B';
+    case 1:
+      return 'KB';
+    case 2:
+      return 'MB';
+    case 3:
+      return 'GB';
+    default:
+      return 'TB';
+  }
+}
 
 /**
  * formatBytes renders a byte count with binary scaling (1024). Null/undefined →
@@ -74,11 +89,11 @@ export function formatBytes(bytes: number | null | undefined): string {
   }
   let value = v;
   let unit = 0;
-  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+  while (value >= 1024 && unit < MAX_BYTE_UNIT) {
     value /= 1024;
     unit += 1;
   }
-  return `${value.toFixed(1)} ${BYTE_UNITS[unit]}`;
+  return `${value.toFixed(1)} ${byteUnitLabel(unit)}`;
 }
 
 /**

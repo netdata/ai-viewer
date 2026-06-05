@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
+import { THEME_PREFERENCE_STORAGE_NAME as THEME_STORAGE_SLOT } from '../src/state/theme';
 
 // SOW-0006 AC#5 — the REAL-BROWSER axe pass on the new viz surfaces (the
 // component-level jest-axe work in chunk "a11y" prepared for this). Runs axe-core
@@ -18,7 +19,6 @@ import { AxeBuilder } from '@axe-core/playwright';
 
 const IMPACTS = new Set(['serious', 'critical']);
 const THEMES = ['dark', 'light'] as const;
-const THEME_STORAGE_KEY = 'aiViewerTheme';
 
 /** seriousOrCritical filters an axe run to only blocking-impact violations. */
 function seriousOrCritical(
@@ -30,10 +30,10 @@ function seriousOrCritical(
 /** lockTheme pins the manual theme override before any page script runs. */
 async function lockTheme(page: Page, theme: (typeof THEMES)[number]): Promise<void> {
   await page.addInitScript(
-    ([key, value]) => {
-      window.localStorage.setItem(key, value);
+    ([storageSlot, value]) => {
+      window.localStorage.setItem(storageSlot, value);
     },
-    [THEME_STORAGE_KEY, theme] as const,
+    [THEME_STORAGE_SLOT, theme] as const,
   );
 }
 

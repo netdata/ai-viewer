@@ -47,7 +47,7 @@ test.describe('sessions list — filter (AC#4)', () => {
     // ?agents=<name> via useFilters → SessionsList refetches). The list still
     // shows ≥ 1 row and EVERY visible Agent cell equals the filtered agent.
     await filters.getByLabel('Agents filter').fill(agent);
-    await expect(page).toHaveURL(new RegExp(`[?&]agents=${encodeURIComponent(agent)}`));
+    await expect.poll(() => new URL(page.url()).searchParams.get('agents')).toBe(agent);
     await expect(rows.first()).toBeVisible();
     const agentCells = page.locator('table tbody tr td:nth-child(2)');
     const matchedCount = await agentCells.count();
@@ -64,7 +64,7 @@ test.describe('sessions list — filter (AC#4)', () => {
 
     // Clear filters restores the full list (FilterBar "Clear filters" button).
     await filters.getByRole('button', { name: 'Clear filters' }).click();
-    await expect(page).not.toHaveURL(/[?&]agents=/);
+    await expect.poll(() => new URL(page.url()).searchParams.has('agents')).toBe(false);
     await expect(rows.first()).toBeVisible();
     await expect(rows).toHaveCount(baseline);
   });

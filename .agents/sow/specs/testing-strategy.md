@@ -158,6 +158,30 @@ Codacy coverage is a reporting layer, not a second test path.
   must not use a process substitution that can turn a failed download into an
   empty successful script.
 
+## Codacy Finding Triage Tests
+
+Codacy security/maintainability triage is scanner policy, but code changes made
+to close findings still need project-native tests:
+
+- Runtime behavior touched while closing a Codacy finding is covered by the
+  normal Go/Frontend test layer for that surface before implementation changes
+  land.
+- False-positive suppressions on runtime source require executable evidence
+  where practical. For example, a SQL-construction finding on a presenter query
+  is paired with a handler/query test proving malicious filter values remain
+  bound as parameters and do not change SQL structure.
+- Test-only or tooling-only Codacy exclusions are backed by the existing tests
+  for those paths: frontend tests remain under ESLint/typecheck/Vitest/Playwright,
+  frontend scripts keep their own self-tests, shell scripts remain under
+  ShellCheck where applicable, and repository-wide secrets/spec-drift gates still
+  scan tracked files.
+- Codacy configuration changes are validated by a hermetic config self-test, not
+  just by `jq empty`. The self-test covers `.codacy/codacy.config.json`
+  tool/pattern settings, its local Analysis CLI `exclude` mirror, and
+  `.codacy.yml` Cloud path-exclusion settings, protecting against accidental
+  broad runtime exclusions and against removing high-signal security patterns
+  without a SOW rationale.
+
 ## CI Gates
 
 The authoritative CI gate catalog and branch-protection contract lives in
@@ -169,7 +193,7 @@ Current CI testing surfaces on `master` and PRs to `master`:
 - `test`: Go build, `go test -race -count=1 -timeout=25m -coverprofile=coverage.out -covermode=atomic ./...`, deterministic adapter fuzz seed corpus, Go coverage artifact upload and threshold enforcement, coverage-gate self-test, benchmark compile smoke, and benchmark-gate self-test.
 - `frontend`: ESLint, TypeScript typecheck, Vitest unit/component run with coverage and native per-directory thresholds, coverage artifact upload, coverage-config verifier/self-tests, Playwright E2E/axe, bundle-size self-test, and enforced bundle-size gate.
 - `embed-smoke`: embedded frontend/server binary build, served UI smoke, and `/api/health` smoke.
-- `gates`: cross-cutting testing infrastructure checks including lint-test, secrets scanner self-test/scan, spec-drift self-test/scan, Codacy coverage-upload self-test, AI-attribution scan, local aggregate syntax check, and optional systemd unit lint.
+- `gates`: cross-cutting testing infrastructure checks including lint-test, secrets scanner self-test/scan, spec-drift self-test/scan, Codacy coverage-upload self-test, Codacy config self-test, AI-attribution scan, local aggregate syntax check, and optional systemd unit lint.
 - `codeql`: required CodeQL matrix jobs for `go`, `javascript-typescript`, and `actions`.
 - `codacy-coverage`: non-required reporting job that uploads coverage artifacts through `scripts/codacy-coverage-upload.sh` when a usable Codacy token is available.
 

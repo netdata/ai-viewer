@@ -75,6 +75,50 @@ Codacy is intentionally not a required branch-protection status yet. SOW-0044
 landed it as a visibility layer; SOW-0046 tracks the critical/high and
 complexity triage required before promoting Codacy to a merge blocker.
 
+### Codacy quality/security triage
+
+The importable Codacy tool/pattern configuration lives in
+`.codacy/codacy.config.json`. Codacy Cloud path exclusions live in
+`.codacy.yml`, which is the Codacy-documented path policy file. The local
+Codacy Analysis CLI does not consume `.codacy.yml`, so root YAML
+`exclude_paths` are mirrored in the JSON top-level `exclude` list. Those root
+exclusions are limited to non-runtime SOW work-ledger files, duplicate
+instruction symlinks, generated artifacts, dependencies, coverage/build output,
+local binary output, and local test output. Tool-scoped YAML exclusions are
+mirrored only into the same tool's JSON `exclude` array. Frontend tests/test
+support and standalone frontend scripts have different replacement gates:
+tests/test support are covered by native frontend test/static gates, while
+standalone scripts rely on their dedicated self-tests/build integration plus
+repository-wide secrets/spec-drift checks.
+After editing either file, run the hermetic config guard before importing
+anything into Codacy Cloud:
+
+```bash
+scripts/test/codacy-config-test.sh
+```
+
+The guard validates JSON/YAML shape, keeps repository-wide non-runtime
+work-ledger, duplicate symlink, generated/local artifact exclusions separate
+from tool-scoped test/tooling exclusions, protects runtime source paths from
+accidental broad exclusions, keeps high-signal security patterns enabled, and
+requires documented rationale for local-only Cloud-noise removals.
+
+Codacy Cloud does not automatically read the committed `.codacy/` directory.
+After local gates and review pass, import the tuned configuration, trigger
+Cloud reanalysis, and compare the before/after summaries:
+
+```bash
+codacy tools gh netdata ai-viewer --import -y
+codacy repository gh netdata ai-viewer --reanalyze
+codacy issues gh netdata ai-viewer --overview --output json
+codacy findings gh netdata ai-viewer --severities Critical,High --output json
+```
+
+While Codacy is reporting-only, this import/reanalysis flow is an operational
+visibility step, not a branch-protection gate. A future SOW must explicitly
+promote Codacy quality/security checks to required status after the
+critical/high backlog is fixed or explicitly triaged.
+
 ## Local gate prerequisites
 
 `./scripts/gates.sh` runs the frontend Playwright E2E/axe gate. On a fresh
@@ -133,6 +177,33 @@ This matches the canonical branch protection in `AGENTS.md`
 `required_pull_request_reviews: null` (no manual-approval gate — external LLM
 reviewers + the discipline checklist are the quality gate, see the
 `project-second-opinions` skill).
+
+GitHub repository rulesets are separate from classic branch protection. Do not
+leave an active branch ruleset targeting `master` or `~DEFAULT_BRANCH` with a
+`pull_request` rule that requires approving reviews or code-owner review; that
+blocks merges even when `required_pull_request_reviews` is null. Verify the
+active rulesets after branch-protection setup:
+
+```bash
+gh api /repos/netdata/ai-viewer/rulesets \
+  --jq '.[] | select(.target == "branch") | {id, name, enforcement, conditions}'
+```
+
+If an old duplicate ruleset exists only to enforce manual reviews, either
+disable it or update the active `pull_request` rule so it requires zero
+approvals and no code-owner review. Preserve the rest of the ruleset payload
+and update through `PUT`; `PATCH` is not supported for repository rulesets:
+
+```bash
+gh api /repos/netdata/ai-viewer/rulesets/<ruleset-id> > /tmp/ruleset.json
+jq '(.rules[] | select(.type == "pull_request")
+      | .parameters.required_approving_review_count) = 0
+    | (.rules[] | select(.type == "pull_request")
+      | .parameters.require_code_owner_review) = false' \
+  /tmp/ruleset.json > /tmp/ruleset-no-manual-review.json
+gh api --method PUT /repos/netdata/ai-viewer/rulesets/<ruleset-id> \
+  --input /tmp/ruleset-no-manual-review.json
+```
 
 ### Token scope
 

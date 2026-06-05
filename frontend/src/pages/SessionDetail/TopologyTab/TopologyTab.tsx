@@ -155,8 +155,8 @@ export function TopologyTab({ sessionId }: { sessionId: string }) {
   // the cross-session page, navigating to the wrong session — until the fresh run
   // lands. Where ids match, the worker's coordinates apply; an unmatched id gets a
   // deterministic seeded fallback. Same-graph case is unchanged (identical result).
-  const positioned: PositionedNode[] = frozen
-    ? reapplyFrozenPositions(nodes, frozenLayout ?? new Map(), opts)
+  const positioned: PositionedNode[] = frozenLayout !== null
+    ? reapplyFrozenPositions(nodes, frozenLayout, opts)
     : useWorker
       ? (workerResult?.key === key
           ? reapplyFrozenPositions(nodes, positionsOf(workerResult.positioned), opts)

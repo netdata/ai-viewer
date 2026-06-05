@@ -92,6 +92,37 @@ gates. Their security findings are not cosmetic.
   noise is tuned by disabling only the narrow tool/pattern/path that produces
   false positives; broad security categories are not disabled just to reduce
   counts.
+- **Codacy local vs Cloud parity:** local Analysis CLI output and Codacy Cloud
+  output are tracked separately. A local false-positive disposition is not
+  assumed to fix Cloud until the tuned `.codacy/codacy.config.json` has been
+  imported and Cloud reanalysis confirms the result. Codacy Cloud path
+  exclusions live in `.codacy.yml`; tool/pattern choices live in
+  `.codacy/codacy.config.json`. The local Analysis CLI does not consume
+  `.codacy.yml`, so repository-wide non-runtime SOW work-ledger, duplicate
+  instruction symlink, generated artifact, dependency, coverage, build-output,
+  local binary-output, and local test-output path exclusions are mirrored in the
+  JSON top-level `exclude` list, while approved tool-specific test/tooling path
+  exclusions are mirrored only into that same tool's JSON `exclude` array. Both
+  surfaces are kept in parity by the config self-test.
+  Cloud-only findings (for example a tool unavailable or deliberately removed
+  from the local config) are either restored locally with evidence, removed from
+  Cloud by importing the tuned config, or recorded as Cloud-only follow-up work.
+- **Test/tooling scanner findings:** test files, test support, and repository
+  maintenance scripts may be excluded from a Codacy tool only when the SOW
+  records why they are non-runtime or already covered by stronger
+  project-native gates. The evidence must name the actual gates: frontend tests
+  and test support are normally covered by native ESLint, TypeScript, Vitest,
+  and Playwright, while standalone frontend scripts are covered by their
+  dedicated script self-tests/build integration plus repository-wide security
+  gates when the frontend ESLint/TypeScript configs intentionally ignore them.
+  Excluding a path from Codacy does not exempt it from project lint/type/test
+  and security gates. Runtime source paths are not excluded merely because a
+  scanner pattern is noisy.
+- **Line suppressions:** use them only after a test or helper contract proves
+  the finding is not exploitable. Suppressions cite the specific scanner rule
+  and the active SOW rationale; broad file-level suppression of security rules
+  is forbidden unless the whole file is generated or non-runtime and already
+  excluded by policy.
 - **CICD/SCA findings:** action pinning, dependency issues, and workflow risks
   are treated as supply-chain security work. If a mitigation conflicts with
   Dependabot freshness or action major-version updates, the SOW records the

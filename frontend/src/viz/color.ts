@@ -10,18 +10,22 @@ import type { OpKind, SessionStatus } from '../api/types';
 // color, never touch the DOM token layer themselves.
 
 /** Status colors map to the same tokens the StatusBadge uses. */
-const STATUS_TOKEN: Record<string, string> = {
-  completed: '--success',
-  running: '--warning',
-  failed: '--error',
-  interrupted: '--error',
-  abandoned: '--error',
-};
+const STATUS_COMPLETED_TOKEN = '--success';
+const STATUS_RUNNING_TOKEN = '--warning';
+const STATUS_FAILED_TOKEN = '--error';
+
+const STATUS_TOKEN_BY_STATUS = new Map<string, string>([
+  ['completed', STATUS_COMPLETED_TOKEN],
+  ['running', STATUS_RUNNING_TOKEN],
+  ['failed', STATUS_FAILED_TOKEN],
+  ['interrupted', STATUS_FAILED_TOKEN],
+  ['abandoned', STATUS_FAILED_TOKEN],
+]);
 
 // Actor-kind tokens, named as concrete (provably non-undefined) strings so
 // colorForActorKind needs no dead `?? NEUTRAL_TOKEN` fallback.
-// They double as the agent/tool entries in KIND_TOKEN — single source of truth so
-// the topology palette and the op-kind palette never diverge.
+// They double as the agent/tool entries in KIND_TOKEN_BY_KIND — single source of
+// truth so the topology palette and the op-kind palette never diverge.
 const AGENT_TOKEN = '--warning';
 const TOOL_TOKEN = '--success';
 
@@ -30,31 +34,33 @@ const TOOL_TOKEN = '--success';
 // borrow a related one (reasoning↔info, internal/system↔text-secondary). An
 // unknown future kind falls back to the neutral token (never crashes — the
 // client treats enums as open, api/types.ts).
-const KIND_TOKEN: Record<string, string> = {
-  llm: '--accent',
-  tool: TOOL_TOKEN,
-  reasoning: '--info',
-  session: '--warning',
-  agent: AGENT_TOKEN,
-  compaction: '--error',
-  retry: '--warning',
-  internal: '--text-secondary',
-  system: '--text-secondary',
-};
+const KIND_TOKEN_BY_KIND = new Map<string, string>([
+  ['llm', '--accent'],
+  ['tool', TOOL_TOKEN],
+  ['reasoning', '--info'],
+  ['session', '--warning'],
+  ['agent', AGENT_TOKEN],
+  ['compaction', '--error'],
+  ['retry', '--warning'],
+  ['internal', '--text-secondary'],
+  ['system', '--text-secondary'],
+]);
 
 const NEUTRAL_TOKEN = '--text-secondary';
 
 // Hard-coded fallbacks used only if a token resolves empty (e.g. a misnamed
 // property or a non-browser context). They mirror the DARK token values in
 // theme/tokens.css so a renderer always gets a usable color.
-const FALLBACK: Record<string, string> = {
-  '--success': '#3fb950',
-  '--warning': '#d29922',
-  '--error': '#f85149',
-  '--accent': '#58a6ff',
-  '--info': '#a5a5ff',
-  '--text-secondary': '#8b949e',
-};
+const DEFAULT_FALLBACK_COLOR = '#888888';
+
+const FALLBACK_COLOR_BY_TOKEN = new Map<string, string>([
+  ['--success', '#3fb950'],
+  ['--warning', '#d29922'],
+  ['--error', '#f85149'],
+  ['--accent', '#58a6ff'],
+  ['--info', '#a5a5ff'],
+  ['--text-secondary', '#8b949e'],
+]);
 
 // Resolved-token cache. Populated lazily on first read and refreshed by
 // refreshThemeColors / the MutationObserver.
@@ -62,13 +68,13 @@ let cache: Map<string, string> | null = null;
 
 function readToken(name: string): string {
   if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
-    return FALLBACK[name] ?? '#888888';
+    return FALLBACK_COLOR_BY_TOKEN.get(name) ?? DEFAULT_FALLBACK_COLOR;
   }
   const value = window
     .getComputedStyle(document.documentElement)
     .getPropertyValue(name)
     .trim();
-  return value !== '' ? value : (FALLBACK[name] ?? '#888888');
+  return value !== '' ? value : (FALLBACK_COLOR_BY_TOKEN.get(name) ?? DEFAULT_FALLBACK_COLOR);
 }
 
 function ensureCache(): Map<string, string> {
@@ -85,7 +91,11 @@ function ensureCache(): Map<string, string> {
  */
 export function refreshThemeColors(): void {
   const next = new Map<string, string>();
-  const names = new Set<string>([NEUTRAL_TOKEN, ...Object.values(STATUS_TOKEN), ...Object.values(KIND_TOKEN)]);
+  const names = new Set<string>([
+    NEUTRAL_TOKEN,
+    ...STATUS_TOKEN_BY_STATUS.values(),
+    ...KIND_TOKEN_BY_KIND.values(),
+  ]);
   for (const name of names) {
     next.set(name, readToken(name));
   }
@@ -99,14 +109,14 @@ function tokenValue(name: string): string {
 
 /** colorForOpKind returns the palette color for an op kind (open enum). */
 export function colorForOpKind(kind: OpKind): string {
-  const token = KIND_TOKEN[kind] ?? NEUTRAL_TOKEN;
+  const token = KIND_TOKEN_BY_KIND.get(kind) ?? NEUTRAL_TOKEN;
   return tokenValue(token);
 }
 
 /** colorForStatus returns the theme status color (completed/running/failed/…).
  *  SessionStatus is an open union (api/types.ts), so any string is accepted. */
 export function colorForStatus(status: SessionStatus): string {
-  const token = STATUS_TOKEN[status] ?? NEUTRAL_TOKEN;
+  const token = STATUS_TOKEN_BY_STATUS.get(status) ?? NEUTRAL_TOKEN;
   return tokenValue(token);
 }
 
@@ -121,19 +131,13 @@ export function colorForStatus(status: SessionStatus): string {
  * renderer also labels the node and shows the ratio in the drawer.
  */
 export function colorForFailureRatio(ratio: number): string {
-  // STATUS_TOKEN is a Record<string,string>, and the project compiles with
-  // noUncheckedIndexedAccess (tsconfig.json), so EVEN a literal-key access yields
-  // `string | undefined` — the `?? NEUTRAL_TOKEN` fallback is type-REQUIRED here,
-  // not dead. It also keeps colorForFailureRatio degrading to neutral if the
-  // status palette is ever pruned. (Reviewer R2's "dead branch" finding does not
-  // hold under this tsconfig.)
   if (!Number.isFinite(ratio) || ratio <= 0) {
-    return tokenValue(STATUS_TOKEN.completed ?? NEUTRAL_TOKEN);
+    return tokenValue(STATUS_COMPLETED_TOKEN);
   }
   if (ratio < 1 / 3) {
-    return tokenValue(STATUS_TOKEN.running ?? NEUTRAL_TOKEN);
+    return tokenValue(STATUS_RUNNING_TOKEN);
   }
-  return tokenValue(STATUS_TOKEN.failed ?? NEUTRAL_TOKEN);
+  return tokenValue(STATUS_FAILED_TOKEN);
 }
 
 /**

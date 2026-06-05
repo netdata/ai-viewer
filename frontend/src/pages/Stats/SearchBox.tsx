@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import type { Filters } from '../../state/filters';
 import { useSearch } from '../../api/stats';
 import { LoadingState, ErrorState } from '../../components/StatusViews';
-import type { SearchLogHit, SearchOpHit } from '../../api/types';
+import type { SearchLogHit, SearchOpHit, SearchResponse } from '../../api/types';
 import { formatTimestamp } from '../../lib/format';
 import styles from './Stats.module.css';
 
@@ -70,14 +70,20 @@ export function SearchBox({ filters }: SearchBoxProps) {
       ) : search.isError ? (
         <ErrorState error={search.error} title="Search failed" />
       ) : (
-        <SearchResults
-          ops={search.data?.ops ?? []}
-          logs={search.data?.logs ?? []}
-          logsIndexed={search.data?.logs_indexed ?? true}
-        />
+        <SearchResults {...searchResultsFrom(search.data)} />
       )}
     </div>
   );
+}
+
+function searchResultsFrom(data: SearchResponse | undefined): SearchResultsProps {
+  const ops = data?.ops;
+  const logs = data?.logs;
+  return {
+    ops: Array.isArray(ops) ? ops : [],
+    logs: Array.isArray(logs) ? logs : [],
+    logsIndexed: typeof data?.logs_indexed === 'boolean' ? data.logs_indexed : true,
+  };
 }
 
 interface SearchResultsProps {

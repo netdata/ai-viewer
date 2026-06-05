@@ -118,15 +118,7 @@ export function applyPatch(
 ): URLSearchParams {
   const next = new URLSearchParams(current);
   for (const key of ARRAY_FILTER_KEYS) {
-    const value = patch[key];
-    if (value === undefined) {
-      continue;
-    }
-    if (value.length === 0) {
-      next.delete(key);
-    } else {
-      next.set(key, value.join(','));
-    }
+    applyArrayPatch(next, key, arrayPatchValue(patch, key));
   }
   if ('from' in patch) {
     setOrDeleteNumber(next, 'from', patch.from);
@@ -143,6 +135,42 @@ export function applyPatch(
     }
   }
   return next;
+}
+
+function arrayPatchValue(
+  patch: FilterPatch,
+  key: ArrayFilterKey,
+): string[] | undefined {
+  switch (key) {
+    case 'agents':
+      return patch.agents;
+    case 'models':
+      return patch.models;
+    case 'tools':
+      return patch.tools;
+    case 'status':
+      return patch.status;
+    case 'sources':
+      return patch.sources;
+  }
+
+  const exhaustive: never = key;
+  return exhaustive;
+}
+
+function applyArrayPatch(
+  params: URLSearchParams,
+  key: ArrayFilterKey,
+  value: string[] | undefined,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (value.length === 0) {
+    params.delete(key);
+  } else {
+    params.set(key, value.join(','));
+  }
 }
 
 function setOrDeleteNumber(

@@ -5,7 +5,7 @@ import {
   readStoredPreference,
   resolveTheme,
   ThemeProvider,
-  THEME_STORAGE_KEY,
+  THEME_PREFERENCE_STORAGE_NAME as THEME_STORAGE_SLOT,
   useTheme,
 } from './theme';
 import { installMatchMedia, type MatchMediaController } from '../test/matchMedia';
@@ -84,11 +84,11 @@ describe('ThemeProvider', () => {
     expect(result.current.preference).toBe('light');
     expect(result.current.resolved).toBe('light');
     expect(document.documentElement.getAttribute('data-theme')).toBe('light');
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(window.localStorage.getItem(THEME_STORAGE_SLOT)).toBe('light');
   });
 
   it('reload reads the persisted override (light) ignoring OS dark', () => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, 'light');
+    window.localStorage.setItem(THEME_STORAGE_SLOT, 'light');
     mm = installMatchMedia(true); // OS dark
     const { result } = renderHook(() => useTheme(), { wrapper });
     expect(result.current.preference).toBe('light');
@@ -97,7 +97,7 @@ describe('ThemeProvider', () => {
   });
 
   it('auto preference clears the stored override', () => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, 'dark');
+    window.localStorage.setItem(THEME_STORAGE_SLOT, 'dark');
     mm = installMatchMedia(false);
     const { result } = renderHook(() => useTheme(), { wrapper });
     expect(result.current.preference).toBe('dark');
@@ -105,7 +105,7 @@ describe('ThemeProvider', () => {
       result.current.setPreference('auto');
     });
     expect(result.current.preference).toBe('auto');
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(THEME_STORAGE_SLOT)).toBeNull();
     // Falls back to OS (light).
     expect(result.current.resolved).toBe('light');
     expect(document.documentElement.getAttribute('data-theme')).toBe('light');
@@ -124,7 +124,7 @@ describe('ThemeProvider', () => {
   });
 
   it('ignores OS preference change when an explicit override is set', () => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, 'light');
+    window.localStorage.setItem(THEME_STORAGE_SLOT, 'light');
     mm = installMatchMedia(false);
     const { result } = renderHook(() => useTheme(), { wrapper });
     expect(result.current.resolved).toBe('light');

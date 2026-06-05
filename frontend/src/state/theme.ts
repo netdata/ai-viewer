@@ -21,7 +21,7 @@ import {
 export type ThemePreference = 'auto' | 'dark' | 'light';
 export type ResolvedTheme = 'dark' | 'light';
 
-export const THEME_STORAGE_KEY = 'aiViewerTheme';
+export const THEME_PREFERENCE_STORAGE_NAME = 'aiViewerTheme';
 const OS_DARK_QUERY = '(prefers-color-scheme: dark)';
 
 /**
@@ -48,7 +48,7 @@ export function readStoredPreference(raw: string | null): ThemePreference {
 /** safeGetStored reads the override, tolerating a disabled/throwing storage. */
 function safeGetStored(): string | null {
   try {
-    return window.localStorage.getItem(THEME_STORAGE_KEY);
+    return window.localStorage.getItem(THEME_PREFERENCE_STORAGE_NAME);
   } catch {
     return null;
   }
@@ -87,9 +87,9 @@ const CYCLE: readonly ThemePreference[] = ['auto', 'dark', 'light'];
 function persistPreference(next: ThemePreference): void {
   try {
     if (next === 'auto') {
-      window.localStorage.removeItem(THEME_STORAGE_KEY);
+      window.localStorage.removeItem(THEME_PREFERENCE_STORAGE_NAME);
     } else {
-      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+      window.localStorage.setItem(THEME_PREFERENCE_STORAGE_NAME, next);
     }
   } catch {
     /* storage disabled — the in-memory preference still drives the UI */
