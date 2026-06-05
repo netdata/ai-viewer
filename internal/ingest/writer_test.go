@@ -1351,40 +1351,189 @@ func TestWriter_PriceOpRecordsObservabilityErrOnEmitFailure(t *testing.T) {
 	}
 }
 
-// TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles verifies the
-// pricing-lookup branch that returns a wrapped error when the SELECT
-// fails with anything other than sql.ErrNoRows. Closing the
-// transaction before invoking apply forces a real "tx done" error,
-// which exercises the line at writer.go:419 that propagates the
-// failure rather than silently treating it as a pricing skip.
+// TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles verifies that
+// OpFinalized propagates a closed-transaction error instead of silently
+// treating it as a normal missing-op/orphan finalize path.
 func TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles(t *testing.T) {
 	t.Parallel()
+	const src = "aiagent_v3:/tmp"
 	_, db := openTestStore(t)
 	ctx := context.Background()
-	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
-	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", &fakePricer{ret: 1.0})
+	if err := ensureSourceRowDirect(ctx, db, src, "aiagent_v3", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "aiagent_v3", "/tmp", &fakePricer{ret: 1.0})
 
 	// Seed a session so requireSessionID succeeds without inserting
 	// against the soon-to-be-closed tx.
-	tx, _ := db.BeginTx(ctx, nil)
-	_ = w.apply(ctx, tx, canonical.SessionStartedEvent{
-		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin seed tx: %v", err)
+	}
+	if err := w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
 		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
-	})
-	_ = tx.Commit()
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed tx: %v", err)
+	}
 
 	// New tx that we close immediately so the next SELECT fails with
 	// something other than sql.ErrNoRows.
-	tx, _ = db.BeginTx(ctx, nil)
-	_ = tx.Rollback()
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin closed tx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback closed tx: %v", err)
+	}
 
-	err := w.apply(ctx, tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1200},
+	err = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1200},
 		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
 		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
 	})
 	if err == nil {
 		t.Errorf("apply OpFinalized on closed tx returned nil, want non-nil error")
+	}
+}
+
+func TestResolveFinalizedOpTiming(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		endTs     int64
+		startTs   sql.NullInt64
+		wantEnd   sql.NullInt64
+		wantDurUS sql.NullInt64
+	}{
+		{
+			name:    "zero_end",
+			endTs:   0,
+			startTs: sql.NullInt64{Int64: 100, Valid: true},
+		},
+		{
+			name:    "invalid_start",
+			endTs:   200,
+			startTs: sql.NullInt64{},
+		},
+		{
+			name:    "non_positive_start",
+			endTs:   200,
+			startTs: sql.NullInt64{Int64: 0, Valid: true},
+		},
+		{
+			name:    "end_before_start",
+			endTs:   150,
+			startTs: sql.NullInt64{Int64: 200, Valid: true},
+		},
+		{
+			name:      "valid",
+			endTs:     250,
+			startTs:   sql.NullInt64{Int64: 100, Valid: true},
+			wantEnd:   sql.NullInt64{Int64: 250, Valid: true},
+			wantDurUS: sql.NullInt64{Int64: 150, Valid: true},
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveFinalizedOpTiming(canonical.OpFinalizedEvent{EndTs: tc.endTs}, tc.startTs)
+			if got.endTsArg != tc.wantEnd {
+				t.Fatalf("endTsArg = %+v, want %+v", got.endTsArg, tc.wantEnd)
+			}
+			if got.durUS != tc.wantDurUS {
+				t.Fatalf("durUS = %+v, want %+v", got.durUS, tc.wantDurUS)
+			}
+		})
+	}
+}
+
+func TestResolveFinalizedOpCostNilPricerReturnsEventCost(t *testing.T) {
+	t.Parallel()
+	w := newWriter("src", "aiagent_v3", "/tmp", nil)
+	ev := canonical.OpFinalizedEvent{
+		EventBase: canonical.EventBase{Ts: 200},
+		CostUSD:   0,
+		TokensIn:  10,
+		TokensOut: 5,
+	}
+	op := finalizedOpLookup{
+		kind:     sql.NullString{String: string(canonical.OpLLM), Valid: true},
+		provider: sql.NullString{String: "openai", Valid: true},
+		model:    sql.NullString{String: "gpt-test", Valid: true},
+		startTs:  sql.NullInt64{Int64: 100, Valid: true},
+	}
+
+	got := w.resolveFinalizedOpCost(context.Background(), nil, ev, op)
+	if got != ev.CostUSD {
+		t.Fatalf("cost = %f, want event cost %f", got, ev.CostUSD)
+	}
+}
+
+const brokenPersistedOpLookupSource = "aiagent_v3:/tmp"
+
+// TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles verifies the
+// provider/model/kind/start_ts lookup itself treats only sql.ErrNoRows as
+// non-fatal. A schema-level lookup failure must bubble up instead of being
+// silently treated like an orphan finalize or pricing skip.
+func TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles(t *testing.T) {
+	t.Parallel()
+
+	ctx, db, w := setupBrokenPersistedOpLookup(t)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx broken lookup: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	err = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: brokenPersistedOpLookupSource, SourceSeq: 2, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
+	})
+	if err == nil {
+		t.Fatal("apply OpFinalized with broken persisted-op lookup returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "lookup op") {
+		t.Fatalf("apply OpFinalized error = %v, want persisted op lookup error", err)
+	}
+}
+
+func setupBrokenPersistedOpLookup(t *testing.T) (context.Context, *sql.DB, *writer) {
+	t.Helper()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, brokenPersistedOpLookupSource, "aiagent_v3", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(brokenPersistedOpLookupSource, "aiagent_v3", "/tmp", &fakePricer{ret: 1.0})
+
+	seedSessionForBrokenPersistedOpLookup(t, ctx, db, w, brokenPersistedOpLookupSource)
+	// Renaming the column forces the persisted-op lookup to hit a schema error.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE ops RENAME COLUMN provider TO provider_broken`); err != nil {
+		t.Fatalf("rename ops.provider in test DB: %v", err)
+	}
+	return ctx, db, w
+}
+
+func seedSessionForBrokenPersistedOpLookup(t *testing.T, ctx context.Context, db *sql.DB, w *writer, src string) {
+	t.Helper()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx seed: %v", err)
+	}
+	if err := w.apply(ctx, tx, canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("seed session: %v", err)
 	}
 }
 
