@@ -292,6 +292,24 @@ First slice local validation:
   threshold gate, adapter fuzz seed corpus, and Playwright/axe. The run reported
   Go total coverage 85.0%, gated `internal/*` aggregate coverage 90.5%, and
   frontend Vitest coverage with 631 passing tests.
+- PR-level Codacy Cloud analysis for PR #50 reported one new issue after the
+  first push: `@typescript-eslint/consistent-type-definitions` on the local
+  `BuiltSubscriptionTimeRange` object shape in `frontend/src/state/filters.ts`.
+  The follow-up fix changed that local object shape from `type` to `interface`
+  with no behavior or exported API change.
+- Post-follow-up targeted validation passed: `cd frontend && npm run lint`,
+  `cd frontend && npm run typecheck`, focused Vitest for
+  `src/state/filters.test.tsx` and `src/components/FilterBar/FilterBar.test.tsx`
+  with 32 passing tests, direct Lizard on `frontend/src/state/filters.ts` with
+  zero threshold warnings, local Codacy file analysis with 0 issues, and
+  `scripts/scan-secrets.sh && scripts/spec-drift.sh`.
+- `./scripts/gates.sh` passed after the PR check follow-up in 515s:
+  lint/static/security/vulnerability checks, secrets, attribution, spec drift,
+  Codacy config/coverage self-tests, systemd, build + bundle-size, benchmark
+  regression gate, Go race+coverage, frontend Vitest coverage, Go coverage
+  threshold gate, adapter fuzz seed corpus, and Playwright/axe. The run reported
+  Go total coverage 85.0%, gated `internal/*` aggregate coverage 90.5%, and
+  frontend Vitest coverage with 631 passing tests.
 
 ## Reviews
 
@@ -353,13 +371,55 @@ Resolution:
   set/delete behavior is covered by the all-dimension and all-key-clear tests.
 - No code or behavior change was required after Round 2.
 
+### PR Check Follow-up - 2026-06-05
+
+Finding:
+
+- Codacy Cloud PR analysis reported one new style issue in
+  `frontend/src/state/filters.ts`: use `interface` instead of a `type` alias for
+  the local `BuiltSubscriptionTimeRange` object shape.
+
+Resolution:
+
+- Delegated a one-file style-only production-source change that converted the
+  local builder shape to `interface BuiltSubscriptionTimeRange`.
+- No runtime behavior, exported API, tests, specs, or query/subscription mapping
+  changed.
+
+### Round 3 - 2026-06-05
+
+Scope: same broad SOW file and current uncommitted diff review, with the
+PR-level Codacy Cloud follow-up and project-frontend guidance update included in
+the reviewed state.
+
+Reviewers:
+
+- `codex`: no correctness, security, race, performance, or behavior finding.
+  Finding: post-follow-up validation had not yet been recorded in the SOW.
+- `glm`: no actionable findings. Verified the type-to-interface follow-up,
+  consumer impact, Lizard state, and SOW/skill accuracy.
+- `kimi`: no actionable findings. Verified the type-to-interface follow-up is
+  local-only and behaviorally erased, confirmed remaining type aliases are
+  justified, and checked the SOW and skill updates.
+- `qwen`: invocation stalled without a final review after the fallback reviewer
+  completed and was stopped; not counted.
+
+Resolution:
+
+- Re-ran the full local gate suite after the PR check follow-up and recorded the
+  post-follow-up validation above.
+- No code or behavior change was required after Round 3.
+
 ## Outcome
 
 Pending.
 
 ## Lessons Extracted
 
-Pending.
+- Frontend TypeScript object shapes should use `interface` unless a `type` alias
+  is needed for a union, intersection, mapped/conditional type, or utility-type
+  expression. Codacy Cloud enforces this convention even when project-native
+  ESLint does not surface the same rule locally.
 
 ## Followup
 

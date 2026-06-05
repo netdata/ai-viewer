@@ -106,10 +106,10 @@ export function readFilters(params: URLSearchParams): Filters {
   return filters;
 }
 
-type BuiltSubscriptionTimeRange = {
+interface BuiltSubscriptionTimeRange {
   from?: number;
   to?: number;
-};
+}
 
 const arrayPatchValue = (
   patch: FilterPatch,
