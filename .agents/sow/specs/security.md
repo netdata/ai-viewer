@@ -76,6 +76,30 @@ that plants an operator-identity string and asserts detection.
 - `golangci-lint` runs `gosec` linters as part of the standard config.
 - `npm audit --audit-level=high` runs in CI; high/critical vulns fail the build.
 
+## Code Scanning Triage
+
+CodeQL and Codacy are the semantic/cloud scanning layers on top of the local
+gates. Their security findings are not cosmetic.
+
+- **CodeQL critical/high alerts:** fix in code, prove false-positive with a
+  query/path-scoped suppression and SOW or issue reference, or file a follow-up
+  SOW before completing the active work.
+- **Codacy critical/high findings:** fix, prove false-positive, or track. Cloud
+  noise is tuned by disabling only the narrow tool/pattern/path that produces
+  false positives; broad security categories are not disabled just to reduce
+  counts.
+- **CICD/SCA findings:** action pinning, dependency issues, and workflow risks
+  are treated as supply-chain security work. If a mitigation conflicts with
+  Dependabot freshness or action major-version updates, the SOW records the
+  tradeoff and the chosen policy.
+- **Coverage and quality metrics:** Codacy coverage/complexity trends are
+  signals for maintainability, not a substitute for the enforced local coverage
+  and lint gates.
+
+Scanner output may be stored in `/tmp` for analysis. Durable artifacts record
+aggregate counts, tool names, and sanitized rationale only; they never include
+tokens, account details, raw sensitive source snippets, or private customer data.
+
 ## Future Auth Design (v2+)
 
 When network exposure is needed, the design will be:

@@ -323,6 +323,59 @@ systemd unit lint may skip when their helper file is absent.
 
 The `ci.yml` job IDs (`lint`, `test`, `frontend`, `embed-smoke`, `gates`, plus each explicit CodeQL matrix job name: `CodeQL (go)`, `CodeQL (javascript-typescript)`, `CodeQL (actions)`) are the branch-protection **required-status-check** contract. The current names are recorded in `.github/workflows-checks.yaml` (operator-readable, NOT consumed by Actions). Renaming a job silently disables its required check (protection keys by name). So any SOW that renames a job MUST, in the **same commit**: (1) rename it in `ci.yml` or `codeql.yml`, (2) update `.github/workflows-checks.yaml`, and (3) re-run the full branch-protection `gh api -X PUT …/branches/master/protection` invocation documented in `docs/setup.md`. GitHub's `PATCH` endpoint is only for the nested `/protection/required_status_checks` update, not the full protection rule. This is the §"Adding a New Gate" rule's sibling for renames.
 
+## Code Scanning Defence Layer
+
+### CodeQL
+
+Runtime checks:
+
+```bash
+actionlint .github/workflows/codeql.yml
+gh run list --workflow codeql --branch master --limit 5
+gh api /repos/netdata/ai-viewer/code-scanning/alerts --jq 'map(select(.state=="open")) | length'
+```
+
+Policy:
+
+- Required contexts are `CodeQL (go)`, `CodeQL (javascript-typescript)`, and
+  `CodeQL (actions)`.
+- CodeQL config lives under `.github/codeql/` once SOW-0044 lands. Query-suite
+  changes are SOW changes, not drive-by workflow edits.
+- Suppressions are query/path scoped in the config file with a SOW/issue
+  rationale. Inline `// codeql[...]` suppressions require explicit SOW evidence.
+- Critical/high alerts are fixed, proven false-positive, or tracked before a SOW
+  closes.
+
+### Codacy
+
+Runtime checks:
+
+```bash
+codacy repository gh netdata ai-viewer --output json
+codacy tools gh netdata ai-viewer --output json
+codacy issues gh netdata ai-viewer --overview --output json
+codacy findings gh netdata ai-viewer --severities Critical,High --output json
+codacy-analysis discover --output-format json --output /tmp/ai-viewer-codacy-discover.json
+codacy-analysis analyze --inspect --output-format json
+codacy-analysis analyze --install-dependencies --output-format json --output /tmp/ai-viewer-codacy-analysis.json
+```
+
+Policy:
+
+- Codacy starts as a measured reporting/tuning surface unless an active SOW
+  explicitly promotes a tuned context to branch protection.
+- Local config under `.codacy/` is committed only after local analysis proves it
+  is high-signal. Generated tool material under `.codacy/generated/` stays
+  ignored.
+- Cloud import through `codacy tools gh netdata ai-viewer --import -y` is allowed
+  only after before/after tool and issue summaries are captured. If organization
+  coding standards block changes, record the exact blocker in the SOW.
+- Coverage upload reuses existing Go/frontend reports. Use GitHub secret names
+  only (`CODACY_PROJECT_TOKEN` or account-token mode variables); never write
+  token values to disk.
+- Disable tools/patterns only with evidence. Broad "too noisy" disables without
+  path/category counts are not acceptable.
+
 ## When a Gate Fails
 
 1. Read the failure output. Do not guess.

@@ -438,6 +438,73 @@ outside those documented differences, the cause is environment (Go/Node version,
 OS), test isolation (stale cache, leftover state), or timing — debuggable from
 the asymmetric input, never papered over by re-running CI.
 
+## Code Scanning Defence Layer
+
+Code scanning is a defence layer on top of the local gates above, not a
+replacement for them.
+
+### CodeQL
+
+`.github/workflows/codeql.yml` runs CodeQL on every push to `master`, every PR to
+`master`, a weekly schedule, and manual dispatch. It analyzes the repository's
+supported CodeQL surfaces:
+
+- `go` — backend and scripts written in Go.
+- `javascript-typescript` — frontend TypeScript/JavaScript; TypeScript is
+  analyzed through the JavaScript extractor with TypeScript enabled.
+- `actions` — GitHub Actions workflow YAML and action metadata.
+
+The job names `CodeQL (go)`, `CodeQL (javascript-typescript)`, and
+`CodeQL (actions)` are required branch-protection contexts. CodeQL uses an
+explicit repository config file under `.github/codeql/` once SOW-0044 lands. The
+policy is:
+
+- Start from the security-focused CodeQL suites, not broad quality-only findings.
+  The project already has strict lint, test, coverage, fuzz, benchmark, a11y,
+  bundle, secret, and spec-drift gates; CodeQL's role is semantic security
+  analysis and workflow/CICD risk.
+- Query-suite changes are code-reviewed SOW changes. Moving from default /
+  `security-extended` to broader `security-and-quality` requires measured noise
+  evidence and an explicit SOW note.
+- Suppressions live in the CodeQL config file as query/path scoped exclusions
+  with a SOW or issue reference explaining the false positive. Inline
+  `// codeql[...]` suppressions are forbidden unless the active SOW proves that
+  a config-level exclusion cannot express the scope.
+- A critical/high CodeQL alert is never silently ignored: it is fixed, proven
+  false-positive with evidence, or tracked in a follow-up SOW before completion.
+
+### Codacy
+
+Codacy is used for maintainability, complexity, duplication, security, and
+coverage visibility. It must be tuned from measured findings; a noisy Codacy
+configuration is treated as a defect because it trains maintainers to ignore the
+signal.
+
+The project maintains two Codacy surfaces:
+
+- Local Analysis CLI configuration under `.codacy/` for reproducible local
+  analysis and machine-readable before/after summaries.
+- Codacy Cloud configuration, imported/verified through the Codacy Cloud CLI
+  when credentials and organization policy allow it.
+
+Codacy is **not** automatically a hard required branch-protection gate merely
+because the Cloud check exists. It becomes a required context only after the
+tuned issue set is high-signal and the required-check name is recorded in
+`.github/workflows-checks.yaml` with branch protection updated through the same
+post-merge API flow used by SOW-0013.
+
+Tuning rules:
+
+- Disable a tool or pattern only with evidence from local/Cloud analysis. The
+  evidence records category/severity/path patterns and why an existing project
+  gate or a more precise Codacy rule already covers the risk.
+- Generated artifacts, dependency directories, coverage HTML, and test fixtures
+  may be excluded only when the exclusion is narrower than the relevant risk.
+- Security findings are triaged under `security.md`; critical/high findings are
+  fixed, proven false-positive, or tracked.
+- Coverage upload reuses existing Go and frontend coverage reports; it does not
+  run a second test path.
+
 **Renaming a CI Job.** The job IDs in `ci.yml` (`lint`, `test`, `frontend`,
 `embed-smoke`, `gates`) plus each explicit CodeQL matrix job name (`CodeQL (go)`,
 `CodeQL (javascript-typescript)`, `CodeQL (actions)`) are the contract for the
