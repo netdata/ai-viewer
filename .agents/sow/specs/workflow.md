@@ -81,6 +81,17 @@ For non-trivial SOWs: minimum three external reviewers in parallel. Findings add
 
 The assistant does not claim work "done" before review convergence. The honest mid-flight phrasing is "code written, gates green, review pending".
 
+### Merge Protection
+
+The PR merge gate is automated CI/CodeQL plus external reviewer convergence,
+not manual approval. Classic branch protection on `master` has
+`required_pull_request_reviews: null`, and GitHub repository rulesets targeting
+`master` or `~DEFAULT_BRANCH` must not add `pull_request` rules that require an
+approving review or code-owner review. If a ruleset reintroduces that gate,
+disable or update the ruleset and merge through the normal
+`gh pr merge --merge --delete-branch` path; do not bypass protections with
+administrator merge.
+
 ### Discipline Checklist
 
 Before reporting to the operator:

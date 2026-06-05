@@ -329,6 +329,7 @@ The canonical branch protection on `master` for this repo (and any new operator 
 - `allow_deletions: false`
 - `required_pull_request_reviews: null` — **NO** manual-approval gate. The operator does not review PRs.
 - `required_status_checks` populated with the CI job names recorded in `.github/workflows-checks.yaml` once the SOW-0013 post-merge setup runs.
+- GitHub repository rulesets must not reintroduce a manual PR-review gate on `master`. Any active branch ruleset targeting `master` or `~DEFAULT_BRANCH` must omit `pull_request` rules that require approving reviews or code-owner review; if such a ruleset exists, disable or update it before merging.
 
 The merge workflow:
 

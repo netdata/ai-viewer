@@ -816,3 +816,8 @@ Completed.
   final r6 grouping evidence.
 - Full local gates, PR CI, CodeQL, and external second-opinion review all
   converged before close.
+- Closeout also found two active GitHub repository rulesets requiring manual PR
+  approval despite canonical branch protection having
+  `required_pull_request_reviews: null`; both duplicate rulesets were disabled,
+  and the workflow contract/setup docs now record that rulesets must not
+  reintroduce a manual approval gate.

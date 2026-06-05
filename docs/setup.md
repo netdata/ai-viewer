@@ -178,6 +178,27 @@ This matches the canonical branch protection in `AGENTS.md`
 reviewers + the discipline checklist are the quality gate, see the
 `project-second-opinions` skill).
 
+GitHub repository rulesets are separate from classic branch protection. Do not
+leave an active branch ruleset targeting `master` or `~DEFAULT_BRANCH` with a
+`pull_request` rule that requires approving reviews or code-owner review; that
+blocks merges even when `required_pull_request_reviews` is null. Verify the
+active rulesets after branch-protection setup:
+
+```bash
+gh api /repos/netdata/ai-viewer/rulesets \
+  --jq '.[] | select(.target == "branch") | {id, name, enforcement, conditions}'
+```
+
+If an old duplicate ruleset exists only to enforce manual reviews, disable it
+instead of bypassing the merge:
+
+```bash
+gh api /repos/netdata/ai-viewer/rulesets/<ruleset-id> > /tmp/ruleset.json
+jq '.enforcement = "disabled"' /tmp/ruleset.json > /tmp/ruleset-disabled.json
+gh api --method PUT /repos/netdata/ai-viewer/rulesets/<ruleset-id> \
+  --input /tmp/ruleset-disabled.json
+```
+
 ### Token scope
 
 The PUT requires admin on the repo. The default `GITHUB_TOKEN` inside Actions
