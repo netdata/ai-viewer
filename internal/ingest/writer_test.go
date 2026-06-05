@@ -1474,20 +1474,54 @@ func TestResolveFinalizedOpCostNilPricerReturnsEventCost(t *testing.T) {
 	}
 }
 
+const brokenPersistedOpLookupSource = "aiagent_v3:/tmp"
+
 // TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles verifies the
 // provider/model/kind/start_ts lookup itself treats only sql.ErrNoRows as
 // non-fatal. A schema-level lookup failure must bubble up instead of being
 // silently treated like an orphan finalize or pricing skip.
 func TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles(t *testing.T) {
 	t.Parallel()
-	const src = "aiagent_v3:/tmp"
+
+	ctx, db, w := setupBrokenPersistedOpLookup(t)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx broken lookup: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	err = w.apply(ctx, tx, canonical.OpFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: brokenPersistedOpLookupSource, SourceSeq: 2, Ts: 1200},
+		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
+		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
+	})
+	if err == nil {
+		t.Fatal("apply OpFinalized with broken persisted-op lookup returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "lookup op") {
+		t.Fatalf("apply OpFinalized error = %v, want persisted op lookup error", err)
+	}
+}
+
+func setupBrokenPersistedOpLookup(t *testing.T) (context.Context, *sql.DB, *writer) {
+	t.Helper()
 	_, db := openTestStore(t)
 	ctx := context.Background()
-	if err := ensureSourceRowDirect(ctx, db, src, "aiagent_v3", "/tmp"); err != nil {
+	if err := ensureSourceRowDirect(ctx, db, brokenPersistedOpLookupSource, "aiagent_v3", "/tmp"); err != nil {
 		t.Fatalf("ensure source: %v", err)
 	}
-	w := newWriter(src, "aiagent_v3", "/tmp", &fakePricer{ret: 1.0})
+	w := newWriter(brokenPersistedOpLookupSource, "aiagent_v3", "/tmp", &fakePricer{ret: 1.0})
 
+	seedSessionForBrokenPersistedOpLookup(t, ctx, db, w, brokenPersistedOpLookupSource)
+	// Renaming the column forces the persisted-op lookup to hit a schema error.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE ops RENAME COLUMN provider TO provider_broken`); err != nil {
+		t.Fatalf("rename ops.provider in test DB: %v", err)
+	}
+	return ctx, db, w
+}
+
+func seedSessionForBrokenPersistedOpLookup(t *testing.T, ctx context.Context, db *sql.DB, w *writer, src string) {
+	t.Helper()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx seed: %v", err)
@@ -1500,28 +1534,6 @@ func TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles(t *testing.T) {
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("seed session: %v", err)
-	}
-
-	// Renaming the column forces the persisted-op lookup to hit a schema error.
-	if _, err := db.ExecContext(ctx, `ALTER TABLE ops RENAME COLUMN provider TO provider_broken`); err != nil {
-		t.Fatalf("rename ops.provider in test DB: %v", err)
-	}
-
-	tx, err = db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx broken lookup: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	err = w.apply(ctx, tx, canonical.OpFinalizedEvent{
-		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1200},
-		SessionNativeID: "s", TurnSeq: 1, Seq: 1,
-		TokensIn: 10, TokensOut: 5, EndTs: 1200, Status: "completed",
-	})
-	if err == nil {
-		t.Fatal("apply OpFinalized with broken persisted-op lookup returned nil, want error")
-	}
-	if !strings.Contains(err.Error(), "lookup op") {
-		t.Fatalf("apply OpFinalized error = %v, want persisted op lookup error", err)
 	}
 }
 

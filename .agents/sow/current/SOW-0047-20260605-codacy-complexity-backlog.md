@@ -876,6 +876,28 @@ Third slice focused validation:
   `internal/*` aggregate coverage 90.6%, `internal/ingest` coverage 85.9%,
   frontend Vitest coverage with 631 passing tests, and frontend E2E/axe with 51
   passing tests.
+- PR #52 initial CI then passed every GitHub-native row except Codacy Static
+  Code Analysis; `codacy-coverage` skipped by design. Codacy Cloud reported one
+  new issue introduced by this slice:
+  `internal/ingest/writer_test.go` `TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles`
+  had CCN 9 against the enforced limit 8.
+- The test-only Codacy follow-up extracted the source/session/schema-break setup
+  into helpers while keeping the lookup-error assertion in the test body. Focused
+  validation passed:
+  `go test ./internal/ingest -run 'TestWriter_ApplyOpFinalizedPersistedOpLookupErrorBubbles|TestWriter_ApplyOpFinalizedLookupNonErrNoRowsBubbles|TestResolveFinalizedOpTiming|TestResolveFinalizedOpCostNilPricerReturnsEventCost' -count=1`
+  in 0.014s, `golangci-lint run --timeout=5m ./internal/ingest` passed with
+  zero issues, and Lizard with Codacy's CCN threshold reported the fixed test at
+  CCN 4.
+- Full `./scripts/gates.sh` passed after the test-only Codacy follow-up in
+  517s: lint/static/security/vulnerability checks, secrets, attribution, spec
+  drift, Codacy config/coverage self-tests, systemd, build + bundle-size,
+  benchmark regression gate, Go race+coverage, frontend Vitest coverage, Go
+  coverage threshold gate, adapter fuzz seed corpus, and Playwright/axe. The
+  benchmark gate reported no `sec/op` regression over the 20% threshold;
+  `BatchInsert` improved to 116.0 ms/op vs 123.5 ms/op baseline. The run
+  reported Go total coverage 85.2%, gated `internal/*` aggregate coverage
+  90.6%, `internal/ingest` coverage 85.9%, frontend Vitest coverage with 631
+  passing tests, and frontend E2E/axe with 51 passing tests.
 
 ## Reviews
 
@@ -1390,6 +1412,37 @@ Resolution:
 - Accepted the test-style observations as non-actionable: the current table test
   is valid, lint-clean, and focused on the helper guard conditions.
 - External review converged with no actionable findings remaining.
+
+### Round 16 - 2026-06-05
+
+Scope: same broad SOW file and current PR #52 diff for the third SOW-0047
+production slice, with the Codacy Cloud test-complexity finding and test-only
+helper extraction included.
+
+Reviewers:
+
+- `codex`: no blocking correctness, race, security, performance,
+  separation-of-concerns, or test-coverage finding. Verified the full branch
+  diff against merge base, side-effect order, lookup error handling, SQL/bind
+  equivalence, dirty/catalog sequence, and that the latest test helper
+  extraction only moved setup.
+- `glm`: no blocking finding. Verified the test body keeps the lookup-error
+  assertion, the helper setup order remains source row -> committed session ->
+  schema break -> fresh transaction -> finalize assertion, and the SOW evidence
+  is accurate.
+- `qwen`: no blocking finding. Verified the test-only extraction keeps the same
+  DB state and event payloads, preserves assertions, keeps the ALTER TABLE
+  schema error isolated to the test-local database, and leaves the sibling
+  closed-transaction test alone.
+- `mimo`: no blocking finding. Verified focused tests and also ran
+  `go test -race -count=1 ./internal/ingest` and `go vet ./internal/ingest`,
+  both clean. Confirmed no production code changed in the follow-up and no
+  unwanted side effects.
+
+Resolution:
+
+- No code changes required from Round 16.
+- External review converged again with no actionable findings remaining.
 
 ## Outcome
 
