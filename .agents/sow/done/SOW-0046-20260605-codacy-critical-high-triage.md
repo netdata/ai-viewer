@@ -2,10 +2,10 @@
 
 ## Status
 
-Status: open
+Status: completed
 
-Sub-state: active 2026-06-05 after SOW-0044 merged and post-merge `ci` plus
-`codeql` were green on `master` at `bb350df`.
+Sub-state: completed 2026-06-05 after local gates, external review, Codacy PR
+analysis, PR CI, and CodeQL all passed.
 
 ## Requirements
 
@@ -344,10 +344,8 @@ tests exist.
 
 ## Validation
 
-Current closeout note: local Codacy, external review, and full local gates are
-complete on the post-Cloud-fix working tree. Codacy Cloud reanalysis, PR CI,
-CodeQL evidence, and the final SOW move to `done/` remain required before this
-SOW is closed.
+Closeout note: local Codacy, external review, full local gates, Codacy PR
+analysis, PR CI, CodeQL, and the final SOW move to `done/` are complete.
 
 - `bash -n scripts/test/codacy-config-test.sh`: pass.
 - `scripts/test/codacy-config-test.sh`: pass. Validated JSON tool/pattern
@@ -503,6 +501,17 @@ SOW is closed.
   total: 85.1%; Go gated internal aggregate coverage: 90.5%; frontend Vitest:
   48 files / 627 tests with 94.17% line coverage; Playwright E2E + axe:
   51 passed; benchmark gate: no sec/op regression > 20%.
+- Codacy PR reanalysis on head `9ca9f5d55d9bed2c755ab6bcbeeb76e02d6ba6b0`:
+  pass. `codacy pull-request gh netdata ai-viewer 49 --output json` reported
+  `isAnalysing: false`, `isUpToStandards: true`, quality `newIssues: 0`,
+  `fixedIssues: 38`, and the `issueThreshold` gate satisfied at 0 new issues.
+  Branch-scoped Codacy issue overviews for `Critical,High` severities and for
+  the `Security` category both returned empty counts.
+- PR #49 checks after head `9ca9f5d55d9bed2c755ab6bcbeeb76e02d6ba6b0`: pass.
+  `gh pr checks 49` showed pass for Codacy Static Code Analysis, CodeQL
+  (`actions`, `go`, and `javascript-typescript`), WIP, external PR review,
+  `embed-smoke`, `frontend`, `gates`, `lint`, and `test`. The `codacy-coverage`
+  job skipped, as designed for pull-request events.
 
 ## Implementation
 
@@ -795,4 +804,15 @@ critical/high/security counts, PR CI, CodeQL, and the final move to `done/`.
 
 ## Outcome
 
-Pending.
+Completed.
+
+- Local Codacy critical/high/security triage is reduced to 0 Error, 0 High,
+  0 Error/High Security, and 0 Security category findings in the final local
+  r6 run.
+- Codacy PR analysis is up to standards with 0 new quality issues and 38 fixed
+  issues on the merged SOW implementation branch.
+- The remaining Lizard complexity backlog is explicitly handed to
+  `.agents/sow/pending/SOW-0047-20260605-codacy-complexity-backlog.md` with the
+  final r6 grouping evidence.
+- Full local gates, PR CI, CodeQL, and external second-opinion review all
+  converged before close.
