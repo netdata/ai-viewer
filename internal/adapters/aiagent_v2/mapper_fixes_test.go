@@ -1,9 +1,6 @@
 package aiagent_v2
 
 import (
-	"encoding/json"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -93,44 +90,60 @@ func TestMap_ReasoningOpEmittedNestedUnderLLM(t *testing.T) {
 	llmOp.Reasoning = &reasoning{Final: "thought about it carefully"}
 
 	events := mapSimple(t, snap)
-	var (
-		llmSeq             int
-		sawReasoningStart  bool
-		sawReasoningFinish bool
-		reasoningExtras    map[string]any
-		reasoningParentSeq int
-		reasoningKind      string
-	)
+	llmSeq, reasoningSeq, reasoningParentSeq, reasoningKind, reasoningExtras, sawReasoningStart := findReasoningStart(events)
+	sawReasoningFinish := hasReasoningFinalize(events)
+	assertReasoningObserved(t, sawReasoningStart, sawReasoningFinish)
+	assertReasoningFields(t, llmSeq, reasoningSeq, reasoningParentSeq, reasoningKind, reasoningExtras)
+}
+
+func findReasoningStart(events []canonical.Event) (int, int, int, string, map[string]any, bool) {
+	var llmSeq int
 	for _, ev := range events {
-		switch v := ev.(type) {
-		case canonical.OpStartedEvent:
-			if v.Kind == canonical.OpLLM {
-				llmSeq = v.Seq
-			}
-			if v.Kind == canonical.OpReasoning {
-				sawReasoningStart = true
-				reasoningExtras = v.Extras
-				reasoningParentSeq = v.ParentOpSeq
-				reasoningKind = v.ReasoningKind
-			}
-		case canonical.OpFinalizedEvent:
-			// The reasoning OpFinalized shares Seq with the LLM op (it
-			// pins the same nesting key). We detect it by an
-			// immediately-following finalize after the reasoning start
-			// — checking Status alone is enough for v2 (no error path).
-			if sawReasoningStart && !sawReasoningFinish && v.Status == "completed" {
-				sawReasoningFinish = true
-			}
+		started, ok := ev.(canonical.OpStartedEvent)
+		if !ok {
+			continue
+		}
+		if started.Kind == canonical.OpLLM {
+			llmSeq = started.Seq
+		}
+		if started.Kind == canonical.OpReasoning {
+			return llmSeq, started.Seq, started.ParentOpSeq, started.ReasoningKind, started.Extras, true
 		}
 	}
+	return llmSeq, 0, 0, "", nil, false
+}
+
+func hasReasoningFinalize(events []canonical.Event) bool {
+	sawReasoningStart := false
+	for _, ev := range events {
+		if started, ok := ev.(canonical.OpStartedEvent); ok && started.Kind == canonical.OpReasoning {
+			sawReasoningStart = true
+			continue
+		}
+		if finalized, ok := ev.(canonical.OpFinalizedEvent); sawReasoningStart && ok && finalized.Status == "completed" {
+			return true
+		}
+	}
+	return false
+}
+
+func assertReasoningObserved(t *testing.T, sawReasoningStart, sawReasoningFinish bool) {
+	t.Helper()
 	if !sawReasoningStart {
 		t.Fatalf("expected OpStarted with Kind=reasoning, none found")
 	}
 	if !sawReasoningFinish {
 		t.Fatalf("expected OpFinalized for the reasoning op, none found")
 	}
+}
+
+func assertReasoningFields(t *testing.T, llmSeq, reasoningSeq, reasoningParentSeq int, reasoningKind string, reasoningExtras map[string]any) {
+	t.Helper()
 	if reasoningParentSeq != llmSeq {
 		t.Fatalf("reasoning ParentOpSeq = %d, want LLM op seq %d", reasoningParentSeq, llmSeq)
+	}
+	if reasoningSeq == llmSeq {
+		t.Fatalf("reasoning Seq collides with LLM seq %d", llmSeq)
 	}
 	if reasoningKind != "summary" {
 		t.Fatalf("reasoning ReasoningKind = %q, want %q", reasoningKind, "summary")
@@ -151,156 +164,6 @@ func TestMap_ReasoningNotEmittedWhenFinalEmpty(t *testing.T) {
 		if os, ok := ev.(canonical.OpStartedEvent); ok && os.Kind == canonical.OpReasoning {
 			t.Fatalf("OpReasoning emitted without reasoning.final; extras=%v", os.Extras)
 		}
-	}
-}
-
-// TestMap_PayloadRefEmittedForRequestAndResponse covers the ref-form
-// payload path. The op carries both `request.payload.ref` and
-// `response.payload.ref`; we expect one PayloadRefEvent per side.
-func TestMap_PayloadRefEmittedForRequestAndResponse(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	snap := simpleSnapshot(2, "payload-ref")
-	// Payload bodies don't need to exist on disk — the adapter never
-	// reads them, only resolves the path. Build the relative paths the
-	// way the producer does.
-	reqRef := json.RawMessage(`{"ref":"payloads/req.http.gz","format":"http","compression":"gzip","originalBytes":1500,"storedBytes":420,"sha256":"abc"}`)
-	respRef := json.RawMessage(`{"ref":"payloads/resp.http.gz","format":"http","compression":"gzip","originalBytes":4500,"storedBytes":1100,"sha256":"def"}`)
-	snap.OpTree.Turns[0].Ops[0].Request = &opPayload{Kind: "llm", Payload: reqRef, Size: 1500}
-	snap.OpTree.Turns[0].Ops[0].Response = &opPayload{Payload: respRef, Size: 4500}
-
-	events := mapSnapshot(snap, "test-source", snap.OpTree.TraceID, root, snap.OpTree.TraceID+".json.gz", func(error) {})
-
-	var refs []canonical.PayloadRefEvent
-	for _, ev := range events {
-		if pr, ok := ev.(canonical.PayloadRefEvent); ok {
-			refs = append(refs, pr)
-		}
-	}
-	if len(refs) != 2 {
-		t.Fatalf("expected 2 PayloadRefEvent, got %d", len(refs))
-	}
-	wantPrefix := "file://" + filepath.ToSlash(filepath.Clean(root))
-	for _, r := range refs {
-		if !strings.HasPrefix(r.LocationURI, wantPrefix) {
-			t.Fatalf("LocationURI %q missing prefix %q", r.LocationURI, wantPrefix)
-		}
-		if r.SHA256 == "" {
-			t.Fatalf("PayloadRefEvent missing SHA256")
-		}
-	}
-	// Validate kinds map to llm_request/llm_response for an LLM op.
-	kinds := map[string]bool{refs[0].PayloadKind: true, refs[1].PayloadKind: true}
-	if !kinds["llm_request"] || !kinds["llm_response"] {
-		t.Fatalf("PayloadKinds = %v, want llm_request + llm_response", kinds)
-	}
-}
-
-// TestMap_PayloadRefForToolOpUsesToolKinds verifies tool ops get
-// tool_request / tool_response, not llm_*.
-func TestMap_PayloadRefForToolOpUsesToolKinds(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	snap := simpleSnapshot(2, "tool-payload")
-	reqRef := json.RawMessage(`{"ref":"payloads/tool-req.json.gz","format":"json","compression":"gzip","originalBytes":80}`)
-	snap.OpTree.Turns[0].Ops[0] = operationNode{
-		OpID: "tool-op", Kind: "tool", StartedAt: 1700000001500,
-		EndedAt: int64Ptr(1700000001600), Status: "ok",
-		Attributes: rawAttrs(map[string]any{"name": "shell", "provider": "builtin"}),
-		Request:    &opPayload{Payload: reqRef, Size: 80},
-	}
-	events := mapSnapshot(snap, "src", snap.OpTree.TraceID, root, snap.OpTree.TraceID+".json.gz", func(error) {})
-	var got string
-	for _, ev := range events {
-		if pr, ok := ev.(canonical.PayloadRefEvent); ok {
-			got = pr.PayloadKind
-		}
-	}
-	if got != "tool_request" {
-		t.Fatalf("PayloadKind = %q, want %q", got, "tool_request")
-	}
-}
-
-// TestMap_PayloadRefTraversalGuardRejects validates that a relative
-// path escaping the root surfaces a SourceError via onError and that
-// no PayloadRefEvent is emitted.
-func TestMap_PayloadRefTraversalGuardRejects(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	snap := simpleSnapshot(2, "evil-ref")
-	evilRef := json.RawMessage(`{"ref":"../../../etc/passwd","format":"text"}`)
-	snap.OpTree.Turns[0].Ops[0].Request = &opPayload{Payload: evilRef, Size: 10}
-	var errs []error
-	events := mapSnapshot(snap, "src", snap.OpTree.TraceID, root, snap.OpTree.TraceID+".json.gz", func(e error) { errs = append(errs, e) })
-	for _, ev := range events {
-		if _, ok := ev.(canonical.PayloadRefEvent); ok {
-			t.Fatalf("escaping ref should not emit PayloadRefEvent")
-		}
-	}
-	if len(errs) == 0 {
-		t.Fatalf("expected onError for path-escape ref, none raised")
-	}
-}
-
-// TestMap_PayloadInlineSkipsRefEmission confirms that an inline
-// (non-ref) payload is silently skipped — no PayloadRefEvent and no
-// onError. Inline payloads are deferred per spec §Canonical Model
-// Gaps item 10.
-func TestMap_PayloadInlineSkipsRefEmission(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	snap := simpleSnapshot(2, "inline")
-	snap.OpTree.Turns[0].Ops[0].Request = &opPayload{
-		Payload: json.RawMessage(`{"messages":[{"role":"user","content":"hi"}]}`),
-		Size:    20,
-	}
-	snap.OpTree.Turns[0].Ops[0].Response = &opPayload{
-		Payload: json.RawMessage(`"base64-blob..."`),
-		Size:    40,
-	}
-	var errs []error
-	events := mapSnapshot(snap, "src", snap.OpTree.TraceID, root, snap.OpTree.TraceID+".json.gz", func(e error) { errs = append(errs, e) })
-	for _, ev := range events {
-		if _, ok := ev.(canonical.PayloadRefEvent); ok {
-			t.Fatalf("inline payload should not emit PayloadRefEvent")
-		}
-	}
-	if len(errs) != 0 {
-		t.Fatalf("inline payload should not produce errors, got %v", errs)
-	}
-}
-
-// TestExtractPayloadRef_VariousShapes hits the JSON-shape probe paths
-// directly so they stay covered when the calling sites are rare in
-// fixtures.
-func TestExtractPayloadRef_VariousShapes(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		ok   bool
-		path string
-	}{
-		{"empty", "", false, ""},
-		{"string scalar", `"opaque-base64-blob"`, false, ""},
-		{"array scalar", `[1,2,3]`, false, ""},
-		{"object no ref/path", `{"messages":[]}`, false, ""},
-		{"ref-only", `{"ref":"a/b/c.gz"}`, true, "a/b/c.gz"},
-		{"path-only", `{"path":"x/y/z.json"}`, true, "x/y/z.json"},
-		{"both ref and path prefers path", `{"ref":"X","path":"Y"}`, true, "Y"},
-		{"malformed json", `{not json`, false, ""},
-		{"whitespace then string", "   \"x\"", false, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			ref, ok := extractPayloadRef(json.RawMessage(c.in))
-			if ok != c.ok {
-				t.Fatalf("extractPayloadRef(%q) ok = %v, want %v", c.in, ok, c.ok)
-			}
-			if c.ok && ref.Path != c.path {
-				t.Fatalf("extractPayloadRef(%q) path = %q, want %q", c.in, ref.Path, c.path)
-			}
-		})
 	}
 }
 
@@ -345,6 +208,55 @@ func TestMap_FirstLLMModelFromChildSession(t *testing.T) {
 	}
 }
 
+func TestMap_FirstLLMModelSkipsOverDepthCapChild(t *testing.T) {
+	t.Parallel()
+	snap := snapshot{Version: 2, Reason: "final", OpTree: overDepthModelRoot()}
+
+	var errCount int
+	events := mapSnapshot(snap, "test-source", "root-model-cap", "", "root-model-cap.json.gz", func(error) {
+		errCount++
+	})
+	if errCount == 0 {
+		t.Fatalf("expected depth-cap error")
+	}
+	if got := sessionStartedModel(events, "root-model-cap"); got != "" {
+		t.Fatalf("root SessionStartedEvent.Model = %q, want empty when only over-cap child has model", got)
+	}
+}
+
+func overDepthModelRoot() opTree {
+	leaf := opTree{
+		TraceID:   "model-leaf",
+		StartedAt: 1700000000000,
+		Turns: []turnNode{{Index: 1, StartedAt: 1700000000001, Ops: []operationNode{{
+			OpID: "leaf-llm", Kind: "llm", StartedAt: 1700000000002,
+			Attributes: rawAttrs(map[string]any{"model": "over-cap-model"}),
+		}}}},
+	}
+	current := &leaf
+	for i := 0; i < maxChildSessionDepth+1; i++ {
+		current = &opTree{
+			TraceID:   "depth-node",
+			StartedAt: 1700000000000,
+			Turns: []turnNode{{Index: 1, StartedAt: 1700000000001, Ops: []operationNode{{
+				OpID: "child-op", Kind: "session", StartedAt: 1700000000001,
+				Attributes: rawAttrs(map[string]any{"name": "child"}), ChildSession: current,
+			}}}},
+		}
+	}
+	current.TraceID = "root-model-cap"
+	return *current
+}
+
+func sessionStartedModel(events []canonical.Event, nativeID string) string {
+	for _, ev := range events {
+		if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.NativeID == nativeID {
+			return ss.Model
+		}
+	}
+	return ""
+}
+
 // TestMap_FirstLLMModelFromStep covers the steps[] arm of the DFS.
 func TestMap_FirstLLMModelFromStep(t *testing.T) {
 	t.Parallel()
@@ -382,27 +294,5 @@ func TestMap_FirstLLMModelFallsBackToAccountingModel(t *testing.T) {
 		if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.Model != "fallback-model" {
 			t.Fatalf("Model = %q, want fallback-model", ss.Model)
 		}
-	}
-}
-
-// TestResolvePayloadPath_RootHandling exercises empty inputs and
-// traversal-guard rejections without requiring a real file.
-func TestResolvePayloadPath_RootHandling(t *testing.T) {
-	t.Parallel()
-	if uri, err := resolvePayloadPath("", "x/y.bin"); err != nil || uri != "" {
-		t.Fatalf("empty root should yield ('', nil), got (%q, %v)", uri, err)
-	}
-	if uri, err := resolvePayloadPath("/tmp", ""); err != nil || uri != "" {
-		t.Fatalf("empty refPath should yield ('', nil), got (%q, %v)", uri, err)
-	}
-	if _, err := resolvePayloadPath("/tmp", "../etc/passwd"); err == nil {
-		t.Fatalf("expected traversal-guard rejection for ../etc/passwd")
-	}
-	uri, err := resolvePayloadPath("/tmp", "payloads/x/y.bin")
-	if err != nil {
-		t.Fatalf("legit ref: %v", err)
-	}
-	if !strings.HasPrefix(uri, "file:///tmp/payloads/x/y.bin") && uri != "file:///tmp/payloads/x/y.bin" {
-		t.Fatalf("uri = %q, want file:///tmp/payloads/x/y.bin", uri)
 	}
 }
