@@ -1033,7 +1033,7 @@ Observed `compactMetadata.trigger` value: `"manual"` (operator ran `/compact`). 
 
 Sessions older than ~Mar 2026 may live as a `<sessionId>/` directory containing ONLY `subagents/` — no parent `.jsonl` at root. Verified observation: `~/.claude/projects/-home-operator-src-alerts/<sessionId>/subagents/agent-*.jsonl` exists; no `<sessionId>.jsonl` next to it. Even older (Feb 2026) sessions have just `subagents/` with two orphan files and nothing else.
 
-Adapter behavior: emit a `SessionStartedEvent` with `Kind='root'`, `AgentName=''`, `Model=''`, `Ts = earliest record across all subagent files`, and treat each subagent file as a `sub_agent` child. The parent session has zero turns/ops directly — the entire activity lives in the children. Mark `sessions.extras_json.orphanRoot = true` so the UI can hint at this.
+Adapter behavior: emit a `SessionStartedEvent` with `Kind='root'`, `AgentName=''`, `Model=''`, `Ts = the earliest first-parseable child transcript timestamp`, and treat each subagent file as a `sub_agent` child. For each child transcript, the timestamp probe skips malformed lines, oversized lines, skipped known-no-op records, records without a timestamp, and records with an unparsable timestamp until it finds the first parseable timestamp in that append-only file; the synthetic root then uses the minimum positive timestamp across child files. If no child record has a parseable timestamp, `Ts=0`. The parent session has zero turns/ops directly — the entire activity lives in the children. Mark `sessions.extras_json.orphanRoot = true` so the UI can hint at this.
 
 ### 10.2 Partial writes
 

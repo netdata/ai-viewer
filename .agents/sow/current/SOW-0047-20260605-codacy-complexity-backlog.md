@@ -11,7 +11,8 @@ Sub-state: active 2026-06-05. First production slice
 slice `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized` is merged.
 Fifth slice implemented: baseline Claude-code scan/tail benchmarks before
 scanner/tailer decomposition. Next slice resumes production complexity
-reduction.
+reduction. Sixth slice selected: Claude-code scanner decomposition with Tail
+behavior preserved by focused regression tests and the new benchmark guard.
 
 ## Requirements
 
@@ -915,6 +916,192 @@ Open decisions:
 
 - None for the operator. Technical sequencing belongs to the assistant.
 
+### Sixth Slice Gate - claude-code scanner decomposition
+
+Status: ready for test-first implementation after this SOW update.
+
+Selected sixth slice:
+
+- `internal/adapters/claude_code/scanner.go` scanner decomposition.
+- Goal: reduce Codacy/Lizard maintainability findings in the Claude-code scanner
+  while preserving transcript discovery, meta sidecar reading, cursor offsets,
+  line streaming, partial-line parking, oversized-line recovery, orphan-root
+  synthesis, Agent-op deferral collection, and Scan-side late-meta repair.
+- Explicit non-goal: do not refactor `internal/adapters/claude_code/tailer.go`
+  event-loop state machine or `internal/adapters/claude_code/parser.go`
+  discriminator parsing in this slice except for narrowly shared helper moves
+  required by scanner extraction. Do not change source-format semantics,
+  cursor JSON shape, ingester behavior, SQLite schema, REST/SSE contracts,
+  frontend presentation, or security posture.
+
+Problem / root-cause model:
+
+- The scanner file combines several jobs in one production file: filesystem
+  discovery, symlink containment, meta sidecar collection and bounded reads,
+  transcript opening, line streaming, parse-error policy, oversized-line
+  recovery, full Scan orchestration, orphan-root synthesis, and SourceProgress
+  checkpointing.
+- The largest selected complexity hotspots are state-machine/orchestration
+  functions, not known behavior bugs. The correct fix is decomposition into
+  narrow helpers and small local structs while preserving event order and cursor
+  state.
+- Tailer remains a separate high-risk slice: it owns fsnotify event-loop
+  behavior, dirty-set flushing, debounce/tick policy, and restart deferral
+  state. Mixing tailer changes into this scanner slice would widen the blast
+  radius beyond the new benchmark prerequisite's first intended use.
+
+Evidence reviewed:
+
+- Direct strict Lizard on current `master` after PR #54:
+  `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/scanner.go internal/adapters/claude_code/tailer.go internal/adapters/claude_code/parser.go -l go -C 8 -L 50 -a 8`
+  reported 16 warnings across three production files.
+- Scanner warnings selected for this slice:
+  - `discoverProject`: 40 NLOC, 51 physical lines.
+  - anonymous `discoverSessionSubagents` walk callback: CCN 10.
+  - `readSessionMetas`: CCN 9.
+  - `readTranscript`: CCN 9, 8 parameters, 87 physical lines.
+  - `streamLines`: 68 NLOC, CCN 18, 108 physical lines.
+  - `readOneLine`: CCN 9.
+  - `scanAll`: 74 NLOC, CCN 19, 128 physical lines.
+  - `emitOrphanRoots`: CCN 12.
+  - `earliestTs`: CCN 9.
+- Tailer/parser residual warnings remain real but deferred:
+  `tailLoop`, `handleEvent`, `markExistingDirty` callback, `addWatchTree`
+  callback, `flushDirty`, `repairChangedMetas`, and `parseLine`.
+- Existing Claude-code adapter tests passed before this slice:
+  `go test ./internal/adapters/claude_code -count=1`.
+- Existing scanner/tailer tests already cover unknown-type dedup, symlink
+  containment, meta containment and size caps, discovery fail-soft behavior,
+  partial-line parking, oversized-line continuation, late-meta Scan repair,
+  Scan→Tail window catch-up, parked/finalized deferral snapshots, and golden
+  fixtures.
+
+Affected contracts and surfaces:
+
+- Claude-code adapter `Scan` behavior and cursor persistence.
+- Shared scanner helpers also used by Tail (`readTranscript`,
+  `readSessionMetas`, `metaHashes`, `repairChangedMetas` callers), so Tail
+  focused tests and benchmark coverage are mandatory even if `tailer.go` is not
+  the primary refactor target.
+- No public API, SQLite schema, source discovery CLI, frontend, or operator
+  behavior change is expected.
+
+Spec deltas before tests/code:
+
+- No spec file delta is required for this slice because it is a
+  behavior-preserving scanner decomposition. `.agents/sow/specs/adapter-claude-code.md`
+  already documents the target scanner behavior for discovery, symlink
+  containment, meta error surfacing, meta size caps, Scan/Tail cursor keys,
+  partial-line hold-back, oversized-line continuation, orphan-root synthesis,
+  Agent-op finalization, Scan-side late-meta repair, and the Claude-code Scan
+  and Tail benchmarks.
+- If implementation reveals real spec/code drift, stop the slice, update the
+  relevant spec first, then resume tests and production refactor.
+- Implementation revealed one spec precision gap before slice acceptance:
+  `.agents/sow/specs/adapter-claude-code.md` now states that synthetic
+  orphan-root `Ts` uses the minimum first-parseable timestamp across child
+  transcripts. Each child probe skips malformed lines, oversized lines, skipped
+  known-no-op records, missing timestamps, and unparsable timestamps until the
+  first parseable timestamp in that append-only file; `Ts=0` only when no child
+  has a parseable timestamp.
+
+Existing patterns to reuse:
+
+- Small unexported helpers that each own one file-system, parse, or emit job.
+- Existing `tailDeferral` and `repairChangedMetas` contracts as shared
+  Scan/Tail invariants.
+- Existing deterministic event ordering: sorted transcripts, sorted meta paths,
+  sorted orphan roots, and deterministic child-finalization pairing.
+- Existing benchmark style from the fifth slice: synthetic projects tree,
+  fixed event counts, and `scripts/check-bench.sh` hard gate.
+
+Risk and blast radius:
+
+- Medium to high: scanner code controls historical backfill and the same
+  `readTranscript`/line-streaming path is reused by Tail. Regressions can cause
+  duplicate rows, missing rows, missing parent Agent-op finalization, suppressed
+  meta repair, or silent source errors.
+- Security risk is specific and testable: all reads must still open
+  containment-checked symlink-resolved paths and must still refuse transcript or
+  meta symlink escapes.
+- Performance risk exists because every historical transcript passes through
+  this path. The newly-added Claude-code Scan/Tail benchmark gate is mandatory.
+
+Sensitive data handling plan:
+
+- No real Claude-code transcript content is written to durable artifacts.
+  Tests must use committed sanitized fixtures or synthetic transcript lines.
+  Any temporary Codacy, Lizard, or benchmark output stays under `/tmp`.
+
+Implementation plan:
+
+1. Delegate a focused test audit and add characterization coverage only for
+   real gaps around scanner helper boundaries before production changes.
+   Candidate gaps: direct `readTranscript` resume/emit-gate assertions and
+   scanner-orphan/meta behavior that currently relies only on broader Scan tests.
+2. Delegate scanner decomposition:
+   - split transcript discovery callbacks into named entry handlers;
+   - extract meta sidecar loading and transcript-open setup into small helpers;
+   - split `streamLines` into line outcome handlers that keep the physical
+     last-record completion flag correct;
+   - split `scanAll` into scan setup, per-transcript processing, progress
+     checkpointing, finalization pairing, meta refresh/repair, and final cursor
+     persistence helpers;
+   - keep event values, event order, cursor JSON, error messages, and
+     SourceProgress behavior stable unless a focused test proves the current
+     text is irrelevant.
+3. Run focused scanner/tailer tests, package tests, package race tests, strict
+   Lizard, local Codacy file analysis, benchmark gate, full gates, and external
+   second-opinion review.
+4. Merge only after reviewers converge and PR checks are green.
+
+Validation plan:
+
+- `go test ./internal/adapters/claude_code -run 'TestScan|TestReadTranscript|TestReadOneLine|TestRestart|TestScanThenTail|TestFlushDirty|TestMeta|TestCollectMeta|TestTail' -count=1`
+- `go test ./internal/adapters/claude_code -count=1`
+- `go test -race -count=1 ./internal/adapters/claude_code`
+- `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/scanner.go internal/adapters/claude_code/scanner_discovery.go internal/adapters/claude_code/scanner_meta.go internal/adapters/claude_code/scanner_transcript.go internal/adapters/claude_code/scanner_run.go internal/adapters/claude_code/scanner_orphans.go internal/adapters/claude_code/scanner_characterization_test.go -l go -C 8 -L 50 -a 8`
+- Local Codacy file analysis for changed Claude-code adapter files.
+- `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`
+- `scripts/check-bench.sh`
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- Full `./scripts/gates.sh`.
+- PR checks must all pass before merge; `codacy-coverage` may skip on PRs by
+  design, but every other row must be green.
+
+Test-order note:
+
+- This sixth slice is a behavior-preserving refactor. Existing and added
+  characterization tests may pass before implementation. The failing signal is
+  the stricter Codacy/Lizard maintainability report listed above.
+
+Benchmarks:
+
+- Required. Claude-code scanner changes are covered by both
+  `BenchmarkClaudeScan_SyntheticCorpus` and `BenchmarkClaudeTail_SyntheticAppend`.
+  Any statistically significant >20% `sec/op` regression blocks the slice.
+
+Artifact impact plan:
+
+- Specs: no expected spec file update unless real drift is found.
+- Runtime project skills: no expected change unless a new scanner-decomposition
+  convention emerges.
+- End-user docs: no expected change.
+- SOW lifecycle: remains active until this selected slice is merged and enough
+  production complexity backlog is reduced or explicitly split into narrower
+  follow-up SOWs.
+
+Open-source reference evidence:
+
+- This is a behavior-preserving decomposition against the already-specified
+  Claude-code transcript contract. No new source-format claim is introduced, so
+  no additional upstream clone/mirror research is required for this slice.
+
+Open decisions:
+
+- None for the operator. Technical sequencing belongs to the assistant.
+
 ## Plan
 
 1. Triage production hotspots and choose the first low-risk/high-value slice.
@@ -1485,6 +1672,50 @@ Fifth slice focused validation:
   passed. The benchmark gate reported no `sec/op` regression over the 20%
   threshold. The run reported Go total coverage 85.3%, gated `internal/*`
   aggregate coverage 90.6%, `internal/adapters/claude_code` coverage 84.3%,
+  frontend Vitest coverage with 631 passing tests, frontend E2E/axe with 51
+  passing tests, and main frontend bundle size 132.2 KB gzipped against the
+  500 KB budget.
+
+Sixth slice focused validation:
+
+- Added `internal/adapters/claude_code/scanner_characterization_test.go` to pin
+  scanner helper boundaries before the production split: EOF replay rebuilds
+  parent Agent-op refs without emitting replay events; EOF replay does not mark
+  a child complete below the emit gate; oversized complete lines skip with
+  `errLineTooLong`; oversized partial EOF lines park with `io.EOF` and
+  consumed `0`; underlying reader errors propagate; orphan-root timestamp
+  synthesis skips malformed, known-no-op, oversized, timestampless,
+  unparsable, and non-positive child records.
+- Split the Claude-code scanner into focused production files:
+  `scanner.go` (constants/types), `scanner_discovery.go`, `scanner_meta.go`,
+  `scanner_transcript.go`, `scanner_run.go`, and `scanner_orphans.go`.
+  `tailer.go`, `parser.go`, `mapper.go`, cursor shape, REST/SSE contracts, and
+  frontend code were intentionally untouched.
+- Focused regression suite passed:
+  `go test ./internal/adapters/claude_code -run 'TestReadOneLine|TestScan_OrphanRoot|TestReadTranscript_Replay' -count=1`.
+- Claude-code package tests passed:
+  `go test ./internal/adapters/claude_code -count=1`.
+- Claude-code package race test passed:
+  `go test -race -count=1 ./internal/adapters/claude_code`.
+- Direct strict Lizard on the split scanner production files and new
+  characterization test passed with zero threshold warnings at `-C 8 -L 50 -a
+  8`. The analyzed files were `scanner.go`, `scanner_discovery.go`,
+  `scanner_meta.go`, `scanner_transcript.go`, `scanner_run.go`,
+  `scanner_orphans.go`, and `scanner_characterization_test.go`; total warning
+  count was 0.
+- Local Codacy Analysis CLI file-scoped run passed with 0 issues:
+  `/tmp/ai-viewer-sow0047-claude-scanner-codacy-final.json`. Trivy,
+  Semgrep/Opengrep, and Lizard analyzed the seven scanner files; Lizard
+  reported 0 issues.
+- Final sixth-slice full `./scripts/gates.sh` passed in 551s after external
+  review convergence: lint/static analysis, Go security/vulnerability checks,
+  secrets over 847 tracked files, attribution scan, spec drift,
+  Codacy coverage/config self-tests, systemd unit lint, build + bundle-size,
+  seven-benchmark regression gate, Go race+coverage, frontend Vitest coverage,
+  Go coverage threshold gate, adapter fuzz seed corpus, and Playwright/axe all
+  passed. The benchmark gate reported no `sec/op` regression over the 20%
+  threshold. The run reported Go total coverage 85.5%, gated `internal/*`
+  aggregate coverage 90.8%, `internal/adapters/claude_code` coverage 85.8%,
   frontend Vitest coverage with 631 passing tests, frontend E2E/axe with 51
   passing tests, and main frontend bundle size 132.2 KB gzipped against the
   500 KB budget.
@@ -2389,6 +2620,117 @@ Resolution:
   and a future Tail benchmark fixture with subagents would need to reset or
   deliberately exercise `tailDeferral` state per iteration.
 - Final full local gates passed before commit; see Validation.
+
+### Round 26 - 2026-06-06
+
+Scope: broad staged sixth-slice Claude-code scanner decomposition diff: this
+SOW, `.agents/sow/specs/adapter-claude-code.md`, and the split scanner files.
+
+Reviewers:
+
+- `codex`: found a real performance/test gap in orphan-root timestamp probing:
+  the first implementation could scan a whole child transcript to EOF when the
+  first parseable timestamp appeared early.
+- `glm`: found the same real issue and classified it as a medium performance
+  regression risk for large orphan child files.
+- `qwen`: found low-severity missing coverage for orphan roots whose child
+  transcripts are empty or all oversized.
+- `kimi`: found real `readOneLine` extraction risks: non-`ErrBufferFull`
+  reader errors could be misclassified as `errLineTooLong`, and the direct line
+  reader tests did not pin the error ordering.
+
+Resolution:
+
+- Changed orphan timestamp probing to stop at the first parseable timestamp in
+  each append-only child transcript after skipping malformed, oversized,
+  known-no-op, timestampless, and unparsable records.
+- Added zero-result orphan-root tests for all-oversized, empty, and
+  timestampless child transcripts.
+- Changed `readOneLine` error ordering so non-`ErrBufferFull` reader errors
+  propagate instead of becoming oversized-line errors.
+- Added direct `readOneLine` tests for oversized complete lines, oversized
+  partial EOF, and underlying reader errors.
+- Review remained open until the same broad scope was rerun on the integrated
+  fixes.
+
+### Round 27 - 2026-06-06
+
+Scope: same broad staged sixth-slice Claude-code scanner decomposition diff
+after the Round 26 fixes.
+
+Reviewers:
+
+- `codex`: found two real remaining issues. First, the oversized partial EOF
+  test used a too-large reader buffer and did not exercise the production 64
+  KiB `streamLines` path; in production, an in-flight oversized line without a
+  trailing newline could still be skipped instead of parked. Second,
+  orphan-root timestamp probing did not reject non-positive parsed timestamps,
+  while the spec now says the synthetic root uses the minimum positive
+  timestamp.
+- `glm`: no actionable finding after the Round 26 fixes. Verified behavior
+  preservation, zero Lizard warnings, race-clean package tests, and the
+  intentional orphan timestamp spec update.
+- `kimi`: no blocking finding. Verified pointer receivers on the hot
+  `lineStreamer` path and value receivers only on immutable `transcriptReader`
+  methods. Noted a low maintainability suggestion to expand the inline
+  Agent-op deferral comment.
+- `qwen`: invocation produced no final review report before the converged
+  reviewer set was available and was not counted.
+
+Resolution:
+
+- Changed oversized partial EOF handling so a line that exceeds
+  `scanBufferMax` but reaches EOF before newline returns `io.EOF` with consumed
+  `0`, parking the cursor until the producer appends a newline. Newline-
+  terminated oversized lines still return `errLineTooLong` and advance past the
+  newline.
+- Updated `TestReadOneLineOversizedPartialEOFHoldsBack` to use the production
+  64 KiB reader path and a body larger than `scanBufferMax`.
+- Changed orphan timestamp parsing to reject parsed timestamps `<= 0` and
+  added a non-positive timestamp zero-fallback case.
+- Expanded the `recordChildCompletion` invariant comment to document ADD,
+  RETRACT, and replay no-op cases because this SOW is about maintainability.
+- Review remained open until the same broad scope was rerun on the integrated
+  fixes.
+
+### Round 28 - 2026-06-06
+
+Scope: same broad staged sixth-slice Claude-code scanner decomposition diff
+after the Round 27 fixes and the Agent-op deferral comment expansion.
+
+Reviewers:
+
+- `codex`: no actionable finding. Verified scanner replay, Tail's shared
+  `readTranscript` path, oversized-line behavior, orphan-root timestamp
+  semantics, symlink containment, meta size caps, staged diff hygiene, and
+  staged Go formatting.
+- `glm`: no actionable finding. Verified the decomposition, the intentional
+  oversized partial EOF behavior, orphan-root timestamp filtering, Tail
+  side-effect boundaries, race-clean focused tests, and `85.7%` package
+  coverage in its read-only run.
+- `kimi`: no actionable finding. Noted only low-risk observations: value
+  receivers on immutable `transcriptReader` methods and a redundant defensive
+  `len(line) == 0` guard.
+- `mimo`: no blocking finding. Flagged advisory maintainability notes around
+  defensive line-reader branches, the redundant zero-length guard, and the
+  pre-existing `metaHashes(root, resolvedRoot, ...)` unused `root` parameter.
+
+Resolution:
+
+- Accepted `kimi`'s value-receiver and zero-length-guard notes as
+  non-actionable: the hot `lineStreamer` path uses pointer receivers, and the
+  defensive guard preserves the old reader shape without runtime cost.
+- Accepted `mimo`'s line-reader branch note as non-actionable after manual
+  control-flow review: the branch preserves old semantics for completed
+  oversized lines when a future caller uses a larger buffer, while production
+  64 KiB callers still take the `ErrBufferFull` drain path.
+- Accepted the `metaHashes` signature note as non-actionable in this slice:
+  the unused `root` parameter and explanatory comment pre-existed the split,
+  and changing it would touch Tail-adjacent call sites for style rather than
+  fixing a scanner decomposition defect.
+- External review converged with no actionable findings remaining.
+- Final full local gates and local Codacy file analysis passed after review
+  convergence; see Validation.
 
 ## Outcome
 
