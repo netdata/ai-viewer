@@ -2,14 +2,15 @@
 
 Two complementary benchmarks live here:
 
-1. **Synthetic Go benchmarks** — hermetic. The SOW-0011 suite is 5
-   benchmarks (adapter `Scan` + `Tail`, SQLite batch insert, REST query,
-   SSE fanout). They are gated **locally** by `scripts/check-bench.sh`
-   (benchstat vs `bench/baseline.txt`; the workstation baseline is not
-   comparable to GitHub-runner hardware), so CI runs only the
-   compile-smoke + the gate self-test. The original `Scan` bench is
-   documented below; see `quality-gates.md` §Go — Benchmarks for the
-   full set and the local-gate rationale.
+1. **Synthetic Go benchmarks** — hermetic. The current suite is 7
+   benchmarks (ai-agent v2 `Scan` + `Tail`, claude-code `Scan` + `Tail`,
+   SQLite batch insert, REST query, SSE fanout). They are gated
+   **locally** by `scripts/check-bench.sh` (benchstat vs
+   `bench/baseline.txt`; the workstation baseline is not comparable to
+   GitHub-runner hardware), so CI runs only the compile-smoke + the gate
+   self-test. The original ai-agent v2 `Scan` bench is documented below;
+   see `quality-gates.md` §Go — Benchmarks for the full set and the
+   local-gate rationale.
 2. **Real-data harness** — operator-runnable, measures the v2
    adapter against the live `~/.ai-agent/sessions/` directory and
    feeds the SOW-0001 §Chunk 9 60-minute backfill gate.
@@ -83,15 +84,16 @@ evidence in the SOW Chunk 9 entry but is not the SOW gate metric.
 ## `bench/baseline.txt`
 
 Frozen baseline consumed by `benchstat` via `scripts/check-bench.sh`. It
-is the raw `go test -run=^$ -bench=. -benchmem -count=6` output for the 5
-synthetic benchmarks (4 packages; `Scan` + `Tail` share `aiagent_v2`),
-prefixed by a comment header carrying the implementing commit SHA and the
-`goos/goarch/pkg/cpu` config lines (benchstat groups by config, so the
-baseline and the current run must share it). `check-bench.sh` compares a
-fresh run against it and fails on a statistically-significant > 20%
-**sec/op** regression for any benchmark (the `geomean` aggregate and the
-custom metrics are excluded). `count=6` is benchstat's minimum for a 0.95
-confidence interval; baseline refresh requires an explicit SOW.
+is the raw `go test -run=^$ -bench=. -benchmem -count=6` output for the 7
+synthetic benchmarks (5 packages; `Scan` + `Tail` share `aiagent_v2`, and
+claude-code `Scan` + `Tail` share `claude_code`), prefixed by a comment
+header carrying benchmark-code provenance and the `goos/goarch/pkg/cpu`
+config lines (benchstat groups by config, so the baseline and the current
+run must share it). `check-bench.sh` compares a fresh run against it and
+fails on a statistically-significant > 20% **sec/op** regression for any
+benchmark (the `geomean` aggregate and the custom metrics are excluded).
+`count=6` is benchstat's minimum for a 0.95 confidence interval; baseline
+refresh requires an explicit SOW.
 
 The real-data harness digest is NOT in `baseline.txt` — it is saved
 separately (e.g. `bench/v2-backfill-2026-05-27.txt`) as a dated,

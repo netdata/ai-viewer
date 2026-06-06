@@ -125,9 +125,9 @@ scripts/check-bench.sh             # count=6, benchstat vs bench/baseline.txt, >
 scripts/test/check-bench-test.sh   # hardware-independent self-test of the gate's benchstat parser
 ```
 
-Marked benchmarks (`func BenchmarkXxx`) exist for the 5 performance-critical paths: adapter `Scan`, adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
+Marked benchmarks (`func BenchmarkXxx`) exist for the 7 performance-critical paths: ai-agent v2 adapter `Scan`, ai-agent v2 adapter `Tail`, claude-code adapter `Scan`, claude-code adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
 
-Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries the commit SHA + `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update).
+Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries benchmark-code provenance: an implementing commit SHA when available, or a same-commit `git blame` note when benchmark code and baseline land together, plus `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update).
 
 ### Go — Race + Stress
 

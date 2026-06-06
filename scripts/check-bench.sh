@@ -41,10 +41,12 @@ if [ -z "$BENCHSTAT" ] || [ ! -x "$BENCHSTAT" ]; then
   exit 2
 fi
 
-# The 4 benchmark-bearing packages, 5 benchmarks (Scan + Tail share aiagent_v2;
-# canonical has no encode/decode benchmark).
+# The 5 benchmark-bearing packages, 7 benchmarks (Scan + Tail share aiagent_v2,
+# and Claude-code Scan + Tail share claude_code; canonical has no encode/decode
+# benchmark).
 BENCH_PKGS=(
   ./internal/adapters/aiagent_v2/
+  ./internal/adapters/claude_code/
   ./internal/ingest/
   ./internal/presenter/
   ./internal/notify/
@@ -77,9 +79,10 @@ echo "$report"
 # any missing one is a tooling error (exit 2), never a pass. The baseline is the
 # source of truth for what MUST be compared (auto-syncs on baseline refresh).
 # NOTE: matching is by benchmark NAME (package/config stripped). It assumes names
-# are unique across packages — true today (Scan_SyntheticCorpus, Tail_SyntheticAppend,
-# BatchInsert, SessionsListQuery, HubFanout are distinct). A future duplicate name
-# in two packages could mask a dropped comparison; keep benchmark names unique.
+# are unique across packages — true today (Claude* adapter benchmarks,
+# aiagent_v2 Scan/Tail, BatchInsert, SessionsListQuery, HubFanout are distinct).
+# A future duplicate name in two packages could mask a dropped comparison; keep
+# benchmark names unique.
 expected="$(grep -E '^Benchmark' "$base" | awk '{print $1}' | sed -E 's/^Benchmark//; s/-[0-9]+$//' | sort -u)"
 # A benchmark counts as "compared" ONLY if its sec/op row carries the vs-base
 # verdict "(p=… n=…)" — benchstat emits that only when BOTH files contributed
@@ -92,7 +95,9 @@ if [ -n "$expected" ]; then
   missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$compared"))"
   if [ -n "$missing" ]; then
     echo -e "${RED}[ERROR]${NC} benchstat produced no sec/op comparison for:" >&2
-    printf '  %s\n' $missing >&2
+    while IFS= read -r bench; do
+      printf '  %s\n' "$bench" >&2
+    done <<< "$missing"
     echo -e "${RED}        baseline and current are disjoint (different goos/goarch/pkg/cpu config, a renamed/removed benchmark) — the gate cannot certify 'no regression'.${NC}" >&2
     exit 2
   fi
@@ -106,7 +111,9 @@ current="$(grep -E '^Benchmark' "$cur" | awk '{print $1}' | sed -E 's/^Benchmark
 newbench="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$current"))"
 if [ -n "$newbench" ]; then
   echo -e "${YELLOW}[warn]${NC} current run has benchmark(s) absent from the baseline (un-gated until a baseline-refresh SOW):" >&2
-  printf '  %s\n' $newbench >&2
+  while IFS= read -r bench; do
+    printf '  %s\n' "$bench" >&2
+  done <<< "$newbench"
 fi
 
 # Gate ONLY the sec/op metric block. benchstat emits one table per metric, each

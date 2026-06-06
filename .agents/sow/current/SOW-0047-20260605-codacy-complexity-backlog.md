@@ -8,8 +8,10 @@ Sub-state: active 2026-06-05. First production slice
 `frontend/src/state/filters.ts` is merged. Second production slice
 `internal/adapters/aiagent_v2/mapper.go` is merged. Third production slice
 `internal/ingest/writer.go` `applyOpFinalized` is merged. Fourth production
-slice `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized` has
-passed local validation and external review; PR/merge is pending.
+slice `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized` is merged.
+Fifth slice implemented: baseline Claude-code scan/tail benchmarks before
+scanner/tailer decomposition. Next slice resumes production complexity
+reduction.
 
 ## Requirements
 
@@ -756,6 +758,163 @@ Open decisions:
 
 - None for the operator. Technical sequencing belongs to the assistant.
 
+### Fifth Slice Gate - claude-code benchmark baseline
+
+Status: ready for test-first implementation after this SOW/spec update.
+
+Selected fifth slice:
+
+- Add deterministic Claude-code adapter `Scan` and `Tail` benchmarks and include
+  them in the local workstation benchmark regression gate.
+- Goal: create a real performance guard before reducing complexity in the
+  Claude-code scanner/tailer state machines.
+- Explicit non-goal: do not refactor `internal/adapters/claude_code/scanner.go`,
+  `tailer.go`, or `parser.go` in this slice; do not change adapter semantics,
+  cursor format, source discovery, ingester behavior, SQLite schema, REST/SSE,
+  frontend presentation, or security posture.
+
+Problem / root-cause model:
+
+- Refreshed strict Lizard on current `master` shows Claude-code scanner/tailer
+  remain high-risk complexity hotspots:
+  - `internal/adapters/claude_code/scanner.go` has 9 warnings; largest selected
+    functions include `scanAll` at 74 NLOC / CCN 19 / 128 physical lines and
+    `streamLines` at 68 NLOC / CCN 18 / 108 physical lines.
+  - `internal/adapters/claude_code/tailer.go` has 6 warnings; largest selected
+    functions include `tailLoop` at 74 NLOC / CCN 21 / 112 physical lines and
+    `flushDirty` at 56 NLOC / CCN 16 / 75 physical lines.
+  - `internal/adapters/claude_code/parser.go` has 1 warning:
+    `parseLine` at 54 NLOC / CCN 16 / 61 physical lines.
+- The scanner/tailer code is behaviorally delicate: file watching, cursor
+  offsets, symlink containment, partial-line parking, late `.meta.json` repair,
+  and Agent-op finalization all interact. Refactoring it without a scan/tail
+  performance guard would leave a blind spot in the next complexity slice.
+
+Evidence reviewed:
+
+- Direct strict Lizard command on current `master`:
+  `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/scanner.go internal/adapters/claude_code/tailer.go internal/adapters/claude_code/parser.go -l go -C 8 -L 50 -a 8`
+  reported 16 warnings across the three files.
+- Existing benchmark gate before this slice covers 5 baselined benchmarks in 4
+  packages: ai-agent v2 adapter scan/tail, ingest batch insert, presenter
+  sessions list, and notify hub fanout.
+- Existing CI benchmark smoke already executes `go test -run=^$ -bench=.`
+  across `./...`, but the local workstation regression gate only runs packages
+  listed in `scripts/check-bench.sh` and only hard-gates names present in
+  `bench/baseline.txt`.
+- The earlier read-only scanner/tailer assessment identified Claude-specific
+  scan/tail benchmarks as a prerequisite before production decomposition. This
+  fifth slice satisfies that prerequisite and makes this SOW the explicit
+  baseline-refresh authorization required by the benchmark policy.
+
+Affected contracts and surfaces:
+
+- `bench/baseline.txt` benchmark inventory and workstation baseline.
+- `scripts/check-bench.sh` benchmark package list.
+- `.github/workflows/ci.yml` required benchmark-count guard.
+- `.agents/sow/specs/quality-gates.md` and
+  `.agents/sow/specs/testing-strategy.md` benchmark inventory.
+- `.agents/sow/specs/adapter-claude-code.md` throughput section.
+- `internal/adapters/claude_code/bench_test.go` only; no production adapter
+  behavior changes in this slice.
+
+Spec deltas before tests/code:
+
+- `.agents/sow/specs/quality-gates.md`: update benchmark inventory from 5
+  paths / 4 packages to 7 paths / 5 packages, adding Claude-code Scan and Tail
+  to the local workstation `scripts/check-bench.sh` gate.
+- `.agents/sow/specs/testing-strategy.md`: update performance-regression test
+  inventory to list the new Claude-code benchmark file.
+- `.agents/sow/specs/adapter-claude-code.md`: add a throughput note naming the
+  two deterministic benchmarks and stating they are included in the local
+  workstation baseline.
+
+Existing patterns to reuse:
+
+- `internal/adapters/aiagent_v2/bench_test.go`: deterministic synthetic corpus,
+  fixed append variants, producer-write fencing with `b.StopTimer`, event
+  counting, `b.ReportMetric`, and `peak_heap_mb` sampling.
+- `scripts/check-bench.sh`: baseline-first benchmark inventory, `benchstat`
+  comparison, and >20% significant `sec/op` regression threshold.
+- `.github/workflows/ci.yml` benchmark presence guard, updated from exactly 5
+  baseline names to exactly 7.
+
+Risk and blast radius:
+
+- Medium gate-risk: adding benchmarks to the hard local baseline can make the
+  full workstation gate slower or noisier. The benchmark bodies must be
+  deterministic, small enough for repeated `-count=6`, and scoped to code CPU
+  rather than OS fsnotify latency.
+- Low runtime risk: benchmark files do not ship in the binary and the slice
+  intentionally avoids production adapter refactors.
+- CI risk: benchmark-count guard and bench smoke must agree with the new
+  baseline inventory. A mismatch fails CI by design.
+
+Sensitive data handling plan:
+
+- Benchmarks use only synthetic transcripts under `b.TempDir()`.
+- No real Claude-code transcript content, cwd, prompt, tool output, or model
+  payload is written to durable artifacts.
+
+Implementation plan:
+
+1. Delegate benchmark/test implementation for `internal/adapters/claude_code`:
+   synthetic projects tree builder, scan benchmark, tail-flush benchmark, and
+   focused tests if helper correctness needs pinning.
+2. Delegate benchmark-gate wiring: add the package to `scripts/check-bench.sh`,
+   update CI's required benchmark count to 7, and refresh `bench/baseline.txt`
+   with six samples for the seven benchmark names on this workstation.
+3. Run focused Claude-code benchmark smoke and `scripts/check-bench.sh`.
+4. Run full local gates and external review before commit/PR.
+
+Validation plan:
+
+- `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`
+- `go test ./internal/adapters/claude_code -count=1`
+- `go test -race -count=1 ./internal/adapters/claude_code`
+- `scripts/check-bench.sh`
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- Full `./scripts/gates.sh`.
+- PR checks must all pass before merge; `codacy-coverage` may skip on PRs by
+  design, but every other row must be green.
+
+Test-order note:
+
+- This fifth slice adds benchmark coverage and gate wiring before production
+  refactoring. The benchmark "failing" signal before implementation is absence
+  from the Go benchmark inventory and mismatch with the just-updated specs.
+
+Benchmarks:
+
+- Required. The implementation must generate a deterministic six-sample
+  `bench/baseline.txt` refresh including the five existing benchmarks and the
+  two new Claude-code benchmarks. Baseline refresh is explicitly authorized by
+  this SOW slice.
+
+Artifact impact plan:
+
+- Specs: quality gates, testing strategy, and Claude-code adapter throughput
+  spec updated first.
+- Runtime project skills: no expected change unless benchmark-gate conventions
+  change during implementation.
+- End-user docs: no expected change.
+- SOW lifecycle: remains active after this benchmark prerequisite slice; the
+  following slice will reduce Claude-code scanner/tailer complexity using the
+  new benchmark guard.
+
+Open-source reference evidence:
+
+- No new Claude-code source-format claim is introduced in this slice. The
+  existing adapter spec remains grounded in the previously cited local mirror
+  evidence (`jarmuine/claude-code @ 4b9d30f79532`) and sanitized operator
+  transcript observations. Benchmarks synthesize records matching the already
+  specified JSONL contract rather than adding a new protocol assertion.
+
+Open decisions:
+
+- None for the operator. Technical sequencing belongs to the assistant.
+
 ## Plan
 
 1. Triage production hotspots and choose the first low-risk/high-value slice.
@@ -807,6 +966,16 @@ Open decisions:
   correction tests, updating stale `data-model.md` `ctx_max` code references,
   and correcting the `onOpStarted` `call_count` comment for identity-change
   migration.
+- Merged PR #53 for the fourth slice. All PR checks passed before merge:
+  Codacy static analysis, CodeQL action and language analyses, lint, test,
+  frontend, gates, embed smoke, reviewer check, WIP guard, and CLA.
+- Selected the fifth slice as a prerequisite benchmark-baseline slice for the
+  Claude-code scanner/tailer. The slice adds deterministic Claude-code `Scan`
+  and `Tail` benchmarks before production scanner/tailer decomposition.
+- Updated the benchmark inventory specs first, then added the benchmark files,
+  wired `scripts/check-bench.sh` to the Claude-code package, refreshed the
+  seven-benchmark workstation baseline, and updated CI's benchmark-count guard
+  from 5 to 7 required names.
 
 ## Validation
 
@@ -1215,6 +1384,110 @@ Fourth slice focused validation:
   coverage 90.6%, `internal/ingest` coverage 86.2%, frontend Vitest coverage
   with 631 passing tests, frontend E2E/axe with 51 passing tests, and main
   frontend bundle size 132.2 KB gzipped against the 500 KB budget.
+
+Fifth slice focused validation:
+
+- `go test ./internal/adapters/claude_code -count=1` passed in 6.667s.
+- `go test -race -count=1 ./internal/adapters/claude_code` passed in 7.694s.
+- `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`
+  passed. Latest smoke results: `BenchmarkClaudeScan_SyntheticCorpus` at
+  12.39 ms/op, 35.16 MB/s, 166089 events/sec, 6456 transcripts/sec,
+  10818097 B/op, and 45954 allocs/op; `BenchmarkClaudeTail_SyntheticAppend` at
+  51.337 us/op, 24.49 MB/s, 116874 events/sec, 82633 B/op, and 148 allocs/op.
+- Direct strict Lizard on
+  `internal/adapters/claude_code/bench_test.go` and
+  `internal/adapters/claude_code/bench_types_test.go` passed with zero
+  threshold warnings at `-C 8 -L 50 -a 8`. Physical line counts are
+  `bench_test.go` 402 and `bench_types_test.go` 68 after the Round 24 review
+  fixes.
+- Local Codacy Analysis CLI initially found two real ShellCheck SC2086 issues in
+  `scripts/check-bench.sh` diagnostic printing. The fix changed the missing and
+  new-benchmark diagnostic output to quoted `read -r` loops without weakening
+  benchmark comparison behavior. Rerun result:
+  `/tmp/ai-viewer-sow0047-claude-bench-codacy-rerun.json` reported 0 issues
+  across Trivy, Semgrep/Opengrep, ShellCheck, Lizard, and ESLint8 for the
+  changed benchmark/script/workflow files.
+- `shellcheck scripts/check-bench.sh`, `scripts/test/check-bench-test.sh`,
+  `git diff --check`, and `gofmt -l` on the new Claude-code benchmark Go files
+  passed; the benchmark self-test reported 8/8 assertions pass.
+- `scripts/check-bench.sh` passed across all seven baselined benchmarks. No
+  statistically-significant `sec/op` regression exceeded the 20% threshold.
+  The new Claude-code comparisons were `ClaudeScan_SyntheticCorpus` at
+  12.69 ms/op vs 13.34 ms/op baseline (-4.87%, p=0.009) and
+  `ClaudeTail_SyntheticAppend` at 53.42 us/op vs 52.15 us/op baseline
+  (noise band, p=0.937).
+- Full staged-candidate `./scripts/gates.sh` passed in 557s: lint/static
+  analysis, Go security/vulnerability checks, secrets over 841 tracked files,
+  attribution, spec drift, Codacy coverage/config self-tests, systemd unit
+  lint, build + bundle-size, seven-benchmark regression gate, Go race+coverage,
+  frontend Vitest coverage, Go coverage threshold gate, adapter fuzz seed
+  corpus, and Playwright/axe all passed. The run reported Go total coverage
+  85.3%, gated `internal/*` aggregate coverage 90.7%,
+  `internal/adapters/claude_code` coverage 84.3%, frontend Vitest coverage with
+  631 passing tests, frontend E2E/axe with 51 passing tests, and main frontend
+  bundle size 132.2 KB gzipped against the 500 KB budget.
+- Round 21 review-fix focused validation passed:
+  `go test ./internal/adapters/claude_code -count=1`,
+  `go test -race -count=1 ./internal/adapters/claude_code`,
+  `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`,
+  direct strict Lizard on the two Claude-code benchmark files,
+  local Codacy Analysis CLI at
+  `/tmp/ai-viewer-sow0047-claude-bench-codacy-reviewfix.json`,
+  baseline inventory check (7 unique benchmark names, 6 samples each),
+  stale-count grep for old 5-benchmark/4-package wording, and
+  `scripts/check-bench.sh`. The refreshed benchmark gate passed with no
+  statistically-significant `sec/op` regression over the 20% threshold; the
+  Claude-code comparisons were `ClaudeScan_SyntheticCorpus` at 12.96 ms/op vs
+  14.95 ms/op baseline (-13.27%, p=0.015) and
+  `ClaudeTail_SyntheticAppend` at 54.19 us/op vs 61.73 us/op baseline
+  (-12.22%, p=0.009).
+- Round 22 benchmark-assertion fix validation passed after adding hard failure
+  on adapter-reported benchmark errors and exact event-count assertions:
+  `go test ./internal/adapters/claude_code -count=1`,
+  `go test -race -count=1 ./internal/adapters/claude_code`,
+  `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`,
+  `gofmt -l internal/adapters/claude_code/bench_test.go internal/adapters/claude_code/bench_types_test.go`,
+  and a baseline inventory check for 7 unique benchmark names with 6 samples
+  each. The benchmark smoke reported `BenchmarkClaudeScan_SyntheticCorpus` at
+  12.858 ms/op, 160053 events/sec, and 47044 allocs/op, and
+  `BenchmarkClaudeTail_SyntheticAppend` at 55.133 us/op, 108827 events/sec,
+  and 152 allocs/op.
+- Refreshed `bench/baseline.txt` again after the Round 22 benchmark timed-body
+  change with the established seven-benchmark command:
+  `go test -run=^$ -bench=. -benchmem -count=6 ./internal/adapters/aiagent_v2/ ./internal/adapters/claude_code/ ./internal/ingest/ ./internal/presenter/ ./internal/notify/`.
+  The refresh produced 42 benchmark samples: 7 benchmark names with 6 samples
+  each. An immediate full benchmark-gate rerun after back-to-back benchmark
+  work failed on `ClaudeScan_SyntheticCorpus` at +31.24% `sec/op`; focused
+  `-count=10` Claude Scan/Tail runs then showed stable samples, and the
+  subsequent uncontended `scripts/check-bench.sh` passed with no `sec/op`
+  regression over 20%. The passing comparison reported
+  `ClaudeScan_SyntheticCorpus` at 12.90 ms/op vs 12.73 ms/op baseline
+  (noise band, p=0.093) and `ClaudeTail_SyntheticAppend` at 57.07 us/op vs
+  53.89 us/op baseline (+5.91%, p=0.002).
+- Round 23 review-fix validation passed after correcting benchmark byte
+  accounting and durable benchmark inventory drift: `go test
+  ./internal/adapters/claude_code -count=1`, `go test -race -count=1
+  ./internal/adapters/claude_code`, `go test ./internal/adapters/claude_code
+  -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`, `gofmt -l
+  internal/adapters/claude_code/bench_test.go
+  internal/adapters/claude_code/bench_types_test.go`, baseline inventory check
+  for 7 unique benchmark names with 6 samples each, and
+  `scripts/check-bench.sh`. The regenerated baseline still has 42 benchmark
+  samples. The Claude-code benchmark smoke passed after `BenchmarkClaudeTail`
+  switched to full parsed file bytes and `BenchmarkClaudeScan` counted
+  `.meta.json` sidecar bytes.
+- Final Round 25 full `./scripts/gates.sh` passed in 554s after external
+  review convergence: lint/static analysis, Go security/vulnerability checks,
+  secrets over 841 tracked files, attribution, spec drift, Codacy
+  coverage/config self-tests, systemd unit lint, build + bundle-size,
+  seven-benchmark regression gate, Go race+coverage, frontend Vitest coverage,
+  Go coverage threshold gate, adapter fuzz seed corpus, and Playwright/axe all
+  passed. The benchmark gate reported no `sec/op` regression over the 20%
+  threshold. The run reported Go total coverage 85.3%, gated `internal/*`
+  aggregate coverage 90.6%, `internal/adapters/claude_code` coverage 84.3%,
+  frontend Vitest coverage with 631 passing tests, frontend E2E/axe with 51
+  passing tests, and main frontend bundle size 132.2 KB gzipped against the
+  500 KB budget.
 
 ## Reviews
 
@@ -1929,6 +2202,193 @@ Resolution:
   slice.
 - External review converged with no actionable findings remaining before the
   final full-gate run.
+
+### Round 21 - 2026-06-06
+
+Scope: broad staged fifth-slice Claude-code benchmark-baseline diff: this SOW,
+`.agents/skills/project-quality-gates/SKILL.md`, benchmark inventory specs,
+`.github/workflows/ci.yml`, `bench/baseline.txt`,
+`internal/adapters/claude_code/bench_test.go`,
+`internal/adapters/claude_code/bench_types_test.go`, and
+`scripts/check-bench.sh`.
+
+Reviewers:
+
+- `codex`: no code-level blocker. Found stale runtime-skill wording in
+  `.agents/skills/project-quality-gates/SKILL.md`: it still described 5
+  performance-critical benchmark paths while the spec, CI, script, and baseline
+  had moved to 7 benchmark functions.
+- `glm`: no benchmark correctness, race, security, determinism, gate-wiring, or
+  baseline-refresh blocker. Found the same stale skill wording. Verified the
+  scan benchmark drainer goroutine is consumed correctly, the tail cursor copy
+  is not mutating the seed cursor in place, and the baseline has 7 names with 6
+  samples each.
+- `qwen`: no blocking finding. Flagged two low-severity benchmark polish items:
+  the tail benchmark's `SetBytes` included seed bytes even though the timed
+  read starts at the append offset, and the synthetic assistant usage shape did
+  not include the production `server_tool_use` / `service_tier` fields.
+
+Resolution:
+
+- Accepted the stale skill wording as real durable-memory drift and updated the
+  runtime quality-gates skill to list 7 performance-critical benchmark paths:
+  ai-agent v2 Scan/Tail, claude-code Scan/Tail, SQLite batch insert, REST query,
+  and SSE fanout.
+- Accepted the tail `SetBytes` finding as real metric inaccuracy and changed
+  `BenchmarkClaudeTail_SyntheticAppend` to report append bytes only.
+- Accepted the assistant-usage shape parity finding and added deterministic
+  synthetic `server_tool_use` plus `service_tier` fields to benchmark assistant
+  records.
+- Refreshed `bench/baseline.txt` again for all seven benchmarks after the
+  review fixes, because both Tail byte accounting and assistant usage shape
+  affect benchmark output and allocation metrics.
+- Review continued in Round 22 with the same broad reviewer scope.
+
+### Round 22 - 2026-06-06
+
+Scope: same broad staged fifth-slice Claude-code benchmark-baseline diff after
+the Round 21 fixes: this SOW, `.agents/skills/project-quality-gates/SKILL.md`,
+benchmark inventory specs, `.github/workflows/ci.yml`, `bench/baseline.txt`,
+`internal/adapters/claude_code/bench_test.go`,
+`internal/adapters/claude_code/bench_types_test.go`, and
+`scripts/check-bench.sh`.
+
+Reviewers:
+
+- `codex`: found one real benchmark-guard weakness. The Scan benchmark used
+  default adapter options, so adapter `OnError` reports were no-ops; Tail prime
+  and measured flush also passed no-op error callbacks; and event counts were
+  only reported as metrics rather than asserted. Also flagged Claude benchmark
+  sample variance as a low/medium confidence risk for the >20% regression gate.
+- `glm`: no actionable finding. Reported the staged diff clean across benchmark
+  correctness, determinism, race/leak, security, maintainability, SOW/spec/skill
+  consistency, and baseline-refresh authorization.
+- `qwen`: invocation exited without a final review report and was not counted.
+
+Resolution:
+
+- Accepted the benchmark-guard weakness as real. Added benchmark error
+  recorders so Claude Scan, Tail cursor priming, and measured Tail flush fail
+  when adapter parse/map errors are reported through callbacks.
+- Added exact deterministic event-count assertions: full Claude Scan must emit
+  2058 canonical events per corpus scan, and measured Claude Tail append flush
+  must emit 6 canonical events per iteration.
+- Refreshed all seven benchmark baseline samples again because the new
+  assertions and callback checks changed the timed benchmark body.
+- Treated the sample-variance warning as a real gate-risk to verify. Standalone
+  `-count=10` Claude Scan and Tail runs were stable; one immediate
+  `scripts/check-bench.sh` run after repeated benchmark work failed on Claude
+  Scan, and the subsequent uncontended full benchmark gate passed. Final full
+  gates remain required before commit.
+- Review continued in Round 23 with the same broad reviewer scope.
+
+### Round 23 - 2026-06-06
+
+Scope: same broad staged fifth-slice Claude-code benchmark-baseline diff after
+the Round 22 fixes: this SOW, `.agents/skills/project-quality-gates/SKILL.md`,
+benchmark inventory specs, `.github/workflows/ci.yml`, `bench/baseline.txt`,
+`internal/adapters/claude_code/bench_test.go`,
+`internal/adapters/claude_code/bench_types_test.go`, and
+`scripts/check-bench.sh`.
+
+Reviewers:
+
+- `codex`: found real durable-memory drift and benchmark metric issues.
+  `.agents/skills/project-testing/SKILL.md` still omitted
+  `internal/adapters/claude_code/bench_test.go`; `bench/README.md` still
+  described 5 benchmarks / 4 packages; Claude Tail `SetBytes` was append-only
+  even though `readTranscript` replays the whole file from offset 0 to rebuild
+  mapper state; and this SOW still recorded stale benchmark file line counts.
+- `glm`: no actionable finding. Reported the staged diff clean across benchmark
+  correctness, determinism, race/leak, security, maintainability, SOW/spec/skill
+  consistency, and baseline-refresh authorization.
+- `qwen`: no blocking finding. Flagged two low-severity benchmark accuracy and
+  cleanup issues: Scan `totalBytes` did not include `.meta.json` sidecar bytes,
+  and `runClaudeBenchScan` could leave its drainer goroutine blocked on the
+  `a.Scan` error path before `b.Fatalf`.
+
+Resolution:
+
+- Accepted the durable-memory drift as real and updated
+  `.agents/skills/project-testing/SKILL.md` plus `bench/README.md` to describe
+  the 7-benchmark / 5-package suite and the Claude-code benchmark file.
+- Accepted the Tail byte-accounting finding as real. Tail now reports full
+  parsed file bytes (`seedBody + appendBody`) because the measured flush path
+  replays from offset 0 and only gates emission by cursor offset.
+- Accepted the Scan byte-accounting finding as real. The synthetic corpus byte
+  count now includes `.meta.json` sidecar bytes because Scan reads them while
+  building subagent metadata maps.
+- Accepted the Scan error-path cleanup. `runClaudeBenchScan` now closes the
+  output channel and waits for the drainer before failing on `a.Scan` errors.
+- Updated stale SOW line-count evidence to the current staged files:
+  `bench_test.go` 402 lines and `bench_types_test.go` 68 lines.
+- Refreshed all seven benchmark baseline samples again because the byte
+  accounting changed reported throughput metrics.
+- Review remains open until the same broad reviewer scope is rerun on the Round
+  23 fixes. The next review scope includes the newly changed
+  `.agents/skills/project-testing/SKILL.md` and `bench/README.md`.
+
+### Round 24 - 2026-06-06
+
+Scope: same broad staged fifth-slice Claude-code benchmark-baseline diff after
+the Round 23 fixes, including the newly changed
+`.agents/skills/project-testing/SKILL.md` and `bench/README.md`.
+
+Reviewers:
+
+- `codex`: no code-level blocker. Verified event counts, CI benchmark-smoke
+  coverage, and the 7-benchmark / 6-sample baseline shape. Found stale SOW
+  line-count evidence: staged `bench_test.go` has 402 lines while two SOW
+  references still said 399.
+- `glm`: no benchmark correctness, determinism, race/leak, security,
+  maintainability, SOW/spec/skill consistency, gate-wiring, or
+  baseline-refresh blocker. Found the same stale SOW line-count evidence.
+- `qwen`: no actionable finding. Verified benchmark correctness,
+  determinism, channel/goroutine hygiene, gate logic, CI benchmark count,
+  documentation consistency, baseline shape, sensitive-data handling, and the
+  non-goal that production scanner/tailer/parser code is unchanged.
+
+Resolution:
+
+- Accepted the SOW evidence drift as real durable-memory drift and updated the
+  two stale line-count references from 399 to 402 for
+  `internal/adapters/claude_code/bench_test.go`.
+- No production, test, script, workflow, spec, skill, or benchmark-baseline
+  change was needed from Round 24.
+- Review remains open until the same broad reviewer scope is rerun on the Round
+  24 SOW-only fix.
+
+### Round 25 - 2026-06-06
+
+Scope: same broad staged fifth-slice Claude-code benchmark-baseline diff after
+the Round 24 SOW-only line-count fix.
+
+Reviewers:
+
+- `codex`: no actionable finding. Verified the benchmark fixtures are synthetic
+  and isolated under `b.TempDir()`, adapter-reported errors fail benchmarks,
+  Scan and Tail event counts are asserted, Scan drains its output goroutine on
+  error, gate wiring includes claude-code, the baseline has 7 names with 6
+  samples each, and no production Claude-code scanner/tailer/parser/adapter
+  behavior is staged. Also ran focused checks including the local benchmark
+  gate, the Claude-code race test, benchmark self-test, and secret scan.
+- `glm`: no actionable finding. Verified functional correctness, security,
+  code quality, error-prone patterns, performance, test quality, architecture,
+  documentation consistency, SOW line-count evidence, and baseline provenance.
+- `qwen`: no actionable finding. Verified benchmark correctness,
+  determinism, tail deferral state behavior, gate logic, CI count guard,
+  sensitive-data handling, documentation consistency, baseline shape, and the
+  non-goal that production scanner/tailer/parser code is unchanged.
+
+Resolution:
+
+- External review converged. No production, test, script, workflow, spec,
+  skill, SOW, or benchmark-baseline fix was required from Round 25.
+- Residual non-blocking risks are documented: workstation benchmark variance,
+  Tail `SetBytes` assumes the two fixed append variants remain equal length,
+  and a future Tail benchmark fixture with subagents would need to reset or
+  deliberately exercise `tailDeferral` state per iteration.
+- Final full local gates passed before commit; see Validation.
 
 ## Outcome
 

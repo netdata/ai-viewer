@@ -652,6 +652,8 @@ Stream-parse line-by-line from the cursor offset. A line without a trailing `\n`
 
 A session jsonl can grow at multi-MB/sec during an active agent run. The adapter uses a small read-ahead buffer (e.g. 64 KB) per file and flushes events in batches of a few hundred per SQLite transaction (see `data-model.md` ingester strategy).
 
+The adapter has two deterministic workstation benchmarks in `internal/adapters/claude_code/bench_test.go`: `BenchmarkClaudeScan_SyntheticCorpus` exercises first backfill over a synthetic projects tree with root and subagent transcripts, and `BenchmarkClaudeTail_SyntheticAppend` exercises the tail flush path over fixed append variants. Both are included in `scripts/check-bench.sh` and `bench/baseline.txt`; a statistically-significant >20% `sec/op` regression blocks local completion.
+
 ## 7. Cursor
 
 The cursor is the adapter's resume contract. Shape (JSON, stored in `sources.cursor`):
