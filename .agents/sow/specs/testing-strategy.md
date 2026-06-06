@@ -203,7 +203,7 @@ per-PR gates.
 
 ## Performance Regression Tests
 
-A benchmark suite covering the performance-critical paths (7 benchmarks across 5 packages): ai-agent v2 adapter `Scan` + `Tail` (`internal/adapters/aiagent_v2/bench_test.go`), claude-code adapter `Scan` + `Tail` (`internal/adapters/claude_code/bench_test.go`), SQLite batch insert (`internal/ingest`), REST query (`internal/presenter`), SSE fanout (`internal/notify`).
+A benchmark suite covering the performance-critical paths (9 benchmarks across 6 packages): ai-agent v2 adapter `Scan` + `Tail` (`internal/adapters/aiagent_v2/bench_test.go`), claude-code adapter `Scan` + `Tail` (`internal/adapters/claude_code/bench_test.go`), Codex adapter `Scan` + `Tail` (`internal/adapters/codex/bench_test.go`), SQLite batch insert (`internal/ingest`), REST query (`internal/presenter`), SSE fanout (`internal/notify`).
 
 The committed baseline is `bench/baseline.txt` (`-count=6`, with `goos/goarch/pkg/cpu` config lines). `scripts/check-bench.sh` runs `benchstat` against it and fails on a statistically-significant > 20% sec/op regression. It is a **local/workstation gate** — the baseline is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate's self-test, not the regression comparison. Baseline refresh requires an explicit SOW (no auto-update). See `quality-gates.md` §Go — Benchmarks.
 

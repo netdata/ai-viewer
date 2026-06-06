@@ -29,7 +29,7 @@ func TestFlushDirty_DirectCoversBranches(t *testing.T) {
 		"session_index.jsonl":       {}, // unrecognized → skipped
 		"rollout-2025-06-26-x.json": {}, // legacy → skipped
 	}
-	if err := flushDirty(context.Background(), resolved, root, "codex:"+root, dirty, &cur, out, func(error) {}); err != nil {
+	if err := flushDirty(context.Background(), resolved, "codex:"+root, dirty, &cur, out, func(error) {}); err != nil {
 		t.Fatalf("flushDirty: %v", err)
 	}
 	if cur.Files[rel].Offset == 0 {
@@ -51,7 +51,7 @@ func TestFlushDirty_Empty(t *testing.T) {
 	resolved, _ := filepath.EvalSymlinks(root)
 	out := make(chan canonical.Event, 4)
 	cur := newCursor()
-	if err := flushDirty(context.Background(), resolved, root, "codex:"+root, map[string]struct{}{}, &cur, out, func(error) {}); err != nil {
+	if err := flushDirty(context.Background(), resolved, "codex:"+root, map[string]struct{}{}, &cur, out, func(error) {}); err != nil {
 		t.Fatalf("flushDirty(empty): %v", err)
 	}
 	if len(drainBuffered(out)) != 0 {
@@ -71,7 +71,7 @@ func TestFlushDirty_CancelledCtx(t *testing.T) {
 	cancel()
 	out := make(chan canonical.Event, 4)
 	cur := newCursor()
-	err := flushDirty(ctx, resolved, root, "codex:"+root, map[string]struct{}{rel: {}}, &cur, out, func(error) {})
+	err := flushDirty(ctx, resolved, "codex:"+root, map[string]struct{}{rel: {}}, &cur, out, func(error) {})
 	if err == nil {
 		t.Error("flushDirty on cancelled ctx should return ctx err")
 	}
@@ -102,7 +102,7 @@ func TestFlushDirty_ReadErrorContinues(t *testing.T) {
 	out := make(chan canonical.Event, 8)
 	cur := newCursor()
 	var errs []string
-	err := flushDirty(context.Background(), resolved, root, "codex:"+root, map[string]struct{}{relBad: {}}, &cur, out, func(e error) { errs = append(errs, e.Error()) })
+	err := flushDirty(context.Background(), resolved, "codex:"+root, map[string]struct{}{relBad: {}}, &cur, out, func(e error) { errs = append(errs, e.Error()) })
 	if err != nil {
 		t.Fatalf("flushDirty should not fatal on a per-file read error: %v", err)
 	}

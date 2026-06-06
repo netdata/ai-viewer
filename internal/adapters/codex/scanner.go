@@ -39,56 +39,80 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	if err != nil {
 		return start, err
 	}
-	cur := start
-	if cur.Files == nil {
-		cur = newCursor()
-	}
-
-	// Pre-resolve the root ONCE so the per-file containment open does not re-run
-	// EvalSymlinks on the root for every file. A resolve failure here is
-	// non-fatal: fall back to the unresolved root (the files were already
-	// discovered, so the root exists; a degenerate resolve only loses the perf
-	// optimisation, not correctness). Mirrors claude_code/scanAll.
-	resolvedRoot := root
-	if rr, rrErr := filepath.EvalSymlinks(filepath.Clean(root)); rrErr == nil {
-		resolvedRoot = rr
-	}
-
-	// Emit one informational SourceError per legacy file the first time it is
-	// seen, then record it in the cursor so it stays quiet thereafter (R1 / spec
-	// §"Legacy"). The content is NOT ingested (Phase-2.5 follow-up).
+	cur := normalizeScanCursor(start)
+	resolvedRoot := resolveScanRoot(root)
 	cur = reportLegacy(cur, disc.legacy, onError)
-
-	emittedSinceProgress := 0
-	lastProgress := time.Now()
-	for _, r := range disc.modern {
-		if ctx.Err() != nil {
-			return cur, ctx.Err()
-		}
-		fc := cur.fileCursor(r.rel)
-		updated, n, rerr := readRollout(ctx, resolvedRoot, r, sourceID, fc, out, onError)
-		if rerr != nil {
-			if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
-				return cur, rerr
-			}
-			onError(rerr)
-			continue
-		}
-		cur = cur.withFile(r.rel, updated)
-		emittedSinceProgress += n
-		if emittedSinceProgress >= progressEveryEvents || time.Since(lastProgress) >= progressEveryDuration {
-			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
-				return cur, perr
-			}
-			emittedSinceProgress = 0
-			lastProgress = time.Now()
-		}
+	cur, err = scanModernRollouts(ctx, resolvedRoot, sourceID, disc.modern, cur, out, onError)
+	if err != nil {
+		return cur, err
 	}
-
 	if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 		return cur, perr
 	}
 	return cur, nil
+}
+
+func normalizeScanCursor(start Cursor) Cursor {
+	if start.Files == nil {
+		return newCursor()
+	}
+	return start
+}
+
+func resolveScanRoot(root string) string {
+	if rr, err := filepath.EvalSymlinks(filepath.Clean(root)); err == nil {
+		return rr
+	}
+	return root
+}
+
+func scanModernRollouts(ctx context.Context, resolvedRoot, sourceID string, rollouts []rollout, cur Cursor, out chan<- canonical.Event, onError func(error)) (Cursor, error) {
+	progress := newScanProgress()
+	for _, r := range rollouts {
+		if err := ctx.Err(); err != nil {
+			return cur, err
+		}
+		fc := cur.fileCursor(r.rel)
+		updated, n, err := readRollout(ctx, resolvedRoot, r, sourceID, fc, out, onError)
+		if err != nil {
+			if isContextStop(err) {
+				return cur, err
+			}
+			onError(err)
+			continue
+		}
+		cur = cur.withFile(r.rel, updated)
+		if err := progress.record(ctx, sourceID, cur, n, out); err != nil {
+			return cur, err
+		}
+	}
+	return cur, nil
+}
+
+func isContextStop(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+type scanProgress struct {
+	emittedSinceProgress int
+	lastProgress         time.Time
+}
+
+func newScanProgress() scanProgress {
+	return scanProgress{lastProgress: time.Now()}
+}
+
+func (p *scanProgress) record(ctx context.Context, sourceID string, cur Cursor, emitted int, out chan<- canonical.Event) error {
+	p.emittedSinceProgress += emitted
+	if p.emittedSinceProgress < progressEveryEvents && time.Since(p.lastProgress) < progressEveryDuration {
+		return nil
+	}
+	if err := emitProgress(ctx, sourceID, cur, out); err != nil {
+		return err
+	}
+	p.emittedSinceProgress = 0
+	p.lastProgress = time.Now()
+	return nil
 }
 
 // fileCursor returns the FileCursor for rel, or a zero cursor when absent.
@@ -124,158 +148,173 @@ func reportLegacy(cur Cursor, legacy []string, onError func(error)) Cursor {
 // leaves the turn open. resolvedRoot is the symlink-resolved sessions root,
 // threaded into the containment open.
 func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID string, start FileCursor, out chan<- canonical.Event, onError func(error)) (FileCursor, int, error) {
-	// Containment guard on EVERY rollout open (security.md §6): a *.jsonl symlink
-	// planted in a watched shard dir after Tail starts would otherwise be opened.
-	// The resolved path is containment-checked before it is opened, and the
-	// RESOLVED path is what gets opened (not the original symlink). The window
-	// between the check and the open is an accepted limitation for this localhost,
-	// read-only tool (no O_NOFOLLOW hardening this round; F9). A refused path
-	// surfaces a SourceError (the caller logs the returned error) and is skipped.
-	resolvedAbs, ok, cerr := withinResolvedRoot(resolvedRoot, r.abs)
-	if cerr != nil {
-		return start, 0, fmt.Errorf("codex: cannot resolve %s for containment; skipping: %w", r.abs, cerr)
-	} else if !ok {
-		return start, 0, fmt.Errorf("codex: %s resolves outside the sessions root; skipping (symlink escape)", r.rel)
-	}
-	f, err := os.Open(resolvedAbs) // #nosec G304 -- opening the containment-checked RESOLVED path (withinResolvedRoot) from a filtered scan under the configured read-only sessions root
+	opened, err := openRolloutForRead(resolvedRoot, r)
 	if err != nil {
-		return start, 0, fmt.Errorf("open %s: %w", r.abs, err)
+		return start, 0, err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = opened.file.Close() }()
 
-	info, err := f.Stat()
+	cur := resetTruncatedRolloutCursor(r, opened.size, start, onError)
+	hasMeta, err := requireFirstSessionMeta(opened.file, r, opened.size, onError)
 	if err != nil {
-		return start, 0, fmt.Errorf("stat %s: %w", r.abs, err)
-	}
-	size := info.Size()
-	mtimeUs := info.ModTime().UnixMicro()
-	cur := start
-
-	// Truncation defense (spec §"Cursor"): a shrunken file is re-scanned from 0;
-	// SQL-layer idempotent upserts absorb any re-emitted rows. Codex never
-	// truncates, so this means a manual operator delete + recreate.
-	if cur.Size > 0 && size < cur.Size {
-		onError(fmt.Errorf("rollout %s shrank (size=%d, cursor.size=%d); rescanning from 0", r.rel, size, cur.Size))
-		cur = FileCursor{}
-	}
-
-	// Rule #24: require a session_meta on the file's first parseable line. Codex
-	// always writes session_meta first (recorder.rs), so a first record that is
-	// NOT session_meta means the file is corrupt / a pre-write crash. Skip it
-	// with a SourceError and hold the offset at 0 so a later append retries. The
-	// probe reads from absolute offset 0 (independent of the resume offset) since
-	// session_meta is line 1 and may already be below the cursor on a resume.
-	hasMeta, probeErr := firstRecordIsSessionMeta(f, size)
-	if probeErr != nil {
-		return start, 0, fmt.Errorf("probe %s: %w", r.rel, probeErr)
+		return start, 0, err
 	}
 	if !hasMeta {
-		onError(fmt.Errorf("rollout %s has no session_meta on its first line; skipping (rule #24, offset held at 0)", r.rel))
-		// Hold offset at 0; do not record size so a later append re-probes.
 		return start, 0, nil
 	}
-	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
-		return start, 0, fmt.Errorf("seek %s: %w", r.rel, serr)
-	}
 
-	emitFrom := cur.Offset
-	mapper := newFileMapper(mapperConfig{
-		sourceID: sourceID,
-		absPath:  r.abs,
-		// root is the already-symlink-resolved sessions root this file was
-		// opened under (containment-checked above); the mapper uses it to build
-		// containment-verified PayloadRef file:// URIs without re-resolving the
-		// root per ref (security.md §6).
-		root:     resolvedRoot,
-		nativeID: nativeIDForRollout(r),
-	})
+	mapper := newRolloutMapper(resolvedRoot, sourceID, r)
 	dedup := newUnknownDedup()
-
-	// Even when the file is fully consumed (offset >= size) we replay from offset
-	// 0 with the emit-gate set to size (emit NOTHING) so the per-file turn/op
-	// inference counters are rebuilt deterministically — codex has no native
-	// turn/op numbers, so a resume produces the SAME Seqs only by replaying the
-	// chain from the start (acceptance #6). emitFrom is clamped to <= size.
-	if emitFrom > size {
-		emitFrom = size
-	}
-
-	res, perr := streamLines(ctx, f, emitFrom, r.rel, mapper, dedup, out, onError)
+	res, perr := streamLines(ctx, opened.file, clampedEmitFrom(cur.Offset, opened.size), r.rel, mapper, dedup, out, onError)
 	if perr != nil {
-		// Record the offset reached even on cancellation so a follow-up resumes
-		// from completed work (only fully-consumed lines advance the offset).
 		cur.Offset = res.advanced
 		return cur, res.emitted, perr
 	}
+	cur = updateCursorAfterStream(cur, opened, mapper, res)
+	emittedContent := res.emitted > 0
+	return finalizeRolloutAtEOF(ctx, opened, cur, mapper, res, emittedContent, out)
+}
+
+type openedRollout struct {
+	file    *os.File
+	info    os.FileInfo
+	size    int64
+	mtimeUs int64
+}
+
+func openRolloutForRead(resolvedRoot string, r rollout) (*openedRollout, error) {
+	resolvedAbs, ok, err := withinResolvedRoot(resolvedRoot, r.abs)
+	if err != nil {
+		return nil, fmt.Errorf("codex: cannot resolve %s for containment; skipping: %w", r.abs, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("codex: %s resolves outside the sessions root; skipping (symlink escape)", r.rel)
+	}
+	f, err := os.Open(resolvedAbs) // #nosec G304 -- opening the containment-checked resolved path from a filtered scan under the configured read-only sessions root
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", r.abs, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("stat %s: %w", r.abs, err)
+	}
+	return &openedRollout{file: f, info: info, size: info.Size(), mtimeUs: info.ModTime().UnixMicro()}, nil
+}
+
+func resetTruncatedRolloutCursor(r rollout, size int64, cur FileCursor, onError func(error)) FileCursor {
+	if cur.Size > 0 && size < cur.Size {
+		onError(fmt.Errorf("rollout %s shrank (size=%d, cursor.size=%d); rescanning from 0", r.rel, size, cur.Size))
+		return FileCursor{}
+	}
+	return cur
+}
+
+func requireFirstSessionMeta(f *os.File, r rollout, size int64, onError func(error)) (bool, error) {
+	hasMeta, err := firstRecordIsSessionMeta(f, size)
+	if err != nil {
+		return false, fmt.Errorf("probe %s: %w", r.rel, err)
+	}
+	if !hasMeta {
+		onError(fmt.Errorf("rollout %s has no session_meta on its first line; skipping (rule #24, offset held at 0)", r.rel))
+		return false, nil
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("seek %s: %w", r.rel, err)
+	}
+	return true, nil
+}
+
+func newRolloutMapper(resolvedRoot, sourceID string, r rollout) *fileMapper {
+	return newFileMapper(mapperConfig{
+		sourceID: sourceID,
+		absPath:  r.abs,
+		root:     resolvedRoot,
+		nativeID: nativeIDForRollout(r),
+	})
+}
+
+func clampedEmitFrom(offset, size int64) int64 {
+	if offset > size {
+		return size
+	}
+	return offset
+}
+
+func updateCursorAfterStream(cur FileCursor, opened *openedRollout, mapper *fileMapper, res streamResult) FileCursor {
 	cur.Offset = res.advanced
-	cur.Size = size
-	cur.MtimeUs = mtimeUs
+	cur.Size = opened.size
+	cur.MtimeUs = opened.mtimeUs
 	if mapper.lastTsUs > 0 {
 		cur.LastTsUs = mapper.lastTsUs
 	}
-	// emittedContent records whether THIS pass surfaced any new canonical event from
-	// records at/after the resume offset, captured before the EOF-finalize block adds
-	// its own events to res.emitted (I2 metadata-append suppression below).
-	emittedContent := res.emitted > 0
+	return cur
+}
 
-	// EOF-finalize (rule #23, spec edge #3, F1): when the file is FULLY read, ask
-	// the mapper to finalize a hanging open turn. The mapper owns the open-turn
-	// decision and splits on format + staleness (mapper_finalize.go):
-	//   - OLD-format open turn (turn_context-only): closed COMPLETED at EOF
-	//     regardless of staleness (spec edge #3 "close at EOF"); no
-	//     SessionFinalized (SOW C#3).
-	//   - NEW-format open turn: closed failed/incomplete + SessionFinalized ONLY
-	//     when the mtime is stale ≥ 1 h (rule #23); a fresh file leaves it open.
-	//   - clean end / no open turn: nothing (stays running, SOW C#3).
-	// This is called UNCONDITIONALLY at full-read EOF (not only when stale) and
-	// passed the stale bool, so the OLD-format completed-close fires on fresh files
-	// too (F1). The synthetic end timestamp is the file mtime in micros.
-	//
-	// H2: the EOF-finalize is suppressed when this exact size was already finalized
-	// on a prior pass (cur.EOFFinalizedSize == size). The mapper's eofFinalized
-	// guard is per-instance and the replay-from-0 rebuilds a fresh mapper each scan,
-	// so without a DURABLE cursor marker an unchanged rescan/restart would re-fire
-	// the EOF TurnFinalized (and the stale SessionFinalized) every time.
-	//
-	// I2: a metadata-only append (codex appends a bare session_meta per
-	// recorder.rs:1615) GROWS the file past the marker yet carries NO new turn
-	// content, so the size-equality check alone (H2) would let finalizeAtEOF re-fire
-	// the OLD-format turn's TurnFinalized (and re-date its close — see lastContentTsUs).
-	// We therefore ALSO suppress when the file grew past the marker but this pass
-	// emitted no new content (emittedContent == false). A genuine append (a new
-	// turn_context / task_started — always emitting at least a TurnStarted) sets
-	// emittedContent and re-finalizes normally.
-	fullyRead := res.advanced >= size
-	grewWithoutContent := cur.EOFFinalizedSize > 0 && size > cur.EOFFinalizedSize && !emittedContent
-	alreadyFinalized := cur.EOFFinalizedSize > 0 && cur.EOFFinalizedSize == size
-	switch {
-	case fullyRead && (alreadyFinalized || grewWithoutContent):
-		// Already EOF-finalized at this-or-a-prior size. Advance the marker to the
-		// current size so a metadata-only growth that we just suppressed does not look
-		// "grown" again on the next rescan (the marker tracks the latest fully-read,
-		// content-free size). A same-size rescan leaves the marker unchanged.
-		if grewWithoutContent {
-			cur.EOFFinalizedSize = size
+type eofFinalizeMode uint8
+
+const (
+	eofFinalizeNone eofFinalizeMode = iota
+	eofFinalizeSuppress
+	eofFinalizeEmit
+)
+
+func finalizeRolloutAtEOF(ctx context.Context, opened *openedRollout, cur FileCursor, mapper *fileMapper, res streamResult, emittedContent bool, out chan<- canonical.Event) (FileCursor, int, error) {
+	switch eofMode(cur, opened.size, res.advanced, emittedContent) {
+	case eofFinalizeNone:
+		return cur, res.emitted, nil
+	case eofFinalizeSuppress:
+		return advanceSuppressedEOFMarker(cur, opened.size, emittedContent), res.emitted, nil
+	default:
+		emitted, err := emitEOFFinalizeEvents(ctx, opened, mapper, out)
+		res.emitted += emitted
+		if err != nil {
+			return cur, res.emitted, err
 		}
-	case fullyRead:
-		stale := time.Since(info.ModTime()) >= staleAfter
-		for _, ev := range mapper.finalizeAtEOF(stale, mtimeUs) {
-			select {
-			case <-ctx.Done():
-				return cur, res.emitted, ctx.Err()
-			case out <- ev:
-				res.emitted++
-			}
-		}
-		// Persist the marker only when the mapper made a terminal decision (it set
-		// its eofFinalized guard). A FRESH new-format file with a still-running turn
-		// emits nothing and leaves the guard false, so a later stale sweep can still
-		// finalize it; the marker stays unset until then.
 		if mapper.eofFinalized {
-			cur.EOFFinalizedSize = size
+			cur.EOFFinalizedSize = opened.size
+		}
+		return cur, res.emitted, nil
+	}
+}
+
+func eofMode(cur FileCursor, size, advanced int64, emittedContent bool) eofFinalizeMode {
+	if advanced < size {
+		return eofFinalizeNone
+	}
+	if eofAlreadyFinalized(cur, size) || eofGrewWithoutContent(cur, size, emittedContent) {
+		return eofFinalizeSuppress
+	}
+	return eofFinalizeEmit
+}
+
+func eofAlreadyFinalized(cur FileCursor, size int64) bool {
+	return cur.EOFFinalizedSize > 0 && cur.EOFFinalizedSize == size
+}
+
+func eofGrewWithoutContent(cur FileCursor, size int64, emittedContent bool) bool {
+	return cur.EOFFinalizedSize > 0 && size > cur.EOFFinalizedSize && !emittedContent
+}
+
+func advanceSuppressedEOFMarker(cur FileCursor, size int64, emittedContent bool) FileCursor {
+	if eofGrewWithoutContent(cur, size, emittedContent) {
+		cur.EOFFinalizedSize = size
+	}
+	return cur
+}
+
+func emitEOFFinalizeEvents(ctx context.Context, opened *openedRollout, mapper *fileMapper, out chan<- canonical.Event) (int, error) {
+	stale := time.Since(opened.info.ModTime()) >= staleAfter
+	emitted := 0
+	for _, ev := range mapper.finalizeAtEOF(stale, opened.mtimeUs) {
+		select {
+		case <-ctx.Done():
+			return emitted, ctx.Err()
+		case out <- ev:
+			emitted++
 		}
 	}
-	return cur, res.emitted, nil
+	return emitted, nil
 }
 
 // firstRecordIsSessionMeta reports whether the file's first non-blank,
@@ -283,9 +322,10 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 // offset 0 (the caller seeks back afterwards). A blank or known-skip line is
 // passed over; the first line that parses to a concrete record decides. A file
 // with no parseable record at all (only blanks, or a single oversized line, or
-// nothing but parse errors) returns false so an empty/corrupt file is treated
-// as "no session_meta" and held at offset 0. size bounds the oversized-line
-// probe so a hostile first line cannot force an unbounded read.
+// nothing but parse errors) returns false so an empty/corrupt file is treated as
+// "no session_meta" and held at offset 0. size only short-circuits empty files;
+// readOneLine bounds each allocation while draining oversized lines to newline or
+// EOF, so a hostile first line cannot force unbounded memory growth.
 func firstRecordIsSessionMeta(f *os.File, size int64) (bool, error) {
 	if size == 0 {
 		return false, nil
@@ -293,35 +333,54 @@ func firstRecordIsSessionMeta(f *os.File, size int64) (bool, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
-	br := bufio.NewReaderSize(f, streamReaderSize)
+	return scanFirstRecordForSessionMeta(bufio.NewReaderSize(f, streamReaderSize))
+}
+
+func scanFirstRecordForSessionMeta(br *bufio.Reader) (bool, error) {
 	for {
-		line, _, err := readOneLine(br)
+		line, err := nextProbeLine(br)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return false, nil
-			}
-			if errors.Is(err, errLineTooLong) {
-				// An oversized first line is not a session_meta the adapter can use;
-				// keep probing past it for a later session_meta (none expected, but
-				// be forgiving rather than abort the whole file).
-				continue
-			}
 			return false, err
 		}
-		if len(line) == 0 {
+		if line == nil {
 			return false, nil
 		}
-		rec, skip, perr := parseLine(line[:len(line)-1])
-		if perr != nil {
-			// A malformed first line is not a usable session_meta; the file is
-			// corrupt for rule-#24 purposes.
-			return false, nil //nolint:nilerr // intentional: a malformed first line means "not a session_meta" (false), not a fatal scan error — rule #24 treats it as a non-rollout
+		isMeta, decided := probeLineSessionMeta(line)
+		if decided {
+			return isMeta, nil
 		}
-		if skip {
-			continue
-		}
-		return rec.Type() == recSessionMeta, nil
 	}
+}
+
+func nextProbeLine(br *bufio.Reader) ([]byte, error) {
+	for {
+		line, _, err := readOneLine(br)
+		if err == nil {
+			if len(line) == 0 {
+				return nil, nil
+			}
+			return line, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		if !errors.Is(err, errLineTooLong) {
+			return nil, err
+		}
+	}
+}
+
+func probeLineSessionMeta(line []byte) (bool, bool) {
+	rec, skip, err := parseLine(line[:len(line)-1])
+	if err != nil {
+		// Rule #24 treats a malformed first concrete line as "not session_meta"
+		// so the scan holds offset 0 and a later append can repair the file.
+		return false, true
+	}
+	if skip {
+		return false, false
+	}
+	return rec.Type() == recSessionMeta, true
 }
 
 // emitProgress publishes a SourceProgressEvent with the current cursor. Mirrors
