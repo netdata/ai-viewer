@@ -141,12 +141,27 @@ schema problem via `/api/health`).
 
 **The opencode source location is a filesystem path (SOW-0005 round-3 P2-4).** Both
 auto-discovery and `--source opencode:<path>` resolve to a real file path that
-`startSource` validates with `os.Stat` before the adapter opens it. The adapter's
-`buildReadOnlyDSN` (`conn.go`) additionally accepts pre-built `file:` URIs and the
-in-memory `:memory:` form, but those DSN shapes are for the adapter's
-**programmatic/test use only** — they are NOT valid `--source` locations because
-`os.Stat` cannot stat a `file:`/`:memory:` DSN string. Operators always pass a
-filesystem path; the DSN forms never appear on the CLI.
+`startSource` validates with `os.Stat` before the adapter opens it. For explicit
+CLI opencode sources, `startSource` then normalizes a relative location to an
+absolute filesystem path before constructing the adapter. This preserves literal
+relative filenames such as `file:opencode.db`: after `os.Stat` proves that the
+file exists, the adapter receives `/abs/.../file:opencode.db`, not the SQLite URI
+`file:opencode.db`. Source IDs and log attributes keep the operator-supplied
+location string; only the adapter-construction path is normalized. The ingester
+also passes that canonical source ID through `AdapterOptions.SourceID`, so
+emitted event attribution, cursor persistence, health reporting, and the
+`sources.id` row all stay on the operator-supplied identity even when the
+adapter opens the normalized absolute path. The Opencode cursor also records a
+hash of the physical adapter open target and resets old/mismatched watermarks at
+this boundary, so progress persisted before the normalization fix cannot be
+reused against a different SQLite target. Non-opencode sources keep their
+existing location behavior.
+
+The adapter's `buildReadOnlyDSN` (`conn.go`) additionally accepts pre-built
+`file:` URIs and the in-memory `:memory:` form, but those DSN shapes are for the
+adapter's **programmatic/test use only** — they are NOT valid `--source` locations
+because `os.Stat` cannot stat a true `file:`/`:memory:` DSN string. Operators
+always pass a filesystem path; the DSN forms never appear on the CLI.
 
 The opencode database path resolution order (`opencodeDBPath`, SOW-0005 P2.4) is:
 

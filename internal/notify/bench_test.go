@@ -14,11 +14,17 @@ import (
 // fans out as N Deliver calls — this benchmark is that hot loop.
 //
 // The hub is seeded with `subs` attached subscriptions whose channels
-// are drained by a background consumer per subscription, so Deliver
-// always takes the fast non-blocking enqueue path (never the
-// drop-oldest branch). That isolates the steady-state channel-send +
-// replay-ring-append + id-mint cost that dominates fan-out, rather than
-// measuring backpressure (covered by TestHub_BackpressureDropsOldest).
+// are sized for the current measured run, so Deliver always takes the
+// fast non-blocking enqueue path (never the drop-oldest branch). That
+// isolates the steady-state channel-send + replay-ring-append + id-mint
+// cost that dominates fan-out, rather than measuring backpressure
+// (covered by TestHub_BackpressureDropsOldest).
+//
+// Do NOT add helper drainer goroutines here. The production poller
+// delivers serially, and helper-goroutine scheduling noise can dominate
+// this microbenchmark under normal desktop/VM load. Deterministic buffer
+// sizing keeps the timed environment focused on the serial Deliver hot
+// path.
 //
 // Each measured iteration delivers ONE event to ONE subscription
 // (round-robin across the `subs` subscriptions), so ns/op is the
@@ -29,43 +35,27 @@ import (
 func BenchmarkHubFanout(b *testing.B) {
 	const subs = 1000
 
-	// Large channel cap + replay buffer so a 1000-deep fan-out drains
-	// without tripping drop-oldest, and long retention so no timer fires
-	// mid-benchmark. The background drainers keep the channels empty.
+	// Size each subscription channel for the number of round-robin deliveries it
+	// will receive in this run. This keeps the benchmark on the fast enqueue path
+	// without background drainers in the timed environment.
+	channelCap := channelCapForRoundRobinDeliveries(b.N, subs)
 	h := New(Options{
-		ChannelCap:   4096,
+		ChannelCap:   channelCap,
 		ReplayBuffer: 256,
 		Retention:    time.Hour,
 	})
 	b.Cleanup(h.Shutdown)
 
 	ids := make([]string, subs)
-	stop := make(chan struct{})
 	for i := 0; i < subs; i++ {
 		id := fmt.Sprintf("sub-%04d", i)
 		ids[i] = id
 		h.Add(id)
-		ch, _, _, st := h.Attach(id, "")
+		_, _, _, st := h.Attach(id, "")
 		if st != AttachOK {
 			b.Fatalf("attach %s: status=%v, want AttachOK", id, st)
 		}
-		// One drainer goroutine per subscription keeps Deliver on the
-		// fast path. It exits when stop is closed (the channel itself is
-		// closed by Shutdown via b.Cleanup, which also unblocks the range).
-		go func(c <-chan Event) {
-			for {
-				select {
-				case <-stop:
-					return
-				case _, ok := <-c:
-					if !ok {
-						return
-					}
-				}
-			}
-		}(ch)
 	}
-	b.Cleanup(func() { close(stop) })
 
 	ev := Event{Kind: "session_changed", SessionID: "x", RootSessionID: "x", TS: 1}
 
@@ -85,4 +75,11 @@ func BenchmarkHubFanout(b *testing.B) {
 	}
 	b.ReportMetric(float64(delivered)/wallSec, "deliveries/sec")
 	b.ReportMetric(float64(subs), "subscriptions")
+}
+
+func channelCapForRoundRobinDeliveries(deliveries, subscriptions int) int {
+	if deliveries <= 0 || subscriptions <= 0 {
+		return 1
+	}
+	return (deliveries + subscriptions - 1) / subscriptions
 }

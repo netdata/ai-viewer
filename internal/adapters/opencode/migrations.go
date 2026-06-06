@@ -45,41 +45,56 @@ var errNoMigrationsTable = errors.New("opencode: __drizzle_migrations table not 
 // column is nullable in opencode's schema) so a stray empty name never pollutes
 // the hash or masquerades as the latest migration.
 func readMigrations(ctx context.Context, db *sql.DB) (names []string, latest string, err error) {
-	present, presentErr := migrationsTablePresent(ctx, db)
-	if presentErr != nil {
-		// A genuine query error (corruption, ctx-cancel, closed DB) is NOT "table
-		// missing" — propagate it so the caller surfaces the failure rather than
-		// silently degrading to no-migrations (SOW-0005 round-2 P2-C).
-		return nil, "", presentErr
+	if err := requireMigrationsTable(ctx, db); err != nil {
+		return nil, "", err
+	}
+	names, err = queryMigrationNames(ctx, db)
+	if err != nil {
+		return nil, "", err
+	}
+	return names, latestMigrationName(names), nil
+}
+
+func requireMigrationsTable(ctx context.Context, db *sql.DB) error {
+	present, err := migrationsTablePresent(ctx, db)
+	if err != nil {
+		return err
 	}
 	if !present {
-		return nil, "", errNoMigrationsTable
+		return errNoMigrationsTable
 	}
-	// id is the Drizzle auto-increment applied-order key; ORDER BY id ASC gives
-	// application order. Fixed identifiers only (migrationsTable), never input.
+	return nil
+}
+
+func queryMigrationNames(ctx context.Context, db *sql.DB) ([]string, error) {
 	q := `SELECT name FROM ` + quoteIdent(migrationsTable) + ` ORDER BY id ASC` // #nosec G202 -- migrationsTable is a fixed package constant via quoteIdent, never user input
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
-		return nil, "", fmt.Errorf("opencode: read %s: %w", migrationsTable, err)
+		return nil, fmt.Errorf("opencode: read %s: %w", migrationsTable, err)
 	}
 	defer func() { _ = rows.Close() }()
 
+	var names []string
 	for rows.Next() {
 		var name sql.NullString
 		if scanErr := rows.Scan(&name); scanErr != nil {
-			return nil, "", fmt.Errorf("opencode: scan %s.name: %w", migrationsTable, scanErr)
+			return nil, fmt.Errorf("opencode: scan %s.name: %w", migrationsTable, scanErr)
 		}
 		if name.Valid && name.String != "" {
 			names = append(names, name.String)
 		}
 	}
 	if rErr := rows.Err(); rErr != nil {
-		return nil, "", fmt.Errorf("opencode: iterate %s: %w", migrationsTable, rErr)
+		return nil, fmt.Errorf("opencode: iterate %s: %w", migrationsTable, rErr)
 	}
-	if len(names) > 0 {
-		latest = names[len(names)-1]
+	return names, nil
+}
+
+func latestMigrationName(names []string) string {
+	if len(names) == 0 {
+		return ""
 	}
-	return names, latest, nil
+	return names[len(names)-1]
 }
 
 // migrationsTablePresent reports whether __drizzle_migrations exists, via

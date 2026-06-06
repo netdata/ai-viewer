@@ -69,9 +69,13 @@ func New(location string, opts canonical.AdapterOptions) (*Adapter, error) {
 	if onError == nil {
 		onError = func(error) {}
 	}
+	sourceID := opts.SourceID
+	if sourceID == "" {
+		sourceID = sourceIDPrefix + location
+	}
 	return &Adapter{
 		dbPath:   location,
-		sourceID: sourceIDPrefix + location,
+		sourceID: sourceID,
 		logger:   logger,
 		onError:  onError,
 	}, nil
@@ -191,7 +195,7 @@ func (a *Adapter) snapshotCursor(ctx context.Context) (Cursor, error) {
 		return Cursor{}, err
 	}
 
-	cur := newCursor()
+	cur := newCursor().withTargetHash(targetHashForDBPath(a.dbPath))
 	for _, table := range trackedTables {
 		mid, mErr := maxID(ctx, db, table)
 		if mErr != nil {

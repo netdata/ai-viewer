@@ -99,44 +99,55 @@ func (m *sessionMapper) cancelOpenLLMOp(tc *turnContext, nextStartUs int64) cano
 // #5) is a no-op rather than a crash.
 func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []canonical.Event {
 	if tc.llmOpSeq == 0 {
-		// Orphan step-finish (no matching step-start). Forward-compat: nothing to
-		// close. The step's tokens were already folded into stepDeltas, so they
-		// are not lost for the turn rollup path; the op simply does not exist.
-		tc.stepCumIdx++
+		advanceOrphanStepFinish(tc)
 		return nil
 	}
 	delta := tc.nextStepDelta()
+	endUs := m.stepFinishEndUs(tc, p)
+	tc.llmOpOpen = false
+
+	out := make([]canonical.Event, 0, 2)
+	if ev, ok := m.llmPatchReemit(tc); ok {
+		out = append(out, ev)
+	}
+	out = append(out, m.llmFinalizeEvent(tc, endUs, delta, data))
+	tc.llmExtras = map[string]any{}
+	return out
+}
+
+func advanceOrphanStepFinish(tc *turnContext) {
+	tc.stepCumIdx++
+}
+
+func (m *sessionMapper) stepFinishEndUs(tc *turnContext, p partRow) int64 {
 	endUs := m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (step-finish)")
 	if endUs < tc.llmStartUs {
-		endUs = tc.llmStartUs
+		return tc.llmStartUs
 	}
-	// The op is now closed; a new step-start opens a fresh one. Clearing this
-	// before any cancelled-finalize check means a normal close is never
-	// force-cancelled (Edge #5 fires only when the prior op was still open).
-	tc.llmOpOpen = false
-	out := make([]canonical.Event, 0, 2)
-	// Re-emit the LLM OpStarted carrying any accumulated patch extras so they
-	// reach ops.extras_json before the finalize (idempotent UPDATE on (turn,seq)).
-	// The re-emit carries the FULL op identity (Name/Model/Provider/ProviderAlias),
-	// not just Extras: the ingest writer updates ops.name UNCONDITIONALLY (model/
-	// provider are COALESCE-protected, name is NOT — writer.go:587), so an
-	// identity-less re-emit would BLANK ops.name (SOW-0005 round-2 P2-D).
-	if len(tc.llmExtras) > 0 {
-		out = append(out, canonical.OpStartedEvent{
-			EventBase:       m.nextBase(tc.llmStartUs),
-			SessionNativeID: m.nativeID(),
-			TurnSeq:         tc.turnSeq,
-			Seq:             tc.llmOpSeq,
-			ParentOpSeq:     -1,
-			Kind:            canonical.OpLLM,
-			Name:            tc.llmName,
-			Model:           tc.llmModel,
-			Provider:        tc.llmProvider,
-			ProviderAlias:   tc.llmProviderAlias,
-			Extras:          tc.llmExtras,
-		})
+	return endUs
+}
+
+func (m *sessionMapper) llmPatchReemit(tc *turnContext) (canonical.OpStartedEvent, bool) {
+	if len(tc.llmExtras) == 0 {
+		return canonical.OpStartedEvent{}, false
 	}
-	out = append(out, canonical.OpFinalizedEvent{
+	return canonical.OpStartedEvent{
+		EventBase:       m.nextBase(tc.llmStartUs),
+		SessionNativeID: m.nativeID(),
+		TurnSeq:         tc.turnSeq,
+		Seq:             tc.llmOpSeq,
+		ParentOpSeq:     -1,
+		Kind:            canonical.OpLLM,
+		Name:            tc.llmName,
+		Model:           tc.llmModel,
+		Provider:        tc.llmProvider,
+		ProviderAlias:   tc.llmProviderAlias,
+		Extras:          tc.llmExtras,
+	}, true
+}
+
+func (m *sessionMapper) llmFinalizeEvent(tc *turnContext, endUs int64, delta tokenCounts, data partData) canonical.OpFinalizedEvent {
+	return canonical.OpFinalizedEvent{
 		EventBase:        m.nextBase(endUs),
 		SessionNativeID:  m.nativeID(),
 		TurnSeq:          tc.turnSeq,
@@ -155,14 +166,7 @@ func (m *sessionMapper) closeLLMOp(tc *turnContext, p partRow, data partData) []
 		// a WARN on overflow so a crafted/corrupt pair cannot wrap to a negative
 		// ctx_used (SOW-0005 round-3 P2-1).
 		CtxUsed: addClampWarn(data.Tokens.Input, data.Tokens.Cache.Read, "ctx_used (tokens.input+tokens.cache.read)", m.mwarn),
-	})
-	// The LLM op is now closed; subsequent reasoning/tool parts (until the next
-	// step-start) have no parent step. They still attach to the just-closed op's
-	// seq as ParentOpSeq so the topology stays under the LLM call that produced
-	// them (matches the spec's "ParentOpSeq = the step-start's seq"); a new
-	// step-start re-opens a fresh op.
-	tc.llmExtras = map[string]any{}
-	return out
+	}
 }
 
 // nextStepDelta returns the per-step token delta for the next step-finish in
@@ -256,35 +260,45 @@ func reasoningKind(raw []byte) string {
 // topology parent the sub-agent attaches under.
 func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []canonical.Event {
 	out := make([]canonical.Event, 0, 4)
-
-	// task→session op (AC#4): emit the session op first so it is the topology
-	// parent. The tool op follows so the turn still records the task invocation.
-	childID, metaMalformed := taskChildSessionID(data)
-	if metaMalformed {
-		// Present-but-unparseable task metadata: a possible sub-agent linkage was
-		// dropped. Surface it (SOW-0005 P2.6) rather than silently losing the edge;
-		// the tool op below is still emitted so the task invocation is recorded.
-		m.mwarn(fmt.Errorf("opencode: malformed task metadata (table=part id=%s field=state.metadata); sub-agent linkage omitted", p.ID))
-	}
-	if childID != "" {
-		tc.opSeq++
-		sessSeq := tc.opSeq
-		out = append(out, canonical.OpStartedEvent{
-			EventBase:            m.nextBase(m.toolStartUs(data, p)),
-			SessionNativeID:      m.nativeID(),
-			TurnSeq:              tc.turnSeq,
-			Seq:                  sessSeq,
-			ParentOpSeq:          tc.parentSeq(),
-			Kind:                 canonical.OpSession,
-			ChildSessionNativeID: childID,
-		})
-	}
+	out = m.appendTaskSessionOp(out, tc, p, data)
 
 	tc.opSeq++
 	seq := tc.opSeq
-	name, namespace := toolNameNamespace(data.Tool)
 	startUs := m.toolStartUs(data, p)
-	out = append(out, canonical.OpStartedEvent{
+	out = append(out, m.toolStartedEvent(tc, seq, startUs, data))
+	status, endPtr, errMsg, hasOutput := toolTerminal(data)
+	if hasOutput {
+		out = append(out, m.payloadRef(m.nextBase(startUs), tc.turnSeq, seq, "tool_response", "json", p.ID, "state.output", -1))
+	}
+	if ev, ok := m.toolFinalizedEvent(tc, data, seq, startUs, status, endPtr, errMsg); ok {
+		out = append(out, ev)
+	}
+	return out
+}
+
+func (m *sessionMapper) appendTaskSessionOp(out []canonical.Event, tc *turnContext, p partRow, data partData) []canonical.Event {
+	childID, metaMalformed := taskChildSessionID(data)
+	if metaMalformed {
+		m.mwarn(fmt.Errorf("opencode: malformed task metadata (table=part id=%s field=state.metadata); sub-agent linkage omitted", p.ID))
+	}
+	if childID == "" {
+		return out
+	}
+	tc.opSeq++
+	return append(out, canonical.OpStartedEvent{
+		EventBase:            m.nextBase(m.toolStartUs(data, p)),
+		SessionNativeID:      m.nativeID(),
+		TurnSeq:              tc.turnSeq,
+		Seq:                  tc.opSeq,
+		ParentOpSeq:          tc.parentSeq(),
+		Kind:                 canonical.OpSession,
+		ChildSessionNativeID: childID,
+	})
+}
+
+func (m *sessionMapper) toolStartedEvent(tc *turnContext, seq int, startUs int64, data partData) canonical.OpStartedEvent {
+	name, namespace := toolNameNamespace(data.Tool)
+	return canonical.OpStartedEvent{
 		EventBase:       m.nextBase(startUs),
 		SessionNativeID: m.nativeID(),
 		TurnSeq:         tc.turnSeq,
@@ -293,39 +307,36 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 		Kind:            canonical.OpTool,
 		Name:            name,
 		ToolNamespace:   namespace,
-	})
+	}
+}
 
-	status, endPtr, errMsg, hasOutput := toolTerminal(data)
-	if hasOutput {
-		out = append(out, m.payloadRef(m.nextBase(startUs), tc.turnSeq, seq, "tool_response", "json", p.ID, "state.output", -1))
+func (m *sessionMapper) toolFinalizedEvent(tc *turnContext, data partData, seq int, startUs int64, status string, endPtr *int64, errMsg string) (canonical.OpFinalizedEvent, bool) {
+	if endPtr == nil {
+		return canonical.OpFinalizedEvent{}, false
 	}
-	if endPtr != nil {
-		endUs := m.msToMicrosWarn(*endPtr, "part.data.state.time.end (tool)")
-		if endUs < startUs {
-			endUs = startUs
-		}
-		// A failed tool op carries an ErrorClass label alongside the opencode detail
-		// (state.error → ErrorMessage). opencode's tool error is a bare string with
-		// no class, so the class is the generic defaultErrorClass (SOW-0005 round-2
-		// P1-C). A non-failed status carries neither.
-		var errClass string
-		if status == "failed" {
-			errClass = defaultErrorClass
-		}
-		out = append(out, canonical.OpFinalizedEvent{
-			EventBase:       m.nextBase(endUs),
-			SessionNativeID: m.nativeID(),
-			TurnSeq:         tc.turnSeq,
-			Seq:             seq,
-			Status:          status,
-			ErrorClass:      errClass,
-			ErrorMessage:    errMsg,
-			EndTs:           endUs,
-			BytesIn:         toolBytesIn(data),
-			BytesOut:        toolBytesOut(data),
-		})
+	endUs := m.msToMicrosWarn(*endPtr, "part.data.state.time.end (tool)")
+	if endUs < startUs {
+		endUs = startUs
 	}
-	return out
+	return canonical.OpFinalizedEvent{
+		EventBase:       m.nextBase(endUs),
+		SessionNativeID: m.nativeID(),
+		TurnSeq:         tc.turnSeq,
+		Seq:             seq,
+		Status:          status,
+		ErrorClass:      toolErrorClass(status),
+		ErrorMessage:    errMsg,
+		EndTs:           endUs,
+		BytesIn:         toolBytesIn(data),
+		BytesOut:        toolBytesOut(data),
+	}, true
+}
+
+func toolErrorClass(status string) string {
+	if status == "failed" {
+		return defaultErrorClass
+	}
+	return ""
 }
 
 // The pure tool helpers (toolStartUs, toolTerminal, toolBytesIn/Out,

@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/netdata/ai-viewer/internal/canonical"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -65,7 +67,7 @@ func rwDSNFor(path string) string {
 // its path plus an open read-write *sql.DB the caller uses to insert rows. The
 // caller MUST close the rw handle before opening the path read-only so the WAL
 // is flushed.
-func newEmptyDB(t *testing.T, dir, name string, extra ...string) (string, *sql.DB) {
+func newEmptyDB(t testing.TB, dir, name string, extra ...string) (string, *sql.DB) {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	rw, err := sql.Open(driverName, rwDSNFor(path))
@@ -82,7 +84,7 @@ func newEmptyDB(t *testing.T, dir, name string, extra ...string) (string, *sql.D
 }
 
 // insertSession inserts a session row with the given id/parent/times.
-func insertSession(t *testing.T, rw *sql.DB, id, parent string, createdMs, updatedMs, archivedMs int64) {
+func insertSession(t testing.TB, rw *sql.DB, id, parent string, createdMs, updatedMs, archivedMs int64) {
 	t.Helper()
 	model, _ := json.Marshal(map[string]any{"id": "the-model", "providerID": "the-alias"})
 	var arch any
@@ -100,7 +102,7 @@ func insertSession(t *testing.T, rw *sql.DB, id, parent string, createdMs, updat
 
 // insertAssistantMessage inserts an assistant message with a JSON body carrying
 // tokens/cost/finish (the mapper reads it). The body is schema-shaped synthetic.
-func insertAssistantMessage(t *testing.T, rw *sql.DB, id, sessionID string, createdMs, updatedMs int64, inTok, outTok int64) {
+func insertAssistantMessage(t testing.TB, rw *sql.DB, id, sessionID string, createdMs, updatedMs int64, inTok, outTok int64) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
 		"role":       "assistant",
@@ -116,7 +118,7 @@ func insertAssistantMessage(t *testing.T, rw *sql.DB, id, sessionID string, crea
 }
 
 // insertMessageRaw inserts a message row with a verbatim data body.
-func insertMessageRaw(t *testing.T, rw *sql.DB, id, sessionID string, createdMs, updatedMs int64, body string) {
+func insertMessageRaw(t testing.TB, rw *sql.DB, id, sessionID string, createdMs, updatedMs int64, body string) {
 	t.Helper()
 	_, err := rw.Exec(
 		`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)`,
@@ -129,7 +131,7 @@ func insertMessageRaw(t *testing.T, rw *sql.DB, id, sessionID string, createdMs,
 // insertPart inserts a part row with a verbatim data body and the given times.
 // sessionID may be "" for the old-schema-without-session_id fixtures (the column
 // is NOT NULL on the current schema, so callers pass a value there).
-func insertPart(t *testing.T, rw *sql.DB, id, messageID, sessionID string, createdMs, updatedMs int64, body string) {
+func insertPart(t testing.TB, rw *sql.DB, id, messageID, sessionID string, createdMs, updatedMs int64, body string) {
 	t.Helper()
 	_, err := rw.Exec(
 		`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)`,
@@ -163,7 +165,7 @@ func textBody(text string) string {
 // writer). The handle uses WAL so the read-only reader sees committed rows. This
 // is the ONLY writable handle pattern the tests use; production never opens
 // opencode.db read-write.
-func openRWAgain(t *testing.T, path string) (*sql.DB, error) {
+func openRWAgain(t testing.TB, path string) (*sql.DB, error) {
 	t.Helper()
 	dsn := "file:" + escapeURIPath(filepath.ToSlash(path)) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	rw, err := sql.Open(driverName, dsn)
@@ -181,7 +183,7 @@ func openRWAgain(t *testing.T, path string) (*sql.DB, error) {
 // openRO reopens a built DB path read-only via the adapter's helper, registering
 // cleanup. It is the ONLY way the tests acquire a connection to the DB under
 // test (the read-only contract).
-func openRO(t *testing.T, path string) *sql.DB {
+func openRO(t testing.TB, path string) *sql.DB {
 	t.Helper()
 	db, err := openReadOnly(context.Background(), path)
 	if err != nil {
@@ -193,7 +195,7 @@ func openRO(t *testing.T, path string) *sql.DB {
 
 // introspect reopens a built DB read-only and introspects its schema, returning
 // both the *sql.DB and the schemaSet (the common preamble of the store tests).
-func introspect(t *testing.T, path string) (*sql.DB, schemaSet) {
+func introspect(t testing.TB, path string) (*sql.DB, schemaSet) {
 	t.Helper()
 	db := openRO(t, path)
 	set, err := introspectAll(context.Background(), db)
@@ -201,6 +203,10 @@ func introspect(t *testing.T, path string) (*sql.DB, schemaSet) {
 		t.Fatalf("introspectAll: %v", err)
 	}
 	return db, set
+}
+
+func testPollRequest(db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan canonical.Event, onError func(error)) pollRequest {
+	return pollRequest{db: db, schema: schema, cur: cur, sourceID: sourceID, st: st, out: out, onError: onError}
 }
 
 // --- query-counting driver ----------------------------------------------------

@@ -266,20 +266,31 @@ func (l sqlCursorLookup) LookupCursor(ctx context.Context, sourceID string) (str
 // re-scan; the spec mandates that the daemon keeps making progress
 // rather than refusing to start.
 func startSource(ctx context.Context, wg *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger) error {
-	factory, ok := adapters.Get(src.format)
+	return startSourceWithFactoryLookup(ctx, wg, ing, lookup, src, logger, adapters.Get)
+}
+
+type adapterFactoryLookup func(format string) (canonical.AdapterFactory, bool)
+
+func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, factoryLookup adapterFactoryLookup) error {
+	factory, ok := factoryLookup(src.format)
 	if !ok {
 		return fmt.Errorf("unknown adapter format %q (registered: %v)", src.format, adapters.Formats())
 	}
 	if _, err := os.Stat(src.location); err != nil {
 		return fmt.Errorf("location %q is not accessible: %w", src.location, err)
 	}
+	adapterLocation, err := adapterConstructionLocation(src)
+	if err != nil {
+		return fmt.Errorf("resolve adapter location for %q: %w", src.location, err)
+	}
 
 	srcLogger := logger.With("source", src.id, "format", src.format, "location", src.location)
 	events := make(chan canonical.Event, adapterEventChanSize)
 
-	adapter, err := factory(src.location, canonical.AdapterOptions{
-		Logger:  srcLogger,
-		OnError: newOnErrorHandler(ctx, src.id, events, srcLogger),
+	adapter, err := factory(adapterLocation, canonical.AdapterOptions{
+		Logger:   srcLogger,
+		SourceID: src.id,
+		OnError:  newOnErrorHandler(ctx, src.id, events, srcLogger),
 	})
 	if err != nil {
 		return fmt.Errorf("construct adapter: %w", err)
@@ -300,6 +311,17 @@ func startSource(ctx context.Context, wg *sync.WaitGroup, ing *ingest.Ingester, 
 
 	srcLogger.Info("ai-viewer-ingest: source started")
 	return nil
+}
+
+func adapterConstructionLocation(src configuredSource) (string, error) {
+	if src.format != "opencode" || filepath.IsAbs(src.location) {
+		return src.location, nil
+	}
+	abs, err := filepath.Abs(src.location)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
 }
 
 // loadSourceCursor reads source_progress.cursor for srcID and decodes it

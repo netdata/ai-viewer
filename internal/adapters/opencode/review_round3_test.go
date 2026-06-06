@@ -70,7 +70,7 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	cur := freshCursor()
 	stCold := newPollState(false) // boundaryReal=false; lastProbe zero ⇒ net immediately due
 	out0 := make(chan canonical.Event, 64)
-	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stCold, out0, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &stCold, out0, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (cold first probe): %v", err)
 	}
 	if got := drainAll(out0); hasSession(got, "ses_b") {
@@ -87,7 +87,7 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	stNet := newPollState(true)
 	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // net due; no WAL
 	outNet := make(chan canonical.Event, 256)
-	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &stNet, outNet, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &stNet, outNet, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (safety-net probe): %v", err)
 	}
 	if got := drainAll(outNet); !hasSession(got, "ses_b") {
@@ -105,7 +105,7 @@ func TestP1_1_BoundaryUpdateReEmitted(t *testing.T) {
 	st2.markProbe(now.Add(-2 * timeUpdatedSafetyNet))
 	st2.markWALEvent(now) // lastWALEvent.After(lastProbe) → gate open via WAL
 	out := make(chan canonical.Event, 256)
-	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st2, out, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st2, out, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (WAL-driven): %v", err)
 	}
 	got := drainAll(out)
@@ -160,7 +160,7 @@ func TestP1_1_CompactingClearsAtBoundaryReSurfacesOnSafetyNet(t *testing.T) {
 	st := newPollState(true)
 	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // net due; no WAL
 	out := make(chan canonical.Event, 256)
-	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (safety-net, compaction cleared at boundary): %v", err)
 	}
 	got := drainAll(out)

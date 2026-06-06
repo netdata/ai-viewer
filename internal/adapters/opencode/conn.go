@@ -125,57 +125,57 @@ func buildReadOnlyDSN(dbPath string) (string, error) {
 		return "", fmt.Errorf("opencode: database path must be non-empty")
 	}
 
-	// Only the URI FORMS (file: / :memory:) carry a `?`-delimited query string;
-	// a BARE filesystem path is treated as OPAQUE (SOW-0005 round-4 P3-2). POSIX
-	// allows '?' in a filename, so splitting a bare path on '?' would misparse a
-	// real file whose name contains '?' — dropping part of the path into a bogus
-	// query. The default opencode path has no '?', but pointing --source
-	// opencode:<path> at such a file must open the LITERAL file. Query splitting is
-	// therefore scoped to the URI forms only; the bare-path branch escapes the
-	// whole dbPath (including any '?') as the file: path.
-	var fileURI, existingQuery string
+	fileURI, existingQuery, err := normalizeSQLiteTarget(dbPath)
+	if err != nil {
+		return "", err
+	}
+	if err := validateSQLiteQuery(dbPath, existingQuery); err != nil {
+		return "", err
+	}
+	return fileURI + "?" + readOnlyQuery().Encode(), nil
+}
+
+func normalizeSQLiteTarget(dbPath string) (fileURI, existingQuery string, err error) {
 	switch {
 	case strings.HasPrefix(dbPath, "file:"):
 		fileURI, existingQuery = splitQuery(dbPath)
 	case isMemoryDSN(dbPath):
 		fileURI, existingQuery = splitQuery(dbPath)
 	default:
-		// Bare filesystem path: opaque. Do NOT split on '?'.
-		abs, err := filepath.Abs(dbPath)
-		if err != nil {
-			return "", fmt.Errorf("opencode: resolve db path %q: %w", dbPath, err)
-		}
-		// SQLite URIs require forward slashes and percent-escaping of the
-		// path. url.PathEscape leaves '/' intact (it escapes only segment
-		// reserved characters) and escapes '?'/'#'/spaces, giving a valid opaque
-		// file: path for a filename containing any of those.
-		uriPath := filepath.ToSlash(abs)
-		if !strings.HasPrefix(uriPath, "/") {
-			uriPath = "/" + uriPath
-		}
-		fileURI = "file:" + escapeURIPath(uriPath)
+		fileURI, err = barePathFileURI(dbPath)
 	}
+	return fileURI, existingQuery, err
+}
 
-	// Parse the caller query only to VALIDATE it (a malformed query is a hard
-	// error) — its contents are then discarded. Building from a fresh url.Values
-	// guarantees no caller _pragma or _txlock can leak through. existingQuery is
-	// empty for a bare path (never split), so this is a no-op there.
+// Bare filesystem paths are opaque: POSIX permits '?' in filenames, so do not
+// split them as DSN queries; percent-escape the whole path into the file URI.
+func barePathFileURI(dbPath string) (string, error) {
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("opencode: resolve db path %q: %w", dbPath, err)
+	}
+	uriPath := filepath.ToSlash(abs)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	return "file:" + escapeURIPath(uriPath), nil
+}
+
+func validateSQLiteQuery(dbPath, existingQuery string) error {
 	if _, err := url.ParseQuery(existingQuery); err != nil {
-		return "", fmt.Errorf("opencode: invalid db DSN query for %q: %w", dbPath, err)
+		return fmt.Errorf("opencode: invalid db DSN query for %q: %w", dbPath, err)
 	}
+	return nil
+}
 
+func readOnlyQuery() url.Values {
 	params := url.Values{}
-	// mode=ro is the OS-level guard; forced regardless of the caller.
 	params.Set("mode", "ro")
-	// _txlock=deferred: a read snapshot taken on first SELECT, never a write
-	// lock. Forced so a caller _txlock=exclusive cannot open a write-path BEGIN.
 	params.Set("_txlock", txlockDeferred)
-	// The ONLY pragmas on the connection are our read-only set (allowlist).
 	for _, p := range readOnlyPragmas {
 		params.Add("_pragma", p)
 	}
-
-	return fileURI + "?" + params.Encode(), nil
+	return params
 }
 
 // openReadOnly opens the opencode database at dbPath strictly read-only and
@@ -260,12 +260,10 @@ func splitQuery(dsn string) (prefix, query string) {
 // isMemoryDSN reports whether dsn refers to an in-memory SQLite database.
 // Only tests use the in-memory form; production always passes a file path.
 func isMemoryDSN(dsn string) bool {
-	if dsn == ":memory:" {
-		return true
-	}
-	return strings.HasPrefix(dsn, "file::memory:") ||
-		strings.Contains(dsn, ":memory:?") ||
-		strings.HasPrefix(dsn, ":memory:?")
+	return dsn == ":memory:" ||
+		strings.HasPrefix(dsn, ":memory:?") ||
+		dsn == "file::memory:" ||
+		strings.HasPrefix(dsn, "file::memory:?")
 }
 
 // pragmaName extracts the lowercase pragma identifier from a _pragma value,
@@ -290,21 +288,23 @@ func pragmaName(v string) string {
 // ([A-Za-z_][A-Za-z0-9_]*) — used to recognise a "<schema>." qualifier so
 // pragmaName strips exactly one legitimate schema prefix and nothing else.
 func isBareIdent(s string) bool {
-	if s == "" {
+	if s == "" || !isIdentStart(s[0]) {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		isAlpha := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-		isDigit := c >= '0' && c <= '9'
-		if i == 0 && !isAlpha {
-			return false
-		}
-		if i > 0 && !isAlpha && !isDigit {
+	for i := 1; i < len(s); i++ {
+		if !isIdentContinue(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func isIdentContinue(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
 }
 
 // escapeURIPath percent-escapes a slash-separated absolute path for use as
@@ -314,7 +314,7 @@ func isBareIdent(s string) bool {
 func escapeURIPath(p string) string {
 	segs := strings.Split(p, "/")
 	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
+		segs[i] = strings.ReplaceAll(url.PathEscape(s), ":", "%3A")
 	}
 	return strings.Join(segs, "/")
 }

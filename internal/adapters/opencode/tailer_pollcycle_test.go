@@ -30,7 +30,7 @@ func TestPollOnce_ProductiveCycle(t *testing.T) {
 	out := make(chan canonical.Event, 256)
 	cur := newCursor()
 	st := newPollState(false)
-	advanced, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
+	advanced, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out, func(error) {}))
 	if err != nil {
 		t.Fatalf("pollOnce: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestPollOnce_ProductiveCycle(t *testing.T) {
 	// correct behaviour but not what THIS test pins — see TestP1_R7_* for that path.)
 	st.markProbe(time.Now())
 	out2 := make(chan canonical.Event, 16)
-	adv2, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out2, silentLogger(), func(error) {})
+	adv2, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out2, func(error) {}))
 	if err != nil {
 		t.Fatalf("pollOnce (second): %v", err)
 	}

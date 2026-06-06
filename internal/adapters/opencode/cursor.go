@@ -1,6 +1,8 @@
 package opencode
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -42,6 +44,10 @@ type Cursor struct {
 	// handled per-column. Observability/invalidation only; NOT part of
 	// After() ordering. Empty until the first probe records it.
 	SchemaHash string `json:"schema_hash,omitempty"`
+	// TargetHash is a digest of the adapter DB open target. It prevents
+	// reusing watermarks persisted for a different physical SQLite target.
+	// It is NOT part of After() ordering.
+	TargetHash string `json:"target_hash,omitempty"`
 	// Tables maps each tracked table name to its watermark. A table absent
 	// from the map has had no rows observed yet (cold start).
 	Tables map[string]TableWatermark `json:"tables,omitempty"`
@@ -132,32 +138,37 @@ func (c Cursor) After(other canonical.Cursor) bool {
 		// c is After it iff c has any table progress.
 		return c.hasProgress()
 	}
-	advancedOne := false
-	for name, mine := range c.Tables {
-		theirs, present := o.Tables[name]
+
+	advancedOne, valid := compareCursorProgress(c.Tables, o.Tables)
+	return valid && advancedOne
+}
+
+func compareCursorProgress(mine, theirs map[string]TableWatermark) (advancedOne, valid bool) {
+	for name, mineWatermark := range mine {
+		theirWatermark, present := theirs[name]
 		if !present {
-			if mine.nonZero() {
+			if mineWatermark.nonZero() {
 				advancedOne = true
 			}
 			continue
 		}
-		switch cmpWatermark(mine, theirs) {
+		switch cmpWatermark(mineWatermark, theirWatermark) {
 		case -1:
-			return false
+			return false, false
 		case 1:
 			advancedOne = true
 		}
 	}
-	// Missing any table the other has progress on is a regression.
-	for name, theirs := range o.Tables {
-		if _, present := c.Tables[name]; present {
-			continue
-		}
-		if theirs.nonZero() {
-			return false
+	return advancedOne, !missingProgressTable(mine, theirs)
+}
+
+func missingProgressTable(mine, theirs map[string]TableWatermark) bool {
+	for name, theirWatermark := range theirs {
+		if _, present := mine[name]; !present && theirWatermark.nonZero() {
+			return true
 		}
 	}
-	return advancedOne
+	return false
 }
 
 // cmpWatermark orders two watermarks by the PAGING POSITION (MaxTimeUpdatedMs,
@@ -258,12 +269,24 @@ func (c Cursor) withSchemaHash(hash string) Cursor {
 	return out
 }
 
+func (c Cursor) withTargetHash(hash string) Cursor {
+	out := c.clone()
+	out.TargetHash = hash
+	return out
+}
+
+func targetHashForDBPath(dbPath string) string {
+	sum := sha256.Sum256([]byte(dbPath))
+	return hex.EncodeToString(sum[:])
+}
+
 // clone deep-copies the cursor's map so callers can mutate the result without
 // affecting the receiver. Mirrors codex/cursor.go.
 func (c Cursor) clone() Cursor {
 	out := Cursor{
 		Version:    cursorVersion,
 		SchemaHash: c.SchemaHash,
+		TargetHash: c.TargetHash,
 		Tables:     make(map[string]TableWatermark, len(c.Tables)+1),
 	}
 	maps.Copy(out.Tables, c.Tables)

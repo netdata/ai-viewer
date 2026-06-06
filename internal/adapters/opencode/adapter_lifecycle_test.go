@@ -232,6 +232,9 @@ func TestAdapter_SnapshotCursor(t *testing.T) {
 	if cur.SchemaHash != wantHash {
 		t.Errorf("snapshot SchemaHash = %q, want real migration digest %q", cur.SchemaHash, wantHash)
 	}
+	if cur.TargetHash != targetHashForDBPath(path) {
+		t.Errorf("snapshot TargetHash = %q, want current target hash", cur.TargetHash)
+	}
 }
 
 // TestAdapter_TailColdSnapshotMissingDB verifies a cold Tail over a missing DB

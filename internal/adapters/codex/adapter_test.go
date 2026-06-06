@@ -58,6 +58,30 @@ func TestAdapter_NewDefaultsNilDeps(t *testing.T) {
 	a.onError(errors.New("x"))
 }
 
+func TestAdapter_NewSourceIDOptionWins(t *testing.T) {
+	t.Parallel()
+	a, err := New(t.TempDir(), canonical.AdapterOptions{SourceID: "source/custom"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if a.sourceID != "source/custom" {
+		t.Fatalf("sourceID = %q, want %q", a.sourceID, "source/custom")
+	}
+}
+
+func TestAdapter_NewSourceIDDefaultsToHistoricalFallback(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := sourceIDPrefix + root
+	if a.sourceID != want {
+		t.Fatalf("sourceID = %q, want %q", a.sourceID, want)
+	}
+}
+
 // TestAdapter_NameAndFormat pins the registry identifiers.
 func TestAdapter_NameAndFormat(t *testing.T) {
 	t.Parallel()

@@ -45,6 +45,32 @@ func TestNew_SubstitutesNilOnError(t *testing.T) {
 	a.onError(errors.New("ignored"))
 }
 
+func TestNew_SourceIDOptionWins(t *testing.T) {
+	t.Parallel()
+
+	a, err := New("/some/root", canonical.AdapterOptions{SourceID: "source/custom"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := a.sourceID; got != "source/custom" {
+		t.Fatalf("sourceID = %q, want %q", got, "source/custom")
+	}
+}
+
+func TestNew_SourceIDDefaultsToHistoricalFallback(t *testing.T) {
+	t.Parallel()
+
+	root := "/some/root"
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := sourceIDPrefix + root
+	if got := a.sourceID; got != want {
+		t.Fatalf("sourceID = %q, want %q", got, want)
+	}
+}
+
 func TestAdapter_NameAndFormat(t *testing.T) {
 	t.Parallel()
 

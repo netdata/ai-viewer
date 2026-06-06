@@ -65,6 +65,10 @@ type AdapterOptions struct {
 	// observability. Subsystem context is set by the ingester before
 	// the adapter is constructed.
 	Logger *slog.Logger
+	// SourceID is the optional canonical source identifier to stamp on
+	// emitted events. When empty, adapters keep their historical
+	// format:location fallback.
+	SourceID string
 	// OnError is invoked for non-fatal per-record parse errors. The
 	// adapter continues processing after calling OnError. Fatal errors
 	// (source unreachable, schema completely wrong) are returned from

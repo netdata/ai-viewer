@@ -100,7 +100,7 @@ func TestP1_R7_CheapPathInsertCoOccurringBoundaryUpdate(t *testing.T) {
 	st.markProbe(time.Now()) // gate CLOSED: no WAL event, net not due
 
 	out := make(chan canonical.Event, 512)
-	active, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
+	active, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out, func(error) {}))
 	if err != nil {
 		t.Fatalf("pollOnce: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestP1_R7_SameMsStress(t *testing.T) {
 			st.markWALEvent(time.Now())
 		}
 
-		if _, perr := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); perr != nil {
+		if _, perr := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out, func(error) {})); perr != nil {
 			t.Fatalf("cycle %d pollOnce: %v", c, perr)
 		}
 
@@ -420,7 +420,7 @@ func TestP2_1_R7_ColdTailGateOpenDoesNotReplayBoundary(t *testing.T) {
 	stWAL.markProbe(now.Add(-2 * timeUpdatedSafetyNet))
 	stWAL.markWALEvent(now) // WAL event after the last probe → gate open via WAL
 	outWAL := make(chan canonical.Event, 64)
-	if _, err := pollOnce(ctxBG(), db, schema, &curWAL, "opencode:test", &stWAL, outWAL, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &curWAL, "opencode:test", &stWAL, outWAL, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (cold WAL-driven): %v", err)
 	}
 	if got := drainAll(outWAL); hasSession(got, "ses_snapshot") {
@@ -435,7 +435,7 @@ func TestP2_1_R7_ColdTailGateOpenDoesNotReplayBoundary(t *testing.T) {
 	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet))
 	stNet.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // a SECOND prior probe; net still due, no WAL
 	outNet := make(chan canonical.Event, 64)
-	if _, err := pollOnce(ctxBG(), db, schema, &curNet, "opencode:test", &stNet, outNet, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &curNet, "opencode:test", &stNet, outNet, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (cold safety-net): %v", err)
 	}
 	if got := drainAll(outNet); hasSession(got, "ses_snapshot") {
@@ -457,7 +457,7 @@ func TestP2_1_R7_ColdTailGateOpenDoesNotReplayBoundary(t *testing.T) {
 	// Reuse stWAL: its cursor must advance on the forward INSERT, flipping boundaryReal.
 	stWAL.markWALEvent(time.Now())
 	outFwd := make(chan canonical.Event, 128)
-	if _, err := pollOnce(ctxBG(), db, schema, &curWAL, "opencode:test", &stWAL, outFwd, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &curWAL, "opencode:test", &stWAL, outFwd, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (forward advance): %v", err)
 	}
 	if !stWAL.boundaryReal {

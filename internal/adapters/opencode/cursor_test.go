@@ -21,6 +21,7 @@ func TestParseCursor_Empty(t *testing.T) {
 func TestParseCursor_RoundTrip(t *testing.T) {
 	t.Parallel()
 	orig := newCursor().
+		withTargetHash("target-deadbeef").
 		withSchemaHash("deadbeef").
 		withTable("part", TableWatermark{MaxIDSeen: "prt_zzz", MaxTimeUpdatedMs: 1779793313250, MaxTimeUpdatedID: "prt_zzz"}).
 		withTable("message", TableWatermark{MaxIDSeen: "msg_yyy", MaxTimeUpdatedMs: 1779793313106, MaxTimeUpdatedID: "msg_yyy"})
@@ -31,6 +32,9 @@ func TestParseCursor_RoundTrip(t *testing.T) {
 	}
 	if got.SchemaHash != "deadbeef" {
 		t.Errorf("schema_hash lost: %q", got.SchemaHash)
+	}
+	if got.TargetHash != "target-deadbeef" {
+		t.Errorf("target_hash lost: %q", got.TargetHash)
 	}
 	w := got.Tables["part"]
 	if w.MaxIDSeen != "prt_zzz" || w.MaxTimeUpdatedMs != 1779793313250 || w.MaxTimeUpdatedID != "prt_zzz" {
@@ -222,11 +226,85 @@ func TestCursor_SchemaHashNotPartOfAfter(t *testing.T) {
 	}
 }
 
+func TestCursor_TargetHashNotPartOfAfter(t *testing.T) {
+	t.Parallel()
+	a := newCursor().
+		withTargetHash("target-a").
+		withTable("part", TableWatermark{MaxTimeUpdatedID: "prt_a", MaxTimeUpdatedMs: 50})
+	b := newCursor().
+		withTargetHash("target-b").
+		withTable("part", TableWatermark{MaxTimeUpdatedID: "prt_a", MaxTimeUpdatedMs: 50})
+	if a.After(b) || b.After(a) {
+		t.Errorf("target_hash must not affect After: a.After(b)=%v b.After(a)=%v", a.After(b), b.After(a))
+	}
+}
+
+func TestGuardCursorTarget_ResetsMismatchedHash(t *testing.T) {
+	t.Parallel()
+	var ce collectErrs
+	cur := newCursor().
+		withTargetHash("old-target").
+		withTable("session", TableWatermark{MaxIDSeen: "ses_1", MaxTimeUpdatedMs: 10, MaxTimeUpdatedID: "ses_1"})
+
+	got := guardCursorTarget(cur, "/abs/opencode.db", "opencode:/abs/opencode.db", ce.onError)
+	if got.hasProgress() {
+		t.Fatalf("mismatched target_hash cursor preserved progress: %+v", got.Tables)
+	}
+	if got.TargetHash != targetHashForDBPath("/abs/opencode.db") {
+		t.Fatalf("target_hash = %q, want current target hash", got.TargetHash)
+	}
+	if ce.count() == 0 {
+		t.Fatal("mismatched target_hash did not surface a WARN via onError")
+	}
+}
+
+func TestGuardCursorTarget_ResetsLegacyBoundaryCursor(t *testing.T) {
+	t.Parallel()
+	var ce collectErrs
+	cur := newCursor().
+		withTable("session", TableWatermark{MaxIDSeen: "ses_1", MaxTimeUpdatedMs: 10, MaxTimeUpdatedID: "ses_1"})
+
+	got := guardCursorTarget(cur, "/abs/file:opencode.db", "opencode:file:opencode.db", ce.onError)
+	if got.hasProgress() {
+		t.Fatalf("legacy source/open-path boundary cursor preserved progress: %+v", got.Tables)
+	}
+	if got.TargetHash != targetHashForDBPath("/abs/file:opencode.db") {
+		t.Fatalf("target_hash = %q, want current target hash", got.TargetHash)
+	}
+	if ce.count() == 0 {
+		t.Fatal("legacy source/open-path boundary reset did not surface a WARN via onError")
+	}
+}
+
+func TestGuardCursorTarget_PreservesLegacyHistoricalFallbackCursor(t *testing.T) {
+	t.Parallel()
+	var ce collectErrs
+	dbPath := "/abs/opencode.db"
+	cur := newCursor().
+		withTable("session", TableWatermark{MaxIDSeen: "ses_1", MaxTimeUpdatedMs: 10, MaxTimeUpdatedID: "ses_1"})
+
+	got := guardCursorTarget(cur, dbPath, sourceIDPrefix+dbPath, ce.onError)
+	if !got.hasProgress() {
+		t.Fatal("legacy historical fallback cursor lost progress")
+	}
+	if got.Tables["session"].MaxIDSeen != "ses_1" {
+		t.Fatalf("session watermark = %+v, want preserved", got.Tables["session"])
+	}
+	if got.TargetHash != targetHashForDBPath(dbPath) {
+		t.Fatalf("target_hash = %q, want current target hash", got.TargetHash)
+	}
+	if ce.count() != 0 {
+		t.Fatalf("preserved legacy fallback cursor surfaced %d errors, want 0", ce.count())
+	}
+}
+
 // TestCursor_CloneIndependent asserts clone produces an independent map so
 // mutating a derived cursor never affects the receiver.
 func TestCursor_CloneIndependent(t *testing.T) {
 	t.Parallel()
-	orig := newCursor().withTable("part", TableWatermark{MaxIDSeen: "prt_a", MaxTimeUpdatedMs: 10, MaxTimeUpdatedID: "prt_a"})
+	orig := newCursor().
+		withTargetHash("target-a").
+		withTable("part", TableWatermark{MaxIDSeen: "prt_a", MaxTimeUpdatedMs: 10, MaxTimeUpdatedID: "prt_a"})
 	derived := orig.
 		withTable("part", TableWatermark{MaxIDSeen: "prt_z", MaxTimeUpdatedMs: 20, MaxTimeUpdatedID: "prt_z"}).
 		withSchemaHash("x")
@@ -235,6 +313,9 @@ func TestCursor_CloneIndependent(t *testing.T) {
 	}
 	if orig.SchemaHash != "" {
 		t.Errorf("receiver mutated: orig SchemaHash = %q, want empty", orig.SchemaHash)
+	}
+	if derived.TargetHash != "target-a" {
+		t.Errorf("derived TargetHash = %q, want target-a", derived.TargetHash)
 	}
 	if derived.Tables["part"].MaxIDSeen != "prt_z" {
 		t.Errorf("derived MaxIDSeen = %q, want prt_z", derived.Tables["part"].MaxIDSeen)
