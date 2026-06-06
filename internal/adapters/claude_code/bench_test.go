@@ -89,7 +89,8 @@ func BenchmarkClaudeTail_SyntheticAppend(b *testing.B) {
 		b.StartTimer()
 
 		flushErrors.reset()
-		if err := flushDirty(context.Background(), resolvedRoot, root, sourceID, dirty, metaDirty, &cur, def, out, flushErrors.onError); err != nil {
+		flush := newTailFlush(context.Background(), resolvedRoot, root, sourceID, &cur, def, out, flushErrors.onError)
+		if err := flush.flushDirty(dirty, metaDirty); err != nil {
 			b.Fatalf("flush append variant %d: %v", i, err)
 		}
 		flushErrors.assertEmpty(b, "flush append")
@@ -157,7 +158,8 @@ func buildClaudeTailBenchFixture(b *testing.B, root string) (rel, path string, s
 		b.Fatalf("resolve root: %v", err)
 	}
 	var flushErrors claudeBenchErrorRecorder
-	if err := flushDirty(context.Background(), resolvedRoot, root, sourceIDPrefix+root, dirty, map[string]struct{}{}, &cur, newTailDeferral(), out, flushErrors.onError); err != nil {
+	flush := newTailFlush(context.Background(), resolvedRoot, root, sourceIDPrefix+root, &cur, newTailDeferral(), out, flushErrors.onError)
+	if err := flush.flushDirty(dirty, map[string]struct{}{}); err != nil {
 		b.Fatalf("prime tail cursor: %v", err)
 	}
 	flushErrors.assertEmpty(b, "prime tail cursor")

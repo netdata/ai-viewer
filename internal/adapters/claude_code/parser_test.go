@@ -2,6 +2,7 @@ package claude_code
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +90,49 @@ func TestParseLine_UserArrayContent(t *testing.T) {
 	_, blocks, isString := classifyUserContent(rec.User)
 	if isString || len(blocks) != 1 || blocks[0].Type != "tool_result" || blocks[0].ToolUseID != "toolu_1" {
 		t.Fatalf("classifyUserContent(array): got blocks=%+v isString=%v", blocks, isString)
+	}
+}
+
+func TestParseLine_UserToolUseResultProbe(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "absent",
+			line: `{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok","is_error":false}]},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		},
+		{
+			name: "top-level null",
+			line: `{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok","is_error":false}]},"toolUseResult":null,"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		},
+		{
+			name: "non-null object",
+			line: `{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok","is_error":false}]},"toolUseResult":{"stdout":"ok"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+			want: true,
+		},
+	}
+	for _, c := range cases {
+		rec, skip, err := parseLine([]byte(c.line))
+		if err != nil || skip {
+			t.Fatalf("%s: parseLine err=%v skip=%v", c.name, err, skip)
+		}
+		if rec.HasToolUseResult != c.want {
+			t.Fatalf("%s: HasToolUseResult = %v, want %v", c.name, rec.HasToolUseResult, c.want)
+		}
+	}
+}
+
+func TestParseLine_UserMessageDecodeErrorIsWrapped(t *testing.T) {
+	t.Parallel()
+	_, _, err := parseLine([]byte(`{"type":"user","uuid":"u1","sessionId":"s","message":42,"timestamp":"2026-05-26T10:00:00.000Z"}`))
+	if err == nil {
+		t.Fatal("parseLine(user malformed message): want error")
+	}
+	if !strings.Contains(err.Error(), "decode user.message") {
+		t.Fatalf("parseLine(user malformed message) error = %v, want decode user.message wrapper", err)
 	}
 }
 

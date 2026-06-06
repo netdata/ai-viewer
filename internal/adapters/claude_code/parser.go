@@ -1,7 +1,6 @@
 package claude_code
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,74 +207,6 @@ func decodeAttachment(raw []byte) attachmentBody {
 		return attachmentBody{}
 	}
 	return wrapper.Attachment
-}
-
-// parseLine decodes one JSONL line into a record. Whitespace-only / empty
-// lines return (record{}, true, nil) to signal "skip silently". Malformed
-// JSON returns a wrapped error. A known-but-ignored type (knownNoOpTypes)
-// returns (record, true, nil) — skipped without surfacing. An unknown type
-// returns errUnknownRecordType wrapped so callers detect the
-// "skip and surface as parse error" case via errors.Is.
-func parseLine(line []byte) (record, bool, error) {
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) == 0 {
-		return record{}, true, nil
-	}
-
-	var env envelope
-	if err := json.Unmarshal(trimmed, &env); err != nil {
-		return record{}, false, fmt.Errorf("decode envelope: %w", err)
-	}
-	if env.Type == "" {
-		return record{}, false, errors.New("record.type is required")
-	}
-
-	rec := record{Env: env, Raw: append([]byte(nil), trimmed...)}
-	switch env.Type {
-	case recUser:
-		var msg userMessage
-		if len(env.Message) > 0 {
-			if err := json.Unmarshal(env.Message, &msg); err != nil {
-				return record{}, false, fmt.Errorf("decode user.message: %w", err)
-			}
-		}
-		rec.User = &msg
-		// Detect a top-level toolUseResult body (spec §3.1) so the mapper can
-		// emit a PayloadRef for it (§5.4). A bare `null` value does not count.
-		var probe struct {
-			ToolUseResult json.RawMessage `json:"toolUseResult"`
-		}
-		if json.Unmarshal(trimmed, &probe) == nil {
-			tur := bytes.TrimSpace(probe.ToolUseResult)
-			rec.HasToolUseResult = len(tur) > 0 && !bytes.Equal(tur, []byte("null"))
-		}
-	case recAssistant:
-		var msg assistantMessage
-		if len(env.Message) > 0 {
-			if err := json.Unmarshal(env.Message, &msg); err != nil {
-				return record{}, false, fmt.Errorf("decode assistant.message: %w", err)
-			}
-		}
-		rec.Assistant = &msg
-	case recSystem:
-		var body systemBody
-		if err := json.Unmarshal(trimmed, &body); err != nil {
-			return record{}, false, fmt.Errorf("decode system: %w", err)
-		}
-		rec.System = &body
-	case recAttachment, recQueueOperation, recLastPrompt, recAITitle,
-		recCustomTitle, recPermissionMode, recPRLink, recBridgeSession,
-		recFileHistorySnapshot:
-		// Consumed straight from Raw by the mapper's snapshot/log paths;
-		// no extra typed body needed.
-	default:
-		if _, ok := knownNoOpTypes[env.Type]; ok {
-			// Declared-but-ignored producer type: skip without surfacing.
-			return rec, true, nil
-		}
-		return record{}, false, &unknownTypeError{Type: string(env.Type)}
-	}
-	return rec, false, nil
 }
 
 // classifyUserContent decodes a user record's polymorphic message.content
