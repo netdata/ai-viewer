@@ -383,8 +383,8 @@ jobs:
             exit 1
           fi
           required_count="$(printf '%s\n' "$required" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
-          if [[ "$required_count" -ne 7 ]]; then
-            echo "::error file=bench/baseline.txt::expected exactly 7 required benchmark names in bench/baseline.txt; got ${required_count}"
+          if [[ "$required_count" -ne 9 ]]; then
+            echo "::error file=bench/baseline.txt::expected exactly 9 required benchmark names in bench/baseline.txt; got ${required_count}"
             printf 'Required benchmark names found:\n%s\n' "$required" >&2
             exit 1
           fi

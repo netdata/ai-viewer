@@ -41,12 +41,13 @@ if [ -z "$BENCHSTAT" ] || [ ! -x "$BENCHSTAT" ]; then
   exit 2
 fi
 
-# The 5 benchmark-bearing packages, 7 benchmarks (Scan + Tail share aiagent_v2,
-# and Claude-code Scan + Tail share claude_code; canonical has no encode/decode
-# benchmark).
+# The 6 benchmark-bearing packages, 9 benchmarks (Scan + Tail share aiagent_v2,
+# Claude-code Scan + Tail share claude_code, and Codex Scan + Tail share codex;
+# canonical has no encode/decode benchmark).
 BENCH_PKGS=(
   ./internal/adapters/aiagent_v2/
   ./internal/adapters/claude_code/
+  ./internal/adapters/codex/
   ./internal/ingest/
   ./internal/presenter/
   ./internal/notify/

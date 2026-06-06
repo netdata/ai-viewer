@@ -26,6 +26,7 @@ The Codex CLI stores one rollout file per conversation under the user's `codex_h
 The adapter's only input is `sessions/YYYY/MM/DD/rollout-*.jsonl`. The other artifacts are explicitly out of scope for the codex adapter.
 
 References (`openai/codex @ 8a94430b`):
+
 - `codex-rs/rollout/src/lib.rs:23` — `pub const SESSIONS_SUBDIR: &str = "sessions";`
 - `codex-rs/rollout/src/recorder.rs:1325-1354` — `precompute_log_file_info` — builds the `YYYY/MM/DD/rollout-YYYY-MM-DDTHH-MM-SS-<id>.jsonl` path. Uses *local* time for both the directory shards and the filename timestamp.
 - `codex-rs/rollout/src/list.rs:399` — comment confirms layout: "Directory layout: `~/.codex/sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl`".
@@ -131,7 +132,7 @@ References: `codex-rs/protocol/src/protocol.rs:2745-2776`. Emitted once per turn
 | `cwd` | string | may differ from session cwd if the model `cd`d |
 | `current_date`, `timezone` | string\|absent | injected into model context |
 | `approval_policy` | enum | `untrusted`\|`on-failure`\|`on-request`\|`never` |
-| `sandbox_policy` | object | `{type: "danger-full-access"|"read-only"|"workspace-write", ...}` — observed all three in real files (proportions: 68% workspace-write, 30% danger-full-access, 2% read-only across 50 sampled sessions) |
+| `sandbox_policy` | object | Object whose `type` is one of `danger-full-access`, `read-only`, or `workspace-write`; observed all three in real files (proportions: 68% workspace-write, 30% danger-full-access, 2% read-only across 50 sampled sessions) |
 | `permission_profile` | object\|absent | finer-grained replacement of `sandbox_policy` in newer versions |
 | `network` | `{allowed_domains, denied_domains}`\|absent | |
 | `file_system_sandbox_policy` | object\|absent | newer field |
@@ -148,7 +149,7 @@ References: `codex-rs/protocol/src/models.rs:750-903`. Tagged union; the variant
 
 | `payload.type` | Variant | Key fields |
 |---|---|---|
-| `message` | `Message` | `role` (user/assistant/system/developer), `content[]` of `{type:"input_text"|"output_text"|"input_image", text|image_url}`, optional `phase` (`commentary`\|`final_answer`) |
+| `message` | `Message` | `role` (user/assistant/system/developer), `content[]` items for `input_text`, `output_text`, or `input_image` with text or image URLs, optional `phase` (`commentary` or `final_answer`) |
 | `reasoning` | `Reasoning` | `summary[]` (visible reasoning summaries), `content[]` (raw CoT, model-dependent, often null), `encrypted_content` (opaque base64, for OpenAI Responses API resume) |
 | `local_shell_call` | `LocalShellCall` | LEGACY — only in old `.json` files; not used in current rollouts |
 | `function_call` | `FunctionCall` | `name` (tool name, e.g. `shell_command`, `apply_patch`, `read`), `namespace` (optional), `arguments` (JSON-encoded **string**, not parsed object), `call_id` |
@@ -232,6 +233,7 @@ References: `codex-rs/rollout/src/recorder.rs:1346-1369, 1610-1620, 1622-1654`.
 - The recorder also exposes `append_rollout_item_to_path` (`recorder.rs:1610`) for metadata-only updates after a session ends — also append-only.
 
 Implications for ai-viewer:
+
 - **Append-only JSONL with byte-offset tail is the correct watch strategy.** No RENAME events to chase.
 - **A `\n`-terminated line is the unit.** If the watcher reads a partial trailing line (no final `\n`), it MUST seek back to the last `\n` and wait for the next write event.
 - **Concurrent crash safety**: because there is no fsync, an OS crash can lose the most recently written bytes. From the adapter's view, this just looks like a shorter file — the cursor resumes after the truncation point on next start.
@@ -246,7 +248,9 @@ Implications for ai-viewer:
   - On `Write`: tail-read from cursor offset to current file size; parse complete lines; advance cursor.
 - Ignore: any file NOT matching `^rollout-.*\.jsonl$` under `sessions/YYYY/MM/DD/` (this excludes the legacy flat `.json` files in `sessions/` root, unless legacy mode is enabled).
 - Ignore: `archived_sessions/`, `session_index.jsonl`, `state_*.sqlite*`, `logs_*.sqlite*`, `history*`.
-- A periodic full sweep (every 5 minutes) covers missed inotify events on slow filesystems and adds new date directories that came into existence while no other event fired in their parent.
+- A periodic full sweep (every 5 seconds, matching the other tailing adapters)
+  covers missed inotify events on slow filesystems and adds new date directories
+  that came into existence while no other event fired in their parent.
 
 ## Cursor
 
@@ -275,12 +279,14 @@ Per-file byte offset plus discovery hints. JSON shape:
 Path keys are RELATIVE to the configured `--codex-home` (default `~/.codex`) — the cursor survives a home-directory move.
 
 Per-file fields:
+
 - `offset` — byte offset of the next unread byte; always at a line start (trailing partial lines held back).
 - `size` — file size when `offset` was recorded; drives truncation detection.
 - `mtime_us` / `last_ts_us` — observability + the staleness heuristic (rule #23).
 - `eof_finalized_size` — DURABLE marker of the file size at which an EOF-finalize already fired (the synthetic close of a hanging turn at full-read EOF: an OLD-format turn closed `completed`, or a stale NEW-format turn closed `failed/incomplete` + its `SessionFinalized`). The mapper's own in-memory guard is rebuilt on every replay-from-0, so the marker must persist in the cursor: without it, an unchanged rescan/restart would re-fire the synthetic `TurnFinalized`/`SessionFinalized`. A metadata-only `session_meta` append (recorder.rs:1615) GROWS `size` past this marker but carries no new turn content, so the scanner ALSO suppresses the re-fire when a grown rescan emitted no new content, then advances the marker to the new size. A genuine new-turn append (always emitting at least a `TurnStarted`) re-opens and closes normally. `0`/absent ⇒ no EOF-finalize has fired yet.
 
 Restart logic:
+
 - For each tracked file: if `current_size >= cursor.offset`, resume from `cursor.offset`.
 - If `current_size < cursor.offset`: file was truncated (codex never truncates, so this means manual operator deletion + recreation) — emit `SourceError`, reset to 0, full re-scan (also clears `eof_finalized_size`).
 - For new files (not in cursor): start at 0, full scan.
@@ -466,6 +472,7 @@ Codex supports sub-agents (`SubAgentSource::ThreadSpawn`) and forks (`forked_fro
 - **`event_msg.collab_close_end`** (72 files) and **`event_msg.collab_waiting_end`** (74 files) also appear in collab sessions. They carry no parent→child edge the topology view needs, so the adapter recognizes them (no `SourceError`) and surfaces each as a `LogEntry` only — no canonical op.
 
 Adapter behavior:
+
 - Emit `SessionStartedEvent.ParentNativeID = parent_thread_id` when the child's `session_meta.source` is `subagent`.
 - Emit `SessionStartedEvent.ParentNativeID = forked_from_id` otherwise when `forked_from_id` is present.
 - In the parent, when an `event_msg.collab_agent_spawn_end` line appears, emit an Op Kind=`session`, Name=`spawn`, ChildSessionNativeID=`new_thread_id`. (If the child rollout file doesn't yet exist at that moment, the ingester's foreign-key constraint must be relaxed temporarily — the canonical-events spec allows out-of-order child arrival.)
@@ -549,6 +556,29 @@ Items in codex that don't map cleanly to canonical-events.md:
 
 12. **Real-time conversation events** (`realtime_conversation_*`): voice/streaming subsystem; none of the real workstation files contain these. Adapter ignores them with a `LogEntry` if seen.
 
+## Performance Benchmarks
+
+The adapter has two deterministic workstation benchmarks in
+`internal/adapters/codex/bench_test.go`, and both are included in
+`scripts/check-bench.sh` and `bench/baseline.txt`:
+
+- `BenchmarkCodexScan_SyntheticCorpus` exercises first backfill over a
+  synthetic `codex_home/sessions/YYYY/MM/DD/rollout-*.jsonl` tree. The fixture
+  uses fake UUIDs, example paths, generic message/tool content, and exact event
+  count assertions so the benchmark cannot silently stop exercising mapper
+  behavior.
+- `BenchmarkCodexTail_SyntheticAppend` exercises the deterministic tail flush
+  path after an initial cursor seed. Timers, fsnotify delivery, and producer
+  sleeps are outside the timed region; the timed path is the adapter's
+  append-read/parse/map/emit work.
+
+Both benchmarks report `B/s` through `b.SetBytes`, adapter-specific throughput
+metrics via `b.ReportMetric` (`events/sec`; scan also reports `files/sec`), and
+`peak_heap_mb` so the Codex path has the same memory-regression visibility as
+the other adapter benchmarks. The benchmark contract is semantic as well as
+performance-related: if the exact emitted event counts change, the benchmark
+fails instead of recording a misleading faster/slower result.
+
 ## References
 
 All citations use the convention from AGENTS.md (`openai/codex @ 8a94430b`). Where `protocol.rs` is referenced, the path is `codex-rs/protocol/src/protocol.rs`; where `models.rs` is referenced, the path is `codex-rs/protocol/src/models.rs`.
@@ -587,6 +617,7 @@ All citations use the convention from AGENTS.md (`openai/codex @ 8a94430b`). Whe
 - `codex-rs/protocol/src/models.rs:750-903` — `ResponseItem` enum (Message, Reasoning, LocalShellCall, FunctionCall, FunctionCallOutput, CustomToolCall/Output, WebSearchCall, ImageGenerationCall, Compaction, ContextCompaction, Other)
 
 Real-file observations (sanitized; no operator-specific values quoted):
+
 - 2,585 rollout files on workstation: 2,566 modern `.jsonl` in `sessions/YYYY/MM/DD/`, 19 legacy `.json` in `sessions/` root.
 - CLI version range observed: 0.61.0 → 0.125.0.
 - Sandbox modes observed: `workspace-write` (68%), `danger-full-access` (30%), `read-only` (2%) across 50 sampled sessions.
