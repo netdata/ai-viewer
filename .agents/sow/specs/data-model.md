@@ -626,7 +626,7 @@ For LLM ops where the model's max context is known (`catalog_models.ctx_max`), t
 2. **Adapter-observation raise.** When an `OpFinalizedEvent` carries `CtxMax > 0` (e.g. ai-agent v3 records the actual context window used for the call), the ingester runs `ctx_max = CASE WHEN ? > 0 THEN MAX(COALESCE(ctx_max, 0), ?) ELSE ctx_max END`. Observations strictly climb; a smaller observation never lowers the value.
 3. **Net effect.** The stored `ctx_max` is the maximum of (pricing-seed-floor, all observed `ev.CtxMax`). If pricing has no entry for the model, the value starts NULL and is set on the first observation. If the source never reports `CtxMax`, the value stays at the pricing-seed.
 
-Code references: `internal/ingest/catalog.go:64-95` (seed-on-OpStarted in `catalogWriter.onOpStarted`) and `internal/ingest/catalog.go:173-199` (observation-raise in `catalogWriter.onOpFinalized`). The interface contract lives in `internal/ingest/pricing.go` (`MetadataPricer`); the loader at `internal/pricing/loader.go` provides the default implementation.
+Code references: `internal/ingest/catalog.go` (`catalogWriter.ctxMaxSeed` and `upsertStartedModel` seed pricing metadata during `OpStarted`) and `internal/ingest/catalog_finalize.go` (`updateFinalizedModel` raises `ctx_max` from `OpFinalizedEvent.CtxMax`). The interface contract lives in `internal/ingest/pricing.go` (`MetadataPricer`); the loader at `internal/pricing/loader.go` provides the default implementation.
 
 ## References
 
