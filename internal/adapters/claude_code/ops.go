@@ -1,101 +1,28 @@
 package claude_code
 
-import (
-	"encoding/json"
+import "github.com/netdata/ai-viewer/internal/canonical"
 
-	"github.com/netdata/ai-viewer/internal/canonical"
-)
-
-// mapUser handles a `user` record. Three shapes (spec §5.4):
+// mapUser handles the `user` record shapes from spec §5.4:
 //   - string content, non-meta, non-compact-summary → opens turn N+1.
 //   - array content (tool_result blocks) → finalizes the matching tool ops.
-//   - isMeta / isCompactSummary → LogEntry only, no turn.
+//   - isMeta → LogEntry only, no turn.
+//   - isCompactSummary → LogEntry plus summary PayloadRef when present, no turn.
 func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	tsUs := m.recordTs(rec)
-	out := make([]canonical.Event, 0, 2)
 
 	if boolValue(rec.Env.IsMeta) {
-		out = append(out, m.logEntry(advance(tsUs), "DBG", "meta-user", rec))
-		return out, nil
+		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "meta-user", rec)}, nil
 	}
 	if boolValue(rec.Env.IsCompactSummary) {
-		// Post-compaction summary: does NOT open a new turn (spec §9.2).
-		// Surface as INF so the UI can show it in a compaction lane, plus a
-		// PayloadRef pointing at the inline summary text (spec §5.4). The ref is
-		// scoped to the preceding compaction op so it references an op that
-		// EXISTS (P1.1a) — payload_refs.op_id is NOT NULL REFERENCES ops(id).
-		out = append(out, m.logEntry(advance(tsUs), "INF", "compaction-summary", rec))
-		ref, ok, perr := m.emitSummaryPayload(advance(tsUs), m.lastCompactionTurnSeq, m.lastCompactionOpSeq)
-		if perr != nil {
-			return nil, perr
-		}
-		if ok {
-			out = append(out, ref)
-		}
-		return out, nil
+		return m.mapCompactSummaryUser(rec, advance, tsUs)
 	}
 
-	str, blocks, isString := classifyUserContent(rec.User)
+	_, blocks, isString := classifyUserContent(rec.User)
 	if isString {
-		// Operator-typed prompt: open the next turn.
-		m.turnSeq++
-		m.opSeqInTurn = 0
-		_ = str
-		out = append(out, canonical.TurnStartedEvent{
-			EventBase:       advance(tsUs),
-			SessionNativeID: m.nativeID,
-			Seq:             m.turnSeq,
-		})
-		return out, nil
+		return []canonical.Event{m.startUserTurn(advance, tsUs)}, nil
 	}
 
-	// Array content: finalize tool ops by tool_use_id. A top-level
-	// toolUseResult body becomes ONE PayloadRef for the record, attached to
-	// the first matched tool op (the common case is a single tool_result per
-	// record); payloadEmitted guards against emitting it more than once.
-	payloadEmitted := false
-	for i := range blocks {
-		blk := blocks[i]
-		if blk.Type != "tool_result" || blk.ToolUseID == "" {
-			continue
-		}
-		open, ok := m.toolOps[blk.ToolUseID]
-		if !ok {
-			// tool_result with no matching open op (e.g. result for an op
-			// emitted before the cursor offset on a tail resume). Skip
-			// finalization; the op was already finalized or never seen.
-			continue
-		}
-		status := "completed"
-		errClass := ""
-		if blk.IsError {
-			status = "failed"
-			errClass = "tool_error"
-		}
-		out = append(out, canonical.OpFinalizedEvent{
-			EventBase:       advance(tsUs),
-			SessionNativeID: m.nativeID,
-			TurnSeq:         open.turnSeq,
-			Seq:             open.opSeq,
-			Status:          status,
-			ErrorClass:      errClass,
-			EndTs:           tsUs,
-		})
-		// A top-level toolUseResult body (the structured tool-result echo,
-		// inline in the transcript) becomes a PayloadRef on the finalized tool
-		// op (spec §5.4, P2b). One ref for the record, attached to the first
-		// matched tool op (the common case is a single tool_result per record).
-		if rec.HasToolUseResult && !payloadEmitted {
-			ref, perr := m.emitToolResultPayload(advance(tsUs), open.turnSeq, open.opSeq)
-			if perr != nil {
-				return nil, perr
-			}
-			out = append(out, ref)
-			payloadEmitted = true
-		}
-		delete(m.toolOps, blk.ToolUseID)
-	}
-	return out, nil
+	return m.mapToolResultUser(rec, blocks, advance, tsUs)
 }
 
 // mapAssistant handles an `assistant` record. A non-synthetic model emits an
@@ -115,175 +42,19 @@ func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.Even
 		return []canonical.Event{m.logEntry(advance(tsUs), "INF", "synthetic-assistant", rec)}, nil
 	}
 
-	// Ensure a turn is open. claude-code's first assistant record can
-	// precede any operator string prompt in odd flows (e.g. resumed mid
-	// tool-cycle); open turn 1 defensively so ops attach to a real turn.
-	if m.turnSeq == 0 {
-		m.turnSeq = 1
-		m.opSeqInTurn = 0
-	}
+	m.ensureAssistantTurn()
 
-	// Emit a SessionUpdatedEvent once with the model so sessions.model is set.
 	out := make([]canonical.Event, 0, 4)
-	if !m.modelSeen {
-		out = append(out, canonical.SessionUpdatedEvent{
-			EventBase: advance(tsUs),
-			NativeID:  m.nativeID,
-			Model:     msg.Model,
-		})
-		m.modelSeen = true
+	if ev, ok := m.assistantModelUpdate(advance, tsUs, msg.Model); ok {
+		out = append(out, ev)
 	}
 
-	// LLM op (started+finalized). Seq is the next op in the turn.
-	m.opSeqInTurn++
-	llmSeq := m.opSeqInTurn
-	out = append(out, canonical.OpStartedEvent{
-		EventBase:       advance(tsUs),
-		SessionNativeID: m.nativeID,
-		TurnSeq:         m.turnSeq,
-		Seq:             llmSeq,
-		ParentOpSeq:     -1,
-		Kind:            canonical.OpLLM,
-		Name:            msg.Model,
-		Model:           msg.Model,
-		Provider:        provider,
-		Extras:          assistantUsageExtras(msg.Usage),
-	})
+	started, llmSeq := m.startAssistantLLM(advance, tsUs, msg)
+	out = append(out, started)
 	out = append(out, m.buildLLMFinalized(msg, advance(tsUs), m.turnSeq, llmSeq, tsUs))
-
-	// thinking blocks → nested reasoning ops under the LLM op.
-	for i := range msg.Content {
-		blk := msg.Content[i]
-		if blk.Type != "thinking" {
-			continue
-		}
-		m.opSeqInTurn++
-		out = append(out,
-			canonical.OpStartedEvent{
-				EventBase:       advance(tsUs),
-				SessionNativeID: m.nativeID,
-				TurnSeq:         m.turnSeq,
-				Seq:             m.opSeqInTurn,
-				ParentOpSeq:     llmSeq,
-				Kind:            canonical.OpReasoning,
-				ReasoningKind:   "raw",
-			},
-			canonical.OpFinalizedEvent{
-				EventBase:       advance(tsUs),
-				SessionNativeID: m.nativeID,
-				TurnSeq:         m.turnSeq,
-				Seq:             m.opSeqInTurn,
-				Status:          "completed",
-				EndTs:           tsUs,
-				BytesOut:        int64(len(blk.Thinking)),
-			},
-		)
-	}
-
-	// tool_use blocks → op-start (finalized later on tool_result). The Agent
-	// tool is a child-session op (spec §4.4, §5.4).
-	for i := range msg.Content {
-		blk := msg.Content[i]
-		if blk.Type != "tool_use" {
-			continue
-		}
-		m.opSeqInTurn++
-		opSeq := m.opSeqInTurn
-		opName, namespace := splitToolName(blk.Name)
-		started := canonical.OpStartedEvent{
-			EventBase:       advance(tsUs),
-			SessionNativeID: m.nativeID,
-			TurnSeq:         m.turnSeq,
-			Seq:             opSeq,
-			ParentOpSeq:     -1,
-			Name:            opName,
-			ToolNamespace:   namespace,
-		}
-		if blk.Name == "Agent" {
-			started.Kind = canonical.OpSession
-			// Stash the toolUseId (the assistant.tool_use block id) UNCONDITIONALLY
-			// — it is the meta-independent parent→child join key the resolver matches
-			// against the child session's own toolUseId (spec §8.1, P1.6). This works
-			// even when the sidecar `.meta.json` has not been read yet (the
-			// parent-before-meta case), so the op→child link no longer needs a
-			// catalog-double-counting transcript re-read on a late meta.
-			if blk.ID != "" {
-				started.Extras = map[string]any{"aiViewer": map[string]any{"toolUseId": blk.ID}}
-			}
-			if agentID, ok := m.toolUseToAgent[blk.ID]; ok && agentID != "" {
-				childID := childNativeID(m.nativeID, agentID)
-				started.ChildSessionNativeID = childID
-				// Record the Agent op so it can be finalized when the child
-				// sidechain reaches EOF (spec §8.1, P1b): the parent has no
-				// tool_result for Agent, so without this the op stays running.
-				if m.agentOps == nil {
-					m.agentOps = map[string]agentOpRef{}
-				}
-				m.agentOps[childID] = agentOpRef{turnSeq: m.turnSeq, opSeq: opSeq}
-			}
-			if desc := agentDescription(blk.Input); desc != "" {
-				started.Name = desc
-			}
-		} else {
-			started.Kind = canonical.OpTool
-		}
-		out = append(out, started)
-		// Track for finalization on the matching tool_result. The Agent
-		// op has no tool_result in the parent (its completion is implicit
-		// in the subagent EOF); we still record it so a stray tool_result
-		// (rare) can finalize it, but its absence is expected.
-		if blk.ID != "" {
-			m.toolOps[blk.ID] = openToolOp{turnSeq: m.turnSeq, opSeq: opSeq, name: opName}
-		}
-	}
+	out = append(out, m.emitAssistantReasoningOps(msg.Content, advance, tsUs, llmSeq)...)
+	out = append(out, m.emitAssistantToolUseOps(msg.Content, advance, tsUs)...)
 	return out, nil
-}
-
-// buildLLMFinalized builds the OpFinalizedEvent for an LLM op, carrying the
-// token accounting derived from message.usage (spec §5.6).
-func (m *fileMapper) buildLLMFinalized(msg *assistantMessage, base canonical.EventBase, turnSeq, opSeq int, endUs int64) canonical.OpFinalizedEvent {
-	ev := canonical.OpFinalizedEvent{
-		EventBase:       base,
-		SessionNativeID: m.nativeID,
-		TurnSeq:         turnSeq,
-		Seq:             opSeq,
-		Status:          "completed",
-		EndTs:           endUs,
-	}
-	if u := msg.Usage; u != nil {
-		// Canonical token contract (canonical-events.md, SOW-0029): TokensIn is
-		// the FRESH/uncached input ONLY; the cache portions are separate
-		// counters. Folding cache into TokensIn would inflate the token total
-		// and double-charge cache in the pricer (which prices each component at
-		// its own rate). CtxUsed is the TOTAL context occupancy
-		// (fresh + cacheCreate + cacheRead + output), not fresh + output.
-		ev.TokensIn = u.InputTokens
-		ev.TokensOut = u.OutputTokens
-		ev.TokensCacheRead = u.CacheReadInputTokens
-		ev.TokensCacheWrite = u.CacheCreationInputTokens
-		ev.CtxUsed = u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens + u.OutputTokens
-	}
-	return ev
-}
-
-// assistantUsageExtras surfaces the cache-token decomposition and server
-// tool-use counters on the LLM op's extras (spec §5.6, §11.8).
-func assistantUsageExtras(u *assistantUsage) map[string]any {
-	if u == nil {
-		return nil
-	}
-	extras := map[string]any{
-		"cacheRead":     u.CacheReadInputTokens,
-		"cacheCreation": u.CacheCreationInputTokens,
-		"uncachedInput": u.InputTokens,
-	}
-	if u.ServiceTier != "" {
-		extras["serviceTier"] = u.ServiceTier
-	}
-	if len(u.ServerToolUse) > 0 {
-		extras["serverToolUse"] = u.ServerToolUse
-	}
-	return extras
 }
 
 // mapSystem handles a `system` record. compact_boundary emits the synthetic
@@ -452,50 +223,8 @@ func (m *fileMapper) mapSnapshot(rec record, base canonical.EventBase) canonical
 		NativeID:  m.nativeID,
 		Extras:    map[string]any{},
 	}
-	switch rec.Env.Type {
-	case recLastPrompt:
-		if v, ok := stringField(fields, "lastPrompt"); ok {
-			ev.Extras["lastPrompt"] = v
-		}
-	case recAITitle:
-		if v, ok := stringField(fields, "aiTitle"); ok {
-			ev.Extras["aiTitle"] = v
-			// AgentName falls back to aiTitle ONLY when no custom title has
-			// been seen on this file. A custom-title (operator-chosen) wins
-			// regardless of arrival order (spec §3.7, P3): a trailing ai-title
-			// must not clobber it.
-			if !m.customTitleSeen {
-				ev.AgentName = v
-			}
-		}
-	case recCustomTitle:
-		if v, ok := stringField(fields, "customTitle"); ok {
-			ev.Extras["customTitle"] = v
-			ev.AgentName = v // custom title wins (spec §3.7).
-			m.customTitleSeen = true
-		}
-	case recPermissionMode:
-		if v, ok := stringField(fields, "permissionMode"); ok {
-			ev.Extras["permissionMode"] = v
-		}
-	case recBridgeSession:
-		for _, k := range []string{"bridgeSessionId", "lastSequenceNum"} {
-			if v, ok := fields[k]; ok {
-				ev.Extras["bridge."+k] = v
-			}
-		}
-	case recFileHistorySnapshot:
-		// Store the actual tracked-file backup map (last non-empty wins),
-		// not merely a boolean, so the UI can show which files the session
-		// backed up (spec §3.11, P3). The map lives under snapshot.trackedFileBackups.
-		if backups := fileHistoryBackups(fields); backups != nil {
-			ev.Extras["fileHistory"] = backups
-		}
-	}
-	if len(ev.Extras) == 0 && ev.AgentName == "" {
-		return nil
-	}
-	return ev
+	m.applySnapshot(rec.Env.Type, fields, &ev)
+	return snapshotUpdateOrNil(ev)
 }
 
 // childNativeID builds the synthetic subagent NativeID per spec §5.1:
@@ -523,59 +252,4 @@ func agentFinalizeEvent(sourceID, parentNativeID string, ref agentOpRef, endUs i
 		Status:          status,
 		EndTs:           endUs,
 	}
-}
-
-// agentDescription extracts the Agent tool_use input's "description" field
-// for use as the child-session op name. Returns "" when absent.
-func agentDescription(input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var m struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	return m.Description
-}
-
-// decodeRawFields decodes a record's raw bytes into a flat field map for
-// snapshot extraction. Returns an empty map on failure (defensive).
-func decodeRawFields(raw []byte) map[string]any {
-	if len(raw) == 0 {
-		return map[string]any{}
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return map[string]any{}
-	}
-	return m
-}
-
-// stringField returns the string value at key, or ("", false) when absent or
-// not a string.
-func stringField(fields map[string]any, key string) (string, bool) {
-	v, ok := fields[key]
-	if !ok {
-		return "", false
-	}
-	s, ok := v.(string)
-	return s, ok
-}
-
-// fileHistoryBackups extracts the snapshot.trackedFileBackups object from a
-// file-history-snapshot record's decoded fields (spec §3.11, P3). Returns nil
-// when absent or empty, so the caller stores only non-empty backup maps
-// (last-non-empty wins) rather than a meaningless boolean.
-func fileHistoryBackups(fields map[string]any) map[string]any {
-	snap, ok := fields["snapshot"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	backups, ok := snap["trackedFileBackups"].(map[string]any)
-	if !ok || len(backups) == 0 {
-		return nil
-	}
-	return backups
 }
