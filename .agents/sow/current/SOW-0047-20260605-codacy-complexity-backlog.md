@@ -7,8 +7,9 @@ Status: open
 Sub-state: active 2026-06-05. First production slice
 `frontend/src/state/filters.ts` is merged. Second production slice
 `internal/adapters/aiagent_v2/mapper.go` is merged. Third production slice
-selected: `internal/ingest/writer.go` `applyOpFinalized`; implementation may
-proceed only for this slice under the Pre-Implementation Gate below.
+`internal/ingest/writer.go` `applyOpFinalized` is merged. Fourth production
+slice `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized` has
+passed local validation and external review; PR/merge is pending.
 
 ## Requirements
 
@@ -572,6 +573,189 @@ Open decisions:
 
 - None for the operator. Technical sequencing belongs to the assistant.
 
+### Fourth Slice Gate - ingest catalog writer
+
+Status: ready for test-first implementation after this SOW update.
+
+Selected fourth slice:
+
+- `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized`
+  decomposition.
+- Goal: reduce Codacy/Lizard maintainability findings in the catalog writer's
+  op-start and op-finalization paths while preserving catalog row identity,
+  call-count idempotency, migration, delta totals, ctx_max layering, and
+  provider alias semantics exactly.
+- Explicit non-goal: do not change SQLite schema or migrations, rollup refresh,
+  writer op persistence, pricing lookup policy, adapter behavior, REST/SSE
+  contracts, frontend presentation, or catalog aggregation semantics in this
+  slice.
+
+Problem / root-cause model:
+
+- `onOpStarted` currently combines effective identity resolution, identity
+  migration, provider/model/tool booking, pricing metadata ctx_max seeding,
+  call-count idempotency, and migrated-total rebooking in one function.
+- `onOpFinalized` currently combines persisted op lookup, delta computation,
+  provider/model/tool totals updates, ctx_max observation raising, duration
+  propagation, and failure/token/cost accounting in one function.
+- The complexity is real maintainability risk in a hot write path, not a
+  behavior defect. The correct fix is narrow decomposition around existing SQL
+  side effects and existing catalog invariants, not a semantic rewrite.
+
+Evidence reviewed:
+
+- Direct Lizard on current `master` reported two selected production hotspots:
+  - `internal/ingest/catalog.go:87` `onOpStarted`: 60 NLOC, CCN 22,
+    98 physical lines.
+  - `internal/ingest/catalog.go:228` `onOpFinalized`: 96 NLOC, CCN 17,
+    117 physical lines.
+- A read-only ingest-catalog assessment recommended this slice now because the
+  hotspots are isolated, specified, and strongly covered by existing
+  idempotency tests. It also found a focused characterization gap around
+  `provider_alias` correction and empty-alias re-emission.
+- Refreshed current production Lizard triage showed higher-count alternatives
+  in adapter scanner/tailer state machines and frontend trace visualizations.
+  The scanner/tailer paths are deferred because they carry restart,
+  filesystem-streaming, and cursor/tailing risks that require broader adapter
+  fixture work.
+- A parallel read-only Claude-code scanner/tailer assessment found that slice
+  viable but correctly identified a prerequisite gap: Claude-specific scan/tail
+  benchmarks should be added before production scanner/tailer decomposition.
+  That makes it a strong next candidate after this narrower catalog slice.
+- PR #52 was merged for the third slice. A post-merge full-gate attempt on
+  `master` failed only in the local workstation benchmark gate while the system
+  was under high CPU load. A controlled read-only benchmark comparison of the
+  pre-v2-mapper commit against current `master` under the same load showed no
+  significant `aiagent_v2` `Scan_SyntheticCorpus` or `Tail_SyntheticAppend`
+  regression, so the failure is treated as a workstation baseline/load issue.
+  Full gates remain unclaimed for this next slice until `./scripts/gates.sh`
+  passes on the final branch state.
+
+Affected contracts and surfaces:
+
+- `catalog_providers` rows keyed by `(name, alias)`.
+- `catalog_models` rows keyed by `(provider, name)`.
+- `catalog_tools` rows keyed by `(namespace, name)`.
+- `catalog_agents` and `catalog_cwds` are not intended to change, but remain in
+  the same file and must keep existing session-start behavior.
+- Op re-emission idempotency: same-identity re-emits add no extra `call_count`
+  and no duplicate terminal totals.
+- Identity migration: changed op identity moves call count and terminal totals
+  off the old key and onto the final key exactly once.
+- Op finalization deltas: failure, tokens, cache tokens, cost, and duration
+  update by `(now - prior)`.
+- Context-window max: pricing metadata seeds `ctx_max`; adapter observations
+  raise it by max and never lower it.
+
+Spec deltas before tests/code:
+
+- No spec file delta is required for this slice because it is a pure
+  behavior-preserving refactor. `.agents/sow/specs/ingester.md` and
+  `.agents/sow/specs/data-model.md` already document the target catalog
+  behavior:
+  - `OpStartedEvent{Kind=llm}` populates `catalog_providers` and
+    `catalog_models`; `OpStartedEvent{Kind=tool}` populates `catalog_tools`.
+  - `call_count` increments only on genuine new ops or is migrated on identity
+    change.
+  - `OpFinalizedEvent` applies `(now - prior)` terminal-total deltas.
+  - `catalog_models.ctx_max` is seeded from pricing metadata and raised by
+    adapter observations.
+- If implementation reveals real spec/code drift, stop the slice, update the
+  relevant spec first, then resume tests and production refactor.
+
+Existing patterns to reuse:
+
+- Small unexported helpers on `catalogWriter` for one catalog side-effect job.
+- Local value structs for grouped persisted-row and delta state instead of long
+  primitive parameter lists.
+- Existing `effectiveOpIdentity`, `priorOpIdentity`,
+  `catalogIdentityChanged`, `removeOpContribution`, `addMigratedTotals`, and
+  `normalizeToolNamespace` contracts.
+- Focused ingest tests plus the full package race suite and benchmark gate.
+
+Risk and blast radius:
+
+- Medium: catalog rows are denormalized running totals. A regression can
+  silently double-count, drain, or strand provider/model/tool aggregates while
+  stored op rows still look correct.
+- Provider alias handling is the main identified gap. `catalog_providers` is
+  keyed by `(name, alias)`, while most existing tests assert only provider name
+  or model/tool behavior.
+- Performance risk exists because the catalog writer runs inside every ingest
+  batch transaction; the benchmark regression gate is mandatory.
+- Low schema/API risk: the intended change is internal decomposition only.
+
+Sensitive data handling plan:
+
+- No real session data or snapshot content is written to durable artifacts.
+  Tests must use synthetic events and existing sanitized fixtures only. Any
+  temporary Codacy, Lizard, or benchmark output stays under `/tmp`.
+
+Implementation plan:
+
+1. Delegate focused characterization tests before production changes for:
+   provider-alias correction migration, empty provider-alias re-emit
+   preservation, and alias-path totals including cache/cost/duration.
+2. Delegate production refactor of `catalog.go`:
+   - split `onOpStarted` into identity/call increment resolution, LLM booking,
+     tool booking, ctx_max seed resolution, and migrated-total rebooking;
+   - split `onOpFinalized` into persisted catalog-op lookup, delta construction,
+     provider totals update, model totals update, and tool totals update;
+   - keep SQL text/bind semantics and side-effect order stable unless a focused
+     test proves the current order is irrelevant.
+3. Run focused catalog tests, package tests, package race tests, direct Lizard,
+   local Codacy file analysis, benchmark gate, full gates, and external
+   second-opinion review.
+4. Merge only after reviewers converge and PR checks are green.
+
+Validation plan:
+
+- `go test ./internal/ingest -run 'TestCatalog|TestWriter_PricerComputedCostFlowsToCatalog|TestWriter_OpFailureBumpsFailureCount|TestWriter_Pricer|TestWriter_Priceable|TestWriter_PricingMiss|TestOpDuration|TestPricing' -count=1`
+- `go test ./internal/ingest -count=1`
+- `go test -race -count=1 ./internal/ingest`
+- `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/ingest/catalog.go internal/ingest/*catalog*_test.go -l go -C 8 -L 50 -a 8`
+- Local Codacy file analysis for `internal/ingest/catalog.go` and any touched
+  catalog test files.
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- `scripts/check-bench.sh` and full `./scripts/gates.sh`.
+- PR checks must all pass before merge; `codacy-coverage` may skip on PRs by
+  design, but every other row must be green.
+
+Test-order note:
+
+- This fourth slice is a behavior-preserving refactor. Existing and added
+  characterization tests may pass before implementation. The failing signal is
+  the stricter Codacy/Lizard maintainability report listed above.
+
+Benchmarks:
+
+- Required. Catalog writes run inside the SQLite batch-insert hot path.
+  `./scripts/gates.sh` must include `scripts/check-bench.sh`; any significant
+  >20% `sec/op` regression blocks the slice.
+
+Artifact impact plan:
+
+- Specs: no expected spec file update for this behavior-preserving slice unless
+  implementation reveals real drift.
+- Runtime project skills: no expected change unless a new catalog-writer
+  decomposition convention emerges.
+- End-user docs: no expected change.
+- SOW lifecycle: remains active until the selected slice is merged and enough
+  production complexity backlog is reduced or explicitly split into narrower
+  follow-up SOWs.
+
+Open-source reference evidence:
+
+- This is an internal behavior-preserving catalog-writer decomposition against
+  already-specified canonical/store contracts. No new source-format or protocol
+  claim is introduced, so no additional upstream clone/mirror research is
+  required for this slice.
+
+Open decisions:
+
+- None for the operator. Technical sequencing belongs to the assistant.
+
 ## Plan
 
 1. Triage production hotspots and choose the first low-risk/high-value slice.
@@ -600,6 +784,29 @@ Open decisions:
 - Addressed first-review findings by pinning `readFilters` coverage for
   `tools` and `sources`, `clearFilters` preservation of unrelated params,
   empty and whitespace-padded `q` handling, and narrower helper types.
+- Merged PR #52 for the third slice. Post-merge full gates were not claimed
+  because the workstation-specific benchmark gate failed under high CPU load on
+  unrelated `aiagent_v2` benchmarks. Controlled same-load comparison against
+  the pre-v2-mapper commit showed no significant current-branch regression, and
+  the next slice keeps full gates mandatory before merge.
+- Refreshed current production Lizard triage on `master` after the first three
+  merged slices and selected `internal/ingest/catalog.go` as the fourth
+  production slice.
+- Added focused provider-alias catalog characterization coverage in
+  `internal/ingest/catalog_alias_test.go` before production refactoring.
+- Refactored `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized`
+  into smaller catalog identity, booking, persisted-row, delta, and totals
+  update helpers while preserving SQL text/bind order and side-effect order.
+- Addressed first fourth-slice review findings by splitting finalized helpers
+  into `internal/ingest/catalog_finalize.go`, keeping `catalog.go` below the
+  400-line production-file guideline, scalarizing the finalized-tool helper
+  dependency to `endTs`, restoring a concise `ctx_max` contract comment, and
+  adding direct provider-alias row-existence plus tool-namespace migration
+  characterization coverage.
+- Addressed later fourth-slice review findings by hardening catalog alias/status
+  correction tests, updating stale `data-model.md` `ctx_max` code references,
+  and correcting the `onOpStarted` `call_count` comment for identity-change
+  migration.
 
 ## Validation
 
@@ -898,6 +1105,116 @@ Third slice focused validation:
   reported Go total coverage 85.2%, gated `internal/*` aggregate coverage
   90.6%, `internal/ingest` coverage 85.9%, frontend Vitest coverage with 631
   passing tests, and frontend E2E/axe with 51 passing tests.
+
+Fourth slice focused validation:
+
+- Added provider-alias catalog characterization coverage in
+  `internal/ingest/catalog_alias_test.go` before production refactoring:
+  provider-alias correction migration, empty provider-alias re-emission
+  preservation, alias-path cache/cost totals, and model duration totals.
+- Focused pre-refactor validation passed:
+  `go test ./internal/ingest -run 'TestCatalog_.*Alias|TestCatalog_ReEmittedOpNoDoubleCount|TestCatalog_LLMIdentityChangeMigratesContribution|TestCatalog_LLMReEmitEmptyProviderModelNoDrain' -count=1`
+  in 0.033s. The new tests pass on current production code, so they pin
+  existing behavior rather than exposing a bug.
+- Direct strict Lizard on the final alias test file passed with zero warnings:
+  `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/ingest/catalog_alias_test.go -l go -C 8 -L 50 -a 8`.
+  File metrics: 153 NLOC, max function 35 NLOC, max CCN 5, max parameter
+  count 4.
+- Refactored `internal/ingest/catalog.go` `onOpStarted` from 60 NLOC /
+  CCN 22 / 98 physical lines to 10 NLOC / CCN 3, and `onOpFinalized` from
+  96 NLOC / CCN 17 / 117 physical lines to 17 NLOC / CCN 5.
+- Direct strict Lizard on `internal/ingest/catalog.go` passed with zero
+  warnings at `-C 8 -L 50 -a 8`; the production file is 313 NLOC and the
+  largest remaining function is 33 NLOC / CCN 5.
+- Focused post-refactor ingest validation passed:
+  `go test ./internal/ingest -run 'TestCatalog|TestWriter_PricerComputedCostFlowsToCatalog|TestWriter_OpFailureBumpsFailureCount|TestWriter_Pricer|TestWriter_Priceable|TestWriter_PricingMiss|TestOpDuration|TestPricing' -count=1`
+  in 0.192s.
+- Package validation passed: `go test ./internal/ingest -count=1` in 9.759s.
+- Package race validation passed:
+  `go test -race -count=1 ./internal/ingest` in 334.872s.
+- `golangci-lint run --timeout=5m ./internal/ingest` passed with zero issues.
+- Local Codacy Analysis CLI focused on `internal/ingest/catalog.go` and
+  `internal/ingest/catalog_alias_test.go` reported 0 issues across
+  Trivy/Semgrep/Lizard:
+  `/tmp/ai-viewer-sow0047-catalog-codacy-final-focused.json`.
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh` passed after
+  the code/test split; the secret scan covered 837 tracked files.
+- `scripts/check-bench.sh` passed. The relevant ingest benchmark,
+  `BatchInsert-16`, measured 117.7 ms/op vs the 123.5 ms/op baseline in one
+  focused run and 115.6 ms/op vs baseline inside the full gate; neither run had
+  a gated `sec/op` regression.
+- Full `./scripts/gates.sh` passed in 610s: lint/static/security/vulnerability
+  checks, secrets, attribution, spec drift, Codacy config/coverage self-tests,
+  systemd, build + bundle-size, benchmark regression gate, Go race+coverage,
+  frontend Vitest coverage, Go coverage threshold gate, adapter fuzz seed
+  corpus, and Playwright/axe. The run reported Go total coverage 85.3%, gated
+  `internal/*` aggregate coverage 90.7%, `internal/ingest` coverage 86.2%,
+  frontend Vitest coverage with 631 passing tests, frontend E2E/axe with
+  51 passing tests, and no benchmark `sec/op` regression over the 20% gate.
+- Round 17 reviewer follow-up validation passed after the catalog-finalize split
+  and test hardening:
+  `go test ./internal/ingest -run 'TestCatalog_.*Alias|TestCatalog_ToolNamespaceCorrectionMigratesContribution|TestCatalog_ReEmittedOpNoDoubleCount|TestCatalog_LLMIdentityChangeMigratesContribution|TestCatalog_LLMReEmitEmptyProviderModelNoDrain|TestCatalog_ToolReEmitEmptyNamespaceNoMigrate|TestCatalog_KindChangeMigratesAcrossTables' -count=1`
+  in 0.053s, `go test ./internal/ingest -count=1` in 9.275s,
+  `go test -race -count=1 ./internal/ingest` in 361.124s, and
+  `golangci-lint run --timeout=5m ./internal/ingest` with 0 issues.
+- Direct strict Lizard after the split reported zero warnings across
+  `internal/ingest/catalog.go`, `internal/ingest/catalog_finalize.go`, and
+  `internal/ingest/catalog_alias_test.go` at `-C 8 -L 50 -a 8`. Physical line
+  counts are `catalog.go` 244, `catalog_finalize.go` 179, and
+  `catalog_alias_test.go` 238; file NLOC are 172, 148, and 224 respectively.
+- Local Codacy Analysis CLI after the review fixes reported 0 issues across
+  Trivy/Semgrep/Lizard for `internal/ingest/catalog.go`,
+  `internal/ingest/catalog_finalize.go`, and
+  `internal/ingest/catalog_alias_test.go`:
+  `/tmp/ai-viewer-sow0047-catalog-codacy-after-review-fixes.json`.
+- Full `./scripts/gates.sh` passed after the Round 17 review fixes in 519s:
+  lint/static/security/vulnerability checks, secrets, attribution, spec drift,
+  Codacy config/coverage self-tests, systemd, build + bundle-size, benchmark
+  regression gate, Go race+coverage, frontend Vitest coverage, Go coverage
+  threshold gate, adapter fuzz seed corpus, and Playwright/axe. The benchmark
+  gate reported no `sec/op` regression over the 20% threshold; `BatchInsert`
+  was 134.6 ms/op vs 123.5 ms/op baseline. The run reported Go total coverage
+  85.3%, gated `internal/*` aggregate coverage 90.7%, `internal/ingest`
+  coverage 86.2%, frontend Vitest coverage with 631 passing tests, frontend
+  E2E/axe with 51 passing tests, and no benchmark `sec/op` regression over the
+  20% gate.
+- Round 18 test-hardening validation passed after accepting reviewer
+  non-blocking coverage suggestions:
+  `go test ./internal/ingest -run 'TestCatalog_.*Alias|TestCatalog_ToolNamespaceCorrectionMigratesContribution|TestCatalog_StatusCorrection|TestCatalog_ProviderWithoutModel|TestCatalog_ReEmittedOpNoDoubleCount|TestCatalog_LLMIdentityChangeMigratesContribution|TestCatalog_LLMReEmitEmptyProviderModelNoDrain|TestCatalog_ToolReEmitEmptyNamespaceNoMigrate|TestCatalog_KindChangeMigratesAcrossTables' -count=1`
+  and direct strict Lizard on `internal/ingest/catalog_alias_test.go` passed
+  with zero threshold warnings. The hardened test file is 306 physical lines,
+  289 NLOC, and its largest test function is 43 NLOC / CCN 3.
+- Post-hardening package validation passed:
+  `go test ./internal/ingest -count=1` in 10.071s,
+  `golangci-lint run --timeout=5m ./internal/ingest` with 0 issues, and local
+  Codacy Analysis CLI reported 0 issues across Trivy/Semgrep/Lizard for
+  `internal/ingest/catalog.go`, `internal/ingest/catalog_finalize.go`, and
+  `internal/ingest/catalog_alias_test.go`:
+  `/tmp/ai-viewer-sow0047-catalog-codacy-after-round18-tests.json`.
+- `git diff --check`, `scripts/scan-ai-attribution.sh`,
+  `scripts/spec-drift.sh`, and `scripts/scan-secrets.sh` passed after the
+  Round 18 SOW/test hardening; the secret scan covered 837 tracked files.
+- After exact staging of the two new Go files, `git diff --cached --check`,
+  `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh`, and
+  `scripts/scan-secrets.sh` passed; the staged secret scan covered 839 tracked
+  files.
+- Final fourth-slice pre-merge fast checks passed after Round 20 fixes:
+  `git diff --cached --check`, `scripts/spec-drift.sh`,
+  `scripts/scan-secrets.sh`, `scripts/scan-ai-attribution.sh`, and
+  `go test ./internal/ingest -count=1` in 9.027s. The final staged secret scan
+  covered 839 tracked files.
+- Final fourth-slice full `./scripts/gates.sh` passed in 520s: lint/static
+  analysis, Go security/vulnerability checks, secrets, attribution, spec drift,
+  Codacy coverage/config self-tests, systemd unit lint, build + bundle-size,
+  benchmark regression gate, Go race+coverage, frontend Vitest coverage, Go
+  coverage threshold gate, adapter fuzz seed corpus, and Playwright/axe all
+  passed. The benchmark gate reported no `sec/op` regression over the 20%
+  threshold; `BatchInsert` improved to 116.9 ms/op vs the 123.5 ms/op baseline.
+  The run reported Go total coverage 85.3%, gated `internal/*` aggregate
+  coverage 90.6%, `internal/ingest` coverage 86.2%, frontend Vitest coverage
+  with 631 passing tests, frontend E2E/axe with 51 passing tests, and main
+  frontend bundle size 132.2 KB gzipped against the 500 KB budget.
 
 ## Reviews
 
@@ -1443,6 +1760,175 @@ Resolution:
 
 - No code changes required from Round 16.
 - External review converged again with no actionable findings remaining.
+
+### Round 17 - 2026-06-05
+
+Scope: same broad SOW file and current uncommitted fourth-slice catalog diff:
+`internal/ingest/catalog.go`, untracked `internal/ingest/catalog_alias_test.go`,
+and this SOW.
+
+Reviewers:
+
+- `codex`: no blocking production correctness, race, security, SQL-order, or
+  performance finding. Findings: the new alias test file was still untracked,
+  and the SOW needed a fourth-slice review entry before merge.
+- `glm`: no blocking correctness, security, race, performance, or spec-drift
+  finding. Findings: restore concise `ctx_max` why-comments near the model
+  finalization SQL; noted the package-level tool-start helper asymmetry as
+  non-blocking.
+- `qwen`: no blocking correctness, race, security, performance, behavior, or
+  SOW/spec finding. Findings: add direct tool-namespace correction migration
+  coverage; optionally scalarize helper parameters instead of passing a whole
+  finalize event where only scalar fields are needed.
+- `mimo`: no blocking correctness, race, security, performance, SQL/bind,
+  or SOW finding. Findings: scalarize `updateFinalizedTool` to take `endTs`
+  instead of the full event, and assert that the old provider-alias row still
+  exists with `call_count=0` after migration.
+
+Resolution:
+
+- Accepted the untracked-file warning as an integration requirement; the final
+  staging step must add both `internal/ingest/catalog_alias_test.go` and
+  `internal/ingest/catalog_finalize.go` explicitly.
+- Split finalized helper structs/functions into
+  `internal/ingest/catalog_finalize.go`, reducing `internal/ingest/catalog.go`
+  from 413 to 244 physical lines and keeping both production files under the
+  400-line guideline.
+- Changed `updateFinalizedTool` to accept `endTs int64`, matching the scalar
+  dependency style used by provider/model update helpers.
+- Restored a concise `ctx_max` comment at the model finalization SQL site:
+  pricing metadata seeds a floor; adapter observations only raise the value.
+- Hardened `TestCatalog_ProviderAliasCorrectionMigratesContribution` so it
+  asserts the old provider-alias row exists and has `call_count=0`.
+- Added `TestCatalog_ToolNamespaceCorrectionMigratesContribution`, proving a
+  tool re-emit migrates call/failure/token/cost/duration totals from
+  `builtin` to the corrected non-empty namespace exactly once.
+- Review remains open until the same broad reviewer scope is rerun on the
+  integrated Round 17 fixes.
+
+### Round 18 - 2026-06-05
+
+Scope: same broad SOW file and current uncommitted fourth-slice catalog diff:
+`internal/ingest/catalog.go`, `internal/ingest/catalog_finalize.go`,
+`internal/ingest/catalog_alias_test.go`, and this SOW, with the Round 17 fixes
+integrated.
+
+Reviewers:
+
+- `codex`: no blocking catalog correctness, race, security, SQL-order, or
+  performance finding. Finding: the SOW staging reminder named only
+  `internal/ingest/catalog_alias_test.go` even though
+  `internal/ingest/catalog_finalize.go` is also new and required by
+  `catalog.go`.
+- `glm`: no blocking correctness, security, race, performance, behavior-change,
+  error-handling, or SOW/spec finding. Noted only the accepted package-level
+  tool-helper asymmetry as non-blocking.
+- `mimo`: no blocking correctness, race, security, SQL-order, performance, or
+  SOW finding. Finding: add an explicit old `builtin/read_file`
+  `call_count=0` assertion to mirror the provider-alias old-row assertion.
+- `qwen`: no blocking issue after re-tracing its own NULL-duration concern
+  through `writer.go`'s `COALESCE` duration persistence. Findings: add focused
+  coverage for completed-to-failed LLM status correction and the provider-only
+  LLM catalog path with no model row.
+
+Resolution:
+
+- Updated the Round 17 staging note so final staging explicitly includes both
+  new files: `internal/ingest/catalog_alias_test.go` and
+  `internal/ingest/catalog_finalize.go`.
+- Hardened `TestCatalog_ToolNamespaceCorrectionMigratesContribution` with a
+  direct old `builtin/read_file` `call_count=0` assertion.
+- Added `TestCatalog_StatusCorrectionLLMDeltaOnce`, proving a
+  completed-to-failed LLM re-finalize increments `failure_count` exactly once
+  without double-counting calls, tokens, cost, or duration.
+- Added `TestCatalog_ProviderWithoutModelBooksProviderOnly`, proving an LLM op
+  with provider and no model books provider totals while leaving
+  `catalog_models` empty for that provider.
+- Review remains open until the same broad reviewer scope is rerun on the
+  integrated Round 18 test/SOW hardening.
+
+### Round 19 - 2026-06-06
+
+Scope: same broad SOW file and staged fourth-slice catalog diff:
+`internal/ingest/catalog.go`, `internal/ingest/catalog_finalize.go`,
+`internal/ingest/catalog_alias_test.go`, this SOW, and exact staging evidence.
+
+Reviewers:
+
+- `codex`: no blocking runtime correctness, security, SQL-ordering, race,
+  call-count, alias, duration, cache-token, cost, or `ctx_max` finding.
+  Finding: `.agents/sow/specs/data-model.md` had stale `ctx_max` code
+  references to old `catalog.go` line ranges after the finalize split.
+- `glm`: no blocking correctness, security, race, performance, behavior,
+  error-handling, or SOW/spec finding. Verified all catalog tests, package
+  validation, lint, Lizard, and unchanged writer call sites.
+- `qwen`: no blocking correctness, security, race, performance, SQL-ordering,
+  SOW, or spec-drift finding. Noted only non-blocking future test/comment
+  polish: tool re-finalize changed-value coverage, non-`ErrNoRows`
+  `readFinalizedCatalogRow` error-path coverage, and a comment explaining the
+  package-level tool-helper asymmetry.
+- `mimo`: no blocking correctness, race, security, SQL-order, performance,
+  SOW, or spec-drift finding. Verified the Round 18 test hardening and staged
+  file set.
+
+Resolution:
+
+- Accepted the `data-model.md` stale-reference finding as real durable-memory
+  drift. Updated the `ctx_max` code references to stable function/file
+  references: `catalogWriter.ctxMaxSeed` / `upsertStartedModel` in
+  `internal/ingest/catalog.go`, and `updateFinalizedModel` in
+  `internal/ingest/catalog_finalize.go`.
+- Accepted qwen's tool re-finalize and error-path coverage notes as
+  non-blocking for this behavior-preserving complexity slice: the shared delta
+  mechanism is already covered by LLM status-correction tests, identity
+  migration tests, and existing catalog tests. No production behavior or
+  unresolved SOW scope changes are required.
+- Accepted qwen's tool-helper asymmetry comment note as non-blocking:
+  package-level tool helpers are deliberately receiver-free because they do not
+  use pricer or `ctx_max` state, and the SOW records that rationale.
+- Review remains open until quick checks and full gates pass after the
+  `data-model.md` spec reference fix.
+
+### Round 20 - 2026-06-06
+
+Scope: same broad SOW/spec/staged-code scope after the `data-model.md`
+reference fix: this SOW, `.agents/sow/specs/data-model.md`,
+`internal/ingest/catalog.go`, `internal/ingest/catalog_finalize.go`, and
+`internal/ingest/catalog_alias_test.go`.
+
+Reviewers:
+
+- `codex`: no runtime correctness, SQL-ordering, transaction, race, security,
+  alias, cache-token, cost, duration, or `ctx_max` bug found. Findings: final
+  full-gate evidence still needed before merge, and the `onOpStarted`
+  `call_count` comment was stale after accepting identity-change migration as a
+  call-count movement case.
+- `glm`: no blocking correctness, security, race, performance, behavior,
+  error-handling, or SOW/spec finding. Noted only non-blocking style
+  observations about package-level tool helpers and small struct/value-helper
+  polish.
+- `qwen`: no blocking correctness, security, performance, SQL-ordering,
+  SOW/spec, or unwanted-side-effect finding. Noted only non-blocking future
+  polish around package-level tool helper naming and SOW length.
+- `mimo`: no blocking correctness, race, security, SQL-ordering, performance,
+  SOW, or spec-drift finding. Verified the `data-model.md` stable-reference
+  fix and the focused catalog validation.
+
+Resolution:
+
+- Accepted the stale `onOpStarted` comment finding as real maintainability
+  drift. Updated the comment to state that `call_count` moves for genuine
+  inserts and identity-change migrations, while plain re-emitted `OpStarted`
+  updates remain idempotent.
+- Accepted the full-gate evidence finding as a completion-gate reminder, not a
+  code defect. Full `./scripts/gates.sh` remains required on the final staged
+  state before this SOW can be marked complete.
+- Accepted the remaining package-level tool helper, struct/value-helper, and
+  SOW-length notes as non-blocking. They do not change the behavior-preserving
+  complexity objective and do not justify another production refactor in this
+  slice.
+- External review converged with no actionable findings remaining before the
+  final full-gate run.
 
 ## Outcome
 
