@@ -115,7 +115,7 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 	// per phase — by design, see adapter.go Scan→Tail hand-off).
 	logMissingColumns(logger, schema)
 
-	cur := recordSchemaHash(ctx, db, coerceScanCursor(since), onError)
+	cur := recordSchemaHash(ctx, db, guardCursorTarget(since, dbPath, sourceID, onError), onError)
 	// SourceProgress is checkpointed by the batch processor (commitBatch),
 	// per-batch, AFTER each batch's affected sessions are emitted — the
 	// checkpoint-after-emit invariant. The trailing emitProgress that used to fire
@@ -144,28 +144,52 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStart bool, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) error {
 	logger = orDefaultLogger(logger)
 	onError = orNoop(onError)
+	rt, err := openTailRuntime(ctx, dbPath, sourceID, out, logger, onError)
+	if err != nil || rt == nil {
+		return err
+	}
+	defer rt.close()
+	return rt.run(ctx, cur, warmStart)
+}
+
+type tailRuntime struct {
+	db         *sql.DB
+	dbPath     string
+	schema     schemaSet
+	sourceID   string
+	out        chan<- canonical.Event
+	logger     *slog.Logger
+	onError    func(error)
+	walEvents  <-chan struct{}
+	closeWatch func()
+}
+
+func openTailRuntime(ctx context.Context, dbPath, sourceID string, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (*tailRuntime, error) {
 	db, err := openReadOnly(ctx, dbPath, withMaxOpenConns(2))
 	if err != nil {
-		// Non-fatal: report once and return cleanly so the daemon keeps serving
-		// other sources (mirrors codex's missing-root handling).
 		onError(fmt.Errorf("opencode: tail open %s (ro): %w", dbPath, err))
-		return nil
+		return nil, nil
 	}
-	defer func() { _ = db.Close() }()
 
 	schema, err := introspectAll(ctx, db)
 	if err != nil {
-		return fmt.Errorf("opencode: tail introspect %s: %w", dbPath, err)
+		_ = db.Close()
+		return nil, fmt.Errorf("opencode: tail introspect %s: %w", dbPath, err)
 	}
-	// Surface optional column drift once per (table, column). Scan logs the same
-	// set once too; the per-phase duplication on this rare old-schema path is
-	// acceptable (introspection runs once per phase by design).
 	logMissingColumns(logger, schema)
-	cur = recordSchemaHash(ctx, db, coerceScanCursor(cur), onError)
 
 	walEvents, closeWatch := watchWAL(dbPath, onError)
-	defer closeWatch()
+	return &tailRuntime{db: db, dbPath: dbPath, schema: schema, sourceID: sourceID, out: out, logger: logger, onError: onError, walEvents: walEvents, closeWatch: closeWatch}, nil
+}
 
+func (rt *tailRuntime) close() {
+	rt.closeWatch()
+	_ = rt.db.Close()
+}
+
+func (rt *tailRuntime) run(ctx context.Context, cur Cursor, warmStart bool) error {
+	cur = recordSchemaHash(ctx, rt.db, guardCursorTarget(cur, rt.dbPath, rt.sourceID, rt.onError), rt.onError)
+	walEvents := rt.walEvents
 	st := newPollState(warmStart)
 	timer := time.NewTimer(st.nextInterval(time.Now()))
 	defer timer.Stop()
@@ -182,18 +206,35 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStar
 			st.markWALEvent(time.Now())
 			resetTimer(timer, st.nextInterval(time.Now()))
 		case <-timer.C:
-			advanced, perr := pollOnce(ctx, db, schema, &cur, sourceID, &st, out, logger, onError)
-			if perr != nil {
-				if errors.Is(perr, context.Canceled) || errors.Is(perr, context.DeadlineExceeded) {
-					return nil
-				}
-				// A transient query error is non-fatal: report and keep polling.
-				onError(perr)
+			advanced, err := pollOnceWithLogger(ctx, rt.pollRequest(&cur, &st), rt.logger)
+			if rt.pollErrorIsTerminal(err) {
+				return nil
+			}
+			if err != nil {
+				rt.onError(err)
 			}
 			st.markCycle(advanced, time.Now())
 			resetTimer(timer, st.nextInterval(time.Now()))
 		}
 	}
+}
+
+func (rt *tailRuntime) pollRequest(cur *Cursor, st *pollState) pollRequest {
+	return pollRequest{db: rt.db, schema: rt.schema, cur: cur, sourceID: rt.sourceID, st: st, out: rt.out, onError: rt.onError}
+}
+
+func (rt *tailRuntime) pollErrorIsTerminal(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+type pollRequest struct {
+	db       *sql.DB
+	schema   schemaSet
+	cur      *Cursor
+	sourceID string
+	st       *pollState
+	out      chan<- canonical.Event
+	onError  func(error)
 }
 
 // pollOnce runs one poll cycle: the cheap MAX(id) change check per table, the
@@ -206,88 +247,48 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStar
 // emitProgress that used to fire here was a SECOND emit of the same cursor and is
 // removed (SOW-0005 round-2 P3-C: one checkpoint layer only). Returns whether the
 // cycle produced a change (so the loop switches to the active cadence).
-func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, sourceID string, st *pollState, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (bool, error) {
+func pollOnce(ctx context.Context, req pollRequest) (bool, error) {
+	return pollOnceWithLogger(ctx, req, nil)
+}
+
+func pollOnceWithLogger(ctx context.Context, req pollRequest, logger *slog.Logger) (bool, error) {
 	now := time.Now()
-	// Capture, BEFORE markProbe mutates lastProbe, whether THIS cycle's probe gate is
-	// open (a WAL write since the last probe, OR the 60 s safety net elapsed). This is
-	// the SAME predicate detectChange uses to decide whether to issue the expensive
-	// MAX(time_updated) probe — read it here so the boundary re-scan can fire on the
-	// gate-open path even when detectChange short-circuits on the cheap MAX(id) path
-	// (round-7 P1-1: the re-scan must NOT key off detectChange's `probed` output).
-	probeGateOpen := shouldProbeTimeUpdated(now, st.lastWALEvent, st.lastProbe, timeUpdatedSafetyNet)
-	changed, probed, err := detectChange(ctx, db, schema, *cur, st, now)
+	probeGateOpen := shouldProbeTimeUpdated(now, req.st.lastWALEvent, req.st.lastProbe, timeUpdatedSafetyNet)
+	changed, probed, err := detectChange(ctx, req.db, req.schema, *req.cur, req.st, now)
 	if err != nil {
 		return false, err
 	}
 	if probed {
-		st.markProbe(now)
+		req.st.markProbe(now)
 	}
-	active := false
-	// Boundary-millisecond re-scan (SOW-0005 round-3 P1-1 → round-7 P1-1): re-emit any
-	// session touched by an in-place UPDATE at exactly the cursor's boundary ms T — the
-	// case the cheap MAX(id) path, the gated MAX(time_updated) > gate, and the forward
-	// delta's strict `> :tuid` tie-break all miss.
-	//
-	// UNIFIED TRIGGER (round-7 P1-1, closes the same-ms class): run BEFORE processChanges,
-	// against the PRE-ADVANCE cursor (*cur is still the pre-advance watermark here —
-	// processChanges below advances it), whenever — for a warm/real boundary — EITHER
-	//   (a) detectChange reported changed==true on ANY path (the cheap MAX(id) INSERT path
-	//       OR the gated MAX(time_updated) probe), OR
-	//   (b) the probe gate is open this cycle (probeGateOpen: a WAL event since the last
-	//       probe, or the 60 s net elapsed).
-	// The re-scan deliberately does NOT key off detectChange's `probed` output: the cheap
-	// MAX(id) path returns changed==true, probed==false and SHORT-CIRCUITS before the gated
-	// probe, so a true INSERT (MaxIDSeen advances) co-occurring with a same-ms in-place
-	// UPDATE of a low-id row (row A, excluded from the forward delta by the strict
-	// `id > MaxTimeUpdatedID` tie-break) would otherwise be stranded: the old `probed`-gated
-	// trigger skipped the re-scan, processChanges advanced the cursor PAST T for the INSERT,
-	// and row A fell permanently below the new watermark, never seen. Arming on changed==true
-	// regardless of path re-emits row A's session FIRST, against the pre-advance T; the
-	// forward delta then emits the INSERT and advances the cursor.
-	//
-	// boundaryReal is the SINGLE cold-`Tail` guard (round-7 P2-1), applied to the WHOLE
-	// trigger — both the changed and gate-open paths. On a PRISTINE cold snapshot
-	// (follow-from-now) the cursor's boundary T is the snapshot HEAD and its bucket was
-	// NEVER emitted; re-scanning it would REPLAY a pre-existing session the cold Tail must
-	// not emit. boundaryReal is true only when the boundary T is a position whose bucket was
-	// already emitted — a WARM Tail (resumed from a Scan cursor) or after this Tail's cursor
-	// has advanced at least once (the new boundary is the just-emitted forward position, so
-	// re-scanning it is idempotent). Gating the gate-open path too (not just the changed
-	// path) closes the round-7 P2-1 hole where a cold Tail's first WAL-driven or safety-net
-	// probe (changed==false but gate open) replayed the snapshot boundary bucket. It also
-	// lets the old, partial `priorProbe` cold guard be removed entirely.
-	//
-	// AC#6 idle property is preserved: a steady-state idle DB within the 60 s net with no
-	// WAL event has changed==false AND probeGateOpen==false, so this never runs on an idle
-	// poll. The cursor is NOT advanced by the re-scan; re-emission is idempotent, and a
-	// session caught by BOTH this and the forward delta below is re-emitted once per path
-	// with no churn beyond the idempotent boundary bucket.
-	if st.boundaryReal && (changed || probeGateOpen) {
-		emitted, berr := emitBoundarySessions(ctx, db, schema, *cur, sourceID, out, logger, onError)
-		if berr != nil {
-			return active, berr
-		}
-		active = active || emitted
+	active, err := maybeEmitBoundarySessions(ctx, req, logger, changed, probeGateOpen)
+	if err != nil {
+		return active, err
 	}
-	// Forward delta: advance the cursor for genuinely new / `> :tuid` rows. Runs AFTER
-	// the boundary re-scan so a co-occurring forward change (row B) advancing the
-	// watermark past T can never strand the pre-advance boundary update (row A).
 	if changed {
-		next, advanced, perr := processChanges(ctx, db, schema, *cur, sourceID, out, logger, onError)
-		*cur = next
+		advanced, perr := applyForwardDelta(ctx, req, logger)
 		active = active || advanced
-		if advanced {
-			// The cursor has moved to a forward position whose bucket was just emitted;
-			// the boundary is now a "real" already-emitted position, so subsequent
-			// gated probes may re-scan it on the changed==true path too (the cold
-			// HEAD-snapshot, if any, is now behind us).
-			st.boundaryReal = true
-		}
 		if perr != nil {
 			return active, perr
 		}
 	}
 	return active, nil
+}
+
+func maybeEmitBoundarySessions(ctx context.Context, req pollRequest, logger *slog.Logger, changed, probeGateOpen bool) (bool, error) {
+	if !req.st.boundaryReal || (!changed && !probeGateOpen) {
+		return false, nil
+	}
+	return emitBoundarySessions(ctx, req.db, req.schema, *req.cur, req.sourceID, req.out, logger, req.onError)
+}
+
+func applyForwardDelta(ctx context.Context, req pollRequest, logger *slog.Logger) (bool, error) {
+	next, advanced, err := processChanges(ctx, req.db, req.schema, *req.cur, req.sourceID, req.out, logger, req.onError)
+	*req.cur = next
+	if advanced {
+		req.st.boundaryReal = true
+	}
+	return advanced, err
 }
 
 // detectChange reports whether any tracked table shows new/changed rows since
@@ -307,33 +308,44 @@ func pollOnce(ctx context.Context, db *sql.DB, schema schemaSet, cur *Cursor, so
 // in-place mutations of existing rows are caught only by the gated
 // MAX(time_updated) probe below, exactly as AC#6 intends.
 func detectChange(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor, st *pollState, now time.Time) (changed, probed bool, err error) {
-	// Cheap path: MAX(id) per table vs the monotonic high-water.
-	for _, table := range trackedTables {
-		mid, mErr := maxID(ctx, db, table)
-		if mErr != nil {
-			return false, false, mErr
-		}
-		if mid > cur.Tables[table].MaxIDSeen {
-			return true, false, nil
-		}
+	changed, err = changedByMaxID(ctx, db, cur)
+	if err != nil || changed {
+		return changed, false, err
 	}
-	// Gated expensive path: MAX(time_updated) per table, only when the gate opens.
 	if !shouldProbeTimeUpdated(now, st.lastWALEvent, st.lastProbe, timeUpdatedSafetyNet) {
 		return false, false, nil
 	}
+	changed, err = changedByTimeUpdated(ctx, db, schema, cur)
+	return changed, true, err
+}
+
+func changedByMaxID(ctx context.Context, db *sql.DB, cur Cursor) (bool, error) {
+	for _, table := range trackedTables {
+		mid, mErr := maxID(ctx, db, table)
+		if mErr != nil {
+			return false, mErr
+		}
+		if mid > cur.Tables[table].MaxIDSeen {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func changedByTimeUpdated(ctx context.Context, db *sql.DB, schema schemaSet, cur Cursor) (bool, error) {
 	for _, table := range trackedTables {
 		if !schema[table].has("time_updated") {
 			continue
 		}
 		mtu, mErr := maxTimeUpdated(ctx, db, table)
 		if mErr != nil {
-			return false, true, mErr
+			return false, mErr
 		}
 		if mtu > cur.Tables[table].MaxTimeUpdatedMs {
-			return true, true, nil
+			return true, nil
 		}
 	}
-	return false, true, nil
+	return false, nil
 }
 
 // shouldProbeTimeUpdated is the PURE gating predicate for the expensive

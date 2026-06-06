@@ -44,6 +44,7 @@ type AdapterFactory func(location string, opts AdapterOptions) (Adapter, error)
 
 type AdapterOptions struct {
     Logger    *slog.Logger
+    SourceID  string             // optional canonical source ID for emitted events; defaults to format:location
     OnError   func(err error)   // adapter MUST call this for non-fatal parse errors
 }
 ```
@@ -74,6 +75,13 @@ type AdapterOptions struct {
 
 The ingester calls `Scan` first, then `Tail`. The adapter MUST handle the case where new data arrives *during* `Scan`: those events should be picked up by `Tail`; any resulting re-emission is absorbed by the ingester's SQL-layer idempotent upserts (natural-identity keys), NOT by a `SourceSeq` gate. See `ingester.md` §Dedup and Idempotency.
 
+`AdapterOptions.SourceID` is the canonical source identifier the ingester uses
+for `sources.id`, cursor persistence, health reporting, and event attribution.
+Adapters that need a different construction/open path (for example a normalized
+absolute filesystem path) MUST still stamp emitted `EventBase.SourceID` values
+with `AdapterOptions.SourceID` when it is non-empty. If it is empty, adapters
+fall back to their historical `format + ":" + location` source ID convention.
+
 ## Concurrency Rules
 
 - An adapter MAY spawn internal goroutines for parallelism.
@@ -100,7 +108,9 @@ Each adapter chooses its own cursor format. Examples:
 - **aiagent_v2**: `{"<originId>.json.gz": <mtime_us>}` per file.
 - **claude_code**: same shape as aiagent_v3.
 - **codex**: `{"<rollout-file>": <byte_offset>}` keyed by date-sharded filename.
-- **opencode**: `{"messages_rowid": <last_seen>, "sessions_rowid": <last_seen>}`.
+- **opencode**: a versioned table-watermark cursor keyed by tracked SQLite
+  tables, with schema/target metadata (for example:
+  `{"version":2,"target_hash":"<sha256>","tables":{"session":{"max_id_seen":"ses_2","max_time_updated":123,"max_time_updated_id":"ses_1"}}}`).
 
 Cursors are stored as JSON in `sources.cursor`. The ingester treats them as opaque. The adapter is responsible for `Cursor.After()` correctness.
 

@@ -43,38 +43,7 @@ func watchWAL(dbPath string, onError func(error)) (<-chan struct{}, func()) {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(hint)
-		for {
-			select {
-			case <-done:
-				return
-			case ev, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if filepath.Base(ev.Name) != walBase {
-					continue
-				}
-				if ev.Op&(fsnotify.Write|fsnotify.Chmod|fsnotify.Create) == 0 {
-					continue
-				}
-				// Non-blocking notify: a pending hint already wakes the next poll.
-				select {
-				case hint <- struct{}{}:
-				default:
-				}
-			case werr, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				// A watcher error never terminates the tail loop; report and
-				// keep the watch (or let the timer net carry it).
-				onError(fmt.Errorf("opencode: wal watcher error: %w", werr))
-			}
-		}
-	}()
+	go runWALWatcher(watcher, walBase, hint, done, &wg, onError)
 
 	// closeWatch stops the goroutine and WAITS for it to exit before returning
 	// (SOW-0005 round-7 P2-2). The watcher goroutine may call onError (a watcher
@@ -96,6 +65,43 @@ func watchWAL(dbPath string, onError func(error)) (<-chan struct{}, func()) {
 		wg.Wait()
 	}
 	return hint, closeWatch
+}
+
+func runWALWatcher(watcher *fsnotify.Watcher, walBase string, hint chan<- struct{}, done <-chan struct{}, wg *sync.WaitGroup, onError func(error)) {
+	defer wg.Done()
+	defer close(hint)
+	for {
+		select {
+		case <-done:
+			return
+		case ev, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if walEventMatches(ev, walBase) {
+				sendWALHint(hint)
+			}
+		case werr, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			onError(fmt.Errorf("opencode: wal watcher error: %w", werr))
+		}
+	}
+}
+
+func walEventMatches(ev fsnotify.Event, walBase string) bool {
+	if filepath.Base(ev.Name) != walBase {
+		return false
+	}
+	return ev.Op&(fsnotify.Write|fsnotify.Chmod|fsnotify.Create) != 0
+}
+
+func sendWALHint(hint chan<- struct{}) {
+	select {
+	case hint <- struct{}{}:
+	default:
+	}
 }
 
 // closedHintChan returns an already-closed hint channel, used when the WAL watch

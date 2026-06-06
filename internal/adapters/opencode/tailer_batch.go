@@ -101,41 +101,64 @@ type batchResult struct {
 // marked done so subsequent batches skip it. The per-table watermark advances in
 // bp.scanned as pages are read; commitBatch promotes it into committed.
 func (bp *batchProcessor) collectBatch(ctx context.Context) (batchResult, error) {
-	affected := newAffectedSet()
-	total := 0
+	bc := &batchCollector{bp: bp, affected: newAffectedSet()}
 	for _, table := range trackedTables {
-		if bp.done[table] {
-			continue
+		if err := bc.collectTable(ctx, table); err != nil {
+			return bc.result(), err
 		}
-		s := bp.schema[table]
-		// Warnings raised inside a page tx (corrupt-cell / unknown-type WARN) are
-		// buffered in sink and flushed by scanOnePage AFTER each page's tx closes
-		// (SOW-0005 round-5 P2-1) — never emitted with the WAL snapshot pinned.
-		sink := &warnSink{}
-		onRow := deltaRowHandler(table, s, affected, sink.collect)
-		query := s.buildSelect()
-		for total < progressEveryRows {
-			if err := ctx.Err(); err != nil {
-				return batchResult{affected: affected.ids(), rowCount: total}, err
-			}
-			page, err := scanOnePage(ctx, bp.db, query, bp.scanned[table], onRow, sink, bp.onError)
-			if err != nil {
-				return batchResult{affected: affected.ids(), rowCount: total}, err
-			}
-			total += page.n
-			if page.n > 0 {
-				bp.scanned[table] = page.watermark
-			}
-			if page.n < deltaPageLimit {
-				bp.done[table] = true
-				break // table caught up
-			}
-		}
-		if total >= progressEveryRows {
-			break // budget spent; remaining tables wait for the next batch
+		if bc.budgetSpent() {
+			break
 		}
 	}
-	return batchResult{affected: affected.ids(), rowCount: total}, nil
+	return bc.result(), nil
+}
+
+type batchCollector struct {
+	bp       *batchProcessor
+	affected *affectedSet
+	total    int
+}
+
+func (bc *batchCollector) collectTable(ctx context.Context, table string) error {
+	if bc.bp.done[table] {
+		return nil
+	}
+	sink := &warnSink{}
+	onRow := deltaRowHandler(table, bc.bp.schema[table], bc.affected, sink.collect)
+	query := bc.bp.schema[table].buildSelect()
+	for !bc.budgetSpent() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if done, err := bc.collectPage(ctx, table, query, onRow, sink); done || err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (bc *batchCollector) collectPage(ctx context.Context, table, query string, onRow func(*sql.Rows) (rowKey, error), sink *warnSink) (bool, error) {
+	page, err := scanOnePage(ctx, bc.bp.db, query, bc.bp.scanned[table], onRow, sink, bc.bp.onError)
+	if err != nil {
+		return false, err
+	}
+	bc.total += page.n
+	if page.n > 0 {
+		bc.bp.scanned[table] = page.watermark
+	}
+	if page.n < deltaPageLimit {
+		bc.bp.done[table] = true
+		return true, nil
+	}
+	return false, nil
+}
+
+func (bc *batchCollector) budgetSpent() bool {
+	return bc.total >= progressEveryRows
+}
+
+func (bc *batchCollector) result() batchResult {
+	return batchResult{affected: bc.affected.ids(), rowCount: bc.total}
 }
 
 // commitBatch reloads+emits the batch's affected sessions, THEN advances the

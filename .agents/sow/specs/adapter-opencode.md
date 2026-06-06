@@ -280,7 +280,7 @@ Key choices:
 
 **DSN is an ALLOWLIST, not a denylist (SOW-0005 P1.2).** `buildReadOnlyDSN` parses the caller-supplied query string only to VALIDATE it, then DISCARDS it and rebuilds the query from scratch with exactly: `mode=ro`, `_txlock=deferred`, and the fixed `readOnlyPragmas` set (`query_only(true)`, `busy_timeout(5000)`). Therefore NO caller-supplied `_pragma` survives — neither one that name-collides with the read-only set NOR a non-colliding write-path pragma (`wal_checkpoint(TRUNCATE)`, `optimize`, `foreign_keys(on)`, …) — and a caller `_txlock=exclusive` is replaced with `deferred`. A maliciously-constructed path string therefore cannot reach a write-path pragma or an exclusive (write-lock) BEGIN. The earlier denylist that stripped only colliding `_pragma` names is replaced by this allowlist.
 
-**`buildReadOnlyDSN` input is a filesystem path on the CLI; `file:`/`:memory:` are programmatic-only (SOW-0005 round-3 P2-4).** `buildReadOnlyDSN` accepts three shapes: a bare filesystem path (normalised to an absolute `file:` URI), an already-built `file:` URI, and the in-memory `:memory:` form. The CLI's opencode source location (auto-discovery + `--source opencode:<path>`) is ALWAYS a filesystem path — `cmd/ai-viewer-ingest`'s `startSource` calls `os.Stat(location)` before constructing the adapter, which fails for a `file:`/`:memory:` DSN string. The `file:`/`:memory:` shapes exist for the adapter's own programmatic and test callers (throwaway shared-cache DBs); they are NOT supported `--source` locations and are not a CLI feature. This is a documented contract, not a code restriction: the adapter still accepts those shapes when called directly.
+**`buildReadOnlyDSN` input is a filesystem path on the CLI; `file:`/`:memory:` are programmatic-only (SOW-0005 round-3 P2-4).** `buildReadOnlyDSN` accepts three shapes: a bare filesystem path (normalised to an absolute `file:` URI), an already-built `file:` URI, and the in-memory `:memory:` form. The CLI's opencode source location (auto-discovery + `--source opencode:<path>`) is ALWAYS a filesystem path — `cmd/ai-viewer-ingest`'s `startSource` calls `os.Stat(location)` before constructing the adapter. For explicit opencode CLI sources, `startSource` then normalizes a relative location to an absolute filesystem path before calling the adapter factory, so a literal relative filename such as `file:opencode.db` remains a filesystem path (`/abs/.../file:opencode.db`) instead of crossing into SQLite URI parsing as `file:opencode.db`. Source IDs and logs retain the original operator-supplied location; only the adapter-construction argument is normalized. The ingester passes the canonical source ID separately through `AdapterOptions.SourceID`, and the Opencode adapter stamps emitted `EventBase.SourceID` values with that ID when present, so event attribution matches `sources.id` and `source_progress.source_id` even when the DB open path is normalized. The `file:`/`:memory:` shapes exist for the adapter's own programmatic and test callers (throwaway shared-cache DBs); they are NOT supported `--source` locations and are not a CLI feature. This is a documented CLI contract, not an adapter restriction: the adapter still accepts those shapes when called directly.
 
 **Never** call `PRAGMA wal_checkpoint`, `PRAGMA optimize`, `VACUUM`, `BEGIN EXCLUSIVE`, or `ATTACH … AS … 'rwc'`. The connection MUST remain a pure reader.
 
@@ -316,12 +316,12 @@ The delta-query layer is the bridge between the watermark cursor and the pure ma
 2. **Affected-session derivation.** From the changed rows, the layer computes the SET of session ids whose full tree must be reloaded and re-mapped:
    - a changed `session` row contributes its own `id`;
    - a changed `message` row contributes its `session_id`;
-   - a changed `part` row contributes its `session_id` (the `part` table denormalizes `session_id`); on a hypothetical old schema where `part` lacks `session_id`, the owning session is resolved via an indexed `SELECT session_id FROM message WHERE id = :message_id` lookup (with the changed-message delta consulted first to avoid the query). This delta-path resolver (`resolvePartSession`) is distinct from the *tree-load* path below;
+   - a changed `part` row contributes its `session_id` (the `part` table denormalizes `session_id`); `part.session_id` is required, so an old schema lacking it fails schema introspection before the delta path runs rather than falling back through `part.message_id`;
    - a changed `session_message` row contributes its `session_id`.
 
    The set is de-duplicated: a session touched by several tables in one cycle is reloaded exactly once.
 
-   **No tree-load `message_id IN (...)` fallback (SOW-0005 round-3 P3-1).** `part.session_id` is a REQUIRED column (`requiredColumns["part"]`), so `introspectAll` makes a `part` table lacking it FATAL upstream — it can never be a tree-load input. The round-2 P2-B `loadPartsByMessageIDs` / `selectPartsByMessageIDs` fallback (a `WHERE message_id IN (?,…)` part query for a `part` table without `session_id`) was therefore UNREACHABLE in production and has been removed, along with its introspection-bypassing isolation test. The tree load always reads parts via the single indexed `WHERE session_id = ?` query. (The delta-path `resolvePartSession` above is a separate concern and keeps its message-PK lookup as documented.)
+   **No tree-load or delta-path `message_id` fallback (SOW-0005 round-3 P3-1, round-6 P3-2).** `part.session_id` is a REQUIRED column (`requiredColumns["part"]`), so `introspectAll` makes a `part` table lacking it FATAL upstream — it can never be a tree-load or delta-path input. The round-2 P2-B `loadPartsByMessageIDs` / `selectPartsByMessageIDs` fallback (a `WHERE message_id IN (?,…)` part query for a `part` table without `session_id`) and the round-6 delta-path `message_id -> message.session_id` lookup fallback were therefore UNREACHABLE in production and have been removed, along with their introspection-bypassing isolation tests. The tree load always reads parts via the single indexed `WHERE session_id = ?` query, and the delta path uses the changed part row's required `session_id`.
 
    **Full-tree scanners validate the required ownership/id columns too (SOW-0005 round-7 P2-3).** The DELTA scanners abort the page on a corrupt/empty required ownership column (round-5 P2-2, above). The FULL-TREE load path (`scanPartRows` in `store_load.go`, which partitions a session's parts into a `map[message_id][]partRow` for the mapper) must apply the SAME discipline: a `part` row whose REQUIRED `message_id` (the partition key) or `session_id` is empty is **NOT** silently attached to the `out[""]` bucket — where it would be dropped when the mapper looks up parts by a message's real id — but is **skipped with a surfaced WARN** (table/column context, no raw value). The WARN is buffered in the same post-tx `warnSink` discipline (§"No warning/error/content EMISSION while a source-DB read tx is open"): it is collected during the read tx and flushed through `onWarn` only after the snapshot is released. A corrupt historical `part.message_id`/`session_id` therefore surfaces in the logs and (via the adapter's `onError` → `SourceError`) in `/api/health`, rather than vanishing into `out[""]`. The message loader's own required columns (`id`/`session_id`) are read the same way; an empty owning id is surfaced, not silently zeroed.
 
@@ -434,28 +434,54 @@ Cursor shape, stored as opaque JSON in `sources.cursor`:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "target_hash": "<sha256 of the adapter's DB open target>",
   "schema_hash": "<sha256 of __drizzle_migrations.name list>",
   "tables": {
-    "session":         { "max_time_updated": 1779793294883, "max_id": "ses_..." },
-    "message":         { "max_time_updated": 1779793313106, "max_id": "msg_..." },
-    "part":            { "max_time_updated": 1779793313250, "max_id": "prt_..." },
-    "session_message": { "max_time_updated": 1779793313191, "max_id": "evt_..." }
+    "session": {
+      "max_id_seen": "ses_...",
+      "max_time_updated": 1779793294883,
+      "max_time_updated_id": "ses_..."
+    },
+    "message": {
+      "max_id_seen": "msg_...",
+      "max_time_updated": 1779793313106,
+      "max_time_updated_id": "msg_..."
+    },
+    "part": {
+      "max_id_seen": "prt_...",
+      "max_time_updated": 1779793313250,
+      "max_time_updated_id": "prt_..."
+    },
+    "session_message": {
+      "max_id_seen": "evt_...",
+      "max_time_updated": 1779793313191,
+      "max_time_updated_id": "evt_..."
+    }
   }
 }
 ```
 
-Two-watermark scheme:
+Three target/progress fields carry different meanings and must not be
+collapsed:
 
-- `max_time_updated` is the source of truth for delta queries.
-- `max_id` is a secondary tiebreaker used only when multiple rows share the same `time_updated` (common — Drizzle stamps the same `Date.now()` across a single transaction). Without this tiebreaker the delta query can miss rows.
+- `target_hash` is a SHA-256 digest of the adapter's DB open target (`dbPath`,
+  after CLI normalization). It proves that persisted table watermarks belong to
+  the same physical SQLite target the adapter is about to read. It is not part
+  of `After()` ordering.
+- `max_id_seen` is the monotonic highest primary key observed for the table. It
+  drives the cheap `MAX(id)` insert check and never regresses.
+- `max_time_updated` + `max_time_updated_id` is the delta-query paging
+  position. `max_time_updated_id` is the secondary tiebreaker when multiple rows
+  share the same `time_updated` bucket, which is common because Drizzle stamps
+  the same `Date.now()` across one transaction.
 
 Delta query template (per table):
 
 ```sql
 SELECT * FROM <t>
 WHERE time_updated > :max_time_updated
-   OR (time_updated = :max_time_updated AND id > :max_id)
+   OR (time_updated = :max_time_updated AND id > :max_time_updated_id)
 ORDER BY time_updated, id
 LIMIT 1000;
 ```
@@ -463,6 +489,21 @@ LIMIT 1000;
 The 1000-row page LIMIT keeps each read transaction short. The adapter pages until the next page is empty.
 
 `schema_hash` invalidates the cursor when opencode applies a new migration that affects shape we read; on mismatch the adapter logs a structured WARN, re-reads `__drizzle_migrations`, and continues without resetting the cursor (column drift is handled per-column; see Edge Cases). A full re-ingest is only triggered when a column we depend on disappears or its type changes incompatibly.
+
+`target_hash` invalidates the cursor when the configured source identity and the
+physical database open target diverge. This matters for explicit CLI sources
+such as a literal relative filename `file:opencode.db`: older code could persist
+a cursor under source ID `opencode:file:opencode.db` while accidentally opening
+SQLite URI `file:opencode.db`; fixed code opens the literal absolute filesystem
+path instead. Reusing the old watermarks against the corrected target could skip
+content. On scan, tail, and cold-tail snapshot startup, the adapter stamps the
+current target hash. If a stored cursor has a different non-empty `target_hash`,
+the adapter logs a structured WARN and resets table watermarks to a fresh cursor
+before reading. If a stored cursor has progress but no `target_hash`, the adapter
+accepts it only when the canonical source ID still matches the adapter's
+historical fallback `opencode:<dbPath>`; when they differ, the cursor is from the
+pre-target-hash era at a source/open-path boundary and is reset once. The reset
+is idempotent because the ingester upserts canonical rows.
 
 `SourceProgress` events are emitted per BATCH, AFTER that batch's affected sessions are emitted (the checkpoint-after-emit invariant — see Read Strategy §"Full-session-tree load + map"). A batch's row budget is `progressEveryRows` (1000) across the tracked tables, so the persisted cursor advances at most one batch ahead of fully-emitted content, never past un-emitted content. The earlier "every 1000 rows or every 5 s" mid-paging cadence is superseded.
 
@@ -728,6 +769,37 @@ not serialised into `expected.jsonl` (it is a log, not a canonical event).
 6. **`message.data.path.cwd` is per-turn, not per-session.** A user can `cd` mid-session (or opencode itself can). The session's `directory` column records start-of-session cwd. The canonical model has no per-turn cwd. **Recommendation**: store per-turn cwd in `turns.extras_json`; not a v1 blocker.
 
 ## Performance
+
+### Performance Benchmarks
+
+The Opencode adapter has deterministic scan and tail benchmarks in
+`internal/adapters/opencode/bench_test.go`. They use synthetic SQLite fixtures
+built from schema-shaped rows, never a real source database. Each synthetic
+session includes the normal step-start/step-finish/text path plus a `tool="task"`
+part with `state.metadata.sessionId`, so the task-tool and child-session topology
+path is included in the measured mapper workload.
+
+The scan benchmark exercises the cold `scanLoop` backfill path and asserts 2622
+events: 256 seed sessions plus the six-session second-batch remainder, each at
+10 events/session, plus two SourceProgress checkpoints. The tail
+benchmark exercises the append poll/tail hot path through `pollOnce` after a
+seeded scan cursor and one new synthetic session tree, and asserts 21 events:
+the idempotent boundary re-scan of the seed session plus the forward delta of
+the appended session, at 10 events/session, plus one SourceProgress checkpoint.
+Each tail benchmark iteration replays the same deterministic already-appended
+session from the same seeded cursor; it is not a sustained writer workload.
+Same-boundary mutation behavior remains covered by focused regression tests; it
+is not folded into this append benchmark. Both benchmarks assert exact emitted
+event counts before reporting timing, so a benchmark cannot silently certify a
+path that stopped emitting content.
+
+Both benchmarks report Go's standard `sec/op`, `B/op`, and `allocs/op`. The scan
+benchmark calls `b.SetBytes` and therefore reports `B/s`; it also reports custom
+`events/sec`, `sessions/sec`, and `peak_heap_mb` metrics. The tail append
+benchmark reports only `events/sec` and `peak_heap_mb` custom metrics, because it
+measures one `pollOnce` append cycle rather than a full-database byte stream.
+`scripts/check-bench.sh` gates only `sec/op` against `bench/baseline.txt`; custom
+metrics are informational trend evidence.
 
 Sample query timings on the operator's 3.9 GB DB, measured cold:
 

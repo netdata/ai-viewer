@@ -118,6 +118,36 @@ func TestBuildReadOnlyDSN_BarePathWithQuestionMarkIsOpaque(t *testing.T) {
 	}
 }
 
+// TestBuildReadOnlyDSN_BarePathWithMemoryMarkerIsOpaque pins the same bare-path
+// opacity for a literal path segment that happens to contain ":memory:?". It is
+// not a SQLite memory DSN unless the string starts with the memory DSN form.
+func TestBuildReadOnlyDSN_BarePathWithMemoryMarkerIsOpaque(t *testing.T) {
+	t.Parallel()
+	bare := "/tmp/opencode:memory:?dir/opencode.db"
+	dsn, err := buildReadOnlyDSN(bare)
+	if err != nil {
+		t.Fatalf("buildReadOnlyDSN(bare-with-memory-marker): %v", err)
+	}
+	prefix, query := splitQuery(dsn)
+	if !strings.HasPrefix(prefix, "file:") {
+		t.Fatalf("bare-path DSN prefix = %q, want file: URI prefix", prefix)
+	}
+	if !strings.Contains(prefix, "opencode%3Amemory%3A%3Fdir") {
+		t.Errorf("bare-path DSN prefix %q lost the literal ':memory:?' segment (should be percent-escaped, not split)", prefix)
+	}
+
+	params, err := url.ParseQuery(query)
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
+	}
+	if params.Get("mode") != "ro" {
+		t.Errorf("mode = %q, want ro", params.Get("mode"))
+	}
+	if strings.Contains(query, "dir/opencode.db") || strings.Contains(query, "opencode.db") {
+		t.Errorf("part of the bare path leaked into the query: %q", query)
+	}
+}
+
 // TestOpenReadOnly_BarePathWithQuestionMarkOpensLiteralFile is the end-to-end proof:
 // an opencode DB created at a path whose DIRECTORY name contains '?' is opened
 // read-only via the literal path (round-4 P3-2). Before the fix the '?' split the
@@ -146,6 +176,33 @@ func TestOpenReadOnly_BarePathWithQuestionMarkOpensLiteralFile(t *testing.T) {
 	// A trivial query confirms the connection is live (the literal file opened).
 	if _, err := introspectAll(ctxBG(), db); err != nil {
 		t.Fatalf("introspect over the '?'-path DB: %v", err)
+	}
+}
+
+// TestOpenReadOnly_BarePathWithMemoryMarkerOpensLiteralFile proves the
+// end-to-end open path treats ":memory:?" inside a bare filesystem directory
+// name as literal path bytes, not as an in-memory SQLite DSN with a query.
+func TestOpenReadOnly_BarePathWithMemoryMarkerOpensLiteralFile(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	weird := filepath.Join(base, "opencode:memory:?dir")
+	if err := os.MkdirAll(weird, 0o755); err != nil {
+		t.Fatalf("mkdir %q: %v", weird, err)
+	}
+	path, rw := newEmptyDB(t, weird, "opencode.db")
+	if !strings.Contains(path, ":memory:?") {
+		t.Fatalf("test path %q unexpectedly has no ':memory:?'", path)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, err := openReadOnly(ctxBG(), path)
+	if err != nil {
+		t.Fatalf("openReadOnly(bare path with ':memory:?') failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := introspectAll(ctxBG(), db); err != nil {
+		t.Fatalf("introspect over the ':memory:?'-path DB: %v", err)
 	}
 }
 

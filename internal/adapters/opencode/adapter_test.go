@@ -68,6 +68,19 @@ func TestAdapter_NewDefaultsNilDeps(t *testing.T) {
 	}
 }
 
+func TestAdapter_NewUsesConfiguredSourceID(t *testing.T) {
+	t.Parallel()
+
+	const sourceID = "opencode:file:opencode.db"
+	a, err := New("/abs/work/file:opencode.db", canonical.AdapterOptions{SourceID: sourceID})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if a.sourceID != sourceID {
+		t.Fatalf("sourceID = %q, want AdapterOptions.SourceID %q", a.sourceID, sourceID)
+	}
+}
+
 // TestAdapter_NameAndFormat pins the registry identifiers.
 func TestAdapter_NameAndFormat(t *testing.T) {
 	t.Parallel()

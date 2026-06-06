@@ -66,9 +66,13 @@ func New(root string, opts canonical.AdapterOptions) (*Adapter, error) {
 	if onError == nil {
 		onError = func(error) {}
 	}
+	sourceID := opts.SourceID
+	if sourceID == "" {
+		sourceID = sourceIDPrefix + root
+	}
 	return &Adapter{
 		root:     root,
-		sourceID: sourceIDPrefix + root,
+		sourceID: sourceID,
 		logger:   logger,
 		onError:  onError,
 	}, nil

@@ -2,9 +2,10 @@
 
 Two complementary benchmarks live here:
 
-1. **Synthetic Go benchmarks** — hermetic. The current suite is 7
-   benchmarks (ai-agent v2 `Scan` + `Tail`, claude-code `Scan` + `Tail`,
-   SQLite batch insert, REST query, SSE fanout). They are gated
+1. **Synthetic Go benchmarks** — hermetic. The current suite is 11
+   benchmarks across 7 packages: ai-agent v2 `Scan` + `Tail`, claude-code
+   `Scan` + `Tail`, Codex `Scan` + `Tail`, Opencode `Scan` + `Tail`,
+   SQLite batch insert, REST query, and SSE fanout. They are gated
    **locally** by `scripts/check-bench.sh` (benchstat vs
    `bench/baseline.txt`; the workstation baseline is not comparable to
    GitHub-runner hardware), so CI runs only the compile-smoke + the gate
@@ -84,16 +85,20 @@ evidence in the SOW Chunk 9 entry but is not the SOW gate metric.
 ## `bench/baseline.txt`
 
 Frozen baseline consumed by `benchstat` via `scripts/check-bench.sh`. It
-is the raw `go test -run=^$ -bench=. -benchmem -count=6` output for the 7
-synthetic benchmarks (5 packages; `Scan` + `Tail` share `aiagent_v2`, and
-claude-code `Scan` + `Tail` share `claude_code`), prefixed by a comment
-header carrying benchmark-code provenance and the `goos/goarch/pkg/cpu`
-config lines (benchstat groups by config, so the baseline and the current
-run must share it). `check-bench.sh` compares a fresh run against it and
-fails on a statistically-significant > 20% **sec/op** regression for any
+is the raw `go test -run=^$ -bench=. -benchmem -count=6` output for the 11
+synthetic benchmarks across 7 packages, prefixed by a comment header
+carrying benchmark-code provenance and the `goos/goarch/pkg/cpu` config
+lines (benchstat groups by config, so the baseline and the current run
+must share it). `check-bench.sh` compares a fresh run against it and fails
+on a statistically-significant > 20% **sec/op** regression for any
 benchmark (the `geomean` aggregate and the custom metrics are excluded).
 `count=6` is benchstat's minimum for a 0.95 confidence interval; baseline
 refresh requires an explicit SOW.
+
+Benchmark fixtures should not add helper-goroutine scheduler noise to a serial
+hot-path measurement. If a benchmark needs to keep a queue/channel on the fast
+path, prefer deterministic buffer sizing or pre-seeding over background
+drainers unless the helper concurrency is itself the behavior being measured.
 
 The real-data harness digest is NOT in `baseline.txt` — it is saved
 separately (e.g. `bench/v2-backfill-2026-05-27.txt`) as a dated,

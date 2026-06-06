@@ -99,12 +99,26 @@ func (s *pollState) nextInterval(now time.Time) time.Duration {
 // keeps it a pure cursor-shaping helper. Returns a ready-to-page cursor.
 func coerceScanCursor(c Cursor) Cursor {
 	if c.Tables == nil {
-		c = newCursor()
+		c.Tables = map[string]TableWatermark{}
 	}
 	if c.Version == 0 {
 		c.Version = cursorVersion
 	}
 	return c
+}
+
+func guardCursorTarget(c Cursor, dbPath, sourceID string, onError func(error)) Cursor {
+	c = coerceScanCursor(c)
+	currentHash := targetHashForDBPath(dbPath)
+	if c.TargetHash != "" && c.TargetHash != currentHash {
+		orNoop(onError)(fmt.Errorf("opencode: cursor target hash mismatch; resetting watermarks: source_id=%q stored_target_hash=%.12s current_target_hash=%.12s", sourceID, c.TargetHash, currentHash))
+		return newCursor().withTargetHash(currentHash)
+	}
+	if c.TargetHash == "" && c.hasProgress() && sourceID != sourceIDPrefix+dbPath {
+		orNoop(onError)(fmt.Errorf("opencode: legacy cursor lacks target hash at source/open-path boundary; resetting watermarks: source_id=%q current_target_hash=%.12s", sourceID, currentHash))
+		return newCursor().withTargetHash(currentHash)
+	}
+	return c.withTargetHash(currentHash)
 }
 
 // recordSchemaHash reads __drizzle_migrations once and stamps the REAL

@@ -123,56 +123,44 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 	}
 	startUs := m.msToMicrosWarn(mwp.Message.TimeCreatedMs, "message.time_created (turn start)")
 	out := make([]canonical.Event, 0, 4+2*len(mwp.Parts))
-
 	out = append(out, canonical.TurnStartedEvent{
 		EventBase:       m.nextBase(startUs),
 		SessionNativeID: m.nativeID(),
 		Seq:             tc.turnSeq,
 	})
 
-	hasStepFinish := false
-	for i := range mwp.Parts {
-		evs, err := m.mapPart(tc, &data, mwp.Parts[i])
-		if err != nil {
-			return nil, err
-		}
-		if mwp.Parts[i].isStepFinish() {
-			hasStepFinish = true
-		}
-		out = append(out, evs...)
+	hasStepFinish, err := m.appendMappedParts(&out, tc, &data, mwp.Parts)
+	if err != nil {
+		return nil, err
 	}
-
-	// A step-start still OPEN at turn end (no step-finish closing it) stays a
-	// RUNNING LLM op with no finalize (adapter-opencode.md §"Edge Cases" #4/#5:
-	// orphan step-start is a running LLM op). It is the within-message force-close
-	// (a NEW step-start arriving) that synthesizes a cancelled finalize — handled
-	// in openLLMOp; the trailing open op is intentionally left running here.
-
-	// Finalize the turn ONLY when it is terminal (adapter-opencode.md §"Per-table
-	// emit rules": data.time.completed set, OR data.error, OR ≥1 step-finish
-	// part). opencode writes the assistant message row live while the turn is
-	// still running; a non-terminal turn stays RUNNING (TurnStarted with no
-	// TurnFinalized) and a later poll re-emits + finalizes it once it completes
-	// (idempotent). Without this gate every live row would be wrongly finalized.
 	if turnIsTerminal(&data, hasStepFinish) {
 		out = append(out, m.finalizeTurn(tc, &data, mwp.Message))
 	}
+	m.recordAssistantTerminal(&data, mwp.Message)
+	return out, nil
+}
 
-	// Track the session's failed-terminal signal as the LAST assistant turn's
-	// terminal error, NOT a sticky OR (SOW-0005 round-2 P1-B). Messages are walked
-	// in order, so: if THIS turn carries an error, record it (error PRESENCE, not a
-	// non-empty name — P2-A); if it does NOT, CLEAR any previously-tracked error
-	// (a later turn recovered, so the session did not end failed). sessionFinalized
-	// then reflects only the last turn's state — a session that errored on turn 3
-	// but succeeded on turn 5 is NOT marked failed.
+func (m *sessionMapper) appendMappedParts(out *[]canonical.Event, tc *turnContext, data *messageData, parts []partRow) (bool, error) {
+	hasStepFinish := false
+	for i := range parts {
+		evs, err := m.mapPart(tc, data, parts[i])
+		if err != nil {
+			return false, err
+		}
+		hasStepFinish = hasStepFinish || parts[i].isStepFinish()
+		*out = append(*out, evs...)
+	}
+	return hasStepFinish, nil
+}
+
+func (m *sessionMapper) recordAssistantTerminal(data *messageData, msg messageRow) {
 	if data.Error != nil {
 		m.failError = data.Error
-		m.failEndUs = m.turnEndUs(&data, mwp.Message)
+		m.failEndUs = m.turnEndUs(data, msg)
 	} else {
 		m.failError = nil
 		m.failEndUs = 0
 	}
-	return out, nil
 }
 
 // mapPart dispatches one part to its emitter per the part-type table (adapter-
@@ -183,50 +171,59 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 func (m *sessionMapper) mapPart(tc *turnContext, msg *messageData, p partRow) ([]canonical.Event, error) {
 	data, err := decodePartData(p.Data)
 	if err != nil {
-		// Session LogEntry (detail view) AND onError (health): part.data is NOT-NULL,
-		// so an undecodable blob is corruption that must degrade /api/health, not just
-		// a per-session WRN (SOW-0005 round-3 P2-2). The part is skipped, not aborted.
-		m.mwarn(fmt.Errorf("opencode: undecodable part.data (table=part id=%s); part skipped: %w", p.ID, err))
-		base := m.nextBase(0)
-		return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq,
-			"part data undecodable: "+err.Error(),
-			map[string]any{"part_id": p.ID})}, nil
+		return m.undecodablePartLog(tc, p, err), nil
 	}
+	if evs, ok := m.mapOpPart(tc, msg, p, data); ok {
+		return evs, nil
+	}
+	return m.mapNonOpPart(tc, p, data), nil
+}
 
+func (m *sessionMapper) mapOpPart(tc *turnContext, msg *messageData, p partRow, data partData) ([]canonical.Event, bool) {
 	switch data.kind() {
 	case partStepStart:
-		return m.openLLMOp(tc, msg, p, data), nil
+		return m.openLLMOp(tc, msg, p, data), true
 	case partStepFinish:
-		return m.closeLLMOp(tc, p, data), nil
+		return m.closeLLMOp(tc, p, data), true
 	case partReasoning:
-		return m.emitReasoningOp(tc, p, data), nil
+		return m.emitReasoningOp(tc, p, data), true
 	case partTool:
-		return m.emitToolOp(tc, p, data), nil
-	case partText:
-		return m.emitTextPayload(tc, p), nil
-	case partPatch:
-		return m.recordPatch(tc, data), nil
-	case partCompaction:
-		return m.emitCompactionLog(tc, p, data), nil
-	case partRetry:
-		return m.emitRetryLog(tc, p, data), nil
-	case partFile:
-		return m.emitFileLog(tc, p, data), nil
-	case partSnapshot, partSubtask, partAgent:
-		// Known-but-not-an-op part types observed as 0-count on the live DB
-		// (adapter-opencode.md §"part" distribution). They carry no op/payload
-		// the mapper materializes in v1; recorded as no-ops here (NOT a WARN —
-		// they are known, just unused). A future SOW may surface subtask as a
-		// session op once the part type is populated.
-		return nil, nil
+		return m.emitToolOp(tc, p, data), true
 	default:
-		// Unknown $.type: forward-compatibility data, skipped with one WRN
-		// (types.go partUnknown; adapter-opencode.md §"Edge Cases" #1).
-		base := m.nextBase(0)
-		return []canonical.Event{m.logEntry(base, "WRN", tc.turnSeq, tc.llmOpSeq,
-			fmt.Sprintf("unknown part type %q", data.RawType),
-			map[string]any{"part_id": p.ID})}, nil
+		return nil, false
 	}
+}
+
+func (m *sessionMapper) mapNonOpPart(tc *turnContext, p partRow, data partData) []canonical.Event {
+	switch data.kind() {
+	case partText:
+		return m.emitTextPayload(tc, p)
+	case partPatch:
+		return m.recordPatch(tc, data)
+	case partCompaction:
+		return m.emitCompactionLog(tc, p, data)
+	case partRetry:
+		return m.emitRetryLog(tc, p, data)
+	case partFile:
+		return m.emitFileLog(tc, p, data)
+	case partSnapshot, partSubtask, partAgent:
+		return nil
+	default:
+		return m.unknownPartLog(tc, p, data)
+	}
+}
+
+func (m *sessionMapper) undecodablePartLog(tc *turnContext, p partRow, err error) []canonical.Event {
+	m.mwarn(fmt.Errorf("opencode: undecodable part.data (table=part id=%s); part skipped: %w", p.ID, err))
+	return []canonical.Event{m.logEntry(m.nextBase(0), "WRN", tc.turnSeq, tc.llmOpSeq,
+		"part data undecodable: "+err.Error(),
+		map[string]any{"part_id": p.ID})}
+}
+
+func (m *sessionMapper) unknownPartLog(tc *turnContext, p partRow, data partData) []canonical.Event {
+	return []canonical.Event{m.logEntry(m.nextBase(0), "WRN", tc.turnSeq, tc.llmOpSeq,
+		fmt.Sprintf("unknown part type %q", data.RawType),
+		map[string]any{"part_id": p.ID})}
 }
 
 // stepFinishTokens extracts the ordered cumulative token snapshots from a

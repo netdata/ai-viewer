@@ -72,61 +72,69 @@ func processChanges(ctx context.Context, db *sql.DB, schema schemaSet, cur Curso
 // was unreachable and removed — SOW-0005 round-6 P3-2). The message→session map the
 // fallback once consulted is therefore gone too.
 func deltaRowHandler(table string, s tableSchema, affected *affectedSet, onError func(error)) func(*sql.Rows) (rowKey, error) {
-	idx := newColumnIndex(s)
-	n := len(s.Present)
 	switch table {
 	case "session":
-		scan, row := scanSessionRow(idx, n, onError)
-		return func(rows *sql.Rows) (rowKey, error) {
-			k, err := scan(rows)
-			if err != nil {
-				return k, err
-			}
-			affected.add(row.ID)
-			return k, nil
-		}
+		return sessionDeltaRowHandler(s, affected, onError)
 	case "message":
-		scan, row := scanMessageRow(idx, n, onError)
-		return func(rows *sql.Rows) (rowKey, error) {
-			k, err := scan(rows)
-			if err != nil {
-				return k, err
-			}
-			affected.add(row.SessionID)
-			return k, nil
-		}
+		return messageDeltaRowHandler(s, affected, onError)
 	case "part":
-		scan, row := scanPartRow(idx, n, onError)
-		return func(rows *sql.Rows) (rowKey, error) {
-			k, err := scan(rows)
-			if err != nil {
-				return k, err
-			}
-			sid, rerr := resolvePartSession(*row)
-			if rerr != nil {
-				return k, rerr
-			}
-			affected.add(sid)
-			return k, nil
-		}
+		return partDeltaRowHandler(s, affected, onError)
 	default: // session_message
-		scan, row := scanSessionMessageRow(idx, n, onError)
-		hasType := s.has("type")
-		return func(rows *sql.Rows) (rowKey, error) {
-			k, err := scan(rows)
-			if err != nil {
-				return k, err
-			}
-			affected.add(row.SessionID)
-			// Spec Edge #1 (§"session_message"): warn on an unrecognized
-			// session_message.type so a new opencode event variant is visible
-			// rather than silently absorbed. Introspection-aware: if the schema
-			// lacks the type column, skip silently (row.Type is "").
-			if hasType {
-				warnUnknownSessionMessageType(row.ID, row.Type, onError)
-			}
-			return k, nil
+		return sessionMessageDeltaRowHandler(s, affected, onError)
+	}
+}
+
+func sessionDeltaRowHandler(s tableSchema, affected *affectedSet, onError func(error)) func(*sql.Rows) (rowKey, error) {
+	scan, row := scanSessionRow(newColumnIndex(s), len(s.Present), onError)
+	return func(rows *sql.Rows) (rowKey, error) {
+		k, err := scan(rows)
+		if err == nil {
+			affected.add(row.ID)
 		}
+		return k, err
+	}
+}
+
+func messageDeltaRowHandler(s tableSchema, affected *affectedSet, onError func(error)) func(*sql.Rows) (rowKey, error) {
+	scan, row := scanMessageRow(newColumnIndex(s), len(s.Present), onError)
+	return func(rows *sql.Rows) (rowKey, error) {
+		k, err := scan(rows)
+		if err == nil {
+			affected.add(row.SessionID)
+		}
+		return k, err
+	}
+}
+
+func partDeltaRowHandler(s tableSchema, affected *affectedSet, onError func(error)) func(*sql.Rows) (rowKey, error) {
+	scan, row := scanPartRow(newColumnIndex(s), len(s.Present), onError)
+	return func(rows *sql.Rows) (rowKey, error) {
+		k, err := scan(rows)
+		if err != nil {
+			return k, err
+		}
+		sid, resolveErr := resolvePartSession(*row)
+		if resolveErr != nil {
+			return k, resolveErr
+		}
+		affected.add(sid)
+		return k, nil
+	}
+}
+
+func sessionMessageDeltaRowHandler(s tableSchema, affected *affectedSet, onError func(error)) func(*sql.Rows) (rowKey, error) {
+	scan, row := scanSessionMessageRow(newColumnIndex(s), len(s.Present), onError)
+	hasType := s.has("type")
+	return func(rows *sql.Rows) (rowKey, error) {
+		k, err := scan(rows)
+		if err != nil {
+			return k, err
+		}
+		affected.add(row.SessionID)
+		if hasType {
+			warnUnknownSessionMessageType(row.ID, row.Type, onError)
+		}
+		return k, nil
 	}
 }
 
@@ -226,70 +234,59 @@ func rollbackFlush(tx *sql.Tx, sink *warnSink, onError func(error)) {
 // SOW-0005 P2.4) and injects it so a nested sub-agent's RootNativeID is the whole
 // tree's root rather than its direct parent.
 func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, sourceID, sessionID string, logger *slog.Logger, onError func(error)) (evs []canonical.Event, skipped bool, err error) {
-	// ONE read-only transaction for the WHOLE per-session read (SOW-0005 round-3
-	// P1-2): the session row, the time_compacting check, the parent-chain root
-	// resolution, and the message+part tree all share a single consistent snapshot.
-	// Opening a second tx for the tree after checking time_compacting in a first one
-	// was a compaction-race TOCTOU — opencode could begin compaction between the two
-	// reads and the adapter would emit a partial/mutating tree despite the Edge #8
-	// skip rule, and the metadata would come from a different snapshot than the tree.
 	tx, err := beginRO(ctx, db)
 	if err != nil {
 		return nil, false, err
 	}
-	// No warning EMISSION while this snapshot is open (SOW-0005 round-5 P2-1): the
-	// loaders (loadSession/loadSessionTree corrupt-cell + oversized-session WARNs)
-	// and resolveRootID (parent-chain WARNs) write into sink — a non-blocking slice
-	// append — instead of the live onError, which would send on the (possibly
-	// backpressured) out channel and pin the WAL snapshot. The tx is closed FIRST
-	// (explicit rollback/commit), THEN sink is flushed through onError, THEN the
-	// pure mapper runs and the caller emits the content events — so NEITHER a
-	// warning NOR a content event is emitted with the snapshot held. The deferred
-	// rollback is a panic-safety net only (a no-op after the explicit close).
 	defer func() { _ = tx.Rollback() }()
 	sink := &warnSink{}
 
-	s, ok, err := loadSession(ctx, tx, schema, sessionID, sink.collect)
-	if err != nil {
+	snap, found, skipped, err := readSessionSnapshot(ctx, tx, schema, sessionID, logger, sink)
+	if err != nil || !found || skipped {
 		rollbackFlush(tx, sink, onError)
+		return nil, skipped, err
+	}
+	if err := commitSessionSnapshot(tx, sink, sessionID, onError); err != nil {
 		return nil, false, err
 	}
+	evs, err = mapSession(sourceID, snap.session, snap.tree, WithRootNativeID(snap.rootID), WithOnWarn(onError))
+	return evs, false, err
+}
+
+type sessionSnapshot struct {
+	session sessionRow
+	tree    []messageWithParts
+	rootID  string
+}
+
+func readSessionSnapshot(ctx context.Context, tx *sql.Tx, schema schemaSet, sessionID string, logger *slog.Logger, sink *warnSink) (sessionSnapshot, bool, bool, error) {
+	s, ok, err := loadSession(ctx, tx, schema, sessionID, sink.collect)
+	if err != nil {
+		return sessionSnapshot{}, false, false, err
+	}
 	if !ok {
-		rollbackFlush(tx, sink, onError)
-		return nil, false, nil
+		return sessionSnapshot{}, false, false, nil
 	}
 	if s.TimeCompactingMs > 0 {
-		// Pause: compaction is reshaping this session's message/part rows, so reading
-		// now would emit partial/stale content. Skip emitting this cycle; the session
-		// re-appears in a later delta when time_compacting clears (P2-E). The check and
-		// the (skipped) tree read are now atomic on this one snapshot (P1-2).
-		rollbackFlush(tx, sink, onError)
 		orDefaultLogger(logger).Info("opencode: session compaction in progress; skipping tree emit this cycle (re-emits when time_compacting clears)",
 			"session_id", sessionID)
-		return nil, true, nil
+		return sessionSnapshot{}, true, true, nil
 	}
 	tree, err := loadSessionTree(ctx, tx, schema, sessionID, sink.collect)
 	if err != nil {
-		rollbackFlush(tx, sink, onError)
-		return nil, false, err
+		return sessionSnapshot{}, false, false, err
 	}
 	root := resolveRootID(ctx, tx, s.ID, s.ParentID, sink.collect)
-	// Commit the read-only snapshot before mapping (mapping is pure CPU work; holding
-	// the snapshot across it would pin the WAL needlessly). A commit failure on a
-	// read-only tx is surfaced rather than silently dropped.
+	return sessionSnapshot{session: s, tree: tree, rootID: root}, true, false, nil
+}
+
+func commitSessionSnapshot(tx *sql.Tx, sink *warnSink, sessionID string, onError func(error)) error {
 	commitErr := tx.Commit()
-	// Flush the buffered loader/root warnings now that the snapshot is released
-	// (P2-1) — before mapping/emitting, so the ordering is: tx closed → warnings →
-	// content events (the caller emits evs).
 	sink.flush(onError)
 	if commitErr != nil {
-		return nil, false, fmt.Errorf("opencode: commit session-read tx for %s: %w", sessionID, commitErr)
+		return fmt.Errorf("opencode: commit session-read tx for %s: %w", sessionID, commitErr)
 	}
-	// The mapper runs AFTER the tx is closed, so its own WARNs (mwarn) may go
-	// straight to the live onError — any channel send now blocks without the
-	// snapshot held.
-	evs, err = mapSession(sourceID, s, tree, WithRootNativeID(root), WithOnWarn(onError))
-	return evs, false, err
+	return nil
 }
 
 // watermarkAdvanced reports whether b is strictly after a on the composite

@@ -29,6 +29,30 @@ func TestAdapter_NewRejectsEmptyRoot(t *testing.T) {
 	}
 }
 
+func TestAdapter_NewSourceIDOptionWins(t *testing.T) {
+	t.Parallel()
+	a, err := New("/some/root", canonical.AdapterOptions{SourceID: "source/custom"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if a.sourceID != "source/custom" {
+		t.Fatalf("sourceID = %q, want %q", a.sourceID, "source/custom")
+	}
+}
+
+func TestAdapter_NewSourceIDDefaultsToHistoricalFallback(t *testing.T) {
+	t.Parallel()
+	root := "/some/root"
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := sourceIDPrefix + root
+	if a.sourceID != want {
+		t.Fatalf("sourceID = %q, want %q", a.sourceID, want)
+	}
+}
+
 func TestAdapter_FactoryConstructs(t *testing.T) {
 	t.Parallel()
 	a, err := Factory("/some/root", canonical.AdapterOptions{})

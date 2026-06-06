@@ -90,7 +90,7 @@ func TestP1_R6_CoOccurringForwardChangeDoesNotStrandBoundaryUpdate(t *testing.T)
 	st.markProbe(time.Now().Add(-2 * timeUpdatedSafetyNet)) // net due; no WAL event
 
 	out := make(chan canonical.Event, 512)
-	active, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {})
+	active, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out, func(error) {}))
 	if err != nil {
 		t.Fatalf("pollOnce: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestP1_R6_ColdFirstProbeStillGuardsBoundaryReplay(t *testing.T) {
 	// gate-open path (the HEAD-snapshot replay guard; round-7 P2-1 single cold guard).
 	st := newPollState(false)
 	out := make(chan canonical.Event, 256)
-	if _, err := pollOnce(ctxBG(), db, schema, &cur, "opencode:test", &st, out, silentLogger(), func(error) {}); err != nil {
+	if _, err := pollOnce(ctxBG(), testPollRequest(db, schema, &cur, "opencode:test", &st, out, func(error) {})); err != nil {
 		t.Fatalf("pollOnce (cold first probe): %v", err)
 	}
 	if got := drainAll(out); hasSession(got, "ses_boundary") {

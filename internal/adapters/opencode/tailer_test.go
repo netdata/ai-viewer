@@ -50,7 +50,7 @@ func drainAll(out chan canonical.Event) []canonical.Event {
 // seedBackfillDB builds a DB with n root sessions, each with one assistant
 // message carrying one step-start/step-finish/text part triple, and returns the
 // path. Times are monotonic across sessions so watermarks are unambiguous.
-func seedBackfillDB(t *testing.T, dir string, n int) string {
+func seedBackfillDB(t testing.TB, dir string, n int) string {
 	t.Helper()
 	path, rw := newEmptyDB(t, dir, "opencode.db")
 	ts := int64(1000)
@@ -60,11 +60,11 @@ func seedBackfillDB(t *testing.T, dir string, n int) string {
 		insertSession(t, rw, sid, "", ts, ts, 0)
 		ts++
 		insertAssistantMessage(t, rw, mid, sid, ts, ts, int64(10*i), int64(5*i))
-		insertPart(t, rw, fmtID("prt_ss", i), mid, sid, ts, ts, stepStartBody())
+		insertPart(t, rw, fmtID("prt_01_ss", i), mid, sid, ts, ts, stepStartBody())
 		ts++
-		insertPart(t, rw, fmtID("prt_sf", i), mid, sid, ts, ts, stepFinishBody(int64(10*i), int64(5*i), 0.01))
+		insertPart(t, rw, fmtID("prt_02_sf", i), mid, sid, ts, ts, stepFinishBody(int64(10*i), int64(5*i), 0.01))
 		ts++
-		insertPart(t, rw, fmtID("prt_tx", i), mid, sid, ts, ts, textBody("answer"))
+		insertPart(t, rw, fmtID("prt_03_tx", i), mid, sid, ts, ts, textBody("answer"))
 		ts++
 	}
 	if err := rw.Close(); err != nil {
@@ -100,6 +100,9 @@ func TestScanLoop_BackfillEmitsAll(t *testing.T) {
 	}
 	if ce.count() != 0 {
 		t.Errorf("backfill surfaced %d errors, want 0", ce.count())
+	}
+	if cur.TargetHash != targetHashForDBPath(path) {
+		t.Errorf("scan cursor target_hash = %q, want current target hash", cur.TargetHash)
 	}
 
 	// Final cursor watermarks equal the DB maxima for each table.

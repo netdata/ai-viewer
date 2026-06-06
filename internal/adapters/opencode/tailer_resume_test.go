@@ -165,31 +165,54 @@ func TestProcessChanges_CheckpointAfterEmit_NoLoss(t *testing.T) {
 
 	db, schema := introspect(t, path)
 
-	// run-1: a consumer that records SessionStarted ids and cancels the context as
-	// soon as it sees the FIRST SourceProgress (the first batch's checkpoint), so
-	// the run stops AFTER batch-1 committed but BEFORE batch-2 emits.
+	// run-1: use an unbuffered channel so receiving the FIRST SourceProgress is a
+	// precise handoff point. After that checkpoint is delivered, cancel and stop
+	// receiving; the producer must observe ctx cancellation before it can emit the
+	// second batch.
 	ctx, cancel := context.WithCancel(ctxBG())
 	defer cancel()
-	out := make(chan canonical.Event, 8192)
+	out := make(chan canonical.Event)
+	type processChangesResult struct {
+		cursor   Cursor
+		advanced bool
+		err      error
+	}
+	doneProcess := make(chan processChangesResult, 1)
 	run1Seen := map[string]bool{}
-	doneConsume := make(chan struct{})
 	go func() {
-		defer close(doneConsume)
-		sawProgress := false
-		for ev := range out {
+		cur, advanced, err := processChanges(ctx, db, schema, newCursor(), "opencode:x", out, silentLogger(), func(error) {})
+		doneProcess <- processChangesResult{cursor: cur, advanced: advanced, err: err}
+	}()
+
+	sawProgress := false
+	for !sawProgress {
+		select {
+		case ev := <-out:
 			if s, ok := ev.(canonical.SessionStartedEvent); ok {
 				run1Seen[s.NativeID] = true
 			}
-			if ev.EventKind() == canonical.EvSourceProgress && !sawProgress {
+			if ev.EventKind() == canonical.EvSourceProgress {
 				sawProgress = true
-				cancel() // stop the producer right after the first checkpoint
+				cancel()
 			}
+		case res := <-doneProcess:
+			close(out)
+			if res.err != nil {
+				t.Fatalf("run-1 processChanges returned before first SourceProgress: %v", res.err)
+			}
+			t.Fatal("run-1 processChanges returned before first SourceProgress")
 		}
-	}()
+	}
 
-	cur1, _, _ := processChanges(ctx, db, schema, newCursor(), "opencode:x", out, silentLogger(), func(error) {})
+	res := <-doneProcess
 	close(out)
-	<-doneConsume
+	if !isContextErr(res.err) {
+		t.Fatalf("run-1 processChanges error = %v, want context cancellation", res.err)
+	}
+	if !res.advanced {
+		t.Fatal("run-1 processChanges reported advanced=false")
+	}
+	cur1 := res.cursor
 
 	// run-1 must NOT have emitted every session (the cancel cut it short) — else
 	// the test is not exercising the resume path.
@@ -224,9 +247,9 @@ func TestProcessChanges_CheckpointAfterEmit_NoLoss(t *testing.T) {
 
 // seedSessionsInto inserts sessions [lo, hi] (1-based, inclusive) into rw with
 // the SAME per-session structure and ids seedBackfillDB uses (ses_<i>/msg_<i>,
-// tokens 10*i/5*i, one step-start/step-finish/text triple), so the content
-// fingerprints match the cold baseline regardless of absolute timestamps. Times
-// are derived from the index so they are globally monotonic.
+// tokens 10*i/5*i, one lexically ordered step-start/step-finish/text triple),
+// so the content fingerprints match the cold baseline regardless of absolute
+// timestamps. Times are derived from the index so they are globally monotonic.
 func seedSessionsInto(t *testing.T, rw *sql.DB, lo, hi int) {
 	t.Helper()
 	for i := lo; i <= hi; i++ {
@@ -235,9 +258,9 @@ func seedSessionsInto(t *testing.T, rw *sql.DB, lo, hi int) {
 		ts := int64(1000 + i*10)
 		insertSession(t, rw, sid, "", ts, ts, 0)
 		insertAssistantMessage(t, rw, mid, sid, ts+1, ts+1, int64(10*i), int64(5*i))
-		insertPart(t, rw, fmtID("prt_ss", i), mid, sid, ts+2, ts+2, stepStartBody())
-		insertPart(t, rw, fmtID("prt_sf", i), mid, sid, ts+3, ts+3, stepFinishBody(int64(10*i), int64(5*i), 0.01))
-		insertPart(t, rw, fmtID("prt_tx", i), mid, sid, ts+4, ts+4, textBody("answer"))
+		insertPart(t, rw, fmtID("prt_01_ss", i), mid, sid, ts+2, ts+2, stepStartBody())
+		insertPart(t, rw, fmtID("prt_02_sf", i), mid, sid, ts+3, ts+3, stepFinishBody(int64(10*i), int64(5*i), 0.01))
+		insertPart(t, rw, fmtID("prt_03_tx", i), mid, sid, ts+4, ts+4, textBody("answer"))
 	}
 }
 
