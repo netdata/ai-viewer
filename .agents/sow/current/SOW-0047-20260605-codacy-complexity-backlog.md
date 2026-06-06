@@ -15,7 +15,11 @@ reduction. Sixth slice selected: Claude-code scanner decomposition with Tail
 behavior preserved by focused regression tests and the new benchmark guard.
 Sixth slice is merged. Seventh slice selected: Claude-code tailer/parser
 decomposition, using the existing Scan/Tail benchmark guard and Tail restart
-regression suite.
+regression suite. Seventh slice is merged. Eighth slice selected:
+Claude-code mapper ops decomposition in `internal/adapters/claude_code/ops.go`,
+using the existing mapper fixtures/tests and Claude-code Scan/Tail benchmark
+guard. Eighth slice is implemented and locally validated; external review
+converged; PR checks, merge, and post-merge gates remain pending.
 
 ## Requirements
 
@@ -1306,6 +1310,214 @@ Open decisions:
 
 - None for the operator. Technical sequencing belongs to the assistant.
 
+### Eighth Slice Gate - claude-code mapper ops decomposition
+
+Status: implementation and local validation complete; external review
+converged; PR checks, merge, and post-merge gates remain pending.
+
+Selected eighth slice:
+
+- `internal/adapters/claude_code/ops.go` mapper-op decomposition.
+- Scope: `mapUser`, `mapAssistant`, and `mapSnapshot`, with small helper files
+  only if needed to keep the existing file focused.
+- Goal: reduce Codacy/Lizard maintainability findings in the Claude-code mapper
+  op path while preserving turn inference, LLM op emission, tool op
+  finalization, tool-result payload refs, Agent child-session op linking,
+  compaction-summary handling, title precedence, permission-mode updates, bridge
+  session updates, and file-history snapshot updates.
+- Explicit non-goal: do not change parser record shapes, scanner/tailer
+  behavior, cursor JSON, ingester behavior, SQLite schema, REST/SSE contracts,
+  frontend behavior, benchmark thresholds, or runtime operator behavior.
+
+Problem / root-cause model:
+
+- After PR #56, the Claude-code scanner, tailer, and parser split is clean under
+  the strict local Lizard thresholds, but `ops.go` still centralizes multiple
+  mapper state transitions in three dense functions.
+- The density is maintainability risk because these functions translate
+  untrusted transcript records into canonical events that are later persisted
+  and rolled up. The risk is not a known behavior bug; it is that future changes
+  to Agent-op linking, token accounting, or snapshot metadata would be easy to
+  get wrong inside large branch-heavy functions.
+- The correct fix is behavior-preserving helper extraction around existing
+  event-building boundaries, not a mapper redesign.
+
+Evidence reviewed:
+
+- PR #56 merged on 2026-06-06 and post-merge `./scripts/gates.sh` passed in
+  538s on `master`: lint/static/security/vulnerability checks, secrets over 857
+  tracked files, attribution scan, spec drift, Codacy coverage/config
+  self-tests, systemd unit lint, build + bundle-size, benchmark regression gate,
+  Go race+coverage, frontend Vitest coverage, Go coverage threshold gate,
+  adapter fuzz seed corpus, and Playwright/axe all passed. The run reported Go
+  total coverage 85.6%, gated `internal/*` aggregate coverage 90.9%,
+  `internal/adapters/claude_code` coverage 86.8%, frontend Vitest with 631
+  passing tests, frontend E2E/axe with 51 passing tests, and main bundle size
+  132.2 KB gzipped.
+- Current local Codacy Analysis CLI output after PR #56:
+  `/tmp/ai-viewer-sow0047-codacy-current-after-pr56.json`. It reports 556
+  Lizard findings across the full tree. The top filtered production-code
+  file buckets are:
+  - `internal/ingest/writer.go`: 6 Lizard findings.
+  - `internal/adapters/codex/tailer.go`: 6 Lizard findings.
+  - `internal/adapters/claude_code/ops.go`: 5 Lizard findings.
+  - `internal/ingest/worker.go`: 4 Lizard findings.
+  - `internal/ingest/catalog_migrate.go`: 4 Lizard findings.
+  - `internal/adapters/opencode/tailer.go`: 4 Lizard findings.
+  - `internal/adapters/codex/scanner.go`: 4 Lizard findings.
+  - `internal/adapters/aiagent_v3/scanner.go`: 4 Lizard findings.
+- Direct strict Lizard on `internal/adapters/claude_code/ops.go` reports:
+  - `mapUser`: 67 NLOC, CCN 14.
+  - `mapAssistant`: 107 NLOC, CCN 17.
+  - `mapSnapshot`: 45 NLOC, CCN 17.
+- Codacy-format issue split for the same file:
+  - `mapUser`: NLOC 67 over 50 and CCN 14 over 8.
+  - `mapAssistant`: NLOC 107 over 50 and CCN 17 over 8.
+  - `mapSnapshot`: CCN 17 over 8.
+- Existing tests in `internal/adapters/claude_code/mapper_test.go`,
+  `parser_test.go`, `parser_fuzz_test.go`, `scanner_test.go`,
+  `tailer_test.go`, `adapter_restart_test.go`, `round7_test.go`, and
+  `round8_test.go` cover the mapped behavior: Agent op child IDs and
+  toolUseId stash, subagent session fields, compaction ops and turn-0
+  summaries, synthetic assistant log-only behavior, token/cache accounting,
+  MCP tool namespacing, isMeta user no-turn behavior, record-type coverage,
+  title precedence, file-history snapshots, attachment payload avoidance,
+  PR-link accumulation, Agent-op terminal-text finalization, and late-meta
+  child repair.
+
+Affected contracts and surfaces:
+
+- Claude-code canonical event mapping for user, assistant, and metadata snapshot
+  records.
+- Turn/op sequence counters inside a single mapped transcript.
+- Tool-result finalization and payload-ref attachment to the first matching
+  open tool op.
+- Agent `tool_use` mapping to `kind='session'`, toolUseId stashing, optional
+  child native ID, and deferred finalization state.
+- LLM token/cache/provider fields and LLM usage extras.
+- Session metadata updates for last prompt, AI title, custom title,
+  permission-mode, bridge session, and file-history snapshot.
+- No public API, storage schema, cursor, source configuration, or frontend
+  behavior change is expected.
+
+Spec deltas before tests/code:
+
+- Initial gate expectation: no spec file delta because this is a pure
+  behavior-preserving refactor and `.agents/sow/specs/adapter-claude-code.md`
+  already documented turn boundary inference (§5.3), per-record mapping (§5.4),
+  LLM token/cache/provider fields (§5.6), Agent parent/child linkage and
+  finalization (§8.1), and compaction summary ownership (§9.2).
+- Round 34 external review found real stale spec prose in
+  `.agents/sow/specs/adapter-claude-code.md` §5.5: the spec described
+  `tool_use` ops before `thinking` ops, while the historical mapper behavior
+  emits the LLM op, all `thinking` reasoning ops, then all `tool_use` ops.
+  Spec delta now included in this slice: §5.5 documents the real semantic
+  grouping order. This is a spec correction only; production code remains
+  behavior-preserving.
+
+Existing patterns to reuse:
+
+- The previous Claude-code scanner/tailer splits: keep public adapter methods
+  and dispatch code thin, move one state transition into one unexported helper.
+- Use value-returning event builders where no mapper state mutation is needed.
+- Keep mutating mapper-state helpers as `fileMapper` methods with explicit
+  names and direct tests.
+- Preserve existing event order exactly: session/model update before LLM op,
+  LLM start/finalize before reasoning/tool ops, tool-result finalization before
+  deleting the open tool, and custom title precedence over later AI title.
+
+Risk and blast radius:
+
+- Medium within the adapter: an incorrect split can change event order, op
+  sequence numbering, Agent child linkage, token accounting, or snapshot
+  last-wins semantics.
+- Security risk is low: no filesystem containment or network behavior is
+  touched.
+- Performance risk is bounded and covered by the existing Claude-code Scan and
+  Tail benchmarks; any statistically significant >20% `sec/op` regression
+  blocks the slice.
+- Ingest/database risk is indirect: mapper event differences would change
+  persisted rows and rollups, so golden tests and restart/tail regression tests
+  remain mandatory.
+
+Sensitive data handling plan:
+
+- No real transcript content is written to durable artifacts. Tests must use
+  existing sanitized fixtures or synthetic inline JSON with redacted content.
+  Temporary Codacy/Lizard/benchmark output stays under `/tmp`.
+
+Implementation plan:
+
+1. Delegate a focused mapper characterization pass before production changes.
+   Add tests only for real gaps, likely direct helper-boundary coverage for:
+   tool-result payload emission once per user record, assistant op ordering with
+   mixed thinking/tool_use blocks, Agent tool naming/linking, and snapshot
+   key-specific metadata updates.
+2. Delegate mapper decomposition:
+   - split user record handling into meta/compact/string-prompt/tool-result
+     helpers;
+   - split assistant mapping into ensure-turn, model update, LLM op emission,
+     reasoning op emission, and tool-use op emission helpers;
+   - split Agent tool-use event construction from generic tool event
+     construction;
+   - split snapshot mapping into one helper per snapshot family or a small
+     dispatch table with explicit handlers;
+   - keep exported behavior, event order, event field values, and mapper state
+     mutation order stable.
+3. Run focused mapper tests, package tests, package race tests, strict Lizard,
+   local Codacy file analysis, Claude-code benchmark smoke,
+   `scripts/check-bench.sh`, full gates, and external second-opinion review.
+4. Merge only after reviewers converge and PR checks are green.
+
+Validation plan:
+
+- `go test ./internal/adapters/claude_code -run 'TestMapper|TestParseLine|TestScanThenTail|TestScan_Agent|TestReadTranscript' -count=1`
+- `go test ./internal/adapters/claude_code -count=1`
+- `go test -race -count=1 ./internal/adapters/claude_code`
+- `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/ops.go internal/adapters/claude_code/ops_user.go internal/adapters/claude_code/ops_assistant.go internal/adapters/claude_code/ops_snapshot.go -l go -C 8 -L 50 -a 8`
+- `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/mapper_ops_characterization_test.go -l go -C 8 -L 50 -a 8`
+- Local Codacy file analysis for changed Claude-code mapper files.
+- `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`
+- `scripts/check-bench.sh`
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- Full `./scripts/gates.sh`.
+- PR checks must all pass before merge; `codacy-coverage` may skip on PRs by
+  design, but every other row must be green.
+
+Test-order note:
+
+- This eighth slice is a behavior-preserving refactor. Existing and added
+  characterization tests may pass before implementation. The failing signal is
+  the strict Codacy/Lizard maintainability report listed above.
+
+Benchmarks:
+
+- Required. Mapper changes are covered by the existing Claude-code Scan and Tail
+  benchmarks. Any statistically significant >20% `sec/op` regression blocks the
+  slice.
+
+Artifact impact plan:
+
+- Specs: no expected spec file update unless real drift is found.
+- Runtime project skills: no expected change unless a new mapper-decomposition
+  convention emerges.
+- End-user docs: no expected change.
+- SOW lifecycle: remains active until this selected slice is merged and enough
+  production complexity backlog is reduced or explicitly split into narrower
+  follow-up SOWs.
+
+Open-source reference evidence:
+
+- This is a behavior-preserving decomposition against the already-specified
+  Claude-code transcript mapping contract. No new source-format claim is
+  introduced, so no additional upstream clone/mirror research is required for
+  this slice.
+
+Open decisions:
+
+- None for the operator. Technical sequencing belongs to the assistant.
+
 ## Plan
 
 1. Triage production hotspots and choose the first low-risk/high-value slice.
@@ -2009,6 +2221,79 @@ Seventh slice focused validation:
   coverage 86.7%, frontend Vitest with 631 passing tests, frontend E2E/axe
   with 51 passing tests, and main frontend bundle size 132.2 KB gzipped against
   the 500 KB budget.
+
+Eighth slice focused validation:
+
+- Added `internal/adapters/claude_code/mapper_ops_characterization_test.go` to
+  pin mapper helper boundaries before the production split: multi-tool-result
+  user records finalize both matching tool ops while emitting one
+  `tool_response` payload ref on the first matched op; mixed assistant records
+  preserve the existing LLM, reasoning, tool, and Agent session-op event order;
+  and snapshot records update the exact metadata keys for last prompt, title
+  precedence, permission mode, bridge session, file history, and empty
+  file-history no-op behavior.
+- Split the Claude-code mapper op path into focused production files:
+  `ops.go`, `ops_user.go`, `ops_assistant.go`, and `ops_snapshot.go`. The split
+  keeps exported adapter contracts, parser record shapes, scanner/tailer
+  behavior, cursor JSON, storage, REST/SSE contracts, and frontend code
+  unchanged. The adapter spec was corrected later in this slice to document the
+  existing assistant op ordering; runtime behavior remained unchanged.
+- Focused mapper and adapter regression suite passed:
+  `go test ./internal/adapters/claude_code -run 'TestMapper|TestParseLine|TestScanThenTail|TestScan_Agent|TestReadTranscript' -count=1`.
+- Claude-code package tests passed:
+  `go test ./internal/adapters/claude_code -count=1`.
+- Claude-code package race test passed:
+  `go test -race -count=1 ./internal/adapters/claude_code`.
+- Direct strict Lizard on `ops.go`, `ops_user.go`, `ops_assistant.go`, and
+  `ops_snapshot.go` passed with zero threshold warnings at `-C 8 -L 50 -a 8`.
+- Direct strict Lizard on
+  `internal/adapters/claude_code/mapper_ops_characterization_test.go` passed
+  with zero threshold warnings at `-C 8 -L 50 -a 8`.
+- Local Codacy Analysis CLI file-scoped run passed with 0 issues:
+  `/tmp/ai-viewer-sow0047-claude-ops-codacy-r1.json`. Trivy,
+  Semgrep/Opengrep, and Lizard analyzed the five changed Claude-code mapper
+  files.
+- Benchmark smoke passed:
+  `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`.
+  The run reported `BenchmarkClaudeScan_SyntheticCorpus` at 15.762 ms/op,
+  130563 events/sec, and 49075 allocs/op, and
+  `BenchmarkClaudeTail_SyntheticAppend` at 62.632 us/op, 95798 events/sec, and
+  173 allocs/op.
+- `scripts/check-bench.sh` passed with no statistically significant `sec/op`
+  regression over the 20% threshold. The Claude-code comparisons were neutral:
+  `ClaudeScan_SyntheticCorpus` 13.00 ms/op baseline vs 12.95 ms/op current,
+  and `ClaudeTail_SyntheticAppend` 56.39 us/op baseline vs 56.08 us/op current.
+- Cross-cutting checks passed before staging: `git diff --check`,
+  `scripts/scan-secrets.sh`, `scripts/scan-ai-attribution.sh`,
+  `scripts/spec-drift.sh`, `gofmt -l` on changed Go files, and
+  `$(go env GOPATH)/bin/goimports -l` on changed Go files.
+- After explicitly staging the SOW and mapper files, staged safety checks
+  passed: `git diff --cached --check`, staged Go `gofmt -l`, staged Go
+  `goimports -l`, `scripts/scan-secrets.sh` over 861 tracked files,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- Full eighth-slice candidate `./scripts/gates.sh` passed in 545s: lint/static
+  analysis, Go security/vulnerability checks, secrets over 861 tracked files,
+  attribution scan, spec drift, Codacy coverage/config self-tests, systemd unit
+  lint, build + bundle-size, benchmark regression gate, Go race+coverage,
+  frontend Vitest coverage, Go coverage threshold gate, adapter fuzz seed
+  corpus, and Playwright/axe all passed. The benchmark gate reported no
+  `sec/op` regression over the 20% threshold. The run reported Go total
+  coverage 85.6%, gated `internal/*` aggregate coverage 90.9%,
+  `internal/adapters/claude_code` coverage 86.9%, frontend Vitest with 631
+  passing tests, frontend E2E/axe with 51 passing tests, and main frontend
+  bundle size 132.2 KB gzipped against the 500 KB budget.
+- External review converged in Round 37 with no actionable findings remaining.
+  PR checks, merge, and post-merge gates remain pending for this eighth slice.
+- Final post-review `./scripts/gates.sh` passed in 553s on the staged Round 37
+  state: lint/static/security/vulnerability checks, secrets over 861 tracked
+  files, attribution scan, spec drift, Codacy coverage/config self-tests,
+  systemd unit lint, build + bundle-size, benchmark regression gate, Go
+  race+coverage, frontend Vitest coverage, Go coverage threshold gate, adapter
+  fuzz seed corpus, and Playwright/axe all passed. The run reported Go total
+  coverage 85.6%, gated `internal/*` aggregate coverage 90.9%,
+  `internal/adapters/claude_code` coverage 86.9%, frontend Vitest with 631
+  passing tests, frontend E2E/axe with 51 passing tests, and main frontend
+  bundle size 132.2 KB gzipped against the 500 KB budget.
 
 ## Reviews
 
@@ -3149,6 +3434,220 @@ Resolution:
   below the enforced `sec/op` regression gate; and the old `metaHashes` `root`
   parameter is unrelated scanner-slice debt already accepted as out of scope in
   Round 28.
+
+### Round 32 - 2026-06-06
+
+Scope: broad staged eighth-slice Claude-code mapper ops decomposition diff:
+this SOW plus the staged Claude-code mapper production and characterization test
+files.
+
+Reviewers:
+
+- `codex`: no code-level correctness, race, security, or behavior-preservation
+  finding. Flagged one low-severity SOW ledger issue: the top sub-state still
+  said the eighth slice was only selected, while the validation section recorded
+  implementation and local validation.
+- `glm`: no blocking finding. Traced `mapUser`, `mapAssistant`, and
+  `mapSnapshot` through the extracted helpers, verified Agent tool-use linkage,
+  snapshot title precedence, moved helper uniqueness, and no spec drift. Noted
+  only low observations: `mapToolResultBlock` has a three-value return, and the
+  new characterization file does not directly add compaction-summary or meta
+  user tests, both already covered by existing broader mapper tests.
+- `kimi`: no blocker. Verified package tests, package race test, formatter
+  checks, vet, package lint, package security scan, strict Lizard, benchmark
+  smoke, and `scripts/check-bench.sh`. Reported two low code-quality
+  observations: `toolUseStarted.opSeq` duplicates `event.Seq`, and the
+  reasoning/tool helper functions allocate intermediate slices before the caller
+  appends them.
+- `qwen`: invocation started and performed partial staged-diff/test inspection,
+  but no final review report was captured, so it is not counted for convergence.
+
+Resolution:
+
+- Accepted the SOW-ledger finding as real and updated the top sub-state plus
+  the eighth-slice gate status to say the eighth slice is implemented and
+  locally validated, with external review follow-up, PR checks, merge, and
+  post-merge gates still pending.
+- Classified `mapToolResultBlock`'s three-value return as acceptable for this
+  slice: it keeps `payloadEmitted` local to the loop without storing transient
+  payload state on `fileMapper`, and Lizard reports the helper below threshold.
+- Classified missing direct compaction/meta characterization in the new file as
+  non-actionable because the existing broader mapper and round tests already pin
+  these branches, and this slice did not change their behavior beyond helper
+  extraction.
+- Classified `toolUseStarted.opSeq` as non-blocking: the duplicated value keeps
+  tool-op tracking explicit at the boundary between event construction and open
+  tool registration; removing it is a style-only change with no demonstrated
+  correctness or complexity-gate benefit.
+- Classified intermediate reasoning/tool slices as non-actionable because the
+  benchmark gate passed, the helper shape keeps mapper state mutation isolated,
+  and no measured `sec/op` regression was demonstrated.
+- Review remains open until the same broad scope is rerun after the SOW-ledger
+  fix.
+
+### Round 33 - 2026-06-06
+
+Scope: same broad staged eighth-slice Claude-code mapper ops decomposition diff
+after the Round 32 SOW-ledger fix: this SOW plus the staged Claude-code mapper
+production and characterization test files.
+
+Reviewers:
+
+- `codex`: no staged production-code correctness, race, security, or
+  behavior-preservation blocker. Found one SOW-record blocker: the top sub-state
+  was corrected, but the eighth-slice gate still said the slice was only ready
+  for test-first implementation; the pending-review status had been applied to
+  the historical fourth-slice gate instead.
+- `glm`: no blocking finding. Verified behavior-preserving decomposition, event
+  order, Agent tool-op tracking, snapshot metadata behavior, focused tests,
+  package tests, vet, and race. Repeated only low observations already
+  classified in Round 32: `toolUseStarted.opSeq` duplicates `event.Seq`,
+  reasoning/tool helpers allocate intermediate slices, and the snapshot test
+  helper does not assert the parsed record type.
+- `qwen`: no blocking finding. Verified the mapper split, characterization
+  tests, focused/package/race checks, staged safety checks, benchmark gate, and
+  full gate record. Repeated only low observations already classified in Round
+  32: `mapToolResultBlock`'s three-value return, `toolUseStarted.opSeq`
+  duplication, intermediate helper slices, discarded `str` in `mapUser`, and no
+  new direct compaction/meta characterization in this test file.
+
+Resolution:
+
+- Accepted the SOW-record blocker as real. Restored the fourth-slice gate to its
+  historical pre-implementation gate status, matching the other already-merged
+  slice gate sections, and updated the eighth-slice gate to the implemented and
+  locally validated state with external review follow-up, PR checks, merge, and
+  post-merge gates still pending.
+- Classified `snapshotEvent`'s missing parsed-record-type assertion as
+  non-actionable for this slice: every caller passes inline snapshot JSON and
+  asserts snapshot-family-specific output; a malformed test line would fail
+  those assertions, and this helper is test-only characterization support.
+- No production code changed after Round 32. Review remains open until the same
+  broad scope is rerun after this SOW-only ledger correction.
+
+### Round 34 - 2026-06-06
+
+Scope: same broad staged eighth-slice Claude-code mapper ops decomposition diff
+after the Round 33 SOW-ledger correction: this SOW, the staged Claude-code
+mapper production and characterization test files, and the relevant existing
+Claude-code adapter spec.
+
+Reviewers:
+
+- `codex`: found one actionable SOW/spec-drift issue and no production-code
+  correctness, race, path-traversal, injection, sensitive-data, or performance
+  blocker. The drift: `.agents/sow/specs/adapter-claude-code.md` §5.5 described
+  assistant op ordering as LLM then `tool_use` then `thinking`, while the
+  historical mapper behavior and new characterization test pin LLM then all
+  `thinking` reasoning ops then all `tool_use` ops.
+- `glm`: no blocking finding. Verified behavior-preserving decomposition,
+  event order, Agent tool-use linkage, snapshot title precedence, token
+  accounting, payload deduplication, tests, race test, and the corrected SOW
+  ledger. Repeated only low observations already classified in prior rounds:
+  `toolUseStarted.opSeq`, intermediate helper slices, and
+  `mapToolResultBlock`'s three-value return.
+- `qwen`: no blocking finding. Verified functional correctness, security, error
+  handling, performance record, characterization tests, architecture split, and
+  corrected SOW ledger. Repeated only low observations already classified in
+  prior rounds: `toolUseStarted.opSeq`, intermediate helper slices,
+  `mapToolResultBlock`'s three-value return, and the `snapshotEvent` helper.
+
+Resolution:
+
+- Accepted the spec-drift finding as real. Updated
+  `.agents/sow/specs/adapter-claude-code.md` §5.5 to document the actual
+  semantic grouping order: LLM op first, all `thinking` reasoning ops next in
+  thinking-block order, then all `tool_use` ops in tool-use-block order.
+- Updated this SOW's spec-delta record to explain the late spec correction.
+- No production code changed after Round 32. Review remains open until the same
+  broad scope is rerun after this spec/SOW correction.
+
+### Round 35 - 2026-06-06
+
+Scope: same broad staged eighth-slice Claude-code mapper ops decomposition diff
+after the Round 34 spec/SOW correction: this SOW, the staged adapter spec,
+mapper production files, and characterization test file.
+
+Reviewers:
+
+- `codex`: found two cleanup findings and no production correctness, race,
+  security, Agent-linking, token-accounting, snapshot, or event-order
+  regression. Findings: the eighth-slice validation bullet still said specs
+  were unchanged even though the adapter spec was corrected, and the `mapUser`
+  comment still said compact-summary users emit `LogEntry` only.
+- `glm`: no blocking finding. Reconfirmed the spec correction is accurate,
+  focused tests and race test pass, and the known low observations remain
+  non-actionable.
+- `qwen`: no blocking finding. Reconfirmed the decomposition is
+  behavior-preserving, the spec correction matches production code, and only
+  previously classified low observations remain.
+
+Resolution:
+
+- Accepted both `codex` cleanup findings as real. Updated the eighth-slice
+  validation bullet to say runtime behavior/contracts stayed unchanged while the
+  adapter spec was corrected to document historical assistant op ordering.
+- Updated the `mapUser` comment to state compact-summary user records emit a
+  log plus an optional summary `PayloadRef`, and still do not open a turn.
+- Review remains open until the same broad scope is rerun after these cleanup
+  fixes.
+
+### Round 36 - 2026-06-06
+
+Scope: same broad staged eighth-slice Claude-code mapper ops decomposition diff
+after the Round 35 SOW/comment cleanup: this SOW, the staged adapter spec,
+mapper production files, and characterization test file.
+
+Reviewers:
+
+- `codex`: found one low comment-drift finding and no blocking correctness,
+  race, security, sensitive-data, behavior-preservation, performance, SOW
+  lifecycle, or spec-drift issue. Finding: the `mapUser` comment said "Three
+  shapes" while listing four handled record shapes.
+- `glm`: no blocking finding. Reconfirmed the decomposition is
+  behavior-preserving, the spec correction is accurate, the SOW ledger is
+  consistent, and only previously classified low observations remain.
+- `qwen`: no blocking finding. Reconfirmed focused mapper tests and race tests
+  pass, the spec correction is accurate, and only previously classified low
+  observations remain.
+
+Resolution:
+
+- Accepted the comment-drift finding as real. Updated the `mapUser` heading to
+  avoid a stale count and describe the `user` record shapes from spec §5.4.
+- Review remains open until the same broad scope is rerun after this comment-only
+  cleanup.
+
+### Round 37 - 2026-06-06
+
+Scope: same broad staged eighth-slice Claude-code mapper ops decomposition diff
+after the Round 36 comment-only cleanup: this SOW, the staged adapter spec,
+mapper production files, and characterization test file.
+
+Reviewers:
+
+- `codex`: no blocking correctness, race, security, behavior-preservation,
+  performance, SOW/spec drift, or project-coding violation found. Verified the
+  staged mapper dispatch, helper behavior, characterization coverage, corrected
+  spec, and SOW ledger; `git diff --cached --check` passed.
+- `glm`: no blocking finding. Reconfirmed behavior-preserving user, assistant,
+  and snapshot helper extraction; verified the spec correction, SOW ledger, and
+  key characterization tests. Ran focused mapper tests, package race test, and
+  `go vet` clean.
+- `qwen`: no blocking finding. Reconfirmed all modified mapper control/data
+  flows, the corrected `mapUser` comment, spec/SOW consistency, security/race
+  posture, and previously classified low observations. Ran mapper tests, race
+  test, `go vet`, `gofmt`, and focused characterization tests clean.
+
+Resolution:
+
+- External review converged with no actionable findings remaining.
+- Previously noted low observations remain non-actionable for this slice:
+  `mapToolResultBlock`'s three-value return, `toolUseStarted.opSeq`
+  duplication, intermediate helper slices, no new direct compaction/meta tests
+  in the new file, and the snapshot test helper's parsed-type assertion style.
+- No code/spec changes were required after Round 37. PR checks, merge, and
+  post-merge gates remain pending.
 
 ## Outcome
 

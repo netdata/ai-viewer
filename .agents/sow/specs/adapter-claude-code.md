@@ -560,11 +560,12 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 
 ### 5.5 Op Seq within turn
 
-`OpStartedEvent.Seq` is 1-based monotonic within the turn. The ordering rule:
+`OpStartedEvent.Seq` is 1-based monotonic within the turn. The mapper groups
+assistant child ops by semantic type, not by raw `content[]` interleaving:
 
 1. The LLM op for an `assistant` record gets `Seq = next available`.
-2. Each `tool_use` block inside that assistant record gets `Seq = next available + 1, +2, ...` AFTER the LLM op (because the LLM produced them).
-3. Each `thinking` block gets a NESTED op under the LLM op (`ParentOpSeq = LLM op's Seq`).
+2. Each `thinking` block gets a NESTED op under the LLM op (`ParentOpSeq = LLM op's Seq`), in `content[]` order among thinking blocks.
+3. Each `tool_use` block inside that assistant record gets `Seq = next available + 1, +2, ...` AFTER the LLM and all thinking blocks, in `content[]` order among tool-use blocks.
 4. Tool ops are `Finalized` not when emitted but when the matching `user.tool_result` arrives; the adapter holds a small in-memory map `tool_use_id -> op state`.
 
 ### 5.6 Token and provider fields
