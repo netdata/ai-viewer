@@ -2,24 +2,17 @@
 
 ## Status
 
-Status: open
+Status: completed
 
-Sub-state: active 2026-06-05. First production slice
-`frontend/src/state/filters.ts` is merged. Second production slice
-`internal/adapters/aiagent_v2/mapper.go` is merged. Third production slice
-`internal/ingest/writer.go` `applyOpFinalized` is merged. Fourth production
-slice `internal/ingest/catalog.go` `onOpStarted` and `onOpFinalized` is merged.
-Fifth slice implemented: baseline Claude-code scan/tail benchmarks before
-scanner/tailer decomposition. Next slice resumes production complexity
-reduction. Sixth slice selected: Claude-code scanner decomposition with Tail
-behavior preserved by focused regression tests and the new benchmark guard.
-Sixth slice is merged. Seventh slice selected: Claude-code tailer/parser
-decomposition, using the existing Scan/Tail benchmark guard and Tail restart
-regression suite. Seventh slice is merged. Eighth slice selected:
-Claude-code mapper ops decomposition in `internal/adapters/claude_code/ops.go`,
-using the existing mapper fixtures/tests and Claude-code Scan/Tail benchmark
-guard. Eighth slice is implemented and locally validated; external review
-converged; PR checks, merge, and post-merge gates remain pending.
+Sub-state: completed 2026-06-06. Eight production slices were merged:
+frontend filter helpers, ai-agent v2 mapper decomposition, ingest writer
+`applyOpFinalized`, ingest catalog writer decomposition, Claude-code benchmark
+baselines, Claude-code scanner decomposition, Claude-code tailer/parser
+decomposition, and Claude-code mapper ops decomposition. PR #57 merged the
+eighth slice. Final closeout measured 141 remaining strict source-only Lizard
+warnings, plus frontend tooling warnings when a broader source/tooling filter is
+used, and split the remaining work into narrower follow-up SOWs instead of
+keeping this SOW open indefinitely.
 
 ## Requirements
 
@@ -1312,8 +1305,12 @@ Open decisions:
 
 ### Eighth Slice Gate - claude-code mapper ops decomposition
 
-Status: implementation and local validation complete; external review
-converged; PR checks, merge, and post-merge gates remain pending.
+Status: completed. PR #57 merged on 2026-06-06 after external review
+converged and all PR checks were green except the expected
+`codacy-coverage` PR skip. A post-merge `./scripts/gates.sh` attempt on
+`master` failed only in the local workstation benchmark gate under high
+ambient CPU load; the immediately repeated `scripts/check-bench.sh` passed,
+confirming no repeatable benchmark regression.
 
 Selected eighth slice:
 
@@ -2283,7 +2280,8 @@ Eighth slice focused validation:
   passing tests, frontend E2E/axe with 51 passing tests, and main frontend
   bundle size 132.2 KB gzipped against the 500 KB budget.
 - External review converged in Round 37 with no actionable findings remaining.
-  PR checks, merge, and post-merge gates remain pending for this eighth slice.
+  PR #57 merged after all PR checks passed except the expected
+  `codacy-coverage` PR skip.
 - Final post-review `./scripts/gates.sh` passed in 553s on the staged Round 37
   state: lint/static/security/vulnerability checks, secrets over 861 tracked
   files, attribution scan, spec drift, Codacy coverage/config self-tests,
@@ -2294,6 +2292,42 @@ Eighth slice focused validation:
   `internal/adapters/claude_code` coverage 86.9%, frontend Vitest with 631
   passing tests, frontend E2E/axe with 51 passing tests, and main frontend
   bundle size 132.2 KB gzipped against the 500 KB budget.
+- Post-merge validation on `master`: an initial `./scripts/gates.sh` run passed
+  lint/static/security/vulnerability checks, secrets, attribution scan,
+  spec drift, Codacy coverage/config self-tests, systemd unit lint, and
+  build + bundle-size, then failed only in `scripts/check-bench.sh`. The
+  failure touched unrelated packages as well as the Claude-code adapter while
+  the workstation was under high ambient CPU load. A direct repeat of
+  `scripts/check-bench.sh` passed with no `sec/op` regression over the 20%
+  threshold. Because `gates.sh` is fail-fast, that first post-merge aggregate
+  did not run the later race/coverage, fuzz, or Playwright stages; full staged
+  gates and PR checks remain the full-green evidence for the eighth slice.
+- SOW-only closeout branch validation: `./scripts/test.sh`,
+  `scripts/check-coverage.sh coverage.out`, `go test -run='^Fuzz'
+  ./internal/adapters/...`, `cd frontend && npm run e2e`, `cd frontend &&
+  npm run e2e:a11y`, `git diff --check`, `git diff --cached --check`,
+  `scripts/scan-secrets.sh`, `scripts/scan-ai-attribution.sh`, and
+  `scripts/spec-drift.sh` passed on the staged closeout diff. Repeated
+  `./scripts/gates.sh` and isolated `scripts/check-bench.sh` attempts failed
+  only at the local workstation benchmark gate while unrelated CPU-heavy
+  workstation processes were active; the branch changes only SOW files and does
+  not touch benchmarked code, memory/allocation metrics stayed flat, and no
+  benchmark threshold or baseline was changed.
+- Closeout strict source-only Lizard warning scan on 2026-06-06 found 141
+  warnings after excluding tests and generated embedded frontend assets. The
+  largest remaining buckets were Codex adapter tailer/scanner/mapper/parser
+  paths, Opencode adapter tailer/mapper paths, remaining ai-agent/Claude-code
+  adapter paths, ingest writer/worker/catalog migration paths, CLI/presenter/
+  pricing/store handlers, frontend trace/topology visualization components, and
+  smaller frontend component/state/utility helpers. A broader source/tooling
+  filter also reports `frontend/scripts/check-bundle-size.js`; that frontend
+  tooling bucket is tracked with the frontend residual SOW.
+- Remaining complexity is tracked by follow-up SOWs:
+  `.agents/sow/pending/SOW-0048-20260606-codex-adapter-complexity.md`,
+  `.agents/sow/pending/SOW-0049-20260606-opencode-adapter-complexity.md`,
+  `.agents/sow/pending/SOW-0050-20260606-backend-residual-complexity.md`,
+  `.agents/sow/pending/SOW-0051-20260606-frontend-visualization-complexity.md`,
+  and `.agents/sow/pending/SOW-0052-20260606-residual-adapter-complexity.md`.
 
 ## Reviews
 
@@ -3647,11 +3681,146 @@ Resolution:
   duplication, intermediate helper slices, no new direct compaction/meta tests
   in the new file, and the snapshot test helper's parsed-type assertion style.
 - No code/spec changes were required after Round 37. PR checks, merge, and
-  post-merge gates remain pending.
+  post-merge validation were completed before closeout; PR #57 merged on
+  2026-06-06. The first post-merge aggregate gate on `master` failed only at
+  the workstation benchmark gate under high ambient CPU load; an immediate
+  isolated benchmark-gate rerun passed. Later SOW-only closeout branch
+  aggregate attempts also failed only in the benchmark gate while unrelated
+  CPU-heavy workstation processes were active; the closeout branch changes only
+  SOW files and does not alter benchmarked code.
+
+### Round 38 - 2026-06-06
+
+Scope: staged SOW-only closeout diff after moving SOW-0047 to `done/` and
+adding residual-complexity follow-up SOWs.
+
+Reviewers:
+
+- `qwen`: found one low stale wording issue in the Round 37 resolution, noted
+  optional validation-summary hygiene, and otherwise found the closeout sound.
+- `glm`: no blocker. Treated historical `current/` and "remains active" slice
+  notes as accurate historical records and found the follow-up SOW shells
+  sufficient for future activation.
+- `codex`: found two actionable closeout issues: the four initial follow-up
+  SOWs did not clearly cover all 141 source-only warnings, and post-merge gate
+  wording did not make clear that the failed aggregate stopped before later
+  stages. Also repeated the stale Round 37 pending sentence finding.
+
+Resolution:
+
+- Accepted the stale Round 37 wording finding and updated it with the actual
+  PR #57 merge and post-merge benchmark-rerun evidence.
+- Accepted the residual-tracking gap as real. Added
+  `SOW-0052-20260606-residual-adapter-complexity.md` for ai-agent v2/v3 and
+  Claude-code residual adapter warnings, broadened SOW-0050 to cover CLI and
+  backend tooling warnings, and broadened SOW-0051 to cover non-visual frontend
+  component/state/utility/tooling warnings.
+- Accepted the post-merge gate wording finding. The closeout now states that
+  the post-merge `master` aggregate failed fast before later stages, while the
+  eighth-slice staged gates and PR checks were full-green evidence. The
+  closeout validation record now separately lists the SOW-only branch checks
+  that passed and the benchmark-only limitation caused by ambient workstation
+  load.
+- The optional validation-summary recommendation is not implemented in this
+  closeout because SOW-0047 already contains per-slice evidence and final
+  acceptance/follow-up mapping; adding a large duplicate summary would make the
+  already-long audit trail harder to maintain.
+
+### Round 39 - 2026-06-06
+
+Scope: same staged SOW-only closeout diff after Round 38 fixes.
+
+Reviewers:
+
+- `qwen`: no blocker. Verified closeout consistency, follow-up SOW coverage,
+  sensitive-data hygiene, stale wording, and the empty-`current/` lifecycle
+  state.
+- `glm`: no blocker. Found SOW-0047 completion evidence internally consistent,
+  follow-up scopes adequate, and noted SOW-0050/SOW-0051 breadth as a low
+  style caveat mitigated by their one-slice-at-a-time implementation plans.
+- `codex`: one low finding. SOW-0049 lacked the explicit residual-closeout
+  guard already present in the other follow-up SOWs.
+
+Resolution:
+
+- Accepted the SOW-0049 finding and added an acceptance criterion requiring any
+  remaining Opencode warning to be reduced, explicitly justified, or split into
+  a narrower follow-up SOW before completion.
+- Treated the SOW-0050/SOW-0051 breadth note as non-blocking because both SOWs
+  are pending activation shells whose implementation plans rank findings first
+  and select one package-local or frontend slice at a time. If activation shows
+  the scope is still too broad, the SOW itself requires remaining warnings to be
+  justified or split further.
+- Same-scope reviewer rerun is required after this fix before merge.
+
+### Round 40 - 2026-06-06
+
+Scope: same staged SOW-only closeout diff after the SOW-0049 residual guard fix.
+
+Reviewers:
+
+- `codex`: no actionable finding. Verified SOW-only staged diff, completed
+  SOW-0047 status, PR #57 merge record, 141-warning follow-up mapping, follow-up
+  coverage across all residual buckets, and sensitive-data constraints.
+- `qwen`: one low finding. SOW-0051's acceptance criteria did not explicitly
+  include the "split into a narrower follow-up SOW" residual guard used by the
+  other four follow-up SOWs.
+- `glm`: same low SOW-0051 residual-guard finding. Otherwise verified closeout
+  consistency, safe lifecycle move, PR #57 merge evidence, sensitive-data
+  hygiene, complete pre-implementation gates, and no unwanted side effects.
+
+Resolution:
+
+- Accepted the SOW-0051 finding and updated its acceptance criteria to require
+  strict Lizard/local Codacy findings to be reduced, explicitly justified, or
+  split into a narrower follow-up SOW before completion.
+- Same-scope reviewer rerun is required after this fix before merge.
+
+### Round 41 - 2026-06-06
+
+Scope: same staged SOW-only closeout diff after the SOW-0051 residual guard fix.
+
+Reviewers:
+
+- `codex`: no actionable finding. Verified the staged diff is SOW-only,
+  SOW-0047 is completed, PR #57 is recorded as merged, all 141 residual warnings
+  are mapped to follow-up SOWs, residual-closeout guards are present in all five
+  follow-ups, sensitive-data handling is preserved, and staged diff whitespace
+  is clean.
+- `qwen`: no blocking finding. Verified closeout consistency, lifecycle move
+  safety, warning-bucket coverage, residual guards, sensitive-data constraints,
+  complete pre-implementation gates, and review convergence. Noted only
+  cosmetic historical wording in old review rounds and that SOW-0050's
+  "split further" wording is less parallel than the other guard bullets.
+- `glm`: no blocker. Verified the same closeout state and noted only a cosmetic
+  point that historical slice-gate `Status: ready...` lines were not rewritten
+  after their slices merged.
+
+Resolution:
+
+- Review converged with no actionable findings.
+- Preserved historical slice-gate and review-round wording as audit trail. The
+  top-level completed status, closeout sub-state, eighth-slice status, Round 37
+  through Round 41 review records, and Outcome section state the current
+  lifecycle and PR #57 merge state.
+- Accepted SOW-0050's `split further` wording as equivalent to a narrower
+  follow-up guard because its implementation plan selects one package-local
+  slice at a time and its acceptance criteria already require remaining warnings
+  to be explicitly justified or split further.
 
 ## Outcome
 
-Pending.
+Completed.
+
+- The original Codacy/Lizard backlog was reduced through eight merged,
+  reviewed, tested production slices.
+- The highest-risk early hotspots were decomposed with characterization tests,
+  package race tests, direct strict Lizard checks, local Codacy checks where
+  relevant, benchmark gates for hot paths, full local gates, PR checks, and
+  external reviewer convergence.
+- Remaining strict source-only warnings are no longer hidden inside this SOW.
+  They are split into narrower follow-up SOWs with explicit scope, risk, and
+  validation expectations.
 
 ## Lessons Extracted
 
@@ -3659,10 +3828,27 @@ Pending.
   is needed for a union, intersection, mapped/conditional type, or utility-type
   expression. Codacy Cloud enforces this convention even when project-native
   ESLint does not surface the same rule locally.
+- Use Lizard's `--warnings_only` mode for closeout backlog grouping. Plain
+  tabular output lists all functions, not only threshold warnings, and can
+  inflate file bucket counts if parsed naively.
+- Local benchmark failures need environmental triage before code action. When
+  benchmark failures hit unrelated packages on a SOW-only branch under high
+  workstation load, record the load evidence and do not refresh baselines,
+  widen thresholds, or claim a full-green aggregate until the benchmark gate can
+  run under trustworthy conditions.
 
 ## Followup
 
-None yet.
+- `SOW-0048`: Codex adapter complexity, including a benchmark prerequisite
+  before scanner/tailer decomposition.
+- `SOW-0049`: Opencode adapter complexity, including a benchmark prerequisite
+  before SQLite tailer/mapper decomposition.
+- `SOW-0050`: residual backend complexity in ingest, presenter, pricing, store,
+  notify, CLI, and backend tooling paths.
+- `SOW-0051`: frontend trace/topology visualization, non-visual component/
+  state/utility helpers, and frontend tooling complexity.
+- `SOW-0052`: residual ai-agent v2/v3 and Claude-code adapter complexity not
+  covered by the Codex and Opencode follow-up SOWs.
 
 ## Regression Log
 
