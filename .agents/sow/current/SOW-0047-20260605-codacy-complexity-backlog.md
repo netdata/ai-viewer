@@ -13,6 +13,9 @@ Fifth slice implemented: baseline Claude-code scan/tail benchmarks before
 scanner/tailer decomposition. Next slice resumes production complexity
 reduction. Sixth slice selected: Claude-code scanner decomposition with Tail
 behavior preserved by focused regression tests and the new benchmark guard.
+Sixth slice is merged. Seventh slice selected: Claude-code tailer/parser
+decomposition, using the existing Scan/Tail benchmark guard and Tail restart
+regression suite.
 
 ## Requirements
 
@@ -1102,6 +1105,207 @@ Open decisions:
 
 - None for the operator. Technical sequencing belongs to the assistant.
 
+### Seventh Slice Gate - claude-code tailer/parser decomposition
+
+Status: ready for test-first implementation after this SOW update.
+
+Selected seventh slice:
+
+- `internal/adapters/claude_code/tailer.go` Tail event-loop and flush-path
+  decomposition, with a narrow `internal/adapters/claude_code/parser.go`
+  discriminator split if it removes the remaining parser hotspot without
+  changing source-format semantics.
+- Goal: reduce Codacy/Lizard maintainability findings in the Claude-code Tail
+  path while preserving fsnotify watch behavior, debounce/flush semantics,
+  cursor offsets, Scan-to-Tail catch-up, meta repair, Agent-op deferral
+  durability, symlink containment, parse error policy, and parser output.
+- Explicit non-goal: do not change scanner behavior, source-format semantics,
+  cursor JSON shape, ingester behavior, SQLite schema, REST/SSE contracts,
+  frontend presentation, benchmark thresholds, or runtime operator behavior.
+
+Problem / root-cause model:
+
+- After the sixth slice, `scanner.go` has no strict Lizard warnings, but the
+  Tail path still combines watcher setup, event classification, dirty-set
+  management, debounce/tick policy, transcript replay, meta repair, and
+  Agent-op finalization in a few dense functions.
+- `parseLine` still mixes envelope validation, type dispatch, typed payload
+  decoding, known-no-op handling, unknown-type reporting, and tool-use-result
+  probing. That is maintainability risk in untrusted JSONL parsing, not a
+  requested semantic change.
+- The right fix is narrow helper extraction and small local structs around
+  existing state machines. The event order, cursor persistence, emitted
+  canonical events, and surfaced errors must remain stable.
+
+Evidence reviewed:
+
+- Post-merge `master` local gates passed in 587s after PR #55: lint/static
+  analysis, Go security/vulnerability checks, secrets over 847 tracked files,
+  attribution scan, spec drift, Codacy coverage/config self-tests, systemd unit
+  lint, build + bundle-size, seven-benchmark regression gate, Go race+coverage,
+  frontend Vitest coverage, Go coverage threshold gate, adapter fuzz seed
+  corpus, and Playwright/axe all passed. The run reported Go total coverage
+  85.4%, gated `internal/*` aggregate coverage 90.7%,
+  `internal/adapters/claude_code` coverage 85.9%, frontend Vitest coverage with
+  631 passing tests, frontend E2E/axe with 51 passing tests, and main bundle
+  size 132.2 KB gzipped.
+- Direct strict Lizard on post-merge `master`:
+  `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/scanner.go internal/adapters/claude_code/tailer.go internal/adapters/claude_code/parser.go -l go -C 8 -L 50 -a 8`
+  reported 7 remaining Claude-code production warnings:
+  - `tailLoop`: 74 NLOC, CCN 21, 112 physical lines.
+  - `handleEvent`: 27 NLOC, CCN 10.
+  - `markExistingDirty` walk callback: 25 NLOC, CCN 9.
+  - `addWatchTree` walk callback: 26 NLOC, CCN 9.
+  - `flushDirty`: 56 NLOC, CCN 16, 9 parameters, 75 physical lines.
+  - `repairChangedMetas`: 44 NLOC, CCN 12, 8 parameters, 54 physical lines.
+  - `parseLine`: 54 NLOC, CCN 16, 61 physical lines.
+- Existing Tail tests cover append pickup, new project directory watches,
+  symlinked root watching, symlink transcript escape refusal, missing-root
+  clean return, partial-line hold-back, transcript-relative path reconstruction,
+  meta hash no-op suppression, late-meta AgentName repair, unreadable meta
+  surfacing, parked/finalized deferral snapshots, restart no-gap/no-dup
+  behavior, Scan-to-Tail catch-up, late-meta parent linkage, durable Agent-op
+  finalization, no premature tool-use finalization, parked completion restore,
+  no double finalize on replay, and late-meta rewrite no-double-finalize.
+- Existing parser tests cover blank/whitespace skip, malformed JSON,
+  missing type, unknown-type error classification, known no-op skip, user string
+  content, user array content, assistant usage/content blocks, system compact
+  boundary records, and fuzz no-panic behavior.
+
+Affected contracts and surfaces:
+
+- Claude-code `Tail` event stream and cursor persistence.
+- fsnotify watcher lifecycle, create-directory race-window catch-up, periodic
+  re-walk, debounce-triggered flush, and SourceProgress checkpoint emission.
+- Shared meta-repair contract used by both Scan and Tail.
+- Agent-op finalization deferral state: pending, completed/parked, finalized,
+  and restart persistence.
+- Parser record classification and typed payload decoding for records consumed
+  by the mapper.
+- No public API, schema, frontend, source configuration, or operator-facing
+  behavior change is expected.
+
+Spec deltas before tests/code:
+
+- No spec file delta is required for this slice because it is a pure
+  behavior-preserving refactor. `.agents/sow/specs/adapter-claude-code.md`
+  already documents the target Tail behavior for watch setup, symlink
+  containment, catch-up, partial-line parking, oversized-line recovery,
+  meta repair, SourceProgress, Agent-op finalization, and the Claude-code
+  Scan/Tail benchmarks.
+- The parser behavior is already covered by the same adapter spec sections
+  describing skipped known no-op records, surfaced unknown record types, and
+  parsed record kinds.
+- If implementation reveals real spec/code drift, stop the slice, update the
+  relevant spec first, then resume tests and production refactor.
+
+Existing patterns to reuse:
+
+- The sixth slice's scanner split: keep orchestration files thin and move
+  discovery/meta/transcript/finalization helpers into focused files.
+- Small unexported helpers that own one state transition or one filesystem
+  operation.
+- Existing `tailDeferral`, `readTranscript`, `flushChangedMetas`, and
+  `repairChangedMetas` contracts.
+- Existing deterministic ordering: sorted dirty transcript names, sorted dirty
+  meta names, sorted repair rels, and sorted child finalizations.
+- Existing Claude-code Scan/Tail benchmarks and full benchmark regression gate.
+
+Risk and blast radius:
+
+- High within the adapter: Tail is the real-time path and a subtle regression
+  can lose appended records, replay historical records, double-finalize Agent
+  ops, suppress meta repairs, or hide source errors.
+- Security-sensitive paths remain in scope: symlink containment for watched
+  directories, transcripts, and meta sidecars must stay fail-closed.
+- Performance risk exists because `flushDirty` runs for every real-time change;
+  `BenchmarkClaudeTail_SyntheticAppend` and the full benchmark gate are
+  mandatory.
+- Parser risk is bounded but important: parsing untrusted JSONL must continue
+  to return wrapped errors, skip only known no-op records silently, and never
+  panic under fuzz.
+
+Sensitive data handling plan:
+
+- No real Claude-code transcript content is written to durable artifacts.
+  Tests must use committed sanitized fixtures or synthetic transcript/meta
+  lines. Any temporary Codacy, Lizard, or benchmark output stays under `/tmp`.
+
+Implementation plan:
+
+1. Delegate a focused Tail/parser test audit and add characterization coverage
+   only for real helper-boundary gaps before production changes. Candidate
+   gaps: direct `handleEvent` create-file/remove classification, direct
+   `flushDirty` no-dirty/meta-only progress behavior, changed-meta repair order,
+   and parser type-dispatch equivalence.
+2. Delegate Tail decomposition:
+   - introduce a small Tail runtime state struct for watcher/cursor/dirty sets,
+     deferral, output, and error callback;
+   - split watcher setup and startup catch-up from the `select` loop;
+   - split event classification from dirty-set mutation;
+   - extract walk callback bodies for existing-file dirty marking and watch-tree
+     addition;
+   - split `flushDirty` into changed-meta processing, dirty transcript
+     processing, deferral pairing/checkpointing, and progress emission helpers;
+   - keep event values, ordering, cursor JSON, error text, and side-effect order
+     stable unless a focused test proves the current text is irrelevant.
+3. If the Tail split leaves the parser warning as the next cheapest
+   same-package win, delegate a narrow parser discriminator split:
+   envelope decode, per-type body decode, tool-use-result probe, known-no-op
+   handling, and unknown-type error construction.
+4. Run focused Tail/parser tests, package tests, package race tests, strict
+   Lizard, local Codacy file analysis, Claude-code benchmark smoke,
+   `scripts/check-bench.sh`, full gates, and external second-opinion review.
+5. Merge only after reviewers converge and PR checks are green.
+
+Validation plan:
+
+- `go test ./internal/adapters/claude_code -run 'TestTail|TestFlushDirty|TestScanThenTail|TestRestart|TestParseLine|TestReadTranscript|TestReadOneLine|TestMeta|TestCollectMeta' -count=1`
+- `go test ./internal/adapters/claude_code -count=1`
+- `go test -race -count=1 ./internal/adapters/claude_code`
+- `~/.codacy/runtimes/lizard-1/venv/bin/lizard internal/adapters/claude_code/tailer.go internal/adapters/claude_code/tailer_*.go internal/adapters/claude_code/parser.go internal/adapters/claude_code/parser*.go internal/adapters/claude_code/*tail*_test.go internal/adapters/claude_code/parser*_test.go -l go -C 8 -L 50 -a 8`
+- Local Codacy file analysis for changed Claude-code Tail/parser files.
+- `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`
+- `scripts/check-bench.sh`
+- `git diff --check`, `scripts/scan-secrets.sh`,
+  `scripts/scan-ai-attribution.sh`, and `scripts/spec-drift.sh`.
+- Full `./scripts/gates.sh`.
+- PR checks must all pass before merge; `codacy-coverage` may skip on PRs by
+  design, but every other row must be green.
+
+Test-order note:
+
+- This seventh slice is a behavior-preserving refactor. Existing and added
+  characterization tests may pass before implementation. The failing signal is
+  the strict Codacy/Lizard maintainability report listed above.
+
+Benchmarks:
+
+- Required. Tail changes are covered directly by
+  `BenchmarkClaudeTail_SyntheticAppend`; parser changes are covered indirectly
+  by both Claude-code Scan and Tail benchmarks. Any statistically significant
+  >20% `sec/op` regression blocks the slice.
+
+Artifact impact plan:
+
+- Specs: no expected spec file update unless real drift is found.
+- Runtime project skills: no expected change unless a new tailer-decomposition
+  convention emerges.
+- End-user docs: no expected change.
+- SOW lifecycle: remains active until this selected slice is merged and enough
+  production complexity backlog is reduced or explicitly split into narrower
+  follow-up SOWs.
+
+Open-source reference evidence:
+
+- This is a behavior-preserving decomposition against the already-specified
+  Claude-code transcript contract. No new source-format claim is introduced, so
+  no additional upstream clone/mirror research is required for this slice.
+
+Open decisions:
+
+- None for the operator. Technical sequencing belongs to the assistant.
+
 ## Plan
 
 1. Triage production hotspots and choose the first low-risk/high-value slice.
@@ -1163,6 +1367,16 @@ Open decisions:
   wired `scripts/check-bench.sh` to the Claude-code package, refreshed the
   seven-benchmark workstation baseline, and updated CI's benchmark-count guard
   from 5 to 7 required names.
+- Selected the seventh slice after the merged scanner decomposition:
+  behavior-preserving Claude-code tailer/parser decomposition with focused
+  event, flush, repair, deferral, and parser tests.
+- Split the Claude-code tail loop and parser dispatcher into focused files,
+  keeping exported adapter contracts, cursor semantics, REST/SSE surfaces,
+  frontend code, and specs unchanged because this slice intentionally changes
+  internal maintainability only.
+- Addressed the local Codacy file-length finding by moving tailer deferral
+  tests into a focused test file, keeping `tailer_test.go` below the 500-NLOC
+  Codacy medium-file threshold.
 
 ## Validation
 
@@ -1719,6 +1933,82 @@ Sixth slice focused validation:
   frontend Vitest coverage with 631 passing tests, frontend E2E/axe with 51
   passing tests, and main frontend bundle size 132.2 KB gzipped against the
   500 KB budget.
+
+Seventh slice focused validation:
+
+- Added/kept focused Claude-code tailer/parser tests before production
+  refactoring: watcher event marking and error surfacing, empty and meta-only
+  flush behavior, meta repair ordering, parser `tool_use_result` probing,
+  parser decode-error wrapping, and tail deferral restore/snapshot behavior.
+- Split the Claude-code tailer into focused production files:
+  `tailer.go`, `tailer_loop.go`, `tailer_events.go`, `tailer_watch.go`,
+  `tailer_flush.go`, `tailer_meta.go`, `tailer_deferral.go`, and
+  `tailer_transcript.go`. Split the parser dispatcher into `parser.go` and
+  `parser_decode.go`.
+- Focused regression suite passed:
+  `go test ./internal/adapters/claude_code -run 'TestTail|TestFlushDirty|TestScanThenTail|TestRestart|TestParseLine|TestReadTranscript|TestReadOneLine|TestMeta|TestCollectMeta|TestHandleEvent|TestRepairChangedMetas' -count=1`.
+- Claude-code package race test passed:
+  `go test -race -count=1 ./internal/adapters/claude_code`.
+- Benchmark smoke passed:
+  `go test ./internal/adapters/claude_code -run '^$' -bench 'BenchmarkClaude(Scan|Tail)' -benchmem -count=1`.
+- Direct strict Lizard on the split tailer/parser production and focused test
+  files passed with zero threshold warnings at `-C 8 -L 50 -a 8`. The selected
+  production hotspots are now below threshold: `tailLoop` 8 NLOC / CCN 3,
+  `flushDirty` 15 NLOC / CCN 5, `repairChangedMetas` 12 NLOC / CCN 1, and
+  `parseLine` 11 NLOC / CCN 3. `tailer_test.go` is now 466 NLOC, below the
+  500-NLOC Codacy medium-file threshold.
+- Local Codacy Analysis CLI file-scoped run passed with 0 issues:
+  `/tmp/ai-viewer-sow0047-claude-tailer-parser-codacy-r2.json`. Trivy,
+  Semgrep/Opengrep, and Lizard analyzed the 16 changed Claude-code files.
+- Cross-cutting checks passed before full gates: `git diff --check`,
+  `scripts/scan-secrets.sh`, `scripts/scan-ai-attribution.sh`, and
+  `scripts/spec-drift.sh`.
+- After staging the new split files explicitly, staged safety checks passed:
+  `git diff --cached --check`, staged Go `gofmt -l`, staged Go `goimports -l`,
+  `scripts/scan-secrets.sh`, and `scripts/scan-ai-attribution.sh`. The staged
+  secret scan covered 857 tracked files.
+- `scripts/check-bench.sh` passed before full gates and again inside full
+  gates with no `sec/op` regression over the 20% threshold. The Claude-code
+  comparisons remained within noise: `ClaudeScan_SyntheticCorpus` around
+  12.83-13.13 ms/op vs baseline, and `ClaudeTail_SyntheticAppend` around
+  54.64-59.22 us/op vs baseline.
+- Full seventh-slice candidate `./scripts/gates.sh` passed in 550s:
+  lint/static analysis, Go security/vulnerability checks, secrets over 847
+  tracked files, attribution scan, spec drift, Codacy coverage/config
+  self-tests, systemd unit lint, build + bundle-size, seven-benchmark
+  regression gate, Go race+coverage, frontend Vitest coverage, Go coverage
+  threshold gate, adapter fuzz seed corpus, and Playwright/axe all passed. The
+  run reported Go total coverage 85.6%, gated `internal/*` aggregate coverage
+  90.9%, `internal/adapters/claude_code` coverage 86.6%, frontend Vitest
+  coverage with 631 passing tests, frontend E2E/axe with 51 passing tests, and
+  main frontend bundle size 132.2 KB gzipped against the 500 KB budget.
+- Round 29 review-fix focused validation passed after making
+  `transcriptSessionDir` build a fresh slice instead of appending into a
+  caller-provided subslice:
+  `go test ./internal/adapters/claude_code -run 'TestTranscriptForRel|TestTail|TestScanThenTail' -count=1`,
+  direct strict Lizard on `tailer_transcript.go`, and a
+  `TODO|FIXME|nolint|#nosec` scan on the touched file.
+- Round 30 review-fix focused validation passed after making the mutating
+  dirty-set/flush receiver contracts explicit and adding direct coverage for
+  the `transcriptSessionDir` aliasing fix:
+  `go test ./internal/adapters/claude_code -run 'TestTranscriptForRel|TestTranscriptSessionDir|TestTail|TestFlushDirty|TestHandleEvent|TestScanThenTail' -count=1`,
+  `go test -race -count=1 ./internal/adapters/claude_code`, and direct strict
+  Lizard on `tailer_loop.go`, `tailer_flush.go`, `tailer_events.go`, and
+  `tailer_helpers_test.go` all passed with zero threshold warnings.
+- Local Codacy Analysis CLI after the Round 30 follow-up reported 0 issues
+  across the 16 changed Claude-code files:
+  `/tmp/ai-viewer-sow0047-claude-tailer-parser-codacy-r4.json`.
+- Final full local gates passed after Round 31 review convergence:
+  `./scripts/gates.sh` completed in 552s with lint/static/security/
+  vulnerability checks clean, secrets over 857 tracked files clean, attribution
+  scan clean, spec drift clean, build + bundle-size clean, the local benchmark
+  regression gate clean, Go race+coverage clean, frontend Vitest coverage
+  clean, Go coverage threshold clean, adapter fuzz seed corpus clean, and
+  Playwright/axe clean. The run reported Go total coverage 85.6%, gated
+  `internal/*` aggregate coverage 90.9%, `internal/adapters/claude_code`
+  coverage 86.7%, frontend Vitest with 631 passing tests, frontend E2E/axe
+  with 51 passing tests, and main frontend bundle size 132.2 KB gzipped against
+  the 500 KB budget.
 
 ## Reviews
 
@@ -2731,6 +3021,134 @@ Resolution:
 - External review converged with no actionable findings remaining.
 - Final full local gates and local Codacy file analysis passed after review
   convergence; see Validation.
+
+### Round 29 - 2026-06-06
+
+Scope: broad staged seventh-slice Claude-code tailer/parser decomposition diff:
+this SOW plus the staged Claude-code tailer/parser production and test files.
+
+Reviewers:
+
+- `codex`: no actionable finding. Verified the focused tests, package tests,
+  race test with an isolated cache, benchmark smoke, secret scan, spec drift,
+  attribution scan, and strict Lizard. Found no correctness, race, security,
+  sensitive-data, SOW/spec drift, or unwanted-side-effect issue.
+- `glm`: no blocking finding. Reported only low/info observations about
+  root-level transcript path classification, meta repair events using
+  `SourceSeq: 0` / `Ts: 0`, and a test callback using `t.Fatalf`; classified
+  them as pre-existing or intentional and recommended no code action.
+- `qwen`: no blocker. Verified package tests, race test, vet/build, benchmark
+  smoke, and the staged SOW evidence. Flagged one low maintainability issue:
+  `transcriptSessionDir` used nested `append`, which could mutate the backing
+  array behind the `projParts` subslice when spare capacity exists.
+- `kimi`: no blocker. Verified focused tests, race test, benchmark gate, strict
+  Lizard, staged diff checks, secrets, attribution, spec drift, build, and vet.
+  Flagged a non-blocking benchmark observation: Claude-code Tail `allocs/op`
+  increased from 152 to 170 while `sec/op` remained within the benchmark gate.
+  Also noted the pre-existing parser raw-copy behavior and the same
+  `transcriptSessionDir` allocation shape.
+
+Resolution:
+
+- Accepted the `transcriptSessionDir` slice-aliasing finding as real
+  maintainability debt and fixed it immediately. The helper now allocates a
+  fresh slice, appends `root`, appends `projParts...`, appends `sessionID`, and
+  then joins.
+- Accepted the `allocs/op` observation as non-blocking and not a follow-up SOW:
+  this project gate intentionally enforces statistically significant `sec/op`
+  regressions, the seventh-slice full gates and reviewer benchmark run both
+  passed, and no production symptom or capacity risk was demonstrated. The
+  benchmark output remains durable evidence in Validation for future profiling
+  if Tail allocation pressure becomes a measured problem.
+- Accepted the parser raw-copy note as non-actionable because it preserves the
+  old defensive copy semantics for records that retain raw JSON; optimizing it
+  for skipped types would be a behavior-neutral micro-optimization without
+  benchmark justification.
+- Review remains open until the same broad reviewer scope is rerun after the
+  `transcriptSessionDir` fix.
+
+### Round 30 - 2026-06-06
+
+Scope: same broad staged seventh-slice Claude-code tailer/parser decomposition
+diff after the Round 29 `transcriptSessionDir` fix and SOW review record.
+
+Reviewers:
+
+- `codex`: no findings. Verified the staged diff, old/new tailer and parser
+  shapes, no TODO/FIXME/nolint/#nosec additions, and the SOW's Round 29 record.
+- `glm`: no blocking finding. Verified the `transcriptSessionDir` fresh-slice
+  fix, focused tests, race test, vet, and file reads. Noted pre-existing or
+  intentional low-risk behavior around remove/rename event swallowing,
+  value-copy `tailFlush`, and the documented ignored `root` parameter.
+- `kimi`: no actionable finding. Verified build, package tests, race test,
+  focused tests, benchmark smoke, fuzz seeds, vet, strict Lizard, secret scan,
+  spec drift, and staged diff hygiene. Noted a theoretical watcher leak only if
+  a panic occurs inside panic-free startup helpers; classified it as
+  non-blocking.
+- `qwen`: no blocker. Verified package tests, race test, vet, focused tests,
+  and that an unrelated `internal/ingest` race timeout reproduces on the base
+  commit. Raised three low/medium code-clarity/test recommendations:
+  `tailDirtySets.mark` used a value receiver while mutating maps,
+  `tailFlush` used value receivers while mutating `*Cursor`, and the
+  `transcriptSessionDir` fix had only indirect coverage.
+
+Resolution:
+
+- Accepted the dirty-set receiver clarity finding and changed the mutating
+  `tailDirtySets.mark` method to a pointer receiver.
+- Accepted the flush receiver clarity finding and changed the flush object API
+  to use pointer receivers. The first implementation used a pointer type alias;
+  that was simplified before acceptance to the idiomatic shape: concrete
+  `tailFlush` struct, `newTailFlush(...) *tailFlush`, and `*tailFlush` method
+  receivers.
+- Accepted the direct-test finding and added
+  `TestTranscriptSessionDirDoesNotMutateProjectParts`, which passes a
+  spare-capacity subslice and asserts the caller backing array is not mutated.
+- Classified the theoretical panic-path watcher leak as non-actionable because
+  the relevant startup helpers return errors rather than panic, normal
+  `prepareRoot` failure still closes the watcher, and panics are process-level
+  defects outside Tail's recover contract.
+- Review remains open until the same broad reviewer scope is rerun after these
+  Round 30 fixes.
+
+### Round 31 - 2026-06-06
+
+Scope: same broad staged seventh-slice Claude-code tailer/parser decomposition
+diff after the Round 30 receiver/test fixes and SOW review record.
+
+Reviewers:
+
+- `codex`: no blocking finding. Performed staged-diff review and reported no
+  correctness, race, path traversal, parser-safety, sensitive-data, or SOW/spec
+  drift issue. Noted it did not run tests because the review prompt was
+  read-only.
+- `glm`: no blocking finding. Verified package tests, race test, vet, build,
+  gofmt, benchmark smoke, parser tests, SOW evidence, and the Round 30 fixes.
+  Reported only low-severity observations about internal parameter shape and
+  confirmed no significant code smell.
+- `qwen`: no blocking finding. Verified build, vet, package race test, focused
+  scanner/tailer tests, and the prior fix notes. Reported only low-severity
+  observations: `tailDirtySets` is still passed by value around reference-type
+  maps, `metaRepair` appropriately uses value receivers, and a focused subagent
+  transcript path unit test could be added later but is already integration
+  covered.
+- `kimi`: no blocking finding. Verified package tests, race test, benchmark
+  smoke, strict Lizard, benchmark gate, vet, gofmt, compile, fuzz targets,
+  secret scan, and spec drift. Reported only non-blocking info: Tail
+  `allocs/op` increased while `sec/op` remains green, and the pre-existing
+  unused `metaHashes` `root` parameter remains out of scope for this slice.
+
+Resolution:
+
+- External review converged with no actionable finding remaining.
+- Classified the remaining low/info notes as non-actionable for this slice:
+  `tailDirtySets` value copies still share map backing storage and are covered
+  by direct event tests; `metaRepair` value receivers are correct because the
+  struct itself is immutable during repair; subagent path reconstruction is
+  exercised by Tail/flush integration tests; Tail allocation changes remain
+  below the enforced `sec/op` regression gate; and the old `metaHashes` `root`
+  parameter is unrelated scanner-slice debt already accepted as out of scope in
+  Round 28.
 
 ## Outcome
 
