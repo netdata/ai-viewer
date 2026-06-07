@@ -416,38 +416,86 @@ func (w *writer) drainObservabilityErrs() []error {
 	return out
 }
 
-// apply dispatches one event to its kind-specific writer.
+// apply dispatches one event to its kind-specific writer. The per-kind
+// switch is the body of dispatchEvent; apply itself is only responsible for
+// updating the batch's max-seq observability counter and delegating to the
+// dispatcher. Unknown kinds (events with no registered handler) return an
+// explicit error so a future canonical event added without a writer wiring
+// fails closed instead of silently dropping.
 func (w *writer) apply(ctx context.Context, tx *sql.Tx, ev canonical.Event) error {
-	seq := ev.EventSourceSeq()
-	if seq > w.batchMaxSeq {
+	if seq := ev.EventSourceSeq(); seq > w.batchMaxSeq {
 		w.batchMaxSeq = seq
 	}
+	return w.dispatchEvent(ctx, tx, ev)
+}
+
+// dispatchEvent forwards ev to its concrete apply* writer method. The 11
+// canonical event kinds are split across three sub-dispatchers (session,
+// turn-or-op, and ancillary) so no single function carries the full CCN of
+// the per-kind switch while the behaviour-preserving contract — same
+// handlers, same call shape, same unknown-kind error — is maintained.
+func (w *writer) dispatchEvent(ctx context.Context, tx *sql.Tx, ev canonical.Event) error {
+	if handled, err := w.dispatchSessionEvent(ctx, tx, ev); handled {
+		return err
+	}
+	if handled, err := w.dispatchTurnOrOpEvent(ctx, tx, ev); handled {
+		return err
+	}
+	if handled, err := w.dispatchAncillaryEvent(ctx, tx, ev); handled {
+		return err
+	}
+	return fmt.Errorf("writer: unknown event kind %s", ev.EventKind())
+}
+
+// dispatchSessionEvent matches the three SessionXxx event kinds and forwards
+// to the corresponding apply method. handled=false means ev is not a session
+// event — the caller falls through to the next sub-dispatcher.
+func (w *writer) dispatchSessionEvent(ctx context.Context, tx *sql.Tx, ev canonical.Event) (handled bool, err error) {
 	switch e := ev.(type) {
 	case canonical.SessionStartedEvent:
-		return w.applySessionStarted(ctx, tx, e)
+		return true, w.applySessionStarted(ctx, tx, e)
 	case canonical.SessionUpdatedEvent:
-		return w.applySessionUpdated(ctx, tx, e)
+		return true, w.applySessionUpdated(ctx, tx, e)
 	case canonical.SessionFinalizedEvent:
-		return w.applySessionFinalized(ctx, tx, e)
-	case canonical.TurnStartedEvent:
-		return w.applyTurnStarted(ctx, tx, e)
-	case canonical.TurnFinalizedEvent:
-		return w.applyTurnFinalized(ctx, tx, e)
-	case canonical.OpStartedEvent:
-		return w.applyOpStarted(ctx, tx, e)
-	case canonical.OpFinalizedEvent:
-		return w.applyOpFinalized(ctx, tx, e)
-	case canonical.PayloadRefEvent:
-		return w.applyPayloadRef(ctx, tx, e)
-	case canonical.LogEntryEvent:
-		return w.applyLogEntry(ctx, tx, e)
-	case canonical.SourceProgressEvent:
-		return w.applySourceProgress(e)
-	case canonical.SourceErrorEvent:
-		return w.applySourceError(ctx, tx, e)
-	default:
-		return fmt.Errorf("writer: unknown event kind %s", ev.EventKind())
+		return true, w.applySessionFinalized(ctx, tx, e)
 	}
+	return false, nil
+}
+
+// dispatchTurnOrOpEvent matches the four Turn/Op start/finalize event kinds
+// — the turns and ops table writers — and forwards to the corresponding
+// apply method. handled=false means ev is not one of these.
+func (w *writer) dispatchTurnOrOpEvent(ctx context.Context, tx *sql.Tx, ev canonical.Event) (handled bool, err error) {
+	switch e := ev.(type) {
+	case canonical.TurnStartedEvent:
+		return true, w.applyTurnStarted(ctx, tx, e)
+	case canonical.TurnFinalizedEvent:
+		return true, w.applyTurnFinalized(ctx, tx, e)
+	case canonical.OpStartedEvent:
+		return true, w.applyOpStarted(ctx, tx, e)
+	case canonical.OpFinalizedEvent:
+		return true, w.applyOpFinalized(ctx, tx, e)
+	}
+	return false, nil
+}
+
+// dispatchAncillaryEvent matches the four non-session/non-turn/non-op event
+// kinds: payload refs, log entries, source progress, and source errors.
+// handled=false means ev matches none of these — dispatchEvent then surfaces
+// the unknown-kind error.
+func (w *writer) dispatchAncillaryEvent(ctx context.Context, tx *sql.Tx, ev canonical.Event) (handled bool, err error) {
+	switch e := ev.(type) {
+	case canonical.PayloadRefEvent:
+		return true, w.applyPayloadRef(ctx, tx, e)
+	case canonical.LogEntryEvent:
+		return true, w.applyLogEntry(ctx, tx, e)
+	case canonical.SourceProgressEvent:
+		w.applySourceProgress(e)
+		return true, nil
+	case canonical.SourceErrorEvent:
+		return true, w.applySourceError(ctx, tx, e)
+	}
+	return false, nil
 }
 
 // applySessionStarted inserts or updates a sessions row. Parent linkage
@@ -636,43 +684,18 @@ WHERE id = ?
 // applySessionUpdated when agent_name or cwd may have changed. Single-connection
 // discipline: each cursor is fully drained into a slice BEFORE any marking, and
 // marking is in-memory only (no SQL write follows the cursor on the batch tx).
+//
+// Implementation is two phases that mirror the discipline above exactly:
+// (1) drainSessionRollupBuckets reads the session-start ts + every op-start
+// ts into slices, fully closing each cursor before returning; (2) the
+// receiver then walks those slices and applies the idempotent in-memory
+// markDirtyRollupBucket marks. The split keeps the cursor-close error paths
+// in one place and the marking loop trivially small.
 func (w *writer) markSessionRollupBucketsDirty(ctx context.Context, tx *sql.Tx, sessionID string) error {
-	// Session start hour: session_starts is attributed to total/agent/cwd of the
-	// session's start bucket, so a changed agent/cwd must re-attribute it.
-	var startTs sql.NullInt64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT start_ts FROM sessions WHERE id = ?`, sessionID).Scan(&startTs); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("writer: read session start_ts %s: %w", sessionID, err)
-		}
-	}
-
-	// Distinct op-start hour buckets for this session. Drain the whole cursor
-	// into a slice first (no write may straddle an open read on the single
-	// pinned connection), THEN mark — bucket math via the same rollups helper
-	// markDirtyRollupBucket uses, so the dirty set matches the op-write paths.
-	rows, err := tx.QueryContext(ctx, `SELECT start_ts FROM ops WHERE session_id = ?`, sessionID)
+	startTs, opStarts, err := drainSessionRollupBuckets(ctx, tx, sessionID)
 	if err != nil {
-		return fmt.Errorf("writer: query session op buckets %s: %w", sessionID, err)
+		return err
 	}
-	var opStarts []int64
-	for rows.Next() {
-		var opStart int64
-		if scanErr := rows.Scan(&opStart); scanErr != nil {
-			_ = rows.Close()
-			return fmt.Errorf("writer: scan session op start %s: %w", sessionID, scanErr)
-		}
-		opStarts = append(opStarts, opStart)
-	}
-	if iterErr := rows.Err(); iterErr != nil {
-		_ = rows.Close()
-		return fmt.Errorf("writer: iterate session op buckets %s: %w", sessionID, iterErr)
-	}
-	if closeErr := rows.Close(); closeErr != nil {
-		return fmt.Errorf("writer: close session op buckets %s: %w", sessionID, closeErr)
-	}
-
-	// All reads drained — now mark (idempotent in-memory map inserts).
 	if startTs.Valid {
 		w.markDirtyRollupBucket(startTs.Int64)
 	}
@@ -680,6 +703,69 @@ func (w *writer) markSessionRollupBucketsDirty(ctx context.Context, tx *sql.Tx, 
 		w.markDirtyRollupBucket(opStart)
 	}
 	return nil
+}
+
+// drainSessionRollupBuckets reads the session's start_ts and every op_start_ts
+// for sessionID into slices, fully draining and closing each cursor before
+// returning. Single-connection discipline (store.OpenWriter pins SetMaxOpenConns=1):
+// no SQL write may straddle an open read on the pinned connection, so the
+// drain happens here BEFORE the caller marks. A NULL start_ts (no sessions
+// row yet) is returned as an invalid NullInt64 — the caller skips that mark.
+func drainSessionRollupBuckets(ctx context.Context, tx *sql.Tx, sessionID string) (sql.NullInt64, []int64, error) {
+	startTs, err := loadSessionStartTs(ctx, tx, sessionID)
+	if err != nil {
+		return sql.NullInt64{}, nil, err
+	}
+	opStarts, err := loadSessionOpStartTs(ctx, tx, sessionID)
+	if err != nil {
+		return sql.NullInt64{}, nil, err
+	}
+	return startTs, opStarts, nil
+}
+
+// loadSessionStartTs reads the session's start_ts into a NullInt64. A missing
+// session row is NOT an error here — it can happen during out-of-order ingest
+// when a session-update arrives before the matching SessionStarted. The
+// caller treats a NULL start_ts as "nothing to mark on the start bucket".
+func loadSessionStartTs(ctx context.Context, tx *sql.Tx, sessionID string) (sql.NullInt64, error) {
+	var startTs sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT start_ts FROM sessions WHERE id = ?`, sessionID).Scan(&startTs); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sql.NullInt64{}, nil
+		}
+		return sql.NullInt64{}, fmt.Errorf("writer: read session start_ts %s: %w", sessionID, err)
+	}
+	return startTs, nil
+}
+
+// loadSessionOpStartTs reads every op's start_ts for sessionID, fully draining
+// the cursor before returning. Errors from Scan / Err / Close are all wrapped
+// with the session id so they surface contextually in the logs. The cursor
+// must NOT outlive this call — single-connection discipline requires every
+// read to finish before any write follows on the batch tx.
+func loadSessionOpStartTs(ctx context.Context, tx *sql.Tx, sessionID string) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT start_ts FROM ops WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("writer: query session op buckets %s: %w", sessionID, err)
+	}
+	var opStarts []int64
+	for rows.Next() {
+		var opStart int64
+		if scanErr := rows.Scan(&opStart); scanErr != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("writer: scan session op start %s: %w", sessionID, scanErr)
+		}
+		opStarts = append(opStarts, opStart)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("writer: iterate session op buckets %s: %w", sessionID, iterErr)
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return nil, fmt.Errorf("writer: close session op buckets %s: %w", sessionID, closeErr)
+	}
+	return opStarts, nil
 }
 
 func (w *writer) applySessionFinalized(ctx context.Context, tx *sql.Tx, ev canonical.SessionFinalizedEvent) error {
@@ -752,70 +838,149 @@ ON CONFLICT (session_id, seq) DO UPDATE SET
 }
 
 func (w *writer) applyOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent) error {
-	sessionID, err := w.requireSessionID(ctx, tx, ev.SessionNativeID, ev.Ts)
+	prep, err := w.prepareOpStarted(ctx, tx, ev)
 	if err != nil {
 		return err
 	}
+	if err := w.upsertOpStarted(ctx, tx, ev, prep); err != nil {
+		return err
+	}
+	return w.afterOpStarted(ctx, tx, ev, prep)
+}
+
+// opStartedPrep carries the resolved-row state applyOpStarted needs to feed the
+// SQL upsert and the post-upsert hooks. It captures the canonical session/turn/
+// op ids, the optional parent op id, the (possibly-stashed) child session id,
+// the resolver-grafted extras blob, and the op's prior persisted catalog
+// identity — read BEFORE the upsert so the catalog migrate logic sees the OLD
+// row (SOW-0004 H1a / I1). opInserted mirrors the original `!prior.found`
+// signal so onOpStarted knows whether this is a genuine new insert or a
+// same/changed-identity re-emit.
+type opStartedPrep struct {
+	sessionID      string
+	turnID         string
+	opID           string
+	parentOpID     sql.NullString
+	childSessionID sql.NullString
+	extras         any
+	prior          priorOpIdentity
+	opInserted     bool
+}
+
+// prepareOpStarted does every read the upsert needs: resolves the session/turn
+// ids, synthesizes the parent turn if no TurnStarted arrived first, captures
+// the op's prior persisted catalog identity (so the catalog upsert can migrate
+// contributions on an identity-changed re-emit — SOW-0004 I1), and computes
+// the parent-op id + child-session link + marshaled extras blob. No mutating
+// SQL beyond the turn ON CONFLICT DO NOTHING synth — the ops UPSERT runs in
+// upsertOpStarted.
+func (w *writer) prepareOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent) (opStartedPrep, error) {
+	sessionID, turnID, opID, prior, err := w.opStartedIdentity(ctx, tx, ev)
+	if err != nil {
+		return opStartedPrep{}, err
+	}
+	parentOpID := resolveOpStartedParent(turnID, ev.ParentOpSeq)
+	childSessionID, opExtras, err := w.resolveOpStartedChild(ctx, tx, ev)
+	if err != nil {
+		return opStartedPrep{}, err
+	}
+	extras, err := marshalExtras(opExtras)
+	if err != nil {
+		return opStartedPrep{}, fmt.Errorf("writer: marshal op extras: %w", err)
+	}
+	return opStartedPrep{
+		sessionID:      sessionID,
+		turnID:         turnID,
+		opID:           opID,
+		parentOpID:     parentOpID,
+		childSessionID: childSessionID,
+		extras:         extras,
+		prior:          prior,
+		opInserted:     !prior.found,
+	}, nil
+}
+
+// opStartedIdentity resolves the canonical session/turn/op ids for this
+// OpStarted (creating stub session/turn rows if no SessionStarted/TurnStarted
+// arrived first) and reads the op's PRIOR persisted catalog identity. The
+// prior identity is captured BEFORE the ops UPSERT so the catalog upsert can
+// (a) count the call ONCE per distinct op (SOW-0004 H1a) and (b) MIGRATE the
+// op's contribution off its old key when this re-emit CHANGES the catalog
+// identity (codex MCP enrichment re-stamping tool_namespace/name on the same
+// (turn,seq) — SOW-0004 I1). ON CONFLICT DO UPDATE returns RowsAffected=1 for
+// both insert and update under modernc/sqlite, so reading the row first is
+// the authoritative insert-vs-update signal: prior.found=false (sql.ErrNoRows)
+// ⇒ genuine new insert. The OpStarted upsert touches only identity columns +
+// start_ts/extras — never the status/tokens/cost/duration columns — so the
+// totals read here are exactly the contribution onOpFinalized already booked
+// under the old identity.
+func (w *writer) opStartedIdentity(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent) (string, string, string, priorOpIdentity, error) {
+	sessionID, err := w.requireSessionID(ctx, tx, ev.SessionNativeID, ev.Ts)
+	if err != nil {
+		return "", "", "", priorOpIdentity{}, err
+	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
 	// Ensure parent turn row exists — synthesize a running turn if no
-	// TurnStarted arrived first. This matches the spec: turns may be
-	// implicit when the source format doesn't emit explicit start
-	// records.
+	// TurnStarted arrived first. This matches the spec: turns may be implicit
+	// when the source format doesn't emit explicit start records.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO turns (id, session_id, seq, start_ts, status)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (session_id, seq) DO NOTHING
 `, turnID, sessionID, ev.TurnSeq, ev.Ts, string(canonical.StatusRunning)); err != nil {
-		return fmt.Errorf("writer: synthesize turn for op: %w", err)
+		return "", "", "", priorOpIdentity{}, fmt.Errorf("writer: synthesize turn for op: %w", err)
 	}
 	opID := canonicalOpID(turnID, ev.Seq)
-	// Read the op's PRIOR persisted catalog identity + terminal totals BEFORE the
-	// upsert so the catalog can (a) count the call ONCE per distinct op (SOW-0004
-	// H1a) and (b) MIGRATE the op's contribution off its old key when this re-emit
-	// CHANGES the catalog identity (codex MCP enrichment re-stamping
-	// tool_namespace/name on the same (turn,seq) — SOW-0004 I1). A re-emitted
-	// OpStarted (late enrichment on the same (turn,seq), as the codex/claude_code
-	// replay-from-0 + enrichment design emits) is an UPDATE, not a new call. ON
-	// CONFLICT DO UPDATE returns RowsAffected=1 for both insert and update under
-	// modernc/sqlite, so reading the row first is the authoritative
-	// insert-vs-update signal: found=false (sql.ErrNoRows) ⇒ genuine new insert.
-	// The OpStarted upsert below touches only identity columns + start_ts/extras —
-	// never the status/tokens/cost/duration columns — so the totals read here are
-	// exactly the contribution onOpFinalized already booked under the old identity.
 	prior, err := w.opPriorIdentity(ctx, tx, opID)
 	if err != nil {
-		return err
+		return "", "", "", priorOpIdentity{}, err
 	}
-	opInserted := !prior.found
-	var parentOpID sql.NullString
-	if ev.ParentOpSeq >= 0 {
-		parentOpID = sql.NullString{String: canonicalOpID(turnID, ev.ParentOpSeq), Valid: true}
+	return sessionID, turnID, opID, prior, nil
+}
+
+// resolveOpStartedParent maps an OpStartedEvent.ParentOpSeq into a NullString
+// op id, mirroring the original inline ParentOpSeq>=0 guard. A negative
+// ParentOpSeq stays as SQL NULL (the op has no parent op).
+func resolveOpStartedParent(turnID string, parentOpSeq int) sql.NullString {
+	if parentOpSeq < 0 {
+		return sql.NullString{}
 	}
-	var childSessionID sql.NullString
-	opExtras := ev.Extras
-	if ev.ChildSessionNativeID != "" {
-		// Only point child_session_id at another session when that row
-		// is already in the store; otherwise the FK fires. When the child
-		// has not landed yet (the parent transcript is read before, or in a
-		// different batch than, the child sidechain), leave the link NULL and
-		// stash the child native id in ops.extras_json.aiViewer.childNativeId.
-		// The resolver re-links child_session_id from that stash once the
-		// child session lands (P1a) — mirroring the session
-		// extras_json.aiViewer.parentNativeId stash + resolver pass.
-		if cid, err := w.lookupSessionID(ctx, tx, ev.ChildSessionNativeID); err == nil {
-			childSessionID = sql.NullString{String: cid, Valid: true}
-		} else if errors.Is(err, sql.ErrNoRows) {
-			opExtras = mergeExtras(ev.Extras, map[string]any{
-				"aiViewer": map[string]any{"childNativeId": ev.ChildSessionNativeID},
-			})
-		} else {
-			return err
-		}
+	return sql.NullString{String: canonicalOpID(turnID, parentOpSeq), Valid: true}
+}
+
+// resolveOpStartedChild looks up the child session row (when the event names
+// one) and either returns its id directly OR stashes the child native id
+// into the op's extras_json.aiViewer.childNativeId so the resolver can re-link
+// it once the child session lands (P1a). A SQL error other than ErrNoRows is
+// propagated unchanged. When the event carries no ChildSessionNativeID, the
+// child link stays NULL and the extras blob is the event's untouched extras.
+func (w *writer) resolveOpStartedChild(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent) (sql.NullString, map[string]any, error) {
+	if ev.ChildSessionNativeID == "" {
+		return sql.NullString{}, ev.Extras, nil
 	}
-	extras, err := marshalExtras(opExtras)
-	if err != nil {
-		return fmt.Errorf("writer: marshal op extras: %w", err)
+	cid, err := w.lookupSessionID(ctx, tx, ev.ChildSessionNativeID)
+	if err == nil {
+		return sql.NullString{String: cid, Valid: true}, ev.Extras, nil
 	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return sql.NullString{}, nil, err
+	}
+	// Child has not landed yet (parent transcript is read before, or in a
+	// different batch than, the child sidechain) — leave the link NULL and
+	// stash the child native id in ops.extras_json.aiViewer.childNativeId.
+	// The resolver re-links child_session_id from that stash once the child
+	// session lands (P1a) — mirroring the session aiViewer.parentNativeId
+	// stash + resolver pass.
+	stashed := mergeExtras(ev.Extras, map[string]any{
+		"aiViewer": map[string]any{"childNativeId": ev.ChildSessionNativeID},
+	})
+	return sql.NullString{}, stashed, nil
+}
+
+// upsertOpStarted runs the ops UPSERT exactly as before — same column list,
+// same ON CONFLICT clause, same graftAiViewerExtras wiring. Pulled out so
+// applyOpStarted is orchestration-only and the dense SQL lives in one place.
+func (w *writer) upsertOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent, prep opStartedPrep) error {
 	// extras_json is REPLACED wholesale on conflict EXCEPT the resolver's
 	// `aiViewer` stash sub-object, which is grafted back when a stash-free re-emit
 	// omits it (SOW-0003 P2.6d/P2.7c). A re-emit of the same op whose extras lack
@@ -849,15 +1014,26 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
     child_session_id = COALESCE(ops.child_session_id, excluded.child_session_id),
     extras_json    = `+graftAiViewerExtras("ops.extras_json")+`
 `,
-		opID, turnID, sessionID, parentOpID, ev.Seq,
+		prep.opID, prep.turnID, prep.sessionID, prep.parentOpID, ev.Seq,
 		string(ev.Kind), ev.Name, nullIfEmpty(ev.ToolNamespace), nullIfEmpty(ev.Model), nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),
 		nullIfEmpty(ev.ReasoningKind), ev.Ts, string(canonical.StatusRunning),
-		childSessionID, extras,
+		prep.childSessionID, prep.extras,
 	); err != nil {
 		return fmt.Errorf("writer: insert op: %w", err)
 	}
-	w.markDirtyTurn(turnID)
-	w.markDirtySession(sessionID)
+	return nil
+}
+
+// afterOpStarted applies the post-upsert side effects: dirty turn/session
+// marking for the aggregate refresh, dirty rollup-bucket marking for the
+// hourly/daily rollup recompute (ev.Ts IS the op start, the bucket the op
+// rolls into), dirty fts_ops marking so refreshFTS rebuilds the search row,
+// and the catalog upsert (which uses prep.prior to decide between count-once
+// new-insert vs migrate-contribution identity change). Behaviour is byte-for-
+// byte identical to the original inline tail of applyOpStarted.
+func (w *writer) afterOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.OpStartedEvent, prep opStartedPrep) error {
+	w.markDirtyTurn(prep.turnID)
+	w.markDirtySession(prep.sessionID)
 	// The op's start hour gains an op, so that hour's rollup must be
 	// recomputed. ev.Ts IS the op start (the OpStarted timestamp), which is
 	// the bucket the op rolls up into. ASSUMPTION (catalog + SOW-0027): an op
@@ -867,11 +1043,8 @@ ON CONFLICT (turn_id, seq) DO UPDATE SET
 	// The op's indexed text (name/model/provider/tool_namespace) may have
 	// changed; refreshFTS rebuilds its fts_ops row from the final persisted
 	// columns at flush time (fts_ops is always indexed — no flag gate).
-	w.markDirtyOp(opID)
-	if err := w.catalog.onOpStarted(ctx, tx, ev, opInserted, prior); err != nil {
-		return err
-	}
-	return nil
+	w.markDirtyOp(prep.opID)
+	return w.catalog.onOpStarted(ctx, tx, ev, prep.opInserted, prep.prior)
 }
 
 // opPriorIdentity reads an op's persisted catalog identity (kind/name/namespace/
@@ -1288,9 +1461,39 @@ VALUES (NULL, ?, NULL, NULL, ?, 'ERR', ?, ?, ?)
 }
 
 func (w *writer) applyLogEntry(ctx context.Context, tx *sql.Tx, ev canonical.LogEntryEvent) error {
-	sessionID, err := w.requireSessionID(ctx, tx, ev.SessionNativeID, ev.Ts)
+	refs, err := w.resolveLogEntryRefs(ctx, tx, ev)
 	if err != nil {
 		return err
+	}
+	logID, inserted, err := insertLogEntry(ctx, tx, refs, ev)
+	if err != nil {
+		return err
+	}
+	w.markDirtySession(refs.sessionID)
+	return w.indexLogEntryFTS(ctx, tx, refs, ev, logID, inserted)
+}
+
+// logEntryRefs carries the canonical session/turn/op linkage + the marshaled
+// extras + the normalized severity that applyLogEntry's insert and FTS hooks
+// both consume. Computed once in resolveLogEntryRefs so the downstream steps
+// stay parameter-light.
+type logEntryRefs struct {
+	sessionID string
+	turnID    sql.NullString
+	opID      sql.NullString
+	extras    any
+	severity  string
+}
+
+// resolveLogEntryRefs resolves the canonical session/turn/op linkage for the
+// LogEntryEvent and marshals its extras + normalizes its severity (default
+// "INF" when missing). turnID/opID are kept as sql.NullString so the insert
+// binds SQL NULL when the event has no turn or op context — preserving the
+// exact COALESCE behaviour idx_log_entries_identity relies on.
+func (w *writer) resolveLogEntryRefs(ctx context.Context, tx *sql.Tx, ev canonical.LogEntryEvent) (logEntryRefs, error) {
+	sessionID, err := w.requireSessionID(ctx, tx, ev.SessionNativeID, ev.Ts)
+	if err != nil {
+		return logEntryRefs{}, err
 	}
 	var turnID sql.NullString
 	if ev.TurnSeq > 0 {
@@ -1302,41 +1505,57 @@ func (w *writer) applyLogEntry(ctx context.Context, tx *sql.Tx, ev canonical.Log
 	}
 	extras, err := marshalExtras(ev.Extras)
 	if err != nil {
-		return fmt.Errorf("writer: marshal log extras: %w", err)
+		return logEntryRefs{}, fmt.Errorf("writer: marshal log extras: %w", err)
 	}
 	severity := strings.ToUpper(strings.TrimSpace(ev.Severity))
 	if severity == "" {
 		severity = "INF"
 	}
-	// RETURNING id yields the new log_entries.id on a genuine insert and
-	// sql.ErrNoRows when the ON CONFLICT DO NOTHING fires (a replayed,
-	// byte-identical log row). That signal drives fts_logs: index ONCE per
-	// first-seen log (append-only), skip on replay so no duplicate fts_logs row
-	// is created — matching BackfillFTS, which reads the already-deduped
-	// log_entries. logID stays 0 (invalid) on conflict.
+	return logEntryRefs{
+		sessionID: sessionID,
+		turnID:    turnID,
+		opID:      opID,
+		extras:    extras,
+		severity:  severity,
+	}, nil
+}
+
+// insertLogEntry runs the INSERT … ON CONFLICT DO NOTHING … RETURNING id. On
+// a genuine first-seen insert it returns the new log_entries.id and inserted=true;
+// on a replayed byte-identical row (idx_log_entries_identity collides) the ON
+// CONFLICT DO NOTHING fires and RETURNING yields no row → sql.ErrNoRows, which
+// this helper translates to (0, false, nil) so the caller can skip the FTS
+// insert without surfacing an error. Any other SQL failure propagates.
+func insertLogEntry(ctx context.Context, tx *sql.Tx, refs logEntryRefs, ev canonical.LogEntryEvent) (int64, bool, error) {
 	var logID int64
 	insertErr := tx.QueryRowContext(ctx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
 `+logEntryOnConflict+`
-RETURNING id`, sessionID, turnID, opID, ev.Ts, severity, ev.Source, ev.Message, extras).Scan(&logID)
-	insertedNewLog := true
+RETURNING id`, refs.sessionID, refs.turnID, refs.opID, ev.Ts, refs.severity, ev.Source, ev.Message, refs.extras).Scan(&logID)
 	if insertErr != nil {
-		if !errors.Is(insertErr, sql.ErrNoRows) {
-			return fmt.Errorf("writer: insert log_entry: %w", insertErr)
+		if errors.Is(insertErr, sql.ErrNoRows) {
+			return 0, false, nil // duplicate: the fts_logs row already exists.
 		}
-		insertedNewLog = false // duplicate: the fts_logs row already exists.
+		return 0, false, fmt.Errorf("writer: insert log_entry: %w", insertErr)
 	}
-	w.markDirtySession(sessionID)
-	// fts_logs is gated on the source's fts5_index_logs flag (fts_ops is not).
-	// Index only newly-inserted logs from THIS source; replays are no-ops.
-	if insertedNewLog && w.fts5IndexLogs {
-		if _, err := tx.ExecContext(ctx, `
+	return logID, true, nil
+}
+
+// indexLogEntryFTS inserts a matching fts_logs row when this batch wrote a
+// NEW log_entries row AND the source has fts5_index_logs=true. fts_logs is
+// append-only (no DELETE) — re-emitting the same log_entries row is a no-op
+// here too, so an open scan + a Tail re-read of the same line never
+// duplicates the FTS row. fts_ops has no flag gate; this hook is fts_logs-only.
+func (w *writer) indexLogEntryFTS(ctx context.Context, tx *sql.Tx, refs logEntryRefs, ev canonical.LogEntryEvent, logID int64, insertedNewLog bool) error {
+	if !insertedNewLog || !w.fts5IndexLogs {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fts_logs (message, log_id, session_id, op_id, severity, ts)
 VALUES (?, ?, ?, ?, ?, ?)`,
-			ev.Message, logID, sessionID, opID, severity, ev.Ts); err != nil {
-			return fmt.Errorf("writer: index log_entry in fts_logs: %w", err)
-		}
+		ev.Message, logID, refs.sessionID, refs.opID, refs.severity, ev.Ts); err != nil {
+		return fmt.Errorf("writer: index log_entry in fts_logs: %w", err)
 	}
 	return nil
 }
@@ -1344,10 +1563,9 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 // applySourceProgress records the cursor checkpoint and the wall-clock
 // timestamp the adapter emitted at. The actual write to source_progress
 // is deferred to the worker's flush so it happens once per batch.
-func (w *writer) applySourceProgress(ev canonical.SourceProgressEvent) error {
+func (w *writer) applySourceProgress(ev canonical.SourceProgressEvent) {
 	w.lastCursor = ev.Cursor
 	w.hasCursor = true
-	return nil
 }
 
 // applySourceError records a parse error against the source: increments

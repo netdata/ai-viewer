@@ -35,15 +35,35 @@ type BackfillStats struct {
 // processed day-by-day, and each day's ops are read and written inside that
 // day's own transaction (the writer store pins a single connection, so a
 // read cursor must never straddle a separate write transaction).
+//
+// Orchestration is split out of the per-day fold + the post-run logging so
+// each helper has one job; the helper sequence here is the durable contract.
 func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Logger) (BackfillStats, error) {
 	start := time.Now()
+	bf, days, err := prepareBackfill(ctx, db, now)
+	if err != nil {
+		return BackfillStats{}, err
+	}
+	if err := runBackfillDays(ctx, bf, days); err != nil {
+		return BackfillStats{}, err
+	}
+	stats := bf.stats(start)
+	logBackfillResult(logger, bf, stats)
+	return stats, nil
+}
+
+// prepareBackfill clears the rollup tables, loads session starts, computes the
+// sorted list of closed UTC days, and constructs the per-run backfiller state.
+// Splitting this out of BackfillRollups makes the run a 3-call orchestration
+// (prepare → run → log) so the per-day fold body has no extra control flow.
+func prepareBackfill(ctx context.Context, db *sql.DB, now int64) (*backfiller, []int64, error) {
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
 
 	// Wipe both rollup tables before rebuilding so this run is a TRUE full
 	// recompute, not an overwrite. The backfill is the recovery path "when
 	// rollups are missing OR STALE" (ingester.md §One-shot backfill), but the
-	// per-day upserts below (ON CONFLICT DO UPDATE) can only refresh rows the
+	// per-day upserts (ON CONFLICT DO UPDATE) can only refresh rows the
 	// recompute still produces — they cannot remove a row it no longer produces
 	// (e.g. a dimension value that has since collapsed into __other__, or any row
 	// from data that has since changed). Deleting first makes the backfill able
@@ -55,39 +75,58 @@ func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Lo
 	// commits before the per-day loop, keeping the single writer connection
 	// (SetMaxOpenConns(1)) uncontended.
 	if err := truncateRollups(ctx, db); err != nil {
-		return BackfillStats{}, err
+		return nil, nil, err
 	}
 
 	startsByDay, err := loadSessionStarts(ctx, db, openHourStart)
 	if err != nil {
-		return BackfillStats{}, err
+		return nil, nil, err
 	}
 	days, err := closedDays(ctx, db, openHourStart, startsByDay)
 	if err != nil {
-		return BackfillStats{}, err
+		return nil, nil, err
 	}
+	return &backfiller{
+		db:            db,
+		openHourStart: openHourStart,
+		openDayStart:  openDayStart,
+		startsByDay:   startsByDay,
+	}, days, nil
+}
 
-	bf := &backfiller{db: db, openHourStart: openHourStart, openDayStart: openDayStart, startsByDay: startsByDay}
+// runBackfillDays materializes every closed day in arrival order, accumulating
+// per-day counts on the backfiller. Each day runs in its own transaction (see
+// flushDay), so a failure in one day rolls only that day back.
+func runBackfillDays(ctx context.Context, bf *backfiller, days []int64) error {
 	for _, day := range days {
 		if err := bf.flushDay(ctx, day); err != nil {
-			return BackfillStats{}, err
+			return err
 		}
 	}
+	return nil
+}
 
-	stats := BackfillStats{
+// stats returns the accumulated per-run counters wrapped with the elapsed
+// wall-clock time. Kept as a method so BackfillRollups stays orchestration-only.
+func (bf *backfiller) stats(start time.Time) BackfillStats {
+	return BackfillStats{
 		HourlyRows:    bf.hourlyRows,
 		DailyRows:     bf.dailyRows,
 		DaysProcessed: bf.daysProcessed,
 		Elapsed:       time.Since(start),
 	}
+}
+
+// logBackfillResult emits a single structured log line summarising the run.
+// Split out so the orchestrator never carries the two-branch log formatting.
+func logBackfillResult(logger *slog.Logger, bf *backfiller, stats BackfillStats) {
 	if stats.DaysProcessed == 0 {
 		logger.Info("rollups-backfill: no closed ops or session starts; nothing to materialize",
-			"open_hour_start", openHourStart, "open_day_start", openDayStart)
-	} else {
-		logger.Info("rollups-backfill: materialized closed-bucket rollups",
-			"days", stats.DaysProcessed, "hourly_rows", stats.HourlyRows, "daily_rows", stats.DailyRows)
+			"open_hour_start", bf.openHourStart, "open_day_start", bf.openDayStart)
+		return
 	}
-	return stats, nil
+	logger.Info("rollups-backfill: materialized closed-bucket rollups",
+		"days", stats.DaysProcessed, "hourly_rows", stats.HourlyRows, "daily_rows", stats.DailyRows)
 }
 
 // truncateRollups empties rollup_hourly and rollup_daily in one short

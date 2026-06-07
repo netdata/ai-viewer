@@ -79,7 +79,7 @@ func (r *resolver) Stop() {
 // emit are absent; without them the SSE contract (sse-protocol.md
 // §session_changed) is silently broken for child-first ingestions.
 //
-// Everything runs in ONE transaction so the two UPDATEs and the notify rows
+// Everything runs in ONE transaction so the link UPDATEs and the notify rows
 // commit atomically: the serve poller can never observe a linkage without its
 // notification, nor a notification before the linked rows are visible. Each
 // UPDATE uses RETURNING to capture exactly the rows it changed (modernc.org/
@@ -87,10 +87,51 @@ func (r *resolver) Stop() {
 // changed child, its newly-linked parent, and its root. When nothing links,
 // the transaction makes no notify rows — an open poller is not spammed for a
 // no-op pass.
+//
+// The link passes are organized as a slice of named steps so the iteration
+// stays trivial and the per-step rollback contract (any error rolls the WHOLE
+// tx back) lives in one place; the resolverStep type captures both the SQL
+// pass and its emit hook through the same signature.
 func (r *resolver) linkOrphans(ctx context.Context) error {
 	if r.db == nil {
 		return errors.New("resolver: nil db")
 	}
+	return r.runResolverTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		affected := map[string]struct{}{}
+		for _, step := range r.resolverSteps() {
+			if err := step(ctx, tx, affected); err != nil {
+				return err
+			}
+		}
+		return r.emitResolverNotify(ctx, tx, affected)
+	})
+}
+
+// resolverStep is one phase of a linkOrphans pass: it accumulates the session
+// ids it changes into the shared affected set. All four link passes share this
+// signature so the resolver loop is a uniform for-range over a step slice.
+type resolverStep func(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error
+
+// resolverSteps returns the ordered list of link passes a linkOrphans run
+// must execute. The order is significant: parent-link must run before root
+// re-resolution so root_session_id can re-point at the just-linked parent in
+// the same pass (see linkRoots's WHERE clause). Op-child passes follow the
+// session passes because they read the now-resolved session tree.
+func (r *resolver) resolverSteps() []resolverStep {
+	return []resolverStep{
+		r.linkParents,
+		r.linkRoots,
+		r.linkOpChildren,
+		r.linkOpChildrenByToolUse,
+	}
+}
+
+// runResolverTx wraps body in the resolver's single-tx contract: BeginTx,
+// run body (which executes every link pass + the notify emit), Commit on
+// success, Rollback on any error (including a successful body whose Commit
+// fails). The defer/committed pattern is the same one the worker uses; it is
+// extracted here so linkOrphans stays orchestration-only.
+func (r *resolver) runResolverTx(ctx context.Context, body func(context.Context, *sql.Tx) error) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("resolver: begin tx: %w", err)
@@ -101,24 +142,7 @@ func (r *resolver) linkOrphans(ctx context.Context) error {
 			_ = tx.Rollback()
 		}
 	}()
-
-	// affected accumulates the distinct session ids whose row is now part of
-	// a newly-resolved parent/child/root relationship and therefore needs a
-	// session_changed notification.
-	affected := map[string]struct{}{}
-	if err := r.linkParents(ctx, tx, affected); err != nil {
-		return err
-	}
-	if err := r.linkRoots(ctx, tx, affected); err != nil {
-		return err
-	}
-	if err := r.linkOpChildren(ctx, tx, affected); err != nil {
-		return err
-	}
-	if err := r.linkOpChildrenByToolUse(ctx, tx, affected); err != nil {
-		return err
-	}
-	if err := r.emitResolverNotify(ctx, tx, affected); err != nil {
+	if err := body(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

@@ -137,60 +137,21 @@ func normalizeToolNamespace(ns string) string {
 // MAX-based, not summed, so it is intentionally NOT decremented — a stale seed on
 // an emptied row is harmless (no op references it) and re-derives on the next
 // observation.
+//
+// The per-kind switch dispatches to small table-specific helpers — one helper
+// per (table, direction) — that own the SQL exec for that table only. Each
+// helper preserves the exact column set and WHERE predicate of the original
+// inline UPDATE; the dispatch carries the per-call sign convention (-1 for
+// remove, +1 for add) through the migrateDir constant.
 func (c *catalogWriter) removeOpContribution(ctx context.Context, tx *sql.Tx, prior priorOpIdentity) error {
-	t := prior.totals
-	failure := failureInc(t.status)
 	switch prior.kind {
 	case string(canonical.OpLLM):
-		if prior.provider != "" {
-			if _, err := tx.ExecContext(ctx, `
-UPDATE catalog_providers SET
-    call_count               = call_count - 1,
-    failure_count            = failure_count - ?,
-    total_tokens_in          = total_tokens_in - ?,
-    total_tokens_out         = total_tokens_out - ?,
-    total_tokens_cache_read  = total_tokens_cache_read - ?,
-    total_tokens_cache_write = total_tokens_cache_write - ?,
-    total_cost_usd           = total_cost_usd - ?
-WHERE name = ? AND alias = ?
-`, failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD,
-				prior.provider, prior.providerAlias); err != nil {
-				return fmt.Errorf("catalog_providers migrate-out: %w", err)
-			}
+		if err := migrateProviderTotals(ctx, tx, prior.provider, prior.providerAlias, prior.totals, migrateOut); err != nil {
+			return err
 		}
-		if prior.provider != "" && prior.model != "" {
-			if _, err := tx.ExecContext(ctx, `
-UPDATE catalog_models SET
-    call_count               = call_count - 1,
-    failure_count            = failure_count - ?,
-    total_tokens_in          = total_tokens_in - ?,
-    total_tokens_out         = total_tokens_out - ?,
-    total_tokens_cache_read  = total_tokens_cache_read - ?,
-    total_tokens_cache_write = total_tokens_cache_write - ?,
-    total_cost_usd           = total_cost_usd - ?,
-    total_duration_us        = total_duration_us - ?
-WHERE provider = ? AND name = ?
-`, failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD, t.durationUS,
-				prior.provider, prior.model); err != nil {
-				return fmt.Errorf("catalog_models migrate-out: %w", err)
-			}
-		}
+		return migrateModelTotals(ctx, tx, prior.provider, prior.model, prior.totals, migrateOut)
 	case string(canonical.OpTool):
-		if prior.name != "" {
-			if _, err := tx.ExecContext(ctx, `
-UPDATE catalog_tools SET
-    call_count        = call_count - 1,
-    failure_count     = failure_count - ?,
-    total_tokens_in   = total_tokens_in - ?,
-    total_tokens_out  = total_tokens_out - ?,
-    total_cost_usd    = total_cost_usd - ?,
-    total_duration_us = total_duration_us - ?
-WHERE namespace = ? AND name = ?
-`, failure, t.tokensIn, t.tokensOut, t.costUSD, t.durationUS,
-				normalizeToolNamespace(prior.toolNamespace), prior.name); err != nil {
-				return fmt.Errorf("catalog_tools migrate-out: %w", err)
-			}
-		}
+		return migrateToolTotals(ctx, tx, prior.toolNamespace, prior.name, prior.totals, migrateOut)
 	}
 	return nil
 }
@@ -205,17 +166,62 @@ WHERE namespace = ? AND name = ?
 // OpFinalized (this UPDATE only moves accumulating totals). The destination key is
 // the EFFECTIVE post-upsert identity so it always matches the ops row and the key
 // the call_count upsert booked under (SOW-0004 I1 shared-ingest edge).
+//
+// The per-kind switch dispatches to the SAME per-table helpers as
+// removeOpContribution, passing migrateIn so the sign is +1 and call_count is
+// NOT touched (the OpStarted upsert already booked the +1 under the new key).
 func (c *catalogWriter) addMigratedTotals(ctx context.Context, tx *sql.Tx, eff effectiveCatalogIdentity, t opPriorTotals) error {
 	// t is the prior PERSISTED contribution; the caller only reaches here when the
 	// op row already existed (prior.found), so t.found is always true. An op started
 	// but never finalized has status="running" (failureInc 0) and zero tokens/cost/
 	// duration, so the adds below move nothing meaningful — only the call_count the
 	// OpStarted upsert already re-booked under the new key matters in that case.
-	failure := failureInc(t.status)
 	switch eff.kind {
 	case string(canonical.OpLLM):
-		if eff.provider != "" {
-			if _, err := tx.ExecContext(ctx, `
+		if err := migrateProviderTotals(ctx, tx, eff.provider, eff.providerAlias, t, migrateIn); err != nil {
+			return err
+		}
+		return migrateModelTotals(ctx, tx, eff.provider, eff.model, t, migrateIn)
+	case string(canonical.OpTool):
+		return migrateToolTotals(ctx, tx, eff.toolNamespace, eff.name, t, migrateIn)
+	}
+	return nil
+}
+
+// migrateDir is the per-direction sign for catalog total migration: -1 drains a
+// prior catalog key (removeOpContribution), +1 books totals onto a new key
+// (addMigratedTotals). The helpers below pick their SQL template based on it so
+// the column sets stay identical across directions while the sign and the
+// call_count handling diverge per direction.
+type migrateDir int
+
+const (
+	migrateOut migrateDir = -1
+	migrateIn  migrateDir = 1
+)
+
+// providerTotalsOutSQL drains an op's prior contribution from catalog_providers
+// (the migrateOut path). The column set mirrors onOpFinalized's provider
+// branch exactly and matches providerTotalsInSQL except for the sign + the
+// call_count update (call_count is only decremented on the way OUT — the
+// OpStarted upsert re-books +1 under the new key, so the migrateIn path does
+// NOT touch call_count).
+const providerTotalsOutSQL = `
+UPDATE catalog_providers SET
+    call_count               = call_count - 1,
+    failure_count            = failure_count - ?,
+    total_tokens_in          = total_tokens_in - ?,
+    total_tokens_out         = total_tokens_out - ?,
+    total_tokens_cache_read  = total_tokens_cache_read - ?,
+    total_tokens_cache_write = total_tokens_cache_write - ?,
+    total_cost_usd           = total_cost_usd - ?
+WHERE name = ? AND alias = ?
+`
+
+// providerTotalsInSQL re-books an op's prior contribution onto a new
+// catalog_providers key (the migrateIn path). Same columns as the OUT SQL but
+// with addition and NO call_count touch.
+const providerTotalsInSQL = `
 UPDATE catalog_providers SET
     failure_count            = failure_count + ?,
     total_tokens_in          = total_tokens_in + ?,
@@ -224,13 +230,50 @@ UPDATE catalog_providers SET
     total_tokens_cache_write = total_tokens_cache_write + ?,
     total_cost_usd           = total_cost_usd + ?
 WHERE name = ? AND alias = ?
-`, failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD,
-				eff.provider, eff.providerAlias); err != nil {
-				return fmt.Errorf("catalog_providers migrate-in: %w", err)
-			}
-		}
-		if eff.provider != "" && eff.model != "" {
-			if _, err := tx.ExecContext(ctx, `
+`
+
+// migrateProviderTotals applies one direction of the catalog_providers
+// migration. The empty-provider guard mirrors the original inline code — an
+// LLM op with no recorded provider never contributed to catalog_providers, so
+// there is nothing to migrate either way.
+func migrateProviderTotals(ctx context.Context, tx *sql.Tx, provider, alias string, t opPriorTotals, dir migrateDir) error {
+	if provider == "" {
+		return nil
+	}
+	stmt := providerTotalsOutSQL
+	verb := "migrate-out"
+	if dir == migrateIn {
+		stmt = providerTotalsInSQL
+		verb = "migrate-in"
+	}
+	failure := failureInc(t.status)
+	if _, err := tx.ExecContext(ctx, stmt,
+		failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD,
+		provider, alias); err != nil {
+		return fmt.Errorf("catalog_providers %s: %w", verb, err)
+	}
+	return nil
+}
+
+// modelTotalsOutSQL drains an op's prior contribution from catalog_models
+// (the migrateOut path). Columns mirror onOpFinalized's model branch exactly
+// (provider+model PK, includes total_duration_us).
+const modelTotalsOutSQL = `
+UPDATE catalog_models SET
+    call_count               = call_count - 1,
+    failure_count            = failure_count - ?,
+    total_tokens_in          = total_tokens_in - ?,
+    total_tokens_out         = total_tokens_out - ?,
+    total_tokens_cache_read  = total_tokens_cache_read - ?,
+    total_tokens_cache_write = total_tokens_cache_write - ?,
+    total_cost_usd           = total_cost_usd - ?,
+    total_duration_us        = total_duration_us - ?
+WHERE provider = ? AND name = ?
+`
+
+// modelTotalsInSQL re-books an op's prior contribution onto a new
+// catalog_models key (the migrateIn path).
+const modelTotalsInSQL = `
 UPDATE catalog_models SET
     failure_count            = failure_count + ?,
     total_tokens_in          = total_tokens_in + ?,
@@ -240,14 +283,47 @@ UPDATE catalog_models SET
     total_cost_usd           = total_cost_usd + ?,
     total_duration_us        = total_duration_us + ?
 WHERE provider = ? AND name = ?
-`, failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD, t.durationUS,
-				eff.provider, eff.model); err != nil {
-				return fmt.Errorf("catalog_models migrate-in: %w", err)
-			}
-		}
-	case string(canonical.OpTool):
-		if eff.name != "" {
-			if _, err := tx.ExecContext(ctx, `
+`
+
+// migrateModelTotals applies one direction of the catalog_models migration.
+// An op with no provider OR no model never contributed to catalog_models (PK
+// requires both), so the guard short-circuits the same way the inline code did.
+func migrateModelTotals(ctx context.Context, tx *sql.Tx, provider, model string, t opPriorTotals, dir migrateDir) error {
+	if provider == "" || model == "" {
+		return nil
+	}
+	stmt := modelTotalsOutSQL
+	verb := "migrate-out"
+	if dir == migrateIn {
+		stmt = modelTotalsInSQL
+		verb = "migrate-in"
+	}
+	failure := failureInc(t.status)
+	if _, err := tx.ExecContext(ctx, stmt,
+		failure, t.tokensIn, t.tokensOut, t.tokensCacheRead, t.tokensCacheWrite, t.costUSD, t.durationUS,
+		provider, model); err != nil {
+		return fmt.Errorf("catalog_models %s: %w", verb, err)
+	}
+	return nil
+}
+
+// toolTotalsOutSQL drains an op's prior contribution from catalog_tools (the
+// migrateOut path). Tools carry no cache split; the column set mirrors
+// onOpFinalized's tool branch exactly.
+const toolTotalsOutSQL = `
+UPDATE catalog_tools SET
+    call_count        = call_count - 1,
+    failure_count     = failure_count - ?,
+    total_tokens_in   = total_tokens_in - ?,
+    total_tokens_out  = total_tokens_out - ?,
+    total_cost_usd    = total_cost_usd - ?,
+    total_duration_us = total_duration_us - ?
+WHERE namespace = ? AND name = ?
+`
+
+// toolTotalsInSQL re-books an op's prior contribution onto a new catalog_tools
+// key (the migrateIn path).
+const toolTotalsInSQL = `
 UPDATE catalog_tools SET
     failure_count     = failure_count + ?,
     total_tokens_in   = total_tokens_in + ?,
@@ -255,11 +331,26 @@ UPDATE catalog_tools SET
     total_cost_usd    = total_cost_usd + ?,
     total_duration_us = total_duration_us + ?
 WHERE namespace = ? AND name = ?
-`, failure, t.tokensIn, t.tokensOut, t.costUSD, t.durationUS,
-				normalizeToolNamespace(eff.toolNamespace), eff.name); err != nil {
-				return fmt.Errorf("catalog_tools migrate-in: %w", err)
-			}
-		}
+`
+
+// migrateToolTotals applies one direction of the catalog_tools migration.
+// Tool namespace is folded through normalizeToolNamespace exactly as the inline
+// code did, so the keyed row matches the one onOpStarted booked.
+func migrateToolTotals(ctx context.Context, tx *sql.Tx, namespace, name string, t opPriorTotals, dir migrateDir) error {
+	if name == "" {
+		return nil
+	}
+	stmt := toolTotalsOutSQL
+	verb := "migrate-out"
+	if dir == migrateIn {
+		stmt = toolTotalsInSQL
+		verb = "migrate-in"
+	}
+	failure := failureInc(t.status)
+	if _, err := tx.ExecContext(ctx, stmt,
+		failure, t.tokensIn, t.tokensOut, t.costUSD, t.durationUS,
+		normalizeToolNamespace(namespace), name); err != nil {
+		return fmt.Errorf("catalog_tools %s: %w", verb, err)
 	}
 	return nil
 }

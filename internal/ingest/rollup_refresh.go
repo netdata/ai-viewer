@@ -48,63 +48,99 @@ const hourSpanUS = int64(3_600_000_000)
 // Single-writer discipline (store.OpenWriter pins SetMaxOpenConns(1)): every
 // read fully drains its cursor into a slice BEFORE any write on this tx, so a
 // read cursor never straddles a write on the one pinned connection.
+//
+// The two passes (HOUR + DAY) share an identical structure — snapshot the
+// carried set, iterate, skip-or-materialize, stage post-commit removal — so
+// each pass runs through refreshRollupBucketPass with its own granularity and
+// carried/pending maps.
 func (w *writer) refreshRollups(ctx context.Context, tx *sql.Tx) error {
 	if len(w.dirtyRollupBuckets) == 0 && len(w.dirtyRollupDays) == 0 {
 		return nil
 	}
 	now := w.now()
-	openHourStart := rollups.BucketTS(now, rollups.Hourly)
-	openDayStart := rollups.BucketTS(now, rollups.Daily)
-
-	// HOUR pass. Snapshot the dirty hours BEFORE iterating: the loop stages removal
-	// of materialized (closed) hours, and mutating the map during range over it is a
-	// Go hazard. The snapshot also lets a hour skipped-because-open be RETAINED (left
-	// in the map) and carried to the next batch/refresh — without it, a bucket whose
-	// ops all arrive during its own open hour would be skipped while open and then
-	// never re-marked, leaving the closed bucket permanently un-materialized
-	// (round-7 P1).
-	dirtyHours := make([]int64, 0, len(w.dirtyRollupBuckets))
-	for h := range w.dirtyRollupBuckets {
-		dirtyHours = append(dirtyHours, h)
+	if err := w.refreshRollupBucketPass(ctx, tx, w.hourPass(rollups.BucketTS(now, rollups.Hourly))); err != nil {
+		return err
 	}
-	for _, h := range dirtyHours {
-		if h >= openHourStart {
-			continue // open hour: never materialized; RETAINED in the dirty set.
+	return w.refreshRollupBucketPass(ctx, tx, w.dayPass(rollups.BucketTS(now, rollups.Daily)))
+}
+
+// rollupPass is one granularity's worth of state and SQL plumbing the refresh
+// loop needs: the carried dirty set, the post-commit pending set, the bucket
+// granularity, the bucket span, the wall-clock cutoff at which a bucket is
+// considered closed, and a human-readable label for error wrapping. The HOUR
+// and DAY passes share the exact same loop body — they differ ONLY in these
+// fields — so a typed bundle keeps the dispatch trivially boring.
+type rollupPass struct {
+	dirty    map[int64]struct{}
+	pending  map[int64]struct{}
+	bucket   rollups.Bucket
+	spanUS   int64
+	openFrom int64
+	label    string
+}
+
+// hourPass returns the HOUR pass configured against this writer's HOUR
+// carried/pending sets and the supplied open-hour cutoff. The open hour is
+// never materialized — the query layer live-folds it.
+func (w *writer) hourPass(openHourStart int64) rollupPass {
+	return rollupPass{
+		dirty:    w.dirtyRollupBuckets,
+		pending:  w.pendingMaterializedBuckets,
+		bucket:   rollups.Hourly,
+		spanUS:   hourSpanUS,
+		openFrom: openHourStart,
+		label:    "hourly",
+	}
+}
+
+// dayPass returns the DAY pass configured against this writer's DAY
+// carried/pending sets. The open day is never derived — even from its closed
+// hours — per data-model.md §"Open-bucket rule".
+func (w *writer) dayPass(openDayStart int64) rollupPass {
+	return rollupPass{
+		dirty:    w.dirtyRollupDays,
+		pending:  w.pendingMaterializedDays,
+		bucket:   rollups.Daily,
+		spanUS:   daySpanUS,
+		openFrom: openDayStart,
+		label:    "daily",
+	}
+}
+
+// refreshRollupBucketPass materializes every CLOSED bucket from pass.dirty,
+// skipping (and retaining) any bucket still in the open window. Materialized
+// buckets are STAGED for removal in pass.pending, applied only after the tx
+// commits (promoteMaterializedRollupBuckets). The snapshot loop mirrors the
+// original inline code exactly: snapshot first so removal is safe across the
+// range, and the open-bucket skip leaves the carried entry in place.
+func (w *writer) refreshRollupBucketPass(ctx context.Context, tx *sql.Tx, pass rollupPass) error {
+	// Snapshot the dirty set BEFORE iterating: the loop stages removal of
+	// materialized (closed) buckets, and mutating the map during range over it
+	// is a Go hazard. The snapshot also lets a bucket skipped-because-open be
+	// RETAINED (left in the map) and carried to the next batch/refresh —
+	// without it, a bucket whose ops all arrive during its own open window
+	// would be skipped while open and then never re-marked, leaving the closed
+	// bucket permanently un-materialized (round-7/round-8 P1).
+	snapshot := make([]int64, 0, len(pass.dirty))
+	for b := range pass.dirty {
+		snapshot = append(snapshot, b)
+	}
+	for _, b := range snapshot {
+		if b >= pass.openFrom {
+			continue // open bucket: never materialized; RETAINED in the dirty set.
 		}
-		if err := w.recomputeBucket(ctx, tx, h, h+hourSpanUS, rollups.Hourly); err != nil {
-			return fmt.Errorf("rollups-refresh: hourly bucket %d: %w", h, err)
+		if err := w.recomputeBucket(ctx, tx, b, b+pass.spanUS, pass.bucket); err != nil {
+			return fmt.Errorf("rollups-refresh: %s bucket %d: %w", pass.label, b, err)
 		}
 		// Closed and materialized IN THIS TX — stage its removal from the carried
 		// set, applied only AFTER the tx commits (promoteMaterializedRollupBuckets).
 		// Deferring the delete keeps a materialized-then-rolled-back bucket CARRIED
 		// (resetBatch discards the staged removal on rollback) so it is retried —
 		// without this, an idle refresh-only pass whose commit fails would lose a
-		// closed bucket whose DB row never landed (round-7 P1 undercount). The
-		// carried set then holds only open/pending hours, so memory stays bounded.
-		w.pendingMaterializedBuckets[h] = struct{}{}
-		w.rollupMaterializedThisRefresh = true
-	}
-
-	// DAY pass — mirrors the hour pass exactly, over the INDEPENDENTLY-carried
-	// dirtyRollupDays set (NOT derived from the dirty hours). Marking the day in
-	// markDirtyRollupBucket and carrying it here means a day stays tracked even after
-	// all of its hours have materialized and left the hour set, so a day that closes
-	// during a lull is still materialized by a later refresh/idle pass — the daily
-	// fix for the round-7 open→closed gap (round-8 P1). A day still open at refresh
-	// time is RETAINED; a closed day is materialized and its removal staged for
-	// post-commit promotion (rollback-safe, identical to hours).
-	dirtyDays := make([]int64, 0, len(w.dirtyRollupDays))
-	for d := range w.dirtyRollupDays {
-		dirtyDays = append(dirtyDays, d)
-	}
-	for _, d := range dirtyDays {
-		if d >= openDayStart {
-			continue // open day: never materialized in rollup_daily; RETAINED.
-		}
-		if err := w.recomputeBucket(ctx, tx, d, d+daySpanUS, rollups.Daily); err != nil {
-			return fmt.Errorf("rollups-refresh: daily bucket %d: %w", d, err)
-		}
-		w.pendingMaterializedDays[d] = struct{}{}
+		// closed bucket whose DB row never landed (round-7/round-8 P1 undercount).
+		// The carried set then holds only open/pending buckets, so memory stays
+		// bounded.
+		pass.pending[b] = struct{}{}
 		w.rollupMaterializedThisRefresh = true
 	}
 	return nil
