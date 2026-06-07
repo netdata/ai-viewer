@@ -618,3 +618,38 @@ None.
 ## Regression Log
 
 None yet.
+
+## PR Check Remediation - 2026-06-07
+
+Remote Codacy analysis on PR #61 reported three ShellCheck SC2016 warnings in
+`scripts/test/check-bench-test.sh`. The findings were valid style findings in
+literal regex assertions. The remediation moved those regexes into
+double-quoted variables with escaped literal dollar signs, preserving the same
+assertions while satisfying ShellCheck.
+
+Follow-up review also found that default local ShellCheck reported SC2329 on the
+benchmark gate's trap callback in `scripts/check-bench.sh`. The final cleanup
+uses an array-aware trap command directly, avoiding an indirect cleanup function
+and keeping the temporary-file cleanup behavior unchanged.
+
+Validation:
+
+- `bash -n scripts/test/check-bench-test.sh`: passed.
+- `shellcheck scripts/test/check-bench-test.sh`: passed.
+- `bash scripts/test/check-bench-test.sh`: passed, 41/41 assertions.
+- `bash -n scripts/check-bench.sh scripts/test/check-bench-test.sh`: passed
+  after the trap cleanup.
+- `shellcheck scripts/check-bench.sh scripts/test/check-bench-test.sh`: passed
+  after the trap cleanup.
+- Local Codacy analysis confirmed ShellCheck, Semgrep, and Trivy reported zero
+  issues for the touched shell scripts.
+- Final `timeout 3600 ./scripts/gates.sh` after PR check remediation and review
+  cleanup: passed every gate in 1243s. Evidence: benchmark regression gate
+  self-test passed 41/41; real benchmark attempt 1 reported `HubFanout`
+  measurement noise and attempt 2 did not reproduce it, so the benchmark gate
+  passed by its retry contract; Go race/coverage passed with total statement
+  coverage 86.0%; Go coverage gate passed with gated `internal/*` aggregate
+  91.0%; frontend Vitest passed 631/631 with 94.41% statements; Playwright
+  E2E/axe passed 51/51; spec drift, secret scan, repository attribution scan,
+  Codacy self-tests, systemd lint, build, bundle gate, and adapter fuzz seed
+  corpus all passed.

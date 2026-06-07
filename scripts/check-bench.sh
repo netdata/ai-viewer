@@ -111,17 +111,7 @@ emit_benchmark_diagnostics() {
 }
 
 cleanup_files=()
-cleanup_temps() {
-  local f
-  if [ "${#cleanup_files[@]}" -eq 0 ]; then
-    return 0
-  fi
-
-  for f in "${cleanup_files[@]}"; do
-    [ -n "$f" ] && rm -f "$f"
-  done
-}
-trap cleanup_temps EXIT
+trap '[ "${#cleanup_files[@]}" -eq 0 ] || rm -f "${cleanup_files[@]}"' EXIT
 
 benchmark_names_from_file() {
   awk '

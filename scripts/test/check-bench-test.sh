@@ -346,8 +346,12 @@ assert_script_contains() {
   assert_file_contains "$CHECK" "$1" "$2"
 }
 
+bench_cpu_pattern="go test .* -cpu=\"\\\$BENCH_CPU\""
+first_attempt_pattern="run_real_bench_attempt 1 \"\\\$base\""
+second_attempt_pattern="run_real_bench_attempt 2 \"\\\$base\""
+
 assert_script_contains '^BENCH_CPU="1"$' "real benchmark CPU policy is pinned to 1"
-assert_script_contains 'go test .* -cpu="\$BENCH_CPU"' "real go test command passes -cpu=1"
+assert_script_contains "$bench_cpu_pattern" "real go test command passes -cpu=1"
 assert_script_contains 'go version:' "diagnostics include Go version"
 assert_script_contains 'effective GOMAXPROCS:' "diagnostics include effective GOMAXPROCS"
 assert_script_contains 'benchmark -cpu:' "diagnostics include benchmark CPU setting"
@@ -358,8 +362,8 @@ assert_script_contains '/proc/loadavg' "diagnostics handle /proc/loadavg"
 assert_script_contains 'loadavg \(1m 5m 15m\):' "diagnostics include load averages"
 assert_script_contains '\$#.*-eq 2' "compare-file self-test mode remains available"
 assert_compare_mode_single_pass
-assert_script_contains 'run_real_bench_attempt 1 "\$base"' "real mode runs first benchmark attempt"
-assert_script_contains 'run_real_bench_attempt 2 "\$base"' "real mode runs second benchmark attempt after regression"
+assert_script_contains "$first_attempt_pattern" "real mode runs first benchmark attempt"
+assert_script_contains "$second_attempt_pattern" "real mode runs second benchmark attempt after regression"
 assert_script_contains 'first-attempt regression was not reproduced' "real retry pass reports local measurement noise"
 assert_script_contains 'reproduced on retry' "real retry failure reports reproduced regression"
 assert_script_contains '\$\{#cleanup_files\[@\]\}.*-eq 0' "cleanup handles empty temp array under nounset"

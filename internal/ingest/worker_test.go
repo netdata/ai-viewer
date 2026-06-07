@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -98,20 +99,8 @@ func TestWorker_CancelDrainsPendingBatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 
-	w := &worker{
-		sourceID:      src,
-		sourceFormat:  "aiagent_v3",
-		location:      "/tmp",
-		fts5IndexLogs: true,
-		events:        ch,
-		db:            db,
-		hwm:           newHWMCache(),
-		pricer:        NopPricer{},
-		logger:        silentLogger(),
-		batchSize:     100,
-		batchEvery:    time.Hour,
-		now:           fixedNow,
-	}
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.events = ch
 
 	go func() {
 		w.run(ctx)
@@ -143,14 +132,35 @@ func TestWorker_CancelDrainsPendingBatch(t *testing.T) {
 		t.Fatal("worker did not exit after context cancellation")
 	}
 
-	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='cancel-drain'`); got != 1 {
-		t.Fatalf("session rows after cancel drain = %d, want 1", got)
+	assertWorkerSessionProgress(t, db, w, src, "cancel-drain", 1, "cancel drain")
+}
+
+func newRuntimeTestWorker(db *sql.DB, src, format, location string) *worker {
+	return &worker{
+		sourceID:      src,
+		sourceFormat:  format,
+		location:      location,
+		fts5IndexLogs: true,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     100,
+		batchEvery:    time.Hour,
+		now:           fixedNow,
 	}
-	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 1 {
-		t.Fatalf("source_progress.last_seq after cancel drain = %d, want 1", got)
+}
+
+func assertWorkerSessionProgress(t *testing.T, db *sql.DB, w *worker, src, nativeID string, wantSeq int64, label string) {
+	t.Helper()
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id=?`, nativeID); got != 1 {
+		t.Fatalf("session rows after %s = %d, want 1", label, got)
 	}
-	if got := w.hwm.Get(src); got != 1 {
-		t.Fatalf("worker HWM after cancel drain = %d, want 1", got)
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != wantSeq {
+		t.Fatalf("source_progress.last_seq after %s = %d, want %d", label, got, wantSeq)
+	}
+	if got := w.hwm.Get(src); got != uint64(wantSeq) {
+		t.Fatalf("worker HWM after %s = %d, want %d", label, got, wantSeq)
 	}
 }
 
@@ -177,20 +187,8 @@ func TestWorker_CancelDrainsBufferedChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan struct{})
-	w := &worker{
-		sourceID:      src,
-		sourceFormat:  "aiagent_v3",
-		location:      "/tmp",
-		fts5IndexLogs: true,
-		events:        ch,
-		db:            db,
-		hwm:           newHWMCache(),
-		pricer:        NopPricer{},
-		logger:        silentLogger(),
-		batchSize:     100,
-		batchEvery:    time.Hour,
-		now:           fixedNow,
-	}
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.events = ch
 
 	go func() {
 		w.run(ctx)
@@ -205,11 +203,16 @@ func TestWorker_CancelDrainsBufferedChannel(t *testing.T) {
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions`); got != 3 {
 		t.Fatalf("session rows after canceled-context drain = %d, want 3", got)
 	}
-	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 3 {
-		t.Fatalf("source_progress.last_seq after canceled-context drain = %d, want 3", got)
+	assertWorkerProgress(t, db, w, src, 3, "canceled-context drain")
+}
+
+func assertWorkerProgress(t *testing.T, db *sql.DB, w *worker, src string, wantSeq int64, label string) {
+	t.Helper()
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != wantSeq {
+		t.Fatalf("source_progress.last_seq after %s = %d, want %d", label, got, wantSeq)
 	}
-	if got := w.hwm.Get(src); got != 3 {
-		t.Fatalf("worker HWM after canceled-context drain = %d, want 3", got)
+	if got := w.hwm.Get(src); got != uint64(wantSeq) {
+		t.Fatalf("worker HWM after %s = %d, want %d", label, got, wantSeq)
 	}
 }
 
@@ -224,21 +227,9 @@ func TestWorkerRuntime_FlushBatchUsesShutdownDrainAfterLifecycleCancel(t *testin
 
 	_, db := openTestStore(t)
 	var errs []error
-	w := &worker{
-		sourceID:      src,
-		sourceFormat:  "aiagent_v3",
-		location:      "/tmp",
-		fts5IndexLogs: true,
-		db:            db,
-		hwm:           newHWMCache(),
-		pricer:        NopPricer{},
-		logger:        silentLogger(),
-		batchSize:     100,
-		batchEvery:    time.Hour,
-		now:           fixedNow,
-		onErr: func(err error) {
-			errs = append(errs, err)
-		},
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.onErr = func(err error) {
+		errs = append(errs, err)
 	}
 	rt := newWorkerRuntime(w)
 	defer rt.close()
@@ -279,21 +270,9 @@ func TestWorkerRuntime_FlushBatchSurvivesLifecycleCancellationRace(t *testing.T)
 
 	_, db := openTestStore(t)
 	var errs []error
-	w := &worker{
-		sourceID:      src,
-		sourceFormat:  "aiagent_v3",
-		location:      "/tmp",
-		fts5IndexLogs: true,
-		db:            db,
-		hwm:           newHWMCache(),
-		pricer:        NopPricer{},
-		logger:        silentLogger(),
-		batchSize:     100,
-		batchEvery:    time.Hour,
-		now:           fixedNow,
-		onErr: func(err error) {
-			errs = append(errs, err)
-		},
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.onErr = func(err error) {
+		errs = append(errs, err)
 	}
 	rt := newWorkerRuntime(w)
 	defer rt.close()
@@ -493,21 +472,11 @@ func TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBucket
 	day0 := ts(0, 0, 0)
 	clk := &mutableClock{now: ts(0, 10, 10)} // open hour/day -> carried, not materialized.
 	var errs []error
-	w := &worker{
-		sourceID:      src,
-		sourceFormat:  format,
-		location:      "/loc",
-		fts5IndexLogs: true,
-		db:            db,
-		hwm:           newHWMCache(),
-		pricer:        NopPricer{},
-		logger:        silentLogger(),
-		batchSize:     1000,
-		batchEvery:    time.Hour,
-		now:           clk.Now,
-		onErr: func(err error) {
-			errs = append(errs, err)
-		},
+	w := newRuntimeTestWorker(db, src, format, "/loc")
+	w.batchSize = 1000
+	w.now = clk.Now
+	w.onErr = func(err error) {
+		errs = append(errs, err)
 	}
 	rt := newWorkerRuntime(w)
 	defer rt.close()
@@ -525,6 +494,18 @@ func TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBucket
 	}
 	rt.flushBatch(context.Background(), "seed carried rollups")
 
+	assertRuntimeCarriedRollups(t, db, rt, errs, hourH, day0)
+
+	clk.now = ts(1, 0, 1) // close both the carried hour and day.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt.handleCancel(ctx)
+
+	assertShutdownIdleRefreshMaterialized(t, db, rt, errs, hourH, day0)
+}
+
+func assertRuntimeCarriedRollups(t *testing.T, db *sql.DB, rt *workerRuntime, errs []error, hourH, day0 int64) {
+	t.Helper()
 	if len(errs) > 0 {
 		t.Fatalf("seed flush reported error: %v", errs[0])
 	}
@@ -537,26 +518,36 @@ func TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBucket
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 0 {
 		t.Fatalf("open day materialized during seed flush = %d, want 0", got)
 	}
+}
 
-	clk.now = ts(1, 0, 1) // close both the carried hour and day.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	rt.handleCancel(ctx)
-
+func assertShutdownIdleRefreshMaterialized(t *testing.T, db *sql.DB, rt *workerRuntime, errs []error, hourH, day0 int64) {
+	t.Helper()
 	if len(errs) > 0 {
 		t.Fatalf("shutdown idle refresh reported error: %v", errs[0])
 	}
 	if rt.shutdownDrainCtx == nil {
 		t.Fatal("shutdown idle refresh used lifecycle context; want bounded shutdown-drain context")
 	}
-	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH); got != 1 {
-		t.Fatalf("shutdown idle refresh hourly rows = %d, want 1", got)
-	}
-	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 1 {
-		t.Fatalf("shutdown idle refresh daily rows = %d, want 1", got)
-	}
+	assertRollupRowCount(t, db, "rollup_hourly", hourH, 1, "shutdown idle refresh hourly")
+	assertRollupRowCount(t, db, "rollup_daily", day0, 1, "shutdown idle refresh daily")
 	if rt.writer.hasPendingRollupBuckets() {
 		t.Fatal("carried rollup buckets still pending after shutdown idle refresh")
+	}
+}
+
+func assertRollupRowCount(t *testing.T, db *sql.DB, table string, bucket int64, want int64, label string) {
+	t.Helper()
+	var query string
+	switch table {
+	case "rollup_hourly":
+		query = `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`
+	case "rollup_daily":
+		query = `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`
+	default:
+		t.Fatalf("unsupported rollup table %q", table)
+	}
+	if got := scanInt(t, db, query, bucket); got != want {
+		t.Fatalf("%s rows = %d, want %d", label, got, want)
 	}
 }
 

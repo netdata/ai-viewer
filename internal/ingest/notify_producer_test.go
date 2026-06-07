@@ -250,18 +250,23 @@ func TestEmitNotify_MaterializedRollupInvalidatesStatsOnce(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	rows := readNotify(t, db)
+	assertSingleStatsInvalidatedNotify(t, readNotify(t, db), commitTS)
+}
+
+func assertSingleStatsInvalidatedNotify(t *testing.T, rows []notifyRow, commitTS int64) {
+	t.Helper()
 	if len(rows) != 1 {
 		t.Fatalf("notify rows = %d, want exactly 1: %+v", len(rows), rows)
 	}
-	if rows[0].kind != "stats_invalidated" {
-		t.Fatalf("notify kind = %q, want stats_invalidated", rows[0].kind)
+	row := rows[0]
+	if row.kind != "stats_invalidated" {
+		t.Fatalf("notify kind = %q, want stats_invalidated", row.kind)
 	}
-	if rows[0].tsUS != commitTS {
-		t.Fatalf("notify ts_us = %d, want %d", rows[0].tsUS, commitTS)
+	if row.tsUS != commitTS {
+		t.Fatalf("notify ts_us = %d, want %d", row.tsUS, commitTS)
 	}
-	if rows[0].sess != "" || rows[0].root != "" || rows[0].source != "" {
-		t.Fatalf("stats_invalidated carried scoped IDs: %+v", rows[0])
+	if row.sess != "" || row.root != "" || row.source != "" {
+		t.Fatalf("stats_invalidated carried scoped IDs: %+v", row)
 	}
 }
 

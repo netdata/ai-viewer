@@ -663,8 +663,8 @@ Artifact maintenance gate:
 - Runtime project skills: no change needed; the existing delegation,
   quality-gate, and backend skills already cover this workflow.
 - End-user docs: no change needed; runtime behavior is unchanged.
-- SOW lifecycle: active in `.agents/sow/current/`; completion move is pending
-  full gates and review convergence.
+- SOW lifecycle: moved to `.agents/sow/done/` with `Status: completed`;
+  residual follow-up slices remain queued in `.agents/sow/pending/`.
 
 Follow-up mapping:
 
@@ -673,3 +673,49 @@ Follow-up mapping:
 - Store/pricing/ingest CLI residuals: SOW-0056.
 - Notify replay residual: SOW-0057.
 - Benchmark gate stability/baseline hygiene: SOW-0058.
+
+## PR Check Remediation - 2026-06-07
+
+Remote Codacy analysis on PR #61 reported new Lizard warnings in Go tests added
+or touched by this SOW. The findings were valid maintainability findings, not
+runtime defects. The remediation split repeated setup and assertion logic into
+small helpers while preserving the same test assertions.
+
+Follow-up review found that strict local Lizard still reported three PR-added
+worker shutdown tests because their physical function lengths remained above the
+local threshold even after the remote findings were reduced. The final
+remediation reused the runtime worker fixture helper across those tests and
+extracted repeated persistence/progress/HWM assertions.
+
+Validation:
+
+- `go test ./internal/ingest -run 'TestWorker_CancelDrainsPendingBatch|TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBuckets|TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack|TestEmitNotify_MaterializedRollupInvalidatesStatsOnce' -count=1`:
+  passed.
+- `go test ./internal/ingest -run 'TestWorker_CancelDrainsPendingBatch|TestWorker_CancelDrainsBufferedChannel|TestWorkerRuntime_FlushBatchUsesShutdownDrainAfterLifecycleCancel|TestWorkerRuntime_FlushBatchSurvivesLifecycleCancellationRace|TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBuckets|TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack|TestEmitNotify_MaterializedRollupInvalidatesStatsOnce' -count=1`:
+  passed after the strict-Lizard follow-up fix.
+- `go test -race ./internal/ingest -run 'TestWorker_CancelDrainsPendingBatch|TestWorker_CancelDrainsBufferedChannel|TestWorkerRuntime_FlushBatchUsesShutdownDrainAfterLifecycleCancel|TestWorkerRuntime_FlushBatchSurvivesLifecycleCancellationRace|TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBuckets|TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack|TestEmitNotify_MaterializedRollupInvalidatesStatsOnce' -count=1`:
+  passed after the strict-Lizard follow-up fix.
+- `lizard -l go -C 8 -L 50 -a 8 -w internal/ingest/worker_test.go internal/ingest/rollup_refresh_test.go internal/ingest/notify_producer_test.go`:
+  still reports the older baseline test warnings already present on
+  `origin/master`, but no longer reports the PR-added worker shutdown tests.
+- Local Codacy analysis confirmed the four PR-introduced Go test findings were
+  removed. Remaining Lizard output in the touched test files is pre-existing
+  test complexity outside this SOW slice and remains tracked by the follow-up
+  residual-complexity SOW queue.
+- Follow-up local Codacy analysis after the strict-Lizard helper cleanup
+  reported zero ShellCheck, Semgrep, and Trivy issues; the remaining Lizard
+  findings were the older touched-file test/file residuals and no longer
+  included the PR-added worker shutdown tests.
+- Final follow-up reviewers found no blocking runtime, race, security, or test
+  weakening defects in the remediation. The stale SOW lifecycle note above was
+  corrected after review.
+- Final `timeout 3600 ./scripts/gates.sh` after PR check remediation and review
+  cleanup: passed every gate in 1243s. Evidence: benchmark regression gate
+  self-test passed 41/41; real benchmark attempt 1 reported `HubFanout`
+  measurement noise and attempt 2 did not reproduce it, so the benchmark gate
+  passed by its retry contract; Go race/coverage passed with total statement
+  coverage 86.0%; Go coverage gate passed with gated `internal/*` aggregate
+  91.0%; frontend Vitest passed 631/631 with 94.41% statements; Playwright
+  E2E/axe passed 51/51; spec drift, secret scan, repository attribution scan,
+  Codacy self-tests, systemd lint, build, bundle gate, and adapter fuzz seed
+  corpus all passed.
