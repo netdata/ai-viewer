@@ -158,9 +158,9 @@ run_real_bench_attempt() {
   if ( cd "$REPO_ROOT" && go test -run='^$' -bench=. -benchmem -count="$BENCH_COUNT" -cpu="$BENCH_CPU" "${BENCH_PKGS[@]}" ) > "$cur"; then
     REAL_BENCH_CUR="$cur"
     return 0
+  else
+    status="$?"
   fi
-
-  status="$?"
   echo -e "${RED}[ERROR]${NC} benchmark command failed on attempt ${attempt} (go test exit ${status})" >&2
   return 2
 }

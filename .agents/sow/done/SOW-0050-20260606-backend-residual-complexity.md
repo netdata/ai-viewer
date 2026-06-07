@@ -673,6 +673,7 @@ Follow-up mapping:
 - Store/pricing/ingest CLI residuals: SOW-0056.
 - Notify replay residual: SOW-0057.
 - Benchmark gate stability/baseline hygiene: SOW-0058.
+- Ingest test residual complexity: SOW-0059.
 
 ## PR Check Remediation - 2026-06-07
 
@@ -700,19 +701,28 @@ Validation:
   `origin/master`, but no longer reports the PR-added worker shutdown tests.
 - Local Codacy analysis confirmed the four PR-introduced Go test findings were
   removed. Remaining Lizard output in the touched test files is pre-existing
-  test complexity outside this SOW slice and remains tracked by the follow-up
-  residual-complexity SOW queue.
+  test complexity outside this SOW slice and is tracked explicitly by SOW-0059.
 - Follow-up local Codacy analysis after the strict-Lizard helper cleanup
   reported zero ShellCheck, Semgrep, and Trivy issues; the remaining Lizard
   findings were the older touched-file test/file residuals and no longer
   included the PR-added worker shutdown tests.
+- Final local Codacy analysis after the benchmark diagnostic fix again reported
+  zero Trivy, Semgrep, and ShellCheck issues. Its 23 Lizard findings are
+  per-rule counts for the pre-existing ingest test complexity tracked by
+  `SOW-0059` (strict function inventory plus file-size cleanup context), not new
+  PR-introduced runtime or shell-script defects.
 - Final follow-up reviewers found no blocking runtime, race, security, or test
   weakening defects in the remediation. The stale SOW lifecycle note above was
   corrected after review.
+- The final reviewer rerun required the new residual-debt ledger to be included
+  explicitly, not left as an untracked local file. `SOW-0059` is included with
+  this PR remediation commit and records the exact 18 residual strict-Lizard
+  test warnings plus the `master` function-name verification.
 - Final `timeout 3600 ./scripts/gates.sh` after PR check remediation and review
-  cleanup: passed every gate in 1243s. Evidence: benchmark regression gate
-  self-test passed 41/41; real benchmark attempt 1 reported `HubFanout`
-  measurement noise and attempt 2 did not reproduce it, so the benchmark gate
+  cleanup: passed every gate in 1581s. Evidence: benchmark regression gate
+  self-test passed 41/41; real benchmark attempt 1 reported
+  `Tail_SyntheticAppend` measurement noise at +20.06% `sec/op`; attempt 2 did
+  not reproduce that same benchmark-name regression, so the benchmark gate
   passed by its retry contract; Go race/coverage passed with total statement
   coverage 86.0%; Go coverage gate passed with gated `internal/*` aggregate
   91.0%; frontend Vitest passed 631/631 with 94.41% statements; Playwright

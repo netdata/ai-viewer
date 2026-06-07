@@ -418,7 +418,7 @@ fi
 assert_fake_real_mode retry-pass 0 0 'PASS after retry.*first-attempt regression was not reproduced' "real mode retries once, then passes local noise" 2 2
 assert_fake_real_mode retry-fail 0 1 'reproduced on retry' "real mode fails when regression reproduces" 2 2
 assert_fake_real_mode retry-disjoint 0 0 'first-attempt regression was not reproduced by the same benchmark' "real mode passes when retry regressions are disjoint" 2 2
-assert_fake_real_mode pass 1 2 'benchmark command failed' "real mode fails closed when go test fails" 1 0
+assert_fake_real_mode pass 1 2 'benchmark command failed.*go test exit 42' "real mode fails closed when go test fails" 1 0
 
 echo
 if [ "$fail" -eq 0 ]; then

@@ -632,6 +632,12 @@ benchmark gate's trap callback in `scripts/check-bench.sh`. The final cleanup
 uses an array-aware trap command directly, avoiding an indirect cleanup function
 and keeping the temporary-file cleanup behavior unchanged.
 
+PR review then found that benchmark command-failure diagnostics captured `$?`
+after the `if` statement instead of inside the failing branch, so a failed real
+`go test` benchmark could be reported with the wrong exit code. The fix captures
+the status in the `else` branch and tightens the fake real-mode self-test to
+require the expected `go test exit 42` diagnostic.
+
 Validation:
 
 - `bash -n scripts/test/check-bench-test.sh`: passed.
@@ -641,12 +647,23 @@ Validation:
   after the trap cleanup.
 - `shellcheck scripts/check-bench.sh scripts/test/check-bench-test.sh`: passed
   after the trap cleanup.
+- `bash scripts/test/check-bench-test.sh`: passed after the diagnostic-status
+  fix; the fake `go test` failure assertion now requires `go test exit 42`.
 - Local Codacy analysis confirmed ShellCheck, Semgrep, and Trivy reported zero
   issues for the touched shell scripts.
+- Final local Codacy analysis after the diagnostic-status fix again reported
+  zero Trivy, Semgrep, and ShellCheck issues. The remaining 23 Lizard findings
+  are per-rule counts for pre-existing ingest test complexity and file-size debt
+  tracked by `SOW-0059`, not benchmark shell-script issues.
+- Final reviewer rerun found no benchmark-script correctness, ShellCheck,
+  cleanup, security, retry-contract, or validation blocker. The only process
+  blocker was ensuring the new `SOW-0059` residual-debt ledger is included with
+  this PR remediation commit rather than left untracked.
 - Final `timeout 3600 ./scripts/gates.sh` after PR check remediation and review
-  cleanup: passed every gate in 1243s. Evidence: benchmark regression gate
-  self-test passed 41/41; real benchmark attempt 1 reported `HubFanout`
-  measurement noise and attempt 2 did not reproduce it, so the benchmark gate
+  cleanup: passed every gate in 1581s. Evidence: benchmark regression gate
+  self-test passed 41/41; real benchmark attempt 1 reported
+  `Tail_SyntheticAppend` measurement noise at +20.06% `sec/op`; attempt 2 did
+  not reproduce that same benchmark-name regression, so the benchmark gate
   passed by its retry contract; Go race/coverage passed with total statement
   coverage 86.0%; Go coverage gate passed with gated `internal/*` aggregate
   91.0%; frontend Vitest passed 631/631 with 94.41% statements; Playwright
