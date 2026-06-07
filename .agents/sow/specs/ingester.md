@@ -66,7 +66,11 @@ Options (functional-option pattern):
 ## Concurrency Model
 
 - One **worker goroutine per source**. Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 1000 events OR 500 ms**, whichever trips first, and commits.
-- The ingest pipeline is **single-writer to SQLite** — every worker uses the same `*sql.DB` handle but is gated by SQLite's connection pool (set to MaxOpenConns=1 for in-memory tests; bounded for on-disk by the driver). This gives deterministic batch ordering per worker while serializing transaction commits.
+- The ingest pipeline is **single-writer to SQLite** — every worker uses the same
+  `*sql.DB` handle, and the writer store pins `MaxOpenConns=1` for both
+  in-memory and on-disk stores. This gives deterministic batch ordering per
+  worker while serializing transaction commits before SQLite can return
+  avoidable writer-lock `SQLITE_BUSY` errors.
 - One **background resolver goroutine** runs at 5 s ticks, retrying parent linkage for sessions inserted with `parent_session_id = NULL` whose `parent_native_id` is now resolvable.
 
 ## Batching
@@ -80,12 +84,49 @@ Per-worker accumulator:
 Flush:
 
 1. `db.BeginTx(ctx, nil)`.
-2. Apply every event in arrival order via per-kind UPSERTs (writer.go).
-3. Recompute session/turn aggregates over the dirty set (aggregates.go).
-4. `UPDATE source_progress SET last_seq=MAX(last_seq, batch_max_seq), cursor=last_cursor, updated_at=now()`. `last_seq` is an observability counter (max `SourceSeq` seen), not a dedup gate — see §Dedup and Idempotency.
-5. `tx.Commit()`.
+2. Ensure the source row exists for the worker's `source_id`.
+3. Apply every event in arrival order via per-kind UPSERTs (writer.go).
+4. Refresh incremental hourly/daily rollups for dirty buckets.
+5. Refresh `fts_ops` rows for dirty ops. `fts_logs` rows are maintained inline
+   by `applyLogEntry` when log entries are written.
+6. Recompute session/turn aggregates over the dirty set (aggregates.go).
+7. `UPDATE source_progress SET last_seq=MAX(last_seq, batch_max_seq), cursor=last_cursor, updated_at=now()`. `last_seq` is an observability counter (max `SourceSeq` seen), not a dedup gate — see §Dedup and Idempotency.
+8. Append notify rows and prune stale notify rows inside the same transaction.
+9. `tx.Commit()`.
+10. Promote post-commit writer state that must only become visible after a
+    successful commit: pending pricing-miss dedup keys, materialized-rollup
+    bucket removals, and the source high-water observability counter.
 
-On error: `tx.Rollback()`, log a structured error via `opts.OnError` (or default `logger.Error`), advance past the offending batch and continue. The offending events are NOT retried — they are logged for operator triage. A SourceErrorEvent is also written for visibility in `/api/health` (Chunk 11).
+Shutdown cancellation is not an offending-batch error. Once an event is accepted
+into the worker's in-memory batch, lifecycle cancellation must not cause that
+event to be dropped without a committed write. Active size/interval flushes use a
+write context detached from immediate lifecycle cancellation for their SQL
+transaction, so a concurrent shutdown cannot abort `BeginTx` or event
+application after the batch has been selected for flush. That active write
+context must preserve parent context values and must not be unbounded: if the
+lifecycle context is canceled while the write is in flight, the write context
+starts the same bounded shutdown-drain timeout and then cancels. Lifecycle
+cancellation includes explicit parent cancellation and parent deadlines; it is
+not a per-query SQL timeout. A parent deadline therefore starts the bounded
+shutdown grace instead of canceling the active write context immediately. Once
+the worker observes lifecycle cancellation before choosing the write context, it
+switches directly to the bounded shutdown-drain context for any remaining flush
+and idle rollup refresh. The final flush after the producer channel closes also
+uses the bounded shutdown-drain context, because parent cancellation may arrive
+concurrently with the channel-close branch. Buffered events must not be dropped
+merely because the parent run context was canceled before or during shutdown
+`BeginTx` / event application; the bounded drain context is the explicit
+shutdown deadline.
+
+On active-run write error: `tx.Rollback()`, report the failure through the
+worker batch-failure path (`worker.report`; tests may install the private
+`onErr` seam, production falls back to `logger.Error`), advance past the
+offending batch and continue. The offending events are NOT retried. Worker write
+failures are not converted into `SourceErrorEvent` rows, because the same write
+path or database failure may prevent reliable persistence of that diagnostic
+event; adapter parse errors and writer-detected data-quality defects use
+`SourceErrorEvent` for `/api/health` visibility, while worker transaction
+failures are logged/reported as batch failures.
 
 ## Dedup and Idempotency
 
@@ -431,15 +472,25 @@ Auto-discovery (Phase 1.5): if no `--source` flags are given, the ingester probe
 
 On SIGTERM/SIGINT:
 
-1. Cancel all adapter contexts.
-2. Wait for in-flight Scan/Tail to return (with timeout 5 s).
-3. Each worker flushes its pending batch (one final transaction).
-4. Persist `source_progress` rows (last_seq, cursor).
-5. Stop the resolver goroutine.
-6. Close SQLite.
+1. Cancel adapter contexts.
+2. Wait up to 5 s for in-flight Scan/Tail goroutines to return. If an adapter
+   does not drain in that window, log a warning and continue shutdown.
+3. Stop the resolver goroutine, cancel the ingester context, and wait for
+   worker goroutines.
+4. Each worker drains already-buffered events and pending rollup buckets. A
+   final flush persists `source_progress` rows (`last_seq`, cursor) and notify
+   rows in the same transaction as the batch.
+5. Worker shutdown writes use the bounded shutdown-drain context. The current
+   bound is 10 s per worker write/drain context. Active writes selected before
+   cancellation detach from immediate lifecycle cancellation, but if shutdown
+   arrives while the write is in flight they arm the same 10 s bound.
+6. Close SQLite after `Ingester.Stop()` returns.
 7. Exit 0.
 
-Hard timeout: 15 s. After that, exit non-zero with a loud log.
+There is no separate process-level hard timeout in the current implementation:
+the shutdown guarantees are the 5 s adapter wait plus the per-worker bounded
+write/drain contexts above. A future SOW that adds a process-level timeout must
+update this contract, the CLI behavior, and tests together.
 
 ## Failure Recovery
 

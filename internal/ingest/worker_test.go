@@ -85,6 +85,481 @@ func TestWorker_FlushesAtInterval(t *testing.T) {
 	}
 }
 
+// TestWorker_CancelDrainsPendingBatch constructs the worker directly and
+// cancels its run context while one event is already buffered in the in-memory
+// batch. The batch size and interval cannot flush it first; persistence proves
+// the ctx.Done shutdown path ran the final drain/flush.
+func TestWorker_CancelDrainsPendingBatch(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	ch := make(chan canonical.Event, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	w := &worker{
+		sourceID:      src,
+		sourceFormat:  "aiagent_v3",
+		location:      "/tmp",
+		fts5IndexLogs: true,
+		events:        ch,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     100,
+		batchEvery:    time.Hour,
+		now:           fixedNow,
+	}
+
+	go func() {
+		w.run(ctx)
+		close(done)
+	}()
+
+	ch <- canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "cancel-drain",
+		RootNativeID: "cancel-drain",
+		Kind:         canonical.KindRoot,
+	}
+
+	if !waitFor(2*time.Second, func() bool {
+		return len(ch) == 0
+	}) {
+		cancel()
+		t.Fatal("worker did not consume the event into its pending batch")
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='cancel-drain'`); got != 0 {
+		cancel()
+		t.Fatalf("session persisted before cancellation = %d, want 0", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not exit after context cancellation")
+	}
+
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='cancel-drain'`); got != 1 {
+		t.Fatalf("session rows after cancel drain = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 1 {
+		t.Fatalf("source_progress.last_seq after cancel drain = %d, want 1", got)
+	}
+	if got := w.hwm.Get(src); got != 1 {
+		t.Fatalf("worker HWM after cancel drain = %d, want 1", got)
+	}
+}
+
+// TestWorker_CancelDrainsBufferedChannel starts run with an already-canceled
+// context and events still buffered in the source channel. Regardless of whether
+// select first receives an event or the ctx.Done branch, shutdown must persist
+// every buffered event and return without the producer closing the channel.
+func TestWorker_CancelDrainsBufferedChannel(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	ch := make(chan canonical.Event, 4)
+	for n := 1; n <= 3; n++ {
+		nativeID := string(rune('a' - 1 + n))
+		ch <- canonical.SessionStartedEvent{
+			EventBase:    canonical.EventBase{SourceID: src, SourceSeq: uint64(n), Ts: int64(n * 1000)},
+			NativeID:     nativeID,
+			RootNativeID: nativeID,
+			Kind:         canonical.KindRoot,
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	w := &worker{
+		sourceID:      src,
+		sourceFormat:  "aiagent_v3",
+		location:      "/tmp",
+		fts5IndexLogs: true,
+		events:        ch,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     100,
+		batchEvery:    time.Hour,
+		now:           fixedNow,
+	}
+
+	go func() {
+		w.run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not exit from already-canceled context")
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions`); got != 3 {
+		t.Fatalf("session rows after canceled-context drain = %d, want 3", got)
+	}
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 3 {
+		t.Fatalf("source_progress.last_seq after canceled-context drain = %d, want 3", got)
+	}
+	if got := w.hwm.Get(src); got != 3 {
+		t.Fatalf("worker HWM after canceled-context drain = %d, want 3", got)
+	}
+}
+
+// TestWorkerRuntime_FlushBatchUsesShutdownDrainAfterLifecycleCancel pins the
+// branch where a size or interval flush is reached after the lifecycle context
+// is already canceled. That branch must switch to the bounded shutdown-drain
+// context before opening the transaction, so the pending batch is not lost to a
+// canceled parent context.
+func TestWorkerRuntime_FlushBatchUsesShutdownDrainAfterLifecycleCancel(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	var errs []error
+	w := &worker{
+		sourceID:      src,
+		sourceFormat:  "aiagent_v3",
+		location:      "/tmp",
+		fts5IndexLogs: true,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     100,
+		batchEvery:    time.Hour,
+		now:           fixedNow,
+		onErr: func(err error) {
+			errs = append(errs, err)
+		},
+	}
+	rt := newWorkerRuntime(w)
+	defer rt.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rt.appendEvent(canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "canceled-branch-drain",
+		RootNativeID: "canceled-branch-drain",
+		Kind:         canonical.KindRoot,
+	})
+	rt.flushBatch(ctx, "size after cancel")
+
+	if len(errs) > 0 {
+		t.Fatalf("shutdown-drain flush reported error: %v", errs[0])
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='canceled-branch-drain'`); got != 1 {
+		t.Fatalf("session rows after shutdown-drain flush = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 1 {
+		t.Fatalf("source_progress.last_seq after shutdown-drain flush = %d, want 1", got)
+	}
+	if got := w.hwm.Get(src); got != 1 {
+		t.Fatalf("worker HWM after shutdown-drain flush = %d, want 1", got)
+	}
+}
+
+// TestWorkerRuntime_FlushBatchSurvivesLifecycleCancellationRace pins the
+// time-of-check/time-of-use shutdown race where writeContext observes an active
+// lifecycle context, then shutdown cancellation arrives before SQL starts. Once
+// an event is accepted into the workerRuntime batch, that event must not be
+// dropped because the lifecycle context flips during the flush handoff.
+func TestWorkerRuntime_FlushBatchSurvivesLifecycleCancellationRace(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	var errs []error
+	w := &worker{
+		sourceID:      src,
+		sourceFormat:  "aiagent_v3",
+		location:      "/tmp",
+		fts5IndexLogs: true,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     100,
+		batchEvery:    time.Hour,
+		now:           fixedNow,
+		onErr: func(err error) {
+			errs = append(errs, err)
+		},
+	}
+	rt := newWorkerRuntime(w)
+	defer rt.close()
+
+	rt.appendEvent(canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "size-cancellation-race",
+		RootNativeID: "size-cancellation-race",
+		Kind:         canonical.KindRoot,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	writeCtx, cancelWrite := rt.writeContext(ctx)
+	defer cancelWrite()
+	cancel()
+	if err := ctx.Err(); err != context.Canceled {
+		t.Fatalf("parent context Err() = %v, want %v", err, context.Canceled)
+	}
+
+	rt.flushBatchWithWriteContext(writeCtx, "size cancellation race")
+
+	if len(errs) > 0 {
+		t.Errorf("size flush reported error after lifecycle cancellation race: %v", errs[0])
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='size-cancellation-race'`); got != 1 {
+		t.Errorf("session rows after lifecycle cancellation race = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT IFNULL(MAX(last_seq), -1) FROM source_progress WHERE source_id=?`, src); got != 1 {
+		t.Errorf("source_progress.last_seq after lifecycle cancellation race = %d, want 1", got)
+	}
+	if got := w.hwm.Get(src); got != 1 {
+		t.Errorf("worker HWM after lifecycle cancellation race = %d, want 1", got)
+	}
+}
+
+// TestDetachedWriteContext pins the unbounded context.WithoutCancel risk: active
+// writes detach from lifecycle cancellation, but shutdown must still arm the
+// bounded drain timeout while preserving parent context values.
+func TestDetachedWriteContext(t *testing.T) {
+	t.Parallel()
+
+	type contextKey struct{}
+	key := contextKey{}
+	parentValue := "preserved-value"
+	parent, cancelParent := context.WithCancel(context.WithValue(context.Background(), key, parentValue))
+
+	grace := 500 * time.Millisecond
+	writeCtx, cancelWrite := detachedWriteContext(parent, grace)
+	defer cancelWrite()
+
+	if got := writeCtx.Value(key); got != parentValue {
+		t.Fatalf("write context value = %v, want %v", got, parentValue)
+	}
+
+	graceStarted := time.Now()
+	cancelParent()
+	probeContextNotCanceledBeforeGrace(t, writeCtx, graceStarted, grace, "write context canceled before bounded shutdown grace elapsed after parent cancellation")
+
+	waitForContextDoneAfterGrace(t, writeCtx, graceStarted, grace, "write context canceled before bounded shutdown grace elapsed after parent cancellation")
+	if err := writeCtx.Err(); err == nil {
+		t.Fatal("write context Err() is nil after Done closed")
+	}
+}
+
+// TestDetachedWriteContextParentDeadlineStartsShutdownGrace pins parent
+// deadline expiry as a lifecycle signal, not as the active write deadline.
+// The write context must survive the parent deadline long enough to use the
+// bounded shutdown grace, then close when that grace expires.
+func TestDetachedWriteContextParentDeadlineStartsShutdownGrace(t *testing.T) {
+	t.Parallel()
+
+	type contextKey struct{}
+	key := contextKey{}
+	parentValue := "preserved-deadline-value"
+	grace := 500 * time.Millisecond
+	parent, cancelParent := context.WithTimeout(context.WithValue(context.Background(), key, parentValue), 20*time.Millisecond)
+	defer cancelParent()
+	deadlineAt, ok := parent.Deadline()
+	if !ok {
+		t.Fatal("parent context has no deadline")
+	}
+
+	writeCtx, cancelWrite := detachedWriteContext(parent, grace)
+	defer cancelWrite()
+
+	if got := writeCtx.Value(key); got != parentValue {
+		t.Fatalf("write context value = %v, want %v", got, parentValue)
+	}
+
+	select {
+	case <-parent.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parent context deadline did not expire")
+	}
+	if err := parent.Err(); err != context.DeadlineExceeded {
+		t.Fatalf("parent Err() = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	probeContextNotCanceledBeforeGrace(t, writeCtx, deadlineAt, grace, "write context canceled before bounded shutdown grace elapsed after parent deadline")
+
+	waitForContextDoneAfterGrace(t, writeCtx, deadlineAt, grace, "write context canceled before bounded shutdown grace elapsed after parent deadline")
+	if err := writeCtx.Err(); err == nil {
+		t.Fatal("write context Err() is nil after Done closed")
+	}
+}
+
+func probeContextNotCanceledBeforeGrace(t *testing.T, ctx context.Context, graceStarted time.Time, grace time.Duration, msg string) {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+		if time.Since(graceStarted) < grace {
+			t.Fatal(msg)
+		}
+	default:
+	}
+}
+
+func waitForContextDoneAfterGrace(t *testing.T, ctx context.Context, graceStarted time.Time, grace time.Duration, msg string) {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+		if time.Since(graceStarted) < grace {
+			t.Fatal(msg)
+		}
+	case <-time.After(grace + time.Second):
+		t.Fatal("write context did not close after bounded shutdown grace")
+	}
+}
+
+// TestWorkerRuntime_HandleCloseUsesShutdownDrainForFinalFlush pins the
+// producer-channel-close path. Even when the lifecycle context is still active
+// at the branch point, the final flush must use the bounded shutdown-drain
+// context because parent cancellation can race the close before SQL work starts.
+func TestWorkerRuntime_HandleCloseUsesShutdownDrainForFinalFlush(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	var errs []error
+	w := &worker{
+		sourceID:      src,
+		sourceFormat:  "aiagent_v3",
+		location:      "/tmp",
+		fts5IndexLogs: true,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     100,
+		batchEvery:    time.Hour,
+		now:           fixedNow,
+		onErr: func(err error) {
+			errs = append(errs, err)
+		},
+	}
+	rt := newWorkerRuntime(w)
+	defer rt.close()
+
+	rt.appendEvent(canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "close-branch-drain",
+		RootNativeID: "close-branch-drain",
+		Kind:         canonical.KindRoot,
+	})
+	rt.handleClose(context.Background())
+
+	if len(errs) > 0 {
+		t.Fatalf("shutdown-drain final flush reported error: %v", errs[0])
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='close-branch-drain'`); got != 1 {
+		t.Fatalf("session rows after close final flush = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 1 {
+		t.Fatalf("source_progress.last_seq after close final flush = %d, want 1", got)
+	}
+	if got := w.hwm.Get(src); got != 1 {
+		t.Fatalf("worker HWM after close final flush = %d, want 1", got)
+	}
+	if rt.shutdownDrainCtx == nil {
+		t.Fatalf("handleClose final flush used lifecycle context; want bounded shutdown-drain context")
+	}
+}
+
+// TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBuckets
+// pins the shutdown idle-refresh path. A canceled parent must select the bounded
+// shutdown-drain context before refreshing carried rollup buckets, so closed
+// hour/day buckets are materialized instead of being lost to parent cancellation.
+func TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBuckets(t *testing.T) {
+	t.Parallel()
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	day0 := ts(0, 0, 0)
+	clk := &mutableClock{now: ts(0, 10, 10)} // open hour/day -> carried, not materialized.
+	var errs []error
+	w := &worker{
+		sourceID:      src,
+		sourceFormat:  format,
+		location:      "/loc",
+		fts5IndexLogs: true,
+		db:            db,
+		hwm:           newHWMCache(),
+		pricer:        NopPricer{},
+		logger:        silentLogger(),
+		batchSize:     1000,
+		batchEvery:    time.Hour,
+		now:           clk.Now,
+		onErr: func(err error) {
+			errs = append(errs, err)
+		},
+	}
+	rt := newWorkerRuntime(w)
+	defer rt.close()
+
+	events := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	events = append(events, llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "m", "p", 1, 1, 0, false)...)
+	for _, ev := range events {
+		rt.appendEvent(ev)
+	}
+	rt.flushBatch(context.Background(), "seed carried rollups")
+
+	if len(errs) > 0 {
+		t.Fatalf("seed flush reported error: %v", errs[0])
+	}
+	if !rt.writer.hasPendingRollupBuckets() {
+		t.Fatal("expected open hour/day carried after seed flush")
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH); got != 0 {
+		t.Fatalf("open hour materialized during seed flush = %d, want 0", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 0 {
+		t.Fatalf("open day materialized during seed flush = %d, want 0", got)
+	}
+
+	clk.now = ts(1, 0, 1) // close both the carried hour and day.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt.handleCancel(ctx)
+
+	if len(errs) > 0 {
+		t.Fatalf("shutdown idle refresh reported error: %v", errs[0])
+	}
+	if rt.shutdownDrainCtx == nil {
+		t.Fatal("shutdown idle refresh used lifecycle context; want bounded shutdown-drain context")
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH); got != 1 {
+		t.Fatalf("shutdown idle refresh hourly rows = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 1 {
+		t.Fatalf("shutdown idle refresh daily rows = %d, want 1", got)
+	}
+	if rt.writer.hasPendingRollupBuckets() {
+		t.Fatal("carried rollup buckets still pending after shutdown idle refresh")
+	}
+}
+
 // TestWorker_LowSeqEventsNotDropped pins SOW-0015's new contract: the
 // per-source last_seq counter is NOT a dedup gate. Events whose
 // SourceSeq is at or below a previously-persisted last_seq still flow to
@@ -451,7 +926,7 @@ func TestWorker_IdleTickMaterializesClosedDayAfterMidnight(t *testing.T) {
 // TestWorker_FlushPromotesPendingMissDedupAfterCommit pins that
 // the rollback/dedup writer-level tests call promotePendingMissDedup
 // manually, so a developer who removed wr.promotePendingMissDedup from
-// worker.flush (worker.go:204) would still see them pass. This test
+// worker.flush would still see them pass. This test
 // drives the *worker* end-to-end for two batches that each carry the
 // SAME missing (provider, model) tuple; only ONE WRN row may land,
 // proving the lifetime dedup map was populated by the worker's
@@ -487,8 +962,7 @@ func TestWorker_FlushPromotesPendingMissDedupAfterCommit(t *testing.T) {
 	// (provider, model). The OpFinalized triggers emitPricingMiss
 	// which writes ONE WRN row and stages a pendingMissDedup entry.
 	// The flush at batchSize=3 commits, then promotePendingMissDedup
-	// runs (worker.go:204) and copies the staged entry into the
-	// lifetime map.
+	// runs and copies the staged entry into the lifetime map.
 	ch <- canonical.SessionStartedEvent{
 		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
 		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
@@ -551,7 +1025,7 @@ func TestWorker_FlushPromotesPendingMissDedupAfterCommit(t *testing.T) {
 	// key in its lifetime pricingMissDedup map → emitPricingMiss
 	// short-circuits → only the batch-1 WRN row exists.
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='WRN'`); got != 1 {
-		t.Errorf("expected 1 WRN row after two committed batches, got %d (worker.flush must call promotePendingMissDedup after tx.Commit; see worker.go:204)", got)
+		t.Errorf("expected 1 WRN row after two committed batches, got %d (worker.flush must call promotePendingMissDedup after tx.Commit)", got)
 	}
 	// parse_errors must also stay at 1 — emitPricingMiss bumps it
 	// alongside the WRN insert, and the dedup must suppress both.

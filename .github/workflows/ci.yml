@@ -367,9 +367,11 @@ jobs:
         run: |
           set +e
           required="$(
-            grep -E '^Benchmark[A-Za-z0-9_]+-[0-9]+' bench/baseline.txt \
-              | awk '{print $1}' \
-              | sed -E 's/-[0-9]+$//' \
+            awk '$1 ~ /^Benchmark[A-Za-z0-9_]+(-[0-9]+)?$/ {
+              name = $1
+              sub(/-[0-9]+$/, "", name)
+              print name
+            }' bench/baseline.txt \
               | sort -u
           )"
           required_ec=$?

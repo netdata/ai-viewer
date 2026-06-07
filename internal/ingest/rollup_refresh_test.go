@@ -299,6 +299,109 @@ func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
 	}
 }
 
+// TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack pins the worker-level
+// idle-refresh transaction boundary. If refreshRollupsOnly materializes carried
+// buckets but notify insertion fails before commit, the rollup rows and notify
+// rows must roll back together, and the carried buckets must survive resetBatch
+// so the next idle refresh can retry them.
+func TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	hourH := ts(0, 10, 0)
+	hourHEnd := ts(0, 10, 30)
+	day0 := ts(0, 0, 0)
+	nowOpen := ts(0, 10, 10)
+	nowClosed := ts(1, 0, 1)
+
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+	clk := &mutableClock{now: nowOpen}
+	wr := newWriter(src, format, "/loc", NopPricer{})
+	wr.now = clk.Now
+
+	batch := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch = append(batch, llmOpEvents(src, "sess-1", 1, 1, hourH, hourHEnd, "m", "p", 1, 1, 0, false)...)
+	flushBatchReuse(t, db, wr, src, format, batch)
+
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("premise broken: open hour/day must be carried after the first flush")
+	}
+	clk.now = nowClosed
+	baselineNotifyRows := scanInt(t, db, `SELECT COUNT(*) FROM notify`)
+	baselineStatsRows := scanInt(t, db, `SELECT COUNT(*) FROM notify WHERE kind='stats_invalidated'`)
+
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `
+CREATE TRIGGER notify_stats_abort
+BEFORE INSERT ON notify
+WHEN NEW.kind = 'stats_invalidated'
+BEGIN
+	SELECT RAISE(ABORT, 'forced notify failure');
+END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	w := &worker{
+		sourceID:     src,
+		sourceFormat: format,
+		location:     "/loc",
+		db:           db,
+		hwm:          newHWMCache(),
+		pricer:       NopPricer{},
+		logger:       silentLogger(),
+		batchSize:    defaultBatchSize,
+		batchEvery:   defaultBatchInterval,
+	}
+	if err := w.refreshRollupsOnly(ctx, wr); err == nil {
+		t.Fatal("refreshRollupsOnly succeeded despite forced notify failure")
+	}
+
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH); got != 0 {
+		t.Fatalf("rollup_hourly rows after failed idle refresh = %d, want 0", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 0 {
+		t.Fatalf("rollup_daily rows after failed idle refresh = %d, want 0", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM notify`); got != baselineNotifyRows {
+		t.Fatalf("notify rows after failed idle refresh = %d, want unchanged baseline %d", got, baselineNotifyRows)
+	}
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("carried buckets dropped before resetBatch after failed idle refresh")
+	}
+	wr.resetBatch()
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("carried buckets dropped after failed idle refresh resetBatch; retry would be lost")
+	}
+
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER notify_stats_abort`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	if err := w.refreshRollupsOnly(ctx, wr); err != nil {
+		t.Fatalf("retry refreshRollupsOnly: %v", err)
+	}
+	wr.resetBatch()
+
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH); got != 1 {
+		t.Fatalf("rollup_hourly rows after retry = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0); got != 1 {
+		t.Fatalf("rollup_daily rows after retry = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM notify WHERE kind='stats_invalidated'`); got != baselineStatsRows+1 {
+		t.Fatalf("stats_invalidated rows after retry = %d, want baseline+1 (%d)", got, baselineStatsRows+1)
+	}
+	if wr.hasPendingRollupBuckets() {
+		t.Fatal("carried buckets still pending after successful retry")
+	}
+}
+
 // TestRefreshRollups_NotifyNotFiredOnMerePendingCarry pins round-7 P1b: a batch
 // that touches NO rollup input must NOT emit a rollup-driven stats_invalidated
 // merely because a previously-open bucket is still CARRIED (pending). Under the

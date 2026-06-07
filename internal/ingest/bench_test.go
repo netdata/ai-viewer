@@ -16,7 +16,7 @@ import (
 // ingest worker pays per flush: BeginTx → ensureSourceRow → per-event
 // writer.apply → refreshRollups → refreshFTS → refreshAggregates →
 // upsertSourceProgress → emitNotify → pruneNotify → Commit
-// (worker.go:221). This is the throughput-critical inner loop of
+// (worker.flush). This is the throughput-critical inner loop of
 // ingestion — every snapshot the adapters parse funnels through it.
 //
 // Each iteration flushes the SAME 530-event synthetic batch into a

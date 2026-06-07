@@ -85,12 +85,14 @@ evidence in the SOW Chunk 9 entry but is not the SOW gate metric.
 ## `bench/baseline.txt`
 
 Frozen baseline consumed by `benchstat` via `scripts/check-bench.sh`. It
-is the raw `go test -run=^$ -bench=. -benchmem -count=6` output for the 11
-synthetic benchmarks across 7 packages, prefixed by a comment header
+is the raw `go test -run=^$ -bench=. -benchmem -count=6 -cpu=1` output for the
+11 synthetic benchmarks across 7 packages, prefixed by a comment header
 carrying benchmark-code provenance and the `goos/goarch/pkg/cpu` config
 lines (benchstat groups by config, so the baseline and the current run
-must share it). `check-bench.sh` compares a fresh run against it and fails
-on a statistically-significant > 20% **sec/op** regression for any
+must share it). `check-bench.sh` compares a fresh run against it and, in
+real local mode, reruns once before failing so only the same benchmark name
+regressing twice exits red; compare-file mode remains single-pass. The gate
+fails on a statistically-significant > 20% **sec/op** regression for any
 benchmark (the `geomean` aggregate and the custom metrics are excluded).
 `count=6` is benchstat's minimum for a 0.95 confidence interval; baseline
 refresh requires an explicit SOW.

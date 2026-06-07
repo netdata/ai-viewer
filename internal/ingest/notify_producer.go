@@ -46,14 +46,19 @@ const notifyRetention = 5 * time.Minute
 //     parse_errors count or enabled flag (tracked via
 //     writer.sourceStatusChanged, set in bumpSourceErrorCounter).
 func (w *writer) emitNotify(ctx context.Context, tx *sql.Tx, tsUS int64) error {
-	// One session_changed per affected session, with its current root.
+	if err := w.emitSessionChangedNotify(ctx, tx, tsUS); err != nil {
+		return err
+	}
+	if err := w.emitStatsInvalidatedNotify(ctx, tx, tsUS); err != nil {
+		return err
+	}
+	return w.emitSourceStatusChangedNotify(ctx, tx, tsUS)
+}
+
+func (w *writer) emitSessionChangedNotify(ctx context.Context, tx *sql.Tx, tsUS int64) error {
 	for id := range w.affectedSessionIDs {
 		rootID, err := w.lookupRootSessionID(ctx, tx, id)
 		if err != nil {
-			// The row is guaranteed written by this point in the tx; a
-			// miss means the database is unhealthy. Surfacing the error
-			// rolls back the whole batch rather than silently dropping a
-			// notification (no silent failures).
 			return fmt.Errorf("ingest notify: lookup root for session %s: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -63,33 +68,33 @@ VALUES (?, 'session_changed', ?, ?)
 			return fmt.Errorf("ingest notify: insert session_changed: %w", err)
 		}
 	}
+	return nil
+}
 
-	// At most one stats_invalidated per batch, when rollups changed. The
-	// catalog rollups derive from session/op writes (non-empty
-	// affectedSessionIDs), and the time-bucketed rollup_hourly/rollup_daily
-	// tables change when THIS batch marked a rollup input
-	// (rollupTouchedThisBatch) OR this refresh materialized a (carried) bucket
-	// (rollupMaterializedThisRefresh). We do NOT key off len(dirtyRollupBuckets):
-	// under carry-forward that set is non-empty whenever an open bucket is merely
-	// pending, which would fire stats_invalidated on every batch. The per-batch
-	// signals preserve the original semantics — fire when the batch actually
-	// touched/materialized a rollup, not when one is still pending. Fire on the
-	// union — still at most one row per batch (round-7 P1b).
-	if len(w.affectedSessionIDs) > 0 || w.rollupTouchedThisBatch || w.rollupMaterializedThisRefresh {
-		if _, err := tx.ExecContext(ctx, `
+func (w *writer) emitStatsInvalidatedNotify(ctx context.Context, tx *sql.Tx, tsUS int64) error {
+	if !w.shouldEmitStatsInvalidatedNotify() {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO notify (ts_us, kind) VALUES (?, 'stats_invalidated')
 `, tsUS); err != nil {
-			return fmt.Errorf("ingest notify: insert stats_invalidated: %w", err)
-		}
+		return fmt.Errorf("ingest notify: insert stats_invalidated: %w", err)
 	}
+	return nil
+}
 
-	// One source_status_changed per batch when the source's status moved.
-	if w.sourceStatusChanged {
-		if _, err := tx.ExecContext(ctx, `
+func (w *writer) shouldEmitStatsInvalidatedNotify() bool {
+	return len(w.affectedSessionIDs) > 0 || w.rollupTouchedThisBatch || w.rollupMaterializedThisRefresh
+}
+
+func (w *writer) emitSourceStatusChangedNotify(ctx context.Context, tx *sql.Tx, tsUS int64) error {
+	if !w.sourceStatusChanged {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO notify (ts_us, kind, source_id) VALUES (?, 'source_status_changed', ?)
 `, tsUS, w.sourceID); err != nil {
-			return fmt.Errorf("ingest notify: insert source_status_changed: %w", err)
-		}
+		return fmt.Errorf("ingest notify: insert source_status_changed: %w", err)
 	}
 	return nil
 }
