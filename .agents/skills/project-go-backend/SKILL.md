@@ -40,6 +40,12 @@ func NewIngester(...) *Ingester { ... }
 - Every blocking function takes `ctx context.Context` as the first parameter.
 - Every goroutine respects `ctx.Done()` for shutdown.
 - HTTP handlers use `r.Context()` and pass it through to store/query calls.
+- Registered REST handlers (`mux.HandleFunc("/api/...", p.<handler>)`) keep
+  their method gate directly visible in the handler body as `r.Method !=
+  http.Method...` comparisons. Do not extract the method guard itself into a
+  helper: `scripts/spec-drift.sh` intentionally fails closed when it cannot
+  prove the registered verb/path contract from the handler body. Extract the
+  error writer or response/query work instead.
 
 ### Channels
 

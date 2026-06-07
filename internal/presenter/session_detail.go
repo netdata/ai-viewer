@@ -3,9 +3,7 @@ package presenter
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"net/http"
-	"strings"
 )
 
 // sessionDetail is the full session row returned by GET
@@ -119,56 +117,57 @@ type sessionDetailResponse struct {
 // and its direct children in four bounded queries.
 func (p *Presenter) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
+		p.writeSessionMethodNotAllowed(w, r)
 		return
 	}
-	// Check control chars on the RAW path id before TrimSpace so a control
-	// byte that is also whitespace (\t, \n, \r) is a loud 400 rather than
-	// silently trimmed away into a doomed lookup (404). Mirrors the
-	// query-value rule (rejectControlChars) and the logs handler.
-	idRaw := r.PathValue("id")
-	if err := rejectControlChars("id", idRaw); err != nil {
-		p.writeBadFilter(w, r, err)
-		return
-	}
-	id := strings.TrimSpace(idRaw)
-	if id == "" {
-		writeJSONError(w, r, p.logger, http.StatusBadRequest,
-			CodeBadRequest, "session id is required", nil)
+	id, ok := p.sessionIDFromPath(w, r)
+	if !ok {
 		return
 	}
 
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
 
-	sess, err := p.loadSession(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
+	resp, op, err := p.loadSessionDetailResponse(ctx, id)
+	if isNoRows(err) {
 		writeJSONError(w, r, p.logger, http.StatusNotFound,
 			CodeNotFound, "session not found", map[string]any{"id": id})
 		return
 	}
 	if err != nil {
-		p.writeDBError(ctx, w, r, "session.detail.session", err)
+		p.writeDBError(ctx, w, r, op, err)
 		return
+	}
+
+	writeJSON(w, r, p.logger, resp)
+}
+
+func (p *Presenter) writeSessionMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
+		CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
+}
+
+func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string) (sessionDetailResponse, string, error) {
+	sess, err := p.loadSession(ctx, id)
+	if err != nil {
+		return sessionDetailResponse{}, "session.detail.session", err
 	}
 
 	turns, err := p.loadTurnsWithOps(ctx, id)
 	if err != nil {
-		p.writeDBError(ctx, w, r, "session.detail.turns", err)
-		return
-	}
-	children, err := p.loadChildSessions(ctx, id)
-	if err != nil {
-		p.writeDBError(ctx, w, r, "session.detail.children", err)
-		return
+		return sessionDetailResponse{}, "session.detail.turns", err
 	}
 
-	writeJSON(w, r, p.logger, sessionDetailResponse{
+	children, err := p.loadChildSessions(ctx, id)
+	if err != nil {
+		return sessionDetailResponse{}, "session.detail.children", err
+	}
+
+	return sessionDetailResponse{
 		Session:       sess,
 		Turns:         turns,
 		ChildSessions: children,
-	})
+	}, "", nil
 }
 
 // loadSession reads the single sessions row. Returns sql.ErrNoRows when

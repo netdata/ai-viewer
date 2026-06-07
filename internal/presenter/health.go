@@ -25,6 +25,8 @@ const degradedLagThresholdUS = int64(60_000_000)
 // errors in the "degraded" rule. Anything inside an hour counts.
 const recentParseErrorWindow = time.Hour
 
+const healthCoreQueryCount = 2
+
 // healthResponse is the JSON envelope of /api/health. JSON tags match
 // the shape documented in observability.md §`/api/health` so external
 // dashboards can rely on the field names.
@@ -80,6 +82,22 @@ type healthSource struct {
 	LastSeq     int64  `json:"last_seq"`
 }
 
+type healthSignals struct {
+	queriesFailed     int
+	lagDegraded       bool
+	recentParseErrors int64
+}
+
+type healthSourceRow struct {
+	id          string
+	format      string
+	location    string
+	enabled     int64
+	lastSeenAt  sql.NullInt64
+	parseErrors int64
+	lastSeq     int64
+}
+
 // handleHealth answers GET /api/health. The handler runs three short
 // queries against the read-only DB: source list, recent log-error
 // count, and the DB file size for diagnostics. Each query is bounded by
@@ -108,47 +126,65 @@ func (p *Presenter) handleHealth(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	now := p.now()
-	resp := healthResponse{
+	resp, signals := p.collectHealthResponse(ctx, now)
+	resp.Status = healthStatusFromSignals(
+		signals.queriesFailed,
+		healthCoreQueryCount,
+		signals.lagDegraded,
+		signals.recentParseErrors,
+	)
+
+	writeJSON(w, r, p.logger, resp)
+}
+
+func (p *Presenter) collectHealthResponse(ctx context.Context, now time.Time) (healthResponse, healthSignals) {
+	resp := p.baseHealthResponse(now)
+	var signals healthSignals
+	sources, lagDegraded, srcErr := p.collectSources(ctx, now)
+	if srcErr != nil {
+		signals.queriesFailed++
+		p.logHealthQueryWarning(ctx, "presenter: health source query failed", srcErr)
+	}
+	resp.Sources = sources
+	signals.lagDegraded = lagDegraded
+
+	recentParseErrors, perErr := p.recentParseErrorCount(ctx, now)
+	if perErr != nil {
+		signals.queriesFailed++
+		p.logHealthQueryWarning(ctx, "presenter: health parse-error query failed", perErr)
+	}
+	signals.recentParseErrors = recentParseErrors
+
+	resp.DBSizeBytes = p.dbSizeBytesOrZero(ctx)
+	resp.Notify = p.collectNotifyHealth(now)
+	resp.SSE = healthSSE{Subscriptions: p.subs.count()}
+	return resp, signals
+}
+
+func (p *Presenter) baseHealthResponse(now time.Time) healthResponse {
+	return healthResponse{
 		Version:       p.version,
 		SchemaVersion: p.schemaVersion,
 		UptimeS:       int64(now.Sub(p.startedAt).Seconds()),
 		DBPath:        p.dbPath,
 	}
+}
 
-	queriesFailed := 0
-	totalQueries := 2 // sources query + parse-error rollup
+func (p *Presenter) logHealthQueryWarning(ctx context.Context, msg string, err error) {
+	p.logger.LogAttrs(ctx, slog.LevelWarn, msg,
+		slog.Any("err", err),
+		slog.String("request_id", requestIDFromContext(ctx)))
+}
 
-	sources, lagDegraded, srcErr := p.collectSources(ctx, now)
-	if srcErr != nil {
-		queriesFailed++
-		p.logger.LogAttrs(ctx, slog.LevelWarn, "presenter: health source query failed",
-			slog.Any("err", srcErr),
-			slog.String("request_id", requestIDFromContext(ctx)))
-	}
-	resp.Sources = sources
-
-	recentParseErrors, perErr := p.recentParseErrorCount(ctx, now)
-	if perErr != nil {
-		queriesFailed++
-		p.logger.LogAttrs(ctx, slog.LevelWarn, "presenter: health parse-error query failed",
-			slog.Any("err", perErr),
-			slog.String("request_id", requestIDFromContext(ctx)))
-	}
-
-	resp.DBSizeBytes = p.dbSizeBytesOrZero(ctx)
-	resp.Notify = p.collectNotifyHealth(now)
-	resp.SSE = healthSSE{Subscriptions: p.subs.count()}
-
+func healthStatusFromSignals(queriesFailed, totalQueries int, lagDegraded bool, recentParseErrors int64) string {
 	switch {
 	case queriesFailed >= totalQueries:
-		resp.Status = healthStatusDown
+		return healthStatusDown
 	case lagDegraded || recentParseErrors > 0:
-		resp.Status = healthStatusDegraded
+		return healthStatusDegraded
 	default:
-		resp.Status = healthStatusOK
+		return healthStatusOK
 	}
-
-	writeJSON(w, r, p.logger, resp)
 }
 
 // collectNotifyHealth derives the notify-poller window from the poller's
@@ -189,48 +225,68 @@ ORDER BY s.created_at, s.id
 		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
+	return readHealthSourceRows(rows, now.UnixMicro())
+}
 
+func readHealthSourceRows(rows *sql.Rows, nowUS int64) ([]healthSource, bool, error) {
 	out := make([]healthSource, 0, 8)
-	nowUS := now.UnixMicro()
 	lagDegraded := false
-
 	for rows.Next() {
-		var (
-			id, format, location string
-			enabled              int64
-			lastSeenAt           sql.NullInt64
-			parseErrors          int64
-			lastSeq              int64
-		)
-		if err := rows.Scan(&id, &format, &location, &enabled, &lastSeenAt, &parseErrors, &lastSeq); err != nil {
-			return out, lagDegraded, err
+		row, err := scanHealthSourceRow(rows)
+		if err != nil {
+			return nil, lagDegraded, err
 		}
-		hs := healthSource{
-			ID:          id,
-			Format:      format,
-			Location:    location,
-			Enabled:     enabled != 0,
-			ParseErrors: parseErrors,
-			LastSeq:     lastSeq,
-		}
-		if lastSeenAt.Valid {
-			v := lastSeenAt.Int64
-			hs.LastSeenAt = &v
-			lag := nowUS - v
-			if lag < 0 {
-				lag = 0
-			}
-			hs.LagUS = lag
-		}
-		if hs.Enabled && hs.LastSeenAt != nil && hs.LagUS > degradedLagThresholdUS {
+		hs, degraded := buildHealthSource(row, nowUS)
+		if degraded {
 			lagDegraded = true
 		}
 		out = append(out, hs)
 	}
 	if err := rows.Err(); err != nil {
-		return out, lagDegraded, err
+		return nil, lagDegraded, err
 	}
 	return out, lagDegraded, nil
+}
+
+func scanHealthSourceRow(rows *sql.Rows) (healthSourceRow, error) {
+	var row healthSourceRow
+	err := rows.Scan(
+		&row.id,
+		&row.format,
+		&row.location,
+		&row.enabled,
+		&row.lastSeenAt,
+		&row.parseErrors,
+		&row.lastSeq,
+	)
+	return row, err
+}
+
+func buildHealthSource(row healthSourceRow, nowUS int64) (healthSource, bool) {
+	source := healthSource{
+		ID:          row.id,
+		Format:      row.format,
+		Location:    row.location,
+		Enabled:     row.enabled != 0,
+		ParseErrors: row.parseErrors,
+		LastSeq:     row.lastSeq,
+	}
+	if row.lastSeenAt.Valid {
+		v := row.lastSeenAt.Int64
+		source.LastSeenAt = &v
+		source.LagUS = sourceLagUS(nowUS, v)
+	}
+	degraded := source.Enabled && source.LastSeenAt != nil &&
+		source.LagUS > degradedLagThresholdUS
+	return source, degraded
+}
+
+func sourceLagUS(nowUS, lastSeenUS int64) int64 {
+	lag := nowUS - lastSeenUS
+	if lag < 0 {
+		return 0
+	}
+	return lag
 }
 
 // recentParseErrorCount returns the count of source-scoped parse-error

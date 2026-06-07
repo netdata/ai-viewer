@@ -239,7 +239,8 @@ Patterns checked:
 - Operator identity, derived at runtime from git/user metadata and `$HOME`; no
   literal operator identity is committed in the scanner. Synthetic placeholder
   commit identities used only to avoid personal commit metadata (currently exact
-  `user` and `user@example.invalid`, case-insensitive) are ignored as Rule-1
+  neutral `user` placeholders plus the matching placeholder email form,
+  case-insensitive) are ignored as Rule-1
   derivation inputs. The exact neutral home stem `user` is also ignored when it
   comes only from `$HOME`, so committed placeholder paths such as
   `/home/user/...` stay portable across generic dev VMs. Tracked content is
@@ -289,7 +290,7 @@ grep/awk-based (no `go/ast` — the surfaces are line-oriented), **fail-closed**
 **actual** code/spec locations (the old skill named stale paths —
 `internal/presenter/sse.go`, `internal/ingest/discover.go` — neither exists):
 
-- **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus each handler's `r.Method` guard in the presenter package, vs. `### <VERB> /api/…` headings in `.agents/sow/specs/rest-api.md`. The compared token is `<VERB> <normalized-path>`, not path alone; `{id}`↔`:id`, single-value `:ref`↔`:id`, and catalog groups are normalized. `HEAD` is implicit parity for `GET`. **Exemption:** a spec endpoint whose section is marked *not registered / Phase 2 / not implemented* (`/api/catalog/{…}`, `/api/payloads/:ref`) is NOT drift — documenting a future route ahead of its handler is allowed; every *registered* route+verb pair must be documented (code→spec unconditional).
+- **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus each handler's in-body `r.Method` guard in the presenter package, vs. `### <VERB> /api/…` headings in `.agents/sow/specs/rest-api.md`. The compared token is `<VERB> <normalized-path>`, not path alone; `{id}`↔`:id`, single-value `:ref`↔`:id`, and catalog groups are normalized. `HEAD` is implicit parity for `GET`. Keep registered handler method gates directly visible as `r.Method != http.Method...` comparisons inside the handler body; extracting the guard into a helper is treated as method-extraction failure and correctly fails closed. **Exemption:** a spec endpoint whose section is marked *not registered / Phase 2 / not implemented* (`/api/catalog/{…}`, `/api/payloads/:ref`) is NOT drift — documenting a future route ahead of its handler is allowed; every *registered* route+verb pair must be documented (code→spec unconditional).
 - **SSE event types** — the wire kinds in `internal/presenter/events_sse.go` (`eventPayload` `case "<kind>"` arms + `event:`/control frames; `stats_invalidated` is the `default` arm, sourced from `subscription_filter.go`) vs. the event-type headings in `.agents/sow/specs/sse-protocol.md`. `resync` is a reconnect-control frame (spec §Reconnect Behavior), treated as known.
 - **SQLite columns** — every `table.column` pair from `internal/store/migrations/*.sql` (`CREATE TABLE`, `CREATE VIRTUAL TABLE … fts5(…)`, `ALTER … ADD COLUMN`) vs. SQL schema blocks in `.agents/sow/specs/data-model.md`. Column direction is **code→spec** and table-scoped: a global mention of the same column name under another table is not enough. Table names are bidirectional.
 - **Canonical event kinds** — `EvXxx EventKind = "<value>"` in `internal/canonical/events.go` vs. the identical fenced block in `.agents/sow/specs/canonical-events.md`. Bidirectional, exact.

@@ -2,6 +2,7 @@ package presenter
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -49,35 +50,15 @@ type logsResponse struct {
 // "no such session".
 func (p *Presenter) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
+		p.writeSessionMethodNotAllowed(w, r)
 		return
 	}
-	// Check control chars on the RAW path id before TrimSpace so a control
-	// byte that is also whitespace (\t, \n, \r) is a loud 400 rather than
-	// silently trimmed away into a doomed lookup (404). Mirrors the
-	// query-value rule (parseSeverities → rejectControlChars).
-	idRaw := r.PathValue("id")
-	if err := rejectControlChars("id", idRaw); err != nil {
-		p.writeBadFilter(w, r, err)
-		return
-	}
-	id := strings.TrimSpace(idRaw)
-	if id == "" {
-		writeJSONError(w, r, p.logger, http.StatusBadRequest,
-			CodeBadRequest, "session id is required", nil)
+	id, ok := p.sessionIDFromPath(w, r)
+	if !ok {
 		return
 	}
 
-	// Severities first: the cursor fingerprint binds to the severity set, so
-	// parseLogPaging must see the parsed filter to validate the cursor.
-	severities, err := parseSeverities(r.URL.Query())
-	if err != nil {
-		p.writeBadFilter(w, r, err)
-		return
-	}
-	lf := logFilter{id: id, severities: severities}
-	limit, cursor, err := parseLogPaging(r, lf)
+	lf, limit, cursor, err := parseLogRequest(r, id)
 	if err != nil {
 		p.writeBadFilter(w, r, err)
 		return
@@ -86,23 +67,47 @@ func (p *Presenter) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
 
-	exists, err := p.sessionExists(ctx, id)
-	if err != nil {
-		p.writeDBError(ctx, w, r, "session.logs.exists", err)
-		return
-	}
-	if !exists {
+	resp, op, err := p.loadSessionLogsResponse(ctx, lf, limit, cursor)
+	if isNoRows(err) {
 		writeJSONError(w, r, p.logger, http.StatusNotFound,
 			CodeNotFound, "session not found", map[string]any{"id": id})
 		return
 	}
+	if err != nil {
+		p.writeDBError(ctx, w, r, op, err)
+		return
+	}
+	writeJSON(w, r, p.logger, resp)
+}
+
+func parseLogRequest(r *http.Request, id string) (logFilter, int, logsCursor, error) {
+	severities, err := parseSeverities(r.URL.Query())
+	if err != nil {
+		return logFilter{}, 0, logsCursor{}, err
+	}
+
+	lf := logFilter{id: id, severities: severities}
+	limit, cursor, err := parseLogPaging(r, lf)
+	if err != nil {
+		return logFilter{}, 0, logsCursor{}, err
+	}
+	return lf, limit, cursor, nil
+}
+
+func (p *Presenter) loadSessionLogsResponse(ctx context.Context, lf logFilter, limit int, cursor logsCursor) (logsResponse, string, error) {
+	exists, err := p.sessionExists(ctx, lf.id)
+	if err != nil {
+		return logsResponse{}, "session.logs.exists", err
+	}
+	if !exists {
+		return logsResponse{}, "", sql.ErrNoRows
+	}
 
 	items, next, err := p.queryLogs(ctx, lf, limit, cursor)
 	if err != nil {
-		p.writeDBError(ctx, w, r, "session.logs.query", err)
-		return
+		return logsResponse{}, "session.logs.query", err
 	}
-	writeJSON(w, r, p.logger, logsResponse{Items: items, NextCursor: next})
+	return logsResponse{Items: items, NextCursor: next}, "", nil
 }
 
 // logFilter is the result-defining filter of GET /api/sessions/:id/logs:
@@ -164,42 +169,59 @@ type logsCursor struct {
 // validated int64 is returned in logsCursor so buildLogsQuery binds an
 // integer.
 func parseLogPaging(r *http.Request, lf logFilter) (limit int, cursor logsCursor, err error) {
-	limit = defaultLimit
-	if l := r.URL.Query().Get("limit"); l != "" {
-		n, convErr := strconv.Atoi(l)
-		if convErr != nil || n < 1 {
-			return 0, cursor, wrapBadFilter("limit must be a positive integer")
-		}
-		if n > maxLimit {
-			return 0, cursor, wrapBadFilter("limit exceeds maximum of 1000")
-		}
-		limit = n
+	return parseLogPagingValues(r.URL.Query(), lf)
+}
+
+func parseLogPagingValues(v url.Values, lf logFilter) (int, logsCursor, error) {
+	limit, err := parseLogLimit(v.Get("limit"))
+	if err != nil {
+		return 0, logsCursor{}, err
 	}
-	if c := r.URL.Query().Get("cursor"); c != "" {
-		cur, decErr := decodeCursor(c)
-		if decErr != nil {
-			return 0, cursor, wrapBadFilter("cursor is malformed")
-		}
-		// Logs have a single fixed ordering; reject any cursor minted under
-		// a different sort/order (e.g. a /api/sessions cursor) so it cannot
-		// be replayed here with a mismatched comparison direction.
-		if cur.Sort != logsSort || cur.Order != logsOrder {
-			return 0, cursor, wrapBadFilter("cursor does not match this endpoint's ordering; restart pagination")
-		}
-		// Bind the cursor to the full logs query (id + severity set).
-		if cur.FP != lf.fingerprint() {
-			return 0, cursor, wrapBadFilter("cursor does not match the current query filters; restart pagination")
-		}
-		// The logs keyset id is the log_entries.id INTEGER row id; reject a
-		// non-decimal-int64 id loudly instead of letting SQLite string→int
-		// affinity yield a wrong/empty page.
-		id, idErr := strconv.ParseInt(cur.ID, 10, 64)
-		if idErr != nil {
-			return 0, cursor, wrapBadFilter("cursor is malformed")
-		}
-		cursor = logsCursor{ts: cur.TS, id: id, present: true}
+
+	cursor, err := parseLogCursorParam(v.Get("cursor"), lf)
+	if err != nil {
+		return 0, logsCursor{}, err
 	}
 	return limit, cursor, nil
+}
+
+func parseLogLimit(raw string) (int, error) {
+	if raw == "" {
+		return defaultLimit, nil
+	}
+	n, convErr := strconv.Atoi(raw)
+	if convErr != nil || n < 1 {
+		return 0, wrapBadFilter("limit must be a positive integer")
+	}
+	if n > maxLimit {
+		return 0, wrapBadFilter("limit exceeds maximum of 1000")
+	}
+	return n, nil
+}
+
+func parseLogCursorParam(raw string, lf logFilter) (logsCursor, error) {
+	if raw == "" {
+		return logsCursor{}, nil
+	}
+	cur, decErr := decodeCursor(raw)
+	if decErr != nil {
+		return logsCursor{}, wrapBadFilter("cursor is malformed")
+	}
+	return validateLogCursor(cur, lf)
+}
+
+func validateLogCursor(cur pageCursor, lf logFilter) (logsCursor, error) {
+	if cur.Sort != logsSort || cur.Order != logsOrder {
+		return logsCursor{}, wrapBadFilter("cursor does not match this endpoint's ordering; restart pagination")
+	}
+	if cur.FP != lf.fingerprint() {
+		return logsCursor{}, wrapBadFilter("cursor does not match the current query filters; restart pagination")
+	}
+	id, idErr := strconv.ParseInt(cur.ID, 10, 64)
+	if idErr != nil {
+		return logsCursor{}, wrapBadFilter("cursor is malformed")
+	}
+	return logsCursor{ts: cur.TS, id: id, present: true}, nil
 }
 
 // parseSeverities parses the ?severity array param under the SAME rule as the

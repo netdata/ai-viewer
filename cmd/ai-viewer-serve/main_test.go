@@ -9,11 +9,16 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"io/fs"
+	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // captureStderr returns a *os.File whose writes we collect for the
@@ -197,4 +202,114 @@ func TestEmbeddedFrontend_NonFatalWithoutIndex(t *testing.T) {
 	if _, err := fs.ReadFile(fsys, "frontend_dist/.gitkeep"); err != nil {
 		t.Fatalf("embedded frontend_dist/.gitkeep not readable: %v", err)
 	}
+}
+
+func TestHTTPServerConfigPinsSSESafeTimeouts(t *testing.T) {
+	t.Parallel()
+	handler := http.NewServeMux()
+	srv := newHTTPServer("127.0.0.1:0", handler)
+
+	if srv.Addr != "127.0.0.1:0" {
+		t.Fatalf("server addr = %q, want 127.0.0.1:0", srv.Addr)
+	}
+	if srv.Handler != handler {
+		t.Fatal("server handler does not match supplied handler")
+	}
+	if srv.ReadHeaderTimeout != 10*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %s, want 10s", srv.ReadHeaderTimeout)
+	}
+	if srv.IdleTimeout != 60*time.Second {
+		t.Fatalf("IdleTimeout = %s, want 60s", srv.IdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want 0 for SSE streams", srv.WriteTimeout)
+	}
+}
+
+func TestHTTPServerNormalizesClosedServerError(t *testing.T) {
+	t.Parallel()
+	if err := normalizeServerError(http.ErrServerClosed); err != nil {
+		t.Fatalf("normalizeServerError(http.ErrServerClosed) = %v, want nil", err)
+	}
+
+	want := errors.New("listen failed")
+	if got := normalizeServerError(want); !errors.Is(got, want) {
+		t.Fatalf("normalizeServerError(custom) = %v, want %v", got, want)
+	}
+}
+
+func TestServeNotifyPollerStopCancelsAndDrains(t *testing.T) {
+	t.Parallel()
+	started := make(chan context.Context, 1)
+	returned := make(chan struct{})
+
+	poller := startNotifyPoller(context.Background(), func(ctx context.Context) {
+		started <- ctx
+		<-ctx.Done()
+		close(returned)
+	})
+
+	pollerCtx := receiveContext(t, started)
+	poller.stopAndWait()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("notify poller did not return after stopAndWait")
+	}
+	if !errors.Is(pollerCtx.Err(), context.Canceled) {
+		t.Fatalf("poller context err = %v, want context.Canceled", pollerCtx.Err())
+	}
+}
+
+func TestServeGracefulShutdownOrder(t *testing.T) {
+	t.Parallel()
+	listenerErr := errors.New("listener failed")
+	var steps []string
+
+	err := runGracefulShutdown(testLogger(), time.Second, serveShutdownHooks{
+		stopPoller: func() {
+			steps = append(steps, "stop-poller")
+		},
+		waitPoller: func() {
+			steps = append(steps, "wait-poller")
+		},
+		shutdownSSE: func() {
+			steps = append(steps, "shutdown-sse")
+		},
+		shutdownServer: func(ctx context.Context) error {
+			steps = append(steps, "http-shutdown")
+			if _, ok := ctx.Deadline(); !ok {
+				t.Error("shutdown context has no deadline")
+			}
+			return errors.New("graceful shutdown warning")
+		},
+		waitListener: func() error {
+			steps = append(steps, "wait-listener")
+			return listenerErr
+		},
+	})
+	if !errors.Is(err, listenerErr) {
+		t.Fatalf("runGracefulShutdown error = %v, want %v", err, listenerErr)
+	}
+
+	want := []string{"stop-poller", "wait-poller", "shutdown-sse", "http-shutdown", "wait-listener"}
+	if strings.Join(steps, ",") != strings.Join(want, ",") {
+		t.Fatalf("shutdown order = %v, want %v", steps, want)
+	}
+}
+
+func receiveContext(t *testing.T, ch <-chan context.Context) context.Context {
+	t.Helper()
+	select {
+	case ctx := <-ch:
+		return ctx
+	case <-time.After(time.Second):
+		t.Fatal("notify poller did not start")
+	}
+	return nil
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

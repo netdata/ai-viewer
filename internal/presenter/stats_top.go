@@ -3,7 +3,9 @@ package presenter
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/netdata/ai-viewer/internal/rollups"
 )
@@ -22,6 +24,19 @@ type topResponse struct {
 	Items     []seriesItem `json:"items"`
 }
 
+type statsTopRequest struct {
+	bucket rollups.Bucket
+	dim    rollupDimension
+	metric statsMetric
+	n      int
+	filter sessionFilter
+}
+
+type statsTopParseError struct {
+	badEnum   string
+	filterErr error
+}
+
 // handleStatsTop answers GET /api/stats/top: the highest-metric dimension
 // values over the window. Sums the dimension's rollup rows over the closed
 // window (fast path) or live-folds them (cross-filter/sources path), folds the
@@ -33,31 +48,45 @@ func (p *Presenter) handleStatsTop(w http.ResponseWriter, r *http.Request) {
 			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
 		return
 	}
-	q := r.URL.Query()
+
+	params, parseErr := parseStatsTopRequest(r.URL.Query(), p.now())
+	if parseErr != nil {
+		p.writeStatsTopParseError(w, r, parseErr)
+		return
+	}
+
+	ctx, cancel := withQueryTimeout(r.Context())
+	defer cancel()
+
+	totals, err := p.topTotals(ctx, params.filter, params.bucket, params.dim, params.metric)
+	if err != nil {
+		p.writeDBError(ctx, w, r, "stats.top", err)
+		return
+	}
+
+	writeJSON(w, r, p.logger, buildStatsTopResponse(totals, params.dim, params.metric, params.n))
+}
+
+func parseStatsTopRequest(q url.Values, now time.Time) (statsTopRequest, *statsTopParseError) {
 	bucket, ok := parseBucket(q.Get("bucket"))
 	if !ok {
-		p.writeBadEnum(w, r, "bucket")
-		return
+		return statsTopRequest{}, &statsTopParseError{badEnum: "bucket"}
 	}
 	dim, ok := parseTopDimension(q.Get("dimension"))
 	if !ok {
-		p.writeBadEnum(w, r, "dimension")
-		return
+		return statsTopRequest{}, &statsTopParseError{badEnum: "dimension"}
 	}
 	metric, ok := parseMetric(q.Get("metric"))
 	if !ok {
-		p.writeBadEnum(w, r, "metric")
-		return
+		return statsTopRequest{}, &statsTopParseError{badEnum: "metric"}
 	}
 	n, err := parseTopN(q.Get("n"))
 	if err != nil {
-		p.writeBadFilter(w, r, err)
-		return
+		return statsTopRequest{}, &statsTopParseError{filterErr: err}
 	}
-	f, err := parseSessionFilter(q, p.now())
+	f, err := parseSessionFilter(q, now)
 	if err != nil {
-		p.writeBadFilter(w, r, err)
-		return
+		return statsTopRequest{}, &statsTopParseError{filterErr: err}
 	}
 	// Rollup-backed stats aggregate over ALL sessions (root + sub-agent); the
 	// group distinction is a session-LIST concern and does not apply here.
@@ -65,15 +94,18 @@ func (p *Presenter) handleStatsTop(w http.ResponseWriter, r *http.Request) {
 	// with the live fold (rest-api.md §"Rollup fast path vs. live fold").
 	f.forceAllSessions()
 
-	ctx, cancel := withQueryTimeout(r.Context())
-	defer cancel()
+	return statsTopRequest{bucket: bucket, dim: dim, metric: metric, n: n, filter: f}, nil
+}
 
-	totals, err := p.topTotals(ctx, f, bucket, dim, metric)
-	if err != nil {
-		p.writeDBError(ctx, w, r, "stats.top", err)
+func (p *Presenter) writeStatsTopParseError(w http.ResponseWriter, r *http.Request, err *statsTopParseError) {
+	if err.badEnum != "" {
+		p.writeBadEnum(w, r, err.badEnum)
 		return
 	}
+	p.writeBadFilter(w, r, err.filterErr)
+}
 
+func buildStatsTopResponse(totals map[string]float64, dim rollupDimension, metric statsMetric, n int) topResponse {
 	items := sortedSeries(totals)
 	if len(items) > n {
 		items = items[:n]
@@ -81,8 +113,7 @@ func (p *Presenter) handleStatsTop(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []seriesItem{}
 	}
-	resp := topResponse{Dimension: dim.dimension, Metric: metricName(metric), Items: items}
-	writeJSON(w, r, p.logger, resp)
+	return topResponse{Dimension: dim.dimension, Metric: metricName(metric), Items: items}
 }
 
 // topTotals sums the requested dimension's metric per key across the whole

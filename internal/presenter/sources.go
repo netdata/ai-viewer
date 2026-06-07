@@ -37,6 +37,42 @@ type sourceItem struct {
 	UpdatedAt   *int64 `json:"updated_at"`
 }
 
+type sourceItemRow struct {
+	id          string
+	format      string
+	location    string
+	cursor      string
+	enabled     int64
+	parseErrors int64
+	lastSeenAt  sql.NullInt64
+	createdAt   int64
+	lastSeq     int64
+	lastTsUS    sql.NullInt64
+	updatedAt   sql.NullInt64
+}
+
+type sourceItemsFailureKind uint8
+
+const (
+	sourceItemsFailureNone sourceItemsFailureKind = iota
+	sourceItemsFailureQuery
+	sourceItemsFailureScan
+	sourceItemsFailureIterate
+)
+
+type sourceItemsFailure struct {
+	kind sourceItemsFailureKind
+	err  error
+}
+
+type sourceItemsFailureResponse struct {
+	level         slog.Level
+	logMessage    string
+	status        int
+	code          string
+	clientMessage string
+}
+
 // handleSources answers GET /api/sources. Returns every configured
 // source with the matching source_progress cursor + last_seq
 // observability counter (max SourceSeq seen; NOT a dedup gate). The
@@ -53,6 +89,15 @@ func (p *Presenter) handleSources(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	items, failure := p.collectSourceItems(ctx)
+	if failure.err != nil {
+		p.writeSourcesFailure(ctx, w, r, failure)
+		return
+	}
+	writeJSON(w, r, p.logger, sourcesResponse{Items: items})
+}
+
+func (p *Presenter) collectSourceItems(ctx context.Context) ([]sourceItem, sourceItemsFailure) {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT
     s.id,
@@ -71,67 +116,111 @@ LEFT JOIN source_progress sp ON sp.source_id = s.id
 ORDER BY s.created_at, s.id
 `)
 	if err != nil {
-		p.logger.LogAttrs(ctx, slog.LevelError, "presenter: sources query failed",
-			slog.Any("err", err),
-			slog.String("request_id", requestIDFromContext(ctx)))
-		writeJSONError(w, r, p.logger, http.StatusServiceUnavailable,
-			CodeDBUnavailable, "failed to list sources", nil)
-		return
+		return nil, sourceItemsFailure{kind: sourceItemsFailureQuery, err: err}
 	}
 	defer func() { _ = rows.Close() }()
+	return readSourceItemRows(rows)
+}
 
+func readSourceItemRows(rows *sql.Rows) ([]sourceItem, sourceItemsFailure) {
 	items := make([]sourceItem, 0, 8)
 	for rows.Next() {
-		var (
-			id, format, location, cursor string
-			enabled                      int64
-			parseErrors                  int64
-			lastSeenAt                   sql.NullInt64
-			createdAt                    int64
-			lastSeq                      int64
-			lastTsUS, updatedAt          sql.NullInt64
-		)
-		if err := rows.Scan(&id, &format, &location, &enabled, &parseErrors,
-			&lastSeenAt, &createdAt, &cursor, &lastSeq, &lastTsUS, &updatedAt); err != nil {
-			p.logger.LogAttrs(ctx, slog.LevelError, "presenter: sources row scan failed",
-				slog.Any("err", err),
-				slog.String("request_id", requestIDFromContext(ctx)))
-			writeJSONError(w, r, p.logger, http.StatusInternalServerError,
-				CodeInternalError, "failed to read sources", nil)
-			return
+		row, err := scanSourceItemRow(rows)
+		if err != nil {
+			return nil, sourceItemsFailure{kind: sourceItemsFailureScan, err: err}
 		}
-		item := sourceItem{
-			ID:          id,
-			Format:      format,
-			Location:    location,
-			Enabled:     enabled != 0,
-			ParseErrors: parseErrors,
-			CreatedAt:   createdAt,
-			Cursor:      cursor,
-			LastSeq:     lastSeq,
-		}
-		if lastSeenAt.Valid {
-			v := lastSeenAt.Int64
-			item.LastSeenAt = &v
-		}
-		if lastTsUS.Valid {
-			v := lastTsUS.Int64
-			item.LastTsUS = &v
-		}
-		if updatedAt.Valid {
-			v := updatedAt.Int64
-			item.UpdatedAt = &v
-		}
-		items = append(items, item)
+		items = append(items, buildSourceItem(row))
 	}
 	if err := rows.Err(); err != nil {
-		p.logger.LogAttrs(ctx, slog.LevelError, "presenter: sources row iteration failed",
-			slog.Any("err", err),
-			slog.String("request_id", requestIDFromContext(ctx)))
-		writeJSONError(w, r, p.logger, http.StatusInternalServerError,
-			CodeInternalError, "failed to iterate sources", nil)
+		return nil, sourceItemsFailure{kind: sourceItemsFailureIterate, err: err}
+	}
+	return items, sourceItemsFailure{kind: sourceItemsFailureNone}
+}
+
+func scanSourceItemRow(rows *sql.Rows) (sourceItemRow, error) {
+	var row sourceItemRow
+	err := rows.Scan(
+		&row.id,
+		&row.format,
+		&row.location,
+		&row.enabled,
+		&row.parseErrors,
+		&row.lastSeenAt,
+		&row.createdAt,
+		&row.cursor,
+		&row.lastSeq,
+		&row.lastTsUS,
+		&row.updatedAt,
+	)
+	return row, err
+}
+
+func buildSourceItem(row sourceItemRow) sourceItem {
+	item := sourceItem{
+		ID:          row.id,
+		Format:      row.format,
+		Location:    row.location,
+		Enabled:     row.enabled != 0,
+		ParseErrors: row.parseErrors,
+		CreatedAt:   row.createdAt,
+		Cursor:      row.cursor,
+		LastSeq:     row.lastSeq,
+	}
+	setSourceItemNullables(&item, row)
+	return item
+}
+
+func setSourceItemNullables(item *sourceItem, row sourceItemRow) {
+	if row.lastSeenAt.Valid {
+		v := row.lastSeenAt.Int64
+		item.LastSeenAt = &v
+	}
+	if row.lastTsUS.Valid {
+		v := row.lastTsUS.Int64
+		item.LastTsUS = &v
+	}
+	if row.updatedAt.Valid {
+		v := row.updatedAt.Int64
+		item.UpdatedAt = &v
+	}
+}
+
+func (p *Presenter) writeSourcesFailure(ctx context.Context, w http.ResponseWriter, r *http.Request, failure sourceItemsFailure) {
+	if failure.err == nil {
 		return
 	}
+	resp := failure.response()
+	p.logger.LogAttrs(ctx, resp.level, resp.logMessage,
+		slog.Any("err", failure.err),
+		slog.String("request_id", requestIDFromContext(ctx)))
+	writeJSONError(w, r, p.logger, resp.status, resp.code, resp.clientMessage, nil)
+}
 
-	writeJSON(w, r, p.logger, sourcesResponse{Items: items})
+func (f sourceItemsFailure) response() sourceItemsFailureResponse {
+	switch f.kind {
+	case sourceItemsFailureQuery:
+		return sourceItemsFailureResponse{
+			level:         slog.LevelError,
+			logMessage:    "presenter: sources query failed",
+			status:        http.StatusServiceUnavailable,
+			code:          CodeDBUnavailable,
+			clientMessage: "failed to list sources",
+		}
+	case sourceItemsFailureScan:
+		return sourceItemsFailureResponse{
+			level:         slog.LevelError,
+			logMessage:    "presenter: sources row scan failed",
+			status:        http.StatusInternalServerError,
+			code:          CodeInternalError,
+			clientMessage: "failed to read sources",
+		}
+	default:
+		return sourceItemsFailureResponse{
+			level:         slog.LevelError,
+			logMessage:    "presenter: sources row iteration failed",
+			status:        http.StatusInternalServerError,
+			code:          CodeInternalError,
+			clientMessage: "failed to iterate sources",
+		}
+	}
 }

@@ -41,6 +41,35 @@ type timelineResponse struct {
 	TEnd   int64          `json:"t_end"`
 }
 
+type timelineBounds struct {
+	tStart int64
+	tEnd   int64
+	seen   bool
+}
+
+func (b *timelineBounds) observe(span timelineSpan) {
+	spanEnd := timelineSpanEnd(span)
+	if !b.seen {
+		b.tStart = span.StartTS
+		b.tEnd = spanEnd
+		b.seen = true
+		return
+	}
+	if span.StartTS < b.tStart {
+		b.tStart = span.StartTS
+	}
+	if spanEnd > b.tEnd {
+		b.tEnd = spanEnd
+	}
+}
+
+func timelineSpanEnd(span timelineSpan) int64 {
+	if span.EndTS == nil {
+		return span.StartTS
+	}
+	return *span.EndTS
+}
+
 // handleSessionTimeline answers GET /api/sessions/:id/timeline. It
 // resolves :id to its session tree (root + all sessions sharing the
 // root), emits one lane per session, and fills each lane's spans from that
@@ -152,34 +181,40 @@ ORDER BY o.session_id ASC, o.start_ts ASC, o.seq ASC, o.id ASC`, rootID)
 	}
 	defer func() { _ = rows.Close() }()
 
+	bounds := timelineBounds{}
 	for rows.Next() {
-		var (
-			sessionID string
-			span      timelineSpan
-			endTS     sql.NullInt64
-		)
-		if err := rows.Scan(&sessionID, &span.ID, &span.Kind, &span.Name,
-			&span.StartTS, &endTS, &span.Status); err != nil {
+		sessionID, span, err := scanTimelineSpan(rows)
+		if err != nil {
 			return 0, 0, false, err
 		}
-		spanEnd := span.StartTS
-		if endTS.Valid {
-			v := endTS.Int64
-			span.EndTS = &v
-			spanEnd = v
-		}
-		if !seen || span.StartTS < tStart {
-			tStart = span.StartTS
-		}
-		if !seen || spanEnd > tEnd {
-			tEnd = spanEnd
-		}
-		seen = true
-		li, ok := laneIndex[sessionID]
-		if !ok {
-			continue
-		}
-		lanes[li].Spans = append(lanes[li].Spans, span)
+		bounds.observe(span)
+		attachTimelineSpanToLane(lanes, laneIndex, sessionID, span)
 	}
-	return tStart, tEnd, seen, rows.Err()
+	return bounds.tStart, bounds.tEnd, bounds.seen, rows.Err()
+}
+
+func scanTimelineSpan(rows *sql.Rows) (string, timelineSpan, error) {
+	var (
+		sessionID string
+		span      timelineSpan
+		endTS     sql.NullInt64
+	)
+	if err := rows.Scan(&sessionID, &span.ID, &span.Kind, &span.Name,
+		&span.StartTS, &endTS, &span.Status); err != nil {
+		return "", timelineSpan{}, err
+	}
+	if endTS.Valid {
+		v := endTS.Int64
+		span.EndTS = &v
+	}
+	return sessionID, span, nil
+}
+
+func attachTimelineSpanToLane(lanes []timelineLane, laneIndex map[string]int, sessionID string, span timelineSpan) bool {
+	li, ok := laneIndex[sessionID]
+	if !ok {
+		return false
+	}
+	lanes[li].Spans = append(lanes[li].Spans, span)
+	return true
 }

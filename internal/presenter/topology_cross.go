@@ -2,6 +2,7 @@ package presenter
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 )
 
@@ -94,6 +95,26 @@ type crossAgent struct {
 	failureRatio float64
 }
 
+type crossAgentRow struct {
+	id           string
+	parentID     string
+	agentName    string
+	kind         string
+	rootID       string
+	sizeMetric   float64
+	failureRatio float64
+}
+
+func (r crossAgentRow) agent() crossAgent {
+	return crossAgent{
+		id:           r.id,
+		parentID:     r.parentID,
+		label:        agentLabel(r.agentName, r.kind, r.id == r.rootID),
+		sizeMetric:   r.sizeMetric,
+		failureRatio: r.failureRatio,
+	}
+}
+
 // buildCrossTopology assembles the cross-session node/edge graph for the
 // filtered set. Two bounded queries: one selects the matching sessions ordered
 // by size_metric DESC limited to maxTopologyNodes+1 (so the cap and the
@@ -166,6 +187,22 @@ func crossSizeExpr(metric topologyMetric, alias string) string {
 // computed in SQL from the session's stored aggregates; the WHERE clause is the
 // shared sessionFilter fragment (static SQL + ?-placeholders).
 func (p *Presenter) loadCrossAgents(ctx context.Context, f sessionFilter, metric topologyMetric) ([]crossAgent, bool, error) {
+	query, args := crossAgentsSelect(f, metric, maxTopologyNodes)
+	rows, err := p.db.QueryContext(ctx, query, args...) // #nosec G201 G202 G701 -- crossAgentsSelect uses a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	agents, err := scanCrossAgents(rows, maxTopologyNodes)
+	if err != nil {
+		return nil, false, err
+	}
+	agents, truncated := trimCrossAgentsToLimit(agents, maxTopologyNodes)
+	return agents, truncated, nil
+}
+
+func crossAgentsSelect(f sessionFilter, metric topologyMetric, limit int) (string, []any) {
 	where, args := f.whereClause("s")
 	sizeExpr := crossSizeExpr(metric, "s")
 	// failure_ratio = failure_count / op_count (0 when op_count is 0). Computed
@@ -177,42 +214,47 @@ SELECT s.id, IFNULL(s.parent_session_id, ''), IFNULL(s.agent_name, ''), s.kind, 
 FROM sessions s WHERE ` + where + `
 ORDER BY size_metric DESC, s.id ASC
 LIMIT ?` // #nosec G202 -- sizeExpr is a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
-	limit := maxTopologyNodes
 	args = append(args, limit+1)
+	return query, args
+}
 
-	rows, err := p.db.QueryContext(ctx, query, args...) // #nosec G201 G202 G701 -- sizeExpr is a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = rows.Close() }()
-
+func scanCrossAgents(rows *sql.Rows, limit int) ([]crossAgent, error) {
 	out := make([]crossAgent, 0, limit)
 	for rows.Next() {
-		var (
-			id, parent, agent, kind, root string
-			size                          float64
-			failRatio                     float64
-		)
-		if err := rows.Scan(&id, &parent, &agent, &kind, &root, &size, &failRatio); err != nil {
-			return nil, false, err
+		agent, err := scanCrossAgent(rows)
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, crossAgent{
-			id:           id,
-			parentID:     parent,
-			label:        agentLabel(agent, kind, id == root),
-			sizeMetric:   size,
-			failureRatio: failRatio,
-		})
+		out = append(out, agent)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
+	return out, nil
+}
+
+func scanCrossAgent(rows *sql.Rows) (crossAgent, error) {
+	var row crossAgentRow
+	err := rows.Scan(
+		&row.id,
+		&row.parentID,
+		&row.agentName,
+		&row.kind,
+		&row.rootID,
+		&row.sizeMetric,
+		&row.failureRatio,
+	)
+	if err != nil {
+		return crossAgent{}, err
+	}
+	return row.agent(), nil
+}
+
+func trimCrossAgentsToLimit(out []crossAgent, limit int) ([]crossAgent, bool) {
 	// More rows than the cap means the result was truncated; drop the overflow
 	// row so exactly maxTopologyNodes nodes are returned.
-	truncated := false
 	if len(out) > limit {
-		out = out[:limit]
-		truncated = true
+		return out[:limit], true
 	}
-	return out, truncated, nil
+	return out, false
 }

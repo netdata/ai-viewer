@@ -71,6 +71,11 @@ type statSourceRow struct {
 	Failures int64  `json:"failures"`
 }
 
+type statsQueryError struct {
+	op  string
+	err error
+}
+
 // handleStats answers GET /api/stats: cross-session aggregates over the
 // same filtered set /api/sessions would return. The matching-session set
 // is expressed once as a parameterized subquery (`sessions WHERE
@@ -91,47 +96,57 @@ func (p *Presenter) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
 
-	where, args := f.whereClause("s")
-	// sessionSet selects the ids of the matching sessions; the ops-based
-	// breakdowns join against it so only ops belonging to the filtered
-	// sessions are counted.
-	// SOW-0046: whereClause returns static SQL plus bound placeholders; TestStats_MaliciousFilterValuesStayBound proves attacker-looking values remain parameters.
-	sessionSet := "SELECT s.id FROM sessions s WHERE " + where // nosemgrep: go.lang.security.injection.tainted-sql-string.tainted-sql-string
+	resp, qerr := p.loadStatsResponse(ctx, f)
+	if qerr != nil {
+		p.writeDBError(ctx, w, r, qerr.op, qerr.err)
+		return
+	}
+	writeJSON(w, r, p.logger, resp)
+}
 
-	resp := statsResponse{
+func newStatsResponse() statsResponse {
+	return statsResponse{
 		ByModel:  []statModelRow{},
 		ByTool:   []statToolRow{},
 		ByAgent:  []statAgentRow{},
 		ByStatus: []statStatusRow{},
 		BySource: []statSourceRow{},
 	}
+}
+
+func statsFilterScope(f sessionFilter) (string, []any, string) {
+	where, args := f.whereClause("s")
+	// sessionSet selects the ids of the matching sessions; the ops-based
+	// breakdowns join against it so only ops belonging to the filtered
+	// sessions are counted.
+	// SOW-0046: whereClause returns static SQL plus bound placeholders; TestStats_MaliciousFilterValuesStayBound proves attacker-looking values remain parameters.
+	sessionSet := "SELECT s.id FROM sessions s WHERE " + where // nosemgrep: go.lang.security.injection.tainted-sql-string.tainted-sql-string
+	return where, args, sessionSet
+}
+
+func (p *Presenter) loadStatsResponse(ctx context.Context, f sessionFilter) (statsResponse, *statsQueryError) {
+	where, args, sessionSet := statsFilterScope(f)
+	resp := newStatsResponse()
 
 	if err := p.statsTotals(ctx, where, args, &resp.Totals); err != nil {
-		p.writeDBError(ctx, w, r, "stats.totals", err)
-		return
+		return resp, &statsQueryError{op: "stats.totals", err: err}
 	}
 	if err := p.statsByStatus(ctx, where, args, &resp); err != nil {
-		p.writeDBError(ctx, w, r, "stats.by_status", err)
-		return
+		return resp, &statsQueryError{op: "stats.by_status", err: err}
 	}
 	if err := p.statsBySource(ctx, where, args, &resp); err != nil {
-		p.writeDBError(ctx, w, r, "stats.by_source", err)
-		return
+		return resp, &statsQueryError{op: "stats.by_source", err: err}
 	}
 	if err := p.statsByAgent(ctx, where, args, resp.Totals.SessionCount, &resp); err != nil {
-		p.writeDBError(ctx, w, r, "stats.by_agent", err)
-		return
+		return resp, &statsQueryError{op: "stats.by_agent", err: err}
 	}
 	if err := p.statsByModel(ctx, sessionSet, args, &resp); err != nil {
-		p.writeDBError(ctx, w, r, "stats.by_model", err)
-		return
+		return resp, &statsQueryError{op: "stats.by_model", err: err}
 	}
 	if err := p.statsByTool(ctx, sessionSet, args, &resp); err != nil {
-		p.writeDBError(ctx, w, r, "stats.by_tool", err)
-		return
+		return resp, &statsQueryError{op: "stats.by_tool", err: err}
 	}
-
-	writeJSON(w, r, p.logger, resp)
+	return resp, nil
 }
 
 // statsTotals aggregates the session-level rollup columns over the

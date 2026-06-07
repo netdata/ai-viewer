@@ -151,31 +151,59 @@ func parseArrayFilters(v url.Values, f *sessionFilter) error {
 
 // parseScalarFilters validates the group/sort/order/limit scalars onto f.
 func parseScalarFilters(v url.Values, f *sessionFilter) error {
-	if g := v.Get("group"); g != "" {
-		if g != groupRoot && g != groupAll {
-			return wrapBadFilter("group must be 'root' or 'all'")
-		}
-		f.group = g
+	if err := applyGroupScalar(v.Get("group"), f); err != nil {
+		return err
 	}
-	if s := v.Get("sort"); s != "" && s != sortStartTS {
+	if err := validateSortScalar(v.Get("sort")); err != nil {
+		return err
+	}
+	if err := applyOrderScalar(v.Get("order"), f); err != nil {
+		return err
+	}
+	return applyLimitScalar(v.Get("limit"), f)
+}
+
+func applyGroupScalar(value string, f *sessionFilter) error {
+	if value == "" {
+		return nil
+	}
+	if value != groupRoot && value != groupAll {
+		return wrapBadFilter("group must be 'root' or 'all'")
+	}
+	f.group = value
+	return nil
+}
+
+func validateSortScalar(value string) error {
+	if value != "" && value != sortStartTS {
 		return wrapBadFilter("sort must be 'start_ts' (only sort supported in v1)")
 	}
-	if o := v.Get("order"); o != "" {
-		if o != "asc" && o != "desc" {
-			return wrapBadFilter("order must be 'asc' or 'desc'")
-		}
-		f.order = o
+	return nil
+}
+
+func applyOrderScalar(value string, f *sessionFilter) error {
+	if value == "" {
+		return nil
 	}
-	if l := v.Get("limit"); l != "" {
-		n, convErr := strconv.Atoi(l)
-		if convErr != nil || n < 1 {
-			return wrapBadFilter("limit must be a positive integer")
-		}
-		if n > maxLimit {
-			return wrapBadFilter("limit exceeds maximum of 1000")
-		}
-		f.limit = n
+	if value != "asc" && value != "desc" {
+		return wrapBadFilter("order must be 'asc' or 'desc'")
 	}
+	f.order = value
+	return nil
+}
+
+func applyLimitScalar(value string, f *sessionFilter) error {
+	if value == "" {
+		return nil
+	}
+	n, convErr := strconv.Atoi(value)
+	if convErr != nil || n < 1 {
+		return wrapBadFilter("limit must be a positive integer")
+	}
+	if n > maxLimit {
+		return wrapBadFilter("limit exceeds maximum of 1000")
+	}
+	f.limit = n
 	return nil
 }
 
@@ -319,131 +347,4 @@ func parseArrayParam(values []string) []string {
 		return nil
 	}
 	return out
-}
-
-// whereClause renders the parameterized WHERE fragment (without the
-// leading "WHERE") shared by the session-set queries, plus the bound
-// args in placeholder order. alias is the table alias for the sessions
-// table (e.g. "s"). The fragment never embeds user input: every value
-// is a `?` placeholder appended to args. It applies the `start_ts` time
-// window (>= from, <= to) PLUS every session dimension condition.
-//
-// The tools filter is an EXISTS subquery against ops (a session matches
-// when ANY of its ops uses one of the named tools), matching rest-api.md
-// §GET /api/sessions ("sessions where any op uses these tools").
-//
-//nolint:unparam // alias is a structural parameter threaded through the sibling helper family (whereClauseNoTimeWindow, dimensionConds) to qualify the sessions table; all current callers pass "s" but the parameter is part of the shared fragment-building contract
-func (f sessionFilter) whereClause(alias string) (string, []any) {
-	conds, args := f.dimensionConds(alias)
-	// The session start_ts time window. Prepended after the dimension conds so
-	// the dimension-only variant (whereClauseNoTimeWindow) shares the exact same
-	// dimension fragment; ordering is immaterial (all AND-joined).
-	if f.from != nil {
-		conds = append(conds, alias+".start_ts >= ?")
-		args = append(args, *f.from)
-	}
-	if f.to != nil {
-		conds = append(conds, alias+".start_ts <= ?")
-		args = append(args, *f.to)
-	}
-	return joinConds(conds, args)
-}
-
-// whereClauseNoTimeWindow renders the same parameterized WHERE fragment as
-// whereClause but OMITS the `start_ts` time window (the >= from / <= to
-// conditions). It exists for the op-bucketed live fold (stats_rollup.go
-// loadFoldOps): that path bounds the OPS by o.start_ts ∈ [lower, upper) as the
-// only time bound, while the session set must constrain ONLY the session
-// dimensions (group/agents/models/status/sources/q + the tools EXISTS
-// subquery). Bounding the session set by s.start_ts there would drop an in-window
-// op whose session started before `from`, diverging from the op-bucketed rollup
-// (rest-api.md §"Rollup fast path vs. live fold" — the AC#2 parity invariant).
-// Identical injection-safety: every value is a `?` placeholder.
-func (f sessionFilter) whereClauseNoTimeWindow(alias string) (string, []any) {
-	return joinConds(f.dimensionConds(alias))
-}
-
-// dimensionConds builds the session DIMENSION conditions shared by whereClause
-// and whereClauseNoTimeWindow (group/agents/models/status/sources/q + the tools
-// EXISTS subquery) — everything EXCEPT the `start_ts` time window. Returns the
-// raw cond slice + args so each caller appends its own time conditions (or none)
-// before joining; every value is a `?` placeholder, never interpolated.
-func (f sessionFilter) dimensionConds(alias string) ([]string, []any) {
-	var conds []string
-	var args []any
-
-	if f.group == groupRoot {
-		conds = append(conds, alias+".kind = ?")
-		args = append(args, "root")
-	}
-	if c, a := inClause(alias+".agent_name", f.agents); c != "" {
-		conds = append(conds, c)
-		args = append(args, a...)
-	}
-	if c, a := inClause(alias+".model", f.models); c != "" {
-		conds = append(conds, c)
-		args = append(args, a...)
-	}
-	if c, a := inClause(alias+".status", f.status); c != "" {
-		conds = append(conds, c)
-		args = append(args, a...)
-	}
-	if c, a := inClause(alias+".source_id", f.source); c != "" {
-		conds = append(conds, c)
-		args = append(args, a...)
-	}
-	if f.q != "" {
-		conds = append(conds, alias+".agent_name LIKE ? ESCAPE '\\'")
-		args = append(args, "%"+escapeLike(f.q)+"%")
-	}
-	if len(f.tools) > 0 {
-		ph := placeholders(len(f.tools))
-		conds = append(conds,
-			"EXISTS (SELECT 1 FROM ops o WHERE o.session_id = "+alias+".id AND o.kind = 'tool' AND o.name IN ("+ph+"))")
-		for _, tval := range f.tools {
-			args = append(args, tval)
-		}
-	}
-
-	return conds, args
-}
-
-// joinConds joins the AND-separated WHERE fragment, returning "1=1" for the
-// empty set so the caller always has a valid boolean predicate. Shared by
-// whereClause and whereClauseNoTimeWindow.
-func joinConds(conds []string, args []any) (string, []any) {
-	if len(conds) == 0 {
-		return "1=1", args
-	}
-	return strings.Join(conds, " AND "), args
-}
-
-// inClause renders "col IN (?, ?, ...)" for a non-empty slice plus its
-// bound args. Returns "" when vals is empty so the caller can skip the
-// dimension entirely.
-func inClause(col string, vals []string) (string, []any) {
-	if len(vals) == 0 {
-		return "", nil
-	}
-	args := make([]any, len(vals))
-	for i, v := range vals {
-		args[i] = v
-	}
-	return col + " IN (" + placeholders(len(vals)) + ")", args
-}
-
-// placeholders returns n comma-separated `?` markers.
-func placeholders(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
-}
-
-// escapeLike escapes the LIKE wildcards so a q value containing % or _ is
-// matched literally. The query uses ESCAPE '\\' so the backslash is the
-// escape char.
-func escapeLike(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return r.Replace(s)
 }
