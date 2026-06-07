@@ -5,6 +5,91 @@ import (
 	"time"
 )
 
+// ringReplay is a fixed-capacity circular buffer of the most recently
+// delivered events, used to satisfy Last-Event-ID reconnects. It is
+// equivalent in observable behavior to a slice that shifts left on
+// every overflow, but append is O(1) instead of O(cap): the hot path
+// in Hub.Deliver records the event at the slot computed from the
+// current head and advances head on overflow, so the post-cap cost is
+// a single store and a modulo, not a memmove of every retained event.
+//
+// The ring stores newest events in append order; iteration is from
+// oldest to newest (the order replaySince must return them in).
+//
+// All access happens under the Hub mutex; the type is not safe for
+// concurrent use on its own.
+type ringReplay struct {
+	buf  []Event // pre-allocated to cap, or nil when cap <= 0 (disabled)
+	head int     // index of the OLDEST valid entry; 0 when empty
+	size int     // number of valid entries in [0, cap(buf)]
+}
+
+// newRingReplay returns a ring with the given capacity. A non-positive
+// capacity yields a disabled ring (buf is nil and appends are no-ops).
+// The buf slice is allocated to its full capacity so index writes in
+// append do not grow the slice — the head/size pair is the source of
+// truth for "which entries are currently valid".
+func newRingReplay(capacity int) ringReplay {
+	if capacity <= 0 {
+		return ringReplay{}
+	}
+	return ringReplay{buf: make([]Event, capacity)}
+}
+
+// append records ev in the ring, evicting the oldest entry when the
+// ring is at capacity. O(1) at all sizes. No-op when the ring is
+// disabled.
+func (r *ringReplay) append(ev Event) {
+	n := cap(r.buf)
+	if n == 0 {
+		return
+	}
+	if r.size < n {
+		// Growing: write at the slot just past the current tail.
+		r.buf[(r.head+r.size)%n] = ev
+		r.size++
+		return
+	}
+	// Full: overwrite the oldest slot and advance head.
+	r.buf[r.head] = ev
+	r.head = (r.head + 1) % n
+}
+
+// oldest returns the oldest entry in the ring and true, or
+// (zero, false) when the ring is empty.
+func (r *ringReplay) oldest() (Event, bool) {
+	if r.size == 0 {
+		return Event{}, false
+	}
+	return r.buf[r.head], true
+}
+
+// newest returns the newest entry in the ring and true, or
+// (zero, false) when the ring is empty.
+func (r *ringReplay) newest() (Event, bool) {
+	if r.size == 0 {
+		return Event{}, false
+	}
+	n := cap(r.buf)
+	return r.buf[(r.head+r.size-1)%n], true
+}
+
+// ordered returns a fresh slice of the ring's entries in oldest-to-newest
+// order — the order replaySince must iterate. Allocates a new slice of
+// the current size; callers that need zero allocation can use a
+// manual loop with the (head, size) invariants.
+func (r *ringReplay) ordered() []Event {
+	if r.size == 0 {
+		return nil
+	}
+	n := cap(r.buf)
+	out := make([]Event, r.size)
+	for i := 0; i < r.size; i++ {
+		out[i] = r.buf[(r.head+i)%n]
+	}
+	return out
+}
+
 // subscription is one SSE client's delivery state inside the Hub. All
 // fields are accessed under the Hub's mutex except dropped, which is an
 // atomic so Dropped() can read it without contending on the hub lock.
@@ -13,13 +98,11 @@ type subscription struct {
 	// buffered to ChannelCap; a full channel triggers drop-oldest in
 	// enqueue so a slow client never blocks Deliver or the hub.
 	ch chan Event
-	// replay is a fixed-capacity ring of the most recently delivered
-	// events, newest last, used to satisfy Last-Event-ID reconnects. Its
-	// capacity is Options.ReplayBuffer.
-	replay []Event
-	// replayCap is the ring capacity, cached so enqueue does not re-read
-	// the option.
-	replayCap int
+	// ring is a fixed-capacity circular buffer of the most recently
+	// delivered events, used to satisfy Last-Event-ID reconnects. Its
+	// capacity is Options.ReplayBuffer. The ring's append is O(1) at
+	// all sizes (see ringReplay above for the overflow algorithm).
+	ring ringReplay
 	// dropped counts events discarded by drop-oldest backpressure. Read
 	// lock-free via Dropped().
 	dropped atomic.Uint64
@@ -39,13 +122,14 @@ type subscription struct {
 	gen uint64
 }
 
-// newSubscription builds a subscription with the given channel and replay
-// capacities.
+// newSubscription builds a subscription with the given channel and
+// replay capacities. A non-positive replayCap disables the ring
+// (appendReplay becomes a no-op, replaySince reports uncovered for any
+// non-empty Last-Event-ID).
 func newSubscription(channelCap, replayCap int) *subscription {
 	return &subscription{
-		ch:        make(chan Event, channelCap),
-		replay:    make([]Event, 0, replayCap),
-		replayCap: replayCap,
+		ch:   make(chan Event, channelCap),
+		ring: newRingReplay(replayCap),
 	}
 }
 
@@ -55,7 +139,7 @@ func newSubscription(channelCap, replayCap int) *subscription {
 // survive and Deliver is non-blocking (sse-protocol.md §Backpressure).
 // Must be called under the hub mutex.
 func (s *subscription) enqueue(ev Event) {
-	s.appendReplay(ev)
+	s.ring.append(ev)
 	for {
 		select {
 		case s.ch <- ev:
@@ -74,19 +158,50 @@ func (s *subscription) enqueue(ev Event) {
 	}
 }
 
-// appendReplay records ev in the ring, evicting the oldest entry when the
-// ring is at capacity. Must be called under the hub mutex.
+// appendReplay records ev in the replay ring, evicting the oldest
+// entry when the ring is at capacity. It is a thin package-internal
+// wrapper around ringReplay.append so callers (including tests) can
+// drive the ring without reaching into its internals. Must be called
+// under the hub mutex; no-op when the ring is disabled (cap <= 0).
 func (s *subscription) appendReplay(ev Event) {
-	if s.replayCap <= 0 {
-		return
+	s.ring.append(ev)
+}
+
+// parseAndValidateBounds checks whether the ring can prove full
+// coverage for the given lastEventID. It parses the client-supplied
+// cursor, fetches the retained oldest/newest entries, and verifies
+// that lastEventID falls within [oldest, newest]. Returns the parsed
+// numeric lastEventID and true when coverage is provable; (0, false)
+// when it is not. The caller must handle the empty-lastEventID case
+// before calling this helper. Must be called under the hub mutex.
+func (s *subscription) parseAndValidateBounds(lastEventID string) (uint64, bool) {
+	last, ok := parseID(lastEventID)
+	if !ok {
+		return 0, false
 	}
-	if len(s.replay) < s.replayCap {
-		s.replay = append(s.replay, ev)
-		return
+	oldestEv, ok := s.ring.oldest()
+	if !ok {
+		return 0, false
 	}
-	// Full: shift left by one and append (ring of fixed size, newest last).
-	copy(s.replay, s.replay[1:])
-	s.replay[len(s.replay)-1] = ev
+	oldest, ok := parseID(oldestEv.ID)
+	if !ok {
+		return 0, false
+	}
+	if oldest > last {
+		return 0, false
+	}
+	newestEv, ok := s.ring.newest()
+	if !ok {
+		return 0, false
+	}
+	newest, ok := parseID(newestEv.ID)
+	if !ok {
+		return 0, false
+	}
+	if last > newest {
+		return 0, false
+	}
+	return last, true
 }
 
 // replaySince returns the buffered events whose ID is ordered strictly
@@ -119,35 +234,13 @@ func (s *subscription) replaySince(lastEventID string) (events []Event, covered 
 	if lastEventID == "" {
 		return nil, true
 	}
-	last, ok := parseID(lastEventID)
-	if !ok {
-		// A client-supplied Last-Event-ID we did not mint (malformed or
-		// from a previous hub instance). We cannot reason about it → ask
-		// the client to resync.
-		return nil, false
-	}
-	if len(s.replay) == 0 {
-		return nil, false
-	}
-	oldest, ok := parseID(s.replay[0].ID)
+	last, ok := s.parseAndValidateBounds(lastEventID)
 	if !ok {
 		return nil, false
 	}
-	if oldest > last {
-		// The ring may have dropped events between last and oldest.
-		return nil, false
-	}
-	newest, ok := parseID(s.replay[len(s.replay)-1].ID)
-	if !ok {
-		return nil, false
-	}
-	if last > newest {
-		// last is ahead of anything the hub ever delivered: a stale id from
-		// a previous hub instance or a forged value. Cannot be covered.
-		return nil, false
-	}
-	out := make([]Event, 0, len(s.replay))
-	for _, ev := range s.replay {
+	ordered := s.ring.ordered()
+	out := make([]Event, 0, len(ordered))
+	for _, ev := range ordered {
 		if id, ok := parseID(ev.ID); ok && id > last {
 			out = append(out, ev)
 		}

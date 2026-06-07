@@ -92,30 +92,38 @@ func newTopoBuilder(agents []topoAgent) *topoBuilder {
 func (b *topoBuilder) observeOp(o topoOpRow) {
 	ag := b.agents[o.sessionID]
 	if ag != nil {
-		ag.ops++
-		if o.failed {
-			ag.failures++
-		}
-		switch b.metric {
-		case metricCost:
-			ag.metric += o.cost
-		case metricTokens:
-			ag.metric += float64(o.tokensIn + o.tokensOut)
-		case metricCalls:
-			ag.metric++
-		case metricCtxPct:
-			if o.ctxRatio > ag.ctxPct {
-				ag.ctxPct = o.ctxRatio
-			}
-		default: // duration
-			ag.metric += float64(o.durationUS)
-		}
+		observeAgentOp(ag, b.metric, o)
 	}
 	if o.kind == "tool" {
 		b.observeToolOp(o)
 	}
 	if o.kind == "session" && o.childSessionID != "" {
 		b.addEdge("agent:"+o.sessionID, "agent:"+o.childSessionID, o.durationUS)
+	}
+}
+
+func observeAgentOp(ag *topoAgent, metric topologyMetric, o topoOpRow) {
+	ag.ops++
+	if o.failed {
+		ag.failures++
+	}
+	observeAgentMetric(ag, metric, o)
+}
+
+func observeAgentMetric(ag *topoAgent, metric topologyMetric, o topoOpRow) {
+	switch metric {
+	case metricCost:
+		ag.metric += o.cost
+	case metricTokens:
+		ag.metric += float64(o.tokensIn + o.tokensOut)
+	case metricCalls:
+		ag.metric++
+	case metricCtxPct:
+		if o.ctxRatio > ag.ctxPct {
+			ag.ctxPct = o.ctxRatio
+		}
+	default: // duration
+		ag.metric += float64(o.durationUS)
 	}
 }
 
@@ -158,53 +166,65 @@ func (b *topoBuilder) addEdge(source, target string, durationUS int64) {
 // (insertion), tools by first appearance, edges by first appearance.
 func (b *topoBuilder) finish() topologyResponse {
 	resp := topologyResponse{Nodes: []topoNode{}, Edges: []topoEdge{}}
-	// nodeIDs collects every materialised node id (agents + tools) so dangling
-	// edges can be dropped defensively below.
 	nodeIDs := make(map[string]struct{}, len(b.agentOrder)+len(b.toolOrder))
+	b.appendAgentNodes(&resp, nodeIDs)
+	b.appendToolNodes(&resp, nodeIDs)
+	b.appendMaterializedEdges(&resp, nodeIDs)
+	return resp
+}
+
+func (b *topoBuilder) appendAgentNodes(resp *topologyResponse, nodeIDs map[string]struct{}) {
 	for _, sid := range b.agentOrder {
 		a := b.agents[sid]
-		size := a.metric
-		if b.metric == metricCtxPct {
-			size = a.ctxPct
-		}
-		resp.Nodes = append(resp.Nodes, topoNode{
+		appendTopologyNode(resp, nodeIDs, topoNode{
 			ID: a.id, Kind: "agent", Label: a.label,
-			SizeMetric: size, FailureRatio: ratio(a.failures, a.ops),
+			SizeMetric: agentSize(b.metric, a), FailureRatio: ratio(a.failures, a.ops),
 		})
-		nodeIDs[a.id] = struct{}{}
-		if size > resp.MaxSizeMetric {
-			resp.MaxSizeMetric = size
-		}
 	}
+}
+
+func agentSize(metric topologyMetric, a *topoAgent) float64 {
+	if metric == metricCtxPct {
+		return a.ctxPct
+	}
+	return a.metric
+}
+
+func (b *topoBuilder) appendToolNodes(resp *topologyResponse, nodeIDs map[string]struct{}) {
 	for _, tid := range b.toolOrder {
 		t := b.tools[tid]
-		size := toolSize(b.metric, t)
-		resp.Nodes = append(resp.Nodes, topoNode{
+		appendTopologyNode(resp, nodeIDs, topoNode{
 			ID: t.id, Kind: "tool", Label: t.label,
-			SizeMetric: size, FailureRatio: ratio(t.failures, t.ops),
+			SizeMetric: toolSize(b.metric, t), FailureRatio: ratio(t.failures, t.ops),
 		})
-		nodeIDs[t.id] = struct{}{}
-		if size > resp.MaxSizeMetric {
-			resp.MaxSizeMetric = size
-		}
 	}
-	// Append edges in first-appearance order, but drop any whose endpoint is
-	// not a materialised node. A kind='session' op can carry a child_session_id
-	// outside this tree (no agent node for it); the spec promises such an edge
-	// is dropped defensively (rest-api.md §GET /api/sessions/:id/topology).
-	// Agent→tool and agent→in-tree-child edges are unaffected — their endpoints
-	// are always materialised.
+}
+
+func appendTopologyNode(resp *topologyResponse, nodeIDs map[string]struct{}, node topoNode) {
+	resp.Nodes = append(resp.Nodes, node)
+	nodeIDs[node.ID] = struct{}{}
+	if node.SizeMetric > resp.MaxSizeMetric {
+		resp.MaxSizeMetric = node.SizeMetric
+	}
+}
+
+func (b *topoBuilder) appendMaterializedEdges(resp *topologyResponse, nodeIDs map[string]struct{}) {
 	for _, key := range b.edgeOrder {
 		e := b.edges[key]
-		if _, ok := nodeIDs[e.Source]; !ok {
-			continue
-		}
-		if _, ok := nodeIDs[e.Target]; !ok {
+		// Session ops can point outside this tree; never emit dangling edges.
+		if !edgeEndpointsMaterialized(e, nodeIDs) {
 			continue
 		}
 		resp.Edges = append(resp.Edges, *e)
 	}
-	return resp
+}
+
+func edgeEndpointsMaterialized(e *topoEdge, nodeIDs map[string]struct{}) bool {
+	if _, ok := nodeIDs[e.Source]; !ok {
+		return false
+	}
+	_, ok := nodeIDs[e.Target]
+	return ok
 }
 
 // toolSize returns the size_metric a tool node carries under the selected

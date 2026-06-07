@@ -124,8 +124,14 @@ func TestHub_ReplayDisabledWhenBufferZero(t *testing.T) {
 	t.Parallel()
 	s := newSubscription(4, 0)
 	s.appendReplay(Event{ID: "1", Kind: "stats_invalidated"})
-	if len(s.replay) != 0 {
-		t.Fatalf("replay len = %d, want 0 (ring disabled)", len(s.replay))
+	if got := s.ring.ordered(); len(got) != 0 {
+		t.Fatalf("replay ordered = %d events, want 0 (ring disabled)", len(got))
+	}
+	if s.ring.size != 0 {
+		t.Fatalf("replay size = %d, want 0 (ring disabled)", s.ring.size)
+	}
+	if cap(s.ring.buf) != 0 {
+		t.Fatalf("replay buf cap = %d, want 0 (no allocation when disabled)", cap(s.ring.buf))
 	}
 	// replaySince with a non-empty lastEventID on an empty ring → gap.
 	events, covered := s.replaySince("1")

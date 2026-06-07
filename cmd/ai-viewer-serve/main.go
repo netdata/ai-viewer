@@ -8,7 +8,7 @@
 //   - verify schema_meta.version matches the binary's expectation
 //   - build the presenter + wire embedded frontend assets
 //   - bind 127.0.0.1:7710 (or --bind) and serve until SIGTERM/SIGINT
-//   - on signal: http.Server.Shutdown(30s) → close store → exit 0
+//   - on signal: stop notify poller, close SSE, http shutdown, close store
 //
 // Read presenter.md, observability.md, deployment.md, and security.md
 // before changing CLI flags or default paths.
@@ -23,18 +23,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"syscall"
-	"time"
-
-	"github.com/netdata/ai-viewer/internal/notify"
-	"github.com/netdata/ai-viewer/internal/presenter"
-	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // frontendFS holds the Vite build output. scripts/build.sh writes the
@@ -51,11 +43,6 @@ var frontendFS embed.FS
 // §"Port Allocation". Localhost-only is mandated by security.md
 // §"Hard Rules"; v1 does not accept a non-localhost flag.
 const defaultBind = "127.0.0.1:7710"
-
-// shutdownTimeout is how long http.Server.Shutdown waits for in-flight
-// handlers to drain. Per presenter.md §"Graceful Shutdown" the timeout
-// is 30 s.
-const shutdownTimeout = 30 * time.Second
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -89,7 +76,6 @@ func run(args []string, stdout, stderr *os.File) int {
 		logger.Error("ai-viewer-serve: failed to resolve --state-dir", "err", err)
 		return 1
 	}
-
 	logger.Info("ai-viewer-serve starting",
 		"db", dbPath,
 		"state_dir", stateDir,
@@ -100,44 +86,13 @@ func run(args []string, stdout, stderr *os.File) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rs, err := store.OpenReader(ctx, dbPath, logger)
+	runtime, err := newServeRuntime(ctx, logger, cfg, dbPath)
 	if err != nil {
-		logger.Error("ai-viewer-serve: failed to open store (read-only)",
-			"db", dbPath, "err", err)
 		return 1
 	}
-	defer func() { _ = rs.Close() }()
+	defer runtime.close()
 
-	if err := presenter.CheckSchema(ctx, rs.DB(), presenter.SchemaVersion); err != nil {
-		logger.Error("ai-viewer-serve: schema version mismatch",
-			"db", dbPath, "expected", presenter.SchemaVersion, "err", err)
-		return 1
-	}
-
-	frontend := embeddedFrontend()
-
-	// hub is the in-memory SSE fan-out. The serve binary owns it so it can
-	// deliver a graceful-shutdown `disconnect` before closing it (see
-	// serveHTTP). The notify poller (started below) is the only producer
-	// into it; presenter handlers attach clients.
-	hub := notify.New(notify.Options{})
-
-	p, err := presenter.New(presenter.Options{
-		DB:            rs.DB(),
-		Logger:        logger,
-		Version:       versionString(cfg.version),
-		DBPath:        dbPath,
-		StartedAt:     time.Now().UTC(),
-		SchemaVersion: presenter.SchemaVersion,
-		FrontendFS:    frontend,
-		Hub:           hub,
-	})
-	if err != nil {
-		logger.Error("ai-viewer-serve: presenter.New failed", "err", err)
-		return 1
-	}
-
-	if err := serveHTTP(ctx, logger, cfg.bind, p); err != nil {
+	if err := serveHTTP(ctx, logger, cfg.bind, runtime.presenter); err != nil {
 		logger.Error("ai-viewer-serve: server exited with error", "err", err)
 		return 1
 	}
@@ -301,80 +256,6 @@ func assertLocalhost(addr string) error {
 // recoverable dev-time state the caller never treats as fatal.
 func embeddedFrontend() fs.FS {
 	return frontendFS
-}
-
-// serveHTTP wires up the HTTP server, the read-only notify poller, signal
-// handling, and graceful shutdown. Returns an error only when the listener
-// itself fails catastrophically; clean shutdown is reported as nil.
-//
-// WriteTimeout is intentionally left unset (0): a global write deadline
-// would kill long-lived /api/events SSE streams. Normal handlers stay
-// bounded by the presenter's 30 s per-request query context, and the SSE
-// handler clears its own write deadline per connection (presenter.md
-// §Middlewares).
-//
-// Graceful-shutdown order (presenter.md §Graceful Shutdown): on signal we
-// (1) stop the notify poller, (2) deliver a `disconnect` to every SSE
-// client and close the hub so the long-lived stream goroutines unblock and
-// return, then (3) http.Server.Shutdown drains the now-returning handlers
-// within shutdownTimeout. The store is closed by run()'s defer afterwards.
-func serveHTTP(ctx context.Context, logger *slog.Logger, bind string, p *presenter.Presenter) error {
-	srv := &http.Server{
-		Addr:              bind,
-		Handler:           p.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Start the read-only notify poller; its context is cancelled at
-	// shutdown so the goroutine returns before the process exits.
-	pollerCtx, stopPoller := context.WithCancel(ctx)
-	defer stopPoller()
-	pollerDone := make(chan struct{})
-	go func() {
-		p.RunNotifyPoller(pollerCtx)
-		close(pollerDone)
-	}()
-
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Info("ai-viewer-serve listening", "bind", bind)
-		err := srv.ListenAndServe()
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		errCh <- err
-	}()
-
-	select {
-	case <-sigCtx.Done():
-		logger.Info("ai-viewer-serve received shutdown signal; draining")
-	case err := <-errCh:
-		stopPoller()
-		<-pollerDone
-		return err
-	}
-
-	// Stop the poller, then signal SSE clients (disconnect + close hub
-	// channels) so the long-lived stream handlers return and Server.Shutdown
-	// can drain them.
-	stopPoller()
-	<-pollerDone
-	p.ShutdownSSE()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("ai-viewer-serve: graceful shutdown error", "err", err)
-	}
-	// Drain the listener goroutine.
-	if err := <-errCh; err != nil {
-		return err
-	}
-	return nil
 }
 
 // versionString returns the binary's build-time version. When the

@@ -146,6 +146,11 @@ func (p *Presenter) serveNotBuiltNotice(w http.ResponseWriter, r *http.Request) 
 // runtime; the mux is built from it once in Handler().
 var publicRootFiles = [...]string{"favicon.svg"}
 
+const (
+	rootPublicCacheControl = "no-cache"
+	assetCacheControl      = "public, max-age=31536000, immutable"
+)
+
 // servePublicFile serves a single embedded root public file (e.g.
 // /favicon.svg). Unlike serveAsset's hashed bundle, these names are stable
 // and not content-hashed, so they carry a revalidating no-cache header rather
@@ -153,37 +158,58 @@ var publicRootFiles = [...]string{"favicon.svg"}
 // slash; it must be a single safe segment with no traversal. Missing files
 // return the structured NOT_FOUND envelope (no SPA fallback for these paths).
 func (p *Presenter) servePublicFile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
+	if !staticFileMethodAllowed(r.Method) {
+		p.writeStaticMethodNotAllowed(w, r)
 		return
 	}
 	if p.frontend == nil {
-		writeJSONError(w, r, p.logger, http.StatusNotFound,
-			CodeNotFound, "not found", map[string]any{"path": r.URL.Path})
+		p.writePublicFileNotFound(w, r)
 		return
 	}
-	name := strings.TrimPrefix(r.URL.Path, "/")
-	// Defence in depth: only a single clean segment is ever a public root file.
+
+	name, ok := publicRootFileName(r.URL.Path)
+	if !ok {
+		p.writePublicFileNotFound(w, r)
+		return
+	}
+
+	data, ok := p.readPublicFile(w, r, name)
+	if !ok {
+		return
+	}
+	p.writePublicFileBytes(w, r, name, data)
+}
+
+func staticFileMethodAllowed(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
+func publicRootFileName(rawPath string) (string, bool) {
+	name := strings.TrimPrefix(rawPath, "/")
 	if name == "" || name != path.Base(name) || strings.Contains(name, "..") {
-		writeJSONError(w, r, p.logger, http.StatusNotFound,
-			CodeNotFound, "not found", map[string]any{"path": r.URL.Path})
-		return
+		return "", false
 	}
+	return name, true
+}
+
+func (p *Presenter) readPublicFile(w http.ResponseWriter, r *http.Request, name string) ([]byte, bool) {
 	data, err := fs.ReadFile(p.frontend, path.Join(frontendRoot, name))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			writeJSONError(w, r, p.logger, http.StatusNotFound,
-				CodeNotFound, "not found", map[string]any{"path": r.URL.Path})
-			return
-		}
-		p.logFrontendError(r, "reading public file", err)
-		writeJSONError(w, r, p.logger, http.StatusInternalServerError,
-			CodeInternalError, "failed to read public file", nil)
-		return
+	if err == nil {
+		return data, true
 	}
+	if errors.Is(err, fs.ErrNotExist) {
+		p.writePublicFileNotFound(w, r)
+		return nil, false
+	}
+	p.logFrontendError(r, "reading public file", err)
+	writeJSONError(w, r, p.logger, http.StatusInternalServerError,
+		CodeInternalError, "failed to read public file", nil)
+	return nil, false
+}
+
+func (p *Presenter) writePublicFileBytes(w http.ResponseWriter, r *http.Request, name string, data []byte) {
 	w.Header().Set("Content-Type", contentTypeForAsset(name))
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", rootPublicCacheControl)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
@@ -199,6 +225,16 @@ func (p *Presenter) servePublicFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (p *Presenter) writeStaticMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
+		CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
+}
+
+func (p *Presenter) writePublicFileNotFound(w http.ResponseWriter, r *http.Request) {
+	writeJSONError(w, r, p.logger, http.StatusNotFound,
+		CodeNotFound, "not found", map[string]any{"path": r.URL.Path})
+}
+
 // serveAsset serves a single file under /assets/. Falls through to 404
 // when the file is missing; the SPA-fallback to index.html is
 // deliberately NOT applied for asset paths so a missing bundle surfaces
@@ -209,49 +245,64 @@ func (p *Presenter) servePublicFile(w http.ResponseWriter, r *http.Request) {
 //	HEAD /assets/* → same headers, empty body (RFC 9110 §9.3.2)
 //	(no SPA fallback — 404 on miss)
 func (p *Presenter) serveAsset(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeJSONError(w, r, p.logger, http.StatusMethodNotAllowed,
-			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
+	if !staticFileMethodAllowed(r.Method) {
+		p.writeStaticMethodNotAllowed(w, r)
 		return
 	}
 	if p.frontend == nil {
-		writeJSONError(w, r, p.logger, http.StatusNotFound,
-			CodeNotFound, "asset not found", map[string]any{"path": r.URL.Path})
+		p.writeAssetNotFound(w, r)
 		return
 	}
-	cleaned, ok := safeAssetPath(r.URL.Path)
+
+	name, f, ok := p.openAssetFile(w, r)
 	if !ok {
-		writeJSONError(w, r, p.logger, http.StatusBadRequest,
-			CodeBadRequest, "invalid asset path", map[string]any{"path": r.URL.Path})
-		return
-	}
-	full := path.Join(frontendRoot, cleaned)
-	f, err := p.frontend.Open(full)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			writeJSONError(w, r, p.logger, http.StatusNotFound,
-				CodeNotFound, "asset not found", map[string]any{"path": r.URL.Path})
-			return
-		}
-		p.logFrontendError(r, "opening asset", err)
-		writeJSONError(w, r, p.logger, http.StatusInternalServerError,
-			CodeInternalError, "failed to read asset", nil)
 		return
 	}
 	defer func() { _ = f.Close() }()
 
-	stat, err := f.Stat()
-	if err != nil || stat.IsDir() {
-		writeJSONError(w, r, p.logger, http.StatusNotFound,
-			CodeNotFound, "asset not found", map[string]any{"path": r.URL.Path})
+	if !p.assetFileReady(w, r, f) {
 		return
 	}
+	p.writeAssetResponse(w, r, name, f)
+}
 
-	w.Header().Set("Content-Type", contentTypeForAsset(cleaned))
+func (p *Presenter) openAssetFile(w http.ResponseWriter, r *http.Request) (string, fs.File, bool) {
+	cleaned, ok := safeAssetPath(r.URL.Path)
+	if !ok {
+		writeJSONError(w, r, p.logger, http.StatusBadRequest,
+			CodeBadRequest, "invalid asset path", map[string]any{"path": r.URL.Path})
+		return "", nil, false
+	}
+	full := path.Join(frontendRoot, cleaned)
+	f, err := p.frontend.Open(full)
+	if err == nil {
+		return cleaned, f, true
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		p.writeAssetNotFound(w, r)
+		return "", nil, false
+	}
+	p.logFrontendError(r, "opening asset", err)
+	writeJSONError(w, r, p.logger, http.StatusInternalServerError,
+		CodeInternalError, "failed to read asset", nil)
+	return "", nil, false
+}
+
+func (p *Presenter) assetFileReady(w http.ResponseWriter, r *http.Request, f fs.File) bool {
+	stat, err := f.Stat()
+	if err != nil || stat.IsDir() {
+		p.writeAssetNotFound(w, r)
+		return false
+	}
+	return true
+}
+
+func (p *Presenter) writeAssetResponse(w http.ResponseWriter, r *http.Request, name string, f fs.File) {
+	w.Header().Set("Content-Type", contentTypeForAsset(name))
 	// Vite emits content-hashed asset filenames so a long cache is safe
 	// for /assets/*. The SPA shell itself (index.html) carries
 	// no-cache so the operator picks up new hashes on the next reload.
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", assetCacheControl)
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
@@ -259,6 +310,11 @@ func (p *Presenter) serveAsset(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, f); err != nil {
 		p.logFrontendError(r, "streaming asset", err)
 	}
+}
+
+func (p *Presenter) writeAssetNotFound(w http.ResponseWriter, r *http.Request) {
+	writeJSONError(w, r, p.logger, http.StatusNotFound,
+		CodeNotFound, "asset not found", map[string]any{"path": r.URL.Path})
 }
 
 // safeAssetPath strips the /assets/ prefix and rejects any segment that
@@ -278,54 +334,6 @@ func safeAssetPath(rawPath string) (string, bool) {
 		return "", false
 	}
 	return path.Join("assets", cleaned), true
-}
-
-// contentTypeForAsset returns a sensible Content-Type for the asset.
-// embed.FS does not expose mime types and Vite's hashed filenames carry
-// the original extension, so a simple extension switch covers every
-// asset Vite emits in Phase 1. Unknown extensions get
-// application/octet-stream so the browser falls back to download.
-func contentTypeForAsset(p string) string {
-	switch lowerExt(p) {
-	case ".html":
-		return "text/html; charset=utf-8"
-	case ".css":
-		return "text/css; charset=utf-8"
-	case ".js", ".mjs":
-		return "application/javascript; charset=utf-8"
-	case ".json":
-		return "application/json; charset=utf-8"
-	case ".svg":
-		return "image/svg+xml"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".webp":
-		return "image/webp"
-	case ".ico":
-		return "image/x-icon"
-	case ".woff":
-		return "font/woff"
-	case ".woff2":
-		return "font/woff2"
-	case ".ttf":
-		return "font/ttf"
-	case ".map":
-		return "application/json; charset=utf-8"
-	default:
-		return "application/octet-stream"
-	}
-}
-
-// lowerExt returns the lower-cased file extension (including the dot)
-// for p. Empty string when p has no extension.
-func lowerExt(p string) string {
-	dot := strings.LastIndexByte(p, '.')
-	if dot < 0 {
-		return ""
-	}
-	return strings.ToLower(p[dot:])
 }
 
 // logFrontendError records a structured frontend-serving failure. Kept

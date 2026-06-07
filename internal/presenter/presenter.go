@@ -1,7 +1,6 @@
 package presenter
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"io/fs"
@@ -110,53 +109,71 @@ const defaultSSEKeepalive = 15 * time.Second
 // §stats_invalidated: "rate-limited to ~1 per second").
 const statsCoalesceWindow = time.Second
 
+func resolvePresenterLogger(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return logger.With("subsystem", "presenter")
+}
+
+func resolvePresenterClock(now func() time.Time) func() time.Time {
+	if now == nil {
+		return func() time.Time { return time.Now().UTC() }
+	}
+	return now
+}
+
+func resolvePresenterStartedAt(startedAt time.Time, now func() time.Time) time.Time {
+	if startedAt.IsZero() {
+		return now()
+	}
+	return startedAt
+}
+
+func resolvePresenterSchemaVersion(schemaVersion int) int {
+	if schemaVersion == 0 {
+		return SchemaVersion
+	}
+	return schemaVersion
+}
+
+func resolvePresenterHub(hub *notify.Hub) *notify.Hub {
+	if hub == nil {
+		return notify.New(notify.Options{})
+	}
+	return hub
+}
+
+func resolveNotifyPollInterval(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return defaultNotifyPollInterval
+	}
+	return interval
+}
+
 // New constructs a Presenter from the provided options. Returns an
-// error when a required option is missing; the caller is expected to
-// configure DB and Logger before calling.
+// error when a required option is missing; optional fields take package
+// defaults.
 func New(opts Options) (*Presenter, error) {
 	if opts.DB == nil {
 		return nil, errors.New("presenter.New: DB is required")
 	}
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-	logger = logger.With("subsystem", "presenter")
-
-	now := opts.Now
-	if now == nil {
-		now = func() time.Time { return time.Now().UTC() }
-	}
-	startedAt := opts.StartedAt
-	if startedAt.IsZero() {
-		startedAt = now()
-	}
-	schemaVersion := opts.SchemaVersion
-	if schemaVersion == 0 {
-		schemaVersion = SchemaVersion
-	}
-
-	hub := opts.Hub
-	if hub == nil {
-		hub = notify.New(notify.Options{})
-	}
-	pollInterval := opts.NotifyPollInterval
-	if pollInterval <= 0 {
-		pollInterval = defaultNotifyPollInterval
-	}
+	logger := resolvePresenterLogger(opts.Logger)
+	now := resolvePresenterClock(opts.Now)
+	hub := resolvePresenterHub(opts.Hub)
 
 	p := &Presenter{
 		db:                 opts.DB,
 		logger:             logger,
 		version:            opts.Version,
 		dbPath:             opts.DBPath,
-		startedAt:          startedAt,
-		schemaVersion:      schemaVersion,
+		startedAt:          resolvePresenterStartedAt(opts.StartedAt, now),
+		schemaVersion:      resolvePresenterSchemaVersion(opts.SchemaVersion),
 		nowFn:              now,
 		frontend:           opts.FrontendFS,
 		hub:                hub,
 		subs:               newSubscriptionManager(hub),
-		notifyPollInterval: pollInterval,
+		notifyPollInterval: resolveNotifyPollInterval(opts.NotifyPollInterval),
 		sseKeepalive:       defaultSSEKeepalive,
 		notifyNow:          now,
 		statsCoalesce:      make(map[string]time.Time),
@@ -328,69 +345,4 @@ func (p *Presenter) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, r, p.logger, http.StatusNotFound,
 		CodeNotFound, "endpoint not yet implemented in this chunk",
 		map[string]any{"path": r.URL.Path, "method": r.Method, "chunk": "13+"})
-}
-
-// CheckSchema verifies the SQLite store's schema_meta.version row
-// matches expectedVersion. Returns ErrSchemaMismatch wrapped with
-// context when the row is absent or carries a different version. The
-// caller (the serve binary's main) surfaces the error with an exit
-// code so the operator sees a clear failure.
-func CheckSchema(ctx context.Context, db *sql.DB, expectedVersion int) error {
-	if db == nil {
-		return errors.New("presenter.CheckSchema: nil db")
-	}
-	var raw string
-	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='version'`).Scan(&raw); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return errors.Join(ErrSchemaMismatch, errors.New("schema_meta.version row missing"))
-		}
-		return errors.Join(ErrSchemaMismatch, err)
-	}
-	var v int
-	for _, c := range raw {
-		if c < '0' || c > '9' {
-			return errors.Join(ErrSchemaMismatch, errors.New("schema_meta.version is non-numeric"))
-		}
-		v = v*10 + int(c-'0')
-	}
-	if v != expectedVersion {
-		return errors.Join(ErrSchemaMismatch, &schemaVersionError{got: v, want: expectedVersion})
-	}
-	return nil
-}
-
-// schemaVersionError carries the structured numbers behind
-// ErrSchemaMismatch so the operator-facing log line shows both sides
-// of the mismatch.
-type schemaVersionError struct {
-	got, want int
-}
-
-func (e *schemaVersionError) Error() string {
-	return "schema_meta.version is " + itoa(e.got) + ", want " + itoa(e.want)
-}
-
-// itoa is a tiny stand-in for strconv.Itoa so the file does not pull in
-// strconv solely for two error strings.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

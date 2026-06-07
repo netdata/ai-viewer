@@ -58,13 +58,35 @@ func (p *Presenter) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stream, ok := p.attachEventStream(w, r, sub)
+	if !ok {
+		return
+	}
+	// AttachOK: we own the stream. Detach (arms the retention timer) only on
+	// this success path.
+	defer p.hub.Detach(sub)
+
+	if !p.startEventStream(r.Context(), w, sub, stream) {
+		return
+	}
+	p.streamLoop(r.Context(), w, stream.rc, sub, stream.ch)
+}
+
+type eventStream struct {
+	rc      *http.ResponseController
+	ch      <-chan notify.Event
+	replay  []notify.Event
+	covered bool
+}
+
+func (p *Presenter) attachEventStream(w http.ResponseWriter, r *http.Request, sub string) (eventStream, bool) {
 	rc := http.NewResponseController(w)
 	if _, okFlush := w.(http.Flusher); !okFlush {
 		// Without a Flusher we cannot stream; this is a server-side
 		// misconfiguration, not a client error.
 		writeJSONError(w, r, p.logger, http.StatusInternalServerError,
 			CodeInternalError, "streaming unsupported", nil)
-		return
+		return eventStream{}, false
 	}
 
 	ch, replay, covered, status := p.hub.Attach(sub, r.Header.Get("Last-Event-ID"))
@@ -72,36 +94,47 @@ func (p *Presenter) handleEvents(w http.ResponseWriter, r *http.Request) {
 	case notify.AttachUnknown:
 		writeJSONError(w, r, p.logger, http.StatusNotFound,
 			CodeNotFound, "subscription not found", map[string]any{"sub": sub})
-		return
+		return eventStream{}, false
 	case notify.AttachBusy:
 		writeJSONError(w, r, p.logger, http.StatusConflict,
 			CodeConflict, "subscription already has an active stream", map[string]any{"sub": sub})
-		return
+		return eventStream{}, false
 	}
-	// AttachOK: we own the stream. Detach (arms the retention timer) only on
-	// this success path.
-	defer p.hub.Detach(sub)
+	return eventStream{rc: rc, ch: ch, replay: replay, covered: covered}, true
+}
 
+func (p *Presenter) startEventStream(ctx context.Context, w http.ResponseWriter, sub string, stream eventStream) bool {
 	writeSSEHeaders(w)
-	if err := rc.Flush(); err != nil {
-		p.logger.DebugContext(r.Context(), "sse header flush failed", "error", err, "sub", sub)
-		return
+	if err := stream.rc.Flush(); err != nil {
+		p.logger.DebugContext(ctx, "sse header flush failed", "error", err, "sub", sub)
+		return false
 	}
-	clearWriteDeadline(rc)
+	clearWriteDeadline(stream.rc)
 
-	if !covered {
-		if err := writeResync(w, rc); err != nil {
-			p.logger.DebugContext(r.Context(), "sse resync write failed", "error", err, "sub", sub)
-			return
+	return p.replayEventStream(ctx, w, sub, stream)
+}
+
+func (p *Presenter) replayEventStream(ctx context.Context, w http.ResponseWriter, sub string, stream eventStream) bool {
+	if !stream.covered {
+		if !p.writeInitialResync(ctx, w, sub, stream.rc) {
+			return false
 		}
 	}
-	for _, ev := range replay {
-		if err := p.writeEvent(w, rc, sub, ev); err != nil {
-			p.logger.DebugContext(r.Context(), "sse replay write failed", "error", err, "sub", sub)
-			return
+	for _, ev := range stream.replay {
+		if err := p.writeEvent(w, stream.rc, sub, ev); err != nil {
+			p.logger.DebugContext(ctx, "sse replay write failed", "error", err, "sub", sub)
+			return false
 		}
 	}
-	p.streamLoop(r.Context(), w, rc, sub, ch)
+	return true
+}
+
+func (p *Presenter) writeInitialResync(ctx context.Context, w http.ResponseWriter, sub string, rc *http.ResponseController) bool {
+	if err := writeResync(w, rc); err != nil {
+		p.logger.DebugContext(ctx, "sse resync write failed", "error", err, "sub", sub)
+		return false
+	}
+	return true
 }
 
 // handleEventsHead answers HEAD /api/events?sub=<id> with the SSE headers

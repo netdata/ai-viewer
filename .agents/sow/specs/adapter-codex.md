@@ -516,7 +516,7 @@ Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1
 
 17. **Cwd identifies the project**: `session_meta.cwd` is the de facto project identifier. UI can group sessions by cwd.
 
-18. **`git` block with sensitive `repository_url`**: real files contain `git@github.com:...` URLs. Fixtures MUST sanitize to `git@github.com:example/example.git`.
+18. **`git` block with sensitive `repository_url`**: real files can contain hosted-git SSH URLs with account/repository identity. Fixtures MUST sanitize to a neutral example repository URL that does not resemble a real account identity.
 
 ## Canonical Model Gaps
 

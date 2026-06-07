@@ -266,8 +266,9 @@ func TestHub_ConcurrentDeliverReplayMonotonic(t *testing.T) {
 
 	s := subFor(h, "s1")
 	h.mu.Lock()
-	ids := make([]uint64, 0, len(s.replay))
-	for _, ev := range s.replay {
+	ordered := s.ring.ordered()
+	ids := make([]uint64, 0, len(ordered))
+	for _, ev := range ordered {
 		v, ok := parseID(ev.ID)
 		if !ok {
 			h.mu.Unlock()

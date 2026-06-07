@@ -219,8 +219,9 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
    author emails + names, unioned with `git config user.email`/`user.name`; home
    stems from each email local-part, each name, and `$HOME` — so **no operator
    literal is committed in the scanner**. Synthetic placeholder commit identities
-   used only to avoid personal commit metadata (currently the exact values `user`
-   and `user@example.invalid`, matched case-insensitively) are ignored while
+   used only to avoid personal commit metadata (currently exact neutral `user`
+   placeholders plus the matching placeholder email form, matched
+   case-insensitively) are ignored while
    deriving the Rule-1 ban-list. The exact neutral home stem `user` is also
    ignored when it comes only from `$HOME`, so committed placeholder paths such
    as `/home/user/...` stay portable across generic dev VMs. Filtering is

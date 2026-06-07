@@ -2,11 +2,11 @@ package presenter
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Full-text search endpoint (GET /api/search, rest-api.md §GET /api/search).
@@ -78,6 +78,13 @@ type searchResponse struct {
 	NextCursor  string         `json:"next_cursor,omitempty"`
 }
 
+type searchRequest struct {
+	match  string
+	filter sessionFilter
+	limit  int
+	offset int64
+}
+
 // handleSearch answers GET /api/search: BM25-ranked full-text matches over ops
 // and logs, filtered by the same parseSessionFilter dimensions as the list
 // endpoints. Mirrors handleStats's guard → parse → withQueryTimeout → query →
@@ -88,31 +95,7 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
 		return
 	}
-	q := r.URL.Query()
-	match, err := parseSearchQuery(q.Get("q"))
-	if err != nil {
-		p.writeBadFilter(w, r, err)
-		return
-	}
-	// Search OWNS q, limit, and cursor; the shared parseSessionFilter must not
-	// see them. q here is the FTS5 MATCH text, NOT the session list's
-	// agent_name LIKE filter (which parseSessionFilter would otherwise apply,
-	// silently excluding every row). limit/cursor have search-specific
-	// semantics (clamp, not 400; offset cursor, not keyset), so they are parsed
-	// separately below. The remaining params (from/to/agents/models/tools/
-	// sources/status) flow through parseSessionFilter unchanged.
-	f, err := parseSessionFilter(sessionFilterValues(q), p.now())
-	if err != nil {
-		p.writeBadFilter(w, r, err)
-		return
-	}
-	// Search spans ALL sessions (root + sub-agent); the group distinction is a
-	// session-LIST concern and does not apply here. Forcing group=all before the
-	// cursor/fingerprint is computed keeps an op/log in a sub-agent session
-	// reachable (rest-api.md §GET /api/search) and the cursor self-consistent.
-	f.forceAllSessions()
-	limit := parseSearchLimit(q.Get("limit"))
-	offset, err := parseSearchCursor(q.Get("cursor"), match, f)
+	req, err := parseSearchRequest(r.URL.Query(), p.now())
 	if err != nil {
 		p.writeBadFilter(w, r, err)
 		return
@@ -121,32 +104,73 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
 
-	resp := searchResponse{Ops: []searchOpRow{}, Logs: []searchLogRow{}}
-
-	var opsHasMore, logsHasMore bool
-	if resp.Ops, opsHasMore, err = p.searchOps(ctx, f, match, limit, offset); err != nil {
-		p.writeDBError(ctx, w, r, "search.ops", err)
+	resp, op, err := p.loadSearchResponse(ctx, req)
+	if err != nil {
+		p.writeDBError(ctx, w, r, op, err)
 		return
 	}
+	writeJSON(w, r, p.logger, resp)
+}
+
+func parseSearchRequest(v url.Values, now time.Time) (searchRequest, error) {
+	match, err := parseSearchQuery(v.Get("q"))
+	if err != nil {
+		return searchRequest{}, err
+	}
+
+	// Search OWNS q, limit, and cursor; the shared parseSessionFilter must not
+	// see them. q here is the FTS5 MATCH text, NOT the session list's
+	// agent_name LIKE filter (which parseSessionFilter would otherwise apply,
+	// silently excluding every row). limit/cursor have search-specific
+	// semantics (clamp, not 400; offset cursor, not keyset), so they are parsed
+	// separately below. The remaining params (from/to/agents/models/tools/
+	// sources/status) flow through parseSessionFilter unchanged.
+	filter, err := parseSessionFilter(sessionFilterValues(v), now)
+	if err != nil {
+		return searchRequest{}, err
+	}
+
+	// Search spans ALL sessions (root + sub-agent); the group distinction is a
+	// session-LIST concern and does not apply here. Forcing group=all before the
+	// cursor/fingerprint is computed keeps an op/log in a sub-agent session
+	// reachable (rest-api.md §GET /api/search) and the cursor self-consistent.
+	filter.forceAllSessions()
+
+	limit := parseSearchLimit(v.Get("limit"))
+	offset, err := parseSearchCursor(v.Get("cursor"), match, filter)
+	if err != nil {
+		return searchRequest{}, err
+	}
+	return searchRequest{match: match, filter: filter, limit: limit, offset: offset}, nil
+}
+
+func (p *Presenter) loadSearchResponse(ctx context.Context, req searchRequest) (searchResponse, string, error) {
+	resp := searchResponse{Ops: []searchOpRow{}, Logs: []searchLogRow{}}
+
+	ops, opsHasMore, err := p.searchOps(ctx, req.filter, req.match, req.limit, req.offset)
+	if err != nil {
+		return searchResponse{}, "search.ops", err
+	}
+	resp.Ops = ops
 
 	// logs_indexed reflects the per-source fts5_index_logs flag over the
 	// in-scope source set; when false the fts_logs query is skipped entirely
 	// (so logsHasMore stays false — there is nothing to paginate on that side).
-	indexed, err := p.logsIndexedInScope(ctx, f)
+	indexed, err := p.logsIndexedInScope(ctx, req.filter)
 	if err != nil {
-		p.writeDBError(ctx, w, r, "search.logs_indexed", err)
-		return
+		return searchResponse{}, "search.logs_indexed", err
 	}
 	resp.LogsIndexed = indexed
+
+	var logsHasMore bool
 	if indexed {
-		if resp.Logs, logsHasMore, err = p.searchLogs(ctx, f, match, limit, offset); err != nil {
-			p.writeDBError(ctx, w, r, "search.logs", err)
-			return
+		resp.Logs, logsHasMore, err = p.searchLogs(ctx, req.filter, req.match, req.limit, req.offset)
+		if err != nil {
+			return searchResponse{}, "search.logs", err
 		}
 	}
-
-	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore, limit, offset, match, f)
-	writeJSON(w, r, p.logger, resp)
+	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore, req.limit, req.offset, req.match, req.filter)
+	return resp, "", nil
 }
 
 // sessionFilterValues returns a shallow copy of v with the search-owned keys
@@ -330,98 +354,4 @@ LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is t
 		out = out[:limit]
 	}
 	return out, hasMore, nil
-}
-
-// searchLogs runs the fts_logs MATCH joined back to log_entries⋈sessions⋈sources,
-// applying the parseSessionFilter constraints. Logs are session-scoped (the
-// ingester's only fts_logs writer sets session_id), so the join chain is
-// fts_logs.log_id → log_entries.id → sessions.id → sources.id; the filter binds
-// to the session/source exactly as searchOps does. The `src.fts5_index_logs = 1`
-// predicate enforces the per-source log opt-out at QUERY time against the LIVE
-// flag: the flag can be flipped true→false after a source's logs were indexed,
-// and incremental ingest then stops indexing NEW logs but leaves the already-
-// written fts_logs rows in place (they survive until a rollups-backfill rebuild —
-// data-model.md §Full-text search). Filtering on the live flag here makes those
-// stale rows harmless, so a disabled source's logs never surface even when an
-// enabled source is also in scope (the logs_indexed gate alone only decides
-// whether to run this query at all). MATCH + all filter values are `?`-bound.
-// ORDER BY rank = best first; the unique fts_logs.log_id tie-breaker orders rows
-// WITHIN an equal-rank group so the total order is deterministic and offset
-// pagination stays stable across the page-1 and offset queries (equal-bm25 rows
-// are common). The cursor is fully drained.
-func (p *Presenter) searchLogs(ctx context.Context, f sessionFilter, match string, limit int, offset int64) ([]searchLogRow, bool, error) {
-	where, whereArgs := f.whereClause("s")
-	// The only concatenated fragment is the parameterized whereClause
-	// (filters.go); the MATCH value, filter values, limit, and offset are all
-	// ?-bound — same convention as searchOps / stats_rollup.go. limit+1 is the
-	// PEEK (see searchOps): the extra row, when present, is trimmed and reported
-	// via hasMore so next_cursor is emitted only when a further row exists.
-	q := `
-SELECT fts_logs.log_id, fts_logs.session_id, fts_logs.op_id, fts_logs.severity, fts_logs.ts,
-       snippet(fts_logs, -1, '[', ']', '…', 10) AS snip, bm25(fts_logs) AS rank
-FROM fts_logs
-JOIN log_entries le ON le.id = fts_logs.log_id
-JOIN sessions s ON le.session_id = s.id
-JOIN sources src ON s.source_id = src.id
-WHERE fts_logs MATCH ? AND src.fts5_index_logs = 1 AND ` + where + `
-ORDER BY rank, fts_logs.log_id
-LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is the parameterized whereClause (filters.go)
-	args := make([]any, 0, len(whereArgs)+3)
-	args = append(args, match)
-	args = append(args, whereArgs...)
-	args = append(args, limit+1, offset)
-
-	rows, err := p.db.QueryContext(ctx, q, args...) // #nosec G201 G701 -- static SQL + ?-placeholders; values bound via args
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	out := make([]searchLogRow, 0, limit+1)
-	for rows.Next() {
-		var (
-			row  searchLogRow
-			opID sql.NullString
-		)
-		if err := rows.Scan(&row.LogID, &row.SessionID, &opID, &row.Severity, &row.TS, &row.Snippet, &row.Rank); err != nil {
-			return nil, false, err
-		}
-		if opID.Valid {
-			v := opID.String
-			row.OpID = &v
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, err
-	}
-	hasMore := len(out) > limit
-	if hasMore {
-		out = out[:limit]
-	}
-	return out, hasMore, nil
-}
-
-// logsIndexedInScope reports whether AT LEAST ONE in-scope source has
-// fts5_index_logs=1 (rest-api.md §GET /api/search §logs_indexed). In-scope = the
-// ?sources set when present, else ALL sources. This is the exact set whose logs
-// the search could return, so the flag lets the client distinguish "no log
-// matches" from "logs not indexed". When no source is in scope (an empty store,
-// or a ?sources= naming only unknown ids) it is false. The `sources` values are
-// `?`-bound.
-func (p *Presenter) logsIndexedInScope(ctx context.Context, f sessionFilter) (bool, error) {
-	q := `SELECT EXISTS (SELECT 1 FROM sources WHERE fts5_index_logs = 1`
-	var args []any
-	if c, a := inClause("id", f.source); c != "" {
-		q += " AND " + c
-		args = append(args, a...)
-	}
-	q += ")"
-	var indexed bool
-	// q is a static literal plus the parameterized inClause fragment
-	// (filters.go: "id IN (?,?)"); the sources values are ?-bound via args.
-	if err := p.db.QueryRowContext(ctx, q, args...).Scan(&indexed); err != nil { // #nosec G201 G701 -- static SQL + ?-bound args only
-		return false, err
-	}
-	return indexed, nil
 }
