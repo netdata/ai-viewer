@@ -50,6 +50,16 @@ type mutableClock struct{ now int64 }
 
 func (c *mutableClock) Now() int64 { return c.now }
 
+type notifyRollbackFixture struct {
+	db                *sql.DB
+	wr                *writer
+	w                 *worker
+	hourH             int64
+	day0              int64
+	baselineNotify    int64
+	baselineStatsRows int64
+}
+
 // flushBatchReuse runs one worker.flush over batch against db reusing the GIVEN
 // writer (so its carry-forward dirtyRollupBuckets survive across calls), with the
 // writer's now driving the open-bucket cutoff. Mirrors worker.run's per-batch
@@ -296,6 +306,121 @@ func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
 	}
 	if wr.hasPendingRollupBuckets() {
 		t.Fatal("carried bucket still pending after a COMMITTED materialization + promote — must be removed")
+	}
+}
+
+// TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack pins the worker-level
+// idle-refresh transaction boundary. If refreshRollupsOnly materializes carried
+// buckets but notify insertion fails before commit, the rollup rows and notify
+// rows must roll back together, and the carried buckets must survive resetBatch
+// so the next idle refresh can retry them.
+func TestRefreshRollups_RefreshOnlyNotifyErrorRollsBack(t *testing.T) {
+	const src = "claude_code:/loc"
+	const format = "claude_code"
+
+	f := newNotifyRollbackFixture(t, src, format)
+	ctx := context.Background()
+	createNotifyAbortTrigger(t, ctx, f.db)
+	if err := f.w.refreshRollupsOnly(ctx, f.wr); err == nil {
+		t.Fatal("refreshRollupsOnly succeeded despite forced notify failure")
+	}
+
+	assertFailedNotifyRefreshRolledBack(t, f)
+	dropNotifyAbortTrigger(t, ctx, f.db)
+	if err := f.w.refreshRollupsOnly(ctx, f.wr); err != nil {
+		t.Fatalf("retry refreshRollupsOnly: %v", err)
+	}
+	f.wr.resetBatch()
+
+	assertRollupRowCount(t, f.db, "rollup_hourly", f.hourH, 1, "rollup_hourly after retry")
+	assertRollupRowCount(t, f.db, "rollup_daily", f.day0, 1, "rollup_daily after retry")
+	wantStats := f.baselineStatsRows + 1
+	if got := scanInt(t, f.db, `SELECT COUNT(*) FROM notify WHERE kind='stats_invalidated'`); got != wantStats {
+		t.Fatalf("stats_invalidated rows after retry = %d, want %d", got, wantStats)
+	}
+	if f.wr.hasPendingRollupBuckets() {
+		t.Fatal("carried buckets still pending after successful retry")
+	}
+}
+
+func newNotifyRollbackFixture(t *testing.T, src, format string) notifyRollbackFixture {
+	t.Helper()
+	hourH := ts(0, 10, 0)
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+	clk := &mutableClock{now: ts(0, 10, 10)}
+	wr := newWriter(src, format, "/loc", NopPricer{})
+	wr.now = clk.Now
+
+	batch := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", hourH, 1),
+		canonical.TurnStartedEvent{
+			EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: hourH},
+			SessionNativeID: "sess-1", Seq: 1,
+		},
+	}
+	batch = append(batch, llmOpEvents(src, "sess-1", 1, 1, hourH, ts(0, 10, 30), "m", "p", 1, 1, 0, false)...)
+	flushBatchReuse(t, db, wr, src, format, batch)
+	if !wr.hasPendingRollupBuckets() {
+		t.Fatal("premise broken: open hour/day must be carried after the first flush")
+	}
+	clk.now = ts(1, 0, 1)
+
+	return notifyRollbackFixture{
+		db: db, wr: wr, w: newRefreshOnlyTestWorker(db, src, format),
+		hourH: hourH, day0: ts(0, 0, 0),
+		baselineNotify:    scanInt(t, db, `SELECT COUNT(*) FROM notify`),
+		baselineStatsRows: scanInt(t, db, `SELECT COUNT(*) FROM notify WHERE kind='stats_invalidated'`),
+	}
+}
+
+func newRefreshOnlyTestWorker(db *sql.DB, src, format string) *worker {
+	return &worker{
+		sourceID:     src,
+		sourceFormat: format,
+		location:     "/loc",
+		db:           db,
+		hwm:          newHWMCache(),
+		pricer:       NopPricer{},
+		logger:       silentLogger(),
+		batchSize:    defaultBatchSize,
+		batchEvery:   defaultBatchInterval,
+	}
+}
+
+func createNotifyAbortTrigger(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+CREATE TRIGGER notify_stats_abort
+BEFORE INSERT ON notify
+WHEN NEW.kind = 'stats_invalidated'
+BEGIN
+	SELECT RAISE(ABORT, 'forced notify failure');
+END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+}
+
+func dropNotifyAbortTrigger(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER notify_stats_abort`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+}
+
+func assertFailedNotifyRefreshRolledBack(t *testing.T, f notifyRollbackFixture) {
+	t.Helper()
+	assertRollupRowCount(t, f.db, "rollup_hourly", f.hourH, 0, "rollup_hourly after failed idle refresh")
+	assertRollupRowCount(t, f.db, "rollup_daily", f.day0, 0, "rollup_daily after failed idle refresh")
+	if got := scanInt(t, f.db, `SELECT COUNT(*) FROM notify`); got != f.baselineNotify {
+		t.Fatalf("notify rows after failed idle refresh = %d, want %d", got, f.baselineNotify)
+	}
+	if !f.wr.hasPendingRollupBuckets() {
+		t.Fatal("carried buckets dropped before resetBatch after failed idle refresh")
+	}
+	f.wr.resetBatch()
+	if !f.wr.hasPendingRollupBuckets() {
+		t.Fatal("carried buckets dropped after failed idle refresh resetBatch; retry would be lost")
 	}
 }
 

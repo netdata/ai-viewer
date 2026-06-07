@@ -226,6 +226,50 @@ func TestEmitNotify_SourceStatusChangedOnParseError(t *testing.T) {
 	}
 }
 
+// TestEmitNotify_MaterializedRollupInvalidatesStatsOnce pins the idle
+// refresh-only signal: a carried bucket materialized by refreshRollupsOnly has
+// no affected sessions and no rollup input touched by the batch, but it still
+// emits exactly one stats_invalidated row.
+func TestEmitNotify_MaterializedRollupInvalidatesStatsOnce(t *testing.T) {
+	t.Parallel()
+	const commitTS = int64(8_000_000)
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	w := newWriter("claude_code:/loc", "claude_code", "/loc", NopPricer{})
+	w.rollupMaterializedThisRefresh = true
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := w.emitNotify(ctx, tx, commitTS); err != nil {
+		t.Fatalf("emitNotify: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	assertSingleStatsInvalidatedNotify(t, readNotify(t, db), commitTS)
+}
+
+func assertSingleStatsInvalidatedNotify(t *testing.T, rows []notifyRow, commitTS int64) {
+	t.Helper()
+	if len(rows) != 1 {
+		t.Fatalf("notify rows = %d, want exactly 1: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.kind != "stats_invalidated" {
+		t.Fatalf("notify kind = %q, want stats_invalidated", row.kind)
+	}
+	if row.tsUS != commitTS {
+		t.Fatalf("notify ts_us = %d, want %d", row.tsUS, commitTS)
+	}
+	if row.sess != "" || row.root != "" || row.source != "" {
+		t.Fatalf("stats_invalidated carried scoped IDs: %+v", row)
+	}
+}
+
 // TestEmitNotify_RollbackLeavesNoRows is the critical atomicity test:
 // notify rows live inside the batch tx, so a rollback must leave the
 // notify table empty.

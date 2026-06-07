@@ -121,19 +121,37 @@ Threshold: zero crashes per run. A seed-corpus crash blocks merge.
 ### Go — Benchmarks
 
 ```bash
-scripts/check-bench.sh             # count=6, benchstat vs bench/baseline.txt, > 20% sec/op gate
+scripts/check-bench.sh             # count=6, -cpu=1, benchstat vs bench/baseline.txt, > 20% sec/op gate
 scripts/test/check-bench-test.sh   # hardware-independent self-test of the gate's benchstat parser
 ```
 
 Marked benchmarks (`func BenchmarkXxx`) exist for the 11 performance-critical paths: ai-agent v2 adapter `Scan`, ai-agent v2 adapter `Tail`, claude-code adapter `Scan`, claude-code adapter `Tail`, Codex adapter `Scan`, Codex adapter `Tail`, Opencode adapter `Scan`, Opencode adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
 
-Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries benchmark-code provenance: an implementing commit SHA when available, or a same-commit `git blame` note when benchmark code and baseline land together, plus `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update).
+Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). In real local/workstation mode, the same benchmark name must regress on the script's second benchmark attempt before the gate exits red; a first-run-only regression, or disjoint first/second-attempt regression sets, is reported as local measurement noise and exits green. The retry is not a threshold change: both attempts compare against the same checked-in `bench/baseline.txt` with the same `-count=6`, `-cpu=1`, and parser, while compare-file mode remains single-pass so the self-test still proves a real >20% regression exits non-zero. The script runs the serial hot-path suite with `go test -run=^$ -bench=. -benchmem -count=6 -cpu=1`; do not remove `-cpu=1` unless a later explicit SOW proves the suite should measure multi-P scheduler behavior. Real benchmark runs emit compact diagnostics (Go version, effective `GOMAXPROCS`, benchmark CPU setting, package list, baseline/current paths, and load averages when available) so red local runs are auditable without exposing process command lines. It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries benchmark-code provenance: an implementing commit SHA when available, or a same-commit `git blame` note when benchmark code and baseline land together, plus the exact command and `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update); SOW-0058 owns the `-cpu=1` baseline refresh.
+
+Fail-closed benchmark-gate behavior is part of the contract: missing, empty, or
+benchmarkless baseline, missing/empty current output, failed `go test`, failed
+`benchstat`, dropped/renamed baseline benchmark, and disjoint benchmark config
+groups all exit non-zero. The self-test must dynamically exercise both
+compare-file parser behavior and real-mode retry/error behavior with hermetic
+fakes, including disjoint first/second-attempt regression sets; static string
+assertions alone are not enough for the retry path.
+
+CI's `Require benchmarks` compile-smoke presence check must normalize both
+suffixed Go benchmark rows (`BenchmarkName-N`) and unsuffixed `-cpu=1` rows
+(`BenchmarkName`) from `bench/baseline.txt`, then compare those logical names
+against the implemented `func BenchmarkXxx` set. The benchmark self-test must
+assert this parser contract, because a workstation baseline refresh can
+otherwise pass local gates and fail only in CI.
 
 Gated benchmarks must isolate the intended hot path from helper-goroutine
 scheduler noise. For serial production paths (for example SSE `Hub.Deliver`
 fanout), use deterministic buffering/pre-seeding in the fixture instead of
 background helper goroutines inside the timed environment; otherwise the local
 workstation gate can fail on unchanged code under ordinary desktop/VM load.
+For very small serial hot paths, a benchmark operation may run a deterministic
+fixed batch to amortize timer/scheduler noise, but it must keep reporting the
+per-hot-path-unit metric (for example deliveries/sec) for human interpretation.
 
 ### Go — Race + Stress
 
