@@ -650,14 +650,14 @@ jobs:
 
       - name: Download Go coverage
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: go-coverage-${{ github.run_id }}
           path: .codacy-coverage/go
 
       - name: Download frontend coverage
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: frontend-coverage-${{ github.run_id }}
           path: .codacy-coverage/frontend
