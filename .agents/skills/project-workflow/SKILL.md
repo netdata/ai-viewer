@@ -14,8 +14,8 @@ This skill is the assistant's runtime checklist. The contract lives in `AGENTS.m
 | Role | Model | Job |
 |---|---|---|
 | **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. Does not write production code. |
-| **Implementer** | `minimax` (fresh subagent) | code + tests + specs as delegated. The single producer of code. |
-| **Reviewers** | `glm`, `mimo`, `minimax` (fresh-context, never the implementer instance), `qwen`, `deepseek` (5 in parallel) | vote `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
+| **Implementer** | `minimax` (default `llm-netdata-cloud/minimax-m3-coder`; fresh subagent) | code + tests + specs as delegated. The single producer of code. |
+| **Reviewers** | `glm`, `mimo`, `minimax` (fresh-context, never the implementer instance; `llm-netdata-cloud/minimax-m3-coder`), `qwen` (currently `llm-netdata-cloud/qwen3.7-plus`), `deepseek` (5 in parallel) | vote `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
 
 **Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The CTO is the only role that runs reviewers. The CTO is the only role that verifies reviewer claims. See `AGENTS.md` for the full contract and `.agents/skills/project-second-opinions/SKILL.md` for reviewer invocation.
 

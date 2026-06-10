@@ -56,7 +56,7 @@ All commands are documented in `.agents/skills/project-second-opinions/SKILL.md`
 | `glm` | `timeout 1800 opencode run -m "llm-netdata-cloud/glm-5.1" --agent code-reviewer "PROMPT"` |
 | `mimo` | `timeout 1800 opencode run -m "llm-netdata-cloud/mimo-v2.5-pro" --agent code-reviewer "PROMPT"` |
 | `minimax` (fresh-context review pass; **never** the implementer instance) | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m3-coder" --agent code-reviewer "PROMPT"` |
-| `qwen` | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.6-plus" --agent code-reviewer "PROMPT"` |
+| `qwen` | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.7-plus" --agent code-reviewer "PROMPT"` |
 | `deepseek` | `timeout 1800 opencode run -m "llm-netdata-cloud/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
 
 ### Ad-hoc (off the production loop; CTO's discretion)
@@ -93,10 +93,14 @@ Therefore: **never narrow the scope between repeated reviews.** Use the same pro
 
 ## Recording Reviews
 
-For every reviewer round triggered during a SOW:
+For every reviewer round during a SOW, record in the SOW under `## Reviews`:
 
-- Record the prompt used (in the SOW under `## Reviews`).
-- Record the reviewer's findings (paraphrased; full output too noisy for a SOW).
+- Reviewer attribution and vote (`PRODUCTION GRADE` / `NEEDS WORK`).
+- The CTO's claim-verification verdict for each finding.
+- The fix applied (or "rejected — false positive" with evidence).
+- The final PRODUCTION GRADE count (e.g. `5/5 PG after fix`).
+
+Do not record full prompts or raw reviewer output in the SOW — those are technical detail. The SOW `## Reviews` is an audit trail of outcomes and verdicts, not a technical dump.
 - Record what was changed in response.
 
 This becomes part of the SOW's audit trail and helps future SOWs learn which reviewers catch which classes of issues.

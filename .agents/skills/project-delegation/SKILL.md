@@ -14,7 +14,7 @@ The master assistant (CTO) is the **orchestrator**, **QA lead**, **integrator**,
 Per the Production-Grade Loop (see `AGENTS.md`), the CTO delegates all code production to **`minimax`** — the current stable minimax variant on litellm (default `llm-netdata-cloud/minimax-m3-coder`). The CTO is the only role that knows the project context; the implementer is a fresh-context subagent that receives a self-contained prompt (spec excerpt, failing tests, constraints, deliverable).
 
 - The implementer (`minimax`) is **not** the same instance as the reviewer-minimax pass. Two different invocations, two different contexts, two different jobs. The implementer writes code; the reviewer reads code.
-- If `minimax` is down/degraded, the CTO rotates the implementer role to the next-most-capable member of the reviewer set (default order: `qwen` → `mimo` → `deepseek` → `glm`) and logs the rotation in the SOW under `## Implementer Rotation`.
+- If `minimax` is down/degraded, the CTO rotates the implementer role to the next-most-capable member of the reviewer set (default order: `qwen` → `mimo` → `deepseek` → `glm`). The rotated reviewer is **removed from the 5-reviewer cycle** for that PR (so the implementer is not also reviewing their own work); the 5-reviewer set is filled by substituting a reviewer from the ad-hoc set (`codex`, `gemini`, `claude`, `kimi`) chosen by the CTO. The CTO logs the rotation AND the substitution in the SOW under `## Implementer Rotation`.
 - The CTO pins to the current stable model at time of work, per the project's "always pin to latest stable" policy. Major-version upgrades require a brief SOW; minor/patch upgrades are autonomous.
 
 ### Why this rule exists

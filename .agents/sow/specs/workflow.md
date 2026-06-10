@@ -109,7 +109,7 @@ Before reporting to the operator:
 - Specs reflect new behavior — same commit as code.
 - Tests exist, pass, race-clean, coverage thresholds met.
 - All quality gates green locally.
-- External review converged for non-trivial work.
+- External review converged for non-trivial work (5/5 PRODUCTION GRADE, or only P3 noise with documented disposition).
 - No new TODO/FIXME without a tracked SOW in `pending/`.
 - `AGENTS.md`, skills, specs updated if a new pattern or gotcha emerged.
 - No half-built features.

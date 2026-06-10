@@ -32,7 +32,7 @@ The CTO runs **exactly these five reviewers in parallel** on every non-trivial c
 | 1 | `glm` | `timeout 1800 opencode run -m "llm-netdata-cloud/glm-5.1" --agent code-reviewer "PROMPT"` |
 | 2 | `mimo` | `timeout 1800 opencode run -m "llm-netdata-cloud/mimo-v2.5-pro" --agent code-reviewer "PROMPT"` |
 | 3 | `minimax` (fresh-context review pass; **never** the implementer instance) | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m3-coder" --agent code-reviewer "PROMPT"` |
-| 4 | `qwen` | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.6-plus" --agent code-reviewer "PROMPT"` |
+| 4 | `qwen` | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.7-plus" --agent code-reviewer "PROMPT"` |
 | 5 | `deepseek` | `timeout 1800 opencode run -m "llm-netdata-cloud/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
 
 All five run in parallel (one Bash invocation each, batched in a single assistant turn). Foreground, with `timeout 1800`. The CTO is the only role that runs them.
@@ -52,8 +52,9 @@ The CTO does not merge until 5/5 PRODUCTION GRADE, **or** until only P3 noise re
 
 - **5/5 PRODUCTION GRADE, gates green, CI green** → CTO merges.
 - **Any P0/P1 NEEDS WORK** → fix, push, re-trigger full 5-reviewer cycle. Iterate.
-- **P2/P3 NEEDS WORK** → fix in this PR; merge when 5/5 PG or only P3 noise remains.
-- **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a recommendation. Do not loop forever.
+- **P2 NEEDS WORK** → fix in the same PR, re-trigger the full 5-reviewer cycle; merge only when 5/5 PG or only P3 noise remains.
+- **P3 NEEDS WORK** → fix in the same PR, document in SOW `## Reviews`, merge with note when gates green and CI green.
+- **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a business-level recommendation. Do not loop forever.
 
 ### Claim verification (CRITICAL — CTO's job)
 
@@ -99,7 +100,7 @@ The Production-Grade Loop supersedes the previous default set. The 5 reviewers a
 | claude (Anthropic) (ad-hoc only) | `CLAUDECODE="" timeout 1800 claude -p "PROMPT"` |
 | kimi (ad-hoc only) | `timeout 1800 opencode run -m "llm-netdata-cloud/kimi-k2.6" --agent code-reviewer "PROMPT"` |
 
-The five production reviewers (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) are reserved for the production PR cycle; their production-loop run is mandatory regardless of any ad-hoc use. For ad-hoc SOW/spec pre-review the CTO may still invoke any of the five if judged beneficial, but the production-loop run is independent.
+The five production reviewers (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) run mandatorily on every non-trivial PR. For ad-hoc SOW/spec pre-review, the CTO may invoke any reviewer (including the five production reviewers) at their discretion. Ad-hoc rounds are independent of the production-loop run. If a production reviewer is unavailable for a cycle (litellm error, model deprecated, timeout), the CTO retries once, then substitutes from the ad-hoc set (`codex`, `gemini`, `claude`, `kimi`) and logs the substitution in the SOW `## Reviews` with the reason. Two or more simultaneous unavailability → operator surface as a hard stall.
 
 `cd` into the project root before running. Use relative paths (some reviewers stumble on arbitrary absolute paths).
 

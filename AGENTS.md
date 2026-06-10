@@ -35,7 +35,7 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
 
-11. **The Production-Grade Loop is the operating model.** All production code is produced by `minimax` (the implementer) and reviewed in parallel by `glm`, `mimo`, `minimax` (fresh-context review pass — never the implementer instance), `qwen`, `deepseek` (five reviewers). The CTO verifies every reviewer claim, drives iteration, and merges only on `PRODUCTION GRADE` from all five (or only P3 noise with documented disposition). **This rule is a hard rule, not a guideline. It must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not write production code; the implementer does not run external reviewers; the operator does not see technical detail.
+11. **The Production-Grade Loop is the operating model.** All production code is produced by the `minimax` implementer (default `llm-netdata-cloud/minimax-m3-coder`) and reviewed in parallel by exactly five reviewers: `glm`, `mimo`, the `minimax` reviewer (fresh-context, never the implementer instance), `qwen`, `deepseek`. The CTO verifies every reviewer claim, drives iteration, and merges only on `PRODUCTION GRADE` from all five (or only P3 noise with documented disposition). **This rule is a hard rule, not a guideline. It must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not write production code; the implementer does not run external reviewers; the operator does not see technical detail.
 
 ## Ownership Model
 
@@ -332,7 +332,8 @@ Findings carry severity:
 
 - **5/5 PRODUCTION GRADE, gates green, CI green** → CTO merges.
 - **Any P0/P1 NEEDS WORK** → fix, push, re-trigger full 5-reviewer cycle. Iterate.
-- **P2/P3 NEEDS WORK** → fix in this PR; merge when 5/5 PG or only P3 noise remains.
+- **P2 NEEDS WORK** → fix in the same PR, re-trigger the full 5-reviewer cycle; merge only when 5/5 PG or only P3 noise remains.
+- **P3 NEEDS WORK** → fix in the same PR, document in SOW `## Reviews`, merge with note when gates green and CI green.
 - **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a business-level recommendation (e.g. "SOW X is blocked on recurring P0 findings; recommend re-scoping or accepting reduced scope"). Do not loop forever; do not over-share reviewer detail in the operator report.
 
 ### Claim verification (CRITICAL)
@@ -348,7 +349,7 @@ Acting on unverified claims causes two failure modes: (a) implementing phantom b
 
 ### Backup implementer
 
-If `minimax` is down/degraded for an extended period, the CTO rotates the implementer role to the next-most-capable member of the reviewer set. Default order: `qwen` → `mimo` → `deepseek` → `glm`. The backup operates under the same protocol — the 5-reviewer cycle still runs, but the implementer slot is filled by the backup. The CTO logs the rotation in the SOW under `## Implementer Rotation`.
+If `minimax` is down/degraded for an extended period, the CTO rotates the implementer role to the next-most-capable member of the reviewer set. Default order: `qwen` → `mimo` → `deepseek` → `glm`. The backup operates under the same protocol — but with **one twist**: the rotated reviewer is **removed from the 5-reviewer cycle** for that PR (so the implementer is not also reviewing their own work), and the 5-reviewer set is filled by substituting a reviewer from the ad-hoc set (`codex`, `gemini`, `claude`, `kimi`) chosen by the CTO. The CTO logs the rotation AND the substitution in the SOW under `## Implementer Rotation`.
 
 ### Implementer model spec
 
@@ -361,6 +362,12 @@ These run automatically on every PR. They are **supplementary signals, not part 
 - The implementer (`minimax`) addresses their findings as part of the work, before opening the PR.
 - If an automated finding touches an area the 5 reviewers flagged, the CTO re-triggers the 5-reviewer cycle on the new diff.
 - Cubic, Codacy, and Dependabot backlogs (e.g. SOW-0046, SOW-0047) are tracked separately in the SOW system.
+
+### Reviewer unavailability (single reviewer down)
+
+If a reviewer in the 5-reviewer set is unavailable for a cycle (litellm error, model deprecated, timeout, rate limit), the CTO retries once. If still unavailable, the CTO substitutes from the ad-hoc set (`codex`, `gemini`, `claude`, `kimi`) and logs the substitution in the SOW `## Reviews` with the reason. The 5-reviewer count remains 5; the substitution is transparent to the operator report (operator still sees `5/5 PG` or `4/5 PG` etc., not the substitution details).
+
+If two or more reviewers in the 5-reviewer set are unavailable simultaneously, the CTO surfaces to the operator as a hard stall with a business-level recommendation.
 
 ### What the operator sees
 
