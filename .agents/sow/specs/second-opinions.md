@@ -2,7 +2,11 @@
 
 ## TL;DR
 
-The assistant may — and should, for non-trivial work — consult external LLMs (codex, gemini, glm, kimi, mimo, minimax, qwen) for second opinions, code reviews, SOW reviews, and design validation. The full invocation patterns and prompts live in `.agents/skills/project-second-opinions/SKILL.md`. Always run multiple reviewers in parallel, always show the user the prompts before running.
+The CTO runs the **5-reviewer Production-Grade Loop** (see `AGENTS.md`) on every non-trivial PR. The five reviewers are `glm`, `mimo`, `minimax` (fresh-context, never the implementer instance), `qwen`, `deepseek`. Each votes `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. The CTO verifies every claim before acting.
+
+Ad-hoc reviews (SOW/spec/design pre-review, off the production loop) may pick a smaller subset from the legacy list (`codex`, `gemini`, `claude`, `glm`, `kimi`, `mimo`, `qwen`, `minimax`, `deepseek`) at the CTO's discretion.
+
+The full invocation patterns and prompts live in `.agents/skills/project-second-opinions/SKILL.md`. The CTO composes and runs review prompts without operator preview — the operator sees business outcomes only.
 
 ## When to Run External Reviewers
 
@@ -39,23 +43,32 @@ Critical neutrality rules:
 - Provide full context without embedded assumptions.
 - Do not include the assistant's own conclusion (let the reviewer reach its own).
 - Always ask reviewers to identify **unwanted side effects** and **security issues** explicitly.
-- Show prompts to the user before running.
+- The CTO does not show review prompts to the operator before running — review is a technical gate, not an operator gate. (This replaces the older "show the user the prompts" rule; the operator sees business outcomes only per `AGENTS.md`.)
 
 ## How to Run
 
-All commands are documented in `project-second-opinions/SKILL.md` with the exact invocation flags. The short version (from the user's global instructions):
+All commands are documented in `.agents/skills/project-second-opinions/SKILL.md` with the exact invocation flags. The short version:
+
+### Production-Grade Loop (mandatory, 5 reviewers in parallel)
 
 | Reviewer | Command |
 |---|---|
-| codex | `timeout 1800 codex exec "PROMPT" --skip-git-repo-check` |
-| gemini | `timeout 1800 gemini -p "PROMPT"` |
-| claude (self) | `CLAUDECODE="" timeout 1800 claude -p "PROMPT"` |
-| glm | `timeout 1800 opencode run -m "llm-netdata-cloud/glm-5.1" --agent code-reviewer "PROMPT"` |
-| kimi | `timeout 1800 opencode run -m "llm-netdata-cloud/kimi-k2.6" --agent code-reviewer "PROMPT"` |
-| mimo | `timeout 1800 opencode run -m "llm-netdata-cloud/mimo-v2.5-pro" --agent code-reviewer "PROMPT"` |
-| qwen | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.6-plus" --agent code-reviewer "PROMPT"` |
-| minimax | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m2.7-coder" --agent code-reviewer "PROMPT"` |
-| deepseek | `timeout 1800 opencode run -m "deepseek/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
+| `glm` | `timeout 1800 opencode run -m "llm-netdata-cloud/glm-5.1" --agent code-reviewer "PROMPT"` |
+| `mimo` | `timeout 1800 opencode run -m "llm-netdata-cloud/mimo-v2.5-pro" --agent code-reviewer "PROMPT"` |
+| `minimax` (fresh-context review pass; **never** the implementer instance) | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m3-coder" --agent code-reviewer "PROMPT"` |
+| `qwen` | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.6-plus" --agent code-reviewer "PROMPT"` |
+| `deepseek` | `timeout 1800 opencode run -m "llm-netdata-cloud/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
+
+### Ad-hoc (off the production loop; CTO's discretion)
+
+| Reviewer | Command |
+|---|---|
+| `codex` (ad-hoc only) | `timeout 1800 codex exec "PROMPT" --skip-git-repo-check` |
+| `gemini` (ad-hoc only) | `timeout 1800 gemini -p "PROMPT"` |
+| `claude` (ad-hoc only) | `CLAUDECODE="" timeout 1800 claude -p "PROMPT"` |
+| `kimi` (ad-hoc only) | `timeout 1800 opencode run -m "llm-netdata-cloud/kimi-k2.6" --agent code-reviewer "PROMPT"` |
+
+`codex`, `gemini`, `claude`, and `kimi` are **deprecated for production-grade review** on this project; they remain available for one-off SOW/spec pre-review where the CTO may pick a smaller subset.
 
 Always:
 

@@ -19,9 +19,9 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 2. **Specs first, tests second, code last.** The order is invariant. The assistant updates the relevant spec before writing tests; writes tests before writing implementation; writes implementation only after both. See `.agents/sow/specs/workflow.md`.
 
-3. **The assistant never writes code in master context.** All production code is produced by spawned subagents working from a written spec + failing tests. The master assistant is the orchestrator, QA lead, reviewer, and integrator. Master-context Edit/Write is permitted only for: `AGENTS.md`, `.agents/sow/specs/*`, `.agents/skills/*`, SOW files, `README.md`, `LICENSE`, top-level config the assistant owns end-to-end, and trivial typo/format fixes the assistant has verified by reading. See `.agents/skills/project-delegation/SKILL.md`.
+3. **The assistant never writes code in master context.** All production code is produced by the `minimax` implementer (per the Production-Grade Loop, Hard Rule #11) working from a written spec + failing tests. The master assistant is the orchestrator, QA lead, claim verifier, and integrator. Master-context Edit/Write is permitted only for: `AGENTS.md`, `.agents/sow/specs/*`, `.agents/skills/*`, SOW files, `README.md`, `LICENSE`, top-level config the assistant owns end-to-end, and trivial typo/format fixes the assistant has verified by reading. See `.agents/skills/project-delegation/SKILL.md`.
 
-4. **The assistant does not trust itself.** Any code the assistant or its subagents have just produced is buggy by default. Before claiming any work "done", "working", or "ready for the operator": (a) automated tests covering the change must exist and pass, (b) all configured quality gates must pass, (c) at least one round of external second-opinion review must have run with findings addressed. Without all three, the assistant must report the work as "code written, not yet verified" — never as working. See `.agents/skills/project-quality-gates/SKILL.md` and `.agents/skills/project-second-opinions/SKILL.md`.
+4. **The assistant does not trust itself.** Any code the assistant or its subagents have just produced is buggy by default. Before claiming any work "done", "working", or "ready for the operator": (a) automated tests covering the change must exist and pass, (b) all configured quality gates must pass, (c) the 5-reviewer Production-Grade Loop must have converged with 5/5 PRODUCTION GRADE (or only P3 noise with documented disposition) and the CTO must have verified every claim. Without all three, the assistant must report the work as "code written, not yet verified" — never as working. See `.agents/skills/project-quality-gates/SKILL.md` and `.agents/skills/project-second-opinions/SKILL.md`.
 
 5. **Untested ≡ broken.** The operator will not manually test code for the assistant. Manual UI walkthroughs by the assistant are diagnostics, not proof. Every behavior the project ships has at least one automated test exercising it. Coverage thresholds are enforced in CI.
 
@@ -35,7 +35,7 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
 
-11. **The Production-Grade Loop is the operating model.** All production code is produced by `minimax` (the implementer) and reviewed in parallel by `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (five reviewers, fresh-context — never the implementer reviewing its own work). The CTO verifies every reviewer claim, drives iteration, and merges only on `PRODUCTION GRADE` from all five. **This rule is a hard rule, not a guideline. It must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not write production code; the implementer does not run external reviewers; the operator does not see technical detail.
+11. **The Production-Grade Loop is the operating model.** All production code is produced by `minimax` (the implementer) and reviewed in parallel by `glm`, `mimo`, `minimax` (fresh-context review pass — never the implementer instance), `qwen`, `deepseek` (five reviewers). The CTO verifies every reviewer claim, drives iteration, and merges only on `PRODUCTION GRADE` from all five (or only P3 noise with documented disposition). **This rule is a hard rule, not a guideline. It must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not write production code; the implementer does not run external reviewers; the operator does not see technical detail.
 
 ## Ownership Model
 
@@ -80,7 +80,7 @@ Mandatory ordering for any change with runtime behavior:
 2. **Write tests against the new spec.** Tests fail because the implementation does not yet exist or does not yet match the spec. Failing tests are the executable contract.
 3. **Write the implementation.** Implementation makes the tests pass without weakening them. Subagent-produced (see Delegation Protocol).
 4. **Run all automated gates.** See `.agents/skills/project-quality-gates/SKILL.md`. Any failure blocks completion.
-5. **Run second-opinion review.** See `.agents/skills/project-second-opinions/SKILL.md`. Address findings; re-run reviewers until converged.
+5. **Run the 5-reviewer Production-Grade Loop.** See `AGENTS.md` "Production-Grade Loop" and `.agents/skills/project-second-opinions/SKILL.md`. The CTO runs `glm`, `mimo`, `minimax` (fresh-context), `qwen`, `deepseek` in parallel. Each votes `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. The CTO verifies every claim. Re-trigger on P0/P1; fix P2 in the same PR; document P3.
 6. **Commit spec + tests + code + doc updates together.** Drift between artifacts is impossible if they ship in one commit.
 
 Skipping a step is forbidden. If a step is genuinely not applicable (e.g. doc-only change), the SOW must justify the skip in writing.
@@ -89,13 +89,14 @@ Detailed workflow lives at `.agents/sow/specs/workflow.md`. The runtime checklis
 
 ## Delegation Protocol
 
-The assistant orchestrates; subagents produce. Rules:
+The assistant orchestrates; the `minimax` implementer produces; the 5 reviewers verify. Rules:
 
-- **Production code is always written by subagents.** Master-context Edit/Write on production source files is forbidden. Permitted master-context edits: contract docs (`AGENTS.md`), specs, skills, SOWs, README, LICENSE, trivial verified typo fixes.
+- **Production code is always written by the `minimax` implementer** (default `llm-netdata-cloud/minimax-m3-coder`). Master-context Edit/Write on production source files is forbidden. Permitted master-context edits: contract docs (`AGENTS.md`), specs, skills, SOWs, README, LICENSE, trivial verified typo fixes.
 - **Heavy investigation is always delegated.** Multi-file reads, exploratory searches, and cross-cutting audits go to `Explore` or `general-purpose` subagents.
-- **Parallelize aggressively.** When subtasks are independent (e.g. running 3 reviewers, or scaffolding 2 unrelated packages), launch them in a single message with parallel Agent invocations.
-- **Subagent prompts are self-contained.** They include file paths, the spec excerpts they must honor, the tests they must make pass, and the quality gates they must satisfy. They do not assume conversation context.
-- **Verify subagent output before trusting it.** Read the actual changes; do not rely on the subagent's summary. Run the quality gates yourself before reporting progress to the operator.
+- **The 5-reviewer cycle is also delegated — but only the CTO runs it.** The implementer never runs reviewers; the master runs the 5-reviewer Production-Grade Loop on the final integrated state.
+- **Parallelize aggressively.** When subtasks are independent (e.g. running 5 reviewers, or scaffolding 2 unrelated packages), launch them in a single message with parallel Agent invocations.
+- **Subagent prompts are self-contained.** They include file paths, the spec excerpts they must honor, the tests they must make pass, and the quality gates they must satisfy. They do not assume conversation context. Implementation prompts include the `[FORBIDDEN]` block stating the implementer MUST NOT run external reviewers.
+- **Verify subagent output before trusting it.** Read the actual changes; do not rely on the subagent's summary. Run the quality gates yourself before reporting progress to the operator. Verify every reviewer claim before acting on it.
 
 Detailed patterns and prompt templates: `.agents/skills/project-delegation/SKILL.md`.
 
@@ -133,7 +134,7 @@ The assistant performs these every time, regardless of how confident it feels. T
 
 1. Read `.agents/sow/pending/` and `.agents/sow/current/` for overlap, contradictions, existing decisions.
 2. Read `.agents/sow/specs/index.md` and the specs it points to that touch the affected areas.
-3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum: `project-workflow`, `project-coding`, `project-quality-gates`, `project-delegation`.
+3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum: `project-workflow`, `project-coding`, `project-quality-gates`, `project-delegation`, `project-second-opinions` (the runtime enforcement of the Production-Grade Loop).
 4. Read source code, tests, fixtures as ground truth.
 5. Ask the operator only for irreducible product/design/risk decisions. Never technical ones.
 
@@ -145,7 +146,7 @@ The assistant runs this checklist before reporting a task complete to the operat
 - [ ] Tests exist covering the new/changed behavior; tests pass; race detector clean.
 - [ ] Coverage thresholds met for affected packages.
 - [ ] All quality gates green locally.
-- [ ] Second-opinion review run for non-trivial work; findings addressed; reviewers converged.
+- [ ] 5-reviewer Production-Grade Loop run for non-trivial work; CTO verified every claim; 5/5 PRODUCTION GRADE (or only P3 noise with documented disposition).
 - [ ] No new TODO/FIXME left without a SOW in `.agents/sow/pending/`.
 - [ ] `AGENTS.md`, relevant skills, and relevant specs updated if a new pattern, gotcha, or convention emerged.
 - [ ] No half-built features in the diff.
@@ -277,8 +278,8 @@ This is the **single source of truth for how code is produced**. It is the assis
 | Role | Model | Job |
 |---|---|---|
 | **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. Does not write production code. |
-| **Implementer** | `minimax` (current stable on litellm; default `nova/minimax-m2.5`) | write code + tests + specs as delegated. The single producer of code. |
-| **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel) | independent second opinions, each voting `PRODUCTION GRADE` or `NEEDS WORK` with findings. |
+| **Implementer** | `minimax` (current stable on litellm; default `llm-netdata-cloud/minimax-m3-coder`) | write code + tests + specs as delegated. The single producer of code. |
+| **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel, fresh-context) | independent second opinions, each voting `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
 | **CTO (verification)** | me | verify every reviewer claim, drive iteration, decide when to stop. |
 
 **Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The reviewer `minimax` is a fresh-context review pass that has not seen the implementation. This kills the self-review blind spot while still collecting minimax's expertise in the review set. The recursion-safety rule in `project-second-opinions` SKILL still applies: any assistant instance that detects "I am being run for review" must not invoke external reviewers.
@@ -295,9 +296,10 @@ This is the **single source of truth for how code is produced**. It is the assis
 5. CTO selects the 5 reviewers (glm, mimo, minimax, qwen, deepseek) and runs them in parallel on the final diff
 6. Each reviewer votes PRODUCTION GRADE or NEEDS WORK with findings
 7. CTO verifies every finding (read the code, run the repro, check the spec). Reject false positives.
-8. P0/P1 findings -> fix and re-trigger full 5-reviewer cycle
-   P2/P3 findings -> fix in the same PR, document in SOW `## Reviews`, merge when gate green
-9. CI green on all required status checks + 5 reviewers converge -> CTO merges, checks out master, pulls, continues
+8. P0/P1 findings → fix and re-trigger full 5-reviewer cycle
+   P2 findings → fix in the same PR, re-trigger the cycle; merge only when 5/5 PG or only P3 noise remains
+   P3 findings → fix in the same PR, document in SOW `## Reviews`, merge when gate green
+9. CI green on all required status checks + 5 reviewers converge → CTO merges, checks out master, pulls, continues
 ```
 
 ### When the loop runs
@@ -308,6 +310,7 @@ The loop runs **once per PR**, not on every little change. Specific triggers (an
 - **Before risky changes** — schema changes, cross-cutting refactors, security-sensitive work, new adapter implementation. Earlier is better than later.
 - **After critical changes** — once a non-trivial chunk is green locally (tests + gates), CTO triggers the cycle.
 - **When uncertain** — if the CTO is not sure about an architectural call, trigger early on a design/spec, not on the full diff.
+- **Contract / process changes** — any PR that touches the production process (AGENTS.md, project skills, specs, workflows, CI config) goes through the 5-reviewer cycle. Only mechanical typo/format fixes and purely informational README-only docs are exempt.
 
 The CTO judges "good chunk" per the spirit of this rule. The bar is: **a PR is the unit**. One SOW = one PR = one loop = one merge.
 
@@ -322,15 +325,15 @@ Findings carry severity:
 
 - **P0** — correctness bug, data loss, security hole, race. Blocks merge.
 - **P1** — design defect, missing error path, test gap on a contract. Blocks merge.
-- **P2** — quality, readability, simplification, non-blocking test gap. Fix in this PR.
-- **P3** — nit, taste, alternative. Document in SOW `## Reviews`, merge with note.
+- **P2** — quality, readability, simplification, non-blocking test gap. Fix in this PR; re-trigger the cycle; merge only when 5/5 PG or only P3 noise remains. CTO may explicitly waive with a documented reason (rare).
+- **P3** — nit, taste, alternative. Fix in this PR, document in SOW `## Reviews`, merge with note.
 
 ### Stop conditions
 
 - **5/5 PRODUCTION GRADE, gates green, CI green** → CTO merges.
 - **Any P0/P1 NEEDS WORK** → fix, push, re-trigger full 5-reviewer cycle. Iterate.
 - **P2/P3 NEEDS WORK** → fix in this PR; merge when 5/5 PG or only P3 noise remains.
-- **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a recommendation. Do not loop forever.
+- **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a business-level recommendation (e.g. "SOW X is blocked on recurring P0 findings; recommend re-scoping or accepting reduced scope"). Do not loop forever; do not over-share reviewer detail in the operator report.
 
 ### Claim verification (CRITICAL)
 
@@ -349,7 +352,7 @@ If `minimax` is down/degraded for an extended period, the CTO rotates the implem
 
 ### Implementer model spec
 
-`minimax` is the implementation model. The CTO pins to the **current stable minimax variant on litellm** at the time of work (per the project's "always pin to latest stable" policy). The default and current variant is `nova/minimax-m2.5`. Major-version upgrades require a brief SOW; minor/patch upgrades are autonomous and committed together with passing gates. If the implementer is changed (e.g. backup rotation), the CTO updates the `### The model split` table above in the same commit.
+`minimax` is the implementation model. The CTO pins to the **current stable minimax variant on litellm** at the time of work (per the project's "always pin to latest stable" policy). The default and current variant is `llm-netdata-cloud/minimax-m3-coder` (the latest stable coder variant, released 2026-06-01). The implementer and the reviewer-minimax use the same model so the split is unambiguous and so a version bump to one is a version bump to both. Major-version upgrades require a brief SOW; minor/patch upgrades are autonomous and committed together with passing gates. If the implementer is changed (e.g. backup rotation), the CTO updates the `### The model split` table above in the same commit.
 
 ### Automated reviewers (cubic, codacy, dependabot, Snyk, etc.)
 

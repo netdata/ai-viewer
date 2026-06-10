@@ -8,10 +8,10 @@ The contract counterpart is `AGENTS.md` (top-level invariants). The runtime chec
 
 ## Roles
 
-- **Operator** — owns product direction, UX feedback, sign-off on SOWs, risk acceptance, and destructive-operation approval.
-- **Master assistant** — owns technical decisions, orchestration, integration, QA, review, and long-term-memory hygiene. Does not write production code directly.
-- **Subagents** — write production code under spec + failing-test constraints supplied by the master assistant.
-- **External reviewers** — independent LLMs (codex, gemini, glm, qwen, etc.) called for second opinions; they do not write code in this repo.
+- **Operator** — owns product direction, UX feedback, sign-off on SOWs, risk acceptance, and destructive-operation approval. Does not see technical detail (see "What the operator sees" in `AGENTS.md`).
+- **CTO (master assistant)** — owns technical decisions, orchestration, integration, QA, claim verification, and long-term-memory hygiene. Does not write production code directly. Runs the 5-reviewer Production-Grade Loop on every non-trivial PR.
+- **Implementer** — a fresh-context `minimax` subagent (default `llm-netdata-cloud/minimax-m3-coder`) that writes production code under spec + failing-test constraints supplied by the CTO. The single producer of code.
+- **Reviewers** — exactly five independent LLMs, run in parallel: `glm`, `mimo`, `minimax` (fresh-context, never the implementer instance), `qwen`, `deepseek`. Each votes `PRODUCTION GRADE` or `NEEDS WORK` (with P0–P3 findings). The CTO verifies every claim. See `AGENTS.md` "Production-Grade Loop" and `.agents/sow/specs/second-opinions.md`.
 
 ## The Invariant Cycle
 
@@ -75,11 +75,21 @@ All gates listed in `quality-gates.md` run locally before reporting any work don
 
 Weakening a gate to make it pass is a contract breach. Fix the root cause.
 
-### External Review
+### External Review (the 5-Reviewer Production-Grade Loop)
 
-For non-trivial SOWs: minimum three external reviewers in parallel. Findings addressed; reviewers re-run with the same scope plus a fix note; iterate until convergence. History recorded in the SOW under `## Reviews`.
+For non-trivial SOWs: the CTO runs the 5-reviewer Production-Grade Loop per `AGENTS.md` and `.agents/sow/specs/second-opinions.md`. The five reviewers (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) run in parallel. Each votes `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. The CTO verifies every claim.
 
-The assistant does not claim work "done" before review convergence. The honest mid-flight phrasing is "code written, gates green, review pending".
+Stop conditions:
+
+- 5/5 PRODUCTION GRADE → merge.
+- Any P0/P1 → fix, push, re-trigger full cycle.
+- P2 → fix in the same PR; merge when 5/5 PG or only P3 noise remains.
+- P3 → document in SOW `## Reviews`, merge with note.
+- Hard stall (5+ cycles with new P0/P1 each round) → write a `## Regression` section, open a follow-up SOW, surface to the operator.
+
+Findings addressed in code; reviewers re-run with the same scope plus a fix note; iterate until convergence. History recorded in the SOW under `## Reviews`.
+
+The CTO does not claim work "done" before review convergence. The honest mid-flight phrasing is "code written, gates green, review pending (X/5 PRODUCTION GRADE)".
 
 ### Merge Protection
 

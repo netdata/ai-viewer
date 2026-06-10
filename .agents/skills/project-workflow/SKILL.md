@@ -15,7 +15,7 @@ This skill is the assistant's runtime checklist. The contract lives in `AGENTS.m
 |---|---|---|
 | **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. Does not write production code. |
 | **Implementer** | `minimax` (fresh subagent) | code + tests + specs as delegated. The single producer of code. |
-| **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel, fresh-context) | vote `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
+| **Reviewers** | `glm`, `mimo`, `minimax` (fresh-context, never the implementer instance), `qwen`, `deepseek` (5 in parallel) | vote `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
 
 **Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The CTO is the only role that runs reviewers. The CTO is the only role that verifies reviewer claims. See `AGENTS.md` for the full contract and `.agents/skills/project-second-opinions/SKILL.md` for reviewer invocation.
 
@@ -97,7 +97,7 @@ After the implementer returns, the master assistant (CTO):
 - Runs the gates to confirm nothing else broke.
 - Confirms automated-reviewer findings (cubic, codacy) are addressed in the diff.
 - Decides whether to accept, ask for changes, or restart with a sharper prompt.
-- Logs the implementer model in the SOW (default `nova/minimax-m2.5`; backup rotation per `AGENTS.md`).
+- Logs the implementer model in the SOW (default `llm-netdata-cloud/minimax-m3-coder`; backup rotation per `AGENTS.md`).
 
 ## Step 5 — Quality Gates
 
@@ -166,13 +166,14 @@ After merge:
 
 ## Reporting to the Operator
 
-Compact, honest, evidence-based.
+Compact, honest, business-outcome-only. The operator does not see file paths, design rationale, test names, or gate command output — those live in the SOW `## Reviews` and the PR description. See `AGENTS.md` "What the operator sees" for the full contract.
 
-- TL;DR (2-3 sentences).
-- Bullet points of what changed.
-- File paths with line numbers as evidence.
-- Gates: which ran, what they reported.
-- Reviewers: which of the 5 ran, the PRODUCTION GRADE count, the claim-verification verdicts, what was done about it.
+- TL;DR (2-3 sentences, business outcomes only).
+- SOW id and one-line description.
+- PR link + state (open / merged / blocked).
+- Reviewer verdicts (PRODUCTION GRADE count: `4/5`, `5/5`).
+- Gate status (green / red).
+- Blocker (if any), with the question or decision needed.
 - Next: what's queued, what's blocked, what needs operator input.
 
 Never report code as "working" or "ready" if any step above is incomplete. The honest phrasings are:
@@ -211,7 +212,7 @@ If the assistant catches itself doing any of these, stop, restart from Step 1, a
 
 ## Cross-References
 
-- Contract: `AGENTS.md`
+- Contract: `AGENTS.md` "Production-Grade Loop" section (the single source of truth).
 - Durable spec: `.agents/sow/specs/workflow.md`
 - Gates: `.agents/skills/project-quality-gates/SKILL.md`
 - Delegation: `.agents/skills/project-delegation/SKILL.md`

@@ -31,9 +31,9 @@ The CTO runs **exactly these five reviewers in parallel** on every non-trivial c
 |---|---|---|
 | 1 | `glm` | `timeout 1800 opencode run -m "llm-netdata-cloud/glm-5.1" --agent code-reviewer "PROMPT"` |
 | 2 | `mimo` | `timeout 1800 opencode run -m "llm-netdata-cloud/mimo-v2.5-pro" --agent code-reviewer "PROMPT"` |
-| 3 | `minimax` (fresh-context review pass; **never** the implementer instance) | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m2.7-coder" --agent code-reviewer "PROMPT"` |
+| 3 | `minimax` (fresh-context review pass; **never** the implementer instance) | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m3-coder" --agent code-reviewer "PROMPT"` |
 | 4 | `qwen` | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.6-plus" --agent code-reviewer "PROMPT"` |
-| 5 | `deepseek` | `timeout 1800 opencode run -m "deepseek/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
+| 5 | `deepseek` | `timeout 1800 opencode run -m "llm-netdata-cloud/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
 
 All five run in parallel (one Bash invocation each, batched in a single assistant turn). Foreground, with `timeout 1800`. The CTO is the only role that runs them.
 
@@ -97,12 +97,9 @@ The Production-Grade Loop supersedes the previous default set. The 5 reviewers a
 | codex (ad-hoc only) | `timeout 1800 codex exec "PROMPT" --skip-git-repo-check` |
 | gemini (ad-hoc only) | `timeout 1800 gemini -p "PROMPT"` |
 | claude (Anthropic) (ad-hoc only) | `CLAUDECODE="" timeout 1800 claude -p "PROMPT"` |
-| glm | `timeout 1800 opencode run -m "llm-netdata-cloud/glm-5.1" --agent code-reviewer "PROMPT"` |
-| kimi | `timeout 1800 opencode run -m "llm-netdata-cloud/kimi-k2.6" --agent code-reviewer "PROMPT"` |
-| mimo | `timeout 1800 opencode run -m "llm-netdata-cloud/mimo-v2.5-pro" --agent code-reviewer "PROMPT"` |
-| qwen | `timeout 1800 opencode run -m "llm-netdata-cloud/qwen3.6-plus" --agent code-reviewer "PROMPT"` |
-| minimax (review; never the implementer instance) | `timeout 1800 opencode run -m "llm-netdata-cloud/minimax-m2.7-coder" --agent code-reviewer "PROMPT"` |
-| deepseek | `timeout 1800 opencode run -m "deepseek/deepseek-v4-pro" --agent code-reviewer "PROMPT"` |
+| kimi (ad-hoc only) | `timeout 1800 opencode run -m "llm-netdata-cloud/kimi-k2.6" --agent code-reviewer "PROMPT"` |
+
+The five production reviewers (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) are reserved for the production PR cycle; their production-loop run is mandatory regardless of any ad-hoc use. For ad-hoc SOW/spec pre-review the CTO may still invoke any of the five if judged beneficial, but the production-loop run is independent.
 
 `cd` into the project root before running. Use relative paths (some reviewers stumble on arbitrary absolute paths).
 
@@ -110,8 +107,6 @@ The Production-Grade Loop supersedes the previous default set. The 5 reviewers a
 
 - **SOW / design review**: codex + gemini + mimo in parallel.
 - **Security-focused review**: minimax + deepseek.
-
-The Production-Grade Loop's five reviewers (glm, mimo, minimax, qwen, deepseek) are reserved for the production PR cycle and are not used for ad-hoc SOW/spec pre-review.
 
 ## Prompt Templates
 
@@ -150,6 +145,10 @@ THIS IS A READ-ONLY REQUEST. PROVIDE YOUR REVIEW.
 
 ```
 YOU ARE RUNNING BY ANOTHER ASSISTANT, FOR A SECOND OPINION:
+
+Vote ONE of:
+- PRODUCTION GRADE — ship it, no actionable findings.
+- NEEDS WORK — list findings below, each with file:line, severity (P0/P1/P2/P3), and a concrete fix proposal.
 
 Please review SOW file: .agents/sow/<pending|current>/<name>.md
 
