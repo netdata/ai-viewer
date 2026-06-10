@@ -7,14 +7,23 @@ description: Orchestration patterns for ai-viewer — when and how to spawn suba
 
 ## The Hard Rule
 
-The master assistant is the **orchestrator**, **QA lead**, **integrator**, and **reviewer**. The master assistant does **not** write production code. Code is produced by spawned subagents working from a written spec and failing tests.
+The master assistant (CTO) is the **orchestrator**, **QA lead**, **integrator**, and the **only role that runs reviewers**. The master assistant does **not** write production code. Code is produced by spawned subagents working from a written spec and failing tests.
 
-This rule exists because:
+### The implementer is `minimax`
+
+Per the Production-Grade Loop (see `AGENTS.md`), the CTO delegates all code production to **`minimax`** — the current stable minimax variant on litellm (default `nova/minimax-m2.5`). The CTO is the only role that knows the project context; the implementer is a fresh-context subagent that receives a self-contained prompt (spec excerpt, failing tests, constraints, deliverable).
+
+- The implementer is **not** the same instance as the `minimax` review pass. Two different invocations, two different contexts, two different jobs.
+- If `minimax` is down/degraded, the CTO rotates the implementer role to the next-most-capable member of the reviewer set (default order: `qwen` → `mimo` → `deepseek` → `glm`) and logs the rotation in the SOW under `## Implementer Rotation`.
+- The CTO pins to the current stable model at time of work, per the project's "always pin to latest stable" policy. Major-version upgrades require a brief SOW; minor/patch upgrades are autonomous.
+
+### Why this rule exists
 
 - The master assistant's context is finite. Code-writing fills it with raw output that displaces decision history.
 - Subagent output gets independently verified by the master before being trusted. Master-written code skips that verification step.
 - Compaction destroys the master's working memory; subagents start with a fresh, self-contained context every time.
 - Parallel subagents finish faster than serial master-context editing.
+- Splitting "writer" and "reviewer" across different model families produces a more honest, less self-confirming codebase.
 
 If the master assistant ever finds itself about to call `Edit` or `Write` on a production source file, stop and delegate.
 
@@ -186,7 +195,7 @@ Conversely, do not spawn a subagent for a one-line typo fix. Trivial verified ed
 
 ## Cross-References
 
-- Contract: `AGENTS.md` (Delegation Protocol section)
+- Contract: `AGENTS.md` "Production-Grade Loop" section (the single source of truth).
 - Workflow: `.agents/skills/project-workflow/SKILL.md`
 - Coding rules: `.agents/skills/project-coding/SKILL.md`
 - Gates: `.agents/skills/project-quality-gates/SKILL.md`

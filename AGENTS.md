@@ -35,6 +35,8 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
 
+11. **The Production-Grade Loop is the operating model.** All production code is produced by `minimax` (the implementer) and reviewed in parallel by `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (five reviewers, fresh-context — never the implementer reviewing its own work). The CTO verifies every reviewer claim, drives iteration, and merges only on `PRODUCTION GRADE` from all five. **This rule is a hard rule, not a guideline. It must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not write production code; the implementer does not run external reviewers; the operator does not see technical detail.
+
 ## Ownership Model
 
 This repository operates under a delegated-ownership contract.
@@ -68,7 +70,7 @@ Every non-trivial change of architecture or design must be visible to the operat
 
 After SOW sign-off, the assistant does not ask permission for technical choices within the agreed scope. If a finding materially changes the SOW, the assistant pauses, writes an addendum, and asks. Otherwise: work proceeds; the operator receives a verified, tested, reviewed system.
 
-**SOW sign-off is the ONLY approval gate.** The operator does NOT approve pull requests, code reviews, branch protection settings, dependency upgrades, or any other in-implementation step. PR review is performed by external LLM reviewers (see `project-second-opinions` skill) plus the assistant's own discipline checklist. The assistant **opens AND merges its own PRs** via `gh pr merge --merge --delete-branch` after external review converges. Asking the operator to "approve" a PR is a contract breach.
+**SOW sign-off is the ONLY approval gate.** The operator does NOT approve pull requests, code reviews, branch protection settings, dependency upgrades, or any other in-implementation step. PR review is performed by the 5-reviewer Production-Grade Loop (see the dedicated section below + `project-second-opinions` skill). The assistant **opens AND merges its own PRs** via `gh pr merge --merge --delete-branch` after the 5-reviewer cycle converges. Asking the operator to "approve" a PR is a contract breach.
 
 ## Spec → Test → Code Protocol
 
@@ -266,18 +268,108 @@ ai-viewer.git/
     └── workflows/               CI: every gate above on every push
 ```
 
-## Second Opinions (External LLMs) — Mandatory
+## Production-Grade Loop — Implementer + 5-Reviewer Cycle
 
-External second-opinion review is **mandatory** before marking any non-trivial SOW completed. "Encouraged" was the old wording; it has been removed.
+This is the **single source of truth for how code is produced**. It is the assistant's standing operating model. It must survive restarts, compactions, and the next instance of the assistant. Treat the rules below as non-negotiable, like the Hard Rules above. The runtime enforcement lives in `.agents/skills/project-second-opinions/SKILL.md`, `.agents/skills/project-delegation/SKILL.md`, and `.agents/skills/project-workflow/SKILL.md`; this section is the contract; the skills are the implementation.
 
-Minimum standard:
+### The model split
 
-- At least three reviewers in parallel for any code-producing SOW.
-- Reviewers chosen from the set in `.agents/skills/project-second-opinions/SKILL.md`.
-- Findings addressed in code; reviewers re-run with the same scope plus a note of fixes; iterate until no actionable findings remain.
-- Review history recorded in the SOW under `## Reviews`.
+| Role | Model | Job |
+|---|---|---|
+| **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. Does not write production code. |
+| **Implementer** | `minimax` (current stable on litellm; default `nova/minimax-m2.5`) | write code + tests + specs as delegated. The single producer of code. |
+| **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel) | independent second opinions, each voting `PRODUCTION GRADE` or `NEEDS WORK` with findings. |
+| **CTO (verification)** | me | verify every reviewer claim, drive iteration, decide when to stop. |
 
-**Safety rule (critical)**: if the assistant has itself been spawned as a reviewer (e.g. by a parent assistant), it MUST NOT invoke external reviewers — that causes infinite recursion. Detection signals are documented in the skill.
+**Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The reviewer `minimax` is a fresh-context review pass that has not seen the implementation. This kills the self-review blind spot while still collecting minimax's expertise in the review set. The recursion-safety rule in `project-second-opinions` SKILL still applies: any assistant instance that detects "I am being run for review" must not invoke external reviewers.
+
+**I do not trust the implementer.** External reviewers are how the project gets the collective output of all five models. The CTO's job is to fuse those reviews with the implementer's work into a verified, tested, gate-green change. The implementer is fast; the reviewers are correct; the CTO is accountable.
+
+### The loop
+
+```
+1. CTO decides SOW scope, writes/updates specs, drafts failing tests
+2. CTO delegates implementation to minimax (per project-delegation skill)
+3. minimax writes code + makes tests pass + runs local gates
+4. CTO verifies minimax's work: diff read, tests re-run, gates re-run, no collateral damage
+5. CTO selects the 5 reviewers (glm, mimo, minimax, qwen, deepseek) and runs them in parallel on the final diff
+6. Each reviewer votes PRODUCTION GRADE or NEEDS WORK with findings
+7. CTO verifies every finding (read the code, run the repro, check the spec). Reject false positives.
+8. P0/P1 findings -> fix and re-trigger full 5-reviewer cycle
+   P2/P3 findings -> fix in the same PR, document in SOW `## Reviews`, merge when gate green
+9. CI green on all required status checks + 5 reviewers converge -> CTO merges, checks out master, pulls, continues
+```
+
+### When the loop runs
+
+The loop runs **once per PR**, not on every little change. Specific triggers (any of these is enough):
+
+- **End of SOW** — before opening the PR. Always.
+- **Before risky changes** — schema changes, cross-cutting refactors, security-sensitive work, new adapter implementation. Earlier is better than later.
+- **After critical changes** — once a non-trivial chunk is green locally (tests + gates), CTO triggers the cycle.
+- **When uncertain** — if the CTO is not sure about an architectural call, trigger early on a design/spec, not on the full diff.
+
+The CTO judges "good chunk" per the spirit of this rule. The bar is: **a PR is the unit**. One SOW = one PR = one loop = one merge.
+
+### PRODUCTION GRADE vote
+
+Each reviewer responds with one of two outcomes:
+
+- `PRODUCTION GRADE` — ship it, no actionable findings.
+- `NEEDS WORK` — one or more findings, each with file:line, severity, and concrete fix.
+
+Findings carry severity:
+
+- **P0** — correctness bug, data loss, security hole, race. Blocks merge.
+- **P1** — design defect, missing error path, test gap on a contract. Blocks merge.
+- **P2** — quality, readability, simplification, non-blocking test gap. Fix in this PR.
+- **P3** — nit, taste, alternative. Document in SOW `## Reviews`, merge with note.
+
+### Stop conditions
+
+- **5/5 PRODUCTION GRADE, gates green, CI green** → CTO merges.
+- **Any P0/P1 NEEDS WORK** → fix, push, re-trigger full 5-reviewer cycle. Iterate.
+- **P2/P3 NEEDS WORK** → fix in this PR; merge when 5/5 PG or only P3 noise remains.
+- **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a recommendation. Do not loop forever.
+
+### Claim verification (CRITICAL)
+
+Reviewer findings are **claims, not findings**. The CTO verifies every claim before acting on it. Verification steps:
+
+1. **Read the file:line the reviewer cited.** Does the code actually do what the reviewer said?
+2. **Run the repro.** If the reviewer says "this race fires under X", construct X and run it.
+3. **Cross-check with the spec.** If the reviewer says "violates SPEC Y §3.2", open the spec and confirm.
+4. **Decide**: real bug (fix), false positive (reject with evidence), disputed (escalate).
+
+Acting on unverified claims causes two failure modes: (a) implementing phantom bugs that don't exist, (b) ignoring real bugs because the reviewer "sounded uncertain". Verify, then act. The CTO is the only one who decides.
+
+### Backup implementer
+
+If `minimax` is down/degraded for an extended period, the CTO rotates the implementer role to the next-most-capable member of the reviewer set. Default order: `qwen` → `mimo` → `deepseek` → `glm`. The backup operates under the same protocol — the 5-reviewer cycle still runs, but the implementer slot is filled by the backup. The CTO logs the rotation in the SOW under `## Implementer Rotation`.
+
+### Implementer model spec
+
+`minimax` is the implementation model. The CTO pins to the **current stable minimax variant on litellm** at the time of work (per the project's "always pin to latest stable" policy). The default and current variant is `nova/minimax-m2.5`. Major-version upgrades require a brief SOW; minor/patch upgrades are autonomous and committed together with passing gates. If the implementer is changed (e.g. backup rotation), the CTO updates the `### The model split` table above in the same commit.
+
+### Automated reviewers (cubic, codacy, dependabot, Snyk, etc.)
+
+These run automatically on every PR. They are **supplementary signals, not part of the 5-reviewer vote**:
+
+- The implementer (`minimax`) addresses their findings as part of the work, before opening the PR.
+- If an automated finding touches an area the 5 reviewers flagged, the CTO re-triggers the 5-reviewer cycle on the new diff.
+- Cubic, Codacy, and Dependabot backlogs (e.g. SOW-0046, SOW-0047) are tracked separately in the SOW system.
+
+### What the operator sees
+
+The operator sees **business outcomes, not technical detail**. In every report:
+
+- SOW id and one-line description.
+- PR link + state (open / merged / blocked).
+- Reviewer verdicts (PRODUCTION GRADE counts: `4/5`, `5/5`).
+- Gate status (green / red).
+- Blocker (if any), with the question or decision needed.
+
+The operator does **not** see code, design rationale, file paths, test names, or gate command output. The CTO decides and reports; the operator approves SOWs and accepts or rejects the outcome. **SOW sign-off is the only operator gate.**
 
 ## Sensitive Data In Durable Artifacts
 
@@ -335,9 +427,9 @@ The merge workflow:
 
 1. Assistant creates a feature branch and pushes work.
 2. Assistant opens a PR (`gh pr create`) — for clean history + SOC2 audit trail.
-3. Assistant runs external LLM reviewers per `project-second-opinions` skill on non-trivial code-producing PRs.
-4. Assistant addresses findings; iterates until reviewers converge.
-5. Assistant merges itself: `gh pr merge <num> --merge --delete-branch`.
+3. Assistant runs the **5-reviewer Production-Grade Loop** (glm, mimo, minimax, qwen, deepseek) per the section above on every non-trivial code-producing PR.
+4. Assistant verifies every reviewer claim, addresses findings, and iterates per the P0/P1/P2/P3 stop conditions.
+5. Assistant merges itself: `gh pr merge <num> --merge --delete-branch` — only when 5/5 PRODUCTION GRADE, gates green, and CI green.
 6. Assistant continues work — no operator step.
 
 Asking the operator to approve a PR is forbidden. The operator's approval gate is the SOW, not the PR.

@@ -1,13 +1,23 @@
 ---
 name: project-workflow
-description: Master orchestration cycle for ai-viewer work — the spec→test→code→review→gates→commit sequence enforced on every non-trivial task. Use at the start of any SOW work, before any Edit/Write in the project, after every milestone, and whenever the assistant catches itself about to skip a step. The single source of truth for "how we work here".
+description: Master orchestration cycle for ai-viewer work — the spec→test→code→review→gates→commit sequence enforced on every non-trivial task, operating under the Production-Grade Loop (implementer=minimax, 5 reviewers=glm/mimo/minimax/qwen/deepseek). Use at the start of any SOW work, before any Edit/Write in the project, after every milestone, and whenever the assistant catches itself about to skip a step. The single source of truth for "how we work here".
 ---
 
 # Workflow
 
 ## Purpose
 
-This skill is the assistant's runtime checklist. The contract lives in `AGENTS.md`; the durable spec lives in `.agents/sow/specs/workflow.md`; this file is the operational pattern the assistant follows every time. Load it at the start of every meaningful task. If the assistant ever notices it has started writing code without consulting this skill, stop and restart from the top.
+This skill is the assistant's runtime checklist. The contract lives in `AGENTS.md` (the "Production-Grade Loop" section is the operating model); the durable spec lives in `.agents/sow/specs/workflow.md`; this file is the operational pattern the assistant follows every time. Load it at the start of every meaningful task. If the assistant ever notices it has started writing code without consulting this skill, stop and restart from the top.
+
+## Roles (per the Production-Grade Loop)
+
+| Role | Model | Job |
+|---|---|---|
+| **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. Does not write production code. |
+| **Implementer** | `minimax` (fresh subagent) | code + tests + specs as delegated. The single producer of code. |
+| **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel, fresh-context) | vote `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
+
+**Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The CTO is the only role that runs reviewers. The CTO is the only role that verifies reviewer claims. See `AGENTS.md` for the full contract and `.agents/skills/project-second-opinions/SKILL.md` for reviewer invocation.
 
 ## The Cycle (Invariant Order)
 
@@ -15,9 +25,9 @@ This skill is the assistant's runtime checklist. The contract lives in `AGENTS.m
 1. Re-orient    →  read SOWs, specs, skills
 2. Spec         →  update or create specs FIRST
 3. Test         →  write failing tests against the new spec
-4. Code         →  delegate to subagent; make tests pass
+4. Code         →  delegate to minimax implementer; make tests pass
 5. Gates        →  run every automated quality gate locally
-6. Review       →  external second opinions; iterate until converged
+6. Review       →  CTO runs 5-reviewer Production-Grade Loop; verify claims; iterate
 7. Discipline   →  run the Discipline Checklist
 8. Commit       →  one commit per logical step; spec + tests + code + docs together
 ```
@@ -68,9 +78,9 @@ A behavior without a failing test before the implementation lands is a defect.
 
 ## Step 4 — Code via Delegation
 
-Production code is written by subagents, not in master context. See `project-delegation` skill.
+Production code is written by the **`minimax` implementer** (a fresh-context subagent), not in master context. See `project-delegation` skill for the full protocol.
 
-The delegation prompt to a subagent contains, at minimum:
+The delegation prompt to the implementer contains, at minimum:
 
 - The SOW reference (file path).
 - The relevant spec excerpt the implementation must honor (quote verbatim).
@@ -78,13 +88,16 @@ The delegation prompt to a subagent contains, at minimum:
 - The quality gates the change must satisfy (`./scripts/gates.sh`).
 - The forbidden patterns from `project-coding` skill.
 - An explicit instruction to not weaken or skip tests.
+- An explicit `[FORBIDDEN]` block stating the implementer must NOT run external reviewers — the CTO does that.
 
-After the subagent returns, the master assistant:
+After the implementer returns, the master assistant (CTO):
 
 - Reads the actual diff (never trusts the summary).
 - Runs the failing tests to confirm they now pass.
 - Runs the gates to confirm nothing else broke.
+- Confirms automated-reviewer findings (cubic, codacy) are addressed in the diff.
 - Decides whether to accept, ask for changes, or restart with a sharper prompt.
+- Logs the implementer model in the SOW (default `nova/minimax-m2.5`; backup rotation per `AGENTS.md`).
 
 ## Step 5 — Quality Gates
 
@@ -92,11 +105,18 @@ Run **every** gate from `project-quality-gates` skill locally. Not "the relevant
 
 If any gate fails: fix root cause, do not weaken the gate. Lowering a threshold to make a gate pass is a contract breach.
 
-## Step 6 — External Review
+## Step 6 — Production-Grade Loop (5-Reviewer Cycle)
 
-For non-trivial SOWs (anything beyond typos or single-line trivial fixes): run external second opinions in parallel per `project-second-opinions` skill.
+For non-trivial SOWs (anything beyond typos or single-line trivial fixes): the CTO runs the 5-reviewer Production-Grade Loop per `project-second-opinions` skill.
 
-Minimum: three reviewers, same prompt, parallel execution. Iterate until reviewers converge with no new actionable findings. Record the rounds in the SOW under `## Reviews`.
+Mandatory:
+
+- **Exactly 5 reviewers** in parallel: `glm`, `mimo`, `minimax` (fresh-context), `qwen`, `deepseek`.
+- Same prompt across iterations; never narrow scope on follow-up rounds.
+- Each reviewer votes `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings.
+- The CTO verifies every claim (read file:line, run the repro, cross-check the spec) before acting.
+- P0/P1 → fix and re-trigger the cycle. P2 → fix in the same PR. P3 → document in SOW.
+- Stop: 5/5 PG (or only P3 noise) + gates green + CI green → CTO merges.
 
 Anti-pattern: narrowing scope on follow-up review rounds to "review just my fixes". Always use the same broad scope plus a short note of fixes. This catches issues the first round did not surface.
 
@@ -107,7 +127,7 @@ Before reporting completion to the operator:
 - [ ] Specs reflect new behavior — same commit as code.
 - [ ] Tests exist, pass, race-clean, coverage thresholds met.
 - [ ] All quality gates green locally.
-- [ ] External review converged for non-trivial work.
+- [ ] External review converged for non-trivial work (5/5 PG or only P3 noise with documented disposition).
 - [ ] No new TODO/FIXME without a tracked SOW in `pending/`.
 - [ ] `AGENTS.md`, skills, specs updated if a new pattern or gotcha emerged.
 - [ ] No half-built features.
@@ -132,8 +152,8 @@ Standard PR flow for any change touching master:
 2. Commit with the discipline above.
 3. Push the branch (`git push -u origin <branch>`).
 4. Open a PR (`gh pr create --base master --head <branch>`).
-5. Run external reviewers (Step 6) on non-trivial PRs.
-6. After convergence, **merge yourself**: `gh pr merge <num> --merge --delete-branch`.
+5. Run the 5-reviewer Production-Grade Loop (Step 6) on non-trivial PRs.
+6. After convergence (5/5 PG or only P3 noise), **merge yourself**: `gh pr merge <num> --merge --delete-branch`.
 7. `git checkout master && git pull` so the local master tracks.
 
 No operator approval step. The operator gates SOWs, not PRs.
@@ -152,7 +172,7 @@ Compact, honest, evidence-based.
 - Bullet points of what changed.
 - File paths with line numbers as evidence.
 - Gates: which ran, what they reported.
-- Reviewers: which ran, what they found, what was done about it.
+- Reviewers: which of the 5 ran, the PRODUCTION GRADE count, the claim-verification verdicts, what was done about it.
 - Next: what's queued, what's blocked, what needs operator input.
 
 Never report code as "working" or "ready" if any step above is incomplete. The honest phrasings are:
@@ -180,7 +200,7 @@ Do not pause for technical preference, library choice, naming, or refactor strat
 - "I'll update the spec at the end." → contract breach.
 - "Let me just edit this Go file directly." → contract breach unless trivial verified typo.
 - "The operator can test the UI to confirm." → contract breach.
-- "External review is overkill for this." → contract breach unless SOW says trivial.
+- "External review is overkill for this." → contract breach unless SOW says trivial. The 5-reviewer Production-Grade Loop is the default for any non-trivial change.
 - "I'll fix the lint warning later." → contract breach.
 - "Adding `t.Skip` until I have time." → contract breach unless linked to an issue + SOW.
 - "Let me lower the coverage threshold for now." → contract breach.
