@@ -140,6 +140,17 @@ func WithFTS5IndexLogs(sourceID string, enabled bool) Option {
 // the field). Marshalling is the caller's responsibility: opencode's
 // auto-discovery probe is the only consumer today, and it json.Marshals the
 // ProbeStatus result before calling this option.
+//
+// Ordering contract: this option must be applied BEFORE the first Submit
+// for the given sourceID (Submit copies the resolved value into the worker
+// under i.mu; the resolver goroutine does not read this map). Applying it
+// concurrently with, or after, a Submit for the same sourceID is a data
+// race on the overrides map. The production caller (cmd/ai-viewer-ingest)
+// applies all WithSourceMeta registrations in the main goroutine before the
+// startSource loop; do the same. (Constructor-only application via
+// ingest.New's variadic ...Option, like the other With* options, avoids the
+// concern entirely and is preferred where the metadata is known at New
+// time.)
 func WithSourceMeta(sourceID, metaJSON string) Option {
 	return func(i *Ingester) {
 		i.sourceMetaOverrides[sourceID] = metaJSON

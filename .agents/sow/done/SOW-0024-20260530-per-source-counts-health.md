@@ -197,7 +197,18 @@ All gates green 2026-06-14 (Phase: Development). The full-test + coverage gates 
 
 ## Reviews
 
-Phase: Development — 5-reviewer cycle is CTO-discretion. This change is schema + cross-cutting (schema + ingester + presenter + CLI), so the CTO ran the 5-reviewer cycle on the committed state per the dev-phase "run it on genuinely risky changes" rule. (Reviewer findings recorded here after the cycle completes.)
+Phase: Development — 5-reviewer cycle is CTO-discretion. This change is schema + cross-cutting (schema + ingester + presenter + CLI), so the CTO ran the 5-reviewer cycle on the committed state per the dev-phase "run it on genuinely risky changes" rule.
+
+**5/5 PRODUCTION GRADE** (glm, mimo, minimax, qwen, deepseek; fresh-context, parallel). No P0/P1/P2 findings.
+
+Reviewer-verified (all five confirmed): the NULL-vs-empty `sql.NullString` bind; `json.RawMessage`+`omitempty` rendering; the ON CONFLICT re-assert path; `sourceMetaOverrides` map safety (written pre-Submit in the main goroutine, read under `i.mu`; the resolver goroutine does not touch it); no untrusted-content / injection surface (`meta_json` is ingester-produced from opencode probe scalars); zero presenter per-adapter knowledge; two-binary separation honored; `SchemaVersion=8` lockstep with `schema_meta.version='8'`, serve-side `CheckSchema` exact-equality; comprehensive test coverage (NULL/valid/malformed for both read paths, write path, re-assert, opencode marshalling, migration bump/idempotency/pre-refusal, schema contract); all 6 stale chain-head assertions bumped; both fake-row fixtures fixed; deferred scope (SOW-0061, SOW-0062) correctly bounded.
+
+P3 findings (all addressed in a follow-up commit on master):
+
+- **Duplicate `warnOnMalformed{Health,Sources}Meta` helpers + double `json.Valid` call** (flagged by glm, qwen, deepseek, mimo; convergent). The two functions were byte-identical except the name, and each row called `json.Valid` twice (once in build, once in warn). Fixed: extracted one shared `metaFromColumn(logger, sourceID, col) json.RawMessage` in the presenter package that computes `json.Valid` once, renders the blob verbatim on success, and emits the WARN (source_id + value_len) + omits on malformed. `buildHealthSource`/`buildSourceItem` no longer touch meta (kept pure); the read loops set `Meta` via the helper. Deleted both duplicate functions. The malformed→WARN tests still pass (message + attrs unchanged). CTO-verified: build, gofmt, lint (0 issues), presenter + ingest tests green.
+- **`WithSourceMeta` is the first post-construction option** (minimax P3). The race is closed in the current control flow (main goroutine, pre-Submit, resolver doesn't read the map), but the API did not document the ordering. Fixed: added an "Ordering contract" note to the `WithSourceMeta` godoc (apply before Submit; constructor-only application preferred) and flagged that adding a mutex to the `*Overrides` maps is a separate, optional hardening if a future caller needs concurrent application. Not a merge-blocker (single production caller is correct).
+
+Lessons surfaced by the reviewers (already in `## Lessons / Follow-Ups`): the migration-addition churn convention is now documented; the two helper fixtures that passed by accident (scan-error path) are a test smell worth a happy-path assertion in a future SOW; SOW-0062 (pre-existing hang) must be addressed to restore the full-test gate.
 
 ## Outcome
 

@@ -255,7 +255,7 @@ func readHealthSourceRows(rows *sql.Rows, logger *slog.Logger, nowUS int64) ([]h
 		if degraded {
 			lagDegraded = true
 		}
-		warnOnMalformedHealthMeta(logger, row.id, row.metaJSON)
+		hs.Meta = metaFromColumn(logger, row.id, row.metaJSON)
 		out = append(out, hs)
 	}
 	if err := rows.Err(); err != nil {
@@ -293,37 +293,39 @@ func buildHealthSource(row healthSourceRow, nowUS int64) (healthSource, bool) {
 		source.LastSeenAt = &v
 		source.LagUS = sourceLagUS(nowUS, v)
 	}
-	if row.metaJSON.Valid && row.metaJSON.String != "" && json.Valid([]byte(row.metaJSON.String)) {
-		source.Meta = json.RawMessage(row.metaJSON.String)
-	}
+	// Meta is set by the caller (readHealthSourceRows) via metaFromColumn so
+	// the json.Valid defence + WARN live in one shared helper (SOW-0024).
 	degraded := source.Enabled && source.LastSeenAt != nil &&
 		source.LagUS > degradedLagThresholdUS
 	return source, degraded
 }
 
-// warnOnMalformedHealthMeta logs a WARN (source id + subsystem) when the
-// sources.meta_json column is non-NULL but fails json.Valid. The sole writer
-// is the ingester (which marshals via encoding/json), so a malformed value
-// is a sole-writer contract violation; the presenter trusts the blob is
-// valid and, as defence-in-depth (SOW-0024), omits the field rather than
-// corrupting the response. The build path has already omitted the field on
-// invalid JSON; this site is the only place the WARN is emitted so the
-// operator can see the violation. Slog is best-effort: a nil logger is
-// tolerated (the constructor falls back to slog.Default() but tests inject
-// a nil-capturing handler).
-func warnOnMalformedHealthMeta(logger *slog.Logger, sourceID string, metaJSON sql.NullString) {
-	if !metaJSON.Valid || metaJSON.String == "" {
-		return
+// metaFromColumn renders the sources.meta_json column as the optional `meta`
+// field shared by /api/health.sources[] and /api/sources.items[] (SOW-0024).
+//
+//   - NULL or empty string → nil json.RawMessage, which `omitempty` omits.
+//     Absence — not zero, not {} — is the "adapter did not populate" signal.
+//   - Valid JSON → the blob verbatim. The presenter never decodes the shape.
+//   - Malformed → nil (omitted) PLUS a WARN with the source id and value_len
+//     (never the raw value, so a large blob cannot flood the log). The sole
+//     writer is the ingester, which marshals via encoding/json, so a malformed
+//     value is a contract violation; omitting it keeps the response intact
+//     rather than 500-ing the whole health/sources endpoint on one bad row.
+//
+// json.Valid is computed exactly once per row (the build and the warn share it).
+func metaFromColumn(logger *slog.Logger, sourceID string, col sql.NullString) json.RawMessage {
+	if !col.Valid || col.String == "" {
+		return nil
 	}
-	if json.Valid([]byte(metaJSON.String)) {
-		return
+	if json.Valid([]byte(col.String)) {
+		return json.RawMessage(col.String)
 	}
-	if logger == nil {
-		return
+	if logger != nil {
+		logger.Warn("presenter: dropping malformed sources.meta_json (sole-writer contract violation)",
+			slog.String("source_id", sourceID),
+			slog.Int("value_len", len(col.String)))
 	}
-	logger.Warn("presenter: dropping malformed sources.meta_json (sole-writer contract violation)",
-		"source_id", sourceID,
-		"value_len", len(metaJSON.String))
+	return nil
 }
 
 func sourceLagUS(nowUS, lastSeenUS int64) int64 {

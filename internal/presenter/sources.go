@@ -141,8 +141,9 @@ func readSourceItemRows(rows *sql.Rows, logger *slog.Logger) ([]sourceItem, sour
 		if err != nil {
 			return nil, sourceItemsFailure{kind: sourceItemsFailureScan, err: err}
 		}
-		warnOnMalformedSourcesMeta(logger, row.id, row.metaJSON)
-		items = append(items, buildSourceItem(row))
+		item := buildSourceItem(row)
+		item.Meta = metaFromColumn(logger, row.id, row.metaJSON)
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, sourceItemsFailure{kind: sourceItemsFailureIterate, err: err}
@@ -181,31 +182,9 @@ func buildSourceItem(row sourceItemRow) sourceItem {
 		LastSeq:     row.lastSeq,
 	}
 	setSourceItemNullables(&item, row)
-	if row.metaJSON.Valid && row.metaJSON.String != "" && json.Valid([]byte(row.metaJSON.String)) {
-		item.Meta = json.RawMessage(row.metaJSON.String)
-	}
+	// Meta is set by the caller (readSourceItemRows) via metaFromColumn so
+	// the json.Valid defence + WARN live in one shared helper (SOW-0024).
 	return item
-}
-
-// warnOnMalformedSourcesMeta mirrors warnOnMalformedHealthMeta for the
-// /api/sources read path: a non-NULL sources.meta_json that fails
-// json.Valid triggers a WARN with the source id and the column is omitted
-// from the response. The sole-writer (ingester) marshals via
-// encoding/json, so a malformed value is a contract violation; the
-// presenter never corrupts the JSON response on it.
-func warnOnMalformedSourcesMeta(logger *slog.Logger, sourceID string, metaJSON sql.NullString) {
-	if !metaJSON.Valid || metaJSON.String == "" {
-		return
-	}
-	if json.Valid([]byte(metaJSON.String)) {
-		return
-	}
-	if logger == nil {
-		return
-	}
-	logger.Warn("presenter: dropping malformed sources.meta_json (sole-writer contract violation)",
-		"source_id", sourceID,
-		"value_len", len(metaJSON.String))
 }
 
 func setSourceItemNullables(item *sourceItem, row sourceItemRow) {
