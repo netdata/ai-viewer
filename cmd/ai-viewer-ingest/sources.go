@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,11 +41,14 @@ import (
 
 // configuredSource holds one parsed (format, location) pair plus the
 // canonical sourceID used by the ingester. Built from --source flags or
-// auto-discovery.
+// auto-discovery. metaJSON carries the adapter-owned JSON metadata blob to
+// persist on sources.meta_json (SOW-0024); the empty string means "no
+// adapter-owned metadata" and the worker binds NULL to the column.
 type configuredSource struct {
 	id       string
 	format   string
 	location string
+	metaJSON string
 }
 
 // opencodeProbeTimeout bounds the one-time opencode auto-discovery ProbeStatus
@@ -54,6 +58,41 @@ type configuredSource struct {
 // timeout. 10 s is generous for a COUNT(*) even on a multi-GB database while still
 // bounding a pathological stall.
 const opencodeProbeTimeout = 10 * time.Second
+
+// opencodeMetaJSON marshals an opencode ProbeStatus result into the JSON
+// blob persisted on sources.meta_json (SOW-0024). The shape is the opencode
+// adapter's contract with the presenter: four keys (session_count,
+// message_count, part_count, latest_migration) and nothing else. A zero
+// or empty latestMigration is still rendered as an empty string (the spec
+// allows it; the presenter does not look inside the blob). Marshalling
+// errors return the empty string so the caller degrades to "no
+// adapter-owned metadata" rather than crashing discovery; the four fields
+// are int64 + string so an error is not reachable today, but the path is
+// defended so a future field cannot crash discovery.
+func opencodeMetaJSON(sessions, messages, parts int64, latestMigration string) string {
+	meta := opencodeSourceMeta{
+		SessionCount:    sessions,
+		MessageCount:    messages,
+		PartCount:       parts,
+		LatestMigration: latestMigration,
+	}
+	blob, err := json.Marshal(meta)
+	if err != nil {
+		return ""
+	}
+	return string(blob)
+}
+
+// opencodeSourceMeta is the JSON shape persisted on sources.meta_json for an
+// opencode source (SOW-0024). Field order is fixed by the struct; the
+// presenter renders the marshalled blob verbatim under /api/health and
+// /api/sources (it never decodes the shape).
+type opencodeSourceMeta struct {
+	SessionCount    int64  `json:"session_count"`
+	MessageCount    int64  `json:"message_count"`
+	PartCount       int64  `json:"part_count"`
+	LatestMigration string `json:"latest_migration"`
+}
 
 // resolveSources returns the source list to start. When the operator
 // passes any --source flag, auto-discovery is bypassed entirely (per
@@ -198,6 +237,14 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 			// database cannot stall startup discovery indefinitely; on timeout the
 			// probe returns its error and discovery proceeds with the source
 			// registered (the counts are observability, not a gate).
+			//
+			// On probe success the result is ALSO marshalled into
+			// configuredSource.metaJSON (SOW-0024) so main.go can register it via
+			// ingest.WithSourceMeta; the ingester persists it on
+			// sources.meta_json and the presenter surfaces it under
+			// /api/health and /api/sources. On probe error metaJSON is left
+			// empty so the worker binds NULL — the omit-when-NULL contract
+			// (the discovery log still carries the counts as observability).
 			probeCtx, cancelProbe := context.WithTimeout(context.Background(), opencodeProbeTimeout)
 			sessions, messages, parts, latest, perr := opencode.ProbeStatus(probeCtx, p.location)
 			cancelProbe()
@@ -208,6 +255,8 @@ func autoDiscoverSources(logger *slog.Logger) []configuredSource {
 				"latest_migration", latest)
 			if perr != nil {
 				attrs = append(attrs, "probe_error", perr.Error())
+			} else {
+				out[len(out)-1].metaJSON = opencodeMetaJSON(sessions, messages, parts, latest)
 			}
 		}
 		logger.Info("ai-viewer-ingest: auto-discovered source", attrs...)

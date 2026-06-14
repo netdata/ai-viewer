@@ -176,16 +176,16 @@ func TestReadHealthSourceRows_ScanErrorReturnsNilSources(t *testing.T) {
 
 	nowUS := fixedTime.UnixMicro()
 	rows, err := db.Query(`
-SELECT 'src-ok', 'aiagent_v3', '/tmp/ok', 1, ?, 0, 100
+SELECT 'src-ok', 'aiagent_v3', '/tmp/ok', 1, ?, 0, 100, NULL
 UNION ALL
-SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', NULL, 0, 101
+SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', NULL, 0, 101, NULL
 `, nowUS-degradedLagThresholdUS-1)
 	if err != nil {
 		t.Fatalf("query rows: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	sources, lagDegraded, scanErr := readHealthSourceRows(rows, nowUS)
+	sources, lagDegraded, scanErr := readHealthSourceRows(rows, nil, nowUS)
 	if scanErr == nil {
 		t.Fatal("err = nil, want scan error")
 	}

@@ -29,7 +29,8 @@ JSON over HTTP. All implemented endpoints return `application/json` except `/api
   "db_size_bytes": 12345678,
   "sources": [
     { "id":"...", "format":"aiagent_v3", "location":"...", "enabled":true,
-      "last_seen_at":<us>, "lag_us":<int>, "parse_errors":0, "last_seq":12345 }
+      "last_seen_at":<us>, "lag_us":<int>, "parse_errors":0, "last_seq":12345,
+      "meta":{ "session_count":42, "message_count":1200, "part_count":3400, "latest_migration":"..." } }
   ],
   "notify": { "last_seq":67890, "lag_us":<int> },
   "sse": { "subscriptions":3 }
@@ -51,6 +52,15 @@ in iteration 2 of SOW-0001 Chunk 11. The
 of the same chunk as a spec ↔ code parity fix once codex flagged they
 were emitted by the binary but absent from this spec.
 
+`meta` is the **optional** per-source metadata blob (SOW-0024): the
+`sources.meta_json` column rendered verbatim. It is OMITTED from a source
+object when the adapter did not populate the column (NULL ≠ zero), so the
+field's absence is the "no metadata" signal. It is adapter-owned — opencode
+populates `{session_count, message_count, part_count, latest_migration}`
+(source-native opencode-DB row counts, NOT ai-viewer's ingested canonical
+counts); file-based adapters omit it. See `observability.md` §`/api/health`
+for freshness and `data-model.md` §sources for the column contract.
+
 ### GET /api/sources
 
 Full source list with cursor metadata. Used by the Sources admin panel.
@@ -58,8 +68,10 @@ Each item carries the per-source `last_seq` (opaque adapter
 observability counter = max SourceSeq seen; NOT a dedup gate and NOT a
 portable event count — identical semantics to
 `/api/health.sources[].last_seq`),
-the persisted `cursor`, and the `updated_at` timestamp of the last
-writer commit. HEAD is supported on both `/api/health` and
+the persisted `cursor`, the `updated_at` timestamp of the last
+writer commit, and the OPTIONAL `meta` blob (identical semantics to
+`/api/health.sources[].meta` — omitted when the adapter did not populate
+`sources.meta_json`; SOW-0024). HEAD is supported on both `/api/health` and
 `/api/sources` and returns the same status + headers with an empty
 body, per RFC 9110 §9.3.2.
 

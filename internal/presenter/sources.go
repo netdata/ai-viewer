@@ -3,6 +3,7 @@ package presenter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -23,18 +24,24 @@ type sourcesResponse struct {
 // healthSource in health.go for the per-adapter semantics. Comparing
 // last_seq across formats is meaningless; comparing it across two
 // snapshots of the same source tells you whether the writer has advanced.
+//
+// Meta is the adapter-owned JSON metadata blob (SOW-0024), rendered
+// verbatim from sources.meta_json. The field is OMITTED (omitempty) when
+// the adapter did not populate the column — absence is the "not
+// populated" signal, not zero / {}.
 type sourceItem struct {
-	ID          string `json:"id"`
-	Format      string `json:"format"`
-	Location    string `json:"location"`
-	Enabled     bool   `json:"enabled"`
-	ParseErrors int64  `json:"parse_errors"`
-	LastSeenAt  *int64 `json:"last_seen_at"`
-	CreatedAt   int64  `json:"created_at"`
-	Cursor      string `json:"cursor"`
-	LastSeq     int64  `json:"last_seq"`
-	LastTsUS    *int64 `json:"last_ts_us"`
-	UpdatedAt   *int64 `json:"updated_at"`
+	ID          string          `json:"id"`
+	Format      string          `json:"format"`
+	Location    string          `json:"location"`
+	Enabled     bool            `json:"enabled"`
+	ParseErrors int64           `json:"parse_errors"`
+	LastSeenAt  *int64          `json:"last_seen_at"`
+	CreatedAt   int64           `json:"created_at"`
+	Cursor      string          `json:"cursor"`
+	LastSeq     int64           `json:"last_seq"`
+	LastTsUS    *int64          `json:"last_ts_us"`
+	UpdatedAt   *int64          `json:"updated_at"`
+	Meta        json.RawMessage `json:"meta,omitempty"`
 }
 
 type sourceItemRow struct {
@@ -49,6 +56,10 @@ type sourceItemRow struct {
 	lastSeq     int64
 	lastTsUS    sql.NullInt64
 	updatedAt   sql.NullInt64
+	// metaJSON is the raw sources.meta_json column. Valid==false means the
+	// adapter did not populate it (the "not populated" signal). See
+	// healthSourceRow.metaJSON for the full contract.
+	metaJSON sql.NullString
 }
 
 type sourceItemsFailureKind uint8
@@ -110,7 +121,8 @@ SELECT
     IFNULL(sp.cursor, ''),
     IFNULL(sp.last_seq, 0),
     sp.last_ts_us,
-    sp.updated_at
+    sp.updated_at,
+    s.meta_json
 FROM sources s
 LEFT JOIN source_progress sp ON sp.source_id = s.id
 ORDER BY s.created_at, s.id
@@ -119,16 +131,17 @@ ORDER BY s.created_at, s.id
 		return nil, sourceItemsFailure{kind: sourceItemsFailureQuery, err: err}
 	}
 	defer func() { _ = rows.Close() }()
-	return readSourceItemRows(rows)
+	return readSourceItemRows(rows, p.logger)
 }
 
-func readSourceItemRows(rows *sql.Rows) ([]sourceItem, sourceItemsFailure) {
+func readSourceItemRows(rows *sql.Rows, logger *slog.Logger) ([]sourceItem, sourceItemsFailure) {
 	items := make([]sourceItem, 0, 8)
 	for rows.Next() {
 		row, err := scanSourceItemRow(rows)
 		if err != nil {
 			return nil, sourceItemsFailure{kind: sourceItemsFailureScan, err: err}
 		}
+		warnOnMalformedSourcesMeta(logger, row.id, row.metaJSON)
 		items = append(items, buildSourceItem(row))
 	}
 	if err := rows.Err(); err != nil {
@@ -151,6 +164,7 @@ func scanSourceItemRow(rows *sql.Rows) (sourceItemRow, error) {
 		&row.lastSeq,
 		&row.lastTsUS,
 		&row.updatedAt,
+		&row.metaJSON,
 	)
 	return row, err
 }
@@ -167,7 +181,31 @@ func buildSourceItem(row sourceItemRow) sourceItem {
 		LastSeq:     row.lastSeq,
 	}
 	setSourceItemNullables(&item, row)
+	if row.metaJSON.Valid && row.metaJSON.String != "" && json.Valid([]byte(row.metaJSON.String)) {
+		item.Meta = json.RawMessage(row.metaJSON.String)
+	}
 	return item
+}
+
+// warnOnMalformedSourcesMeta mirrors warnOnMalformedHealthMeta for the
+// /api/sources read path: a non-NULL sources.meta_json that fails
+// json.Valid triggers a WARN with the source id and the column is omitted
+// from the response. The sole-writer (ingester) marshals via
+// encoding/json, so a malformed value is a contract violation; the
+// presenter never corrupts the JSON response on it.
+func warnOnMalformedSourcesMeta(logger *slog.Logger, sourceID string, metaJSON sql.NullString) {
+	if !metaJSON.Valid || metaJSON.String == "" {
+		return
+	}
+	if json.Valid([]byte(metaJSON.String)) {
+		return
+	}
+	if logger == nil {
+		return
+	}
+	logger.Warn("presenter: dropping malformed sources.meta_json (sole-writer contract violation)",
+		"source_id", sourceID,
+		"value_len", len(metaJSON.String))
 }
 
 func setSourceItemNullables(item *sourceItem, row sourceItemRow) {

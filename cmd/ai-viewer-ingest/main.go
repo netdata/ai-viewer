@@ -159,6 +159,21 @@ func run(args []string, stdout, stderr *os.File) int {
 			"hint", "use --source format:location or create one of the auto-discovery paths")
 	}
 
+	// Register per-source adapter-owned metadata before Submit so the worker
+	// resolves it via WithSourceMeta on first flush (SOW-0024). The ingester
+	// option is applied to the already-constructed ingester; this is safe
+	// because no workers exist yet at this point (the loop below calls Submit,
+	// which is the first point a worker goroutine starts) and the resolver
+	// goroutine started by ing.Start reads only the source_progress HWM cache,
+	// not the sourceMetaOverrides map. Empty metaJSON values are skipped — the
+	// worker binds NULL for those sources (the omit-when-NULL contract).
+	for _, src := range sources {
+		if src.metaJSON == "" {
+			continue
+		}
+		ingest.WithSourceMeta(src.id, src.metaJSON)(ing)
+	}
+
 	adapterCtx, cancelAdapters := context.WithCancel(ctx)
 	defer cancelAdapters()
 

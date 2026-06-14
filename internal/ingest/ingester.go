@@ -127,6 +127,25 @@ func WithFTS5IndexLogs(sourceID string, enabled bool) Option {
 	}
 }
 
+// WithSourceMeta registers an adapter-owned JSON metadata blob to persist on
+// the sources.meta_json column for sourceID (SOW-0024). The blob is the
+// general per-source metadata surface: any adapter can populate it with
+// source-native metadata that has no canonical-column analog, and the
+// presenter renders it verbatim under each source in /api/health and
+// /api/sources (omitted when NULL). The override is the runtime source of
+// truth and is re-asserted on the sources row at every batch flush, so a
+// daemon restart re-applies the configured value. The empty string is a
+// no-op (the resolver returns "" and the worker binds NULL to the column —
+// the absence = "not populated" signal the presenter honors by omitting
+// the field). Marshalling is the caller's responsibility: opencode's
+// auto-discovery probe is the only consumer today, and it json.Marshals the
+// ProbeStatus result before calling this option.
+func WithSourceMeta(sourceID, metaJSON string) Option {
+	return func(i *Ingester) {
+		i.sourceMetaOverrides[sourceID] = metaJSON
+	}
+}
+
 // Ingester wires source-format adapters to the SQLite store. One
 // instance owns one writer-side *sql.DB.
 type Ingester struct {
@@ -159,6 +178,13 @@ type Ingester struct {
 	// (true) in resolveFTS5IndexLogs. Persisted on the sources row by the worker
 	// and read by applyLogEntry to gate fts_logs population.
 	fts5IndexLogsOverrides map[string]bool
+	// sourceMetaOverrides maps sourceID → the adapter-owned JSON metadata blob
+	// to persist on sources.meta_json. Set by WithSourceMeta; absence resolves
+	// to "" in resolveSourceMeta (the worker binds NULL to the column — the
+	// absence = "not populated" signal). Persisted on the sources row by the
+	// worker; rendered verbatim by the presenter under /api/health and
+	// /api/sources (SOW-0024, data-model.md §sources).
+	sourceMetaOverrides map[string]string
 }
 
 // New constructs an Ingester. The db must be writable (use
@@ -180,6 +206,7 @@ func New(db *sql.DB, opts ...Option) (*Ingester, error) {
 		formatOverrides:        make(map[string]string),
 		locationOverrides:      make(map[string]string),
 		fts5IndexLogsOverrides: make(map[string]bool),
+		sourceMetaOverrides:    make(map[string]string),
 	}
 	for _, opt := range opts {
 		opt(i)
@@ -236,6 +263,7 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 		sourceFormat:  format,
 		location:      location,
 		fts5IndexLogs: i.resolveFTS5IndexLogs(sourceID),
+		metaJSON:      i.resolveSourceMeta(sourceID),
 		events:        events,
 		db:            i.db,
 		hwm:           i.hwm,
@@ -330,6 +358,15 @@ func (i *Ingester) resolveFTS5IndexLogs(sourceID string) bool {
 		return v
 	}
 	return true
+}
+
+// resolveSourceMeta returns the adapter-owned JSON metadata blob to persist on
+// sources.meta_json for sourceID. A registered WithSourceMeta override wins;
+// absence (or an empty string) resolves to "" so the worker binds NULL to the
+// column — the absence = "not populated" signal the presenter honors by
+// omitting the field. SOW-0024.
+func (i *Ingester) resolveSourceMeta(sourceID string) string {
+	return i.sourceMetaOverrides[sourceID]
 }
 
 // parseSourceID splits "format:location" into its two parts. Returns

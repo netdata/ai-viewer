@@ -25,9 +25,14 @@ import (
 
 const migration0007Name = "0007_fts5_index_logs.sql"
 
-// TestMigration0007_BumpsSchemaVersionTo7 pins the lockstep contract: applying
-// the full migration chain (which ends at 0007) leaves schema_meta.version '7'.
-func TestMigration0007_BumpsSchemaVersionTo7(t *testing.T) {
+// TestMigration0007_ChainHeadSchemaVersion pins the FULL-chain head version:
+// openMigratedSQLite runs every migration through the latest (0008), so the
+// on-disk schema_meta.version is '8'. 0007's OWN bump (to '7') is pinned
+// separately by TestMigration0007_BumpsSchemaVersionTo7_Internal (in the 0008
+// test file, which stops the chain at 0007); this assertion guards the lockstep
+// with presenter.SchemaVersion as new migrations are added — mirroring how
+// TestMigration0006_ChainHeadSchemaVersion was bumped once 0007 became head.
+func TestMigration0007_ChainHeadSchemaVersion(t *testing.T) {
 	t.Parallel()
 	db := openMigratedSQLite(t)
 	var version string
@@ -35,8 +40,8 @@ func TestMigration0007_BumpsSchemaVersionTo7(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "7" {
-		t.Fatalf("schema_meta.version = %q, want %q (0007 bumps the version in lockstep)", version, "7")
+	if version != "8" {
+		t.Fatalf("schema_meta.version = %q, want %q (full chain head is 0008)", version, "8")
 	}
 }
 
@@ -127,7 +132,7 @@ func TestMigration0007_AddsFTS5IndexLogsColumnDefault1(t *testing.T) {
 }
 
 // TestMigration0007_IsIdempotent re-runs the full migration chain over an
-// already-migrated DB and asserts it is a no-op: the version stays '7' and the
+// already-migrated DB and asserts it is a no-op: the version stays '8' and the
 // 0007 row is recorded exactly once. ALTER TABLE ADD COLUMN is not natively
 // idempotent in SQLite, so the runner's per-file _schema_migrations tracking is
 // what makes a second Up() skip 0007; this pins that guarantee.
@@ -146,8 +151,8 @@ func TestMigration0007_IsIdempotent(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "7" {
-		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "7")
+	if version != "8" {
+		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "8")
 	}
 
 	if got := scanIntInternal(t, db,

@@ -127,7 +127,7 @@ func isFTSShadowTable(name string) bool {
 }
 
 // TestOpen_RunsMigrations asserts every contract table is created and
-// schema_meta carries version='7' (the latest migration, 0007, bumps it).
+// schema_meta carries version='8' (the latest migration, 0008, bumps it).
 func TestOpen_RunsMigrations(t *testing.T) {
 	t.Parallel()
 
@@ -143,8 +143,8 @@ func TestOpen_RunsMigrations(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "7" {
-		t.Fatalf("schema_meta.version: want %q, got %q", "7", version)
+	if version != "8" {
+		t.Fatalf("schema_meta.version: want %q, got %q", "8", version)
 	}
 
 	var createdAt string
@@ -179,21 +179,21 @@ func TestOpen_Idempotent(t *testing.T) {
 		// expectedMigrations grows by one each time a new SQL file is
 		// added under migrations/. Update the constant in lockstep with
 		// the new migration so this contract test stays meaningful.
-		const expectedMigrations = 7
+		const expectedMigrations = 8
 		if count != expectedMigrations {
 			t.Fatalf("round %d: _schema_migrations rows: want %d, got %d", round, expectedMigrations, count)
 		}
 
 		// Inserting the same schema_meta version twice would be a defect
 		// only if the migration ran a second time without the INSERT OR
-		// REPLACE guard. Sanity-check the version is still '7'.
+		// REPLACE guard. Sanity-check the version is still '8'.
 		var version string
 		if err := s.DB().QueryRowContext(context.Background(),
 			`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 			t.Fatalf("round %d: read schema_meta.version: %v", round, err)
 		}
-		if version != "7" {
-			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "7", version)
+		if version != "8" {
+			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "8", version)
 		}
 
 		if err := s.Close(); err != nil {

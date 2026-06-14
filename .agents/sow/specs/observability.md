@@ -52,7 +52,13 @@ The single source of truth for "is this thing alive and what state is it in":
       "last_seen_at":<us>,
       "lag_us":<int>,           // now - last_seen_at
       "parse_errors":0,
-      "last_seq":12345          // per-source observability counter (max SourceSeq seen); NOT a dedup gate
+      "last_seq":12345,         // per-source observability counter (max SourceSeq seen); NOT a dedup gate
+      "meta":{                  // OPTIONAL — omitted when the adapter did not populate sources.meta_json
+        "session_count":42,     // opencode source-native row counts (the source DB's own tables),
+        "message_count":1200,   // NOT ai-viewer's ingested canonical counts; a distinct signal.
+        "part_count":3400,      // File-based adapters omit the field entirely (NULL ≠ zero).
+        "latest_migration":"0009_..."
+      }
     }
   ],
   "notify": {
@@ -92,6 +98,17 @@ Do NOT compare `last_seq` across formats; the only portable meaning is
 true `events_ingested_total` counter is future work and not yet
 plumbed; the field was renamed in iteration 2 of SOW-0001 Chunk 11
 once a real-corpus run surfaced the misleading v2 values.
+
+`meta` is the **optional per-source metadata blob** (SOW-0024). It is the
+`sources.meta_json` column rendered verbatim; the field is OMITTED from the
+response when the adapter did not populate the column (NULL), so absence — not
+zero — is the "adapter has no metadata" signal. It is adapter-owned: opencode
+populates `{session_count, message_count, part_count, latest_migration}` from
+its startup probe (source-native opencode-DB row counts, NOT ai-viewer's
+ingested canonical counts); file-based adapters omit it. Freshness is the last
+ingester startup (the probe runs once at auto-discovery; a restart refreshes
+it). The presenter renders the blob as-is and has no per-adapter knowledge of
+its shape (`data-model.md` §sources).
 
 `status` is `degraded` when:
 

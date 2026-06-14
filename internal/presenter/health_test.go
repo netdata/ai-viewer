@@ -3,10 +3,15 @@ package presenter
 import (
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
+	"time"
+
+	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // healthBody is the in-test mirror of healthResponse. We intentionally
@@ -354,3 +359,195 @@ func TestHealth_DownOnClosedDB(t *testing.T) {
 type nullableInt struct {
 	sql.NullInt64
 }
+
+// healthBodyWithRaw is the in-test mirror of the response body that
+// preserves the raw JSON bytes so the test can assert the field is
+// ABSENT (not just the typed Go value) — omitempty is the contract, and
+// the only way to prove the field is genuinely absent is to check the
+// rendered bytes. Mirrors the healthBody struct but adds a Raw field that
+// holds the exact response payload.
+type healthBodyWithRaw struct {
+	Status        string         `json:"status"`
+	Version       string         `json:"version"`
+	SchemaVersion int            `json:"schema_version"`
+	UptimeS       int64          `json:"uptime_s"`
+	DBPath        string         `json:"db_path"`
+	DBSizeBytes   int64          `json:"db_size_bytes"`
+	Sources       []healthSource `json:"sources"`
+}
+
+// doHealthRaw runs a GET /api/health and returns the raw response bytes
+// alongside the typed body. Tests that need to assert field-absence use
+// the raw bytes; tests that need the typed shape use body.
+func doHealthRaw(t *testing.T, p *Presenter) (int, []byte, healthBodyWithRaw) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	raw := rr.Body.Bytes()
+	var body healthBodyWithRaw
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("decode /api/health body: %v\nraw: %s", err, raw)
+		}
+	}
+	return rr.Code, raw, body
+}
+
+// newHealthPresenterWithLogger mirrors newTestPresenter but lets the
+// caller inject a slog.Logger that captures structured output (for
+// asserting the malformed-meta WARN). The presenter itself never
+// mutates the logger; the helper is purely for test isolation.
+func newHealthPresenterWithLogger(t *testing.T, logger *slog.Logger) (*Presenter, *sql.DB, func()) {
+	t.Helper()
+	s, err := store.OpenWriter(t.Context(), ":memory:", logger)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	frontend := fstest.MapFS{
+		"frontend_dist/index.html": &fstest.MapFile{
+			Data:    []byte("<!doctype html><title>test</title>"),
+			ModTime: fixedTime,
+		},
+		"frontend_dist/assets/app.js": &fstest.MapFile{
+			Data:    []byte("console.log('test');\n"),
+			ModTime: fixedTime,
+		},
+	}
+	p, err := New(Options{
+		DB:            s.DB(),
+		Logger:        logger,
+		Version:       "test-sha",
+		DBPath:        "/tmp/test.db",
+		StartedAt:     fixedTime.Add(-30 * time.Second),
+		SchemaVersion: SchemaVersion,
+		Now:           func() time.Time { return fixedTime },
+		FrontendFS:    frontend,
+	})
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("New: %v", err)
+	}
+	return p, s.DB(), func() { _ = s.Close() }
+}
+
+// TestHealth_SourceMetaOmittedAndPresent pins the SOW-0024 read path on
+// /api/health:
+//   - (a) a source with sources.meta_json = NULL renders the response
+//     without a `meta` field (omitempty + absence = "not populated");
+//   - (b) a source with a valid JSON blob renders the blob verbatim;
+//   - (c) a source with a malformed meta_json renders WITHOUT the field
+//     AND emits a WARN carrying the source id (the no-silent-corruption
+//     defence — the sole-writer ingester would never produce this, but
+//     the presenter must not corrupt the response if it ever does).
+func TestHealth_SourceMetaOmittedAndPresent(t *testing.T) {
+	t.Parallel()
+
+	// (a) meta_json = NULL → field absent.
+	t.Run("omitted when null", func(t *testing.T) {
+		t.Parallel()
+		p, db, cleanup := newTestPresenter(t)
+		defer cleanup()
+		now := fixedTime.UnixMicro()
+		if _, err := db.Exec(
+			`INSERT INTO sources (id, format, location, enabled, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			"aiagent_v3:/tmp/null", "aiagent_v3", "/tmp", 1, now, now,
+		); err != nil {
+			t.Fatalf("seed sources: %v", err)
+		}
+		code, raw, body := doHealthRaw(t, p)
+		if code != http.StatusOK {
+			t.Fatalf("status = %d", code)
+		}
+		if len(body.Sources) != 1 {
+			t.Fatalf("sources len = %d, want 1", len(body.Sources))
+		}
+		// Typed check: Meta is a json.RawMessage; the nil/empty value
+		// is the omitempty signal — the JSON encoder would skip it.
+		if body.Sources[0].Meta != nil {
+			t.Errorf("meta on NULL-source: %s, want nil (omitempty)", body.Sources[0].Meta)
+		}
+		// Raw check: the field must be absent, not present-as-null.
+		if strings.Contains(string(raw), `"meta":`) {
+			t.Errorf("raw response carries a meta field on NULL-source: %s", raw)
+		}
+	})
+
+	// (b) valid JSON blob → rendered verbatim.
+	t.Run("present when valid", func(t *testing.T) {
+		t.Parallel()
+		p, db, cleanup := newTestPresenter(t)
+		defer cleanup()
+		now := fixedTime.UnixMicro()
+		blob := `{"session_count":42,"message_count":1200,"part_count":3400,"latest_migration":"0009_x"}`
+		if _, err := db.Exec(
+			`INSERT INTO sources (id, format, location, enabled, last_seen_at, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"opencode:/tmp/x", "opencode", "/tmp/x", 1, now, blob, now,
+		); err != nil {
+			t.Fatalf("seed sources: %v", err)
+		}
+		_, _, body := doHealthRaw(t, p)
+		if len(body.Sources) != 1 {
+			t.Fatalf("sources len = %d, want 1", len(body.Sources))
+		}
+		got := strings.TrimSpace(string(body.Sources[0].Meta))
+		if got != blob {
+			t.Errorf("meta = %q, want %q (verbatim round-trip)", got, blob)
+		}
+	})
+
+	// (c) malformed meta_json → field omitted + WARN logged.
+	t.Run("omitted + warn on malformed", func(t *testing.T) {
+		t.Parallel()
+		logger, buf := captureLogger()
+		p, db, cleanup := newHealthPresenterWithLogger(t, logger)
+		defer cleanup()
+		now := fixedTime.UnixMicro()
+		if _, err := db.Exec(
+			`INSERT INTO sources (id, format, location, enabled, last_seen_at, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"opencode:/tmp/bad", "opencode", "/tmp/bad", 1, now, `{not-json`, now,
+		); err != nil {
+			t.Fatalf("seed sources: %v", err)
+		}
+		code, raw, body := doHealthRaw(t, p)
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (health must answer on malformed meta)", code)
+		}
+		if len(body.Sources) != 1 {
+			t.Fatalf("sources len = %d, want 1", len(body.Sources))
+		}
+		if body.Sources[0].Meta != nil {
+			t.Errorf("meta on malformed-source: %s, want nil (omit on invalid JSON)", body.Sources[0].Meta)
+		}
+		if strings.Contains(string(raw), `"meta":`) {
+			t.Errorf("raw response carries a meta field on malformed-source: %s", raw)
+		}
+		// The WARN must be present with the source id; the no-silent-corruption
+		// defence is the whole point.
+		var warnLine map[string]any
+		for _, rawLine := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(rawLine), &m); err != nil {
+				t.Fatalf("unmarshal log: %v (raw: %q)", err, rawLine)
+			}
+			if m["msg"] == "presenter: dropping malformed sources.meta_json (sole-writer contract violation)" {
+				warnLine = m
+				break
+			}
+		}
+		if warnLine == nil {
+			t.Fatalf("no malformed-meta WARN in log; got:\n%s", buf.String())
+		}
+		if got, _ := warnLine["source_id"].(string); got != "opencode:/tmp/bad" {
+			t.Errorf("WARN source_id = %q, want %q", got, "opencode:/tmp/bad")
+		}
+		if got, _ := warnLine["level"].(string); got != "WARN" {
+			t.Errorf("WARN level = %q, want WARN", got)
+		}
+	})
+}
+
+// newHealthPresenterWithLogger above references t.Context() (Go 1.24+); a
+// project that pinned older Go would need context.Background(). The
+// project Go version is 1.24+ (see go.mod), so t.Context() is fine and
+// is the modern, lint-clean idiom.

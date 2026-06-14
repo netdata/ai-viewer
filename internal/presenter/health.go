@@ -3,6 +3,7 @@ package presenter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -71,15 +72,21 @@ type healthSSE struct {
 //
 // Do NOT compare last_seq across formats; it is only meaningful as
 // "the most recent cursor position the writer committed".
+//
+// Meta is the adapter-owned JSON metadata blob (SOW-0024), rendered
+// verbatim from sources.meta_json. The field is OMITTED (omitempty) when
+// the adapter did not populate the column — absence is the "not
+// populated" signal, not zero / {}.
 type healthSource struct {
-	ID          string `json:"id"`
-	Format      string `json:"format"`
-	Location    string `json:"location"`
-	Enabled     bool   `json:"enabled"`
-	LastSeenAt  *int64 `json:"last_seen_at"`
-	LagUS       int64  `json:"lag_us"`
-	ParseErrors int64  `json:"parse_errors"`
-	LastSeq     int64  `json:"last_seq"`
+	ID          string          `json:"id"`
+	Format      string          `json:"format"`
+	Location    string          `json:"location"`
+	Enabled     bool            `json:"enabled"`
+	LastSeenAt  *int64          `json:"last_seen_at"`
+	LagUS       int64           `json:"lag_us"`
+	ParseErrors int64           `json:"parse_errors"`
+	LastSeq     int64           `json:"last_seq"`
+	Meta        json.RawMessage `json:"meta,omitempty"`
 }
 
 type healthSignals struct {
@@ -96,6 +103,13 @@ type healthSourceRow struct {
 	lastSeenAt  sql.NullInt64
 	parseErrors int64
 	lastSeq     int64
+	// metaJSON is the raw sources.meta_json column. Valid==false means the
+	// adapter did not populate it (the "not populated" signal). String is
+	// empty when Valid==true AND the column was bound to ''; the worker
+	// guarantees a NULL bind for the empty override so String==""
+	// together with Valid==true should never appear in practice, but the
+	// build path treats both cases as "omit the field".
+	metaJSON sql.NullString
 }
 
 // handleHealth answers GET /api/health. The handler runs three short
@@ -216,7 +230,8 @@ SELECT
     s.enabled,
     s.last_seen_at,
     s.parse_errors,
-    IFNULL(sp.last_seq, 0)
+    IFNULL(sp.last_seq, 0),
+    s.meta_json
 FROM sources s
 LEFT JOIN source_progress sp ON sp.source_id = s.id
 ORDER BY s.created_at, s.id
@@ -225,10 +240,10 @@ ORDER BY s.created_at, s.id
 		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
-	return readHealthSourceRows(rows, now.UnixMicro())
+	return readHealthSourceRows(rows, p.logger, now.UnixMicro())
 }
 
-func readHealthSourceRows(rows *sql.Rows, nowUS int64) ([]healthSource, bool, error) {
+func readHealthSourceRows(rows *sql.Rows, logger *slog.Logger, nowUS int64) ([]healthSource, bool, error) {
 	out := make([]healthSource, 0, 8)
 	lagDegraded := false
 	for rows.Next() {
@@ -240,6 +255,7 @@ func readHealthSourceRows(rows *sql.Rows, nowUS int64) ([]healthSource, bool, er
 		if degraded {
 			lagDegraded = true
 		}
+		warnOnMalformedHealthMeta(logger, row.id, row.metaJSON)
 		out = append(out, hs)
 	}
 	if err := rows.Err(); err != nil {
@@ -258,6 +274,7 @@ func scanHealthSourceRow(rows *sql.Rows) (healthSourceRow, error) {
 		&row.lastSeenAt,
 		&row.parseErrors,
 		&row.lastSeq,
+		&row.metaJSON,
 	)
 	return row, err
 }
@@ -276,9 +293,37 @@ func buildHealthSource(row healthSourceRow, nowUS int64) (healthSource, bool) {
 		source.LastSeenAt = &v
 		source.LagUS = sourceLagUS(nowUS, v)
 	}
+	if row.metaJSON.Valid && row.metaJSON.String != "" && json.Valid([]byte(row.metaJSON.String)) {
+		source.Meta = json.RawMessage(row.metaJSON.String)
+	}
 	degraded := source.Enabled && source.LastSeenAt != nil &&
 		source.LagUS > degradedLagThresholdUS
 	return source, degraded
+}
+
+// warnOnMalformedHealthMeta logs a WARN (source id + subsystem) when the
+// sources.meta_json column is non-NULL but fails json.Valid. The sole writer
+// is the ingester (which marshals via encoding/json), so a malformed value
+// is a sole-writer contract violation; the presenter trusts the blob is
+// valid and, as defence-in-depth (SOW-0024), omits the field rather than
+// corrupting the response. The build path has already omitted the field on
+// invalid JSON; this site is the only place the WARN is emitted so the
+// operator can see the violation. Slog is best-effort: a nil logger is
+// tolerated (the constructor falls back to slog.Default() but tests inject
+// a nil-capturing handler).
+func warnOnMalformedHealthMeta(logger *slog.Logger, sourceID string, metaJSON sql.NullString) {
+	if !metaJSON.Valid || metaJSON.String == "" {
+		return
+	}
+	if json.Valid([]byte(metaJSON.String)) {
+		return
+	}
+	if logger == nil {
+		return
+	}
+	logger.Warn("presenter: dropping malformed sources.meta_json (sole-writer contract violation)",
+		"source_id", sourceID,
+		"value_len", len(metaJSON.String))
 }
 
 func sourceLagUS(nowUS, lastSeenUS int64) int64 {

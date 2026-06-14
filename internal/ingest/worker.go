@@ -23,13 +23,19 @@ type worker struct {
 	// restart. applyLogEntry reads it to gate fts_logs population (fts_ops is
 	// always indexed regardless of this flag).
 	fts5IndexLogs bool
-	events        <-chan canonical.Event
-	db            *sql.DB
-	hwm           *hwmCache
-	pricer        Pricer
-	logger        *slog.Logger
-	batchSize     int
-	batchEvery    time.Duration
+	// metaJSON is the resolved adapter-owned JSON metadata blob the ingester
+	// computed from WithSourceMeta (default ""). ensureSourceRow persists it
+	// on the sources.meta_json column; the empty string binds NULL — the
+	// "not populated" signal the presenter honors by omitting the meta
+	// field. SOW-0024.
+	metaJSON   string
+	events     <-chan canonical.Event
+	db         *sql.DB
+	hwm        *hwmCache
+	pricer     Pricer
+	logger     *slog.Logger
+	batchSize  int
+	batchEvery time.Duration
 	// now supplies the wall-clock cutoff the incremental rollup refresh uses
 	// to pick its open hour/day. Injectable for deterministic tests; defaults
 	// to defaultNow when the worker is built without one.
@@ -70,7 +76,7 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 }
 
 func (w *worker) writeBatchRows(ctx context.Context, tx *sql.Tx, wr *writer, batch []canonical.Event) error {
-	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location, w.fts5IndexLogs); err != nil {
+	if err := ensureSourceRow(ctx, tx, w.sourceID, w.sourceFormat, w.location, w.fts5IndexLogs, w.metaJSON); err != nil {
 		return err
 	}
 	for _, ev := range batch {
@@ -214,19 +220,26 @@ func (w *worker) report(err error) {
 // of truth (a daemon restart re-asserts the configured value over whatever a
 // prior run stored). The persisted flag gates fts_logs indexing: the FTS
 // backfill (indexableLogsForFTSQuery) and /api/search (searchLogs) both filter
-// on src.fts5_index_logs = 1 (data-model.md §Full-text search).
-func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string, fts5IndexLogs bool) error {
+// on src.fts5_index_logs = 1 (data-model.md §Full-text search). metaJSON is
+// the resolved per-source adapter-owned JSON metadata blob (SOW-0024); the
+// empty string binds NULL to the column — the absence = "not populated" signal
+// the presenter honors by omitting the meta field. It is persisted on both
+// insert and conflict-update, mirroring fts5IndexLogs, for the same
+// restart-reasserts-runtime-truth reason.
+func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location string, fts5IndexLogs bool, metaJSON string) error {
 	ftsFlag := 0
 	if fts5IndexLogs {
 		ftsFlag = 1
 	}
+	metaArg := sql.NullString{String: metaJSON, Valid: metaJSON != ""}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO sources (id, format, location, enabled, fts5_index_logs, created_at)
-VALUES (?, ?, ?, 1, ?, ?)
+INSERT INTO sources (id, format, location, enabled, fts5_index_logs, meta_json, created_at)
+VALUES (?, ?, ?, 1, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     location        = excluded.location,
-    fts5_index_logs = excluded.fts5_index_logs
-`, sourceID, format, location, ftsFlag, time.Now().UTC().UnixMicro()); err != nil {
+    fts5_index_logs = excluded.fts5_index_logs,
+    meta_json       = excluded.meta_json
+`, sourceID, format, location, ftsFlag, metaArg, time.Now().UTC().UnixMicro()); err != nil {
 		return fmt.Errorf("ensure source row: %w", err)
 	}
 	return nil

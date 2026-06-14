@@ -19,11 +19,11 @@ import (
 // stays version-neutral. Servers refuse to start when the on-disk
 // schema_meta.version differs from this value — see CheckSchema below — so a
 // store that has not yet had the latest migration applied is rejected rather
-// than served with stale rows. 0007 (sources.fts5_index_logs column, SOW-0007)
-// is the latest; it sets schema_meta.version='7'. It is a sources-table-shape
-// change serve validates at startup, so a v7 binary must refuse a pre-0007
+// than served with stale rows. 0008 (sources.meta_json column, SOW-0024) is
+// the latest; it sets schema_meta.version='8'. It is a sources-table-shape
+// change serve validates at startup, so a v8 binary must refuse a pre-0008
 // store (whose sources table lacks the column).
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema
 // version disagrees with the binary's expected version. The main()

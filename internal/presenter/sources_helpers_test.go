@@ -75,16 +75,16 @@ func TestReadSourceItemRows_ScanErrorReturnsNilItems(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	rows, err := db.Query(`
-SELECT 'src-ok', 'aiagent_v3', '/tmp/ok', 1, 0, NULL, 100, '', 0, NULL, NULL
+SELECT 'src-ok', 'aiagent_v3', '/tmp/ok', 1, 0, NULL, 100, '', 0, NULL, NULL, NULL
 UNION ALL
-SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', 0, NULL, 101, '', 0, NULL, NULL
+SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', 0, NULL, 101, '', 0, NULL, NULL, NULL
 `)
 	if err != nil {
 		t.Fatalf("query rows: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	items, failure := readSourceItemRows(rows)
+	items, failure := readSourceItemRows(rows, nil)
 	if failure.err == nil {
 		t.Fatal("failure.err = nil, want scan error")
 	}

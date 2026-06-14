@@ -40,7 +40,10 @@ func ensureSourceRowDirect(ctx context.Context, db *sql.DB, id, format, loc stri
 	}
 	// true mirrors the ingester's default-resolved fts5_index_logs (indexed
 	// unless the operator opts out); these tests do not exercise the flag.
-	if err := ensureSourceRow(ctx, tx, id, format, loc, true); err != nil {
+	// "" mirrors the ingester's default-resolved metaJSON (no adapter-owned
+	// metadata, so the column is bound NULL — the omit-when-NULL contract).
+	// Dedicated meta-persistence coverage lives in TestIngester_PersistsSourceMeta.
+	if err := ensureSourceRow(ctx, tx, id, format, loc, true, ""); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

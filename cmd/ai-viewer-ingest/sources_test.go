@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -312,5 +314,145 @@ func TestOpencodeProbeRespectsCancelledContext(t *testing.T) {
 	}
 	if latest != "20260510033149_init" {
 		t.Errorf("ProbeStatus latest migration = %q, want the planted one", latest)
+	}
+}
+
+// TestOpencodeMetaJSON_RoundTrips pins the opencode meta-blob contract
+// (SOW-0024): the helper marshals the four opencode keys in a stable shape
+// that decodes back to those keys. The presenter renders this blob verbatim
+// under /api/health and /api/sources — any field name drift would break the
+// UI's read-only consumer.
+func TestOpencodeMetaJSON_RoundTrips(t *testing.T) {
+	t.Parallel()
+	const (
+		sessions int64 = 42
+		messages int64 = 1200
+		parts    int64 = 3400
+		latest         = "20260510033149_session_usage"
+	)
+	blob := opencodeMetaJSON(sessions, messages, parts, latest)
+	if blob == "" {
+		t.Fatal("opencodeMetaJSON returned empty string for a happy-path probe result")
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(blob), &got); err != nil {
+		t.Fatalf("unmarshal opencodeMetaJSON result: %v (blob=%q)", err, blob)
+	}
+	for _, c := range []struct {
+		key string
+		// want is encoded as a string for the assertion so the JSON-decoded
+		// number type (float64) does not have to match the int64 input
+		// exactly — round-trip equality over the wire shape is the contract.
+		want string
+	}{
+		{"session_count", "42"},
+		{"message_count", "1200"},
+		{"part_count", "3400"},
+		{"latest_migration", latest},
+	} {
+		v, ok := got[c.key]
+		if !ok {
+			t.Errorf("opencodeMetaJSON result missing key %q (blob=%q)", c.key, blob)
+			continue
+		}
+		// JSON numbers decode to float64; JSON strings decode to string. Compare
+		// the canonical string form so int64 and float64 agree across the wire.
+		gotStr := fmt.Sprintf("%v", v)
+		if gotStr != c.want {
+			t.Errorf("opencodeMetaJSON[%q] = %v, want %v (blob=%q)", c.key, v, c.want, blob)
+		}
+	}
+}
+
+// TestAutoDiscover_OpencodeMetaBlob pins the opencode discovery → metaJSON
+// wiring (SOW-0024): a successful ProbeStatus result is marshalled into
+// configuredSource.metaJSON via opencodeMetaJSON, ready for main.go to
+// register via ingest.WithSourceMeta. The test drives autoDiscoverSources
+// end-to-end against a planted opencode DB so the round-trip — probe
+// (counts + latest) → marshalled blob → unmarshalled keys — is the actual
+// production path, not the helper in isolation.
+func TestAutoDiscover_OpencodeMetaBlob(t *testing.T) {
+	// Not parallel: mutates process-wide HOME.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	plantOpencodeDB(t, tmp, 7, 11, 13, "20260510033149_session_usage")
+
+	got, err := resolveSources(nil, silentLogger())
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	var oc *configuredSource
+	for i := range got {
+		if got[i].format == "opencode" {
+			oc = &got[i]
+		}
+	}
+	if oc == nil {
+		t.Fatalf("opencode source not auto-discovered; got %+v", got)
+	}
+	if oc.metaJSON == "" {
+		t.Fatal("opencode metaJSON is empty after a successful probe; the discovery path must marshal the ProbeStatus result")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(oc.metaJSON), &parsed); err != nil {
+		t.Fatalf("unmarshal opencode metaJSON: %v (blob=%q)", err, oc.metaJSON)
+	}
+	for _, c := range []struct {
+		key  string
+		want string
+	}{
+		{"session_count", "7"},
+		{"message_count", "11"},
+		{"part_count", "13"},
+		{"latest_migration", "20260510033149_session_usage"},
+	} {
+		v, ok := parsed[c.key]
+		if !ok {
+			t.Errorf("opencode metaJSON missing key %q (blob=%q)", c.key, oc.metaJSON)
+			continue
+		}
+		if got := fmt.Sprintf("%v", v); got != c.want {
+			t.Errorf("opencode metaJSON[%q] = %v, want %v (blob=%q)", c.key, v, c.want, oc.metaJSON)
+		}
+	}
+}
+
+// TestAutoDiscover_OpencodeMetaEmptyOnProbeError pins the best-effort
+// discovery contract (SOW-0024): when the opencode probe errors, the source
+// is still registered but metaJSON is left empty so the worker binds NULL
+// (the omit-when-NULL contract). The operator-facing discovery log still
+// carries the probe_error attr (covered by
+// TestAutoDiscover_OpencodeProbeErrorStillRegisters).
+func TestAutoDiscover_OpencodeMetaEmptyOnProbeError(t *testing.T) {
+	// Not parallel: mutates process-wide HOME.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	clearOtherAdapterEnv(t)
+	dbPath := filepath.Join(tmp, ".local", "share", "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A non-SQLite regular file at the probe path: os.Stat succeeds so the
+	// source is discovered, but ProbeStatus errors.
+	if err := os.WriteFile(dbPath, []byte("not a database"), 0o644); err != nil {
+		t.Fatalf("write bogus db: %v", err)
+	}
+
+	got, err := resolveSources(nil, silentLogger())
+	if err != nil {
+		t.Fatalf("resolveSources: %v", err)
+	}
+	var oc *configuredSource
+	for i := range got {
+		if got[i].format == "opencode" && got[i].location == dbPath {
+			oc = &got[i]
+		}
+	}
+	if oc == nil {
+		t.Fatalf("opencode source not registered despite a probe error; got %+v", got)
+	}
+	if oc.metaJSON != "" {
+		t.Errorf("opencode metaJSON = %q on a probe error, want \"\" (omit-when-NULL contract)", oc.metaJSON)
 	}
 }

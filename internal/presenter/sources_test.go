@@ -2,6 +2,7 @@ package presenter
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -20,6 +21,161 @@ import (
 // JSON contract.
 type sourcesBody struct {
 	Items []sourceItem `json:"items"`
+}
+
+// doSourcesRaw issues GET /api/sources and returns the raw response
+// bytes alongside the typed body so tests can assert field-absence
+// (the SOW-0024 contract for meta on NULL — omitempty must skip the
+// field, not emit it as null).
+func doSourcesRaw(t *testing.T, p *Presenter) (int, []byte, sourcesBody) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/sources", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	raw := rr.Body.Bytes()
+	var body sourcesBody
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("decode body: %v\nraw: %s", err, raw)
+		}
+	}
+	return rr.Code, raw, body
+}
+
+// newSourcesPresenterWithLogger mirrors newHealthPresenterWithLogger
+// for the /api/sources handler: it lets the caller inject a slog.Logger
+// that captures structured output (for asserting the malformed-meta
+// WARN). Sourced from the store package via a fresh :memory: DB.
+func newSourcesPresenterWithLogger(t *testing.T, logger *slog.Logger) (*Presenter, *sql.DB, func()) {
+	t.Helper()
+	s, err := store.OpenWriter(t.Context(), ":memory:", logger)
+	if err != nil {
+		t.Fatalf("open writer store: %v", err)
+	}
+	frontend := fstest.MapFS{
+		"frontend_dist/index.html": &fstest.MapFile{
+			Data:    []byte("<!doctype html><title>test</title>"),
+			ModTime: fixedTime,
+		},
+	}
+	p, err := New(Options{
+		DB:            s.DB(),
+		Logger:        logger,
+		Version:       "test-sha",
+		DBPath:        "/tmp/test.db",
+		StartedAt:     fixedTime.Add(-30 * time.Second),
+		SchemaVersion: SchemaVersion,
+		Now:           func() time.Time { return fixedTime },
+		FrontendFS:    frontend,
+	})
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("New: %v", err)
+	}
+	return p, s.DB(), func() { _ = s.Close() }
+}
+
+// TestSources_SourceMetaOmittedAndPresent mirrors
+// TestHealth_SourceMetaOmittedAndPresent for the /api/sources read path
+// (SOW-0024): (a) NULL → field absent; (b) valid blob → rendered
+// verbatim; (c) malformed blob → field omitted + WARN logged.
+func TestSources_SourceMetaOmittedAndPresent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("omitted when null", func(t *testing.T) {
+		t.Parallel()
+		p, db, cleanup := newTestPresenter(t)
+		defer cleanup()
+		now := fixedTime.UnixMicro()
+		if _, err := db.Exec(
+			`INSERT INTO sources (id, format, location, enabled, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			"aiagent_v3:/tmp/null", "aiagent_v3", "/tmp", 1, now, now,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		code, raw, body := doSourcesRaw(t, p)
+		if code != http.StatusOK {
+			t.Fatalf("status = %d", code)
+		}
+		if len(body.Items) != 1 {
+			t.Fatalf("items len = %d, want 1", len(body.Items))
+		}
+		if body.Items[0].Meta != nil {
+			t.Errorf("meta on NULL-source: %s, want nil (omitempty)", body.Items[0].Meta)
+		}
+		if strings.Contains(string(raw), `"meta":`) {
+			t.Errorf("raw response carries a meta field on NULL-source: %s", raw)
+		}
+	})
+
+	t.Run("present when valid", func(t *testing.T) {
+		t.Parallel()
+		p, db, cleanup := newTestPresenter(t)
+		defer cleanup()
+		now := fixedTime.UnixMicro()
+		blob := `{"session_count":42,"message_count":1200,"part_count":3400,"latest_migration":"0009_x"}`
+		if _, err := db.Exec(
+			`INSERT INTO sources (id, format, location, enabled, last_seen_at, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"opencode:/tmp/x", "opencode", "/tmp/x", 1, now, blob, now,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		_, _, body := doSourcesRaw(t, p)
+		if len(body.Items) != 1 {
+			t.Fatalf("items len = %d, want 1", len(body.Items))
+		}
+		got := strings.TrimSpace(string(body.Items[0].Meta))
+		if got != blob {
+			t.Errorf("meta = %q, want %q (verbatim round-trip)", got, blob)
+		}
+	})
+
+	t.Run("omitted + warn on malformed", func(t *testing.T) {
+		t.Parallel()
+		logger, buf := captureLogger()
+		p, db, cleanup := newSourcesPresenterWithLogger(t, logger)
+		defer cleanup()
+		now := fixedTime.UnixMicro()
+		if _, err := db.Exec(
+			`INSERT INTO sources (id, format, location, enabled, last_seen_at, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"opencode:/tmp/bad", "opencode", "/tmp/bad", 1, now, `{not-json`, now,
+		); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		code, raw, body := doSourcesRaw(t, p)
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if len(body.Items) != 1 {
+			t.Fatalf("items len = %d, want 1", len(body.Items))
+		}
+		if body.Items[0].Meta != nil {
+			t.Errorf("meta on malformed-source: %s, want nil (omit on invalid JSON)", body.Items[0].Meta)
+		}
+		if strings.Contains(string(raw), `"meta":`) {
+			t.Errorf("raw response carries a meta field on malformed-source: %s", raw)
+		}
+		var warnLine map[string]any
+		for _, rawLine := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(rawLine), &m); err != nil {
+				t.Fatalf("unmarshal log: %v (raw: %q)", err, rawLine)
+			}
+			if m["msg"] == "presenter: dropping malformed sources.meta_json (sole-writer contract violation)" {
+				warnLine = m
+				break
+			}
+		}
+		if warnLine == nil {
+			t.Fatalf("no malformed-meta WARN in log; got:\n%s", buf.String())
+		}
+		if got, _ := warnLine["source_id"].(string); got != "opencode:/tmp/bad" {
+			t.Errorf("WARN source_id = %q, want %q", got, "opencode:/tmp/bad")
+		}
+		if got, _ := warnLine["level"].(string); got != "WARN" {
+			t.Errorf("WARN level = %q, want WARN", got)
+		}
+	})
 }
 
 // doSources issues GET /api/sources against the presenter handler.

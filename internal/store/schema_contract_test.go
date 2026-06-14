@@ -263,6 +263,11 @@ func expectedSchema() []tableContract {
 				// after created_at). Per-source FTS5 log-indexing opt-out flag,
 				// default 1 (index logs). data-model.md §Full-text search.
 				{Name: "fts5_index_logs", Type: "INTEGER", NotNull: true, DfltVal: "1"},
+				// Appended by migration 0008 (ALTER TABLE ADD COLUMN appends
+				// after fts5_index_logs). General adapter-owned per-source
+				// metadata blob; nullable, no default (NULL = adapter did not
+				// populate it). data-model.md §sources (SOW-0024).
+				{Name: "meta_json", Type: "TEXT"},
 			},
 			indexes: nil,
 			fks:     nil,

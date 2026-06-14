@@ -417,3 +417,108 @@ func TestWithFTS5IndexLogs_ReassertsOnRestart(t *testing.T) {
 		t.Fatalf("fts5_index_logs = %d, want 1 (ingester re-asserts default on restart)", got)
 	}
 }
+
+// blobRoundTrip asserts s unmarshals to a map[string]any with the four
+// opencode keys (SOW-0024). Shared by the persistence + reassert tests so
+// each asserts only its own slice of the contract.
+const sampleOpencodeMetaJSON = `{"session_count":42,"message_count":1200,"part_count":3400,"latest_migration":"20260510033149_session_usage"}`
+
+// TestIngester_PersistsSourceMeta pins the write path (SOW-0024 AC#2 write
+// half). Two sources, one with WithSourceMeta(blob) and one without. The first
+// flush persists the blob verbatim; the second source's column is NULL (the
+// "not populated" signal).
+func TestIngester_PersistsSourceMeta(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	const withMeta = "aiagent_v3:/tmp/with"
+	const withoutMeta = "aiagent_v3:/tmp/without"
+	ctx := context.Background()
+
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1),
+		WithBatchInterval(time.Second),
+		WithSourceMeta(withMeta, sampleOpencodeMetaJSON),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	submitOneSessionAndWaitForSource(t, i, db, withMeta)
+	submitOneSessionAndWaitForSource(t, i, db, withoutMeta)
+
+	// Source with the option: meta_json round-trips verbatim.
+	if got := scanString(t, db, `SELECT meta_json FROM sources WHERE id=?`, withMeta); got != sampleOpencodeMetaJSON {
+		t.Errorf("meta_json = %q, want %q (WithSourceMeta blob round-trip)", got, sampleOpencodeMetaJSON)
+	}
+	// Source without the option: meta_json is NULL (not "", which would render
+	// as the empty object — the omit-when-NULL contract).
+	var nullCheck sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT meta_json FROM sources WHERE id=?`, withoutMeta).Scan(&nullCheck); err != nil {
+		t.Fatalf("select meta_json (unregistered source): %v", err)
+	}
+	if nullCheck.Valid {
+		t.Errorf("meta_json = %q on the unregistered source, want NULL (absence = not populated)", nullCheck.String)
+	}
+}
+
+// TestIngester_SourceMetaReassertsOnRestart pins the daemon-restart
+// re-assertion contract (SOW-0024): the WithSourceMeta option is the runtime
+// source of truth, so ensureSourceRow's ON CONFLICT updates meta_json to the
+// resolved value even when a prior run stored a different blob. A seeded
+// row with a stale blob is re-asserted to the new option value on the next
+// batch flush.
+func TestIngester_SourceMetaReassertsOnRestart(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	const sourceID = "aiagent_v3:/tmp"
+	const stale = `{"session_count":1,"message_count":2,"part_count":3,"latest_migration":"old"}`
+	const fresh = `{"session_count":99,"message_count":100,"part_count":101,"latest_migration":"fresh"}`
+	ctx := context.Background()
+
+	// Seed a row with a stale blob (the prior run's value).
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO sources (id, format, location, meta_json, created_at) VALUES (?, 'aiagent_v3', '/tmp', ?, 1000)`,
+		sourceID, stale); err != nil {
+		t.Fatalf("seed prior source row: %v", err)
+	}
+
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1),
+		WithBatchInterval(time.Second),
+		WithSourceMeta(sourceID, fresh),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = i.Stop() }()
+
+	// The sources row already exists, so a row-count wait would pass before the
+	// batch flush runs ensureSourceRow's ON CONFLICT UPDATE. Wait on the column
+	// flipping to the re-asserted value instead.
+	ch := make(chan canonical.Event, 1)
+	ch <- canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: sourceID, SourceSeq: 1, Ts: 1000},
+		NativeID:  "s", RootNativeID: "s", Kind: canonical.KindRoot,
+	}
+	if err := i.Submit(sourceID, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	defer close(ch)
+
+	if !waitFor(2*time.Second, func() bool {
+		return scanString(t, db, `SELECT meta_json FROM sources WHERE id=?`, sourceID) == fresh
+	}) {
+		got := scanString(t, db, `SELECT meta_json FROM sources WHERE id=?`, sourceID)
+		t.Fatalf("meta_json = %q, want %q (ingester re-asserts WithSourceMeta on restart)", got, fresh)
+	}
+}

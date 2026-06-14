@@ -33,9 +33,39 @@ CREATE TABLE sources (
     enabled         INTEGER NOT NULL DEFAULT 1,
     parse_errors    INTEGER NOT NULL DEFAULT 0,
     fts5_index_logs INTEGER NOT NULL DEFAULT 1, -- per-source log-search opt-out
+    meta_json       TEXT,                       -- adapter-owned source metadata blob (JSON); NULL when the adapter did not populate it
     created_at      INTEGER NOT NULL
 );
 ```
+
+`meta_json` is the **general per-source metadata surface** (SOW-0024). It is a
+nullable JSON TEXT blob that an adapter populates with source-native metadata
+that has no canonical-column analog; the presenter renders it verbatim under
+each source in `/api/health` and `/api/sources` (omitted when NULL). The
+contract:
+
+- **Adapter-owned.** Any adapter can populate it; the presenter has ZERO
+  per-adapter knowledge (no presenter code branch per format). Adding a 6th
+  adapter that contributes metadata is additive — it just writes `meta_json`
+  in its discovery/probe path.
+- **NULL = not populated.** A source whose adapter did not populate the blob
+  has `meta_json IS NULL`, and the `meta` field is OMITTED from the JSON
+  response (NULL is not rendered as zero or `{}` — absence is the signal).
+- **Sole writer is the ingester.** The presenter trusts the blob is valid JSON
+  (the ingester marshals it via `encoding/json`); as defence-in-depth the
+  presenter runs `json.Valid` and, on a malformed value, logs a WARN with the
+  source id and omits the field rather than corrupting the response.
+- **opencode** populates `{ "session_count": <int>, "message_count": <int>,
+  "part_count": <int>, "latest_migration": "<name>" }` from the startup
+  `ProbeStatus` probe (`adapter-opencode.md` §`__drizzle_migrations`). The
+  counts are the opencode SQLite native row counts, NOT ai-viewer's ingested
+  canonical counts — they are a distinct, source-native signal. File-based
+  adapters (ai-agent v2/v3, claude-code, codex) do not populate the blob.
+- **Freshness = last ingester startup.** The opencode probe runs once at
+  auto-discovery (`cmd/ai-viewer-ingest` startup); the blob reflects the
+  source's state at that point and is re-asserted on each batch flush. A
+  restart re-probes and refreshes it. (Ingested-canonical per-source counters
+  and periodic re-probe are follow-up work — SOW-0061.)
 
 `NOT NULL` is explicit on every `TEXT PRIMARY KEY` column because SQLite's
 default rowid tables allow NULL in TEXT PK columns (only `INTEGER PRIMARY
@@ -401,7 +431,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='7', key='created_at' value=...
+-- key='version' value='8', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
@@ -449,6 +479,15 @@ Migration history:
   `'7'` in lockstep with `presenter.SchemaVersion`. The `sources` column shape is
   part of the surface serve validates, so a v7 serve binary refuses a pre-0007
   store.
+- `0008_source_meta.sql` — adds the `sources.meta_json` column (`TEXT`,
+  nullable, no default; the general adapter-owned per-source metadata blob —
+  §sources) and bumps `schema_meta.version` to `'8'` in lockstep with
+  `presenter.SchemaVersion` (SOW-0024). The column is part of the surface serve
+  reads (`/api/health`, `/api/sources`), so a v8 serve binary refuses a pre-0008
+  store. The change is ADDITIVE (a nullable column; existing rows get NULL,
+  which the presenter omits), so it does NOT reset source cursors and does NOT
+  trigger a re-ingest — it follows the 0007 precedent of an additive
+  `ALTER TABLE ... ADD COLUMN` + version bump with no data move.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB
