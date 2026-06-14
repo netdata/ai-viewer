@@ -35,7 +35,7 @@ The project is in active development: unreleased, not installed anywhere, zero u
 ### What stays in force during Development
 
 - **Specs first, tests second, code last** (Hard Rule #2) — invariant.
-- **The assistant never writes code in master context** (Hard Rule #3) — invariant. The `minimax` implementer still produces code; the CTO still orchestrates and verifies.
+- **The assistant never writes code in master context** (Hard Rule #3) — **SUSPENDED by operator directive 2026-06-14** (see Hard Rule #3 above). The CTO writes production code directly; `minimax` is reviewer-only.
 - **All automated quality gates** — CI runs on every push to `master` (lint, test, frontend, embed-smoke, gates, CodeQL). Codacy, cubic, Dependabot run too. The CTO reads their findings and addresses the real ones; they don't block.
 - **SOWs for tracking** — still write SOWs in `pending/` → `current/` → `done/`. They're the durable record of what was done and why. Just no PR-per-SOW.
 - **Delegation** — `minimax` still implements; the CTO still verifies subagent output (read the diff, re-run tests, re-run gates).
@@ -55,7 +55,7 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 2. **Specs first, tests second, code last.** The order is invariant. The assistant updates the relevant spec before writing tests; writes tests before writing implementation; writes implementation only after both. See `.agents/sow/specs/workflow.md`.
 
-3. **The assistant never writes code in master context.** All production code is produced by the `minimax` implementer (per the Production-Grade Loop, Hard Rule #11) working from a written spec + failing tests. The master assistant is the orchestrator, QA lead, claim verifier, and integrator. Master-context Edit/Write is permitted only for: `AGENTS.md`, `.agents/sow/specs/*`, `.agents/skills/*`, SOW files, `README.md`, `LICENSE`, top-level config the assistant owns end-to-end, and trivial typo/format fixes the assistant has verified by reading. See `.agents/skills/project-delegation/SKILL.md`.
+3. **The assistant never writes code in master context** *(GA-phase rule — **SUSPENDED by operator directive 2026-06-14**)*. Per direct operator instruction ("stop using minimax as a coder and do the coding yourself. Use minimax as a reviewer from now on"), the **CTO now writes production code directly**; `minimax` is **reviewer-only** (it remains one of the 5 reviewers, but no longer the implementer). Hard Rule #3's master-context Edit/Write prohibition is lifted for production source; the CTO still owns specs/tests/SOWs/AGENTS.md as before. This override is in force until the operator rescinds it. The full Production-Grade Loop below is updated to reflect it (implementer = CTO; `minimax` stays in the reviewer set). The spec→test→code ordering, the automated gates, the no-silent-failures invariant, and the 5-reviewer second-opinion practice are all unchanged. Master-context edits permitted as before for: `AGENTS.md`, `.agents/sow/specs/*`, `.agents/skills/*`, SOW files, `README.md`, `LICENSE`, top-level config the assistant owns end-to-end, and trivial typo/format fixes the assistant has verified by reading — PLUS now all production source (`cmd/**`, `internal/**`, `frontend/src/**`, etc.) under the same discipline (tests + gates + reviewer cycle).
 
 4. **The assistant does not trust itself.** Any code the assistant or its subagents have just produced is buggy by default. Before claiming any work "done", "working", or "ready for the operator": (a) automated tests covering the change must exist and pass, (b) all configured quality gates must pass, (c) the 5-reviewer Production-Grade Loop must have converged with 5/5 PRODUCTION GRADE (or only P3 noise with documented disposition) and the CTO must have verified every claim. Without all three, the assistant must report the work as "code written, not yet verified" — never as working. See `.agents/skills/project-quality-gates/SKILL.md` and `.agents/skills/project-second-opinions/SKILL.md`.
 
@@ -313,10 +313,14 @@ This is the **single source of truth for how code is produced**. It is the assis
 
 | Role | Model | Job |
 |---|---|---|
-| **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. Does not write production code. |
-| **Implementer** | `minimax` (current stable on litellm; default `llm-netdata-cloud/minimax-m3-coder`) | write code + tests + specs as delegated. The single producer of code. |
+| **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. **Writes production code directly** (operator directive 2026-06-14; Hard Rule #3 suspended). |
+| ~~Implementer~~ (`minimax`) | `llm-netdata-cloud/minimax-m3-coder` | **reviewer-only** per the 2026-06-14 operator directive — no longer the implementer. The CTO may still delegate to it ad-hoc for heavy drafting, but the default is CTO-coded. |
 | **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel, fresh-context) | independent second opinions, each voting `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
 | **CTO (verification)** | me | verify every reviewer claim, drive iteration, decide when to stop. |
+
+**Operator directive 2026-06-14 (in force until rescinded):** the CTO writes production code directly; `minimax` is reviewer-only. The 5-reviewer set is unchanged (glm/mimo/minimax/qwen/deepseek). This trades the implementer≠reviewer separation (a GA-phase strength) for faster dev-phase iteration — the 5 external reviewers still provide independent review of CTO-written code, so the code is never self-graded. If the operator rescinds this directive, revert this section + Hard Rule #3 and return to `minimax`-implements.
+
+**I do not trust my own code.** CTO-written code is treated exactly like subagent-produced code: it is buggy by default until tests + gates + the 5-reviewer cycle converge. The CTO does not skip the reviewer cycle for CTO-written code any more than for subagent-written code.
 
 **Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The reviewer `minimax` is a fresh-context review pass that has not seen the implementation. This kills the self-review blind spot while still collecting minimax's expertise in the review set. The recursion-safety rule in `project-second-opinions` SKILL still applies: any assistant instance that detects "I am being run for review" must not invoke external reviewers.
 
