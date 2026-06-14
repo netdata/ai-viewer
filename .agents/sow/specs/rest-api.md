@@ -532,6 +532,12 @@ Response — matched ops and logs, ranked by BM25 with `snippet()` excerpts:
   appear in search even if previously-indexed `fts_logs` rows remain until a
   `rollups-backfill` rebuild.
 - An empty/whitespace-only `q` is a `BAD_REQUEST`.
+- A malformed FTS5 `q` (unbalanced quote, dangling `AND`/`OR`/`NEAR/`, bare
+  structural tokens the FTS5 parser rejects) is a `BAD_REQUEST`
+  (`"malformed search query"`). The classifier keys on the typed SQLite
+  error (`*sqlite.Error` with `Code() == 1`) surfaced by the parameterized
+  `MATCH ?`; it does not inspect the user's `q` text. A genuine database
+  failure still returns `503 DB_UNAVAILABLE`.
 
 ### GET /api/catalog/{tools,models,agents}
 

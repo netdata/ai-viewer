@@ -2,11 +2,15 @@ package presenter
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 // Full-text search endpoint (GET /api/search, rest-api.md §GET /api/search).
@@ -44,6 +48,26 @@ const (
 	// fixed non-empty marker rather than a row id.
 	searchCursorID = "off"
 )
+
+// isMalformedFTS5Query reports whether err is the typed SQLite error modernc
+// surfaces when the FTS5 parser rejects the user's MATCH expression. SQLite
+// does not expose an FTS5-specific result code; the FTS5 parser raises the
+// generic SQLITE_ERROR (Code() == 1) for any syntax rejection. Because the
+// search SQL is static + parameterized (?-bound MATCH + parameterized
+// whereClause), a code-1 error from THIS query is overwhelmingly a malformed
+// MATCH. A genuine DB-unavailable condition (SQLITE_IOERR, SQLITE_CORRUPT,
+// etc.) carries a different code and stays on the 503 path. See rest-api.md
+// §GET /api/search and SOW-0035.
+func isMalformedFTS5Query(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return sqliteErr.Code() == 1
+}
 
 // searchOpRow is one matched op in the GET /api/search response. rank is the
 // BM25 score (negative; nearer zero = less relevant), snippet the matched
@@ -106,6 +130,23 @@ func (p *Presenter) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	resp, op, err := p.loadSearchResponse(ctx, req)
 	if err != nil {
+		// A malformed FTS5 q (unbalanced quote, dangling AND/OR/NEAR/, bare
+		// structural tokens the FTS5 parser rejects) surfaces from SQLite as a
+		// generic *sqlite.Error with Code()==1 (SQLITE_ERROR). The search SQL
+		// is static + parameterized (?-bound MATCH + parameterized
+		// whereClause), so this code is overwhelmingly a malformed MATCH and
+		// must be a 400 to the operator — a genuine DB failure (disk I/O,
+		// corruption, dropped table) carries a different code and stays on
+		// the 503 path. See rest-api.md §GET /api/search and SOW-0035.
+		if isMalformedFTS5Query(err) {
+			p.logger.LogAttrs(ctx, slog.LevelInfo, "presenter: malformed search query",
+				slog.String("op", op),
+				slog.String("request_id", requestIDFromContext(ctx)),
+				slog.Int("q_len", len(req.match)))
+			writeJSONError(w, r, p.logger, http.StatusBadRequest,
+				"bad_request", "malformed search query", nil)
+			return
+		}
 		p.writeDBError(ctx, w, r, op, err)
 		return
 	}

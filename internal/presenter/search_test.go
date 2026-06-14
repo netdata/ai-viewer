@@ -496,3 +496,86 @@ func TestSearch_LogsIndexedScopedToSourcesFilter(t *testing.T) {
 		t.Errorf("sources=srcOn: logs_indexed=%v logs=%+v, want true/1", body.LogsIndexed, body.Logs)
 	}
 }
+
+// TestSearch_MalformedFTS5Returns400 asserts that a malformed FTS5 query (an
+// unbalanced quote, a dangling operator, bare structural tokens the FTS5 parser
+// rejects) is classified as a client error (400 BAD_REQUEST "malformed search
+// query"), NOT a server error (503 DB_UNAVAILABLE). The classifier keys on the
+// typed SQLite error (*sqlite.Error with Code()==1) returned by the
+// parameterized MATCH ?; it does not inspect the user's q text. A genuine
+// database failure must still return 503 (covered by the catch-all in
+// writeDBError for any non-code-1 error).
+//
+// rest-api.md GET /api/search: a malformed FTS5 q -> 400 BAD_REQUEST
+// "malformed search query".
+func TestSearch_MalformedFTS5Returns400(t *testing.T) {
+	// Each malformed q must produce a 400 BAD_REQUEST with code "bad_request"
+	// and a message containing "malformed search query". URL-encoded where
+	// needed; the query string never reaches the SQL text (always ?-bound).
+	// Each subtest gets its own presenter+SQLite so t.Parallel subtests do not
+	// contend on the same FTS5 connection (modernc serialises MATCH on a single
+	// connection; parallel MATCH on the shared pool can surface a different
+	// error and mis-classify).
+	malformed := []struct {
+		name string
+		q    string // already URL-encoded for the query string
+	}{
+		{name: "unbalanced quote", q: "%22"},        // "
+		{name: "dangling NEAR/", q: "NEAR%2F"},      // NEAR/
+		{name: "dangling AND", q: "foo+AND"},        // foo AND
+		{name: "unclosed phrase", q: "%22unclosed"}, // "unclosed
+		{name: "bare structural", q: "%28%28%28"},   // (((
+	}
+	for _, tc := range malformed {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, db, cleanup := newTestPresenter(t)
+			defer cleanup()
+			base := seedBase()
+			seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
+			seedSession(t, db, sessionRow{
+				id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA", kind: "root",
+				agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 9000,
+			})
+			seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
+			seedFTSOp(t, db, opRow{
+				id: "op1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "X",
+				startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+			}, "connection refused by peer")
+
+			code, _, env := getSearch(t, p, "q="+tc.q)
+			if code != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400 (env=%+v)", code, env)
+			}
+			if env.Error.Code != "bad_request" {
+				t.Errorf("error code=%q, want "+""+"bad_request"+"", env.Error.Code)
+			}
+			if !strings.Contains(env.Error.Message, "malformed search query") {
+				t.Errorf("message=%q, want it to contain "+""+"malformed search query"+"", env.Error.Message)
+			}
+		})
+	}
+
+	// Sanity: a valid query still works (regression guard for an over-broad classifier).
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
+	seedSession(t, db, sessionRow{
+		id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA", kind: "root",
+		agent: "nedi", status: "completed", startTS: base + 1000, endTS: base + 9000,
+	})
+	seedTurn(t, db, turnRow{id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1000, status: "completed"})
+	seedFTSOp(t, db, opRow{
+		id: "op1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "tool", name: "X",
+		startTS: base + 1100, endTS: base + 1200, durationUS: 100, status: "completed",
+	}, "connection refused by peer")
+	code, body, env := getSearch(t, p, "q=connection")
+	if code != http.StatusOK {
+		t.Fatalf("valid query status=%d, want 200 (env=%+v)", code, env)
+	}
+	if len(body.Ops) != 1 || body.Ops[0].OpID != "op1" {
+		t.Fatalf("valid query ops=%+v, want [op1]", body.Ops)
+	}
+}
