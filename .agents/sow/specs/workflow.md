@@ -83,8 +83,8 @@ Stop conditions:
 
 - 5/5 PRODUCTION GRADE → merge.
 - Any P0/P1 → fix, push, re-trigger full cycle.
-- P2 → fix in the same PR; merge when 5/5 PG or only P3 noise remains.
-- P3 → document in SOW `## Reviews`, merge with note.
+- P2 → fix in the same PR, re-trigger the full cycle; merge only when 5/5 PG or only P3 noise remains.
+- P3 → fix in this PR, document in SOW `## Reviews`, merge with note.
 - Hard stall (5+ cycles with new P0/P1 each round) → write a `## Regression` section, open a follow-up SOW, surface to the operator.
 
 Findings addressed in code; reviewers re-run with the same scope plus a fix note; iterate until convergence. History recorded in the SOW under `## Reviews`.
