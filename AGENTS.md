@@ -2,6 +2,14 @@
 
 A read-only, real-time explorer for AI coding-agent session snapshots. Multi-format: ingests `ai-agent` (v2 and v3), `claude-code`, `codex`, and `opencode` session storage formats, normalizes them into a canonical model, and presents them through a modern dark/light web UI with span-based tracing, topology, timeline, and statistics views.
 
+> **⚠️ CURRENT PHASE: DEVELOPMENT (started 2026-06-14).**
+> The app is unreleased, not installed anywhere, zero users, zero production risk.
+> The **PR-per-SOW rule, master branch protection, and the mandatory 5-reviewer Production-Grade Loop are SUSPENDED** for this phase. Work goes directly to `master`.
+> CI / Codacy / cubic / CodeQL still run on every push to `master` as defense-in-depth; the CTO reads their findings and addresses the real ones.
+> The 5-reviewer cycle is **CTO-discretion** during this phase (use it for genuinely risky changes; skip for trivial).
+> See the **"Phase: Development"** section below for the full override list.
+> This phase ends when the operator declares GA; at that point the Production-Grade Loop (Hard Rule #11 + the dedicated section) takes over and this banner is removed.
+
 ## Goals
 
 - **Primary purpose**: give the operator a fast, beautiful, low-friction way to see what their AI coding agents have been doing — across time, across formats, across sub-agents.
@@ -10,6 +18,34 @@ A read-only, real-time explorer for AI coding-agent session snapshots. Multi-for
 - **Multi-format and extensible**: an adapter is one Go package implementing one interface; new formats are additive, never schema-breaking.
 - **Mental model first**: anyone (operator or contributor) should be able to read the specs and know exactly what the system does and why.
 - **Tested, working, production-quality code**: no half-built features, no silent failures, no untested code paths.
+
+## Phase: Development (active — started 2026-06-14)
+
+The project is in active development: unreleased, not installed anywhere, zero users, zero production risk. Process weight matches risk weight. The rules in this section **override** the PR-per-SOW, master branch protection, and mandatory 5-reviewer rules during this phase. When the operator declares GA, this section is deleted and the Production-Grade Loop (Hard Rule #11 + the "Production-Grade Loop" section) takes over.
+
+### What's overridden during Development
+
+| Rule (GA default) | Development override |
+|---|---|
+| **PR per SOW** (Hard Rule #11 + workflow spec + Branch Protection section) | **Work directly on `master`.** No PRs, no per-SOW branches. Commit to `master` with clear SOW-referencing messages. SOWs still move `pending/` → `current/` → `done/` for tracking. |
+| **Master branch protection** (Branch Protection section) | **Not enforced as a gate.** The two repository rulesets (17315422 `protect-default-branch`, 17315423 `protect-master-branch`) have Team-admin bypass; the CTO pushes directly. The rulesets stay configured for GA re-enable. |
+| **5-reviewer Production-Grade Loop mandatory** (Hard Rule #11) | **CTO-discretion.** Run it on genuinely risky changes (schema, security, new adapter, cross-cutting refactor). Skip it for trivial changes. When in doubt, run it — but it's no longer a hard gate. |
+| **Hard Rule #4 "5/5 PRODUCTION GRADE before done"** | **Softened.** The honest phrasing during dev is "code written, gates green, CI green". Reviewer convergence is desired but not blocking. |
+
+### What stays in force during Development
+
+- **Specs first, tests second, code last** (Hard Rule #2) — invariant.
+- **The assistant never writes code in master context** (Hard Rule #3) — invariant. The `minimax` implementer still produces code; the CTO still orchestrates and verifies.
+- **All automated quality gates** — CI runs on every push to `master` (lint, test, frontend, embed-smoke, gates, CodeQL). Codacy, cubic, Dependabot run too. The CTO reads their findings and addresses the real ones; they don't block.
+- **SOWs for tracking** — still write SOWs in `pending/` → `current/` → `done/`. They're the durable record of what was done and why. Just no PR-per-SOW.
+- **Delegation** — `minimax` still implements; the CTO still verifies subagent output (read the diff, re-run tests, re-run gates).
+- **Sensitive data hygiene** — invariant.
+- **Git discipline** — invariant (no `git add -A`, specific files only, never mention AI tools in commits, etc.).
+
+### Phase transition
+
+- **Development → GA**: declared by the operator. At that point: delete this section + the top banner, re-enable the Production-Grade Loop as mandatory, switch back to PR-per-SOW, confirm branch protection is active. Record the transition in a SOW.
+- **GA → Development**: not expected. If we need to roll back, the operator declares it and this section is re-added.
 
 ## Operating Contract — Hard Rules (Non-Negotiable)
 
