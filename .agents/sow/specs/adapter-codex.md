@@ -522,15 +522,14 @@ Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1
 
 Items in codex that don't map cleanly to canonical-events.md:
 
-> **v1 `turns.extras_json` reachability (gaps #2, #3, #8).** The `turns` table has an
-> `extras_json` column (data-model.md), but no canonical turn event carries an `Extras`
-> field today (`TurnStartedEvent`/`TurnFinalizedEvent` in `internal/canonical/events.go`
-> have none) and the ingest writer never populates `turns.extras_json`. So `codex_turn_id`,
-> `turns.extras_json.sandbox`, and `ttft_ms` are structurally unreachable from any adapter
-> as of SOW-0004. The codex adapter therefore surfaces these per-turn values via a single
-> informational `turn_meta` LogEntry at turn finalize (no silent loss), and populating the
-> real `turns.extras_json` column is deferred to a follow-up SOW that adds a turn-extras
-> carrier to the canonical event + writer (shared infrastructure benefiting every adapter).
+> **`turns.extras_json` is now reachable (SOW-0021).** `TurnFinalizedEvent`
+> carries an `Extras` field and the ingest writer marshals it into
+> `turns.extras_json` (wholesale write, idempotent under re-emit since turns are
+> terminal). The codex adapter attaches the per-turn metadata below to the
+> `TurnFinalizedEvent.Extras` at finalize — the interim `turn_meta` LogEntry
+> SOW-0004 used is removed. The gap items #2/#3/#8 are therefore RESOLVED (the
+> values live in `turns.extras_json.{codex_turn_id,sandbox,effort,approval_policy,ttft_ms,last_agent_message}`
+> as documented).
 
 1. **Reasoning op as first-class**: covered (`OpKind = 'reasoning'` exists). However, codex distinguishes `agent_reasoning` (visible summary) from `agent_reasoning_raw_content` (full CoT) — canonical model has no field for that distinction. Stash in Extras: `{reasoning_kind: "summary"|"raw"}`.
 

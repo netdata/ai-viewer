@@ -243,6 +243,13 @@ type TurnFinalizedEvent struct {
 	TokensCacheRead  int64
 	TokensCacheWrite int64
 	CostUSD          float64
+	// Extras carries per-turn metadata the adapter computes by finalize time
+	// (codex codex_turn_id/sandbox/effort/approval_policy/ttft_ms/
+	// last_agent_message). The ingest writer marshals it into turns.extras_json
+	// (wholesale write; nil/empty writes NULL). Turn-finalize is terminal +
+	// single-shot per (session, seq), so a re-emit carries the same extras and
+	// the write is idempotent (SOW-0021).
+	Extras map[string]any
 }
 
 // EventKind implements Event.

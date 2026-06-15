@@ -253,6 +253,7 @@ func (m *fileMapper) finalizeTurn(ts *turnState, base canonical.EventBase, endUs
 		TokensOut:        ts.tokensOut,
 		TokensCacheRead:  ts.tokensCacheRead,
 		TokensCacheWrite: ts.tokensCacheWrite,
+		Extras:           m.turnExtras(ts),
 	}
 }
 
@@ -272,7 +273,8 @@ func (m *fileMapper) finalizeTurn(ts *turnState, base canonical.EventBase, endUs
 // turn). Called from BOTH the turn_context and task_started handlers; in a
 // new-format session task_started follows turn_context, so the turn_context call
 // supersedes the prior turn and the task_started call is then a same-id no-op.
-// turnExtrasLog is emitted for the closed turn so its metadata is not lost.
+// The finalized turn carries its per-turn extras via TurnFinalizedEvent.Extras
+// (SOW-0021), so no separate LogEntry is emitted.
 func (m *fileMapper) supersedePriorTurn(newTurnID string, advance func(int64) canonical.EventBase, atUs int64) []canonical.Event {
 	prior := m.mostRecentOpenTurn()
 	if prior == nil || prior.codexTurnID == newTurnID {
@@ -285,9 +287,6 @@ func (m *fileMapper) supersedePriorTurn(newTurnID string, advance func(int64) ca
 	base := func() canonical.EventBase { return advance(atUs) }
 	out := m.finalizeDanglingOps(prior.codexTurnID, base, atUs, danglingStatus)
 	out = append(out, m.finalizeTurn(prior, base(), atUs, status, errClass))
-	if ev := m.turnExtrasLog(prior, base()); ev != nil {
-		out = append(out, ev)
-	}
 	return out
 }
 

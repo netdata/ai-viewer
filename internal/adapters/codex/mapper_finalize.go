@@ -93,9 +93,6 @@ func (m *fileMapper) closeOpenTurnAtEOF(ts *turnState, closeUs int64, status, er
 	}
 	out := m.finalizeDanglingOps(ts.codexTurnID, base, endUs, danglingStatus)
 	out = append(out, m.finalizeTurn(ts, base(), endUs, status, errClass))
-	if ev := m.turnExtrasLog(ts, base()); ev != nil {
-		out = append(out, ev)
-	}
 	if withSessionFinalize {
 		out = append(out, canonical.SessionFinalizedEvent{
 			EventBase:  base(),

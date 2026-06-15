@@ -129,6 +129,7 @@ type TurnFinalizedEvent struct {
     TokensCacheRead int64     // cached input tokens READ (Anthropic/claude-code cache_read_input_tokens; OpenAI/opencode cached), billed at the cache-read rate — NOT part of TokensIn.
     TokensCacheWrite int64    // cache-CREATION tokens (Anthropic cache_creation_input_tokens), billed at the cache-write rate — NOT part of TokensIn.
     CostUSD         float64   // 0.0 when adapter cannot compute (no native cost + no pricing table hit)
+    Extras          map[string]any // per-turn metadata the adapter computes by finalize time (codex codex_turn_id/sandbox/effort/approval_policy/ttft_ms/last_agent_message; claude-code may surface turn_duration); marshalled into turns.extras_json. nil/empty writes NULL.
 }
 ```
 

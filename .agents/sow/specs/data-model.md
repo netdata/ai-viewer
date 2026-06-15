@@ -140,7 +140,7 @@ CREATE TABLE turns (
     tokens_cache_write INTEGER NOT NULL DEFAULT 0,
     cost_usd          REAL NOT NULL DEFAULT 0.0,
     op_count          INTEGER NOT NULL DEFAULT 0,
-    extras_json       TEXT,                     -- e.g. codex_turn_id, claude-code system.subtype='turn_duration'
+    extras_json       TEXT,                     -- per-turn metadata from TurnFinalizedEvent.Extras (SOW-0021): codex {codex_turn_id,sandbox,effort,approval_policy,ttft_ms,last_agent_message}; NULL when the adapter set none
     UNIQUE (session_id, seq)
 );
 

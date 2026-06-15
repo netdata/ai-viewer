@@ -1088,10 +1088,11 @@ func TestMapper_FinalAnswerLog(t *testing.T) {
 	}
 }
 
-// TestMapper_TurnExtrasLog asserts the turn-meta LogEntry carries codex_turn_id,
-// sandbox, effort, and ttft_ms at turn close (the canonical-gap workaround; spec
-// gaps #2/#3/#8).
-func TestMapper_TurnExtrasLog(t *testing.T) {
+// TestMapper_TurnFinalizedCarriesExtras (SOW-0021) asserts the turn's metadata
+// (codex_turn_id, sandbox, effort, ttft_ms) rides on the TurnFinalizedEvent.Extras
+// — the SOW-0021 migration off the interim turn_meta LogEntry onto the real
+// turns.extras_json carrier. No turn_meta LogEntry is emitted anymore.
+func TestMapper_TurnFinalizedCarriesExtras(t *testing.T) {
 	t.Parallel()
 	m := newTestMapper("sid")
 	lines := []string{
@@ -1101,28 +1102,37 @@ func TestMapper_TurnExtrasLog(t *testing.T) {
 		`{"timestamp":"` + tsDone + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-abc","completed_at":"` + tsDone + `","time_to_first_token_ms":250}}`,
 	}
 	events := runLines(t, m, lines)
-	var meta canonical.LogEntryEvent
+	var tf canonical.TurnFinalizedEvent
 	found := false
 	for _, ev := range events {
-		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "turn_meta" {
-			meta = le
+		if t, ok := ev.(canonical.TurnFinalizedEvent); ok {
+			tf = t
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("no turn_meta LogEntry emitted")
+		t.Fatal("no TurnFinalizedEvent emitted")
 	}
-	if meta.Extras["codex_turn_id"] != "turn-abc" {
-		t.Errorf("codex_turn_id = %v, want turn-abc", meta.Extras["codex_turn_id"])
+	if tf.Extras["codex_turn_id"] != "turn-abc" {
+		t.Errorf("codex_turn_id = %v, want turn-abc", tf.Extras["codex_turn_id"])
 	}
-	if meta.Extras["sandbox"] != "workspace-write" {
-		t.Errorf("sandbox = %v, want workspace-write", meta.Extras["sandbox"])
+	if tf.Extras["sandbox"] != "workspace-write" {
+		t.Errorf("sandbox = %v, want workspace-write", tf.Extras["sandbox"])
 	}
-	if meta.Extras["ttft_ms"] != int64(250) {
-		t.Errorf("ttft_ms = %v, want 250", meta.Extras["ttft_ms"])
+	if tf.Extras["effort"] != "high" {
+		t.Errorf("effort = %v, want high", tf.Extras["effort"])
 	}
-	if meta.TurnSeq != 1 {
-		t.Errorf("turn_meta TurnSeq = %d, want 1", meta.TurnSeq)
+	if tf.Extras["ttft_ms"] != int64(250) {
+		t.Errorf("ttft_ms = %v, want 250", tf.Extras["ttft_ms"])
+	}
+	if tf.Seq != 1 {
+		t.Errorf("TurnFinalized Seq = %d, want 1", tf.Seq)
+	}
+	// No turn_meta LogEntry must remain — the data lives on TurnFinalized now.
+	for _, ev := range events {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "turn_meta" {
+			t.Errorf("turn_meta LogEntry still emitted (SOW-0021 should have removed it): %+v", le)
+		}
 	}
 }
 

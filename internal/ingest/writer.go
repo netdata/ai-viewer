@@ -828,17 +828,28 @@ func (w *writer) applyTurnFinalized(ctx context.Context, tx *sql.Tx, ev canonica
 		return err
 	}
 	turnID := canonicalTurnID(sessionID, ev.Seq)
+	// Turn extras (SOW-0021): marshal the adapter's per-turn metadata into
+	// turns.extras_json. marshalExtras returns (nil,nil) for an empty map → the
+	// ? binds NULL, so a turn with no extras leaves the column NULL (matching
+	// the data-model default). Turn-finalize is terminal + single-shot per
+	// (session, seq), so the ON CONFLICT wholesale write is idempotent under
+	// re-emit (a re-emit carries the same extras).
+	extrasJSON, err := marshalExtras(ev.Extras)
+	if err != nil {
+		return fmt.Errorf("writer: marshal turn extras: %w", err)
+	}
 	// Insert if missing (e.g. TurnFinalized arrives without a TurnStarted).
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO turns (id, session_id, seq, start_ts, end_ts, status, error_class)
-VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+INSERT INTO turns (id, session_id, seq, start_ts, end_ts, status, error_class, extras_json)
+VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)
 ON CONFLICT (session_id, seq) DO UPDATE SET
     end_ts      = excluded.end_ts,
     status      = excluded.status,
-    error_class = excluded.error_class
+    error_class = excluded.error_class,
+    extras_json = excluded.extras_json
 `,
 		turnID, sessionID, ev.Seq, ev.Ts, nullIfZero(ev.EndTs),
-		nonEmpty(ev.Status, string(canonical.StatusCompleted)), ev.ErrorClass,
+		nonEmpty(ev.Status, string(canonical.StatusCompleted)), ev.ErrorClass, extrasJSON,
 	); err != nil {
 		return fmt.Errorf("writer: finalize turn: %w", err)
 	}

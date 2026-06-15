@@ -193,15 +193,16 @@ func TestMapper_AgentMessageStashedAndDeduped(t *testing.T) {
 	if llm != 1 {
 		t.Fatalf("LLM op count = %d, want 1 (agent_message must not add a second)", llm)
 	}
-	// The turn_meta log carries the stashed last_agent_message.
-	var meta canonical.LogEntryEvent
+	// The turn's last_agent_message rides on the TurnFinalizedEvent.Extras
+	// (SOW-0021 migrated it off the interim turn_meta LogEntry).
+	var tf canonical.TurnFinalizedEvent
 	for _, ev := range events {
-		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Message == "turn_meta" {
-			meta = le
+		if t, ok := ev.(canonical.TurnFinalizedEvent); ok {
+			tf = t
 		}
 	}
-	if meta.Extras["last_agent_message"] != "the answer" {
-		t.Errorf("last_agent_message = %v, want 'the answer'", meta.Extras["last_agent_message"])
+	if tf.Extras["last_agent_message"] != "the answer" {
+		t.Errorf("last_agent_message = %v, want 'the answer' (on TurnFinalized.Extras)", tf.Extras["last_agent_message"])
 	}
 }
 

@@ -148,9 +148,6 @@ func (m *fileMapper) mapTaskComplete(rec record, advance func(int64) canonical.E
 	// rule #4, edge #9: status completed inferred at task_complete).
 	out = append(out, m.finalizeDanglingOps(p.TurnID, base, endUs, "completed")...)
 	out = append(out, m.finalizeTurn(ts, base(), endUs, "completed", ""))
-	if ev := m.turnExtrasLog(ts, base()); ev != nil {
-		out = append(out, ev)
-	}
 	return out
 }
 
@@ -172,9 +169,6 @@ func (m *fileMapper) mapTurnAborted(rec record, advance func(int64) canonical.Ev
 	out := make([]canonical.Event, 0, 3)
 	out = append(out, m.finalizeDanglingOps(p.TurnID, base, endUs, "cancelled")...)
 	out = append(out, m.finalizeTurn(ts, base(), endUs, "failed", abortErrorClass(p.Reason)))
-	if ev := m.turnExtrasLog(ts, base()); ev != nil {
-		out = append(out, ev)
-	}
 	return out
 }
 
@@ -273,23 +267,13 @@ func abortErrorClass(reason string) string {
 	}
 }
 
-// turnExtrasLog emits an INF LogEntry carrying the turn's computed metadata that
-// the spec routes to turns.extras_json — codex_turn_id, sandbox, effort,
-// approval_policy, ttft_ms, last_agent_message (spec "Canonical Model Gaps" #2,
-// #3, #8; rule #19). It is scoped to the turn (TurnSeq) so the UI's per-turn
-// Logs surface it.
-//
-// IMPORTANT (canonical-model gap surfaced in Chunk B): the canonical
-// TurnFinalizedEvent has NO Extras field and the ingest writer's turns INSERT
-// (internal/ingest/writer.go) does not populate turns.extras_json from any
-// event, so these values cannot reach turns.extras_json today. Emitting them as
-// a turn-scoped LogEntry keeps the data DURABLE and VISIBLE (no silent loss)
-// without touching the canonical schema or the writer, both out of Chunk B
-// scope. A follow-up SOW should add a turn-extras carrier (a TurnFinalized
-// Extras field or a turn-scoped SessionUpdated-style event) so the data lands in
-// turns.extras_json as the spec intends. Returns nil when the turn carried no
-// surfaced metadata.
-func (m *fileMapper) turnExtrasLog(ts *turnState, base canonical.EventBase) canonical.Event {
+// turnExtras builds the per-turn metadata map the adapter computes by finalize
+// time — codex_turn_id, sandbox, effort, approval_policy, ttft_ms,
+// last_agent_message (spec "Canonical Model Gaps" #2, #3, #8; rule #19). It is
+// attached to TurnFinalizedEvent.Extras, which the ingest writer marshals into
+// turns.extras_json (SOW-0021). Returns nil when the turn carried no surfaced
+// metadata (so the writer writes NULL, not "{}").
+func (m *fileMapper) turnExtras(ts *turnState) map[string]any {
 	extras := map[string]any{}
 	if ts.codexTurnID != "" {
 		extras["codex_turn_id"] = ts.codexTurnID
@@ -312,9 +296,7 @@ func (m *fileMapper) turnExtrasLog(ts *turnState, base canonical.EventBase) cano
 	if len(extras) == 0 {
 		return nil
 	}
-	le := m.logEntry(base, "INF", "turn_meta", extras)
-	le.TurnSeq = ts.seq
-	return le
+	return extras
 }
 
 // errorExtras surfaces an event_msg.error message in the LogEntry extras.

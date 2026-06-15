@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -1869,3 +1870,91 @@ func (fakeEvent) EventTs() int64                 { return 0 }
 // timingFake holds a t for hooks that need access; reserved for future
 // use to avoid the linter complaining about unused imports.
 var _ = time.Now
+
+// TestWriter_TurnFinalizedExtras writes turns.extras_json from
+// TurnFinalizedEvent.Extras (SOW-0021) and is idempotent under re-emit (a
+// turn-finalize re-emit carries the same extras; the wholesale write is stable).
+func TestWriter_TurnFinalizedExtras(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "aiagent_v3:/tmp", "aiagent_v3", "/tmp")
+	w := newWriter("aiagent_v3:/tmp", "aiagent_v3", "/tmp", NopPricer{})
+
+	apply := func(ev canonical.Event) {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if err := w.apply(ctx, tx, ev); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("apply %T: %v", ev, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}
+
+	apply(canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "sess-1", RootNativeID: "sess-1", Kind: canonical.KindRoot,
+	})
+	apply(canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 2, Ts: 1100},
+		SessionNativeID: "sess-1", Seq: 1,
+	})
+
+	// TurnFinalized carrying extras.
+	extras := map[string]any{"codex_turn_id": "turn-abc", "ttft_ms": int64(250), "sandbox": "workspace-write"}
+	apply(canonical.TurnFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 3, Ts: 1600},
+		SessionNativeID: "sess-1", Seq: 1, Status: "completed", EndTs: 1600, Extras: extras,
+	})
+
+	readExtras := func() string {
+		var got sql.NullString
+		if err := db.QueryRowContext(ctx,
+			`SELECT extras_json FROM turns WHERE session_id = (SELECT id FROM sessions WHERE native_id='sess-1') AND seq = 1`).Scan(&got); err != nil {
+			t.Fatalf("read turns.extras_json: %v", err)
+		}
+		if !got.Valid {
+			return ""
+		}
+		return got.String
+	}
+
+	got := readExtras()
+	if got == "" {
+		t.Fatal("turns.extras_json is NULL after a TurnFinalized carrying Extras")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("turns.extras_json not valid JSON: %v (raw: %s)", err, got)
+	}
+	if parsed["codex_turn_id"] != "turn-abc" || parsed["ttft_ms"] != float64(250) || parsed["sandbox"] != "workspace-write" {
+		t.Errorf("turns.extras_json = %s, want the codex_turn_id/ttft_ms/sandbox keys", got)
+	}
+
+	// Re-emit the same TurnFinalized (tailer full-tree re-feed). The wholesale
+	// write must be stable (idempotent) — turns are terminal + single-shot.
+	apply(canonical.TurnFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 4, Ts: 1600},
+		SessionNativeID: "sess-1", Seq: 1, Status: "completed", EndTs: 1600, Extras: extras,
+	})
+	if got2 := readExtras(); got2 != got {
+		t.Errorf("turns.extras_json changed on re-emit: was %s, now %s (must be idempotent)", got, got2)
+	}
+
+	// A TurnFinalized with NO extras leaves an existing column untouched only if
+	// the re-emit omits it — but the writer writes NULL when Extras is empty. Per
+	// the wholesale-write contract, a finalize re-emit with empty extras clears
+	// the column. This is acceptable: terminal turns carry their full extras on
+	// every emit. Pin the empty-extras → NULL behaviour.
+	apply(canonical.TurnFinalizedEvent{
+		EventBase:       canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 5, Ts: 1600},
+		SessionNativeID: "sess-1", Seq: 1, Status: "completed", EndTs: 1600,
+	})
+	if got3 := readExtras(); got3 != "" {
+		t.Errorf("turns.extras_json after empty-extras finalize = %s, want empty (NULL) — empty Extras writes NULL", got3)
+	}
+}
