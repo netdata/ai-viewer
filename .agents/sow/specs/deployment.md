@@ -42,6 +42,32 @@ scripts/install-systemd-user.sh status     # systemctl --user status for both
 - `uninstall`: disables+stops the units if present (idempotent), removes them, reloads; leaves the binaries and the data dir (`~/.local/share/ai-viewer`) intact.
 - The two units are version-controlled templates under `deploy/systemd/`; `scripts/test/systemd-units-test.sh` statically lints them (`systemd-analyze verify` + required-directive checks).
 
+### System Install (root, `/opt/ai-viewer`)
+
+For a system-wide, runs-at-boot install (binaries + data under `/opt/ai-viewer`, two **system** systemd units running as a dedicated `ai-viewer` system user), use `scripts/install-system.sh`. This is the recommended install for an always-on workstation service; the user-level script above is the no-root alternative.
+
+```bash
+scripts/install-system.sh             # build + install + enable + start + verify + print URL
+scripts/install-system.sh status      # systemctl status for both + the URL
+scripts/install-system.sh uninstall   # stop + disable + remove units + /opt/ai-viewer + the ai-viewer user
+```
+
+Layout (`/opt/ai-viewer`):
+
+| Path | Purpose |
+|---|---|
+| `/opt/ai-viewer/bin/ai-viewer-{ingest,serve}` | binaries (rebuilt from source on every install) |
+| `/opt/ai-viewer/data/index.db` | SQLite index (owned by the `ai-viewer` user) |
+| `/opt/ai-viewer/logs/` | fallback log dir (journald is the primary sink via stdout) |
+| `/etc/systemd/system/ai-viewer-{ingest,serve}.service` | system unit templates (under `deploy/systemd-system/`) |
+
+- The `ai-viewer` system user is created with `--system --no-create-home --shell /usr/sbin/nologin` (no login). It owns `/opt/ai-viewer` so the ingester can write `index.db`.
+- The server binds `127.0.0.1:7710` (localhost-only; same as the user install) — no auth in v1 (`security.md` §bind).
+- **Source read access**: the `ai-viewer` user reads the operator's agent data (`~/.ai-agent`, `~/.claude`, `~/.codex`, `~/.local/share/opencode`). On a typical single-user install those are world-readable + world-traversable (`o+r`/`o+x`), so no ACL/group setup is needed. If a source dir is locked down, add the `ai-viewer` user to the owning group or grant an ACL (`setfacl -R -m u:ai-viewer:rX <dir>`).
+- The system units apply systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `ReadWritePaths` scoped to the data dir for the ingester). The server has no `ReadWritePaths` — it is read-only on the DB (`CheckSchema` + `SELECT`s; never writes).
+- The server starts after the ingester (`After=ai-viewer-ingest.service`) but this orders START only, not readiness — on a fresh install the server may cycle a few `RestartSec=3s` retries until the ingester has created+migrated the schema (same race as the user units; `deployment.md` §systemd).
+- **Data is disposable.** `/opt/ai-viewer/data/index.db` is a derived artifact — deleting it triggers a full re-ingest on the next start (the source files are the source of truth). `uninstall` removes it without warning; re-running `install` rebuilds it.
+
 ## Build Pipeline
 
 ai-viewer ships as a **single binary that serves the UI**: `ai-viewer-serve`

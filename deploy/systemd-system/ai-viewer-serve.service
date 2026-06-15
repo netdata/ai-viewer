@@ -1,0 +1,36 @@
+# ai-viewer server (system unit) — serves the UI + REST + SSE at 127.0.0.1:7710.
+# See ai-viewer-ingest.service header for the /opt/ai-viewer layout, the
+# run-as-operator decision, and the explicit-sources rationale.
+#
+# After=ai-viewer-ingest.service orders START only, not readiness. On a fresh
+# install the server may start before the ingester has created+migrated the
+# SQLite schema; the server's CheckSchema then fails and it exits non-zero.
+# Restart=on-failure (RestartSec=3s) retries until the schema exists. This
+# start-order race is intentional and acceptable — mirrors the USER-unit
+# templates (deploy/systemd/ai-viewer-serve.service) and deployment.md
+# §"systemd User Units" / SOW-0001 Chunk 19 D3.
+[Unit]
+Description=ai-viewer server (UI + REST + SSE at 127.0.0.1:7710)
+After=network.target ai-viewer-ingest.service
+
+[Service]
+Type=simple
+User=__OPERATOR_USER__
+Group=__OPERATOR_GROUP__
+ExecStart=/opt/ai-viewer/bin/ai-viewer-serve --db /opt/ai-viewer/data/index.db --state-dir /opt/ai-viewer/data --bind 127.0.0.1:7710 --log-level info
+WorkingDirectory=/opt/ai-viewer
+Restart=on-failure
+RestartSec=3s
+
+# Hardening. The server is read-only on the DB (CheckSchema + SELECTs; never
+# writes), so ProtectSystem=strict with no ReadWritePaths is safe — only the
+# ingester writes the DB. It still needs read access to the DB file + the
+# embedded frontend (compiled into the binary). Runs as the operator (see the
+# ingest unit header for the reasoning).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

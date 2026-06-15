@@ -500,6 +500,18 @@ go test -race ./...         # Go tests with race
 cd frontend && npm test     # frontend tests
 ```
 
+## Install & Run (workstation)
+
+System install under `/opt/ai-viewer`, running as the operator, localhost-only at `http://127.0.0.1:7710/`:
+
+```bash
+scripts/install-system.sh             # build + install + enable + start + verify + print URL
+scripts/install-system.sh status      # systemctl status for both + the URL
+scripts/install-system.sh uninstall   # stop + disable + remove units + /opt/ai-viewer
+```
+
+The full procedure, layout, design decisions (runs-as-operator + explicit `--source` flags), threat-model reasoning, operating notes, and common-issue diagnostics live in **`.agents/skills/project-deployment/SKILL.md`** — load that skill for any install/upgrade/source-discovery/permission issue. The authoritative contract is `.agents/sow/specs/deployment.md` §"System Install". (No-root user-level variant: `scripts/install-systemd-user.sh`.)
+
 ## Production Scope
 
 ai-viewer is **workstation-only** initially. It binds `127.0.0.1` by default. There is no authentication; remote access is out of scope for v1. If/when the operator authorizes production deployment, that decision lands in its own SOW with an explicit security and auth design.

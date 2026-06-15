@@ -1,0 +1,52 @@
+# ai-viewer system units
+#
+# Two long-running processes (ingester + server) installed system-wide under
+# /opt/ai-viewer. The ingester writes /opt/ai-viewer/data/index.db; the server
+# reads it (read-only at the SQL layer via CheckSchema — it never writes) and
+# serves the UI at 127.0.0.1:7710. Both are localhost-only; no auth (v1 is
+# workstation-scoped — security.md §bind).
+#
+# RUNS AS THE OPERATOR (User=__OPERATOR_USER__ / Group=__OPERATOR_GROUP__).
+# The operator's agent-data dirs (~/.ai-agent, ~/.claude, ~/.codex,
+# ~/.local/share/opencode) are owner-only (0700) on a typical install, so a
+# dedicated service user CANNOT read them without invasive recursive ACLs.
+# Running as the operator is correct and simple here: the app's whole purpose
+# is "the operator's viewer for the operator's agent data" (localhost-only,
+# read-only on sources by design — os.O_RDONLY), and it's the same privilege
+# level the operator already grants to every other agent CLI they run
+# (opencode/codex/claude). The dedicated-user least-privilege win is marginal
+# relative to the rest of the operator's stack and was actively breaking
+# source access. See deployment.md §"System Install" for the threat-model
+# reasoning. scripts/install-system.sh substitutes __OPERATOR_USER__ /
+# __OPERATOR_GROUP__ at install time.
+#
+# SOURCES ARE EXPLICIT (--source flags in ExecStart), not auto-discovery.
+# Auto-discovery probes $HOME-relative paths; the explicit list is auditable
+# (the unit file shows exactly what the service reads) and survives even if
+# the operator's home layout changes. scripts/install-system.sh renders the
+# __AI_VIEWER_SOURCES__ token from the operator's well-known paths.
+[Unit]
+Description=ai-viewer ingester (watches agent sources, writes /opt/ai-viewer/data/index.db)
+After=network.target
+
+[Service]
+Type=simple
+User=__OPERATOR_USER__
+Group=__OPERATOR_GROUP__
+ExecStart=/opt/ai-viewer/bin/ai-viewer-ingest --db /opt/ai-viewer/data/index.db --state-dir /opt/ai-viewer/data --log-level info __AI_VIEWER_SOURCES__
+WorkingDirectory=/opt/ai-viewer
+Restart=on-failure
+RestartSec=3s
+
+# Hardening (defense-in-depth; the ingester only needs read access to the
+# explicit sources and write access to /opt/ai-viewer/data). ProtectHome is
+# read-only (the ingester reads the operator's session files but writes nothing
+# there — ai-viewer never writes to sources).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/ai-viewer/data /opt/ai-viewer/logs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

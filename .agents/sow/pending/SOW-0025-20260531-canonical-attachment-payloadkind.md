@@ -2,9 +2,32 @@
 
 ## Status
 
-Status: open
+Status: deferred (2026-06-15)
 
-Sub-state: proposed follow-up, awaiting operator prioritization. Discovered during SOW-0005 (opencode adapter) round-4 external review (codex P2-3). Not blocking SOW-0005 — opencode ships an interim no-loss representation (an INF LogEntry carrying the attachment metadata).
+Sub-state: CTO decision — defer until the serving route (`/api/payloads`, Phase 2) exists or the operator wants an attachments gallery. Discovered during SOW-0005 round-4 external review (codex P2-3). Not blocking — opencode ships an interim no-loss INF LogEntry carrying filename/url/mime (`internal/adapters/opencode/mapper_emitters.go:92`), so zero data is lost while this waits.
+
+### Deferral rationale (2026-06-15 CTO call)
+
+- **Schema should follow the serving route, not precede it.** `/api/payloads` is Phase 2 and unbuilt; committing a schema now is designing blind.
+- **`payload_refs.op_id` is `NOT NULL REFERENCES ops(id)`** (`internal/store/migrations/0001_initial.sql:222`) — a user attachment has no owning op (it's user-supplied context, not an op artifact), so the naive "add an attachment kind to payload_refs" would either FK-roll-back the batch or require making op_id nullable. This is the crux the interim LogEntry exists to avoid.
+- **Attachments are minor** for an app whose primary purpose is "see what your AI agents did"; Milestone A (runnable app) is the priority.
+- **Two design options were analyzed** (surfaced to the operator 2026-06-15), trading off UX-flexibility vs schema-cleanliness:
+  - **Schema-A** (separate `attachment_refs` table, session/turn-scoped, dedicated `/api/sessions/:id/attachments` endpoint): cleaner contract (keeps `payload_refs` op-scoped, NOT NULL); but a separate table means showing attachments inline with op payloads later needs a union.
+  - **Schema-B** (make `payload_refs.op_id` nullable + `attachment` kind, serve via `/api/payloads`): more UX-flexible (a gallery is just a filtered query on `payload_refs`); but weakens the op-scoped `payload_refs` contract.
+  - Note (corrected during review): on UX-flexibility B is the superset (B→gallery is cheap; A→inline is awkward); on schema-cleanliness A wins. The tension is real and resolving it needs the serving-route design.
+- **Default when revisited:** Schema-A (clean contracts) served via a dedicated endpoint, unless the then-current `/api/payloads` design makes Schema-B materially simpler.
+
+Reopen when: `/api/payloads` lands, OR the operator requests an attachments gallery, OR a cross-adapter consistency need appears (codex/claude-code/ai-agent attachment analogues).
+
+### When-revisited default (operator guidance 2026-06-15)
+
+The operator's standing principle for unresolved UX questions: **"do the thing that enables better/more future potentials."** Applied here, that resolves the Schema-A vs Schema-B tension toward **Schema-B** (make `payload_refs.op_id` nullable + an `attachment` kind, serve via `/api/payloads`), because B is the UX superset:
+
+- B → dedicated gallery: cheap (a filtered query on `payload_refs WHERE kind='attachment'`).
+- B → inline-with-payloads: natural (same table/route).
+- A → inline-with-payloads: awkward (needs a union across two tables).
+
+So B keeps more UX doors open, which is the operator's stated tiebreaker (especially since the operator has not yet seen the UI and cannot judge the UX directly). The schema-cleanliness cost of B (weakening the op-scoped `payload_refs` contract with a nullable `op_id`) is the accepted trade-off for future UX flexibility — consistent with "long-term-best always wins" when the long-term shape depends on a UX that isn't designed yet. When this SOW is picked up, implement Schema-B unless the then-current `/api/payloads` design makes Schema-A materially better.
 
 ## Requirements
 
