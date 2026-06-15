@@ -158,7 +158,15 @@ func streamLines(ctx context.Context, r io.Reader, emitFrom int64, t transcript,
 		out:      out,
 		onError:  onError,
 	}
-	return streamer.run()
+	emitted, off, err := streamer.run()
+	// Flush a deferred SessionStarted at EOF (SOW-0028) so a file that opened
+	// with only timestamp-less records still creates its session row. ctx
+	// cancellation suppresses the tail emit (we are shutting down); a real
+	// emit error is reported alongside the loop error.
+	if ferr := streamer.finalize(); ferr != nil && err == nil {
+		err = ferr
+	}
+	return emitted, off, err
 }
 
 type lineStreamer struct {
@@ -180,6 +188,18 @@ func (s *lineStreamer) run() (int, int64, error) {
 			return s.emitted, s.off, err
 		}
 	}
+}
+
+// finalize flushes a deferred SessionStarted at EOF (SOW-0028). No-op once the
+// session started during mapRecord. Emits the tail events (SessionStarted +
+// any buffered leading-snapshot events) for a file that never saw a
+// timestamped record. Called by streamLines after the per-record loop ends.
+func (s *lineStreamer) finalize() error {
+	events := s.mapper.finalizeSessionStart()
+	if len(events) == 0 {
+		return nil
+	}
+	return s.emitEvents(events)
 }
 
 func (s *lineStreamer) step() (bool, error) {

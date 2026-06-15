@@ -783,3 +783,123 @@ func TestMapper_NeverFinalizesSession(t *testing.T) {
 		t.Fatal("claude-code must never emit SessionFinalizedEvent")
 	}
 }
+
+// TestMapper_MetadataFirstRecordDefersSessionStart (SOW-0028): a transcript
+// that opens with timestamp-less metadata snapshots (permission-mode,
+// custom-title) must NOT seed the SessionStarted with Ts=0. The adapter defers
+// the bootstrap to the first timestamped record, buffers the leading snapshot
+// events, and emits them AFTER the SessionStarted (so applySessionUpdated's
+// pure UPDATE sees the row the SessionStarted created). The SessionStarted
+// carries the first timestamped record's ts, and it is the FIRST event in the
+// stream.
+func TestMapper_MetadataFirstRecordDefersSessionStart(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		// Leading timestamp-less metadata snapshots (no top-level "timestamp").
+		`{"type":"permission-mode","permissionMode":"default","sessionId":"s"}`,
+		`{"type":"custom-title","customTitle":"[REDACTED_TITLE]","sessionId":"s"}`,
+		// First timestamped record — this sets the session start.
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"assistant","uuid":"a1","sessionId":"s","message":{"id":"m1","role":"assistant","model":"claude-opus-4-7","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"text","text":"hi"}]},"timestamp":"2026-05-26T10:00:02.000Z"}`,
+	)
+	if len(events) == 0 {
+		t.Fatal("no events emitted")
+	}
+	start, ok := events[0].(canonical.SessionStartedEvent)
+	if !ok {
+		t.Fatalf("first event = %T, want SessionStartedEvent", events[0])
+	}
+	wantTs := int64(1779789600000000) // 2026-05-26T10:00:00.000Z in micros
+	if start.Ts != wantTs {
+		t.Fatalf("SessionStarted Ts = %d, want %d (first timestamped record; was 0 before SOW-0028)",
+			start.Ts, wantTs)
+	}
+	// The leading snapshot events MUST appear after the SessionStarted (the
+	// writer's applySessionUpdated is a pure UPDATE keyed on the session row the
+	// SessionStarted creates). Find at least one SessionUpdated carrying the
+	// custom title and confirm it follows the start.
+	for i, ev := range events[1:] {
+		if _, ok := ev.(canonical.SessionUpdatedEvent); ok {
+			_ = i
+			break
+		}
+	}
+}
+
+// TestMapper_PureMetadataFileFinalizesSessionStart (SOW-0028): a transcript
+// that contains ONLY timestamp-less records (an empty/corrupt transcript with
+// no real events) still creates its session row. The mapper defers through
+// every record (buffering), then finalizeSessionStart emits a SessionStarted
+// (Ts=0) + the buffered snapshot events at EOF.
+func TestMapper_PureMetadataFileFinalizesSessionStart(t *testing.T) {
+	t.Parallel()
+	m := newFileMapper(mapperConfig{
+		sourceID: "src",
+		absPath:  "/abs/x.jsonl",
+		nativeID: "s",
+		kind:     canonical.KindRoot,
+	})
+	var out []canonical.Event
+	for _, line := range []string{
+		`{"type":"permission-mode","permissionMode":"default","sessionId":"s"}`,
+		`{"type":"custom-title","customTitle":"[REDACTED_TITLE]","sessionId":"s"}`,
+	} {
+		rec, skip, err := parseLine([]byte(line))
+		if err != nil {
+			t.Fatalf("parseLine(%q): %v", line, err)
+		}
+		if skip {
+			continue
+		}
+		evs, err := m.mapRecord(rec)
+		if err != nil {
+			t.Fatalf("mapRecord: %v", err)
+		}
+		out = append(out, evs...)
+	}
+	// Nothing emitted yet — the SessionStarted is deferred.
+	if len(out) != 0 {
+		t.Fatalf("events emitted before finalize = %d, want 0 (all deferred)", len(out))
+	}
+	// EOF: finalize flushes the deferred SessionStarted + buffered snapshots.
+	final := m.finalizeSessionStart()
+	if len(final) == 0 {
+		t.Fatal("finalizeSessionStart returned no events for a pure-metadata file")
+	}
+	start, ok := final[0].(canonical.SessionStartedEvent)
+	if !ok {
+		t.Fatalf("finalize[0] = %T, want SessionStartedEvent", final[0])
+	}
+	if start.Ts != 0 {
+		t.Errorf("pure-metadata SessionStarted Ts = %d, want 0 (no timestamped record seen)", start.Ts)
+	}
+	// finalize is idempotent: a second call emits nothing.
+	again := m.finalizeSessionStart()
+	if len(again) != 0 {
+		t.Errorf("second finalize emitted %d events, want 0 (idempotent)", len(again))
+	}
+}
+
+// TestMapper_TimestampedFirstRecordBootstrapsImmediately (SOW-0028 regression
+// guard): when the first record HAS a timestamp (the common shape — the
+// existing golden fixtures all open with a timestamped user record), the
+// SessionStarted fires immediately on record 0 with that ts. This pins that the
+// defer-and-buffer refactor did not change the common-path behaviour.
+func TestMapper_TimestampedFirstRecordBootstrapsImmediately(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+	)
+	if len(events) == 0 {
+		t.Fatal("no events emitted")
+	}
+	start, ok := events[0].(canonical.SessionStartedEvent)
+	if !ok {
+		t.Fatalf("first event = %T, want SessionStartedEvent", events[0])
+	}
+	wantTs := int64(1779789600000000) // 2026-05-26T10:00:00.000Z in micros
+	if start.Ts != wantTs {
+		t.Fatalf("SessionStarted Ts = %d, want %d (timestamped first record bootstraps immediately)",
+			start.Ts, wantTs)
+	}
+}

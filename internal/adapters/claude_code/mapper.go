@@ -79,6 +79,13 @@ type fileMapper struct {
 
 	// sessionStarted guards the once-per-file SessionStartedEvent.
 	sessionStarted bool
+	// pendingBeforeStart buffers events from leading timestamp-less records
+	// (metadata snapshots that appear before the first timestamped record) until
+	// the SessionStarted fires, so they emit AFTER it (the writer's
+	// applySessionUpdated is a pure UPDATE and needs the session row first).
+	// spec §5.2 (SOW-0028). Cleared when the SessionStarted fires, or drained by
+	// finalizeSessionStart at EOF for a pure-metadata file.
+	pendingBeforeStart []canonical.Event
 	// turnSeq is the current 1-based turn counter. 0 means no turn open yet.
 	turnSeq int
 	// opSeqInTurn is the 1-based op counter within the current turn.
@@ -223,8 +230,11 @@ func newFileMapper(cfg mapperConfig) *fileMapper {
 
 // mapRecord converts one parsed record into canonical events, advancing the
 // mapper's inference state. Pure with respect to I/O; mutates only the
-// receiver's counters. The first call on any file emits the
-// SessionStartedEvent.
+// receiver's counters. The SessionStartedEvent is emitted once per file —
+// deferred to the first record that carries a real timestamp (spec §5.2) so a
+// transcript opening with timestamp-less metadata snapshots does not seed
+// start_ts=0. Leading timestamp-less records' events are buffered and emitted
+// AFTER the SessionStarted. See finalizeSessionStart for the EOF fallback.
 func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 	idx := m.recordIdx
 	m.recordIdx++
@@ -256,13 +266,86 @@ func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 		return b
 	}
 
-	// Bootstrap the session on the first record (spec §5.2).
+	// Bootstrap the session on the first record that carries a real timestamp
+	// (spec §5.2). A transcript opening with timestamp-less metadata snapshots
+	// (permission-mode, custom-title, …) defers: the snapshot's events are
+	// buffered into pendingBeforeStart and emitted AFTER the SessionStarted so
+	// the writer's applySessionUpdated (a pure UPDATE) sees the row the
+	// SessionStarted created. sub=0 is reserved for the SessionStarted when it
+	// fires, so it keeps the lowest SourceSeq for the record.
 	if !m.sessionStarted {
-		tsUs := m.recordTs(rec)
-		out = append(out, m.sessionStarted0(rec, advance(tsUs)))
+		recTs := m.recordTs(rec)
+		if recTs == 0 {
+			// Defer: buffer this record's events; emit nothing yet.
+			recOut, err := m.mapOneRecord(rec, advance)
+			if err != nil {
+				return nil, err
+			}
+			m.pendingBeforeStart = append(m.pendingBeforeStart, recOut...)
+			return nil, nil
+		}
+		// First timestamped record: reserve sub=0 for the SessionStarted, then
+		// build this record's events with sub starting at 1.
+		start := m.sessionStarted0(rec, advance(recTs))
+		recOut, err := m.mapOneRecord(rec, advance)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, start)
+		out = append(out, m.pendingBeforeStart...)
+		m.pendingBeforeStart = nil
 		m.sessionStarted = true
+		out = append(out, recOut...)
+		return out, nil
 	}
 
+	recOut, err := m.mapOneRecord(rec, advance)
+	if err != nil {
+		return nil, err
+	}
+	return recOut, nil
+}
+
+// finalizeSessionStart flushes a deferred SessionStarted at EOF for a file that
+// contained ONLY timestamp-less records (an empty/corrupt transcript with no
+// real events). Without it such a file would never create its session row. The
+// SessionStarted carries Ts=0 (no timestamped record was ever seen). It is a
+// no-op once the session started during mapRecord. Returns the events the
+// caller (the line streamer) must emit after the per-record loop ends.
+func (m *fileMapper) finalizeSessionStart() []canonical.Event {
+	if m.sessionStarted {
+		return nil
+	}
+	m.sessionStarted = true
+	// Build a minimal SessionStarted with a zero ts from a synthetic empty
+	// record (sessionStarted0 reads env fields for cwd/version/extras; an empty
+	// record yields an event with empty extras, which is correct for a file
+	// that carried no usable records).
+	idx := m.recordIdx
+	sub := uint64(0)
+	advance := func(tsUs int64) canonical.EventBase {
+		b := canonical.EventBase{
+			SourceID:  m.sourceID,
+			SourceSeq: packSeq(idx, sub),
+			Ts:        tsUs,
+		}
+		sub++
+		return b
+	}
+	out := make([]canonical.Event, 0, 1+len(m.pendingBeforeStart))
+	out = append(out, m.sessionStarted0(record{}, advance(0)))
+	out = append(out, m.pendingBeforeStart...)
+	m.pendingBeforeStart = nil
+	return out
+}
+
+// mapOneRecord maps one parsed record (post-bootstrap) to its canonical events
+// via the per-type switch. It does NOT handle session bootstrapping — mapRecord
+// owns that. The advance closure supplies monotonically-increasing SourceSeq
+// within this record (sub starts at 0 for the first event mapOneRecord emits;
+// mapRecord reserves sub=0 for the SessionStarted when bootstrapping).
+func (m *fileMapper) mapOneRecord(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
+	out := make([]canonical.Event, 0, 4)
 	switch rec.Env.Type {
 	case recUser:
 		evs, err := m.mapUser(rec, advance)

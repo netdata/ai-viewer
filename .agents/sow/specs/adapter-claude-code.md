@@ -293,7 +293,7 @@ The adapter should treat `toolUseResult` as opaque structured payload for ops of
 Observed `subtype` values:
 
 - `stop_hook_summary` — a session-stop hook fired. Body includes `hookCount`, `hookInfos[]`, `hookErrors[]`, `preventedContinuation`, `stopReason`, `level`, `toolUseID`. Useful for plugin/hook visibility.
-- `api_error` — an Anthropic API call failed. Body: `error{status, headers, requestID, type}`, `retryInMs`, `retryAttempt`, `maxRetries`. Maps to a failed LLM op (see §5).
+- `api_error` — an Anthropic API call failed. Body: `error{status, headers, requestID, type}`, `retryInMs` (**a float** — Claude Code emits fractional backoff ms, e.g. `38317.38269012852`; the adapter decodes it as `*float64`), `retryAttempt`, `maxRetries`. Maps to a failed LLM op (see §5).
 - `compact_boundary` — **compaction marker** (see §9). Body: `compactMetadata{trigger, preTokens, postTokens, durationMs, preservedSegment{headUuid, anchorUuid, tailUuid}, preservedMessages{anchorUuid, uuids[]}}`. `trigger` observed values: `"manual"`.
 - `turn_duration` — emitted at the end of a turn. Body: `durationMs`, `messageCount`. The adapter uses this as a definitive **turn boundary signal** for the preceding turn.
 - `local_command` — a `/`-prefixed local CLI command ran. Body varies.
@@ -511,7 +511,7 @@ The subagent's NativeID is NOT the parent's `sessionId` (they would collide); th
 
 ### 5.2 Session bootstrapping
 
-A `SessionStartedEvent` is emitted on the FIRST observed record in a file, with `Ts = first record's timestamp`. Fields:
+A `SessionStartedEvent` is emitted with `Ts = the first record's timestamp that HAS one`. Real transcripts frequently open with one or more timestamp-less metadata snapshots (`permission-mode`, `custom-title`, `last-prompt`, `file-history-snapshot` — §3 records that lack `timestamp`); bootstrapping on the literal first record would seed `start_ts=0` and strand the session at epoch. The adapter therefore DEFERS the `SessionStarted` until the first record carrying a real `timestamp`: the events of any leading timestamp-less records are buffered and emitted AFTER the `SessionStarted` (preserving the writer's UPDATE-after-INSERT contract — `applySessionUpdated` is a pure `UPDATE`, so the session row must exist first). A file that contains ONLY timestamp-less records (an empty/corrupt transcript with no events) finalizes a `SessionStarted` with `Ts=0` at EOF so the session row still exists. Fields of the `SessionStartedEvent`:
 
 - `Kind`: `'root'` for main session jsonls; `'sub_agent'` for `subagents/agent-*.jsonl` files.
 - `AgentName`: for main sessions, the `customTitle` if seen, else `aiTitle` if seen, else empty; for subagents, the `agentType` from `.meta.json`.

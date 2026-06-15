@@ -162,7 +162,7 @@ type systemBody struct {
 	Compact     *compactMetadata `json:"compactMetadata"`
 	DurationMs  *int64           `json:"durationMs"`
 	APIError    json.RawMessage  `json:"error"`
-	RetryMs     *int64           `json:"retryInMs"`
+	RetryMs     *float64         `json:"retryInMs"`
 	RetryNumber *int64           `json:"retryAttempt"`
 }
 

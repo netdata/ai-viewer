@@ -199,3 +199,39 @@ func TestChildNativeID(t *testing.T) {
 		t.Fatalf("agentIDFromNative(%q) = %q, want agent-15hex", got, id)
 	}
 }
+
+// TestParseLine_SystemFloatRetryInMs (SOW-0028): real Claude Code transcripts
+// emit retryInMs as a FLOAT (fractional API backoff ms, e.g.
+// 38317.38269012852). The adapter must decode it without error — previously the
+// field was *int64 and the unmarshal failed, dropping the record and degrading
+// /api/health. retryInMs is a passthrough field (no mapper consumer), so
+// decoding as *float64 is the complete fix.
+func TestParseLine_SystemFloatRetryInMs(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		// api_error with fractional retryInMs (the real-data shape).
+		`{"type":"system","subtype":"api_error","uuid":"sy3","sessionId":"s","content":"err","error":{"status":529,"type":"overloaded_error"},"retryInMs":38317.38269012852,"retryAttempt":1,"timestamp":"2026-05-26T10:00:09.000Z"}`,
+		// Integer retryInMs still decodes (the synthetic/golden shape).
+		`{"type":"system","subtype":"api_error","uuid":"sy4","sessionId":"s","content":"err","error":{"status":529,"type":"overloaded_error"},"retryInMs":1000,"retryAttempt":1,"timestamp":"2026-05-26T10:00:09.000Z"}`,
+	}
+	for _, line := range cases {
+		rec, skip, err := parseLine([]byte(line))
+		if err != nil || skip {
+			t.Fatalf("parseLine(float retryInMs): err=%v skip=%v\ninput: %s", err, skip, line)
+		}
+		if rec.System == nil || rec.System.RetryMs == nil {
+			t.Fatalf("retryInMs not decoded for input: %s", line)
+		}
+		if *rec.System.RetryMs < 0 {
+			t.Errorf("retryInMs = %v, want non-negative", *rec.System.RetryMs)
+		}
+	}
+	// Pin the float shape decodes to the exact value (the regression target).
+	rec, _, err := parseLine([]byte(`{"type":"system","subtype":"api_error","uuid":"sy3","sessionId":"s","error":{"status":529},"retryInMs":38317.38269012852,"timestamp":"2026-05-26T10:00:09.000Z"}`))
+	if err != nil {
+		t.Fatalf("parseLine(float retryInMs exact): %v", err)
+	}
+	if got := *rec.System.RetryMs; got != 38317.38269012852 {
+		t.Errorf("retryInMs = %v, want 38317.38269012852", got)
+	}
+}
