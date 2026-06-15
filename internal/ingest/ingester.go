@@ -208,12 +208,13 @@ type Ingester struct {
 	// incremental refresh runs as normal. atomic so the main goroutine can
 	// toggle it while the worker goroutine reads it without a lock.
 	deferReadModels atomic.Bool
-	// backfillOnce ensures BackfillReadModels runs exactly once even when
-	// multiple adapter goroutines finish their Scan concurrently (SOW-0063).
-	// Without this, 5 sources finishing at the same time would each call the
-	// backfill → concurrent FTS truncation → failure.
-	backfillOnce sync.Once
-	backfillErr  error
+	// backfillMu serializes BackfillReadModels across the 5 source goroutines
+	// that finish scanning concurrently. backfillDone is set only on success,
+	// so a failed backfill (e.g. context cancelled during shutdown) allows the
+	// next caller to retry. Without this, sync.Once would fail-once-forever
+	// if the first caller's context was cancelled (SOW-0063).
+	backfillMu   sync.Mutex
+	backfillDone bool
 }
 
 // New constructs an Ingester. The db must be writable (use
@@ -373,39 +374,43 @@ func (i *Ingester) DeferReadModels() bool { return i.deferReadModels.Load() }
 // before Tail starts, so the read models deferred during the bulk scan are
 // built once in a single pass rather than incrementally per-batch (which is
 // super-linear in data volume). Uses the existing tested BackfillFTS +
-// BackfillRollups functions. Thread-safe: sync.Once ensures it runs exactly
-// once even when multiple adapter goroutines finish their Scan concurrently.
+// BackfillRollups functions. Serialized by a mutex so concurrent source
+// goroutines don't both truncate fts_ops (which would deadlock on the single
+// SQLite connection). Allows retry on failure: backfillDone is set only on
+// success.
 func (i *Ingester) BackfillReadModels(ctx context.Context) error {
-	i.backfillOnce.Do(func() {
-		i.deferReadModels.Store(false)
-		now := defaultNow()
-		if i.now != nil {
-			now = i.now()
-		}
-		if i.logger != nil {
-			i.logger.Info("ai-viewer-ingest: backfilling read models (FTS + rollups)")
-		}
-		ftsStats, err := BackfillFTS(ctx, i.db, i.logger)
-		if err != nil {
-			i.backfillErr = fmt.Errorf("backfill FTS: %w", err)
-			return
-		}
-		rollupStats, err := BackfillRollups(ctx, i.db, now, i.logger)
-		if err != nil {
-			i.backfillErr = fmt.Errorf("backfill rollups: %w", err)
-			return
-		}
-		if i.logger != nil {
-			i.logger.Info("ai-viewer-ingest: read models backfilled",
-				"fts_op_rows", ftsStats.OpRows,
-				"fts_log_rows", ftsStats.LogRows,
-				"hourly_rows", rollupStats.HourlyRows,
-				"daily_rows", rollupStats.DailyRows,
-				"days", rollupStats.DaysProcessed,
-				"elapsed_s", rollupStats.Elapsed.Seconds())
-		}
-	})
-	return i.backfillErr
+	i.backfillMu.Lock()
+	defer i.backfillMu.Unlock()
+	if i.backfillDone {
+		return nil
+	}
+	i.deferReadModels.Store(false)
+	now := defaultNow()
+	if i.now != nil {
+		now = i.now()
+	}
+	if i.logger != nil {
+		i.logger.Info("ai-viewer-ingest: backfilling read models (FTS + rollups)")
+	}
+	ftsStats, err := BackfillFTS(ctx, i.db, i.logger)
+	if err != nil {
+		return fmt.Errorf("backfill FTS: %w", err)
+	}
+	rollupStats, err := BackfillRollups(ctx, i.db, now, i.logger)
+	if err != nil {
+		return fmt.Errorf("backfill rollups: %w", err)
+	}
+	i.backfillDone = true
+	if i.logger != nil {
+		i.logger.Info("ai-viewer-ingest: read models backfilled",
+			"fts_op_rows", ftsStats.OpRows,
+			"fts_log_rows", ftsStats.LogRows,
+			"hourly_rows", rollupStats.HourlyRows,
+			"daily_rows", rollupStats.DailyRows,
+			"days", rollupStats.DaysProcessed,
+			"elapsed_s", rollupStats.Elapsed.Seconds())
+	}
+	return nil
 }
 
 // deriveSourceFields returns (format, location) for sourceID. Format
