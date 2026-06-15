@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -196,6 +198,22 @@ type Ingester struct {
 	// worker; rendered verbatim by the presenter under /api/health and
 	// /api/sources (SOW-0024, data-model.md §sources).
 	sourceMetaOverrides map[string]string
+	// deferReadModels is the bulk-scan fast-path flag (SOW-0063). When true,
+	// the worker skips refreshRollups + refreshFTS during batch flush — the two
+	// read-model refreshes that are super-linear in accumulated data volume.
+	// refreshAggregates (cheap session-count update) still runs so the UI shows
+	// correct counts. The binary sets this true before Scan, clears it after
+	// Scan returns, and runs BackfillReadModels (BackfillFTS + BackfillRollups)
+	// to build the deferred read models once. During Tail (steady state),
+	// incremental refresh runs as normal. atomic so the main goroutine can
+	// toggle it while the worker goroutine reads it without a lock.
+	deferReadModels atomic.Bool
+	// backfillOnce ensures BackfillReadModels runs exactly once even when
+	// multiple adapter goroutines finish their Scan concurrently (SOW-0063).
+	// Without this, 5 sources finishing at the same time would each call the
+	// backfill → concurrent FTS truncation → failure.
+	backfillOnce sync.Once
+	backfillErr  error
 }
 
 // New constructs an Ingester. The db must be writable (use
@@ -270,19 +288,20 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 	}
 	format, location := i.deriveSourceFields(sourceID)
 	w := &worker{
-		sourceID:      sourceID,
-		sourceFormat:  format,
-		location:      location,
-		fts5IndexLogs: i.resolveFTS5IndexLogs(sourceID),
-		metaJSON:      i.resolveSourceMeta(sourceID),
-		events:        events,
-		db:            i.db,
-		hwm:           i.hwm,
-		pricer:        i.pricer,
-		logger:        i.logger.With("source_id", sourceID),
-		batchSize:     i.batchSize,
-		batchEvery:    i.batchInterval,
-		now:           i.now,
+		sourceID:        sourceID,
+		sourceFormat:    format,
+		location:        location,
+		fts5IndexLogs:   i.resolveFTS5IndexLogs(sourceID),
+		metaJSON:        i.resolveSourceMeta(sourceID),
+		events:          events,
+		db:              i.db,
+		hwm:             i.hwm,
+		pricer:          i.pricer,
+		logger:          i.logger.With("source_id", sourceID),
+		batchSize:       i.batchSize,
+		batchEvery:      i.batchInterval,
+		now:             i.now,
+		deferReadModels: &i.deferReadModels,
 	}
 	i.workers[sourceID] = w
 	ctx := i.ctx
@@ -338,6 +357,55 @@ func (i *Ingester) ResolveOrphans(ctx context.Context) error {
 		return nil
 	}
 	return i.resolver.linkOrphans(ctx)
+}
+
+// SetDeferReadModels toggles the bulk-scan fast-path (SOW-0063). When true,
+// the worker skips refreshRollups + refreshFTS during batch flush; the binary
+// calls BackfillReadModels after the scan to build them once. Thread-safe
+// (atomic).
+func (i *Ingester) SetDeferReadModels(b bool) { i.deferReadModels.Store(b) }
+
+// DeferReadModels reports whether the bulk-scan fast-path is active.
+func (i *Ingester) DeferReadModels() bool { return i.deferReadModels.Load() }
+
+// BackfillReadModels rebuilds the FTS index + rollup tables from the committed
+// data (SOW-0063). Called by the binary after the initial Scan completes and
+// before Tail starts, so the read models deferred during the bulk scan are
+// built once in a single pass rather than incrementally per-batch (which is
+// super-linear in data volume). Uses the existing tested BackfillFTS +
+// BackfillRollups functions. Thread-safe: sync.Once ensures it runs exactly
+// once even when multiple adapter goroutines finish their Scan concurrently.
+func (i *Ingester) BackfillReadModels(ctx context.Context) error {
+	i.backfillOnce.Do(func() {
+		i.deferReadModels.Store(false)
+		now := defaultNow()
+		if i.now != nil {
+			now = i.now()
+		}
+		if i.logger != nil {
+			i.logger.Info("ai-viewer-ingest: backfilling read models (FTS + rollups)")
+		}
+		ftsStats, err := BackfillFTS(ctx, i.db, i.logger)
+		if err != nil {
+			i.backfillErr = fmt.Errorf("backfill FTS: %w", err)
+			return
+		}
+		rollupStats, err := BackfillRollups(ctx, i.db, now, i.logger)
+		if err != nil {
+			i.backfillErr = fmt.Errorf("backfill rollups: %w", err)
+			return
+		}
+		if i.logger != nil {
+			i.logger.Info("ai-viewer-ingest: read models backfilled",
+				"fts_op_rows", ftsStats.OpRows,
+				"fts_log_rows", ftsStats.LogRows,
+				"hourly_rows", rollupStats.HourlyRows,
+				"daily_rows", rollupStats.DailyRows,
+				"days", rollupStats.DaysProcessed,
+				"elapsed_s", rollupStats.Elapsed.Seconds())
+		}
+	})
+	return i.backfillErr
 }
 
 // deriveSourceFields returns (format, location) for sourceID. Format

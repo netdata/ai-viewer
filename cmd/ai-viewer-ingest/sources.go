@@ -355,7 +355,7 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, ing *
 	go func() {
 		defer wg.Done()
 		defer close(events)
-		runAdapter(ctx, adapter, since, events, srcLogger)
+		runAdapter(ctx, adapter, since, events, srcLogger, ing)
 	}()
 
 	srcLogger.Info("ai-viewer-ingest: source started")
@@ -443,7 +443,11 @@ func newOnErrorHandler(ctx context.Context, srcID string, events chan<- canonica
 // historical data, then Tail() to follow changes until ctx is cancelled.
 // Errors from either call are logged with the source's sticky logger;
 // the caller closes the channel after we return.
-func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger) {
+//
+// Between Scan and Tail, if the ingester is in bulk-scan mode (deferReadModels),
+// the deferred read models (FTS index + rollup tables) are backfilled in a
+// single pass and incremental refresh is re-enabled for Tail (SOW-0063).
+func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger, ing *ingest.Ingester) {
 	logger.Info("ai-viewer-ingest: adapter scan starting", "resume", since != nil)
 	if err := adapter.Scan(ctx, since, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -454,8 +458,15 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 		// Fall through to Tail anyway — partial backfill is better than
 		// no realtime data.
 	} else {
-		logger.Info("ai-viewer-ingest: adapter scan complete; tail starting")
+		logger.Info("ai-viewer-ingest: adapter scan complete")
 	}
+	// Backfill the deferred read models (FTS + rollups) that were skipped during
+	// the bulk scan. sync.Once on the ingester ensures this runs exactly once
+	// even when all 5 sources finish scanning simultaneously (SOW-0063).
+	if err := ing.BackfillReadModels(ctx); err != nil {
+		logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
+	}
+	logger.Info("ai-viewer-ingest: tail starting")
 	if err := adapter.Tail(ctx, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			logger.Info("ai-viewer-ingest: adapter tail cancelled")

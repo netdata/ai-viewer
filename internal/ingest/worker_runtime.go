@@ -38,6 +38,7 @@ func newWorkerRuntime(w *worker) *workerRuntime {
 	if w.now != nil {
 		wr.now = w.now
 	}
+	wr.deferReadModels = w.deferReadModels
 	rt := &workerRuntime{
 		worker:     w,
 		writer:     wr,

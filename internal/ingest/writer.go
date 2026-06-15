@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 	"github.com/netdata/ai-viewer/internal/rollups"
@@ -184,6 +185,9 @@ type writer struct {
 	// the matching BackfillRollups option when a test compares the two paths
 	// (the refresh≡backfill byte-parity invariant); production leaves it 0.
 	maxRollupRowsPerBucket int
+	// deferReadModels points at the ingester's bulk-scan flag (SOW-0062).
+	// When true, refreshBatchReadModels skips refreshRollups + refreshFTS.
+	deferReadModels *atomic.Bool
 }
 
 // logEntryOnConflict is the ON CONFLICT clause appended to every

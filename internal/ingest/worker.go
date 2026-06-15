@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -40,6 +41,12 @@ type worker struct {
 	// to pick its open hour/day. Injectable for deterministic tests; defaults
 	// to defaultNow when the worker is built without one.
 	now func() int64
+	// deferReadModels points at the ingester's bulk-scan flag (SOW-0063). When
+	// true, refreshBatchReadModels skips refreshRollups + refreshFTS (the two
+	// super-linear-in-volume refreshes) and runs only refreshAggregates (the
+	// cheap session-count update). The binary clears this after the initial
+	// Scan completes and runs BackfillReadModels to build the deferred models.
+	deferReadModels *atomic.Bool
 	// onErr is invoked for batch-level failures (commit errors, etc.).
 	// Defaults to logger.Error if not set.
 	onErr func(error)
@@ -114,6 +121,13 @@ func (w *worker) logObservabilityErrs(wr *writer) {
 }
 
 func (w *writer) refreshBatchReadModels(ctx context.Context, tx *sql.Tx) error {
+	// Bulk-scan fast path (SOW-0063): skip the two super-linear refreshes
+	// (rollups + FTS) during the initial scan; the binary backfills them once
+	// after Scan returns. refreshAggregates (cheap session-count update) still
+	// runs so the UI shows correct counts during the scan.
+	if w.deferReadModels != nil && w.deferReadModels.Load() {
+		return refreshAggregates(ctx, tx, w.dirtyTurnIDs, w.dirtySessionIDs)
+	}
 	if err := w.refreshRollups(ctx, tx); err != nil {
 		return err
 	}

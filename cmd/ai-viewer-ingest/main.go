@@ -174,6 +174,13 @@ func run(args []string, stdout, stderr *os.File) int {
 		ingest.WithSourceMeta(src.id, src.metaJSON)(ing)
 	}
 
+	// Enable the bulk-scan fast path: skip FTS + rollup refresh during the
+	// initial historical scan; runAdapter backfills them once after each
+	// adapter's Scan returns, then re-enables incremental refresh for Tail.
+	// This makes the initial ingest of large source volumes (100k+ files)
+	// minutes instead of hours (SOW-0063).
+	ing.SetDeferReadModels(true)
+
 	adapterCtx, cancelAdapters := context.WithCancel(ctx)
 	defer cancelAdapters()
 
