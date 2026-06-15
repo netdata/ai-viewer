@@ -60,10 +60,11 @@ type sessionFilter struct {
 	source []string
 	q      string // substring match on agent_name
 
-	group string
-	sort  string
-	order string // "asc" | "desc"
-	limit int
+	group        string
+	sort         string
+	order        string // "asc" | "desc"
+	limit        int
+	includeEmpty bool // when false (default), sessions with 0 ops + 0 turns are excluded from the list
 
 	cursor    pageCursor
 	hasCursor bool
@@ -160,6 +161,10 @@ func parseScalarFilters(v url.Values, f *sessionFilter) error {
 	if err := applyOrderScalar(v.Get("order"), f); err != nil {
 		return err
 	}
+	// include_empty=1 opts INTO seeing sessions with 0 ops + 0 turns (stubs,
+	// abandoned test sessions). Default (absent/0) hides them so the list
+	// surfaces sessions with real work first (SOW-0063).
+	f.includeEmpty = v.Get("include_empty") == "1"
 	return applyLimitScalar(v.Get("limit"), f)
 }
 

@@ -57,6 +57,12 @@ func (f sessionFilter) fingerprint() string {
 	writeSortedDim(&b, "tools", f.tools)
 	writeSortedDim(&b, "status", f.status)
 	writeSortedDim(&b, "sources", f.source)
+	writeLP(&b, "include_empty")
+	if f.includeEmpty {
+		writeLP(&b, "1")
+	} else {
+		writeLP(&b, "0")
+	}
 	return b.String()
 }
 

@@ -82,6 +82,13 @@ SELECT
 FROM sessions s
 WHERE ` + where
 
+	// Default: exclude sessions with no work (0 ops + 0 turns) — stubs,
+	// abandoned test fixtures, not-yet-scanned parents dominate the list
+	// otherwise. include_empty=1 opts in (SOW-0063).
+	if !f.includeEmpty {
+		query += ` AND (s.op_count > 0 OR s.turn_count > 0)`
+	}
+
 	// Keyset narrowing: rows strictly after the cursor tuple in the sort
 	// direction. Row-value comparison gives a total order on (start_ts, id).
 	if f.hasCursor && !f.cursor.isZero() {

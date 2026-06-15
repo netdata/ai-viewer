@@ -65,6 +65,12 @@ type sessionRow struct {
 // seedSession inserts one sessions row from a sessionRow.
 func seedSession(t *testing.T, db *sql.DB, s sessionRow) {
 	t.Helper()
+	// Default to op_count=1 so the session is visible in the default list view
+	// (which excludes 0-op sessions — SOW-0063). Tests that need genuinely-empty
+	// sessions must set opCount explicitly and add include_empty=1 to the URL.
+	if s.opCount == 0 && s.turnCount == 0 {
+		s.opCount = 1
+	}
 	var parent any
 	if s.parentID != "" {
 		parent = s.parentID
