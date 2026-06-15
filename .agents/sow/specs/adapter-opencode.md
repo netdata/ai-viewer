@@ -535,6 +535,8 @@ When a new `session` row appears (delta on `session` table):
   - `Kind = "sub_agent"` if `parent_id` set, else `"root"`
   - `AgentName = session.agent`
   - `Model = json_extract(session.model, '$.id')` if non-NULL
+  - `Provider = canonicalProvider(json_extract(session.model, '$.providerID'))` (best-effort canonical mapping; SOW-0023)
+  - `ProviderAlias = json_extract(session.model, '$.providerID')` verbatim (the user-defined alias; SOW-0023)
   - `Extras = { providerID, variant, project_id, directory, version, slug, title }`
 - `Ts = session.time_created * 1000` (convert ms→µs)
 - `SourceSeq = deterministic per-event identifier` (stable across rescans; observability counter, not a dedup gate — see Idempotency)

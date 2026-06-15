@@ -172,6 +172,15 @@ type SessionStartedEvent struct {
 	// CallPath is the durable agent-chain string (ai-agent v3 'callPath').
 	// May be empty.
 	CallPath string
+	// Provider is the canonical provider name ('anthropic'|'openai'|...)
+	// for the session. Empty when unknown at session start; populated
+	// last-known via SessionUpdated when discovered later. The op-scoped
+	// provider is authoritative for multi-provider sessions; this column is
+	// a UI convenience (SOW-0023).
+	Provider string
+	// ProviderAlias is the user-defined provider alias (opencode). Empty
+	// otherwise. Same last-known semantics as Provider (SOW-0023).
+	ProviderAlias string
 	// Extras carries format-specific extras that land in sessions.extras_json.
 	// The use of map[string]any here is intentional and documented; see
 	// AGENTS.md and canonical-events.md.
@@ -195,7 +204,12 @@ type SessionUpdatedEvent struct {
 	// of the SessionStatus constants encoded as a string for forward
 	// compatibility with adapter-specific intermediate states.
 	Status string
-	Extras map[string]any
+	// Provider / ProviderAlias are last-known session-level provider fields
+	// (SOW-0023). Empty when no update; the writer COALESCE(NULLIF)s them so
+	// an empty value leaves the existing column untouched.
+	Provider      string
+	ProviderAlias string
+	Extras        map[string]any
 }
 
 // EventKind implements Event.

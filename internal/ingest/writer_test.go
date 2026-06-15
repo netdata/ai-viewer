@@ -1958,3 +1958,86 @@ func TestWriter_TurnFinalizedExtras(t *testing.T) {
 		t.Errorf("turns.extras_json after empty-extras finalize = %s, want empty (NULL) — empty Extras writes NULL", got3)
 	}
 }
+
+// TestWriter_SessionProviderCarrier writes sessions.provider/provider_alias
+// from SessionStartedEvent (SOW-0023) and is idempotent under re-emit via
+// COALESCE(NULLIF(...)): a re-emit carrying the same provider leaves the column
+// unchanged, and a re-emit with an empty provider does NOT clobber an existing
+// value (the COALESCE keeps it).
+func TestWriter_SessionProviderCarrier(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "opencode:/tmp", "opencode", "/tmp")
+	w := newWriter("opencode:/tmp", "opencode", "/tmp", NopPricer{})
+
+	apply := func(ev canonical.Event) {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if err := w.apply(ctx, tx, ev); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("apply %T: %v", ev, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}
+
+	apply(canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "opencode:/tmp", SourceSeq: 1, Ts: 1000},
+		NativeID:  "sess-p", RootNativeID: "sess-p", Kind: canonical.KindRoot,
+		Provider: "anthropic", ProviderAlias: "my-anthropic",
+	})
+
+	readProvider := func() (string, string) {
+		var p, pa sql.NullString
+		if err := db.QueryRowContext(ctx,
+			`SELECT provider, provider_alias FROM sessions WHERE native_id='sess-p'`).Scan(&p, &pa); err != nil {
+			t.Fatalf("read provider: %v", err)
+		}
+		pp, _ := p.Value()
+		pa2, _ := pa.Value()
+		ps, _ := pp.(string)
+		pas, _ := pa2.(string)
+		return ps, pas
+	}
+
+	gotP, gotPA := readProvider()
+	if gotP != "anthropic" || gotPA != "my-anthropic" {
+		t.Fatalf("after SessionStarted: provider=%q alias=%q, want anthropic/my-anthropic", gotP, gotPA)
+	}
+
+	// Re-emit SessionStarted with empty provider (e.g. an adapter that doesn't
+	// know the provider re-feeding the tree). COALESCE(NULLIF) must KEEP the
+	// existing column (not clobber to empty).
+	apply(canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "opencode:/tmp", SourceSeq: 2, Ts: 1000},
+		NativeID:  "sess-p", RootNativeID: "sess-p", Kind: canonical.KindRoot,
+	})
+	if gotP2, gotPA2 := readProvider(); gotP2 != "anthropic" || gotPA2 != "my-anthropic" {
+		t.Errorf("after empty re-emit: provider=%q alias=%q, want anthropic/my-anthropic (COALESCE keeps existing)", gotP2, gotPA2)
+	}
+
+	// SessionUpdated carrying a NEW last-known provider updates the column.
+	apply(canonical.SessionUpdatedEvent{
+		EventBase:     canonical.EventBase{SourceID: "opencode:/tmp", SourceSeq: 3, Ts: 2000},
+		NativeID:      "sess-p",
+		Provider:      "openai",
+		ProviderAlias: "my-openai",
+	})
+	if gotP3, gotPA3 := readProvider(); gotP3 != "openai" || gotPA3 != "my-openai" {
+		t.Errorf("after SessionUpdated: provider=%q alias=%q, want openai/my-openai", gotP3, gotPA3)
+	}
+
+	// SessionUpdated with empty provider leaves the column untouched.
+	apply(canonical.SessionUpdatedEvent{
+		EventBase: canonical.EventBase{SourceID: "opencode:/tmp", SourceSeq: 4, Ts: 3000},
+		NativeID:  "sess-p",
+		Model:     "gpt-5",
+	})
+	if gotP4, gotPA4 := readProvider(); gotP4 != "openai" || gotPA4 != "my-openai" {
+		t.Errorf("after empty-provider SessionUpdated: provider=%q alias=%q, want openai/my-openai (untouched)", gotP4, gotPA4)
+	}
+}

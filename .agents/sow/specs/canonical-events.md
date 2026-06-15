@@ -48,6 +48,8 @@ type SessionStartedEvent struct {
     Model           string  // may be empty if not yet known at start
     Cwd             string  // working directory at session start (claude-code, codex, opencode)
     CallPath        string  // durable agent-chain string (ai-agent v3 'callPath'); may be empty
+    Provider        string  // canonical provider ('anthropic'|'openai'|...); empty if unknown at start (SOW-0023)
+    ProviderAlias   string  // user-defined provider alias (opencode); empty otherwise (SOW-0023)
     Extras          map[string]any   // adapter-specific extras → sessions.extras_json
 }
 ```
@@ -69,12 +71,14 @@ Emitted when the adapter learns metadata about an already-started session — e.
 ```go
 type SessionUpdatedEvent struct {
     EventBase
-    NativeID  string
-    AgentName string  // empty if no update
-    Model     string  // empty if no update
-    Cwd       string  // empty if no update
-    Status    string  // empty if no update
-    Extras    map[string]any  // merged into existing extras_json
+    NativeID       string
+    AgentName      string  // empty if no update
+    Model          string  // empty if no update
+    Cwd            string  // empty if no update
+    Status         string  // empty if no update
+    Provider       string  // last-known canonical provider; empty if no update (SOW-0023)
+    ProviderAlias  string  // last-known user-defined alias; empty if no update (SOW-0023)
+    Extras         map[string]any  // merged into existing extras_json
 }
 ```
 

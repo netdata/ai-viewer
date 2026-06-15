@@ -583,15 +583,17 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
-    kind, agent_name, model, cwd, call_path, status,
+    kind, agent_name, model, provider, provider_alias, cwd, call_path, status,
     start_ts, last_activity_ts, extras_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (source_id, native_id) DO UPDATE SET
     parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
     root_session_id   = excluded.root_session_id,
     kind              = excluded.kind,
     agent_name        = COALESCE(NULLIF(excluded.agent_name, ''), sessions.agent_name),
     model             = COALESCE(NULLIF(excluded.model, ''), sessions.model),
+    provider          = COALESCE(NULLIF(excluded.provider, ''), sessions.provider),
+    provider_alias    = COALESCE(NULLIF(excluded.provider_alias, ''), sessions.provider_alias),
     cwd               = COALESCE(NULLIF(excluded.cwd, ''), sessions.cwd),
     call_path         = COALESCE(NULLIF(excluded.call_path, ''), sessions.call_path),
     start_ts          = MIN(sessions.start_ts, excluded.start_ts),
@@ -599,7 +601,9 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
     extras_json       = `+graftAiViewerExtras("sessions.extras_json")+`
 `,
 		id, w.sourceID, ev.NativeID, parentID, rootID,
-		kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model), nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
+		kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model),
+		nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),
+		nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
 		ev.Ts, ev.Ts, extrasJSON,
 	); err != nil {
 		return fmt.Errorf("writer: insert session: %w", err)
@@ -651,6 +655,8 @@ func (w *writer) applySessionUpdated(ctx context.Context, tx *sql.Tx, ev canonic
 UPDATE sessions SET
     agent_name        = COALESCE(NULLIF(?, ''), agent_name),
     model             = COALESCE(NULLIF(?, ''), model),
+    provider          = COALESCE(NULLIF(?, ''), provider),
+    provider_alias    = COALESCE(NULLIF(?, ''), provider_alias),
     cwd               = COALESCE(NULLIF(?, ''), cwd),
     status            = COALESCE(NULLIF(?, ''), status),
     last_activity_ts  = MAX(last_activity_ts, ?),
@@ -661,7 +667,7 @@ UPDATE sessions SET
     END
 WHERE id = ?
 `,
-		ev.AgentName, ev.Model, ev.Cwd, ev.Status, ev.Ts,
+		ev.AgentName, ev.Model, ev.Provider, ev.ProviderAlias, ev.Cwd, ev.Status, ev.Ts,
 		extrasJSON, extrasJSON, extrasJSON,
 		id,
 	); err != nil {

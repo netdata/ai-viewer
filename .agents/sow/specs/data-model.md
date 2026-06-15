@@ -85,8 +85,8 @@ CREATE TABLE sessions (
     kind              TEXT NOT NULL,            -- 'root' | 'sub_agent' | 'tool_internal' | 'fork'
     agent_name        TEXT,                     -- if known
     model             TEXT,                     -- primary model used in this session (last-known)
-    provider          TEXT,                     -- 'anthropic'|'openai'|'google'|'openrouter'|...
-    provider_alias    TEXT,                     -- user-defined provider alias (opencode); NULL otherwise
+   provider          TEXT,                     -- 'anthropic'|'openai'|'google'|'openrouter'|...; session-level (last-known, from SessionStarted/Updated — SOW-0023); op-scoped ops.provider is authoritative for multi-provider sessions
+   provider_alias    TEXT,                     -- user-defined provider alias (opencode); session-level last-known (SOW-0023); NULL otherwise
     cwd               TEXT,                     -- working directory at session start (claude-code, codex, opencode)
     call_path         TEXT,                     -- durable agent-chain string (ai-agent v3 callPath); NULL otherwise
     status            TEXT NOT NULL,            -- 'running' | 'completed' | 'failed' | 'abandoned' | 'interrupted'

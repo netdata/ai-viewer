@@ -250,8 +250,14 @@ func (m *sessionMapper) sessionStarted() canonical.SessionStartedEvent {
 		Kind:           kind,
 		AgentName:      m.session.Agent,
 		Model:          mr.modelID(),
-		Cwd:            m.session.Directory,
-		Extras:         m.sessionExtras(mr),
+		// Session-level provider attribution (SOW-0023): the alias is the
+		// user-declared providerID from session.model; the canonical provider
+		// is the best-effort mapping (op-scoped ops.provider stays authoritative
+		// for multi-provider sessions; this column is a UI convenience).
+		Provider:      canonicalProvider(mr.ProviderID),
+		ProviderAlias: mr.ProviderID,
+		Cwd:           m.session.Directory,
+		Extras:        m.sessionExtras(mr),
 	}
 	return ev
 }

@@ -271,6 +271,15 @@ func TestMapSession_RootSessionStarted(t *testing.T) {
 	if st.Model != "the-model" {
 		t.Fatalf("Model = %q, want the-model (from session.model $.id)", st.Model)
 	}
+	// Session-level provider attribution (SOW-0023): alias is the verbatim
+	// providerID; canonical provider is the best-effort mapping (unknown alias
+	// passes through unchanged).
+	if st.ProviderAlias != "the-alias" {
+		t.Errorf("ProviderAlias = %q, want the-alias (verbatim session.model.providerID)", st.ProviderAlias)
+	}
+	if st.Provider != "the-alias" {
+		t.Errorf("Provider = %q, want the-alias (unknown alias passes through canonicalProvider)", st.Provider)
+	}
 	if st.Cwd != "/work/dir" {
 		t.Fatalf("Cwd = %q, want /work/dir", st.Cwd)
 	}
