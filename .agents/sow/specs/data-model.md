@@ -603,6 +603,8 @@ Because the two cutoffs are independent, **the current day's already-closed hour
 
 **R1 safety bound (high-cardinality collapse).** A per-`(bucket_ts, source_format, dimension)` row cap, `maxRollupRowsPerBucket` (default `2000`), bounds the table against a high-cardinality dimension (most plausibly `cwd`). When a single dimension within one bucket would exceed the cap, its lowest-metric tail collapses into a single `dimension_value='__other__'` row, so an unbounded set of distinct cwds cannot explode the rollup tables. The collapse preserves additivity (the `__other__` row carries the summed tail metrics).
 
+The cap is overridable on BOTH materialization paths — the incremental refresh (`internal/ingest/rollup_refresh.go`, via the writer) and the one-shot backfill (`BackfillRollups`, via a `BackfillOption`) — defaulting to the rollups-package 2000 when unset (SOW-0062). The two paths MUST use the same value or the refresh≡backfill byte-parity invariant (the `rollup_parity_test.go` gate) breaks for collapse cases; production leaves it at the default. The seam exists for test/local tuning; an operator-facing CLI flag is a separate config-surface decision (not in SOW-0062).
+
 **Retention.** `rollup_hourly` defaults to 90 days; `rollup_daily` is kept forever (both are small relative to `ops`). Hourly pruning is a maintenance step (a bounded delete in the ingester's write cycle), not an automatic cascade, so an operator can widen the window without losing already-materialized daily history.
 
 ### Full-text search (FTS5)

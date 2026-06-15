@@ -21,9 +21,22 @@ func fixedNow() int64 { return ts(2, 12, 0) }
 // refreshRollups → refreshAggregates → progress → notify → commit) exactly.
 func flushBatch(t *testing.T, db *sql.DB, sourceID, format string, now int64, batch []canonical.Event) {
 	t.Helper()
+	flushBatchWithMaxRollupRows(t, db, sourceID, format, now, batch, 0)
+}
+
+// flushBatchWithMaxRollupRows is flushBatch with an injected R1 collapse cap
+// (writer.maxRollupRowsPerBucket). Tests that exercise the __other__
+// tail-collapse set this small so they can use a small high-cardinality batch
+// instead of 2000+ real events (SOW-0062). 0 keeps the rollups default (2000).
+// When a test compares the incremental path to BackfillRollups, it MUST pass
+// the SAME value to WithBackfillMaxRollupRowsPerBucket, or the
+// refresh≡backfill byte-parity invariant breaks for collapse cases.
+func flushBatchWithMaxRollupRows(t *testing.T, db *sql.DB, sourceID, format string, now int64, batch []canonical.Event, maxRollupRows int) {
+	t.Helper()
 	ctx := context.Background()
 	wr := newWriter(sourceID, format, "/loc", NopPricer{})
 	wr.now = func() int64 { return now }
+	wr.maxRollupRowsPerBucket = maxRollupRows
 	w := &worker{
 		sourceID:     sourceID,
 		sourceFormat: format,
@@ -523,11 +536,19 @@ func sessionStartEvent(src, sess, agent, cwd string, startTS int64, seq uint64) 
 // the incremental hook must produce byte-identical rollup_hourly + rollup_daily
 // to BackfillRollups over the SAME ops/sessions and the SAME now. It includes
 // EQUAL-start_ts ops (different ids) to exercise the (start_ts, id) tiebreak and
-// >2000 distinct cwds in one bucket to exercise __other__ collapse parity.
+// >cap distinct cwds in one bucket to exercise __other__ collapse parity.
+//
+// The R1 collapse cap is injected small (testMaxRows=20) on BOTH paths — the
+// writer field (store A incremental) and the BackfillRollups option (store B) —
+// set to the SAME value so the refresh≡backfill byte-parity invariant holds.
+// This lets the test use a small high-cardinality batch (distinctCwds=30)
+// instead of 2000+ real events; the collapse logic is independent of the cap's
+// magnitude (SOW-0062).
 func TestRefreshRollups_ParityWithBackfill(t *testing.T) {
 	const src = "claude_code:/loc"
 	const format = "claude_code"
 	now := fixedNow()
+	const testMaxRows = 20 // injected R1 cap (default 2000); same on both paths. SOW-0062.
 
 	// ---- Store A: incremental path (driven through the writer). ----
 	_, dbA := openTestStore(t)
@@ -548,12 +569,12 @@ func TestRefreshRollups_ParityWithBackfill(t *testing.T) {
 	batch = append(batch, llmOpEvents(src, "sess-1", 1, 2, eqStart, eqEnd, "sonnet", "anthropic", 7, 9, 0.2, true)...)
 	// A third op in a different closed hour the same day (10:00).
 	batch = append(batch, llmOpEvents(src, "sess-1", 1, 3, ts(0, 10, 0), ts(0, 10, 5), "haiku", "anthropic", 1, 2, 0.05, false)...)
-	// >2000 distinct cwds in ONE hour bucket (11:00) to exercise __other__.
+	// >cap distinct cwds in ONE hour bucket (11:00) to exercise __other__.
 	// Each distinct cwd is a separate session+turn+op so the cwd dimension in
-	// that bucket exceeds the 2000 cap and collapses its tail.
+	// that bucket exceeds the cap and collapses its tail.
 	collapseHourStart := ts(0, 11, 0)
 	collapseEnd := ts(0, 11, 5)
-	const distinctCwds = 2100
+	const distinctCwds = 30
 	seqBase := uint64(1000)
 	for i := 0; i < distinctCwds; i++ {
 		sess := fmt.Sprintf("csess-%d", i)
@@ -573,7 +594,7 @@ func TestRefreshRollups_ParityWithBackfill(t *testing.T) {
 		)
 		seqBase += 2
 	}
-	flushBatch(t, dbA, src, format, now, batch)
+	flushBatchWithMaxRollupRows(t, dbA, src, format, now, batch, testMaxRows)
 
 	// ---- Store B: backfill path (seed identical ops/sessions, then backfill). ----
 	_, dbB := openTestStore(t)
@@ -612,7 +633,10 @@ func TestRefreshRollups_ParityWithBackfill(t *testing.T) {
 			status: "completed", tokensIn: 1, tokensOut: 1, costUSD: 0.001,
 		})
 	}
-	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger()); err != nil {
+	// SAME testMaxRows on the backfill path — the refresh≡backfill parity
+	// invariant requires both paths to collapse at the same cap.
+	if _, err := BackfillRollups(context.Background(), dbB, now, silentLogger(),
+		WithBackfillMaxRollupRowsPerBucket(testMaxRows)); err != nil {
 		t.Fatalf("BackfillRollups: %v", err)
 	}
 
@@ -745,10 +769,17 @@ func TestRefreshRollups_ReplayIdempotent(t *testing.T) {
 // bucket must NOT leave a stale per-value row after later batches add enough
 // distinct cwds to collapse it into __other__. Delete-then-insert is what makes
 // this hold (an overwrite-only upsert would strand the old row).
+//
+// The R1 collapse cap is injected small (testMaxRows=20) so the test can use a
+// small high-cardinality batch (extra=30) instead of 2000+ real events — the
+// ranking (op_count DESC, dimension_value ASC) is what the assertion keys on,
+// and it is independent of the cap's magnitude, so a small cap exercises the
+// same delete-then-insert collapse path (SOW-0062).
 func TestRefreshRollups_OtherStaleRowRemoval(t *testing.T) {
 	const src = "claude_code:/loc"
 	const format = "claude_code"
 	now := fixedNow()
+	const testMaxRows = 20 // injected R1 cap (default 2000); see SOW-0062.
 
 	_, db := openTestStore(t)
 	seedSource(t, db, src, format)
@@ -765,17 +796,18 @@ func TestRefreshRollups_OtherStaleRowRemoval(t *testing.T) {
 		},
 	}
 	first = append(first, llmOpEvents(src, "lonely", 1, 1, hour, end, "m", "p", 1, 1, 0, false)...)
-	flushBatch(t, db, src, format, now, first)
+	flushBatchWithMaxRollupRows(t, db, src, format, now, first, testMaxRows)
 
 	if _, ok := readRollups(t, db, "rollup_hourly")[rollupKey{hour, format, "cwd", "/work/lonely"}]; !ok {
 		t.Fatal("premise broken: lonely cwd row not present after first batch")
 	}
 
-	// Batch 2: 2100 more distinct cwds with HIGHER op_count than lonely (each 2
+	// Batch 2: 30 more distinct cwds with HIGHER op_count than lonely (each 2
 	// ops) so the rank pushes /work/lonely into the tail → collapses to __other__.
+	// extra > testMaxRows so the cwd dimension exceeds the cap and collapses.
 	second := []canonical.Event{}
 	seq := uint64(1000)
-	const extra = 2100
+	const extra = 30
 	for i := 0; i < extra; i++ {
 		sess := fmt.Sprintf("e-%d", i)
 		cwd := fmt.Sprintf("/work/e%05d", i)
@@ -794,7 +826,7 @@ func TestRefreshRollups_OtherStaleRowRemoval(t *testing.T) {
 		second = append(second, withSeq(o2[0], seq), withSeq(o2[1], seq+1))
 		seq += 2
 	}
-	flushBatch(t, db, src, format, now, second)
+	flushBatchWithMaxRollupRows(t, db, src, format, now, second, testMaxRows)
 
 	h := readRollups(t, db, "rollup_hourly")
 	if _, ok := h[rollupKey{hour, format, "cwd", "/work/lonely"}]; ok {

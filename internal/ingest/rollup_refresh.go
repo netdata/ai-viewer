@@ -168,7 +168,9 @@ func (w *writer) recomputeBucket(ctx context.Context, tx *sql.Tx, bucketStart, b
 	if err := w.deleteBucketRows(ctx, tx, bucket, bucketStart); err != nil {
 		return err
 	}
-	rows := rollups.Rollup(ops, starts, bucket, rollups.Options{})
+	rows := rollups.Rollup(ops, starts, bucket, rollups.Options{
+		MaxRowsPerBucketDimension: w.maxRollupRowsPerBucket,
+	})
 	if err := upsertRollups(ctx, tx, bucket, rows); err != nil {
 		return err
 	}

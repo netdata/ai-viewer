@@ -174,6 +174,16 @@ type writer struct {
 	// path and BackfillRollups share one cutoff — the byte-diff gate's
 	// premise); defaults to defaultNow.
 	now func() int64
+	// maxRollupRowsPerBucket overrides the R1 per-(bucket, source_format,
+	// dimension) collapse cap for the incremental refresh path
+	// (refreshRollups → rollups.Rollup). Zero means "use the rollups-package
+	// default" (2000, data-model.md §R1 safety bound) — so production
+	// behaviour is unchanged. Tests that exercise the __other__ tail-collapse
+	// set this to a small value so they can use a small high-cardinality batch
+	// instead of 2 000+ real events (SOW-0062). The SAME value MUST be set on
+	// the matching BackfillRollups option when a test compares the two paths
+	// (the refresh≡backfill byte-parity invariant); production leaves it 0.
+	maxRollupRowsPerBucket int
 }
 
 // logEntryOnConflict is the ON CONFLICT clause appended to every

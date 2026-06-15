@@ -38,9 +38,9 @@ type BackfillStats struct {
 //
 // Orchestration is split out of the per-day fold + the post-run logging so
 // each helper has one job; the helper sequence here is the durable contract.
-func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Logger) (BackfillStats, error) {
+func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Logger, opts ...BackfillOption) (BackfillStats, error) {
 	start := time.Now()
-	bf, days, err := prepareBackfill(ctx, db, now)
+	bf, days, err := prepareBackfill(ctx, db, now, opts)
 	if err != nil {
 		return BackfillStats{}, err
 	}
@@ -56,7 +56,7 @@ func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Lo
 // sorted list of closed UTC days, and constructs the per-run backfiller state.
 // Splitting this out of BackfillRollups makes the run a 3-call orchestration
 // (prepare → run → log) so the per-day fold body has no extra control flow.
-func prepareBackfill(ctx context.Context, db *sql.DB, now int64) (*backfiller, []int64, error) {
+func prepareBackfill(ctx context.Context, db *sql.DB, now int64, opts []BackfillOption) (*backfiller, []int64, error) {
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
 
@@ -86,12 +86,18 @@ func prepareBackfill(ctx context.Context, db *sql.DB, now int64) (*backfiller, [
 	if err != nil {
 		return nil, nil, err
 	}
-	return &backfiller{
+	bf := &backfiller{
 		db:            db,
 		openHourStart: openHourStart,
 		openDayStart:  openDayStart,
 		startsByDay:   startsByDay,
-	}, days, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(bf)
+		}
+	}
+	return bf, days, nil
 }
 
 // runBackfillDays materializes every closed day in arrival order, accumulating
@@ -163,9 +169,34 @@ type backfiller struct {
 	// startsByDay maps a UTC-day bucket → that day's session starts.
 	startsByDay map[int64][]rollups.SessionStart
 
+	// maxRollupRowsPerBucket overrides the R1 collapse cap for this backfill
+	// run (SOW-0062). Zero means "use the rollups-package default" (2000).
+	// Set via WithBackfillMaxRollupRowsPerBucket; a test that compares
+	// backfill to the incremental refresh sets the SAME value on both paths
+	// (the refresh≡backfill byte-parity invariant).
+	maxRollupRowsPerBucket int
+
 	hourlyRows    int
 	dailyRows     int
 	daysProcessed int
+}
+
+// BackfillOption configures a BackfillRollups run. The zero value of every
+// option reproduces the prior (option-less) behaviour, so existing callers are
+// unchanged. Mirrors the functional-option pattern used by the Ingester
+// (With* options).
+type BackfillOption func(*backfiller)
+
+// WithBackfillMaxRollupRowsPerBucket overrides the R1 per-(bucket,
+// source_format, dimension) collapse cap for this backfill run (SOW-0062). A
+// value <= 0 (the default) keeps the rollups-package 2000. Tests that exercise
+// the __other__ tail-collapse set this small so they can use a small
+// high-cardinality batch instead of 2 000+ real events. When a test compares
+// the incremental refresh to backfill, it MUST set the SAME value on the
+// writer (writer.maxRollupRowsPerBucket) and here, or the refresh≡backfill
+// byte-parity invariant breaks for collapse cases.
+func WithBackfillMaxRollupRowsPerBucket(n int) BackfillOption {
+	return func(bf *backfiller) { bf.maxRollupRowsPerBucket = n }
 }
 
 // flushDay materializes one UTC day in a single transaction: every closed
@@ -187,14 +218,18 @@ func (bf *backfiller) flushDay(ctx context.Context, day int64) error {
 	}
 	starts := bf.startsByDay[day]
 
-	hourly := rollups.Rollup(ops, starts, rollups.Hourly, rollups.Options{})
+	hourly := rollups.Rollup(ops, starts, rollups.Hourly, rollups.Options{
+		MaxRowsPerBucketDimension: bf.maxRollupRowsPerBucket,
+	})
 	if err := upsertRollups(ctx, tx, rollups.Hourly, hourly); err != nil {
 		return fmt.Errorf("rollups-backfill: upsert hourly for day %d: %w", day, err)
 	}
 
 	var daily []rollups.RollupRow
 	if day < bf.openDayStart { // exclude the open day from rollup_daily
-		daily = rollups.Rollup(ops, starts, rollups.Daily, rollups.Options{})
+		daily = rollups.Rollup(ops, starts, rollups.Daily, rollups.Options{
+			MaxRowsPerBucketDimension: bf.maxRollupRowsPerBucket,
+		})
 		if err := upsertRollups(ctx, tx, rollups.Daily, daily); err != nil {
 			return fmt.Errorf("rollups-backfill: upsert daily for day %d: %w", day, err)
 		}
