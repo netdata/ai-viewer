@@ -15,6 +15,12 @@
   color: var(--text-secondary);
 }
 
+.source {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 .num {
   text-align: right;
   font-variant-numeric: tabular-nums;

@@ -23,6 +23,19 @@ function durationUs(s: SessionListItem): number | null {
   return s.end_ts === null ? null : s.end_ts - s.start_ts;
 }
 
+/** sourceLabel extracts a compact human-readable label from the source_id. */
+function sourceLabel(sourceID: string): string {
+  const fmt = sourceID.split(':')[0];
+  switch (fmt) {
+    case 'aiagent_v3': return 'ai-agent v3';
+    case 'aiagent_v2': return 'ai-agent v2';
+    case 'claude-code': return 'claude-code';
+    case 'codex': return 'codex';
+    case 'opencode': return 'opencode';
+    default: return fmt;
+  }
+}
+
 /**
  * SessionRowBody renders the column CELLS only (no <tr>), so a parent <tr> can
  * prepend extra leading columns (e.g. the SessionsList child-expander) without
@@ -38,6 +51,7 @@ export function SessionRowBody({ session }: SessionRowProps) {
         </Link>
       </td>
       <td className={styles.mono}>{session.model || '—'}</td>
+      <td className={styles.source}>{sourceLabel(session.source_id ?? '')}</td>
       <td className={styles.mono}>{formatTimestamp(session.start_ts)}</td>
       <td>{formatDuration(durationUs(session))}</td>
       <td>

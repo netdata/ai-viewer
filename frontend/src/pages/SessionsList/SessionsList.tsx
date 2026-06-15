@@ -73,6 +73,7 @@ export function SessionsList() {
                   </th>
                   <th>Agent</th>
                   <th>Model</th>
+                  <th>Source</th>
                   <th>Start</th>
                   <th>Duration</th>
                   <th>Status</th>
