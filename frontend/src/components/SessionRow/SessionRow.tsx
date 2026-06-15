@@ -25,7 +25,7 @@ function durationUs(s: SessionListItem): number | null {
 
 /** sourceLabel extracts a compact human-readable label from the source_id. */
 function sourceLabel(sourceID: string): string {
-  const fmt = sourceID.split(':')[0];
+  const fmt = sourceID.split(':')[0] ?? '';
   switch (fmt) {
     case 'aiagent_v3': return 'ai-agent v3';
     case 'aiagent_v2': return 'ai-agent v2';
