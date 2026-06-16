@@ -71,7 +71,7 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
 
-11. **The Production-Grade Loop is the operating model.** All production code is produced by the `minimax` implementer (default `llm-netdata-cloud/minimax-m3-coder`) and reviewed in parallel by exactly five reviewers: `glm`, `mimo`, the `minimax` reviewer (fresh-context, never the implementer instance), `qwen`, `deepseek`. The CTO verifies every reviewer claim, drives iteration, and merges only on `PRODUCTION GRADE` from all five (or only P3 noise with documented disposition). **This rule is a hard rule, not a guideline. It must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not write production code; the implementer does not run external reviewers; the operator does not see technical detail.
+11. **The Production-Grade Loop is the operating model.** *(GA-phase rule — **partially SUSPENDED by operator directive 2026-06-14**)*. The CTO writes production code directly (Hard Rule #3 suspended). The 5-reviewer cycle (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) remains the quality model but is **CTO-discretion** during the Development phase: run it on genuinely risky changes (schema, security, new adapter, cross-cutting refactor); skip for trivial. **This rule must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not skip the reviewer cycle on CTO-written code — it is treated as buggy-by-default until tests + gates + the 5-reviewer cycle converge. The operator does not see technical detail.
 
 ## Ownership Model
 
@@ -125,9 +125,9 @@ Detailed workflow lives at `.agents/sow/specs/workflow.md`. The runtime checklis
 
 ## Delegation Protocol
 
-The assistant orchestrates; the `minimax` implementer produces; the 5 reviewers verify. Rules:
+The assistant orchestrates and writes production code (per the 2026-06-14 operator directive); the 5 reviewers verify. Rules:
 
-- **Production code is always written by the `minimax` implementer** (default `llm-netdata-cloud/minimax-m3-coder`). Master-context Edit/Write on production source files is forbidden. Permitted master-context edits: contract docs (`AGENTS.md`), specs, skills, SOWs, README, LICENSE, trivial verified typo fixes.
+- **Production code is written by the CTO directly.** The `minimax` implementer role is **suspended** (reviewer-only). The CTO may still delegate heavy drafting to it ad-hoc, but the default is CTO-coded.
 - **Heavy investigation is always delegated.** Multi-file reads, exploratory searches, and cross-cutting audits go to `Explore` or `general-purpose` subagents.
 - **The 5-reviewer cycle is also delegated — but only the CTO runs it.** The implementer never runs reviewers; the master runs the 5-reviewer Production-Grade Loop on the final integrated state.
 - **Parallelize aggressively.** When subtasks are independent (e.g. running 5 reviewers, or scaffolding 2 unrelated packages), launch them in a single message with parallel Agent invocations.
