@@ -386,9 +386,11 @@ func TestCrossTopology_BadFilterRejected(t *testing.T) {
 // injected cap and asserts the response keeps the top-N by size_metric and sets
 // truncated=true.
 func TestCrossTopology_NodeCapAndTruncated(t *testing.T) {
-	// NOT parallel: it mutates the package-level maxTopologyNodes cap.
+	// Inject a small cap via the override (SOW-0034: was a mutable package var).
 	p, db, cleanup := newTestPresenter(t)
 	defer cleanup()
+	maxTopologyNodesOverride = 3
+	defer func() { maxTopologyNodesOverride = 0 }()
 	base := seedBase()
 	seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
 	// Five root sessions with ascending duration (end-start) so the top-3 by
@@ -402,11 +404,6 @@ func TestCrossTopology_NodeCapAndTruncated(t *testing.T) {
 			startTS: base + 1_000, endTS: base + 1_000 + dur, opCount: 1,
 		})
 	}
-
-	// Inject a small cap for the duration of this test.
-	restore := maxTopologyNodes
-	maxTopologyNodes = 3
-	defer func() { maxTopologyNodes = restore }()
 
 	code, body, env := getCrossTopology(t, p, "metric=duration")
 	if code != http.StatusOK {

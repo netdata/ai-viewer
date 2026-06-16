@@ -72,7 +72,7 @@ func parseTopologyMetric(raw string) (topologyMetric, error) {
 	case metricCost, metricTokens, metricCalls, metricCtxPct:
 		return m, nil
 	default:
-		return "", wrapBadFilter("unknown metric " + raw + " (want one of cost,tokens,duration,calls,ctx_pct)")
+		return "", wrapBadFilter("unknown metric (want one of cost,tokens,duration,calls,ctx_pct)")
 	}
 }
 

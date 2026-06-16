@@ -30,20 +30,32 @@ import (
 //     set is dropped (lineage to a filtered-out session is not drawn).
 //   - size_metric: from the session's own stored aggregates (NOT a per-op
 //     rescan, to stay bounded over a large filtered set) — see crossSizeExpr.
-//   - Bound: the node set is capped at maxTopologyNodes (top-N by size_metric);
+//   - Bound: the node set is capped at effectiveMaxTopologyNodes() (top-N by size_metric);
 //     truncated=true when the cap was hit.
 
-// maxTopologyNodes caps the cross-session node set. A filter can match very
-// many sessions; the force graph and the perf budget cannot, so the endpoint
-// keeps the top-N sessions by the selected size_metric and flags the response
-// truncated when the cap is hit (rest-api.md §GET /api/topology; aligns with
-// frontend-architecture.md's 500-node Canvas/Worker threshold). A package var
-// (not a const) so tests can inject a small cap.
-var maxTopologyNodes = 500
+// defaultMaxTopologyNodes caps the cross-session node set. A filter can match
+// very many sessions; the force graph and the perf budget cannot, so the
+// endpoint keeps the top-N sessions by the selected size_metric and flags the
+// response truncated when the cap is hit. Tests inject a smaller cap via
+// maxTopologyNodesOverride (SOW-0034: was a mutable package var that prevented
+// test parallelism).
+const defaultMaxTopologyNodes = 500
+
+// maxTopologyNodesOverride is set by tests that need a smaller cap. Production
+// code leaves it 0 (→ defaultMaxTopologyNodes). Accessed under no lock because
+// only tests set it, and topology tests are the sole writer.
+var maxTopologyNodesOverride int
+
+func effectiveMaxTopologyNodes() int {
+	if maxTopologyNodesOverride > 0 {
+		return maxTopologyNodesOverride
+	}
+	return defaultMaxTopologyNodes
+}
 
 // handleCrossTopology answers GET /api/topology. It parses the same filter
 // params as /api/sessions, validates ?metric=, builds one agent node per
-// matching session (capped at maxTopologyNodes by size_metric) plus the
+// matching session (capped at effectiveMaxTopologyNodes() by size_metric) plus the
 // lineage edges among the retained nodes, and writes the shared topology
 // envelope. Method/HEAD handling and the unknown-metric BAD_REQUEST mirror the
 // per-session handler.
@@ -117,7 +129,7 @@ func (r crossAgentRow) agent() crossAgent {
 
 // buildCrossTopology assembles the cross-session node/edge graph for the
 // filtered set. Two bounded queries: one selects the matching sessions ordered
-// by size_metric DESC limited to maxTopologyNodes+1 (so the cap and the
+// by size_metric DESC limited to effectiveMaxTopologyNodes()+1 (so the cap and the
 // truncated flag are detected without a separate COUNT), one selects the
 // lineage parent links among the retained sessions.
 func (p *Presenter) buildCrossTopology(ctx context.Context, f sessionFilter, metric topologyMetric) (topologyResponse, error) {
@@ -182,23 +194,23 @@ func crossSizeExpr(metric topologyMetric, alias string) string {
 
 // loadCrossAgents selects the matching sessions as agent accumulators, ordered
 // by the selected size_metric DESC (then id ASC for a stable tie-break),
-// limited to maxTopologyNodes+1 so the caller can both keep the top-N and learn
+// limited to effectiveMaxTopologyNodes()+1 so the caller can both keep the top-N and learn
 // whether more matched (truncated). The size expression and failure_ratio are
 // computed in SQL from the session's stored aggregates; the WHERE clause is the
 // shared sessionFilter fragment (static SQL + ?-placeholders).
 func (p *Presenter) loadCrossAgents(ctx context.Context, f sessionFilter, metric topologyMetric) ([]crossAgent, bool, error) {
-	query, args := crossAgentsSelect(f, metric, maxTopologyNodes)
+	query, args := crossAgentsSelect(f, metric, effectiveMaxTopologyNodes())
 	rows, err := p.db.QueryContext(ctx, query, args...) // #nosec G201 G202 G701 -- crossAgentsSelect uses a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
 	if err != nil {
 		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	agents, err := scanCrossAgents(rows, maxTopologyNodes)
+	agents, err := scanCrossAgents(rows, effectiveMaxTopologyNodes())
 	if err != nil {
 		return nil, false, err
 	}
-	agents, truncated := trimCrossAgentsToLimit(agents, maxTopologyNodes)
+	agents, truncated := trimCrossAgentsToLimit(agents, effectiveMaxTopologyNodes())
 	return agents, truncated, nil
 }
 
@@ -252,7 +264,7 @@ func scanCrossAgent(rows *sql.Rows) (crossAgent, error) {
 
 func trimCrossAgentsToLimit(out []crossAgent, limit int) ([]crossAgent, bool) {
 	// More rows than the cap means the result was truncated; drop the overflow
-	// row so exactly maxTopologyNodes nodes are returned.
+	// row so exactly effectiveMaxTopologyNodes() nodes are returned.
 	if len(out) > limit {
 		return out[:limit], true
 	}
