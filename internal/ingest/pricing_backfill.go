@@ -62,6 +62,8 @@ FROM ops WHERE kind='llm' AND cost_usd = 0 AND tokens_in > 0 AND model != ''`)
 		if len(placeholders) == 0 {
 			return nil
 		}
+		// #nosec G202 — placeholders are static "(?,?)" strings (no user input);
+		// every value is bound via args as a ? placeholder.
 		q := "INSERT INTO temp.reprice_batch (id, cost) VALUES " + strings.Join(placeholders, ",")
 		_, err := db.ExecContext(ctx, q, args...)
 		placeholders = placeholders[:0]

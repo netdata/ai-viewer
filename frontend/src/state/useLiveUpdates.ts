@@ -34,7 +34,6 @@ export function useLiveUpdates(filter: SubscriptionFilterRequest): ConnectionSta
     const controller = new AbortController();
     let connection: SseConnection | null = null;
     let disposed = false;
-    setStatus('connecting');
 
     void connectSse(queryClient, filter, { onStatus: setStatus }, controller.signal)
       .then((conn) => {

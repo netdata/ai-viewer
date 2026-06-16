@@ -29,7 +29,7 @@ export function RawDataTab({ detail }: RawDataTabProps) {
   return (
     <div className={styles.container}>
       <div className={styles.toolbar}>
-        <label className={styles.label}>Section:</label>
+        <span className={styles.label}>Section:</span>
         <select
           value={section}
           onChange={(e) => setSection(e.target.value as typeof section)}
