@@ -356,8 +356,7 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanW
 	go func() {
 		defer wg.Done()
 		defer close(events)
-		defer scanWG.Done()
-		runAdapter(ctx, adapter, since, events, srcLogger)
+		runAdapter(ctx, adapter, since, events, srcLogger, scanWG.Done)
 	}()
 
 	srcLogger.Info("ai-viewer-ingest: source started")
@@ -449,11 +448,12 @@ func newOnErrorHandler(ctx context.Context, srcID string, events chan<- canonica
 // Between Scan and Tail, if the ingester is in bulk-scan mode (deferReadModels),
 // the deferred read models (FTS index + rollup tables) are backfilled in a
 // single pass and incremental refresh is re-enabled for Tail (SOW-0063).
-func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger) {
+func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger, scanDone func()) {
 	logger.Info("ai-viewer-ingest: adapter scan starting", "resume", since != nil)
 	if err := adapter.Scan(ctx, since, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			logger.Info("ai-viewer-ingest: adapter scan cancelled")
+			scanDone()
 			return
 		}
 		logger.Error("ai-viewer-ingest: adapter scan failed", "err", err)
@@ -462,6 +462,11 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 	} else {
 		logger.Info("ai-viewer-ingest: adapter scan complete")
 	}
+	// Scan is done (success or error) — signal the centralized backfill
+	// coordinator that this source's Scan phase is complete. The backfill
+	// waits for ALL sources' scans before running, so it doesn't contend
+	// with tail-mode flushes (SOW-0063).
+	scanDone()
 	// NOTE: the read-model backfill is now handled centrally in main.go — it
 	// runs ONCE after ALL sources' scans complete (not per-source), avoiding
 	// contention between the FTS truncate tx and concurrent tail-mode flushes
