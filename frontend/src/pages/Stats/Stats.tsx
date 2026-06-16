@@ -249,6 +249,30 @@ export function Stats() {
                 ))}
               </select>
             </label>
+            <button
+              type="button"
+              className={styles.copyButton}
+              onClick={() => {
+                const items = topItemsFrom(ranking.data);
+                if (items.length === 0) return;
+                const header = `${topDimension},${topMetric}\n`;
+                const rows = items.map((i) => `"${i.key.replace(/"/g, '""')}",${i.value}`).join('\n');
+                const csv = header + rows;
+                try {
+                  const blob = new Blob([csv], { type: 'text/csv' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = `top-${topDimension}-${topMetric}.csv`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                } catch {
+                  // Best-effort; no silent failure path needed for a download
+                }
+              }}
+            >
+              Export CSV
+            </button>
           </div>
         </div>
 
@@ -257,11 +281,31 @@ export function Stats() {
         ) : ranking.isError ? (
           <ErrorState error={ranking.error} title="Failed to load breakdown" />
         ) : (
-          <BarChart
-            items={topItemsFrom(ranking.data)}
-            dimension={topDimension}
-            metric={topMetric}
-          />
+          <>
+            <BarChart
+              items={topItemsFrom(ranking.data)}
+              dimension={topDimension}
+              metric={topMetric}
+            />
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>{DIMENSION_OPTIONS.find((d) => d.value === topDimension)?.label ?? topDimension}</th>
+                  <th className={styles.numCol}>{METRIC_OPTIONS.find((m) => m.value === topMetric)?.label ?? topMetric}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topItemsFrom(ranking.data).map((item) => (
+                  <tr key={item.key}>
+                    <td>{item.key}</td>
+                    <td className={styles.numCol}>
+                      {topMetric === 'cost' ? formatCost(item.value) : formatNumber(item.value)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         )}
       </section>
 
