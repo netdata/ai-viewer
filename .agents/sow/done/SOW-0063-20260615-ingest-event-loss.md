@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open (BLOCKER — usability)
+Status: completed (BLOCKER — usability)
 
 Sub-state: CORRECTION (2026-06-15). Originally filed as "intermittent canonical-event loss" based on the observation that many v3 sessions had 0 turns/ops. **That diagnosis was wrong.** The evidence (below) shows the events were never lost — the scanner simply hadn't reached those files yet (it processes them alphabetically and was ~33% through 316k when stopped). The "empty running" sessions are `requireSessionID` stubs for unscanned parents, not data loss. The real issues are: (1) the scan is too slow for real-world volume (~11h for 316k files), and (2) stub rows pollute the UI by looking identical to real empty/running sessions.
 
