@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useFilters, filtersToSubscription } from '../../state/filters';
-import { useAggregate, useTop } from '../../api/stats';
+import { useAggregate, useTop, useStats } from '../../api/stats';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
 import { LoadingState, ErrorState } from '../../components/StatusViews';
 import type {
@@ -16,6 +16,7 @@ import type {
 import { LineChart } from './charts/LineChart';
 import { BarChart } from './charts/BarChart';
 import { SearchBox } from './SearchBox';
+import { formatCost, formatNumber } from '../../lib/format';
 import {
   applyStatPatch,
   readStatControls,
@@ -93,6 +94,7 @@ export function Stats() {
 
   const aggregate = useAggregate(filters, { bucket, groupBy: 'total', metric: trendMetric });
   const ranking = useTop(filters, { dimension: topDimension, metric: topMetric, n: TOP_N });
+  const stats = useStats(filters);
 
   // One live subscription for the active filter; stats_invalidated refreshes the
   // ['stats']-keyed aggregate + top queries (search stays put — see file header).
@@ -133,6 +135,36 @@ export function Stats() {
           </span>
         </div>
       </div>
+
+      {/* ── Summary metrics bar ─────────────────────────────────────────── */}
+      {stats.data && (
+        <div className={styles.summaryBar}>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryValue}>{formatCost(stats.data.totals.cost_usd)}</span>
+            <span className={styles.summaryLabel}>Total cost</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.session_count)}</span>
+            <span className={styles.summaryLabel}>Sessions</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.op_count)}</span>
+            <span className={styles.summaryLabel}>Ops</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.tokens_in)}</span>
+            <span className={styles.summaryLabel}>Tokens in</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.tokens_out)}</span>
+            <span className={styles.summaryLabel}>Tokens out</span>
+          </div>
+          <div className={styles.summaryItem}>
+            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.failures)}</span>
+            <span className={styles.summaryLabel}>Failures</span>
+          </div>
+        </div>
+      )}
 
       {/* ── Trends over time (line chart) ─────────────────────────────────── */}
       <section className={styles.panel} aria-labelledby="stats-trends-title">
