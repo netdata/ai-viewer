@@ -211,13 +211,18 @@ func (m *fileMapper) tokenTurn(turnID string) *turnState {
 	return nil
 }
 
-// applyLLMCtx emits an OpFinalizedEvent that sets CtxUsed/CtxMax on the turn's
-// last LLM op (spec rule #17) when the turn accumulated a cumulative total and
-// has an LLM op to attach it to. The ingester reconciles this finalize with the
-// op's earlier finalize (idempotent upsert keyed on (turn,seq)). Returns
-// (event, true) when emitted, (zero, false) when there is nothing to apply.
+// applyLLMCtx emits an OpFinalizedEvent that sets CtxUsed/CtxMax AND the turn's
+// accumulated token/cost totals on the turn's last LLM op (spec rule #17, C#1,
+// SOW-0030). The ingester rolls session/turn token totals FROM OP rows, so
+// codex tokens must land on an op — putting them on TurnFinalizedEvent only
+// (as before) meant they never persisted (the aggregate model ignores
+// TurnFinalized token fields). The turn's last LLM op is the natural attribution
+// point: it is the op that consumed the tokens. The ingester reconciles this
+// finalize with the op's earlier finalize (idempotent upsert keyed on
+// (turn,seq)). Returns (event, true) when emitted, (zero, false) when there is
+// nothing to apply.
 func (m *fileMapper) applyLLMCtx(ts *turnState, base func() canonical.EventBase) (canonical.OpFinalizedEvent, bool) {
-	if ts.lastLLMOpSeq == 0 || (ts.lastLLMCtxUsed == 0 && ts.ctxMax == 0) {
+	if ts.lastLLMOpSeq == 0 || (ts.lastLLMCtxUsed == 0 && ts.ctxMax == 0 && ts.tokensIn == 0 && ts.tokensOut == 0) {
 		return canonical.OpFinalizedEvent{}, false
 	}
 	endUs := ts.lastLLMEndTs
@@ -225,14 +230,18 @@ func (m *fileMapper) applyLLMCtx(ts *turnState, base func() canonical.EventBase)
 		endUs = ts.startTsUs
 	}
 	return canonical.OpFinalizedEvent{
-		EventBase:       base(),
-		SessionNativeID: m.nativeID,
-		TurnSeq:         ts.seq,
-		Seq:             ts.lastLLMOpSeq,
-		Status:          "completed",
-		EndTs:           endUs,
-		CtxUsed:         ts.lastLLMCtxUsed,
-		CtxMax:          ts.ctxMax,
+		EventBase:        base(),
+		SessionNativeID:  m.nativeID,
+		TurnSeq:          ts.seq,
+		Seq:              ts.lastLLMOpSeq,
+		Status:           "completed",
+		EndTs:            endUs,
+		CtxUsed:          ts.lastLLMCtxUsed,
+		CtxMax:           ts.ctxMax,
+		TokensIn:         ts.tokensIn,
+		TokensOut:        ts.tokensOut,
+		TokensCacheRead:  ts.tokensCacheRead,
+		TokensCacheWrite: ts.tokensCacheWrite,
 	}, true
 }
 
