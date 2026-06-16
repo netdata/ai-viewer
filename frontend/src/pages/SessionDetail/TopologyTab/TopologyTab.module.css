@@ -116,11 +116,17 @@
   border-radius: var(--radius-md);
   background: var(--bg-secondary);
   overflow: hidden;
+  width: 100%;
+  height: calc(100vh - 280px);
+  min-height: 400px;
+  position: relative;
 }
 
 .vizScroller {
   overflow: auto;
   max-width: 100%;
+  width: 100%;
+  height: 100%;
 }
 
 .vizSvg {

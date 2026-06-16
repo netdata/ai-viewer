@@ -162,9 +162,10 @@ function TopologySvg({
     <div className={styles.vizScroller} role="group" aria-label="Session topology graph">
       <svg
         ref={svgRef}
-        width={width}
-        height={height}
+        width="100%"
+        height="100%"
         viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="xMidYMid meet"
         className={styles.vizSvg}
       >
         <g ref={gRef}>
