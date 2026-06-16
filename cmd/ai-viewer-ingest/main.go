@@ -76,6 +76,9 @@ func run(args []string, stdout, stderr *os.File) int {
 	if len(args) > 0 && args[0] == "rollups-backfill" {
 		return runBackfill(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "reprice" {
+		return runReprice(args[1:], stdout, stderr)
+	}
 
 	cfg, exitCode, ok := parseFlags(args, stderr)
 	if !ok {
