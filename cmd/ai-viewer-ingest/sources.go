@@ -314,13 +314,13 @@ func (l sqlCursorLookup) LookupCursor(ctx context.Context, sourceID string) (str
 // logs a WARN and falls back to a full
 // re-scan; the spec mandates that the daemon keeps making progress
 // rather than refusing to start.
-func startSource(ctx context.Context, wg *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger) error {
-	return startSourceWithFactoryLookup(ctx, wg, ing, lookup, src, logger, adapters.Get)
+func startSource(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger) error {
+	return startSourceWithFactoryLookup(ctx, wg, scanWG, ing, lookup, src, logger, adapters.Get)
 }
 
 type adapterFactoryLookup func(format string) (canonical.AdapterFactory, bool)
 
-func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, factoryLookup adapterFactoryLookup) error {
+func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, factoryLookup adapterFactoryLookup) error {
 	factory, ok := factoryLookup(src.format)
 	if !ok {
 		return fmt.Errorf("unknown adapter format %q (registered: %v)", src.format, adapters.Formats())
@@ -352,10 +352,12 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, ing *
 	}
 
 	wg.Add(1)
+	scanWG.Add(1)
 	go func() {
 		defer wg.Done()
 		defer close(events)
-		runAdapter(ctx, adapter, since, events, srcLogger, ing)
+		defer scanWG.Done()
+		runAdapter(ctx, adapter, since, events, srcLogger)
 	}()
 
 	srcLogger.Info("ai-viewer-ingest: source started")
@@ -447,7 +449,7 @@ func newOnErrorHandler(ctx context.Context, srcID string, events chan<- canonica
 // Between Scan and Tail, if the ingester is in bulk-scan mode (deferReadModels),
 // the deferred read models (FTS index + rollup tables) are backfilled in a
 // single pass and incremental refresh is re-enabled for Tail (SOW-0063).
-func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger, ing *ingest.Ingester) {
+func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger) {
 	logger.Info("ai-viewer-ingest: adapter scan starting", "resume", since != nil)
 	if err := adapter.Scan(ctx, since, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -460,21 +462,10 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 	} else {
 		logger.Info("ai-viewer-ingest: adapter scan complete")
 	}
-	// Backfill the deferred read models (FTS + rollups) that were skipped during
-	// the bulk scan. The mutex on the ingester ensures this runs exactly once even
-	// when all 5 sources finish scanning simultaneously (SOW-0063). Use a DETACHED
-	// context — the per-adapter ctx may be cancelled (e.g. during binary swaps or
-	// when sibling goroutines finish their scan), which would abort the backfill's
-	// truncate/read/insert transaction. No timeout: on a 1M+ op DB modernc SQLite
-	// can take 20+ minutes for the FTS backfill; a timeout would abort it mid-way
-	// (the mutex-guarded retry would then truncate and restart, never completing).
-	// The backfill is bounded by the data volume and modernc's throughput, not by
-	// wall time.
-	backfillCtx, backfillCancel := context.WithCancel(context.Background())
-	defer backfillCancel()
-	if err := ing.BackfillReadModels(backfillCtx); err != nil {
-		logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
-	}
+	// NOTE: the read-model backfill is now handled centrally in main.go — it
+	// runs ONCE after ALL sources' scans complete (not per-source), avoiding
+	// contention between the FTS truncate tx and concurrent tail-mode flushes
+	// on the single SQLite connection (SOW-0063).
 	logger.Info("ai-viewer-ingest: tail starting")
 	if err := adapter.Tail(ctx, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

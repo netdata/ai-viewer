@@ -178,8 +178,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 
 	// Enable the bulk-scan fast path: skip FTS + rollup refresh during the
-	// initial historical scan; runAdapter backfills them once after each
-	// adapter's Scan returns, then re-enables incremental refresh for Tail.
+	// initial historical scan; the post-scan backfill rebuilds them once.
 	// This makes the initial ingest of large source volumes (100k+ files)
 	// minutes instead of hours (SOW-0063).
 	ing.SetDeferReadModels(true)
@@ -192,14 +191,41 @@ func run(args []string, stdout, stderr *os.File) int {
 	// cannot contend with the writer's own batch transactions.
 	lookup := sqlCursorLookup{db: ws.DB()}
 
+	// scanWG waits for all sources' Scan() to complete. The post-scan
+	// read-model backfill runs ONCE after ALL scans finish (not per-source),
+	// so it doesn't contend with concurrent tail-mode flushes on the single
+	// SQLite connection (the prior per-source approach deadlocked the FTS
+	// backfill's truncate tx against ongoing flushes — SOW-0063).
+	var scanWG sync.WaitGroup
+	scanDone := make(chan struct{})
+	go func() {
+		scanWG.Wait()
+		close(scanDone)
+	}()
+
 	var adapterWG sync.WaitGroup
 	for _, src := range sources {
-		if err := startSource(adapterCtx, &adapterWG, ing, lookup, src, logger); err != nil {
+		if err := startSource(adapterCtx, &adapterWG, &scanWG, ing, lookup, src, logger); err != nil {
 			logger.Warn("ai-viewer-ingest: source skipped",
 				"source", src.id, "err", err)
 			continue
 		}
 	}
+
+	// Post-scan backfill: wait for ALL scans to complete, then rebuild the
+	// FTS + rollup read models once (no per-source contention). Runs in a
+	// goroutine so the main thread can proceed to the signal-wait loop.
+	go func() {
+		<-scanDone
+		if ing.DeferReadModels() {
+			backfillCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			logger.Info("ai-viewer-ingest: all scans complete; backfilling read models")
+			if err := ing.BackfillReadModels(backfillCtx); err != nil {
+				logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
+			}
+		}
+	}()
 
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
