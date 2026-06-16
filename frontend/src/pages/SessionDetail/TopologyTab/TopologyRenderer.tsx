@@ -181,7 +181,10 @@ function TopologySvg({
     if (e.button !== 0) return;
     e.stopPropagation(); // prevent the zoom/pan behavior from also firing
     draggingRef.current = { id: p.node.id, lastScreenX: e.clientX, lastScreenY: e.clientY };
-    (e.currentTarget).setPointerCapture(e.pointerId);
+    const target = e.currentTarget;
+    if (target && typeof target.setPointerCapture === 'function') {
+      target.setPointerCapture(e.pointerId);
+    }
   }, []);
 
   const onNodePointerMove = useCallback((e: ReactPointerEvent<SVGGElement>) => {
@@ -207,7 +210,10 @@ function TopologySvg({
     const drag = draggingRef.current;
     if (!drag) return;
     e.stopPropagation();
-    (e.currentTarget).releasePointerCapture(e.pointerId);
+    const target = e.currentTarget;
+    if (target && typeof target.releasePointerCapture === 'function') {
+      target.releasePointerCapture(e.pointerId);
+    }
     draggingRef.current = null;
   }, []);
 
