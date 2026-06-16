@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent, MouseEvent } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import type { KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { select } from 'd3-selection';
 import { zoom, zoomIdentity, type D3ZoomEvent } from 'd3-zoom';
 import type { TopologyEdge } from '../../../api/types';
@@ -122,7 +122,7 @@ function graphLabelFor(p: PositionedNode): string {
 }
 
 function TopologySvg({
-  positioned,
+  positioned: initial,
   edges,
   width,
   height,
@@ -131,11 +131,25 @@ function TopologySvg({
 }: Omit<TopologyRendererProps, 'useCanvas'>) {
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
+
+  // Local override positions for dragged nodes (nodeId → {x,y}). A node in this
+  // map replaces its layout position; nodes NOT in the map keep their layout x/y.
+  const [dragOverrides, setDragOverrides] = useState<Map<string, { x: number; y: number }>>(new Map());
+
+  // Merge layout positions with drag overrides so edges + nodes use the same coords.
+  const positioned = initial.map((p) => {
+    const ov = dragOverrides.get(p.node.id);
+    return ov ? { ...p, x: ov.x, y: ov.y } : p;
+  });
   const idx = posIndex(positioned);
 
+  // The current zoom transform (so drag deltas can be converted from screen
+  // pixels to graph coordinates). Stored on a ref so the drag handlers read the
+  // live value without re-rendering on every zoom tick.
+  const zoomTransformRef = useRef({ k: 1, x: 0, y: 0 });
+
   // d3-zoom pan/zoom applied to the inner <g> transform; the SVG element stays
-  // the zoom surface. Re-attached only when the size changes (the listener is
-  // stable across data updates).
+  // the zoom surface. Re-attached only when the size changes.
   useEffect(() => {
     const svg = svgRef.current;
     const g = gRef.current;
@@ -147,16 +161,54 @@ function TopologySvg({
       .filter(zoomEventFilter)
       .on('zoom', (event: D3ZoomEvent<SVGSVGElement, unknown>) => {
         g.setAttribute('transform', event.transform.toString());
+        zoomTransformRef.current = { k: event.transform.k, x: event.transform.x, y: event.transform.y };
       });
     const selection = select(svg);
     selection.call(zoomBehavior);
-    // Reset to identity so a remount starts un-panned (arrow keeps `transform`
-    // bound to its behavior — d3's documented selection.call idiom).
     selection.call((s) => zoomBehavior.transform(s, zoomIdentity));
     return () => {
       selection.on('.zoom', null);
     };
   }, [width, height]);
+
+  // Drag: pointer-down on a node starts a drag; pointer-move updates the node's
+  // position in graph coords (screen delta / zoom scale); pointer-up ends it.
+  // setPointerCapture keeps the events even if the pointer leaves the node.
+  const draggingRef = useRef<{ id: string; lastScreenX: number; lastScreenY: number } | null>(null);
+
+  const onNodePointerDown = useCallback((e: ReactPointerEvent<SVGGElement>, p: PositionedNode) => {
+    // Only drag on primary button (left); let right-click/middle through to zoom.
+    if (e.button !== 0) return;
+    e.stopPropagation(); // prevent the zoom/pan behavior from also firing
+    draggingRef.current = { id: p.node.id, lastScreenX: e.clientX, lastScreenY: e.clientY };
+    (e.currentTarget as SVGGElement).setPointerCapture(e.pointerId);
+  }, []);
+
+  const onNodePointerMove = useCallback((e: ReactPointerEvent<SVGGElement>) => {
+    const drag = draggingRef.current;
+    if (!drag) return;
+    e.stopPropagation();
+    const dx = (e.clientX - drag.lastScreenX) / zoomTransformRef.current.k;
+    const dy = (e.clientY - drag.lastScreenY) / zoomTransformRef.current.k;
+    drag.lastScreenX = e.clientX;
+    drag.lastScreenY = e.clientY;
+    setDragOverrides((prev) => {
+      const next = new Map(prev);
+      const cur = next.get(drag.id) ?? positioned.find((p) => p.node.id === drag.id);
+      if (cur) {
+        next.set(drag.id, { x: cur.x + dx, y: cur.y + dy });
+      }
+      return next;
+    });
+  }, [positioned]);
+
+  const onNodePointerUp = useCallback((e: ReactPointerEvent<SVGGElement>) => {
+    const drag = draggingRef.current;
+    if (!drag) return;
+    e.stopPropagation();
+    (e.currentTarget as SVGGElement).releasePointerCapture(e.pointerId);
+    draggingRef.current = null;
+  }, []);
 
   return (
     <div className={styles.vizScroller} role="group" aria-label="Session topology graph">
@@ -196,6 +248,9 @@ function TopologySvg({
               onClick={() => {
                 onNodeClick(p);
               }}
+              onPointerDown={(e) => { onNodePointerDown(e, p); }}
+              onPointerMove={onNodePointerMove}
+              onPointerUp={onNodePointerUp}
             />
           ))}
         </g>
@@ -208,10 +263,16 @@ function TopologyNodeShape({
   p,
   selected,
   onClick,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
 }: {
   p: PositionedNode;
   selected: boolean;
   onClick: () => void;
+  onPointerDown: (e: ReactPointerEvent<SVGGElement>) => void;
+  onPointerMove: (e: ReactPointerEvent<SVGGElement>) => void;
+  onPointerUp: (e: ReactPointerEvent<SVGGElement>) => void;
 }) {
   const fill = colorForFailureRatio(p.node.failure_ratio);
   const stroke = colorForActorKind(p.node.kind);
@@ -230,6 +291,9 @@ function TopologyNodeShape({
       className={selected ? styles.nodeSelected : styles.node}
       onClick={onClick}
       onKeyDown={onKeyDown}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
       transform={`translate(${p.x},${p.y})`}
     >
       {p.node.kind === 'agent' ? (
@@ -351,7 +415,7 @@ function TopologyCanvas({
 
   // Hit-test a click: invert the zoom transform, then find the node whose shape
   // contains the point (nearest-first by distance for overlapping circles).
-  const onClick = (e: MouseEvent<HTMLCanvasElement>): void => {
+  const onClick = (e: ReactMouseEvent<HTMLCanvasElement>): void => {
     const bounds = e.currentTarget.getBoundingClientRect();
     const px = (e.clientX - bounds.left - transform.x) / transform.k;
     const py = (e.clientY - bounds.top - transform.y) / transform.k;
