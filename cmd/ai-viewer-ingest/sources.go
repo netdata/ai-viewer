@@ -461,9 +461,15 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 		logger.Info("ai-viewer-ingest: adapter scan complete")
 	}
 	// Backfill the deferred read models (FTS + rollups) that were skipped during
-	// the bulk scan. sync.Once on the ingester ensures this runs exactly once
-	// even when all 5 sources finish scanning simultaneously (SOW-0063).
-	if err := ing.BackfillReadModels(ctx); err != nil {
+	// the bulk scan. The mutex on the ingester ensures this runs exactly once even
+	// when all 5 sources finish scanning simultaneously (SOW-0063). Use a DETACHED
+	// context — the per-adapter ctx may be cancelled (e.g. during binary swaps or
+	// when sibling goroutines finish their scan), which would abort the backfill's
+	// truncate/read/insert transaction. The backfill is a shared post-scan step
+	// that should outlive any single adapter goroutine.
+	backfillCtx, backfillCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer backfillCancel()
+	if err := ing.BackfillReadModels(backfillCtx); err != nil {
 		logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
 	}
 	logger.Info("ai-viewer-ingest: tail starting")
