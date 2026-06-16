@@ -79,6 +79,7 @@ export const COVERAGE_INCLUDE = [
   'src/components/LogRow/**/*.{ts,tsx}',
   'src/components/LoadMore/**/*.{ts,tsx}',
   'src/components/StatusViews/**/*.{ts,tsx}',
+  'src/components/LiveIndicator/**/*.{ts,tsx}',
   'src/components/SpanDetailDrawer/**/*.{ts,tsx}',
   // Flat (non-dir) component file with a unit test (ComingSoon.test.tsx). Listed
   // by exact path so it is MEASURED and contributes to the global aggregate
@@ -143,6 +144,7 @@ export const COVERAGE_EXCLUDED = [
 export const PER_DIR_GLOBS = [
   'src/components/FilterBar/**',
   'src/components/LoadMore/**',
+  'src/components/LiveIndicator/**',
   'src/components/LogRow/**',
   'src/components/SessionRow/**',
   'src/components/SpanDetailDrawer/**',
