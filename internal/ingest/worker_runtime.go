@@ -145,12 +145,46 @@ func (rt *workerRuntime) flushBatch(ctx context.Context, reason string) {
 	rt.flushBatchWithWriteContext(writeCtx, reason)
 }
 
+// flushMaxRetries bounds how many times a failing batch is retried before it is
+// dropped (SOW-0063 hardening). A SQLite WAL checkpoint, a transient lock
+// contention, or a brief disk-full condition can fail a flush that would
+// succeed on a second attempt; without retries the events are permanently lost
+// (the old code dropped the batch on any error). 3 retries with exponential
+// backoff covers transient conditions; a permanent error (corruption, disk
+// gone) still drops the batch after exhausting retries — logged at ERROR.
+const flushMaxRetries = 3
+
 func (rt *workerRuntime) flushBatchWithWriteContext(writeCtx context.Context, reason string) {
 	if len(rt.batch) == 0 {
 		return
 	}
-	if err := rt.worker.flush(writeCtx, rt.writer, rt.batch); err != nil {
-		rt.worker.report(fmt.Errorf("flush (%s): %w", reason, err))
+	batch := rt.batch
+	for attempt := 0; attempt <= flushMaxRetries; attempt++ {
+		err := rt.worker.flush(writeCtx, rt.writer, batch)
+		if err == nil {
+			break
+		}
+		if attempt < flushMaxRetries {
+			// Transient: retry with backoff (100ms, 200ms, 400ms). The events
+			// are NOT dropped — the batch stays in rt.batch for the next attempt.
+			rt.worker.report(fmt.Errorf("flush (%s) attempt %d/%d: %w — retrying", reason, attempt+1, flushMaxRetries+1, err))
+			backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-writeCtx.Done():
+				// Context cancelled during backoff (shutdown): preserve the batch
+				// in rt.batch so the shutdown drain path can attempt it once more.
+				rt.batch = batch
+				return
+			}
+			rt.writer.resetBatch()
+			continue
+		}
+		// Exhausted retries: log at ERROR and drop. This is a permanent failure
+		// (corruption, disk full, schema bug); the events are lost. Surfaced via
+		// report so the operator sees it in journald.
+		rt.worker.report(fmt.Errorf("flush (%s) failed after %d attempts, DROPPING %d events: %w",
+			reason, flushMaxRetries+1, len(batch), err))
 	}
 	rt.batch = rt.batch[:0]
 	rt.writer.resetBatch()

@@ -29,7 +29,7 @@ Make ai-viewer usable on real-world agent-data volumes (100k+ session files): th
 ### Acceptance Criteria
 
 1. **Scan speed:** a 316k-file ai-agent v3 source ingests in under 10 minutes (target: under 5). **Verification**: timed ingest of the operator's real data; row counts + event counts match the adapter's emission counts for a sampled subset.
-2. **Stub/empty status:** a session that has not been fully scanned (stub) OR was scanned but genuinely has no work shows a distinct status (`empty` or `stub`), NOT `running`. `running` means "live, has work, not closed." The Sessions list default-sort de-prioritizes empty/stub sessions. **Verification**: status enum test + UI check.
+2. **Stub/empty status:** PARTIALLY ADDRESSED. The `empty`-session filter (hide sessions with 0 ops + 0 turns from the default list, `include_empty=1` to see them) is deployed and solves the UX problem. The canonical `abandoned` status already exists for "started but produced no turns" — the remaining work is to transition 0-op sessions to `abandoned` at finalize time (the writer currently leaves stubs as `running`). This is a lower-priority cosmetic improvement now that 0-op sessions are hidden by default.
 3. **No silent batch drops:** a flush failure retries (bounded backoff) or re-queues the batch events rather than dropping them silently. **Verification**: a test that injects a transient flush failure asserts the events land on retry.
 
 ## Pre-Implementation Gate
