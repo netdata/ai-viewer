@@ -159,13 +159,15 @@ func (m *sessionMapper) llmFinalizeEvent(tc *turnContext, endUs int64, delta tok
 		TokensCacheRead:  delta.Cache.Read,
 		TokensCacheWrite: delta.Cache.Write,
 		CostUSD:          data.Cost,
-		// CtxUsed = input + cache.read at this step-finish (the most-recent step's
-		// cumulative input is the live context occupancy — adapter-opencode.md
-		// "ctx_used" row). Uses the CUMULATIVE value (data.Tokens), not the delta:
-		// context occupancy is a level, not a per-step increment. Saturating add with
-		// a WARN on overflow so a crafted/corrupt pair cannot wrap to a negative
-		// ctx_used (SOW-0005 round-3 P2-1).
-		CtxUsed: addClampWarn(data.Tokens.Input, data.Tokens.Cache.Read, "ctx_used (tokens.input+tokens.cache.read)", m.mwarn),
+		// Canonical CtxUsed = TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut
+		// (SOW-0031: cross-adapter alignment; the old 2-term formula omitted cache_write + output).
+		// Uses the CUMULATIVE value (data.Tokens), not the delta: context occupancy is a
+		// level, not a per-step increment. Saturating add with a WARN on overflow.
+		CtxUsed: addClampWarn(
+			addClampWarn(data.Tokens.Input, data.Tokens.Cache.Read, "ctx_used (input+cache_read)", m.mwarn),
+			addClampWarn(data.Tokens.Cache.Write, data.Tokens.Output, "ctx_used (cache_write+output)", m.mwarn),
+			"ctx_used (full)", m.mwarn,
+		),
 	}
 }
 

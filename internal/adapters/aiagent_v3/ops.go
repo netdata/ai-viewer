@@ -115,8 +115,9 @@ func applyOpAccounting(ev *canonical.OpFinalizedEvent, acc *accounting) {
 	if acc.CostUSD != nil {
 		ev.CostUSD = *acc.CostUSD
 	}
-	// Best-effort context-window-in estimate per spec §5.3.
-	ev.CtxUsed = acc.TokensIn + acc.TokensCacheRead
+	// Canonical CtxUsed = TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut
+	// (SOW-0031: cross-adapter alignment; the old 2-term formula omitted cache_write + output).
+	ev.CtxUsed = acc.TokensIn + acc.TokensCacheRead + acc.TokensCacheWrite + ev.TokensOut
 }
 
 func applyOpBytes(ev *canonical.OpFinalizedEvent, refs []payloadRef) {

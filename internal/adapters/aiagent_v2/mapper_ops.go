@@ -121,7 +121,9 @@ func applyAccounting(ev *canonical.OpFinalizedEvent, acc accountingEntry) {
 	ev.TokensCacheRead = acc.Tokens.CacheReadInputTokens + acc.Tokens.CachedTokens
 	ev.TokensCacheWrite = acc.Tokens.CacheWriteInputTokens
 	ev.CostUSD = acc.CostUSD
-	ev.CtxUsed = acc.Tokens.InputTokens + ev.TokensCacheRead + acc.Tokens.OutputTokens
+	// Canonical CtxUsed = TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut
+	// (SOW-0031: the old 3-term formula omitted cache_write).
+	ev.CtxUsed = acc.Tokens.InputTokens + ev.TokensCacheRead + ev.TokensCacheWrite + acc.Tokens.OutputTokens
 }
 
 func applyToolCharacterAccounting(ev *canonical.OpFinalizedEvent, acc accountingEntry) {

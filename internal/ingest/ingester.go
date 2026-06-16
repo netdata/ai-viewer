@@ -27,7 +27,7 @@ const (
 	// defaultBatchInterval is the max time between flushes when the batch hasn't
 	// reached the size threshold. Keeps the UI seeing fresh data during a slow
 	// tail without waiting for a full batch. Unchanged from the original 500ms.
-	defaultBatchInterval = 500 * time.Millisecond
+	defaultBatchInterval    = 500 * time.Millisecond
 	defaultResolverInterval = 5 * time.Second
 )
 
