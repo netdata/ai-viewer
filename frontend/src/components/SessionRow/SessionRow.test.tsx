@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SessionRow } from './SessionRow';
 import type { SessionListItem } from '../../api/types';
@@ -69,8 +69,52 @@ describe('SessionRow', () => {
   it('renders an em dash for an empty model and a running (null end_ts) duration', () => {
     renderRow(makeSession({ model: '', end_ts: null, status: 'running' }));
     const row = screen.getByRole('row');
-    // Both the empty model and the open-ended duration render the em dash.
     expect(within(row).getAllByText('—').length).toBeGreaterThanOrEqual(2);
     expect(within(row).getByText('running')).toBeInTheDocument();
+  });
+
+  it('renders the Source column with the source label', () => {
+    renderRow(makeSession({ source_id: 'claude-code:/home/user/.claude' }));
+    expect(screen.getByText('claude-code')).toBeInTheDocument();
+  });
+
+  it('renders all five source formats with their compact labels', () => {
+    const cases: Array<[string, string]> = [
+      ['aiagent_v3:/x', 'ai-agent v3'],
+      ['aiagent_v2:/x', 'ai-agent v2'],
+      ['claude-code:/x', 'claude-code'],
+      ['codex:/x', 'codex'],
+      ['opencode:/x', 'opencode'],
+    ];
+    for (const [sourceID, expected] of cases) {
+      cleanup();
+      renderRow(makeSession({ source_id: sourceID }));
+      expect(screen.getByText(expected)).toBeInTheDocument();
+    }
+  });
+
+  it('renders cost, tokens, turns, ops, and failures with formatted values', () => {
+    renderRow(makeSession({
+      cost_usd: 12.34,
+      tokens_in: 12345,
+      tokens_out: 6789,
+      turn_count: 5,
+      op_count: 42,
+      failure_count: 3,
+    }));
+    const row = screen.getByRole('row');
+    expect(within(row).getByText('$12.34')).toBeInTheDocument();
+    expect(within(row).getByText('12,345')).toBeInTheDocument();
+    expect(within(row).getByText('6,789')).toBeInTheDocument();
+    expect(within(row).getByText('5')).toBeInTheDocument();
+    expect(within(row).getByText('42')).toBeInTheDocument();
+    expect(within(row).getByText('3')).toBeInTheDocument();
+  });
+
+  it('renders a completed duration from end_ts - start_ts', () => {
+    renderRow(makeSession({ start_ts: 1_700_000_000_000_000, end_ts: 1_700_000_060_000_000 }));
+    // 60s duration formatted as "1m 0s" or "60s" depending on the formatter
+    const row = screen.getByRole('row');
+    expect(within(row).getByText(/1m|60s/)).toBeInTheDocument();
   });
 });
