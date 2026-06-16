@@ -357,6 +357,96 @@
               }
             }
           ]
+        },
+        {
+          "name": "gpt-5-codex",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://platform.openai.com/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 2.5,
+                "output_per_million": 15.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.1-codex",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://platform.openai.com/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 1.38,
+                "output_per_million": 11.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.1-codex-max",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://platform.openai.com/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 1.38,
+                "output_per_million": 11.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.2",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://platform.openai.com/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 2.5,
+                "output_per_million": 15.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.2-codex",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://platform.openai.com/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 2.5,
+                "output_per_million": 15.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.3-codex",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://platform.openai.com/docs/pricing",
+              "source": "manual_seed",
+              "prices": {
+                "input_per_million": 2.5,
+                "output_per_million": 15.0
+              }
+            }
+          ]
         }
       ]
     },
