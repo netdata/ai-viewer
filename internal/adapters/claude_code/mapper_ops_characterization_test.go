@@ -80,18 +80,18 @@ func TestMapper_SnapshotLastPromptUpdatesExtras(t *testing.T) {
 	}
 }
 
-func TestMapper_SnapshotTitlesUpdateAgentNameWithCustomPrecedence(t *testing.T) {
+func TestMapper_SnapshotTitlesPopulateExtrasNotAgentName(t *testing.T) {
 	t.Parallel()
 
 	m := newSnapshotMapper()
 	aiTitle := mustSnapshotUpdate(t, m, `{"type":"ai-title","aiTitle":"AI generated title","sessionId":"s"}`)
-	if aiTitle.Extras["aiTitle"] != "AI generated title" || aiTitle.AgentName != "AI generated title" {
-		t.Fatalf("ai-title update before custom-title = extras %+v AgentName %q", aiTitle.Extras, aiTitle.AgentName)
+	if aiTitle.Extras["aiTitle"] != "AI generated title" || aiTitle.AgentName != "" {
+		t.Fatalf("ai-title: extras %+v AgentName %q (AgentName must be empty — titles go to Extras only, feedback #4)", aiTitle.Extras, aiTitle.AgentName)
 	}
 
 	customTitle := mustSnapshotUpdate(t, m, `{"type":"custom-title","customTitle":"Pinned title","sessionId":"s"}`)
-	if customTitle.Extras["customTitle"] != "Pinned title" || customTitle.AgentName != "Pinned title" {
-		t.Fatalf("custom-title update = extras %+v AgentName %q", customTitle.Extras, customTitle.AgentName)
+	if customTitle.Extras["customTitle"] != "Pinned title" || customTitle.AgentName != "" {
+		t.Fatalf("custom-title: extras %+v AgentName %q (AgentName must be empty — titles go to Extras only, feedback #4)", customTitle.Extras, customTitle.AgentName)
 	}
 }
 

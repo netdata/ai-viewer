@@ -371,7 +371,7 @@ Re-appended near EOF for tail readers. **No timestamp**. The adapter treats the 
 { "type": "ai-title",    "aiTitle":    "<string>", "sessionId": "<uuid>" }
 ```
 
-No timestamp. Last-wins. `custom-title` is user-set and wins over `ai-title` for display (`logs.ts:67-74`). The adapter promotes the surviving title to the session's `AgentName`. Precedence is **custom-title over ai-title regardless of arrival order**: once a `custom-title` has set the AgentName, a later `ai-title` does NOT overwrite it (the writer's `COALESCE(NULLIF(excluded.agent_name,''), agent_name)` would otherwise let a trailing `ai-title` clobber the user's chosen title). The adapter enforces this by not emitting an `ai-title` AgentName update once a `custom-title` has been seen on the file.
+No timestamp. Last-wins. `custom-title` is user-set and wins over `ai-title` for display (`logs.ts:67-74`). Both titles go into `sessions.extras_json.{customTitle,aiTitle}` for the UI to render as a session label. They do **NOT** set `AgentName` — `AgentName` is the agent's identity (agent type for sub-agents from `.meta.json`; empty for main sessions), not a session title. (Feedback #4, 2026-06-15: the old behavior set AgentName from titles, which made the "Agent" column show session titles like "Review SOW-0023..." instead of the agent identity — confusing.)
 
 ### 3.8 `permission-mode` records
 
@@ -514,7 +514,7 @@ The subagent's NativeID is NOT the parent's `sessionId` (they would collide); th
 A `SessionStartedEvent` is emitted with `Ts = the first record's timestamp that HAS one`. Real transcripts frequently open with one or more timestamp-less metadata snapshots (`permission-mode`, `custom-title`, `last-prompt`, `file-history-snapshot` — §3 records that lack `timestamp`); bootstrapping on the literal first record would seed `start_ts=0` and strand the session at epoch. The adapter therefore DEFERS the `SessionStarted` until the first record carrying a real `timestamp`: the events of any leading timestamp-less records are buffered and emitted AFTER the `SessionStarted` (preserving the writer's UPDATE-after-INSERT contract — `applySessionUpdated` is a pure `UPDATE`, so the session row must exist first). A file that contains ONLY timestamp-less records (an empty/corrupt transcript with no events) finalizes a `SessionStarted` with `Ts=0` at EOF so the session row still exists. Fields of the `SessionStartedEvent`:
 
 - `Kind`: `'root'` for main session jsonls; `'sub_agent'` for `subagents/agent-*.jsonl` files.
-- `AgentName`: for main sessions, the `customTitle` if seen, else `aiTitle` if seen, else empty; for subagents, the `agentType` from `.meta.json`.
+- `AgentName`: for subagents, the `agentType` from `.meta.json`; for main sessions, empty (the session title/label is in `Extras.{customTitle,aiTitle}`, NOT in AgentName — feedback #4).
 - `Model`: empty initially. A `SessionUpdatedEvent` is emitted on the first `assistant` record carrying a non-`<synthetic>` model.
 - `Extras`: `{ cwd, version, entrypoint, gitBranch, permissionMode (when seen), customTitle, aiTitle, lastPrompt, prLinks, bridge, slug }`.
 

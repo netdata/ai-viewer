@@ -34,10 +34,12 @@ func (m *fileMapper) applyAITitleSnapshot(fields map[string]any, ev *canonical.S
 	if !ok {
 		return
 	}
+	// The AI-generated title is a human-readable label for the session, NOT the
+	// agent's identity. It belongs in Extras (the UI can show it as a
+	// session-label/tooltip), not in AgentName. Previously this set
+	// ev.AgentName = v, which made the "Agent" column show the session title
+	// instead of the agent type — confusing for the operator (feedback #4).
 	ev.Extras["aiTitle"] = v
-	if !m.customTitleSeen {
-		ev.AgentName = v
-	}
 }
 
 func (m *fileMapper) applyCustomTitleSnapshot(fields map[string]any, ev *canonical.SessionUpdatedEvent) {
@@ -45,8 +47,9 @@ func (m *fileMapper) applyCustomTitleSnapshot(fields map[string]any, ev *canonic
 	if !ok {
 		return
 	}
+	// The operator's custom title is a label for the session, NOT the agent's
+	// identity — same reasoning as aiTitle above. Keep it in Extras only.
 	ev.Extras["customTitle"] = v
-	ev.AgentName = v
 	m.customTitleSeen = true
 }
 
@@ -64,8 +67,12 @@ func applyFileHistorySnapshot(fields map[string]any, ev *canonical.SessionUpdate
 	}
 }
 
+// snapshotUpdateOrNil returns nil when a SessionUpdatedEvent carries nothing
+// useful (no extras and no agent-name update). Agent-name updates come only
+// from the sub-agent metadata path (.meta.json agentType), not from title
+// snapshots (which populate Extras only).
 func snapshotUpdateOrNil(ev canonical.SessionUpdatedEvent) canonical.Event {
-	if len(ev.Extras) == 0 && ev.AgentName == "" {
+	if len(ev.Extras) == 0 && ev.AgentName == "" && ev.Model == "" && ev.Status == "" {
 		return nil
 	}
 	return ev

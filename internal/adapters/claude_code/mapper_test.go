@@ -595,32 +595,42 @@ func TestMapper_RecordTypeCoverage(t *testing.T) {
 // TestMapper_CustomTitleWinsOverLaterAITitle verifies P3: a custom-title sets
 // AgentName, and a LATER ai-title does NOT overwrite it (spec §3.7 precedence:
 // the operator's chosen title wins regardless of arrival order).
-func TestMapper_CustomTitleWinsOverLaterAITitle(t *testing.T) {
+// TestMapper_TitlesGoToExtrasNotAgentName (SOW feedback #4) verifies that
+// custom-title and ai-title snapshots populate Extras (the session-label home),
+// NOT AgentName (the agent-identity column). Previously they set AgentName,
+// which made the "Agent" column show session titles — confusing.
+func TestMapper_TitlesGoToExtrasNotAgentName(t *testing.T) {
 	t.Parallel()
 	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
 		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
 		`{"type":"custom-title","customTitle":"My Title","sessionId":"s"}`,
 		`{"type":"ai-title","aiTitle":"Robot Title","sessionId":"s"}`,
 	)
-	// The custom-title update must set AgentName; the ai-title update must NOT.
-	var customSet, aiClobbered bool
+	// Both titles must land in Extras; neither must set AgentName.
+	var customInExtras, aiInExtras bool
 	for _, ev := range events {
 		su, ok := ev.(canonical.SessionUpdatedEvent)
 		if !ok {
 			continue
 		}
-		if su.Extras["customTitle"] == "My Title" && su.AgentName == "My Title" {
-			customSet = true
+		if su.Extras["customTitle"] == "My Title" {
+			customInExtras = true
+			if su.AgentName != "" {
+				t.Error("custom-title snapshot must NOT set AgentName (feedback #4)")
+			}
 		}
-		if su.Extras["aiTitle"] == "Robot Title" && su.AgentName != "" {
-			aiClobbered = true
+		if su.Extras["aiTitle"] == "Robot Title" {
+			aiInExtras = true
+			if su.AgentName != "" {
+				t.Error("ai-title snapshot must NOT set AgentName (feedback #4)")
+			}
 		}
 	}
-	if !customSet {
-		t.Fatal("custom-title must set AgentName")
+	if !customInExtras {
+		t.Fatal("custom-title must populate Extras.customTitle")
 	}
-	if aiClobbered {
-		t.Fatal("ai-title after a custom-title must NOT set AgentName (custom wins, P3)")
+	if !aiInExtras {
+		t.Fatal("ai-title must populate Extras.aiTitle")
 	}
 }
 
