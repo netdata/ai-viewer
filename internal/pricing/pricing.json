@@ -7,11 +7,15 @@
   "providers": [
     {
       "name": "anthropic",
-      "aliases": ["claude"],
+      "aliases": [
+        "claude"
+      ],
       "models": [
         {
           "name": "claude-opus-4-7",
-          "aliases": ["claude-opus-4.7"],
+          "aliases": [
+            "claude-opus-4.7"
+          ],
           "ctx_max": 1000000,
           "tiers": [
             {
@@ -19,20 +23,22 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 5.00,
-                "output_per_million": 25.00,
-                "cache_read_per_million": 0.50,
+                "input_per_million": 5.0,
+                "output_per_million": 25.0,
+                "cache_read_per_million": 0.5,
                 "cache_write_per_million": 6.25,
                 "cache_write_5m_per_million": 6.25,
-                "cache_write_1h_per_million": 10.00,
-                "reasoning_per_million": 25.00
+                "cache_write_1h_per_million": 10.0,
+                "reasoning_per_million": 25.0
               }
             }
           ]
         },
         {
           "name": "claude-opus-4-5",
-          "aliases": ["claude-opus-4.5"],
+          "aliases": [
+            "claude-opus-4.5"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -40,19 +46,22 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 5.00,
-                "output_per_million": 25.00,
-                "cache_read_per_million": 0.50,
+                "input_per_million": 5.0,
+                "output_per_million": 25.0,
+                "cache_read_per_million": 0.5,
                 "cache_write_per_million": 6.25,
                 "cache_write_5m_per_million": 6.25,
-                "cache_write_1h_per_million": 10.00
+                "cache_write_1h_per_million": 10.0
               }
             }
           ]
         },
         {
           "name": "claude-sonnet-4-5",
-          "aliases": ["claude-sonnet-4.5", "claude-4-5-sonnet"],
+          "aliases": [
+            "claude-sonnet-4.5",
+            "claude-4-5-sonnet"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -60,19 +69,21 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 3.00,
-                "output_per_million": 15.00,
-                "cache_read_per_million": 0.30,
+                "input_per_million": 3.0,
+                "output_per_million": 15.0,
+                "cache_read_per_million": 0.3,
                 "cache_write_per_million": 3.75,
                 "cache_write_5m_per_million": 3.75,
-                "cache_write_1h_per_million": 6.00
+                "cache_write_1h_per_million": 6.0
               }
             }
           ]
         },
         {
           "name": "claude-sonnet-4",
-          "aliases": ["claude-4-sonnet"],
+          "aliases": [
+            "claude-4-sonnet"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -80,19 +91,21 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 3.00,
-                "output_per_million": 15.00,
-                "cache_read_per_million": 0.30,
+                "input_per_million": 3.0,
+                "output_per_million": 15.0,
+                "cache_read_per_million": 0.3,
                 "cache_write_per_million": 3.75,
                 "cache_write_5m_per_million": 3.75,
-                "cache_write_1h_per_million": 6.00
+                "cache_write_1h_per_million": 6.0
               }
             }
           ]
         },
         {
           "name": "claude-haiku-4-5",
-          "aliases": ["claude-haiku-4.5"],
+          "aliases": [
+            "claude-haiku-4.5"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -100,19 +113,21 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 1.00,
-                "output_per_million": 5.00,
-                "cache_read_per_million": 0.10,
+                "input_per_million": 1.0,
+                "output_per_million": 5.0,
+                "cache_read_per_million": 0.1,
                 "cache_write_per_million": 1.25,
                 "cache_write_5m_per_million": 1.25,
-                "cache_write_1h_per_million": 2.00
+                "cache_write_1h_per_million": 2.0
               }
             }
           ]
         },
         {
           "name": "claude-3-7-sonnet",
-          "aliases": ["claude-3.7-sonnet"],
+          "aliases": [
+            "claude-3.7-sonnet"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -120,19 +135,23 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 3.00,
-                "output_per_million": 15.00,
-                "cache_read_per_million": 0.30,
+                "input_per_million": 3.0,
+                "output_per_million": 15.0,
+                "cache_read_per_million": 0.3,
                 "cache_write_per_million": 3.75,
                 "cache_write_5m_per_million": 3.75,
-                "cache_write_1h_per_million": 6.00
+                "cache_write_1h_per_million": 6.0
               }
             }
           ]
         },
         {
           "name": "claude-3-5-sonnet",
-          "aliases": ["claude-3.5-sonnet", "claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022"],
+          "aliases": [
+            "claude-3.5-sonnet",
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-sonnet-20241022"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -140,19 +159,22 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 3.00,
-                "output_per_million": 15.00,
-                "cache_read_per_million": 0.30,
+                "input_per_million": 3.0,
+                "output_per_million": 15.0,
+                "cache_read_per_million": 0.3,
                 "cache_write_per_million": 3.75,
                 "cache_write_5m_per_million": 3.75,
-                "cache_write_1h_per_million": 6.00
+                "cache_write_1h_per_million": 6.0
               }
             }
           ]
         },
         {
           "name": "claude-3-5-haiku",
-          "aliases": ["claude-3.5-haiku", "claude-3-5-haiku-20241022"],
+          "aliases": [
+            "claude-3.5-haiku",
+            "claude-3-5-haiku-20241022"
+          ],
           "ctx_max": 200000,
           "tiers": [
             {
@@ -160,12 +182,60 @@
               "citation_url": "https://docs.anthropic.com/en/docs/about-claude/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 0.80,
-                "output_per_million": 4.00,
+                "input_per_million": 0.8,
+                "output_per_million": 4.0,
                 "cache_read_per_million": 0.08,
-                "cache_write_per_million": 1.00,
-                "cache_write_5m_per_million": 1.00,
-                "cache_write_1h_per_million": 1.60
+                "cache_write_per_million": 1.0,
+                "cache_write_5m_per_million": 1.0,
+                "cache_write_1h_per_million": 1.6
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-opus-4-8",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 5.0,
+                "output_per_million": 25.0,
+                "cache_read_per_million": 0.5
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-sonnet-4-6",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 3.0,
+                "output_per_million": 15.0,
+                "cache_read_per_million": 0.3
+              }
+            }
+          ]
+        },
+        {
+          "name": "claude-fable-5",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 10.0,
+                "output_per_million": 50.0,
+                "cache_read_per_million": 1.0
               }
             }
           ]
@@ -174,11 +244,15 @@
     },
     {
       "name": "openai",
-      "aliases": ["oai"],
+      "aliases": [
+        "oai"
+      ],
       "models": [
         {
           "name": "gpt-5",
-          "aliases": ["gpt5"],
+          "aliases": [
+            "gpt5"
+          ],
           "ctx_max": 400000,
           "tiers": [
             {
@@ -187,16 +261,18 @@
               "source": "manual_seed",
               "prices": {
                 "input_per_million": 1.25,
-                "output_per_million": 10.00,
+                "output_per_million": 10.0,
                 "cache_read_per_million": 0.125,
-                "reasoning_per_million": 10.00
+                "reasoning_per_million": 10.0
               }
             }
           ]
         },
         {
           "name": "gpt-5-mini",
-          "aliases": ["gpt5-mini"],
+          "aliases": [
+            "gpt5-mini"
+          ],
           "ctx_max": 400000,
           "tiers": [
             {
@@ -205,16 +281,19 @@
               "source": "manual_seed",
               "prices": {
                 "input_per_million": 0.25,
-                "output_per_million": 2.00,
+                "output_per_million": 2.0,
                 "cache_read_per_million": 0.025,
-                "reasoning_per_million": 2.00
+                "reasoning_per_million": 2.0
               }
             }
           ]
         },
         {
           "name": "gpt-4o",
-          "aliases": ["gpt4o", "gpt-4o-2024-08-06"],
+          "aliases": [
+            "gpt4o",
+            "gpt-4o-2024-08-06"
+          ],
           "ctx_max": 128000,
           "tiers": [
             {
@@ -222,8 +301,8 @@
               "citation_url": "https://openai.com/api/pricing/",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 2.50,
-                "output_per_million": 10.00,
+                "input_per_million": 2.5,
+                "output_per_million": 10.0,
                 "cache_read_per_million": 1.25
               }
             }
@@ -231,7 +310,9 @@
         },
         {
           "name": "gpt-4-turbo",
-          "aliases": ["gpt-4-turbo-2024-04-09"],
+          "aliases": [
+            "gpt-4-turbo-2024-04-09"
+          ],
           "ctx_max": 128000,
           "tiers": [
             {
@@ -239,8 +320,40 @@
               "citation_url": "https://openai.com/api/pricing/",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 10.00,
-                "output_per_million": 30.00
+                "input_per_million": 10.0,
+                "output_per_million": 30.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.4",
+          "ctx_max": 1050000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 2.5,
+                "output_per_million": 15.0,
+                "cache_read_per_million": 0.25
+              }
+            }
+          ]
+        },
+        {
+          "name": "gpt-5.1",
+          "ctx_max": 272000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 1.38,
+                "output_per_million": 11.0,
+                "cache_read_per_million": 0.14
               }
             }
           ]
@@ -249,11 +362,15 @@
     },
     {
       "name": "google",
-      "aliases": ["gemini"],
+      "aliases": [
+        "gemini"
+      ],
       "models": [
         {
           "name": "gemini-2-5-pro",
-          "aliases": ["gemini-2.5-pro"],
+          "aliases": [
+            "gemini-2.5-pro"
+          ],
           "ctx_max": 2097152,
           "tiers": [
             {
@@ -262,7 +379,7 @@
               "source": "manual_seed",
               "prices": {
                 "input_per_million": 1.25,
-                "output_per_million": 10.00,
+                "output_per_million": 10.0,
                 "cache_read_per_million": 0.125
               }
             }
@@ -270,7 +387,9 @@
         },
         {
           "name": "gemini-2-5-flash",
-          "aliases": ["gemini-2.5-flash"],
+          "aliases": [
+            "gemini-2.5-flash"
+          ],
           "ctx_max": 1048576,
           "tiers": [
             {
@@ -278,8 +397,8 @@
               "citation_url": "https://ai.google.dev/gemini-api/docs/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 0.30,
-                "output_per_million": 2.50,
+                "input_per_million": 0.3,
+                "output_per_million": 2.5,
                 "cache_read_per_million": 0.03
               }
             }
@@ -287,7 +406,9 @@
         },
         {
           "name": "gemini-2-0-flash",
-          "aliases": ["gemini-2.0-flash"],
+          "aliases": [
+            "gemini-2.0-flash"
+          ],
           "ctx_max": 1048576,
           "tiers": [
             {
@@ -295,8 +416,8 @@
               "citation_url": "https://ai.google.dev/gemini-api/docs/pricing",
               "source": "manual_seed",
               "prices": {
-                "input_per_million": 0.10,
-                "output_per_million": 0.40,
+                "input_per_million": 0.1,
+                "output_per_million": 0.4,
                 "cache_read_per_million": 0.025
               }
             }
@@ -309,7 +430,10 @@
       "models": [
         {
           "name": "deepseek-chat",
-          "aliases": ["deepseek-v3", "deepseek-v4-flash"],
+          "aliases": [
+            "deepseek-v3",
+            "deepseek-v4-flash"
+          ],
           "ctx_max": 1000000,
           "tiers": [
             {
@@ -328,7 +452,7 @@
               "source": "manual_archive",
               "prices": {
                 "input_per_million": 0.27,
-                "output_per_million": 1.10,
+                "output_per_million": 1.1,
                 "cache_read_per_million": 0.07
               }
             }
@@ -336,7 +460,9 @@
         },
         {
           "name": "deepseek-reasoner",
-          "aliases": ["deepseek-r1"],
+          "aliases": [
+            "deepseek-r1"
+          ],
           "ctx_max": 1000000,
           "tiers": [
             {
@@ -371,8 +497,227 @@
               "source": "manual_seed",
               "prices": {
                 "input_per_million": 0.27,
-                "output_per_million": 1.10,
+                "output_per_million": 1.1,
                 "cache_read_per_million": 0.07
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "alibaba",
+      "aliases": [],
+      "models": [
+        {
+          "name": "qwen3.6-plus",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.325,
+                "output_per_million": 1.95
+              }
+            }
+          ]
+        },
+        {
+          "name": "qwen3.5-plus",
+          "ctx_max": 991808,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.0,
+                "output_per_million": 0.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "kimi-k2.5-alibaba",
+          "ctx_max": 256000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.5,
+                "output_per_million": 1.5
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "minimax",
+      "aliases": [],
+      "models": [
+        {
+          "name": "minimax-m2.5",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.36,
+                "output_per_million": 1.44
+              }
+            }
+          ]
+        },
+        {
+          "name": "minimax-m2.1",
+          "ctx_max": 196000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.36,
+                "output_per_million": 1.44
+              }
+            }
+          ]
+        },
+        {
+          "name": "minimax-m2",
+          "ctx_max": 196000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.36,
+                "output_per_million": 1.44
+              }
+            }
+          ]
+        },
+        {
+          "name": "minimax-m2.7",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.36,
+                "output_per_million": 1.44
+              }
+            }
+          ]
+        },
+        {
+          "name": "minimax-m2.7-coder",
+          "ctx_max": 1000000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.36,
+                "output_per_million": 1.44
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zhipuai",
+      "aliases": [],
+      "models": [
+        {
+          "name": "glm-4.7",
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 2.25,
+                "output_per_million": 2.75
+              }
+            }
+          ]
+        },
+        {
+          "name": "glm-5.1",
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 2.25,
+                "output_per_million": 2.75
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "internal",
+      "aliases": [],
+      "models": [
+        {
+          "name": "neda-extractor",
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.0,
+                "output_per_million": 0.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "neda-searcher",
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.0,
+                "output_per_million": 0.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "neda-thinker",
+          "ctx_max": 128000,
+          "tiers": [
+            {
+              "effective_date": "2026-01-01",
+              "citation_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+              "source": "litellm",
+              "prices": {
+                "input_per_million": 0.0,
+                "output_per_million": 0.0
               }
             }
           ]
