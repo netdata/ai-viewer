@@ -16,8 +16,18 @@ import (
 
 // Default batching / resolver parameters. Override via Option.
 const (
-	defaultBatchSize        = 1000
-	defaultBatchInterval    = 500 * time.Millisecond
+	// defaultBatchSize is the events-per-batch flush threshold. Larger batches
+	// reduce per-tx overhead (the BeginTx + Commit round-trip is the dominant
+	// cost per batch on modernc's serialized single connection). 5000 is a good
+	// balance: a 5000-event tx is still well under SQLite's 500ms busy_timeout,
+	// but reduces the tx count 5x vs the old 1000. The deferred-read-models
+	// fast path (SOW-0063) makes each batch cheap (INSERTs + aggregate refresh
+	// only, no FTS/rollup recompute), so the larger batch is purely a win.
+	defaultBatchSize = 5000
+	// defaultBatchInterval is the max time between flushes when the batch hasn't
+	// reached the size threshold. Keeps the UI seeing fresh data during a slow
+	// tail without waiting for a full batch. Unchanged from the original 500ms.
+	defaultBatchInterval = 500 * time.Millisecond
 	defaultResolverInterval = 5 * time.Second
 )
 
