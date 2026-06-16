@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: proposed follow-up (P2, pre-existing). Discovered 2026-05-31 during SOW-0029 round-1 external review (codex + glm + minimax all flagged it). Not blocking SOW-0029 — `ctx_used` does not affect the pricer (which uses `tokens_in`/cache) and is a UI context-percent input only.
 

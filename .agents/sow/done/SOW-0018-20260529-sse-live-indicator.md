@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: awaits operator approval before moving to current/. Surfaced during SOW-0001 Chunk-18 (Playwright E2E): D4's deferred half. Not blocking — Phase-1 data already refreshes live; this is the visible UX layer on top.
 

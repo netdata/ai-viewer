@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: proposed follow-up (P1, pre-existing). Discovered 2026-05-31 during SOW-0029 round-1 external review (codex, the decisive reviewer; glm + minimax missed it). NOT introduced by SOW-0029 — predates it (codex adapter + the ingester's op-rollup aggregate model). SOW-0029's codex `tokens_in`=fresh fix is correct at the event level but moot until this lands (codex token totals are 0 in the DB regardless).
 

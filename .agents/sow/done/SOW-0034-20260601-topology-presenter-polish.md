@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: proposed follow-up (P3 cluster). Filed 2026-06-01 from the SOW-0006 Round-4 external review (glm). These are minor backend code-quality items in the topology presenter — NOT user-facing defects and NOT hard-rule violations, so they were split out of SOW-0006 (which fixed the user-facing P2s + the no-silent-failure items in-line) to keep that milestone converging. Each must be verified on pickup before any change (the adjudicate-on-ground-truth rule — a reviewer finding is not a fact until confirmed against the code).
 
