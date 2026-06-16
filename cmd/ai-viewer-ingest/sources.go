@@ -465,9 +465,12 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 	// when all 5 sources finish scanning simultaneously (SOW-0063). Use a DETACHED
 	// context — the per-adapter ctx may be cancelled (e.g. during binary swaps or
 	// when sibling goroutines finish their scan), which would abort the backfill's
-	// truncate/read/insert transaction. The backfill is a shared post-scan step
-	// that should outlive any single adapter goroutine.
-	backfillCtx, backfillCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// truncate/read/insert transaction. No timeout: on a 1M+ op DB modernc SQLite
+	// can take 20+ minutes for the FTS backfill; a timeout would abort it mid-way
+	// (the mutex-guarded retry would then truncate and restart, never completing).
+	// The backfill is bounded by the data volume and modernc's throughput, not by
+	// wall time.
+	backfillCtx, backfillCancel := context.WithCancel(context.Background())
 	defer backfillCancel()
 	if err := ing.BackfillReadModels(backfillCtx); err != nil {
 		logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
