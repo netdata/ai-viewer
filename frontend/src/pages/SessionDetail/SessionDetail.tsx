@@ -9,15 +9,16 @@ import { LogsTab } from './LogsTab';
 import { TraceTab } from './TraceTab';
 import { TopologyTab } from './TopologyTab';
 import { TimelineTab } from './TimelineTab';
+import { RawDataTab } from './RawDataTab';
 import styles from './SessionDetail.module.css';
 
 // Session detail page (ui-pages.md §/sessions/:id). Tabs Overview + Trace +
-// Topology + Timeline + Logs are all real. The active tab lives in the URL
-// (?tab=) so it is shareable; an unknown value falls back to overview.
+// Topology + Timeline + Logs + Raw Data are all real. The active tab lives in
+// the URL (?tab=) so it is shareable; an unknown value falls back to overview.
 // An unknown id (404) renders a clean "not found" state instead of the tabs. The
 // open session is live-refreshed over SSE (session_changed → ['session', id]).
 
-type TabKey = 'overview' | 'trace' | 'topology' | 'timeline' | 'logs';
+type TabKey = 'overview' | 'trace' | 'topology' | 'timeline' | 'logs' | 'raw';
 
 const TABS: ReadonlyArray<TabSpec<TabKey>> = [
   { key: 'overview', label: 'Overview' },
@@ -25,6 +26,7 @@ const TABS: ReadonlyArray<TabSpec<TabKey>> = [
   { key: 'topology', label: 'Topology' },
   { key: 'timeline', label: 'Timeline' },
   { key: 'logs', label: 'Logs' },
+  { key: 'raw', label: 'Raw Data' },
 ];
 
 const TAB_KEYS = new Set<TabKey>(TABS.map((t) => t.key));
@@ -84,6 +86,7 @@ export function SessionDetail() {
             {tab === 'trace' && <TraceTab detail={data} />}
             {tab === 'topology' && <TopologyTab sessionId={id} />}
             {tab === 'timeline' && <TimelineTab sessionId={id} />}
+            {tab === 'raw' && <RawDataTab detail={data} />}
           </div>
         </>
       )}
