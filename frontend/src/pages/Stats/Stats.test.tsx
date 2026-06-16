@@ -37,6 +37,7 @@ const liveSpy = vi.fn();
 vi.mock('../../api/stats', () => ({
   useAggregate: (...args: unknown[]) => aggSpy(...args) as unknown,
   useTop: (...args: unknown[]) => topSpy(...args) as unknown,
+  useStats: () => ({ data: undefined, isPending: false }),
   useSearch: (...args: unknown[]) => searchSpy(...args) as unknown,
 }));
 vi.mock('../../state/useLiveUpdates', () => ({

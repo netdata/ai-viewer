@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { connectSse, SseCanceledError, type SseConnection } from '../api/sse';
+import { connectSse, SseCanceledError, type SseConnection, type ConnectionStatus } from '../api/sse';
 import type { SubscriptionFilterRequest } from '../api/types';
 
 // useLiveUpdates owns the SSE connection lifecycle for one mounted view
@@ -20,46 +20,44 @@ import type { SubscriptionFilterRequest } from '../api/types';
 
 /**
  * useLiveUpdates connects an SSE subscription for `filter` and keeps the
- * relevant TanStack Query caches live. It returns nothing observable — the
- * invalidation wiring lives in connectSse.
+ * relevant TanStack Query caches live. Returns the current SSE connection
+ * status ('connecting' | 'open' | 'reconnecting' | 'closed') so the UI can
+ * render a live indicator. The invalidation wiring lives in connectSse.
  */
-export function useLiveUpdates(filter: SubscriptionFilterRequest): void {
+export function useLiveUpdates(filter: SubscriptionFilterRequest): ConnectionStatus {
   const queryClient = useQueryClient();
   // Stable dependency: re-subscribe only when the filter CONTENT changes.
   const filterKey = JSON.stringify(filter);
+  const [status, setStatus] = useState<ConnectionStatus>('connecting');
 
   useEffect(() => {
     const controller = new AbortController();
     let connection: SseConnection | null = null;
     let disposed = false;
+    setStatus('connecting');
 
-    void connectSse(queryClient, filter, {}, controller.signal)
+    void connectSse(queryClient, filter, { onStatus: setStatus }, controller.signal)
       .then((conn) => {
         connection = conn;
-        // If teardown already ran before the POST resolved, close immediately.
-        // (connectSse also tears down on an aborted signal, but close() is
-        // idempotent so this is a harmless belt-and-suspenders guard.)
         if (disposed) {
           conn.close();
         }
       })
       .catch((err: unknown) => {
-        // An abort during connect is a cancellation, not a failure — swallow it.
         if (err instanceof SseCanceledError) {
           return;
         }
-        // Any real failure is surfaced, never silently dropped (AGENTS.md).
         console.warn('useLiveUpdates: SSE connect failed', err);
       });
 
     return () => {
       disposed = true;
-      // Abort drives the cancellation contract for an in-flight/just-opened
-      // connection; close() tears down one that already resolved. Idempotent.
       controller.abort();
       connection?.close();
+      setStatus('closed');
     };
-    // filterKey is the content fingerprint of `filter`; queryClient is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey, queryClient]);
+
+  return status;
 }

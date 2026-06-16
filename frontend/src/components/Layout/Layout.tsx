@@ -1,6 +1,9 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { ThemeToggle } from '../ThemeToggle';
 import { FilterBar } from '../FilterBar';
+import { LiveIndicator } from '../LiveIndicator/LiveIndicator';
+import { filtersToSubscription } from '../../state/filters';
+import { useLiveUpdates } from '../../state/useLiveUpdates';
 import styles from './Layout.module.css';
 
 // App shell (ui-pages.md §Global Layout): header with brand + primary nav +
@@ -16,6 +19,10 @@ const NAV: ReadonlyArray<{ to: string; label: string }> = [
 ];
 
 export function Layout() {
+  // One SSE subscription for the active filter; keeps the live indicator + all
+  // pages' queries fresh. The indicator reflects the SSE connection state.
+  const sseStatus = useLiveUpdates(filtersToSubscription({ agents: [], models: [], tools: [], sources: [], status: [], q: '' }));
+
   return (
     <div className={styles.shell}>
       <header className={styles.header}>
@@ -36,6 +43,7 @@ export function Layout() {
             ))}
           </nav>
           <div className={styles.headerActions}>
+            <LiveIndicator status={sseStatus} />
             <ThemeToggle />
           </div>
         </div>

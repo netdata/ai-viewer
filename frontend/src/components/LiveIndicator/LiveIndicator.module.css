@@ -1,0 +1,53 @@
+.indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.open {
+  background: var(--status-completed, #4caf50);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.connecting {
+  background: var(--status-running, #ff9800);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.reconnecting {
+  background: var(--status-running, #ff9800);
+  animation: pulse 0.5s ease-in-out infinite;
+}
+
+.closed {
+  background: var(--status-failed, #f44336);
+}
+
+.label {
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .open, .connecting, .reconnecting {
+    animation: none;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
