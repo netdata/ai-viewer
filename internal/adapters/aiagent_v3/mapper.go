@@ -2,6 +2,7 @@ package aiagent_v3
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -159,13 +160,17 @@ func mapTurnEnd(rec record, base canonical.EventBase, sessionRoot string) ([]can
 	}
 
 	// Turn-level aggregates from body.Accounting (may be nil for
-	// system-only turns; spec §3.4).
+	// system-only turns; spec §3.4). Round-trip body.Attributes into
+	// Extras so turn-level metadata is not silently dropped (SOW-0064).
 	tfin := canonical.TurnFinalizedEvent{
 		EventBase:       advance(),
 		SessionNativeID: rec.Common.SessionID,
 		Seq:             body.Turn,
 		Status:          mapTurnStatus(body.Status),
 		EndTs:           base.Ts,
+	}
+	if len(body.Attributes) > 0 {
+		tfin.Extras = prefixAttributes(body.Attributes)
 	}
 	if body.Accounting != nil {
 		tfin.TokensIn = body.Accounting.TokensIn
@@ -275,14 +280,36 @@ func mapSessionSummary(rec record, base canonical.EventBase, tsUs int64) []canon
 		subIdx++
 		return nb
 	}
-	events := []canonical.Event{
-		canonical.SessionFinalizedEvent{
-			EventBase:    base,
-			NativeID:     rec.Common.SessionID,
-			Status:       status,
-			ErrorMessage: body.Error,
-			EndTs:        tsUs,
-		},
+	events := []canonical.Event{}
+	// Parse the structured failure taxonomy from the error string into
+	// ErrorClass + extras, so failure analysis can query/sort by class
+	// and slugs (SOW-0064). The pattern:
+	//   "Turn N failed after X attempts of Y (maxTurns=Z); last_error=<class>; slugs=<csv>."
+	// Also captures "Session completed without a final report" as a soft failure.
+	var errorClass string
+	var taxonomyExtras map[string]any
+	if body.Status == "failed" && body.Error != "" {
+		parsed := parseV3ErrorTaxonomy(body.Error)
+		errorClass = parsed.errorClass
+		taxonomyExtras = parsed.extras
+	}
+	finalizedEvent := canonical.SessionFinalizedEvent{
+		EventBase:    base,
+		NativeID:     rec.Common.SessionID,
+		Status:       status,
+		ErrorClass:   errorClass,
+		ErrorMessage: body.Error,
+		EndTs:        tsUs,
+	}
+	events = append(events, finalizedEvent)
+	// Emit taxonomy extras via a SessionUpdated so the ingester merges them
+	// into sessions.extras_json (error_slugs, attempts, max_turns, etc.).
+	if taxonomyExtras != nil {
+		events = append(events, canonical.SessionUpdatedEvent{
+			EventBase: advance(),
+			NativeID:  rec.Common.SessionID,
+			Extras:    taxonomyExtras,
+		})
 	}
 	// If finalReport metadata appears, surface it via a SessionUpdated
 	// event so the canonical row's extras_json receives the format /
@@ -322,7 +349,12 @@ func mapSessionSummary(rec record, base canonical.EventBase, tsUs int64) []canon
 
 func mapSessionError(rec record, base canonical.EventBase, tsUs int64) []canonical.Event {
 	body := rec.SessionError
-	return []canonical.Event{
+	// Round-trip attributes into extras (SOW-0064).
+	var extras map[string]any
+	if len(body.Attributes) > 0 {
+		extras = prefixAttributes(body.Attributes)
+	}
+	out := []canonical.Event{
 		canonical.SessionFinalizedEvent{
 			EventBase:    base,
 			NativeID:     rec.Common.SessionID,
@@ -343,4 +375,141 @@ func mapSessionError(rec record, base canonical.EventBase, tsUs int64) []canonic
 			Message:         body.Error,
 		},
 	}
+	if extras != nil {
+		out = append(out, canonical.SessionUpdatedEvent{
+			EventBase: canonical.EventBase{
+				SourceID:  base.SourceID,
+				SourceSeq: packSeq(rec.Common.Seq, 2),
+				Ts:        tsUs,
+			},
+			NativeID: rec.Common.SessionID,
+			Extras:   extras,
+		})
+	}
+	return out
+}
+
+// v3ErrorTaxonomy holds the parsed failure classification from an ai-agent v3
+// session_summary.error string. The producer embeds a structured taxonomy
+// inside the free-text error: "Turn N failed after X attempts of Y
+// (maxTurns=Z); last_error=<class>; slugs=<csv>." — we extract the
+// structured fields so failure analysis can query/sort by class and slugs
+// instead of regex-parsing the string (SOW-0064).
+type v3ErrorTaxonomy struct {
+	errorClass string
+	extras     map[string]any
+}
+
+// parseV3ErrorTaxonomy extracts the structured failure fields from an ai-agent
+// v3 error string. Returns zero values when the string doesn't match the
+// known pattern (non-failure or unparseable errors are left as-is).
+func parseV3ErrorTaxonomy(errStr string) v3ErrorTaxonomy {
+	out := v3ErrorTaxonomy{extras: map[string]any{}}
+
+	// Pattern: "Turn N failed after X attempts of Y (maxTurns=Z); last_error=<class>; slugs=<csv>."
+	// Extract last_error
+	if idx := strings.Index(errStr, "last_error="); idx >= 0 {
+		rest := errStr[idx+len("last_error="):]
+		end := strings.Index(rest, ";")
+		if end < 0 {
+			end = len(rest)
+		}
+		lastErr := strings.TrimSpace(rest[:end])
+		// Trim to the first colon (some errors have "class: detail")
+		if colon := strings.Index(lastErr, ":"); colon > 0 {
+			out.errorClass = strings.TrimSpace(lastErr[:colon])
+			out.extras["error_detail"] = strings.TrimSpace(lastErr[colon+1:])
+		} else {
+			out.errorClass = lastErr
+		}
+		// Normalize common classes
+		switch {
+		case strings.Contains(out.errorClass, "rate_limit"):
+			out.errorClass = "rate_limit"
+		case strings.Contains(out.errorClass, "invalid_response"):
+			out.errorClass = "invalid_response"
+		case strings.Contains(out.errorClass, "No output"):
+			out.errorClass = "provider_error"
+		case strings.Contains(out.errorClass, "AI_APICallError"), strings.Contains(out.errorClass, "AI_RetryError"):
+			out.errorClass = "provider_error"
+		case strings.Contains(out.errorClass, "400"):
+			out.errorClass = "provider_error"
+		case out.errorClass == "unknown":
+			out.errorClass = "unknown"
+		}
+	}
+
+	// Extract slugs
+	if idx := strings.Index(errStr, "slugs="); idx >= 0 {
+		rest := errStr[idx+len("slugs="):]
+		end := strings.IndexAny(rest, ".;\n")
+		if end < 0 {
+			end = len(rest)
+		}
+		slugStr := strings.TrimSpace(rest[:end])
+		if slugStr != "" {
+			slugs := strings.Split(slugStr, ",")
+			for i := range slugs {
+				slugs[i] = strings.TrimSpace(slugs[i])
+			}
+			out.extras["error_slugs"] = slugs
+		}
+	}
+
+	// Extract attempts/maxTurns
+	if idx := strings.Index(errStr, "after "); idx >= 0 {
+		rest := errStr[idx+len("after "):]
+		if ofIdx := strings.Index(rest, " attempts of "); ofIdx >= 0 {
+			out.extras["attempts"] = parseIntSafe(rest[:ofIdx])
+			rest2 := rest[ofIdx+len(" attempts of "):]
+			if parenIdx := strings.Index(rest2, " ("); parenIdx >= 0 {
+				out.extras["max_attempts"] = parseIntSafe(rest2[:parenIdx])
+			}
+		}
+	}
+	if idx := strings.Index(errStr, "maxTurns="); idx >= 0 {
+		rest := errStr[idx+len("maxTurns="):]
+		end := strings.IndexAny(rest, ");\n")
+		if end < 0 {
+			end = len(rest)
+		}
+		out.extras["max_turns"] = parseIntSafe(rest[:end])
+	}
+
+	// Soft failure: "Session completed without a final report after N turns."
+	if strings.Contains(errStr, "completed without a final report") {
+		out.errorClass = "no_final_report"
+	}
+
+	if len(out.extras) == 0 {
+		out.extras = nil
+	}
+	return out
+}
+
+func parseIntSafe(s string) int {
+	s = strings.TrimSpace(s)
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// prefixAttributes copies a source body's attributes map into an extras map
+// with "attr." prefixes, mirroring how mapSessionStart and mapOp handle their
+// attributes. Ensures no source field is silently dropped (SOW-0064, Hard
+// Rule #6).
+func prefixAttributes(attrs map[string]any) map[string]any {
+	if len(attrs) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(attrs))
+	for k, v := range attrs {
+		out["attr."+k] = v
+	}
+	return out
 }
