@@ -9,12 +9,13 @@ import (
 // slice is initialised to an empty (non-nil) slice so the JSON serialises
 // as [] rather than null on an empty result set.
 type statsResponse struct {
-	Totals   statsTotals     `json:"totals"`
-	ByModel  []statModelRow  `json:"by_model"`
-	ByTool   []statToolRow   `json:"by_tool"`
-	ByAgent  []statAgentRow  `json:"by_agent"`
-	ByStatus []statStatusRow `json:"by_status"`
-	BySource []statSourceRow `json:"by_source"`
+	Totals        statsTotals     `json:"totals"`
+	ByModel       []statModelRow  `json:"by_model"`
+	ByTool        []statToolRow   `json:"by_tool"`
+	ByAgent       []statAgentRow  `json:"by_agent"`
+	ByStatus      []statStatusRow `json:"by_status"`
+	BySource      []statSourceRow `json:"by_source"`
+	ByErrorClass  []statErrorRow  `json:"by_error_class"`
 }
 
 type statsTotals struct {
@@ -71,6 +72,15 @@ type statSourceRow struct {
 	Failures int64  `json:"failures"`
 }
 
+// statErrorRow is one row in the by_error_class breakdown: how many failed
+// sessions share each error class, with their total cost/tokens (SOW-0067).
+type statErrorRow struct {
+	ErrorClass string  `json:"error_class"`
+	Sessions   int64   `json:"sessions"`
+	Ops        int64   `json:"ops"`
+	CostUSD    float64 `json:"cost_usd"`
+}
+
 type statsQueryError struct {
 	op  string
 	err error
@@ -106,11 +116,12 @@ func (p *Presenter) handleStats(w http.ResponseWriter, r *http.Request) {
 
 func newStatsResponse() statsResponse {
 	return statsResponse{
-		ByModel:  []statModelRow{},
-		ByTool:   []statToolRow{},
-		ByAgent:  []statAgentRow{},
-		ByStatus: []statStatusRow{},
-		BySource: []statSourceRow{},
+		ByModel:      []statModelRow{},
+		ByTool:       []statToolRow{},
+		ByAgent:      []statAgentRow{},
+		ByStatus:     []statStatusRow{},
+		BySource:     []statSourceRow{},
+		ByErrorClass: []statErrorRow{},
 	}
 }
 
@@ -146,6 +157,9 @@ func (p *Presenter) loadStatsResponse(ctx context.Context, f sessionFilter) (sta
 	if err := p.statsByTool(ctx, sessionSet, args, &resp); err != nil {
 		return resp, &statsQueryError{op: "stats.by_tool", err: err}
 	}
+	if err := p.statsByErrorClass(ctx, where, args, &resp); err != nil {
+		return resp, &statsQueryError{op: "stats.by_error_class", err: err}
+	}
 	return resp, nil
 }
 
@@ -177,4 +191,34 @@ FROM sessions s WHERE ` + where // #nosec G201 G202 -- where is static SQL + ?-p
 		&out.TokensIn, &out.TokensOut, &out.TokensCacheRead, &out.TokensCacheWrite,
 		&out.CostUSD, &out.Failures, &out.DurationUS,
 	)
+}
+
+// statsByErrorClass breaks down failed sessions by error_class, showing how
+// many sessions share each failure type and their aggregate cost/ops. This is
+// the data behind the failure-analysis section of the Statistics page
+// (SOW-0067). Only sessions with a non-empty error_class are counted.
+func (p *Presenter) statsByErrorClass(ctx context.Context, where string, args []any, resp *statsResponse) error {
+	q := `
+SELECT IFNULL(NULLIF(s.error_class, ''), 'unknown') AS class,
+       COUNT(*) AS sessions,
+       IFNULL(SUM(s.op_count), 0) AS ops,
+       IFNULL(SUM(s.cost_usd), 0) AS cost
+FROM sessions s
+WHERE ` + where + ` AND s.status = 'failed'
+GROUP BY class
+ORDER BY sessions DESC
+LIMIT 50` // #nosec G201 G202 -- where is static SQL + ?-placeholders; values bound via args
+	rows, err := p.db.QueryContext(ctx, q, args...) // #nosec G201 G701
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var row statErrorRow
+		if err := rows.Scan(&row.ErrorClass, &row.Sessions, &row.Ops, &row.CostUSD); err != nil {
+			return err
+		}
+		resp.ByErrorClass = append(resp.ByErrorClass, row)
+	}
+	return rows.Err()
 }

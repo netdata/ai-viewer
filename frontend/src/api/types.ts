@@ -373,6 +373,13 @@ export interface StatSourceRow {
   failures: number;
 }
 
+export interface StatErrorRow {
+  error_class: string;
+  sessions: number;
+  ops: number;
+  cost_usd: number;
+}
+
 export interface StatsResponse {
   totals: StatsTotals;
   by_model: StatModelRow[];
@@ -380,6 +387,7 @@ export interface StatsResponse {
   by_agent: StatAgentRow[];
   by_status: StatStatusRow[];
   by_source: StatSourceRow[];
+  by_error_class: StatErrorRow[];
 }
 
 // ── GET /api/stats/aggregate, /api/stats/top (dashboard charts) ───────────────

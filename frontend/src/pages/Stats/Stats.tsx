@@ -309,6 +309,57 @@ export function Stats() {
         )}
       </section>
 
+      {/* ── Failure analysis ─────────────────────────────────────────────── */}
+      {stats.data && stats.data.by_error_class.length > 0 && (
+        <section className={styles.panel} aria-labelledby="stats-failures-title">
+          <h2 id="stats-failures-title" className={styles.panelTitle}>
+            Failure analysis
+          </h2>
+          <div className={styles.tableWrap} role="region" aria-label="Error class breakdown">
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>Error class</th>
+                  <th className={styles.numCol}>Failed sessions</th>
+                  <th className={styles.numCol}>Ops</th>
+                  <th className={styles.numCol}>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.data.by_error_class.map((row) => (
+                  <tr key={row.error_class}>
+                    <td>{row.error_class}</td>
+                    <td className={styles.numCol}>{formatNumber(row.sessions)}</td>
+                    <td className={styles.numCol}>{formatNumber(row.ops)}</td>
+                    <td className={styles.numCol}>{formatCost(row.cost_usd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className={styles.failureRateBar}>
+            {(() => {
+              const totalFailed = stats.data.totals.failures || 1;
+              return stats.data.by_error_class.slice(0, 8).map((row) => {
+                const pct = (row.sessions / totalFailed) * 100;
+                return (
+                  <div key={row.error_class} className={styles.failureRateRow}>
+                    <span className={styles.failureRateLabel}>{row.error_class}</span>
+                    <div className={styles.failureRateTrack}>
+                      <div
+                        className={styles.failureRateFill}
+                        style={{ width: `${Math.max(pct, 2)}%` }}
+                      />
+                    </div>
+                    <span className={styles.failureRatePct}>{pct.toFixed(1)}%</span>
+                  </div>
+                );
+              });
+            })()}
+          </div>
+        </section>
+      )}
+
       {/* ── Deep search (ops + logs) ──────────────────────────────────────── */}
       <section className={styles.panel} aria-labelledby="stats-search-title">
         <h2 id="stats-search-title" className={styles.panelTitle}>
