@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed 2026-06-02 from a defect found during SOW-0010 review. The acute instance (the coverage gate) was fixed in SOW-0010; SOW-0013 later fixed standalone formatter walks by using tracked Go files only. This SOW closes the remaining package-level `./...` gate class. Awaiting operator approval.
 

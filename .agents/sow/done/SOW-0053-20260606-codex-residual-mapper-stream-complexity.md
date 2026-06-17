@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: pending from SOW-0048 split. Not active yet. This is a drafted
 follow-up; before activation, narrow it to the first residual slice and replace

@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed by SOW-0013 as the tracked follow-up for AC#3 / R1 — the full `scripts/gates.sh` exceeds the 5-minute local target and the SOW-0013 mandate forbids dropping/weakening any gate to chase it. This SOW owns getting under the target the right way.
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed 2026-06-03 as a tracked follow-up of SOW-0012 (frontend quality stack). The ambient `declare module` shim added in SOW-0012 Chunk B resolves under the `tsc` gate but the standalone editor TS LSP flags it (TS7016/TS2307). Filed as a pending SOW (not left only in SOW-0012 `## Followup`) per AGENTS.md "tech debt is paid or filed in pending/".
 

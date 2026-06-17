@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed by SOW-0013 review round 2. Not blocking SOW-0013 because the
 current gates fail closed and are validated, but these hardening items reduce

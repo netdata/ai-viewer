@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed 2026-06-03 as a tracked follow-up of SOW-0012 (frontend quality stack), which documented this real a11y gap in `frontend/src/viz/waterfall/a11y.md` + `frontend/src/viz/flamegraph/a11y.md` and SOW-0012 `## Followup`. Filed as a pending SOW (not left only in a Followup note) per AGENTS.md "tech debt is paid or filed in pending/".
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed 2026-06-02 as the deferred half of SOW-0010 (test infrastructure + coverage). SOW-0010 shipped the per-package + repo-wide **statement** coverage gate (`scripts/check-coverage.sh`, `internal/*` ≥ 80%); the **new-code-in-PR ≥ 90%** threshold was deferred here because it needs a diff↔coverage intersector plus its own self-tests — a self-contained, testable addition best done with focus. Awaiting operator approval.
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — internal quality; no user-visible impact (2026-06-17)
 
 Sub-state: filed 2026-06-03 as a tracked follow-up of SOW-0012 (frontend quality stack). SOW-0012's coverage-config disk-completeness check requires every source dir/flat-file under `src/components/` and `src/pages/` to be either measured or in `COVERAGE_EXCLUDED`. Two REAL components — `src/components/Layout` and `src/components/StatCard` — were placed in `COVERAGE_EXCLUDED` (exercised end-to-end by Playwright, but lacking dedicated Vitest unit tests). This SOW pays that debt: add unit tests and move both from `COVERAGE_EXCLUDED` into the measured + per-dir-gated set.
 
