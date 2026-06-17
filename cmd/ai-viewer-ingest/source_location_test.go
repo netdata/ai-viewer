@@ -135,7 +135,9 @@ func runStartSourceWithFactoryCapture(t *testing.T, src configuredSource) captur
 	}
 
 	var scanWG sync.WaitGroup
-	if err := startSourceWithFactoryLookup(ctx, &wg, &scanWG, ing, nil, src, silentLogger(), lookup); err != nil {
+	ch := make(chan struct{})
+	close(ch)
+	if err := startSourceWithFactoryLookup(ctx, &wg, &scanWG, ing, nil, src, silentLogger(), lookup, ch); err != nil {
 		t.Fatalf("startSourceWithFactoryLookup: %v", err)
 	}
 	cancel()

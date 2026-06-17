@@ -203,18 +203,14 @@ func run(args []string, stdout, stderr *os.File) int {
 		close(scanDone)
 	}()
 
-	var adapterWG sync.WaitGroup
-	for _, src := range sources {
-		if err := startSource(adapterCtx, &adapterWG, &scanWG, ing, lookup, src, logger); err != nil {
-			logger.Warn("ai-viewer-ingest: source skipped",
-				"source", src.id, "err", err)
-			continue
-		}
-	}
-
 	// Post-scan backfill: wait for ALL scans to complete, then rebuild the
-	// FTS + rollup read models once (no per-source contention). Runs in a
-	// goroutine so the main thread can proceed to the signal-wait loop.
+	// FTS + rollup read models once (no per-source contention). The
+	// backfillDone channel gates the tailers: each source's runAdapter
+	// BLOCKS on <-backfillDone before starting Tail, so the backfill
+	// (which truncates fts_ops/fts_logs in a single tx) never contends
+	// with concurrent tail-mode flushes on the single SQLite connection
+	// (SOW-0063 — the root cause of the FTS stall on every fresh install).
+	backfillDone := make(chan struct{})
 	go func() {
 		<-scanDone
 		if ing.DeferReadModels() {
@@ -225,7 +221,17 @@ func run(args []string, stdout, stderr *os.File) int {
 				logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
 			}
 		}
+		close(backfillDone)
 	}()
+
+	var adapterWG sync.WaitGroup
+	for _, src := range sources {
+		if err := startSource(adapterCtx, &adapterWG, &scanWG, ing, lookup, src, logger, backfillDone); err != nil {
+			logger.Warn("ai-viewer-ingest: source skipped",
+				"source", src.id, "err", err)
+			continue
+		}
+	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

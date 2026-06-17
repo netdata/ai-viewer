@@ -314,13 +314,13 @@ func (l sqlCursorLookup) LookupCursor(ctx context.Context, sourceID string) (str
 // logs a WARN and falls back to a full
 // re-scan; the spec mandates that the daemon keeps making progress
 // rather than refusing to start.
-func startSource(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger) error {
-	return startSourceWithFactoryLookup(ctx, wg, scanWG, ing, lookup, src, logger, adapters.Get)
+func startSource(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, backfillDone <-chan struct{}) error {
+	return startSourceWithFactoryLookup(ctx, wg, scanWG, ing, lookup, src, logger, adapters.Get, backfillDone)
 }
 
 type adapterFactoryLookup func(format string) (canonical.AdapterFactory, bool)
 
-func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, factoryLookup adapterFactoryLookup) error {
+func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, factoryLookup adapterFactoryLookup, backfillDone <-chan struct{}) error {
 	factory, ok := factoryLookup(src.format)
 	if !ok {
 		return fmt.Errorf("unknown adapter format %q (registered: %v)", src.format, adapters.Formats())
@@ -356,7 +356,7 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanW
 	go func() {
 		defer wg.Done()
 		defer close(events)
-		runAdapter(ctx, adapter, since, events, srcLogger, scanWG.Done)
+		runAdapter(ctx, adapter, since, events, srcLogger, scanWG.Done, backfillDone)
 	}()
 
 	srcLogger.Info("ai-viewer-ingest: source started")
@@ -448,7 +448,7 @@ func newOnErrorHandler(ctx context.Context, srcID string, events chan<- canonica
 // Between Scan and Tail, if the ingester is in bulk-scan mode (deferReadModels),
 // the deferred read models (FTS index + rollup tables) are backfilled in a
 // single pass and incremental refresh is re-enabled for Tail (SOW-0063).
-func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger, scanDone func()) {
+func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.Cursor, events chan<- canonical.Event, logger *slog.Logger, scanDone func(), backfillDone <-chan struct{}) {
 	logger.Info("ai-viewer-ingest: adapter scan starting", "resume", since != nil)
 	if err := adapter.Scan(ctx, since, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -463,14 +463,14 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 		logger.Info("ai-viewer-ingest: adapter scan complete")
 	}
 	// Scan is done (success or error) — signal the centralized backfill
-	// coordinator that this source's Scan phase is complete. The backfill
-	// waits for ALL sources' scans before running, so it doesn't contend
-	// with tail-mode flushes (SOW-0063).
+	// coordinator that this source's Scan phase is complete.
 	scanDone()
-	// NOTE: the read-model backfill is now handled centrally in main.go — it
-	// runs ONCE after ALL sources' scans complete (not per-source), avoiding
-	// contention between the FTS truncate tx and concurrent tail-mode flushes
-	// on the single SQLite connection (SOW-0063).
+	// Wait for the centralized read-model backfill to complete before
+	// starting Tail, so the FTS truncate/rebuild doesn't contend with
+	// tail-mode flushes on the single SQLite connection (SOW-0063).
+	// On a resume (no deferred read models), backfillDone is already
+	// closed and this is a no-op.
+	<-backfillDone
 	logger.Info("ai-viewer-ingest: tail starting")
 	if err := adapter.Tail(ctx, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
