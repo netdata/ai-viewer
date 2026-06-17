@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open (BLOCKER for SOW-0065)
+Status: completed (BLOCKER for SOW-0065)
 
 ## Requirements
 
