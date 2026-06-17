@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';
 import type { OpDetail, PayloadRef, TopologyNode } from '../../api/types';
 import {
@@ -385,9 +385,37 @@ function Field({
 }
 
 function PayloadRow({ payload }: { payload: PayloadRef }) {
-  // Byte-preview deferred until GET /api/payloads/:ref exists; render metadata
-  // and a disabled affordance now. When the route lands, this control enables
-  // and fetches the first bytes — no structural change needed.
+  const [preview, setPreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showPreview, setShowPreview] = useState(false);
+
+  const fetchPreview = useCallback(async () => {
+    if (preview !== null) {
+      setShowPreview((v) => !v);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(`/api/payloads/${payload.id}`);
+      if (!resp.ok) {
+        const body = await resp.text();
+        setError(`HTTP ${resp.status}: ${body.slice(0, 200)}`);
+      } else {
+        const text = await resp.text();
+        const truncated = resp.headers.get('X-Payload-Truncated') === 'true';
+        const total = resp.headers.get('X-Payload-Total-Bytes');
+        setPreview(truncated && total ? `${text}\n\n--- truncated (showing first 4 KB of ${formatBytes(parseInt(total, 10))}) ---` : text);
+        setShowPreview(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'fetch failed');
+    } finally {
+      setLoading(false);
+    }
+  }, [payload.id, preview]);
+
   return (
     <li className={styles.payloadRow}>
       <div className={styles.payloadMeta}>
@@ -406,11 +434,20 @@ function PayloadRow({ payload }: { payload: PayloadRef }) {
       <button
         type="button"
         className={styles.payloadPreview}
-        disabled
-        title="Payload preview is coming in a later release"
+        onClick={() => { void fetchPreview(); }}
+        disabled={loading}
+        title="Preview payload content (first 4 KB)"
       >
-        Preview (coming soon)
+        {loading ? 'Loading…' : showPreview ? 'Hide' : 'Preview'}
       </button>
+      {error !== null && (
+        <div className={styles.payloadError} role="alert">{error}</div>
+      )}
+      {showPreview && preview !== null && (
+        <pre className={styles.payloadPreviewContent}>
+          <code>{preview}</code>
+        </pre>
+      )}
     </li>
   );
 }

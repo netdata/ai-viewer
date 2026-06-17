@@ -132,7 +132,7 @@ describe('SpanDetailDrawer', () => {
     expect(within(dialog).getByText('RateLimitError')).toBeInTheDocument();
   });
 
-  it('lists payload_refs with kind + format, and a disabled preview affordance (op variant)', () => {
+  it('lists payload_refs with kind + format, and an active preview button (op variant)', () => {
     render(
       <SpanDetailDrawer
         detail={opDetail({
@@ -147,11 +147,11 @@ describe('SpanDetailDrawer', () => {
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByText('llm_request')).toBeInTheDocument();
     expect(within(dialog).getByText('llm_response')).toBeInTheDocument();
-    // Byte-preview is deferred: a disabled control communicates "coming soon".
+    // The preview button is enabled (fetches GET /api/payloads/:id on click).
     const previews = within(dialog).getAllByRole('button', { name: /preview/i });
     expect(previews.length).toBeGreaterThan(0);
     for (const btn of previews) {
-      expect(btn).toBeDisabled();
+      expect(btn).not.toBeDisabled();
     }
   });
 

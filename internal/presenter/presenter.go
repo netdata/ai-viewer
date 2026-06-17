@@ -273,6 +273,7 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/subscriptions", p.handleSubscriptionsCreate)
 	mux.HandleFunc("/api/subscriptions/{id}", p.handleSubscriptionDelete)
 	mux.HandleFunc("/api/events", p.handleEvents)
+	mux.HandleFunc("/api/payloads/", p.handlePayloadPreview)
 	mux.HandleFunc("/api/", p.notImplemented)
 
 	// Frontend routes.
