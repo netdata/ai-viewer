@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 ## Requirements
 
