@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — verified 0 real-data impact (2026-06-17)
 
 Sub-state: follow-up filed during SOW-0024 (Hard Rule #9: tech debt is paid or tracked). SOW-0024 delivered the source-native `sources.meta_json` blob (opencode startup probe counts) but deliberately deferred two related signals to keep its scope surgical. This SOW tracks both.
 

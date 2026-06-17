@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — verified 0 real-data impact (2026-06-17)
 
 Sub-state: proposed follow-up, awaiting operator prioritization. Discovered 2026-05-31 during SOW-0026 (op duration_us fix) round-2 external review (codex P2). NOT blocking SOW-0026 — the gap is pre-existing (predates SOW-0026), is not triggered by any current adapter, and the SOW-0026 contract is documented in `ingester.md`.
 
