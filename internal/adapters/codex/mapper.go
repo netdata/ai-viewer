@@ -57,6 +57,11 @@ type fileMapper struct {
 	// (spec rule #1). For a fork or sub-agent it is still the child's own id;
 	// the parent linkage is carried by parentNativeID.
 	nativeID string
+	// disambiguateSuffix, when non-empty, carries ":<basename>" appended to the
+	// session_meta.payload.id so two rollout files with the same id become two
+	// distinct canonical sessions (SOW-0022, edge #14). Set by the scanner when
+	// it detects a duplicate id; empty for the common (unique-id) case.
+	disambiguateSuffix string
 	// parentNativeID is empty for a root session; the parent thread id for a
 	// sub-agent (source.subagent.thread_spawn.parent_thread_id) or the
 	// forked_from_id for a fork (spec rule #1, "Sub-Agent Linkage").

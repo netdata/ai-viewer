@@ -43,6 +43,11 @@ type Adapter struct {
 	// (cmd/ai-viewer-ingest/sources.go runAdapter), single-threaded, so a plain
 	// field needs no synchronisation. Mirrors claude_code.
 	scanCursor *Cursor
+	// seenSessionIDs is allocated by Scan to track session_meta.payload.id
+	// values across rollout files, so a duplicate id can be disambiguated
+	// (SOW-0022, edge #14). Kept on the Adapter for documentation; the actual
+	// map lives in scanModernRollouts (local scope, not persisted).
+	seenSessionIDs map[string]string //nolint:unused // documentation field; the map lives in scanModernRollouts
 }
 
 // Compile-time conformance to the canonical.Adapter interface.

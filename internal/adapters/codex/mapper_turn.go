@@ -15,14 +15,16 @@ import (
 // payload so the event is complete either way.
 func applySessionMeta(ev *canonical.SessionStartedEvent, p *sessionMetaPayload, m *fileMapper) {
 	// session_meta.payload.id is the AUTHORITATIVE native id (spec adapter-codex.md
-	// :290 — parent_thread_id / forked_from_id reference this UUID). It overrides
-	// the filename-seeded value (the scanner derives the id from the rollout
-	// filename as a fallback for a file whose body id is absent). Assigning both
-	// ev.NativeID and m.nativeID makes every subsequent turn/op/log event carry the
-	// authoritative id; RootNativeID is re-derived below (G5).
-	if p.ID != "" {
-		ev.NativeID = p.ID
-		m.nativeID = p.ID
+	// :290). If the adapter detected a duplicate id (two rollout files with the
+	// same payload.id), m.disambiguateSuffix carries ":<basename>" so the
+	// second occurrence becomes a distinct canonical session (SOW-0022, edge #14).
+	canonicalID := p.ID
+	if m.disambiguateSuffix != "" {
+		canonicalID = p.ID + ":" + m.disambiguateSuffix
+	}
+	if canonicalID != "" {
+		ev.NativeID = canonicalID
+		m.nativeID = canonicalID
 	}
 	kind, parent := p.classifySource()
 	// forked_from_id wins as the parent only when source did not already name a

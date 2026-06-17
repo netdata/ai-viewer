@@ -71,7 +71,7 @@ func (f *tailFlush) processDirtyRollout(rel string) error {
 
 func (f *tailFlush) readAndRecordRollout(r rollout) error {
 	fc := f.cur.fileCursor(r.rel)
-	updated, _, err := readRollout(f.ctx, f.resolvedRoot, r, f.sourceID, fc, f.out, f.onError)
+	updated, _, err := readRollout(f.ctx, f.resolvedRoot, r, f.sourceID, fc, f.out, f.onError, nil) // SOW-0022: tailer passes nil (no cross-file dedup on incremental tail)
 	if err != nil {
 		return f.handleRolloutError(err)
 	}

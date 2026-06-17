@@ -173,7 +173,7 @@ func TestReadRollout_StaleFinalizeCancel(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	_, _, err := readRollout(ctx, resolved, r, "codex:"+root, FileCursor{}, out, func(error) {})
+	_, _, err := readRollout(ctx, resolved, r, "codex:"+root, FileCursor{}, out, func(error) {}, nil)
 	if err == nil {
 		t.Fatal("readRollout with ctx cancelled during finalize emit should return ctx err")
 	}
@@ -195,7 +195,7 @@ func TestReadRollout_TruncationResetReemits(t *testing.T) {
 	out := make(chan canonical.Event, 64)
 	// Cursor claims a much larger size than the file → truncation reset to 0.
 	var errs []string
-	updated, n, err := readRollout(context.Background(), resolved, r, "codex:"+root, FileCursor{Offset: 99999, Size: 99999}, out, func(e error) { errs = append(errs, e.Error()) })
+	updated, n, err := readRollout(context.Background(), resolved, r, "codex:"+root, FileCursor{Offset: 99999, Size: 99999}, out, func(e error) { errs = append(errs, e.Error()) }, nil)
 	if err != nil {
 		t.Fatalf("readRollout: %v", err)
 	}

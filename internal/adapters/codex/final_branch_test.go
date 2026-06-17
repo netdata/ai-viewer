@@ -112,7 +112,7 @@ func TestReadRollout_ContainmentRefusesEscape(t *testing.T) {
 
 	out := make(chan canonical.Event, 8)
 	r := rollout{rel: rel, abs: link}
-	_, n, err := readRollout(context.Background(), resolved, r, "codex:"+root, FileCursor{}, out, func(error) {})
+	_, n, err := readRollout(context.Background(), resolved, r, "codex:"+root, FileCursor{}, out, func(error) {}, nil)
 	if err == nil {
 		t.Fatal("readRollout must refuse a symlink escaping the root")
 	}
@@ -132,7 +132,7 @@ func TestReadRollout_OpenError(t *testing.T) {
 	rel := "2025/11/20/rollout-2025-11-20T10-00-00-" + uuid7(1) + ".jsonl"
 	r := rollout{rel: rel, abs: filepath.Join(resolved, filepath.FromSlash(rel))} // not created
 	out := make(chan canonical.Event, 4)
-	_, _, err := readRollout(context.Background(), resolved, r, "codex:"+root, FileCursor{}, out, func(error) {})
+	_, _, err := readRollout(context.Background(), resolved, r, "codex:"+root, FileCursor{}, out, func(error) {}, nil)
 	if err == nil {
 		t.Fatal("readRollout on a non-existent in-root path should return an open error")
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -68,12 +69,13 @@ func resolveScanRoot(root string) string {
 
 func scanModernRollouts(ctx context.Context, resolvedRoot, sourceID string, rollouts []rollout, cur Cursor, out chan<- canonical.Event, onError func(error)) (Cursor, error) {
 	progress := newScanProgress()
+	seenIDs := make(map[string]string) // SOW-0022: cross-file duplicate-id tracking
 	for _, r := range rollouts {
 		if err := ctx.Err(); err != nil {
 			return cur, err
 		}
 		fc := cur.fileCursor(r.rel)
-		updated, n, err := readRollout(ctx, resolvedRoot, r, sourceID, fc, out, onError)
+		updated, n, err := readRollout(ctx, resolvedRoot, r, sourceID, fc, out, onError, seenIDs)
 		if err != nil {
 			if isContextStop(err) {
 				return cur, err
@@ -147,7 +149,7 @@ func reportLegacy(cur Cursor, legacy []string, onError func(error)) Cursor {
 // failed/incomplete ONLY when the mtime is stale ≥ 1 h (rule #23); a fresh file
 // leaves the turn open. resolvedRoot is the symlink-resolved sessions root,
 // threaded into the containment open.
-func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID string, start FileCursor, out chan<- canonical.Event, onError func(error)) (FileCursor, int, error) {
+func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID string, start FileCursor, out chan<- canonical.Event, onError func(error), seenIDs map[string]string) (FileCursor, int, error) {
 	opened, err := openRolloutForRead(resolvedRoot, r)
 	if err != nil {
 		return start, 0, err
@@ -164,6 +166,21 @@ func readRollout(ctx context.Context, resolvedRoot string, r rollout, sourceID s
 	}
 
 	mapper := newRolloutMapper(resolvedRoot, sourceID, r)
+	// Duplicate-id disambiguation (SOW-0022, edge #14): if this rollout's
+	// filename-derived id was already seen on a different file, append
+	// ":<basename>" to the mapper's NativeID so the two same-id rollouts
+	// become two distinct canonical sessions. The mapper overrides this from
+	// session_meta when the meta is read, preserving the suffix.
+	fileID := mapper.nativeID // the filename-derived id (pre-meta anchor)
+	basename := strings.TrimSuffix(filepath.Base(r.abs), modernExt)
+	if fileID != "" && seenIDs != nil {
+		if _, dup := seenIDs[fileID]; dup {
+			mapper.disambiguateSuffix = basename
+			onError(fmt.Errorf("codex: duplicate session id %q in %s — disambiguating as %s:%s", fileID, r.rel, fileID, basename))
+		} else {
+			seenIDs[fileID] = r.rel
+		}
+	}
 	dedup := newUnknownDedup()
 	res, perr := streamLines(ctx, opened.file, clampedEmitFrom(cur.Offset, opened.size), r.rel, mapper, dedup, out, onError)
 	if perr != nil {
