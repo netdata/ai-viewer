@@ -3,6 +3,7 @@ package presenter
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -101,7 +102,22 @@ func newSubscriptionManager(hub interface {
 // hub) and silently DROPS the event before the client ever connects.
 // Adding to the hub first guarantees any matched event lands in the hub's
 // replay buffer instead (sse-protocol.md §Reconnect Behavior).
+// maxSubscriptions caps the number of concurrent SSE subscriptions (SOW-0019,
+// defense-in-depth). A single-user localhost app will never approach this; the
+// cap prevents a runaway client (or a bug) from leaking goroutines/memory via
+// orphan subscriptions. Returns 503 when the cap is hit so the client can retry.
+const maxSubscriptions = 100
+
 func (m *subscriptionManager) create(filter subscriptionFilter) (string, error) {
+	// Cap check (SOW-0019): reject if at the limit so the registry can't grow
+	// unbounded. The check is under the lock to avoid a TOCTOU race.
+	m.mu.Lock()
+	if len(m.entries) >= maxSubscriptions {
+		m.mu.Unlock()
+		return "", errTooManySubscriptions
+	}
+	m.mu.Unlock()
+
 	id, err := newSubscriptionID()
 	if err != nil {
 		return "", err
@@ -115,10 +131,19 @@ func (m *subscriptionManager) create(filter subscriptionFilter) (string, error) 
 	}
 	m.hub.add(id)
 	m.mu.Lock()
+	// Re-check under the lock: a concurrent create may have pushed us over.
+	if len(m.entries) >= maxSubscriptions {
+		m.mu.Unlock()
+		m.hub.remove(id)
+		return "", errTooManySubscriptions
+	}
 	m.entries[id] = subscriptionEntry{filter: filter, createdAt: time.Now().UTC()}
 	m.mu.Unlock()
 	return id, nil
 }
+
+// errTooManySubscriptions is returned when the subscription cap is reached.
+var errTooManySubscriptions = errors.New("too many concurrent subscriptions")
 
 // delete removes a subscription from the registry and the hub. Idempotent:
 // deleting an unknown id is a no-op (the DELETE route returns 204 either

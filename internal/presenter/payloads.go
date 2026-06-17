@@ -127,7 +127,7 @@ func (p *Presenter) handlePayloadPreview(w http.ResponseWriter, r *http.Request)
 	if r.Method == http.MethodHead {
 		return
 	}
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 // lookupPayloadRef fetches one payload_refs row by ID.
@@ -192,8 +192,15 @@ func (p *Presenter) resolvePayload(ctx context.Context, ref payloadRefRow, roots
 	case strings.HasPrefix(uri, "file://"):
 		return p.resolveFilePayload(uri, ref.Compression, roots, maxBytes)
 	default:
-		return nil, false, 0, fmt.Errorf("unsupported payload URI scheme: %s", uri[:min(len(uri), 40)])
+		return nil, false, 0, fmt.Errorf("unsupported payload URI scheme: %s", uri[:minLen(len(uri), 40)])
 	}
+}
+
+func minLen(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // resolveFilePayload reads a file:// payload, optionally gzip-decompressing and
@@ -255,7 +262,6 @@ func (p *Presenter) readFileLine(path string, lineNo int, maxBytes int) ([]byte,
 	defer func() { _ = f.Close() }()
 
 	// Scan to the target line.
-	buf := make([]byte, 0, 8192)
 	currentLine := 0
 	// Read line by line using a simple scanner.
 	chunk := make([]byte, 65536)
@@ -275,8 +281,7 @@ func (p *Presenter) readFileLine(path string, lineNo int, maxBytes int) ([]byte,
 							preview = preview[:maxBytes]
 							truncated = true
 						}
-						buf = preview
-						return buf, truncated, total, nil
+						return preview, truncated, total, nil
 					}
 					lineBuf = lineBuf[:0] // reset for next line
 				} else {
@@ -375,7 +380,7 @@ func readGzipPayload(path string, fileSize int64, maxBytes int) ([]byte, bool, i
 	// Read up to maxBytes + 1 (to detect truncation).
 	buf := make([]byte, maxBytes+1)
 	n, err := io.ReadFull(gz, buf)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return nil, false, 0, fmt.Errorf("gzip read: %w", err)
 	}
 	truncated := n > maxBytes
@@ -401,17 +406,9 @@ func readFilePayload(path string, fileSize int64, maxBytes int) ([]byte, bool, i
 	}
 	buf := make([]byte, readSize)
 	n, err := io.ReadFull(f, buf)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return nil, false, 0, fmt.Errorf("read file: %w", err)
 	}
 	truncated := fileSize > int64(maxBytes)
 	return buf[:n], truncated, fileSize, nil
-}
-
-// min returns the smaller of a and b.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
