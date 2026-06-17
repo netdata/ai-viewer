@@ -352,7 +352,9 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanW
 	}
 
 	wg.Add(1)
-	scanWG.Add(1)
+	// NOTE: scanWG.Add was already called by main.go (scanWG.Add(len(sources)))
+	// BEFORE the scanWG.Wait goroutine started — required by sync.WaitGroup
+	// semantics (Add must happen before Wait). Do NOT Add here.
 	go func() {
 		defer wg.Done()
 		defer close(events)

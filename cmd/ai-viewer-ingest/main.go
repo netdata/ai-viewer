@@ -196,7 +196,19 @@ func run(args []string, stdout, stderr *os.File) int {
 	// so it doesn't contend with concurrent tail-mode flushes on the single
 	// SQLite connection (the prior per-source approach deadlocked the FTS
 	// backfill's truncate tx against ongoing flushes — SOW-0063).
+	// scanWG waits for all sources' Scan() to complete. The post-scan
+	// read-model backfill runs ONCE after ALL scans finish (not per-source),
+	// so it doesn't contend with concurrent tail-mode flushes on the single
+	// SQLite connection (the prior per-source approach deadlocked the FTS
+	// backfill's truncate tx against ongoing flushes — SOW-0063).
+	//
+	// CRITICAL: scanWG.Add must happen BEFORE scanWG.Wait. The Wait goroutine
+	// below starts immediately; if Add runs later (in the for loop below),
+	// the Wait may see counter=0 and fire prematurely (the root cause of the
+	// FTS backfill firing while scans are still running). Pre-add all counters
+	// here, then the goroutine in startSourceWithFactoryLookup does NOT Add.
 	var scanWG sync.WaitGroup
+	scanWG.Add(len(sources))
 	scanDone := make(chan struct{})
 	go func() {
 		scanWG.Wait()
