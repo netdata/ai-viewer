@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"path/filepath"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -86,10 +87,11 @@ func rootOf(nativeID, parentNativeID string) string {
 	return nativeID
 }
 
-// agentNameFromMeta derives the session AgentName: agent_nickname or agent_role
-// for a sub-agent, else "codex:" + originator (spec rule #1). A bare originator
-// with no nickname yields "codex:<originator>"; an empty originator yields
-// "codex".
+// agentNameFromMeta derives the session AgentName. For sub-agents:
+// agent_nickname or agent_role if present. For root sessions: "codex:<originator>
+// (<cwd_basename>)" so the operator can identify which project a session belongs
+// to (SOW-0066 — "codex:codex_cli_rs" is meaningless; "codex:codex_cli_rs
+// (netdata-ktsaou.git)" identifies the work).
 func agentNameFromMeta(p *sessionMetaPayload) string {
 	if p.AgentNickname != "" {
 		return p.AgentNickname
@@ -97,10 +99,19 @@ func agentNameFromMeta(p *sessionMetaPayload) string {
 	if p.AgentRole != "" {
 		return p.AgentRole
 	}
+	base := "codex"
 	if p.Originator != "" {
-		return "codex:" + p.Originator
+		base = "codex:" + p.Originator
 	}
-	return "codex"
+	if p.Cwd != "" {
+		kind, _ := p.classifySource()
+		if kind != sourceSubagent {
+			if cwdBase := filepath.Base(p.Cwd); cwdBase != "" && cwdBase != "." && cwdBase != "/" {
+				return base + " (" + cwdBase + ")"
+			}
+		}
+	}
+	return base
 }
 
 // sessionExtras builds sessions.extras_json from session_meta (spec rule #1,

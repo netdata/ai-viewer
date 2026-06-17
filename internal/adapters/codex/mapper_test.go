@@ -38,8 +38,8 @@ func TestMapper_SessionStartedRoot(t *testing.T) {
 	if s.RootNativeID != "sid-root" || s.ParentNativeID != "" {
 		t.Errorf("root/parent = {%q %q}, want {sid-root \"\"}", s.RootNativeID, s.ParentNativeID)
 	}
-	if s.AgentName != "codex:codex_exec" {
-		t.Errorf("AgentName = %q, want codex:codex_exec", s.AgentName)
+	if s.AgentName != "codex:codex_exec (<ROOT>)" {
+		t.Errorf("AgentName = %q, want codex:codex_exec (<ROOT>)", s.AgentName)
 	}
 	if s.Cwd != "<ROOT>" {
 		t.Errorf("Cwd = %q, want <ROOT>", s.Cwd)
