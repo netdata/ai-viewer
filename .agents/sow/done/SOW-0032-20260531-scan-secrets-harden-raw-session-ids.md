@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: deferred — secrets scan passes clean; UUID hardening is defense-in-depth (2026-06-17)
 
 Sub-state: proposed follow-up (P2, repo-wide hygiene). Discovered 2026-05-31 during SOW-0029 rounds 4-5 external review: the secret/PII gate (`scripts/scan-secrets.sh`) detects the operator NAME/email/home-with-username and known secret shapes, but does NOT detect raw real session UUIDs. codex (manual) repeatedly surfaced pre-existing raw session ids the gate misses — a per-round whack-a-mole that only a hardened gate ends. Not blocking SOW-0029 (whose change set is clean and CI-green; the one real UUID it newly touched was removed, and the one codex flagged at `SOW-0001:106` was sanitized in that PR).
 
