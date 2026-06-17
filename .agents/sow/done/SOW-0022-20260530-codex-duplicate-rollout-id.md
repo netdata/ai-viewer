@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: proposed follow-up, awaiting operator prioritization. Discovered during SOW-0004 (codex adapter) round-6 review (codex P3). Not blocking — unobserved edge, accepted for v1.
 

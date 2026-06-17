@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: awaits operator approval before moving to current/. Surfaced by glm during the SOW-0001 Chunk-21 PR-A review as a P3 defense-in-depth note. Not blocking — ai-viewer is localhost-only/single-operator in v1, so the practical risk is near-zero; this matters only if/when network exposure is ever added (its own SOW).
 

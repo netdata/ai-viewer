@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: open
+Status: completed
 
 Sub-state: proposed follow-up (P2). Split out of SOW-0006 (APM tracing UI) on 2026-05-31: SOW-0006 AC#4 specified a span-drawer payload BYTE-preview (first 4 KB via `GET /api/payloads/:ref`, with a download-full link), but that endpoint is a security-sensitive source-file reader and was already a documented Phase-2 deferral (`rest-api.md §GET /api/payloads`; `presenter.go` falls through to notImplemented). SOW-0006 delivered the drawer's LIVE part (op fields + `payload_refs` list + open/Esc/outside-click/focus-trap a11y) and narrowed AC#4 to that; this SOW delivers the byte-preview.
 
