@@ -3,12 +3,14 @@ import { useSearchParams } from 'react-router-dom';
 import { useFilters, filtersToSubscription } from '../../state/filters';
 import { useAggregate, useTop, useStats } from '../../api/stats';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
-import { LoadingState, ErrorState } from '../../components/StatusViews';
+import { LoadingState, ErrorState, EmptyState } from '../../components/StatusViews';
 import type {
   AggregateBucket,
   AggregateResponse,
   StatsBucket,
   StatsMetric,
+  StatsResponse,
+  StatsTotals,
   TopDimension,
   TopItem,
   TopResponse,
@@ -68,6 +70,16 @@ const DIMENSION_OPTIONS: ReadonlyArray<{ value: TopDimension; label: string }> =
 /** Fixed top-N size; the server clamps to [1,200] (rest-api.md §GET /api/stats/top). */
 const TOP_N = 20;
 
+/** Breakdown dimensions for the multi-metric comparison table. */
+const BREAKDOWN_DIMS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'by_model', label: 'Model' },
+  { value: 'by_source', label: 'Source' },
+  { value: 'by_agent', label: 'Agent' },
+  { value: 'by_tool', label: 'Tool' },
+  { value: 'by_status', label: 'Status' },
+  { value: 'by_error_class', label: 'Error class' },
+];
+
 export function Stats() {
   const { filters } = useFilters();
 
@@ -85,6 +97,8 @@ export function Stats() {
   // global filter params — and any control NOT in the patch — are preserved.
   // replace:true keeps control tweaks out of the history stack (they are view
   // tuning, not navigation), matching the SessionDetail ?tab= convention.
+  const [breakdownDim, setBreakdownDim] = useState('by_model');
+
   const setControl = useCallback(
     (patch: StatControlsPatch): void => {
       setSearchParams((prev) => applyStatPatch(prev, patch), { replace: true });
@@ -309,6 +323,32 @@ export function Stats() {
         )}
       </section>
 
+      {/* ── Multi-metric comparison table ─────────────────────────────────── */}
+      {stats.data && (
+        <section className={styles.panel} aria-labelledby="stats-breakdown-title">
+          <div className={styles.panelHeader}>
+            <h2 id="stats-breakdown-title" className={styles.panelTitle}>
+              Comparison table
+            </h2>
+            <div className={styles.controls}>
+              <span className={styles.controlLabel}>Dimension</span>
+              <select
+                className={styles.select}
+                value={breakdownDim}
+                onChange={(e) => setBreakdownDim(e.target.value)}
+              >
+                {BREAKDOWN_DIMS.map((d) => (
+                  <option key={d.value} value={d.value}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <BreakdownTable data={stats.data} dimension={breakdownDim} totals={stats.data.totals} />
+        </section>
+      )}
+
       {/* ── Failure analysis ─────────────────────────────────────────────── */}
       {stats.data && stats.data.by_error_class.length > 0 && (
         <section className={styles.panel} aria-labelledby="stats-failures-title">
@@ -379,4 +419,169 @@ function aggregateBucketsFrom(data: AggregateResponse | undefined): AggregateBuc
 function topItemsFrom(data: TopResponse | undefined): TopItem[] {
   const items = data?.items;
   return Array.isArray(items) ? items : [];
+}
+
+interface BreakdownRow {
+  label: string;
+  sublabel?: string;
+  sessions: number;
+  calls: number;
+  failures: number;
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  failureRate: number;
+}
+
+function BreakdownTable({
+  data,
+  dimension,
+  totals,
+}: {
+  data: StatsResponse;
+  dimension: string;
+  totals: StatsTotals;
+}) {
+  const rows: BreakdownRow[] = useMemo(() => {
+    const totalSessions = totals.session_count || 1;
+    switch (dimension) {
+      case 'by_model':
+        return data.by_model
+          .filter((m) => m.calls > 0)
+          .slice(0, 30)
+          .map((m) => ({
+            label: m.name,
+            sublabel: m.provider,
+            sessions: 0,
+            calls: m.calls,
+            failures: m.failures,
+            costUsd: m.cost_usd,
+            tokensIn: m.tokens_in,
+            tokensOut: m.tokens_out,
+            failureRate: m.calls > 0 ? (m.failures / m.calls) * 100 : 0,
+          }));
+      case 'by_source':
+        return data.by_source.map((s) => ({
+          label: s.source.split(':')[0] ?? s.source,
+          sublabel: s.source,
+          sessions: s.sessions,
+          calls: 0,
+          failures: s.failures,
+          costUsd: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          failureRate: s.sessions > 0 ? (s.failures / s.sessions) * 100 : 0,
+        }));
+      case 'by_agent':
+        return data.by_agent
+          .filter((a) => a.sessions > 0)
+          .slice(0, 30)
+          .map((a) => ({
+            label: a.name,
+            sessions: a.sessions,
+            calls: 0,
+            failures: a.failures,
+            costUsd: a.cost_usd,
+            tokensIn: a.tokens_in,
+            tokensOut: a.tokens_out,
+            failureRate: a.sessions > 0 ? (a.failures / a.sessions) * 100 : 0,
+          }));
+      case 'by_tool':
+        return data.by_tool
+          .filter((t) => t.calls > 0)
+          .slice(0, 30)
+          .map((t) => ({
+            label: t.namespace ? `${t.namespace}.${t.name}` : t.name,
+            sessions: 0,
+            calls: t.calls,
+            failures: t.failures,
+            costUsd: 0,
+            tokensIn: 0,
+            tokensOut: 0,
+            failureRate: t.calls > 0 ? (t.failures / t.calls) * 100 : 0,
+          }));
+      case 'by_status':
+        return data.by_status.map((s) => ({
+          label: s.status,
+          sessions: s.count,
+          calls: 0,
+          failures: s.status === 'failed' ? s.count : 0,
+          costUsd: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          failureRate: s.count > 0 ? ((s.status === 'failed' ? s.count : 0) / s.count) * 100 : 0,
+        }));
+      case 'by_error_class':
+        return data.by_error_class.map((e) => ({
+          label: e.error_class,
+          sessions: e.sessions,
+          calls: 0,
+          failures: e.sessions,
+          costUsd: e.cost_usd,
+          tokensIn: 0,
+          tokensOut: 0,
+          failureRate: totalSessions > 0 ? (e.sessions / totalSessions) * 100 : 0,
+        }));
+      default:
+        return [];
+    }
+  }, [data, dimension, totals]);
+
+  if (rows.length === 0) {
+    return <EmptyState>No data for this dimension.</EmptyState>;
+  }
+
+  return (
+    <div className={styles.tableWrap} role="region" aria-label="Comparison table">
+      <table className={styles.table}>
+        <thead>
+          <tr>
+            <th>Name</th>
+            {dimension === 'by_model' || dimension === 'by_tool' ? (
+              <th className={styles.numCol}>Calls</th>
+            ) : (
+              <th className={styles.numCol}>Sessions</th>
+            )}
+            <th className={styles.numCol}>Failures</th>
+            <th className={styles.numCol}>Failure %</th>
+            {(dimension === 'by_model' || dimension === 'by_agent') && (
+              <>
+                <th className={styles.numCol}>Tokens in</th>
+                <th className={styles.numCol}>Tokens out</th>
+                <th className={styles.numCol}>Cost</th>
+              </>
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.label + (row.sublabel ?? '')}>
+              <td>
+                {row.label}
+                {row.sublabel && row.sublabel !== row.label && (
+                  <span className={styles.dimSublabel}>{row.sublabel}</span>
+                )}
+              </td>
+              <td className={styles.numCol}>
+                {formatNumber(row.calls || row.sessions)}
+              </td>
+              <td className={styles.numCol}>{formatNumber(row.failures)}</td>
+              <td className={styles.numCol}>
+                <span style={{ color: row.failureRate > 10 ? 'var(--status-failed)' : 'inherit' }}>
+                  {row.failureRate.toFixed(1)}%
+                </span>
+              </td>
+              {(dimension === 'by_model' || dimension === 'by_agent') && (
+                <>
+                  <td className={styles.numCol}>{formatNumber(row.tokensIn)}</td>
+                  <td className={styles.numCol}>{formatNumber(row.tokensOut)}</td>
+                  <td className={styles.numCol}>{formatCost(row.costUsd)}</td>
+                </>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
