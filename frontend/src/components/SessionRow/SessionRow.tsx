@@ -56,6 +56,9 @@ export function SessionRowBody({ session }: SessionRowProps) {
       <td>{formatDuration(durationUs(session))}</td>
       <td>
         <StatusBadge status={session.status} />
+        {session.status === 'failed' && session.error_class ? (
+          <span className={styles.errorClass}>{session.error_class}</span>
+        ) : null}
       </td>
       <td className={styles.num}>{formatNumber(session.turn_count)}</td>
       <td className={styles.num}>{formatNumber(session.op_count)}</td>

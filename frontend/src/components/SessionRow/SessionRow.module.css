@@ -21,6 +21,18 @@
   white-space: nowrap;
 }
 
+.errorClass {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  background: var(--status-failed, #f44336);
+  color: white;
+  white-space: nowrap;
+}
+
 .num {
   text-align: right;
   font-variant-numeric: tabular-nums;

@@ -20,6 +20,7 @@ type sessionListItem struct {
 	AgentName         string  `json:"agent_name"`
 	Model             string  `json:"model"`
 	Status            string  `json:"status"`
+	ErrorClass        string  `json:"error_class"`
 	StartTS           int64   `json:"start_ts"`
 	EndTS             *int64  `json:"end_ts"`
 	TokensIn          int64   `json:"tokens_in"`
@@ -78,6 +79,7 @@ SELECT
     s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''), s.status,
     s.start_ts, s.end_ts, s.tokens_in, s.tokens_out, s.cost_usd,
     s.turn_count, s.op_count, s.failure_count,
+    IFNULL(s.error_class, '') AS error_class,
     (SELECT COUNT(*) FROM sessions c WHERE c.parent_session_id = s.id) AS child_session_count
 FROM sessions s
 WHERE ` + where
@@ -145,7 +147,7 @@ func scanSessionListItem(rows *sql.Rows) (sessionListItem, error) {
 		&it.ID, &it.NativeID, &it.RootSessionID, &parent, &it.SourceID,
 		&it.Kind, &it.AgentName, &it.Model, &it.Status,
 		&it.StartTS, &endTS, &it.TokensIn, &it.TokensOut, &it.CostUSD,
-		&it.TurnCount, &it.OpCount, &it.FailureCount, &it.ChildSessionCount,
+		&it.TurnCount, &it.OpCount, &it.FailureCount, &it.ErrorClass, &it.ChildSessionCount,
 	); err != nil {
 		return sessionListItem{}, err
 	}
