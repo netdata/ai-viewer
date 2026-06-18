@@ -72,3 +72,30 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+/* Enhanced child session rows */
+.childFailed {
+  background: rgba(244, 67, 54, 0.05);
+}
+
+.childFailed:hover {
+  background: rgba(244, 67, 54, 0.1);
+}
+
+.childError {
+  display: inline-block;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  background: var(--status-failed, #f44336);
+  color: white;
+}
+
+.childDur {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}

@@ -188,6 +188,7 @@ export interface ChildSummary {
   agent_name: string;
   model: string;
   status: SessionStatus;
+  error_class?: string;
   start_ts: number;
   end_ts: number | null;
   tokens_in: number;

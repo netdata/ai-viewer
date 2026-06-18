@@ -217,7 +217,7 @@ describe('OverviewTab', () => {
         ],
       ),
     );
-    const section = screen.getByRole('region', { name: 'Child sessions' });
+    const section = screen.getByRole('region', { name: /^Child sessions/ });
     expect(within(section).getByText('nedi-sub')).toBeInTheDocument();
     expect(within(section).getByText('claude-haiku-4-5')).toBeInTheDocument();
     expect(within(section).getByText('running')).toBeInTheDocument();
@@ -227,7 +227,7 @@ describe('OverviewTab', () => {
 
   it('renders no child-sessions section when the session has no children', () => {
     renderTab(detail([]));
-    expect(screen.queryByRole('region', { name: 'Child sessions' })).toBeNull();
-    expect(screen.queryByText('Child sessions')).toBeNull();
+    expect(screen.queryByRole('region', { name: /^Child sessions/ })).toBeNull();
+    expect(screen.queryByText(/^Child sessions/)).toBeNull();
   });
 });
