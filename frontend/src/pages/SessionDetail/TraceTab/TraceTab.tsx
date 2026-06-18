@@ -33,12 +33,24 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
   const [view, setView] = useState<View>('waterfall');
   const [waterfallMode, setWaterfallMode] = useState<WaterfallMode>('detailed');
   const [selected, setSelected] = useState<TraceNode | null>(null);
+  const [kindFilter, setKindFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
 
   // Keep the viz palette in sync with theme flips while this tab is mounted.
   useEffect(() => startThemeColorWatch(), []);
 
   const roots = useMemo(() => buildOpTree(detail.turns), [detail.turns]);
-  const flat = useMemo(() => flattenTree(roots), [roots]);
+  const flatAll = useMemo(() => flattenTree(roots), [roots]);
+
+  // Apply the kind + status filters to the flat op list (SOW-0070).
+  const flat = useMemo(() => {
+    return flatAll.filter((n) => {
+      if (kindFilter !== 'all' && n.op.kind !== kindFilter) return false;
+      if (statusFilter === 'failed' && n.op.error_class === null) return false;
+      if (statusFilter === 'completed' && n.op.status !== 'completed') return false;
+      return true;
+    });
+  }, [flatAll, kindFilter, statusFilter]);
   // Op ids that start a new turn (after the first) — for the Detailed view's
   // turn-boundary rules (decision #6).
   const turnBoundaryIds = useMemo(() => turnBoundaries(detail), [detail]);
@@ -46,9 +58,12 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
   const useCanvas = flat.length > SVG_SPAN_CEILING;
   const selectedId = selected?.op.id ?? null;
 
-  if (flat.length === 0) {
+  if (flatAll.length === 0) {
     return <EmptyState>No operations recorded for this session.</EmptyState>;
   }
+
+  const KIND_OPTIONS = ['all', 'llm', 'tool', 'session', 'reasoning'];
+  const STATUS_OPTIONS = ['all', 'completed', 'failed'];
 
   return (
     <div className={styles.wrap}>
@@ -79,8 +94,6 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
           </label>
         </fieldset>
 
-        {/* The Detailed|By-turn sub-toggle applies ONLY to the waterfall view
-            (decision #6); it is hidden under flame. */}
         {view === 'waterfall' ? (
           <fieldset className={styles.viewToggle}>
             <legend className={styles.srOnly}>Detail level</legend>
@@ -109,7 +122,33 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
           </fieldset>
         ) : null}
 
-        <span className={styles.opCount}>{flat.length} ops</span>
+        <fieldset className={styles.filterGroup}>
+          <legend className={styles.srOnly}>Op kind filter</legend>
+          <select
+            className={styles.filterSelect}
+            value={kindFilter}
+            onChange={(e) => setKindFilter(e.target.value)}
+            aria-label="Filter by op kind"
+          >
+            {KIND_OPTIONS.map((k) => (
+              <option key={k} value={k}>{k === 'all' ? 'All kinds' : k}</option>
+            ))}
+          </select>
+          <select
+            className={styles.filterSelect}
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            aria-label="Filter by status"
+          >
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s} value={s}>{s === 'all' ? 'All statuses' : s}</option>
+            ))}
+          </select>
+        </fieldset>
+
+        <span className={styles.opCount}>
+          {flat.length === flatAll.length ? `${flat.length} ops` : `${flat.length} / ${flatAll.length} ops`}
+        </span>
       </div>
 
       <div className={styles.vizArea}>

@@ -284,3 +284,28 @@
   color: var(--error);
   white-space: nowrap;
 }
+
+/* Op kind + status filters (SOW-0070) */
+.filterGroup {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  gap: var(--space-2);
+}
+
+.filterSelect {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.filterSelect:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
