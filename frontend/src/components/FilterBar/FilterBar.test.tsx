@@ -1,8 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { FilterBar } from './FilterBar';
+
+// Mock useSources so FilterBar tests don't need a live API.
+vi.mock('../../api/sources', () => ({
+  useSources: () => ({
+    data: {
+      items: [
+        { id: 'src1', format: 'aiagent_v3', location: '/tmp', enabled: true, parse_errors: 0, last_seq: 0 },
+        { id: 'src2', format: 'codex', location: '/tmp', enabled: true, parse_errors: 0, last_seq: 0 },
+      ],
+    },
+  }),
+}));
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
 
 // FilterBar reads its values from the URL and writes changes straight back —
 // there is no internal state. A LocationProbe surfaces the current search
@@ -15,10 +32,12 @@ function LocationProbe() {
 
 function renderBar(initial: string) {
   return render(
-    <MemoryRouter initialEntries={[initial]}>
-      <FilterBar />
-      <LocationProbe />
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[initial]}>
+        <FilterBar />
+        <LocationProbe />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -64,13 +83,19 @@ describe('FilterBar', () => {
     expect(screen.getByTestId('loc')).toHaveTextContent('models=m1');
   });
 
-  it('editing the tools and sources inputs writes their params', async () => {
+  it('editing the tools input writes its param', async () => {
     const user = userEvent.setup();
     renderBar('/');
     await user.type(screen.getByLabelText('Tools filter'), 'tool1');
     expect(screen.getByTestId('loc')).toHaveTextContent('tools=tool1');
-    await user.type(screen.getByLabelText('Sources filter'), 'src1');
-    expect(screen.getByTestId('loc')).toHaveTextContent('sources=src1');
+  });
+
+  it('clicking a source chip toggles the sources param', async () => {
+    const user = userEvent.setup();
+    renderBar('/');
+    const chip = screen.getByText('aiagent_v3');
+    await user.click(chip);
+    expect(screen.getByTestId('loc').textContent).toContain('sources=');
   });
 
   it('clearing the search box removes the q param', async () => {

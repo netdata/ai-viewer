@@ -1,15 +1,15 @@
 import { useFilters } from '../../state/filters';
 import type { SessionStatus } from '../../api/types';
+import { useSources } from '../../api/sources';
 import styles from './FilterBar.module.css';
 
 // Global filter bar (ui-pages.md §Global Layout). Always visible; every control
 // reads from and writes to the URL via useFilters() — there is no local filter
 // state. Routes read the same hook to scope their queries.
 //
-// Chunk 14 implements the controls that map cleanly to the REST filter set:
-// free-text search (q), status checkboxes, and comma-separated text inputs for
-// the agents/models/tools/sources dimensions. Richer pickers (typeahead from
-// the catalog, a date-range widget) are Phase-5 polish.
+// The Sources filter is a multi-select dropdown populated from /api/sources
+// (SOW-0068). The status checkboxes include "failed" with an error_class
+// sub-filter badge count.
 
 const STATUSES: readonly SessionStatus[] = [
   'running',
@@ -29,12 +29,25 @@ function csvToList(value: string): string[] {
 
 export function FilterBar() {
   const { filters, setFilters, clearFilters } = useFilters();
+  const sourcesQuery = useSources();
+
+  const sourceOptions = (sourcesQuery.data?.items ?? []).map((s) => ({
+    value: s.id,
+    label: s.format,
+  }));
 
   const toggleStatus = (status: SessionStatus, checked: boolean): void => {
     const next = checked
       ? [...filters.status, status]
       : filters.status.filter((s) => s !== status);
     setFilters({ status: next });
+  };
+
+  const toggleSource = (sourceID: string): void => {
+    const next = filters.sources.includes(sourceID)
+      ? filters.sources.filter((s) => s !== sourceID)
+      : [...filters.sources, sourceID];
+    setFilters({ sources: next });
   };
 
   return (
@@ -95,19 +108,21 @@ export function FilterBar() {
           />
         </label>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Sources</span>
-          <input
-            type="text"
-            className={styles.input}
-            placeholder="comma,separated"
-            aria-label="Sources filter"
-            value={filters.sources.join(',')}
-            onChange={(e) => {
-              setFilters({ sources: csvToList(e.target.value) });
-            }}
-          />
-        </label>
+        <fieldset className={styles.sourcePicker}>
+          <legend className={styles.label}>Sources</legend>
+          <div className={styles.sourceChips}>
+            {sourceOptions.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={`${styles.sourceChip} ${filters.sources.includes(opt.value) ? styles.sourceChipActive : ''}`}
+                onClick={() => toggleSource(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </fieldset>
       </div>
 
       <div className={styles.row}>

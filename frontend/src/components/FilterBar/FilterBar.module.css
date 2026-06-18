@@ -74,3 +74,39 @@
 .clear:hover {
   background: var(--border);
 }
+
+/* Sources picker — clickable chips instead of free-text (SOW-0068) */
+.sourcePicker {
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.sourceChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.sourceChip {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sourceChip:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.sourceChipActive {
+  background: var(--accent, #0066cc);
+  color: white;
+  border-color: var(--accent, #0066cc);
+}
