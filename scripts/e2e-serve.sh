@@ -79,7 +79,7 @@ mkdir -p "$state"
 # Ingest all three fixtures in a SINGLE invocation: --source is a repeatable
 # flag (cmd/ai-viewer-ingest repeatableFlag) and explicit --source flags replace
 # auto-discovery, so the seed never scans a developer's real ~/.ai-agent. Info
-# level surfaces both the per-source "adapter scan complete; tail starting" line
+# level surfaces both the per-source "adapter scan complete" line
 # we gate on and any per-source parse error if a fixture is bad.
 echo -e "${GRAY}seeding schema'd DB at${NC} $db ${GRAY}from${NC} ${#FIXTURES[@]} fixtures" >&2
 "$INGEST_BIN" --db "$db" --state-dir "$state" --log-level info \
@@ -89,15 +89,16 @@ echo -e "${GRAY}seeding schema'd DB at${NC} $db ${GRAY}from${NC} ${#FIXTURES[@]}
   > "$tmp/ingest.log" 2>&1 &
 ing_pid=$!
 
-# Wait until EVERY source has finished its initial scan. ingestadapter logs
-# "adapter scan complete; tail starting" exactly ONCE per source after Scan()
-# has emitted all of that fixture's events to the worker; so #FIXTURES (3)
-# occurrences proves every source emitted BEFORE we stop. This is the load-safe
-# fix: gating on the schema/migration line only proved OpenWriter finished, so a
-# SIGTERM under load could interrupt Scan() mid-fixture and commit a partial
-# seed. Bounded ~15s (150 × 0.1s) with the same per-iteration PID-death bail.
+# Wait until EVERY source has finished its initial scan. The ingester logs
+# "adapter scan complete" exactly ONCE per source after Scan() has emitted all
+# of that fixture's events to the worker (cmd/ai-viewer-ingest/sources.go); so
+# #FIXTURES (3) occurrences proves every source emitted BEFORE we stop. This is
+# the load-safe fix: gating on the schema/migration line only proved OpenWriter
+# finished, so a SIGTERM under load could interrupt Scan() mid-fixture and
+# commit a partial seed. Bounded ~15s (150 × 0.1s) with the same per-iteration
+# PID-death bail.
 want_scans="${#FIXTURES[@]}"
-scan_msg='adapter scan complete; tail starting'
+scan_msg='adapter scan complete'
 # scan_count emits ONE clean integer: grep -c already prints 0 on no match and
 # exits 1, so we only swallow that exit (a bare `|| echo 0` would append a second
 # 0 and yield the two-line value "0\n0", which breaks the [[ -ge ]] arithmetic).
