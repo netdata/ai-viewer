@@ -8,15 +8,20 @@ React + TypeScript + Vite. Single-page app served from Go via `go:embed`. Minima
 
 | Concern | Choice | Why |
 |---|---|---|
-| Build | **Vite (current stable)** | fast dev loop, native ESM, simple config |
-| Language | **TypeScript (current stable, strict mode)** | type safety, IDE support |
-| UI library | **React (current stable)** | ecosystem maturity, hiring familiarity, embedded-binary friendly |
-| Routing | **React Router (current stable)** | the standard |
-| Server state | **TanStack Query (current stable)** | caching, retry, SSE-aware invalidation |
-| Styling | **CSS modules + CSS custom properties for theming** | no runtime CSS-in-JS overhead; theme switch via `:root` vars |
-| Charts | **D3 (current stable)** for topology/timeline; native HTML/CSS tables elsewhere | D3 only where its expressive power is needed |
-| Tests | **Vitest** unit + RTL component tests + **Playwright** for E2E | matches Vite tooling |
-| Lint | **ESLint + typescript-eslint** | zero warnings policy |
+| Build | **Vite 8.x (current stable)** | fast dev loop, native ESM, simple config |
+| Language | **TypeScript 6.x (current stable, strict mode)** | type safety, IDE support |
+| UI library | **React 19.x (current stable)** | ecosystem maturity, hiring familiarity, embedded-binary friendly |
+| Routing | **React Router 7.x (current stable)** | the standard |
+| Server state | **TanStack Query 5.x (current stable)** | caching, retry, SSE-aware invalidation |
+| Styling | **Tailwind CSS 4.x + shadcn/ui primitives + Radix Primitives** | utility-first + accessible primitives + Tailwind v4 runtime-token bridge for instant theme flips |
+| CSS Modules | **Backwards-compat only** | legacy CSS Modules continue to work via the legacy-token shim in `src/theme/app.css`; new code is Tailwind utilities |
+| Charts | **D3 (current stable)** for topology/timeline (legacy) + **@visx/visx 4.x** for the redesigned Stats line + bar charts (planned SOW-0076) | D3 where its expressive power is needed; visx for declarative charts |
+| Tables | **@tanstack/react-table 8.x** for the redesigned sessions/agents/tools tables (headless) | headless = full visual control |
+| Animations | **motion 12.x (formerly framer-motion)** | tiny footprint, hybrid WAAPI + JS engine |
+| Icons | **lucide-react 1.x** | tree-shakable, ISC, 1000+ icons, shadcn-default |
+| Fonts | **Geist Sans + Geist Mono** self-hosted via **@fontsource/* 5.x** | SIL OFL; no Google Fonts dependency; modern + legible |
+| Tests | **Vitest 4.x** unit + RTL component tests + **Playwright 1.x** for E2E | matches Vite tooling |
+| Lint | **ESLint 9.x + typescript-eslint 8.x** | zero warnings policy |
 
 ## Directory Layout
 
@@ -204,42 +209,47 @@ flatten `data.pages[].items` for rendering.
 
 **Operator decision (2026-05-26): theme matches the operating system by default; a manual override is available and persisted.**
 
-Dark and light are first-class equals — both are polished, neither is the "real" one with the other as an afterthought.
-
-### Token file
-
-`theme/tokens.css` defines CSS custom properties under two selectors. Dark is the `:root` default; light overrides via `[data-theme="light"]`. The single `data-theme` attribute on `<html>` is the switch.
+**Updated 2026-06-19 (SOW-0073):** the theme file is now `theme/app.css` (single file, replaces the old `tokens.css` + `global.css` split). It defines semantic CSS custom properties (shadcn-style: `--background`, `--foreground`, `--primary`, `--secondary`, `--muted`, `--accent`, `--destructive`, `--border`, `--input`, `--ring`, `--card`, `--popover`, `--chart-1..5`, `--status-*`, `--source-*`) under two selectors: `:root` for dark (the default), `:root[data-theme="light"]` for light. Tailwind v4's `@theme inline` block bridges the CSS variables to Tailwind utilities (`bg-background`, `text-foreground`, `border-border`, etc.) so the theme switch is instant with zero JS. Dark and light are first-class equals — both are designed, not hue-inversions of each other.
 
 ```css
 :root {
-  /* DARK (default) */
-  --bg-primary: #0d1117;
-  --bg-secondary: #161b22;
-  --bg-tertiary: #21262d;
-  --border: #30363d;
-  --text-primary: #c9d1d9;
-  --text-secondary: #8b949e;
-  --accent: #58a6ff;
-  --success: #3fb950;
-  --warning: #d29922;
-  --error: #f85149;
-  --info: #a5a5ff;
+  /* DARK (default) — OKLCH-based dashboard palette */
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.18 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.7 0.15 250);
+  --primary-foreground: oklch(0.145 0 0);
+  --muted: oklch(0.22 0 0);
+  --muted-foreground: oklch(0.65 0 0);
+  --border: oklch(1 0 0 / 12%);
+  --ring: oklch(0.7 0.15 250);
+  --status-completed: oklch(0.72 0.17 145);
+  --status-running:   oklch(0.78 0.16 75);
+  --status-failed:    oklch(0.65 0.22 25);
+  --status-abandoned: oklch(0.55 0.01 250);
+  --status-interrupted: oklch(0.7 0.18 50);
   /* … */
 }
 
 :root[data-theme="light"] {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f6f8fa;
-  --bg-tertiary: #eaeef2;
-  --border: #d0d7de;
-  --text-primary: #1f2328;
-  --text-secondary: #59636e;
-  --accent: #0969da;
-  --success: #1a7f37;
-  --warning: #9a6700;
-  --error: #cf222e;
-  --info: #5a5aff;
+  /* LIGHT — inverted L* on the same hue families */
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  /* … */
 }
+```
+
+### Typography
+
+Geist Sans (variable weight) for UI text; Geist Mono for tabular / code content. Self-hosted via `@fontsource/geist-sans` + `@fontsource/geist-mono` (SIL OFL; no Google Fonts CDN). Type scale (Tailwind defaults are the foundation, extended via `--font-sans` / `--font-mono` tokens):
+
+- `text-xs` — 0.75 rem, uppercase tracking-wider for table column headers
+- `text-sm` — 0.875 rem, default body
+- `text-base` — 1 rem, page titles / hero numbers
+- `text-lg` — 1.125 rem, page hero (Sessions, Topology, etc.)
+- `text-2xl` — 1.5 rem, oversized hero
+- Numeric columns use `font-variant-numeric: tabular-nums` so digits align.
 ```
 
 ### Theme resolution algorithm
