@@ -10,6 +10,7 @@ import {
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useSearchParams } from 'react-router-dom';
+import { TooltipProvider } from '../../components/ui/tooltip';
 import type {
   AggregateResponse,
   SearchResponse,
@@ -182,9 +183,11 @@ function mountStates(opts: {
 
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={['/stats']}>
-      <Stats />
-    </MemoryRouter>,
+    <TooltipProvider delayDuration={0}>
+      <MemoryRouter initialEntries={['/stats']}>
+        <Stats />
+      </MemoryRouter>
+    </TooltipProvider>,
   );
 }
 

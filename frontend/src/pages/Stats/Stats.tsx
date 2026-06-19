@@ -19,6 +19,9 @@ import { LineChart } from './charts/LineChart';
 import { BarChart } from './charts/BarChart';
 import { SearchBox } from './SearchBox';
 import { formatCost, formatDuration, formatNumber } from '../../lib/format';
+import { Button } from '../../components/ui/button';
+import { Link2 } from 'lucide-react';
+import { cn } from '../../lib/utils';
 import {
   applyStatPatch,
   readStatControls,
@@ -99,6 +102,20 @@ const BREAKDOWN_DIMS: readonly { value: string; label: string }[] = [
   { value: 'by_status', label: 'Status' },
   { value: 'by_error_class', label: 'Error class' },
 ];
+
+/** SummaryStat — a single KPI in the Stats page summary bar. */
+function SummaryStat({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span className={cn('font-mono text-lg font-semibold tabular-nums', accent ?? 'text-foreground')}>
+        {value}
+      </span>
+    </div>
+  );
+}
 
 /** Maximum series drawn on the trend chart; the rest roll into an "other" line. */
 const SERIES_LIMIT = 8;
@@ -187,60 +204,51 @@ export function Stats() {
   );
 
   return (
-    <section aria-labelledby="stats-title">
-      <div className={styles.header}>
-        <h1 id="stats-title">Statistics</h1>
-        <div className={styles.toolbar}>
-          <button
-            type="button"
-            className={styles.copyButton}
-            onClick={() => {
-              void handleCopyLink();
-            }}
+    <section aria-labelledby="stats-title" className="flex flex-col gap-6 px-6 py-5">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 id="stats-title" className="text-2xl font-semibold tracking-tight">Statistics</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Aggregated cost, token, and failure trends over the active filter window.
+          </p>
+        </div>
+        <div className="inline-flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { void handleCopyLink(); }}
+            aria-label="Copy link"
           >
+            <Link2 className="size-3.5" aria-hidden />
             Copy link
-          </button>
+          </Button>
           {/* Polite live region announces the copy outcome; visually hidden. */}
-          <span role="status" aria-live="polite" className={styles.srOnly}>
+          <span role="status" aria-live="polite" className="sr-only">
             {copyStatus}
           </span>
         </div>
       </div>
 
-      {/* ── Summary metrics bar ─────────────────────────────────────────── */}
+      {/* ── Summary metrics bar ───────────────────────────────────────── */}
       {stats.data && (
-        <div className={styles.summaryBar}>
-          <div className={styles.summaryItem}>
-            <span className={styles.summaryValue}>{formatCost(stats.data.totals.cost_usd)}</span>
-            <span className={styles.summaryLabel}>Total cost</span>
-          </div>
-          <div className={styles.summaryItem}>
-            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.session_count)}</span>
-            <span className={styles.summaryLabel}>Sessions</span>
-          </div>
-          <div className={styles.summaryItem}>
-            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.op_count)}</span>
-            <span className={styles.summaryLabel}>Ops</span>
-          </div>
-          <div className={styles.summaryItem}>
-            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.tokens_in)}</span>
-            <span className={styles.summaryLabel}>Tokens in</span>
-          </div>
-          <div className={styles.summaryItem}>
-            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.tokens_out)}</span>
-            <span className={styles.summaryLabel}>Tokens out</span>
-          </div>
-          <div className={styles.summaryItem}>
-            <span className={styles.summaryValue}>{formatNumber(stats.data.totals.failures)}</span>
-            <span className={styles.summaryLabel}>Failures</span>
-          </div>
+        <div className="grid grid-cols-2 gap-3 rounded-lg border border-border bg-card p-4 sm:grid-cols-3 lg:grid-cols-6">
+          <SummaryStat label="Total cost" value={formatCost(stats.data.totals.cost_usd)} accent="text-foreground" />
+          <SummaryStat label="Sessions" value={formatNumber(stats.data.totals.session_count)} accent="text-foreground" />
+          <SummaryStat label="Ops" value={formatNumber(stats.data.totals.op_count)} accent="text-foreground" />
+          <SummaryStat label="Tokens in" value={formatNumber(stats.data.totals.tokens_in)} accent="text-foreground" />
+          <SummaryStat label="Tokens out" value={formatNumber(stats.data.totals.tokens_out)} accent="text-foreground" />
+          <SummaryStat
+            label="Failures"
+            value={formatNumber(stats.data.totals.failures)}
+            accent={stats.data.totals.failures > 0 ? 'text-status-failed' : 'text-foreground'}
+          />
         </div>
       )}
 
       {/* ── Trends over time (multi-series line chart) ────────────────────── */}
-      <section className={styles.panel} aria-labelledby="stats-trends-title">
-        <div className={styles.panelHeader}>
-          <h2 id="stats-trends-title" className={styles.panelTitle}>
+      <section className="rounded-lg border border-border bg-card p-5" aria-labelledby="stats-trends-title">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 id="stats-trends-title" className="text-base font-semibold tracking-tight">
             Trends over time
           </h2>
           <div className={styles.controls}>
@@ -310,9 +318,9 @@ export function Stats() {
       </section>
 
       {/* ── Top-N breakdown (horizontal bars) ─────────────────────────────── */}
-      <section className={styles.panel} aria-labelledby="stats-top-title">
-        <div className={styles.panelHeader}>
-          <h2 id="stats-top-title" className={styles.panelTitle}>
+      <section className="rounded-lg border border-border bg-card p-5" aria-labelledby="stats-top-title">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 id="stats-top-title" className="text-base font-semibold tracking-tight">
             Top {TOP_N} breakdown
           </h2>
           <div className={styles.controls}>
@@ -392,9 +400,9 @@ export function Stats() {
 
       {/* ── Multi-metric comparison table (SOW-0067) ──────────────────────── */}
       {stats.data && (
-        <section className={styles.panel} aria-labelledby="stats-breakdown-title">
-          <div className={styles.panelHeader}>
-            <h2 id="stats-breakdown-title" className={styles.panelTitle}>
+        <section className="rounded-lg border border-border bg-card p-5" aria-labelledby="stats-breakdown-title">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <h2 id="stats-breakdown-title" className="text-base font-semibold tracking-tight">
               Comparison table
             </h2>
             <div className={styles.controls}>
@@ -446,9 +454,9 @@ export function Stats() {
 
       {/* ── Failure analysis ─────────────────────────────────────────────── */}
       {stats.data && stats.data.by_error_class.length > 0 && (
-        <section className={styles.panel} aria-labelledby="stats-failures-title">
-          <div className={styles.panelHeader}>
-            <h2 id="stats-failures-title" className={styles.panelTitle}>
+        <section className="rounded-lg border border-border bg-card p-5" aria-labelledby="stats-failures-title">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <h2 id="stats-failures-title" className="text-base font-semibold tracking-tight">
               Failure analysis
             </h2>
             <button
@@ -521,8 +529,8 @@ export function Stats() {
       )}
 
       {/* ── Deep search (ops + logs) ──────────────────────────────────────── */}
-      <section className={styles.panel} aria-labelledby="stats-search-title">
-        <h2 id="stats-search-title" className={styles.panelTitle}>
+      <section className="rounded-lg border border-border bg-card p-5" aria-labelledby="stats-search-title">
+        <h2 id="stats-search-title" className="mb-4 text-base font-semibold tracking-tight">
           Search ops &amp; logs
         </h2>
         <SearchBox filters={filters} />
