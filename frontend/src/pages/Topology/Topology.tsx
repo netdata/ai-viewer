@@ -25,7 +25,6 @@ import type { ForceWorkerRequest, ForceWorkerResponse } from '../../viz/forceWor
 import ForceWorker from '../../viz/forceWorker?worker';
 import { TopologyRenderer } from '../SessionDetail/TopologyTab/TopologyRenderer';
 import { formatNumber } from '../../lib/format';
-import styles from '../SessionDetail/TopologyTab/TopologyTab.module.css';
 
 // Cross-session topology page (ui-pages.md §/topology). Reuses the chunk-6a
 // renderer + layout engine, but the scope is the global FilterBar filter rather
@@ -187,14 +186,20 @@ export function Topology() {
   };
 
   return (
-    <section aria-labelledby="topology-title" className={styles.wrap}>
-      <h1 id="topology-title">Topology</h1>
+    <section aria-labelledby="topology-title" className="flex flex-col gap-6 px-6 py-5">
+      <div>
+        <h1 id="topology-title" className="text-2xl font-semibold tracking-tight">Topology</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Cross-session actor graph. Each circle is one session, sized by the
+          selected metric. Hover for tooltips, click to open the session.
+        </p>
+      </div>
 
-      <div className={styles.toolbar}>
-        <label className={styles.control}>
-          <span>Size by</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1 text-sm">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Size by</span>
           <select
-            className={styles.select}
+            className="bg-transparent text-sm text-foreground focus:outline-none"
             value={metric}
             onChange={(e) => {
               setMetric(e.target.value as TopologyMetric);
@@ -208,10 +213,17 @@ export function Topology() {
           </select>
         </label>
 
-        <fieldset className={styles.modeToggle}>
-          <legend className={styles.srOnly}>Layout</legend>
+        <fieldset className="inline-flex items-center gap-1 rounded-md border border-border bg-card p-1">
+          <legend className="sr-only">Layout</legend>
           {MODES.map((m) => (
-            <label key={m.key} className={styles.modeOption}>
+            <label
+              key={m.key}
+              className={`inline-flex cursor-pointer items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs ${
+                mode === m.key
+                  ? 'bg-accent text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
               <input
                 type="radio"
                 name="cross-topology-mode"
@@ -219,6 +231,7 @@ export function Topology() {
                 onChange={() => {
                   onSelectMode(m.key);
                 }}
+                className="sr-only"
               />
               <span>{m.label}</span>
             </label>
@@ -227,7 +240,11 @@ export function Topology() {
 
         <button
           type="button"
-          className={styles.freezeButton}
+          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-sm transition-colors ${
+            frozen
+              ? 'border-primary bg-accent text-foreground'
+              : 'border-border bg-card text-foreground hover:bg-accent'
+          }`}
           aria-pressed={frozen}
           disabled={mode === 'hierarchical'}
           title={
@@ -240,14 +257,14 @@ export function Topology() {
           {frozen ? 'Unfreeze layout' : 'Freeze layout'}
         </button>
 
-        <span className={styles.spacer} />
-        <span className={styles.nodeCount}>
-          {nodes.length} session{nodes.length === 1 ? '' : 's'}
+        <span className="ml-auto inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground tabular-nums">
+          <span>{nodes.length}</span>
+          <span>session{nodes.length === 1 ? '' : 's'}</span>
         </span>
       </div>
 
       {truncated ? (
-        <p className={styles.nodeCount} role="status">
+        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground" role="status">
           Showing top {formatNumber(nodes.length)} sessions by{' '}
           {METRICS.find((m) => m.key === metric)?.label.toLowerCase() ?? metric}; narrow the filter
           to see the rest.
@@ -255,14 +272,20 @@ export function Topology() {
       ) : null}
 
       {isPending ? (
-        <LoadingState label="Loading topology…" />
+        <div className="rounded-lg border border-border bg-card p-12">
+          <LoadingState label="Loading topology…" />
+        </div>
       ) : isError ? (
-        <ErrorState error={error} title="Failed to load topology" />
+        <div className="rounded-lg border border-border bg-card p-12">
+          <ErrorState error={error} title="Failed to load topology" />
+        </div>
       ) : nodes.length === 0 ? (
-        <EmptyState>No sessions match the current filters.</EmptyState>
+        <div className="rounded-lg border border-dashed border-border bg-card/50 p-12">
+          <EmptyState>No sessions match the current filters.</EmptyState>
+        </div>
       ) : (
         <>
-          <div className={styles.vizArea}>
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
             <TopologyRenderer
               positioned={positioned}
               edges={edges}
@@ -284,21 +307,38 @@ export function Topology() {
 /** Legend explains the encodings (cross-session nodes are all sessions). */
 function Legend() {
   return (
-    <div className={styles.legend} aria-label="Topology legend">
-      <span className={styles.legendItem}>
-        <span className={styles.legendSwatch} style={{ background: 'var(--text-secondary)' }} />
-        Session (circle)
+    <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground" aria-label="Topology legend">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">Legend</span>
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          aria-hidden
+          className="inline-block size-2.5 rounded-full"
+          style={{ backgroundColor: 'var(--muted-foreground)' }}
+        />
+        Session
       </span>
-      <span className={styles.legendItem}>
-        <span className={styles.legendSwatch} style={{ background: 'var(--success)' }} />
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          aria-hidden
+          className="inline-block size-2.5 rounded-full"
+          style={{ backgroundColor: 'var(--status-completed)' }}
+        />
         No failures
       </span>
-      <span className={styles.legendItem}>
-        <span className={styles.legendSwatch} style={{ background: 'var(--warning)' }} />
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          aria-hidden
+          className="inline-block size-2.5 rounded-full"
+          style={{ backgroundColor: 'var(--status-running)' }}
+        />
         Some failures
       </span>
-      <span className={styles.legendItem}>
-        <span className={styles.legendSwatch} style={{ background: 'var(--error)' }} />
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          aria-hidden
+          className="inline-block size-2.5 rounded-full"
+          style={{ backgroundColor: 'var(--status-failed)' }}
+        />
         Many failures
       </span>
     </div>
