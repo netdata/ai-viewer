@@ -117,4 +117,45 @@ describe('SessionRow', () => {
     const row = screen.getByRole('row');
     expect(within(row).getByText(/1m|60s/)).toBeInTheDocument();
   });
+
+  // ── SOW-0068: primary/secondary distinction + parent-tree drill-in ─────────
+
+  it('renders NO kind badge on a root (primary) session', () => {
+    renderRow(makeSession({ kind: 'root' }));
+    expect(screen.queryByText('sub-agent')).not.toBeInTheDocument();
+    expect(screen.queryByText('internal')).not.toBeInTheDocument();
+    expect(screen.queryByText('fork')).not.toBeInTheDocument();
+  });
+
+  it('renders a kind badge on secondary sessions (sub_agent / tool_internal / fork)', () => {
+    const cases: Array<[SessionListItem['kind'], string]> = [
+      ['sub_agent', 'sub-agent'],
+      ['tool_internal', 'internal'],
+      ['fork', 'fork'],
+    ];
+    for (const [kind, label] of cases) {
+      cleanup();
+      renderRow(makeSession({ kind }));
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it('renders a "↩ parent" link to the parent session Topology tab for a secondary with a parent', () => {
+    renderRow(makeSession({ kind: 'sub_agent', parent_session_id: 'parent-1' }));
+    const parentLink = screen.getByRole('link', { name: /view parent session parent-1 tree/i });
+    expect(parentLink).toHaveAttribute('href', '/sessions/parent-1?tab=topology');
+  });
+
+  it('renders NO parent link on a root session (no parent_session_id)', () => {
+    renderRow(makeSession({ kind: 'root', parent_session_id: null }));
+    expect(screen.queryByRole('link', { name: /view parent/i })).not.toBeInTheDocument();
+  });
+
+  it('renders NO parent link on a root even if a malformed parent_session_id is set (defensive)', () => {
+    // A root has no parent by definition (backend invariant); the link is gated
+    // on kind !== 'root' so malformed data never yields a parent link on a
+    // primary row or a self-referential link.
+    renderRow(makeSession({ kind: 'root', parent_session_id: 'malformed' }));
+    expect(screen.queryByRole('link', { name: /view parent/i })).not.toBeInTheDocument();
+  });
 });

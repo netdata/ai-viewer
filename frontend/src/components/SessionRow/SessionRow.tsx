@@ -37,18 +37,53 @@ function sourceLabel(sourceID: string): string {
 }
 
 /**
+ * kindLabel maps a secondary session kind to its badge label (SOW-0068). A root
+ * (primary) session returns null — primary is the default and renders no badge,
+ * so the primary-vs-secondary distinction reads at a glance without noise.
+ */
+function kindLabel(kind: SessionListItem['kind']): string | null {
+  switch (kind) {
+    case 'sub_agent': return 'sub-agent';
+    case 'tool_internal': return 'internal';
+    case 'fork': return 'fork';
+    default: return null; // root → primary → no badge
+  }
+}
+
+/**
  * SessionRowBody renders the column CELLS only (no <tr>), so a parent <tr> can
  * prepend extra leading columns (e.g. the SessionsList child-expander) without
  * forking the canonical column order. SessionRow wraps it in a <tr> for
  * standalone use (and its component test).
+ *
+ * SOW-0068: secondary sessions carry a kind badge next to the agent name, and a
+ * secondary with a parent_session_id carries a "↩ parent" link to that parent's
+ * Topology tab (the tree that spawned it). Root rows render neither.
  */
 export function SessionRowBody({ session }: SessionRowProps) {
+  const badge = kindLabel(session.kind);
+  // The parent-tree link is a SECONDARY-session affordance (SOW-0068). Gated on
+  // kind !== 'root' as well as parent_session_id: a root has no parent by
+  // definition (the backend invariant — internal/canonical/events.go), so this
+  // is defense-in-depth against malformed data and keeps the rendered affordance
+  // precise (never a self-link or a parent link on a primary row).
+  const showParentLink = session.kind !== 'root' && !!session.parent_session_id;
   return (
     <>
       <td className={styles.agent}>
         <Link to={`/sessions/${encodeURIComponent(session.id)}`}>
           {session.agent_name || session.native_id}
         </Link>
+        {badge && <span className={styles.kindBadge}>{badge}</span>}
+        {showParentLink && session.parent_session_id && (
+          <Link
+            to={`/sessions/${encodeURIComponent(session.parent_session_id)}?tab=topology`}
+            className={styles.parentLink}
+            aria-label={`View parent session ${session.parent_session_id} tree`}
+          >
+            ↩ parent
+          </Link>
+        )}
       </td>
       <td className={styles.mono}>{session.model || '—'}</td>
       <td className={styles.source}>{sourceLabel(session.source_id ?? '')}</td>

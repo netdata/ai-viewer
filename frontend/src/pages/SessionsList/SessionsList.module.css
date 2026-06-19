@@ -2,6 +2,33 @@
   overflow-x: auto;
 }
 
+/* SOW-0068: page header row — title + the "Show secondary" toggle. */
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.toggle input {
+  cursor: pointer;
+}
+
+.toggle:focus-within {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;

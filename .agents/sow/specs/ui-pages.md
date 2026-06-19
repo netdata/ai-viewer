@@ -34,7 +34,17 @@ human-readable.
 
 ### `/` — Sessions list
 
-- Hierarchical list: root sessions at the top level, expandable to show child (sub-agent) sessions.
+- **Primary by default** — the list shows PRIMARY (root) sessions only, most
+  recent first. A "Show secondary" toggle (SOW-0068) switches the query to
+  `group=all`, revealing secondary sessions — sub-agent (`sub_agent`),
+  tool-internal (`tool_internal`), and fork (`fork`) kinds — each marked with a
+  small kind badge next to the agent name so primary vs secondary is obvious at
+  a glance. Primary (root) rows render no badge (the default).
+- **Secondary drill-in (SOW-0068)** — a secondary row whose `parent_session_id`
+  is set carries a "↩ parent" link to its parent session's Topology tab
+  (`/sessions/<parent>?tab=topology`), so the operator can jump straight to the
+  tree that spawned it. Root rows keep the existing `child_session_count`
+  expander → the session's own detail (Overview lists its children).
 - Columns: agent, model, start time, duration, status (with color), turns, ops, tokens in/out, cost, failures.
 - Click a row → session detail page.
 - Live updates: as new sessions appear within the timeframe + filters, they fade-in at the top of the list. *(Phase-1: the list refreshes live via SSE query-invalidation; the fade-in animation itself is Phase-2 — see §"Realtime UX Rules" and SOW-0018.)*

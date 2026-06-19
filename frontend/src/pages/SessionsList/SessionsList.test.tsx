@@ -243,4 +243,19 @@ describe('SessionsList', () => {
     await user.click(screen.getByRole('link', { name: 'nedi' }));
     expect(screen.getByTestId('loc')).toHaveTextContent('/sessions/sess-9');
   });
+
+  it('defaults to primary-only (group=root)', () => {
+    infiniteSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
+    renderPage();
+    expect(infiniteSpy.mock.calls[0]?.[1]).toBe('root');
+  });
+
+  it('the "Show secondary" toggle widens the query to group=all', async () => {
+    const user = userEvent.setup();
+    infiniteSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
+    renderPage();
+    expect(infiniteSpy.mock.calls.at(-1)?.[1]).toBe('root');
+    await user.click(screen.getByRole('checkbox', { name: /show secondary/i }));
+    expect(infiniteSpy.mock.calls.at(-1)?.[1]).toBe('all');
+  });
 });
