@@ -5,6 +5,14 @@
 /ai-viewer-ingest
 /ai-viewer-serve
 
+# Stray root-level node_modules/ created by an earlier Playwright run
+# (not a project dependency tree). The project deps live under
+# frontend/node_modules/, already gitignored.
+/node_modules/
+
+# pi agent session state (goals, scratch). Not part of the project.
+/.pi/
+
 # Go
 *.test
 *.out

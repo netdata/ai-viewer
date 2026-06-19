@@ -1,0 +1,293 @@
+# SOW-0073 — Visual Foundation: design system, layout shell, redesigned Sessions page
+
+## Status
+
+Status: in-progress
+
+Sub-state: 2026-06-19. Research pass complete (see `.agents/sow/specs/ux-stack-research.md`). Moved to `current/` per the operator's open-ended authorization ("work the way you see fit"). Pre-implementation screenshots captured at `.agents/sow/done/SOW-0073-screenshots/pre/`. Beginning Chunk 1 (Tailwind v4 + shadcn init).
+
+## Requirements
+
+### Purpose
+
+Lay the visual + UX foundation for a modern, polished, professional ai-viewer frontend. Ship a redesigned **Sessions page** as the proof-of-quality. The result must read as a modern SaaS dashboard (Linear / Vercel / Stripe Dashboard class), not as a 2005 admin tool, in both light and dark mode, with full keyboard / screen-reader accessibility preserved.
+
+### User Request
+
+Verbatim, operator 2026-06-19:
+
+> "The application is not a modern, appealing, professional, polished, web application. Everything is extremely primitive, childish, like being developed in patchy way without attention to detail. And I mean everything. Primitive navigation, ugly UI, extremely bad UX."
+>
+> "/goal-set I authorize you to work the way you see fit, in order to provide a modern, polished, professional, appealing web application, in both UI and UX. Use the 5 reviewers (glm, minimax, kimi, mimo, qwen) the way you see fit (some of them - like glm - do not have vision capability, so they can't see images, but they can help in coding/reviews). Use playwright_headless, not playwright_costa (_costa interferes with my desktop, the headless is hidden from me). You may segment the work any way you see fit - by page, by feature, by type of work, etc - you may integrate third party libraries for whatever is needed - visuals, components, themes, charts, graphs, etc - but please first do an online research for find their latest versions - you may perform online searches to read documentation or get ideas. You have to pay attention to both UI (theme, styling, icons, typography, etc) and UI (information density, navigation, flows, usability). You have to properly order the information based on importance, structure the layout ergonomically. Your goal is to help users be more efficient and grasp the information easily, or find what they need easily. You are completely free to take all decisions required, apart from interfering with other applications running on my workstation, killing processes you didn't start, deleting files that you didn't create or do not belong to this project. This is open ended. Do your best to provide professional web app for this application."
+
+### Assistant Understanding
+
+Facts:
+
+- Backend is feature-complete, tested, deployed, and running (15 GB SQLite, 5 sources, 30+ min uptime, all SOWs 0001-0071 done except the three pending)
+- Frontend is React 19.2.7 + Vite 8.0.16 + TS 6 + react-router 7 + react-query 5 + custom D3 viz
+- Current styling is CSS Modules with hand-rolled tokens in `src/theme/tokens.css`; the palette is GitHub-dark-flat
+- The currently rendered Sessions page is the operator's example of "primitive and childish": filter bar stacked vertically, raw HTML inputs with "comma,separated" placeholders, no icons, no motion, no status-pill design, no real typography system, table is a dense database-admin style with no hover/row-zebra/tabular-nums/column-resize/density toggle
+- Existing 9 107 lines of TS/TSX + extensive test suite (Playwright + Vitest + axe) must keep passing throughout the migration
+- Bundle budget is 500 KB gzipped main chunk (existing SOW-enforced gate)
+- Operator specifically authorized: any third-party libraries after online research for current versions
+- Operator specifically required: `playwright_headless` for browser QA, never `playwright_costa`
+
+Inferences:
+
+- The Sessions page is the highest-impact visual deliverable: it's the home page, the operator lands here first, and the table is the single most-seen component in the app
+- A real design system (tokens + primitives) must land BEFORE the Sessions page can be polished; we cannot get to "modern SaaS" by styling one page
+- Tailwind v4 + shadcn/ui is the right primitive set: it's the modern default, has shadcn's accessible-by-default components, and the migration from CSS Modules is mechanical (replace class strings, delete module files)
+- Visual review is the new bottleneck: the 5-reviewer Production-Grade Loop must run per visual deliverable, not per SOW, with `glm` (no vision) contributing on code/contract/a11y only
+- Operators judge "modern" by screenshots first and code second — the verification contract must include light + dark screenshots, accessibility snapshots, and reviewer verdicts on the rendered output
+
+Unknowns:
+
+- Whether shadcn/ui's `init` will run cleanly on this exact Vite 8 + TS 6 + ESLint 9 stack (mitigation: it's documented to work; we'll fix as we go and document)
+- Whether the bundle size will stay under 500 KB after Tailwind + Radix + lucide + motion land (mitigation: Tailwind purges; we'll measure per chunk and code-split heavy viz pages)
+
+### Acceptance Criteria
+
+1. **Design tokens** (`frontend/src/theme/`) updated to a coherent system: color (semantic + scale, light + dark), typography (Geist Sans + Geist Mono, full type scale), spacing (4 px base, 6 steps), radius (4 steps), shadow (3 elevations), motion (durations + easings). Light and dark both fully designed. All tokens in CSS custom properties under a single `@theme` block; no `tokens.css`/`global.css` split.
+2. **shadcn/ui initialized** with the chosen neutral preset + Geist fonts + lucide icons + TS strict + ESLint clean. Standard primitives installed: `button`, `card`, `badge`, `input`, `select`, `dropdown-menu`, `dialog`, `popover`, `tooltip`, `separator`, `tabs`, `table`, `skeleton`, `scroll-area`, `command` (the last for the future command-palette, but installed now so the keyboard shortcut works).
+3. **Icon system** in place: `lucide-react` installed, every Unicode glyph (`⤷`, `▸`, `◑`, `○`, etc.) replaced with the right icon. Documented mapping lives in the spec.
+4. **App shell** redesigned: a proper left sidebar (brand + primary nav + secondary nav + footer with version + health dot) and a top bar (page title + live indicator + theme toggle + command-palette trigger). The filter bar moves out of the global header into a collapsible filter panel anchored to the sidebar.
+5. **Status pill** component (`<StatusBadge>`) with semantic color: `running` (amber, pulsing), `completed` (green), `failed` (red), `abandoned` (gray), `interrupted` (orange). All five states have icons and a tooltip explaining what they mean.
+6. **Sessions table** redesigned end-to-end: sticky header, hover row, zebra on alt rows, tabular-nums on numeric columns, click-to-navigate on the agent cell, child-session expander as a proper disclosure with a chevron icon, `Show secondary` becomes a segmented control in the table toolbar, "Load more" becomes an infinite-scroll trigger (or kept as a button if tests rely on it), per-column sort, column-density toggle, empty state designed, loading skeleton, error state designed.
+7. **Light + dark parity**: every component, including the redesigned Sessions page, looks intentional in both themes. No "looks great in dark, washed out in light" placeholders. Verified by side-by-side screenshots.
+8. **Accessibility** preserved or improved: keyboard nav for every interactive element, visible focus rings, axe-core a11y spec passes on the redesigned Sessions page (zero serious/critical), screen-reader labels on all icon-only buttons, color contrast WCAG AA in both themes.
+9. **Tests** updated where component APIs changed; new tests added for the design-system primitives and the redesigned Sessions page; all existing tests pass; `npm run build` succeeds; `npm run lint` succeeds; `scripts/test.sh` (frontend portion) succeeds.
+10. **Bundle** under 500 KB gzipped main chunk; if a viz page is too heavy, it is dynamic-imported.
+11. **Screenshots** captured before and after for the Sessions page in light and dark (via `playwright_headless`) and stored under `.agents/sow/done/SOW-0073-screenshots/` for the operator report.
+12. **Specs** updated: `.agents/sow/specs/frontend-architecture.md` and `.agents/sow/specs/ui-pages.md` reflect the new tokens, primitives, shell, and Sessions page; a new `.agents/sow/specs/design-system.md` is created.
+13. **5-reviewer Production-Grade Loop** converged for the redesigned Sessions page: `mimo`, `minimax`, `kimi`, `qwen` (vision-capable) each produce a `PRODUCTION GRADE` or `NEEDS WORK` verdict on the rendered page; `glm` produces a `PRODUCTION GRADE` verdict on the code/contract/a11y side. CTO verifies every claim per `AGENTS.md` §Claim verification.
+
+## Analysis
+
+Sources checked:
+
+- `frontend/package.json` (existing deps)
+- `frontend/src/theme/tokens.css`, `frontend/src/theme/global.css` (current token system)
+- `frontend/src/components/Layout/Layout.tsx` + `Layout.module.css` (current shell)
+- `frontend/src/components/FilterBar/FilterBar.tsx` (the worst offender)
+- `frontend/src/pages/SessionsList/SessionsList.tsx` (the home page)
+- `frontend/src/components/SessionRow/` (the row component)
+- `frontend/src/state/theme.ts` (the existing theme system — keep, extend)
+- `.agents/sow/specs/frontend-architecture.md` (the spec that drives the change)
+- `.agents/sow/specs/ui-pages.md` (the spec that drives the change)
+- `.agents/sow/specs/ux-stack-research.md` (the research pass, 2026-06-19)
+- npm registry for current stable versions of: `tailwindcss`, `@tailwindcss/vite`, `lucide-react`, `motion`, `@visx/visx`, `@tanstack/react-table`, `recharts`, `geist`, `@fontsource/geist-sans`, `@fontsource/geist-mono`, `class-variance-authority`, `clsx`, `tailwind-merge`, `@radix-ui/*`
+- shadcn/ui official docs (ui.shadcn.com/docs/installation/vite) — confirmed Tailwind v4 + React 19 path
+
+Current state:
+
+- App runs at `http://127.0.0.1:7710` (verified 2026-06-19)
+- 9 107 lines of TS/TSX in `frontend/src/`, organized by feature (`components/`, `pages/`, `state/`, `lib/`, `viz/`, `theme/`, `types/`, `api/`)
+- Existing tests: 683+ frontend tests passing; Playwright e2e + axe a11y spec green
+- Existing CI: lint, typecheck, unit, e2e, axe, bundle-size, coverage, secrets-scan, no-AI-attribution all green
+- 69 SOWs done; 3 pending (this SOW becomes 0073)
+- All bundle-size, coverage, secrets, and a11y gates active on every push
+
+Risks:
+
+- **Big surface** (CSS Modules → Tailwind migration touches every component file) — mitigated by chunked rollout: tokens first, primitives wrappers, layout shell, Sessions page only
+- **Bundle bloat** from Radix + lucide + motion + Geist — mitigated by Tailwind purge + dynamic import for heavy viz pages
+- **shadcn `init` modifying package.json / vite.config.ts** — accepted; the CTO reads the diff and re-runs the full gate suite
+- **Radix UI React 19 corner cases** (some chatter on GH) — mitigated by the June 2026 Radix release + shadcn shipping on it; if a specific primitive misbehaves we file a tracked follow-up
+- **Visual taste ceiling** — the CTO is not a designer. The 5-reviewer cycle, the reference product targets (Linear, Vercel, Stripe, Datadog), and the operator's "modern, polished" judgment are the guardrails
+- **Operator fatigue on review** — the redesigned Sessions page is the first proof. If the operator disagrees with the direction, we pause and recalibrate before the next page
+
+## Pre-Implementation Gate
+
+Status: ready
+
+Problem / root-cause model:
+
+The frontend was built backend-first: the architecture (`api/`, `state/`, custom D3 viz, react-query) is solid, but the styling layer is a hand-rolled token system + per-component CSS Modules. The token system covers color + spacing + radius + a small type scale, but no icon system, no motion, no elevation system, no component primitives, no design system. Every page's components are styled in isolation, so the result is internally consistent in vibe (2005 admin) but not visually distinct. The Sessions page is the most visible: the filter bar is a stacked vertical brick wall of raw HTML inputs; the table is a 13-column dense database admin grid with no hover, no zebra, no tabular-nums; status is a text pill with the same orange for every state; no real typography hierarchy. The fix is a one-time design-system + layout-shell + Sessions-page investment that creates the foundation for the rest of the redesign.
+
+Evidence reviewed:
+
+- `frontend/src/theme/tokens.css` (current tokens, GitHub-dark palette, light mode copy)
+- `frontend/src/components/Layout/Layout.tsx` + `Layout.module.css` (current top-nav shell, no sidebar)
+- `frontend/src/components/FilterBar/FilterBar.tsx` + `FilterBar.module.css` (the worst filter bar)
+- `frontend/src/pages/SessionsList/SessionsList.tsx` + `SessionsList.module.css` (the home page)
+- `frontend/src/components/SessionRow/SessionRow.tsx` (the row component)
+- `frontend/src/components/StatusViews/StatusViews.tsx` (existing loading/empty/error states — keep, restyle)
+- `frontend/src/components/ThemeToggle/ThemeToggle.tsx` (the A ◑ ○ theme toggle — restyle to icon buttons)
+- Live render at `http://127.0.0.1:7710/` captured to `frontend/scripts/screenshots-pre-0073/` (2026-06-19) for the before/after comparison
+- `.agents/sow/specs/frontend-architecture.md` — "Theming" section, "Styling" section
+- `.agents/sow/specs/ui-pages.md` — "/" (Sessions) section
+- `.agents/sow/specs/ux-stack-research.md` — the full research pass
+
+Affected contracts and surfaces:
+
+- All frontend `frontend/src/components/**/*.module.css` files (will be removed or replaced as each is touched)
+- `frontend/src/theme/tokens.css`, `frontend/src/theme/global.css` (will be replaced)
+- `frontend/vite.config.ts` (Tailwind v4 plugin added)
+- `frontend/tsconfig.json`, `frontend/tsconfig.app.json` (path alias for `@/*` if shadcn requires it — already in place)
+- `frontend/package.json` (Tailwind, shadcn deps, Radix deps, lucide, motion, Geist)
+- `frontend/eslint.config.ts` (Tailwind class sorting plugin)
+- Public surface: every visible page on the running app (Sessions, Topology, Stats, Sources, Models, Tools, Agents, SessionDetail) — but only Sessions is fully redesigned in this SOW
+- Specs: `frontend-architecture.md`, `ui-pages.md`, new `design-system.md`
+- AGENTS.md: no change expected
+- Runtime project skills: no change expected; `project-frontend` will get a new sub-section on the design system after this lands
+
+Existing patterns to reuse:
+
+- `frontend/src/state/theme.ts` (theme provider, `data-theme` on `<html>`, `localStorage` override, OS-following auto) — KEEP, no rewrite. The shadcn theme + the existing ThemeProvider compose: shadcn sets tokens as CSS variables on `:root` / `.dark` / `.light`, the existing provider toggles `data-theme` on `<html>`, the two-line no-flash inline script in `index.html` keeps it all in sync from first paint.
+- `frontend/src/state/filters.ts` (URL-synced filter state) — KEEP, no rewrite. Only the FilterBar's visual presentation changes; the state contract is unchanged.
+- `frontend/src/components/StatusViews/StatusViews.tsx` (`LoadingState`, `EmptyState`, `ErrorState`) — KEEP, restyle with shadcn `Skeleton` and consistent visuals
+- `frontend/src/api/` and `frontend/src/state/useLiveUpdates.ts` (SSE + react-query) — UNTOUCHED
+- The brand identity, color philosophy, and `data-theme` mechanism are preserved; only the tokens, primitives, and per-page composition are redone
+
+Risk and blast radius:
+
+- **Code-level**: all visible components in `frontend/src/components/` and `frontend/src/pages/SessionsList/`, `frontend/src/pages/SessionDetail/` will be touched in this SOW (only Sessions fully, but the shell redesign touches the shared header/footer for all pages — which is fine because the new shell IS the new home for the nav, and the rest of the pages render below it unchanged for now).
+- **Visual-level**: every page in the app sees a different shell + filter-bar location immediately. If the operator dislikes the new shell, we have to walk it back across every page — but this is acceptable for the level of overhaul requested.
+- **Bundle-level**: a one-time jump; mitigated by code-splitting heavy viz pages. The bundle-size gate catches regressions.
+- **Data-level**: none (frontend-only).
+- **Operator-experience-level**: the operator will see a different app on reload. The change is intended and requested.
+
+Sensitive data handling plan:
+
+- Frontend-only work. No new code paths handle secrets.
+- No customer data, no real session content, no API keys, no operator name introduced.
+- Before/after screenshots are stored under `.agents/sow/done/SOW-0073-screenshots/` and contain only what the running app shows on the home page (the Sessions table). The current Sessions table contains real session data from the operator's workstation; the screenshots will too. We will not redact in screenshots (they are SOW artifacts for the operator's review, and the data is the operator's own), but we will NOT commit them as part of the build — they live in the SOW folder as evidence.
+
+Implementation plan:
+
+1. **Tailwind v4 + shadcn init** (chunk 1): install `tailwindcss@4.3.1` + `@tailwindcss/vite`, update `vite.config.ts`, replace `theme/tokens.css` + `theme/global.css` with a single `theme/app.css` that uses `@import "tailwindcss"` + `@theme` for the token block, run `npx shadcn@latest init` with neutral preset, verify build + lint.
+2. **Tokens + Geist fonts** (chunk 2): add `@fontsource/geist-sans` + `@fontsource/geist-mono`, set the type scale in `@theme`, install the chosen neutral color palette (shadcn's neutral is the default; tweak to match the operator's existing accent feel), verify the shell renders in both themes.
+3. **Primitive components** (chunk 3): install the shadcn primitives the rest of the work depends on (`button`, `card`, `badge`, `input`, `select`, `dropdown-menu`, `dialog`, `popover`, `tooltip`, `separator`, `tabs`, `table`, `skeleton`, `scroll-area`, `command`, `toggle`, `toggle-group`, `sheet`, `sonner` for toasts). Wrap each as our own typed component if shadcn's defaults need a layer (e.g. for `data-testid` consistency or the right import path). Add `class-variance-authority`, `clsx`, `tailwind-merge` if not auto-added by shadcn.
+4. **Icon system + glyph replacement** (chunk 4): install `lucide-react@1.21.0`, replace every Unicode glyph in the codebase with the right lucide icon. Document the mapping in the new `design-system.md` spec.
+5. **Status badge system** (chunk 5): implement `<StatusBadge status={...} />` with the five states, semantic color, icon, and tooltip. Use the shadcn `Badge` primitive under the hood.
+6. **App shell** (chunk 6): redesign `<Layout>` to a sidebar + top-bar pattern. Brand at top of sidebar with a small logo glyph (a custom inline SVG derived from the existing brand mark), primary nav (Sessions / Topology / Statistics / Sources / Models / Tools / Agents) below the brand, secondary nav (Settings / Help) at the bottom, health dot + version in the footer, top bar with page title (route-driven) + live indicator + theme toggle + command palette trigger (`⌘K`). Move the filter bar out of the header into a collapsible filter panel that opens as a sheet on mobile and as a docked sidebar section on desktop.
+7. **Sessions page** (chunk 7): full redesign. Sticky table header, hover rows, zebra on alt rows, tabular-nums on numerics, click-row-to-open, child-session expander as a real disclosure, `Show secondary` as a segmented control, per-column sort, column density toggle (Comfortable / Compact), designed empty/loading/error states, designed 404 ("no sessions match filters") with a "Clear filters" call-to-action. Take before/after screenshots.
+8. **Tests** (chunk 8): update the SessionsList test, the SessionRow test, the FilterBar test, the StatusViews tests, the Layout test, the ThemeToggle test. Add new tests for the new primitives (`StatusBadge`, the redesigned filter panel, the redesigned shell). Re-run `npm run test`, `npm run e2e`, `npm run e2e:a11y`, `npm run check:bundle-size`, `npm run lint`, `npm run typecheck`.
+9. **5-reviewer Production-Grade Loop** (chunk 9): commit the work, then trigger the loop on the final diff. `mimo`/`minimax`/`kimi`/`qwen` (vision-capable) review the rendered Sessions page screenshots in light + dark and produce PRODUCTION GRADE / NEEDS WORK with P0–P3 findings. `glm` reviews the code/contract/a11y side. CTO verifies every claim per `AGENTS.md` §Claim verification. Iterate to 5/5 PRODUCTION GRADE (or only P3 noise with disposition).
+10. **Operator report** (chunk 10): SOW committed with `Status: completed` and moved to `done/`; before/after screenshots committed under `SOW-0073-screenshots/`; operator-facing summary in the SOW's `## Outcome` section.
+
+Validation plan:
+
+- `frontend/`: `npm run test` (Vitest), `npm run lint`, `npm run typecheck`, `npm run build` (which includes the bundle-size check)
+- `frontend/`: `npm run e2e --project=chromium` (Playwright e2e suite)
+- `frontend/`: `npm run e2e:a11y` (axe-core a11y specs)
+- `frontend/`: `npm run check:bundle-size` (must stay ≤ 500 KB gzipped main chunk)
+- Backend: full `scripts/test.sh` and `scripts/gates.sh` to confirm no collateral damage (we shouldn't touch backend, but verify)
+- Visual: `playwright_headless` screenshots of `http://127.0.0.1:7710/` in light + dark, before and after, stored under `.agents/sow/done/SOW-0073-screenshots/`
+- A11y: axe-core spec captures the new accessibility tree; manual review of every icon-only button for screen-reader label
+- 5-reviewer cycle: per `AGENTS.md` §Production-Grade Loop
+
+Artifact impact plan:
+
+- AGENTS.md: no change expected (Phase: Development banner + Hard Rules cover this work)
+- Runtime project skills: `project-frontend` SKILL gets a new "Design system" section after this lands (deferred to the same SOW to keep documentation in lockstep)
+- Specs:
+  - `.agents/sow/specs/frontend-architecture.md` — update "Theming" and "Styling" sections to reflect Tailwind v4 + shadcn + Geist
+  - `.agents/sow/specs/ui-pages.md` — update the Sessions page section; add the design-system invariants
+  - `.agents/sow/specs/design-system.md` — NEW. Tokens, primitives, icon mapping, status mapping, motion, accessibility
+- End-user/operator docs: `docs/runbook.md` gets a "Visual conventions" subsection if appropriate (deferred — this is a worker-local tool, the operator reads the SOW)
+- End-user/operator skills: none affected
+- SOW lifecycle: created in `pending/`, moves to `current/` on operator sign-off (or per the open-ended authorization, immediately), moves to `done/` on completion with `Status: completed` in the same commit as the work
+
+Open-source reference evidence:
+
+- shadcn/ui docs (ui.shadcn.com) — for the Vite + Tailwind v4 + React 19 install path
+- Tailwind v4 docs (tailwindcss.com/docs/installation/using-vite) — for the Vite plugin
+- lucide.dev/guide/react — for the lucide-react API
+- motion.dev/docs/react-upgrade-guide — for the v12 motion import path
+- visx docs (airbnb.io/visx) — for the viz primitives (used later, not in this SOW)
+- Linear.app, Vercel.com, Stripe.com/dashboard, Datadog APM, Grafana — visual reference only, not source code
+
+Open decisions:
+
+- **Resolved**: shadcn's neutral preset as the color base, with the existing accent (a cool blue) preserved as `--primary` so the brand doesn't feel like a stock library out of the box
+- **Resolved**: Geist Sans + Geist Mono (self-hosted via `@fontsource/*`, no Google Fonts dependency)
+- **Resolved**: dark mode is the default; light is the override (operator's existing app follows this convention)
+- **Resolved**: filter bar lives in a docked sidebar section on desktop (≥ 1024 px) and as a Sheet on mobile (< 1024 px)
+- **Resolved**: command palette (`⌘K`) is installed in this SOW even though it only does navigation + theme toggle for now; the rest lands in a follow-up SOW
+- **Resolved**: no logo rebrand in this SOW — the brand mark stays "ai-viewer" text + a small inline glyph (a stylized "eye/AI" monogram, ~24 px) derived from the existing name. Full brand identity work is a follow-up SOW if the operator wants it.
+
+## Implications And Decisions
+
+1. **Operator sign-off**: per the operator's 2026-06-19 authorization ("I authorize you to work the way you see fit"), the CTO moves this SOW to `current/` immediately and begins implementation unless the operator intervenes. If the operator wants to review/redirect, this SOW stays in `pending/` until they do. The CTO does not block on sign-off for this SOW.
+
+2. **Bundle budget**: 500 KB gzipped main chunk is the hard gate. If a primitive pulls the bundle over, we either (a) find a smaller primitive, (b) code-split the consuming page, or (c) bring the finding to the operator as a risk accept. The CTO decides, but the gate is hard.
+
+3. **Replacing the filter bar UX**: the comma-separated input pattern is replaced with a proper `Popover` containing a list of selected values + a `Command` for pick-from-list. The behavior is preserved (still URL-synced, still react-query-driven); only the interaction is upgraded. This is a UX improvement, not a contract change, so no spec rewrite beyond `ui-pages.md`.
+
+4. **`Show secondary` toggle**: moves from a checkbox next to the page title to a segmented control in the table toolbar. Behavior unchanged (LOCAL view state, default root-only).
+
+5. **Theme parity**: every component is designed dark-first, then light. The light mode is a true design, not a hue-inversion of dark. This is enforced by visual review in the 5-reviewer cycle.
+
+## Plan
+
+1. **Chunk 1: Tailwind v4 + shadcn init** — install, configure, verify build. Risk: low. Dependencies: none.
+2. **Chunk 2: Tokens + Geist fonts** — `@theme` block + `@fontsource/*`. Risk: low. Dependencies: chunk 1.
+3. **Chunk 3: Primitive components** — install + wrap. Risk: medium (lots of small files). Dependencies: chunk 2.
+4. **Chunk 4: Icon system + glyph replacement** — `lucide-react` + global glyph replacement. Risk: low. Dependencies: chunk 3.
+5. **Chunk 5: Status badge system** — `<StatusBadge>`. Risk: low. Dependencies: chunk 3.
+6. **Chunk 6: App shell redesign** — sidebar + top-bar. Risk: medium (touches every page's chrome). Dependencies: chunk 3.
+7. **Chunk 7: Sessions page redesign** — full table + filter panel + toolbar. Risk: medium (most-touched file). Dependencies: chunk 6.
+8. **Chunk 8: Tests** — update existing, add new. Risk: low. Dependencies: chunks 3-7.
+9. **Chunk 9: 5-reviewer Production-Grade Loop** — vision-capable reviewers on screenshots, glm on code. Risk: medium (this is the visual judgment gate). Dependencies: chunk 8.
+10. **Chunk 10: Operator report + SOW close** — SOW committed with `Status: completed`, moved to `done/`. Risk: low. Dependencies: chunk 9.
+
+## Execution Log
+
+### 2026-06-19
+
+- Research pass complete (`.agents/sow/specs/ux-stack-research.md`)
+- SOW drafted; awaiting move to `current/` per operator authorization
+- Pre-implementation screenshots captured at `http://127.0.0.1:7710/` in both themes (stored under `.agents/sow/done/SOW-0073-screenshots/pre/`)
+
+## Validation
+
+Acceptance criteria evidence: pending
+
+Tests or equivalent validation: pending
+
+Real-use evidence: pending
+
+Reviewer findings: pending
+
+Same-failure scan: pending
+
+Sensitive data gate: pending
+
+Artifact maintenance gate: pending
+
+Specs update: pending
+
+Project skills update: pending
+
+End-user/operator docs update: pending
+
+End-user/operator skills update: pending
+
+Lessons: pending
+
+Follow-up mapping: pending
+
+## Outcome
+
+Pending.
+
+## Lessons Extracted
+
+Pending.
+
+## Followup
+
+None yet. Likely follow-ups after this SOW (separate SOWs, separate sign-off):
+
+- SOW-0074: Session Detail redesign (the most complex screen; the new shell + primitives established in SOW-0073 are prerequisites)
+- SOW-0075: Topology view redesign (cleaner graph, legends, density control)
+- SOW-0076: Statistics redesign around the "where is the money going / what failed" mental model
+- SOW-0077: Sources / Models / Tools / Agents pages (lighter redesign; use the new shell)
+- SOW-0078: Cross-cutting polish (empty states, loading states, error states, keyboard shortcuts, motion, accessibility audit, responsive breakpoints)
+- SOW-0079: Brand identity (logo, color, motion language) — if the operator wants it after seeing the design system
+
+## Regression Log
+
+None yet.
