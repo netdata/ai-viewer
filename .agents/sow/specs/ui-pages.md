@@ -273,6 +273,14 @@ read this to know the current contract without re-reading the code.
   `/sessions/:child.id`; rendered only when the session has children (a leaf
   session shows no child-sessions section). This is the drill-down target the
   SessionsList child-count link promises (§`/` SessionsList).
+- **Possibly related sessions** (SOW-0071): a section listing HEURISTIC
+  cross-harness links — sessions from a DIFFERENT harness that started in the
+  same working directory while this session was running (e.g. claude-code
+  spawning `codex` via Bash). Visually distinct from the child-sessions tree
+  (dashed border) because these are SOFT links (the harnesses don't record the
+  parent-child edge); each row shows the harness + a human-readable reason +
+  a link to the related session's detail. Rendered only when
+  `useSessionRelated(id)` returns matches.
 - **Logs tab**: `useSessionLogs(id, { severities })` with a severity
   multi-select (DBG/INF/WRN/ERR) and a "Load more" control. Renders log rows
   (ts, severity, source, op id, message) via the `LogRow` primitive. The

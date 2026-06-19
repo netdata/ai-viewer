@@ -1,13 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { OverviewTab, toolsUsed } from './OverviewTab';
 import type {
   ChildSummary,
   OpDetail,
   SessionDetailResponse,
   TurnDetail,
 } from '../../../api/types';
+
+// useSessionRelated (SOW-0071) is mocked as a spy defaulting to no data; the
+// "Possibly related" test overrides the return to exercise the section.
+type RelatedResult = { data: { related: Array<Record<string, unknown>> } | undefined; isPending: boolean; isError: boolean; error: unknown };
+const relatedSpy = vi.fn((): RelatedResult => ({ data: { related: [] }, isPending: false, isError: false, error: null }));
+vi.mock('../../../api/sessions', () => ({
+  useSessionRelated: () => relatedSpy(),
+}));
+
+import { OverviewTab, toolsUsed } from './OverviewTab';
 
 // OverviewTab renders the session header + per-session aggregate StatCards from
 // the DETAIL response row (not /api/stats), plus a tools-used summary derived
@@ -270,5 +279,51 @@ describe('OverviewTab', () => {
     // The grandchild cell carries the indent span with a depth>0 marker ("└ ").
     const grandCell = within(section).getByText('sub-worker').parentElement;
     expect(grandCell?.textContent).toContain('└');
+  });
+
+  // ── SOW-0071: heuristic cross-harness "Possibly related" section ───────────
+
+  it('renders the "Possibly related" section with a dashed border when heuristic links exist', () => {
+    relatedSpy.mockReturnValue({
+      data: {
+        related: [
+          {
+            id: 'codex-session',
+            source_format: 'codex',
+            agent_name: 'codex',
+            status: 'completed' as const,
+            start_ts: 1,
+            end_ts: null,
+            reason: 'same cwd, started during this session (different harness)',
+          },
+        ],
+      },
+      isPending: false,
+      isError: false,
+      error: null,
+    });
+    renderTab(detail([]));
+    const heading = screen.getByRole('heading', { name: /possibly related/i });
+    expect(heading).toBeInTheDocument();
+    // The section carries the dashed-border class (AC2: visually distinct from
+    // the solid-border child-sessions tree).
+    const section = heading.closest('section');
+    expect(section?.className).toMatch(/related/);
+    // The related session links to its detail page.
+    expect(screen.getByRole('link', { name: 'codex' })).toHaveAttribute(
+      'href',
+      '/sessions/codex-session',
+    );
+  });
+
+  it('renders NO "Possibly related" section when no heuristic links exist', () => {
+    relatedSpy.mockReturnValue({
+      data: { related: [] },
+      isPending: false,
+      isError: false,
+      error: null,
+    });
+    renderTab(detail([]));
+    expect(screen.queryByRole('heading', { name: /possibly related/i })).not.toBeInTheDocument();
   });
 });

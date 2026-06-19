@@ -8,6 +8,7 @@ import {
 import { get, buildQuery } from './client';
 import type { Filters } from '../state/filters';
 import type {
+  RelatedResponse,
   SessionDetailResponse,
   SessionListResponse,
   TimelineResponse,
@@ -213,6 +214,27 @@ export function useSessionTrace(id: string): UseQueryResult<TraceResponse> {
   return useQuery({
     queryKey: ['session-trace', id] as const,
     queryFn: ({ signal }) => fetchSessionTrace(id, signal),
+    enabled: id.length > 0,
+  });
+}
+
+/**
+ * fetchSessionRelated GETs heuristic cross-harness soft links for a session
+ * (SOW-0071): sessions from a different harness that started in the same cwd
+ * while this session was running.
+ */
+export function fetchSessionRelated(id: string, signal?: AbortSignal): Promise<RelatedResponse> {
+  return get<RelatedResponse>(`/sessions/${encodeURIComponent(id)}/related`, signal);
+}
+
+/**
+ * useSessionRelated is the query hook for the Overview's "Possibly related"
+ * section. Distinct query key (['session-related', id]).
+ */
+export function useSessionRelated(id: string): UseQueryResult<RelatedResponse> {
+  return useQuery({
+    queryKey: ['session-related', id] as const,
+    queryFn: ({ signal }) => fetchSessionRelated(id, signal),
     enabled: id.length > 0,
   });
 }

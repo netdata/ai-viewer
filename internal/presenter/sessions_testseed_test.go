@@ -60,6 +60,16 @@ type sessionRow struct {
 	costUSD                           float64
 	turnCount, opCount                int64
 	failureCount                      int64
+	cwd                               string // "" => NULL (the schema default)
+}
+
+// seedSessionWithCwd inserts one sessions row with an explicit cwd (SOW-0071
+// cross-harness detection joins on cwd). Mirrors seedSession but adds the cwd
+// column; tests that don't need cwd use seedSession (cwd = NULL).
+func seedSessionWithCwd(t *testing.T, db *sql.DB, s sessionRow, cwd string) {
+	t.Helper()
+	s.cwd = cwd
+	seedSession(t, db, s)
 }
 
 // seedSession inserts one sessions row from a sessionRow.
@@ -79,17 +89,21 @@ func seedSession(t *testing.T, db *sql.DB, s sessionRow) {
 	if s.endTS != 0 {
 		endTS = s.endTS
 	}
+	var cwd any
+	if s.cwd != "" {
+		cwd = s.cwd
+	}
 	if _, err := db.Exec(`
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id, kind,
     agent_name, model, provider, status, start_ts, end_ts, last_activity_ts,
     tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,
-    cost_usd, turn_count, op_count, failure_count
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    cost_usd, turn_count, op_count, failure_count, cwd
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.id, s.sourceID, s.nativeID, parent, s.rootID, s.kind,
 		s.agent, s.model, s.provider, s.status, s.startTS, endTS, s.startTS,
 		s.tokensIn, s.tokensOut, s.tokensCacheRead, s.tokensCacheWrite,
-		s.costUSD, s.turnCount, s.opCount, s.failureCount,
+		s.costUSD, s.turnCount, s.opCount, s.failureCount, cwd,
 	); err != nil {
 		t.Fatalf("seed session %s: %v", s.id, err)
 	}

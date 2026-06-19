@@ -2,6 +2,7 @@ import { Fragment, type ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 import { StatCard } from '../../../components/StatCard';
 import { StatusBadge } from '../../../components/SessionRow';
+import { useSessionRelated } from '../../../api/sessions';
 import { cacheHitRate, formatCost, formatDuration, formatNumber, formatPct } from '../../../lib/format';
 import type { ChildSummary, SessionDetailResponse, TurnDetail } from '../../../api/types';
 import styles from './OverviewTab.module.css';
@@ -40,6 +41,14 @@ export function toolsUsed(turns: TurnDetail[]): ToolUsage[] {
 export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
   const s = detail.session;
   const tools = toolsUsed(detail.turns);
+  // Heuristic cross-harness links (SOW-0071): sessions from a different harness
+  // in the same cwd. Rendered only when matches exist. The section is a soft
+  // enhancement — a query error does NOT break the Overview, but the error is
+  // surfaced (AGENTS.md §6 — no silent failures).
+  const related = useSessionRelated(s.id);
+  if (related.isError && related.error) {
+    console.error('Possibly related query failed', related.error);
+  }
   // tokens_in is the FRESH/uncached input (canonical token contract); the cache
   // portions are separate. Hit-rate = cache_read / total input (em dash when
   // there is no input at all — cacheHitRate returns null, formatPct → "—").
@@ -91,6 +100,32 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
               <ChildTreeRows nodes={detail.child_sessions} depth={0} />
             </tbody>
           </table>
+        </section>
+      ) : null}
+
+      {/* ── Possibly related (SOW-0071 heuristic cross-harness soft links) ── */}
+      {related.data && related.data.related.length > 0 ? (
+        <section className={styles.related} aria-labelledby="related-title">
+          <h2 id="related-title" className={styles.relatedTitle}>
+            Possibly related
+          </h2>
+          <p className={styles.relatedHint}>
+            Sessions from a different harness in the same working directory that started during
+            this session. These are heuristic soft links — the harnesses do not record the
+            parent-child edge.
+          </p>
+          <ul className={styles.relatedList}>
+            {related.data.related.map((r) => (
+              <li key={r.id} className={styles.relatedItem}>
+                <Link to={`/sessions/${encodeURIComponent(r.id)}`} className={styles.relatedLink}>
+                  {r.agent_name || r.id}
+                </Link>
+                <span className={styles.relatedFormat}>{r.source_format}</span>
+                <StatusBadge status={r.status} />
+                <span className={styles.relatedReason}>{r.reason}</span>
+              </li>
+            ))}
+          </ul>
         </section>
       ) : null}
 

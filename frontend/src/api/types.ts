@@ -328,6 +328,24 @@ export interface TraceResponse {
   ops: TraceOp[];
 }
 
+// ── GET /api/sessions/:id/related (SOW-0071 heuristic cross-harness links) ──
+
+/** One heuristic cross-harness soft link (presenter relatedSession). */
+export interface RelatedSession {
+  id: string;
+  source_format: string;
+  agent_name: string;
+  status: SessionStatus;
+  start_ts: number;
+  end_ts: number | null;
+  reason: string;
+}
+
+/** GET /api/sessions/:id/related envelope. */
+export interface RelatedResponse {
+  related: RelatedSession[];
+}
+
 // ── GET /api/sessions/:id/logs ──────────────────────────────────────────────
 
 /** One log entry (presenter logItem). */

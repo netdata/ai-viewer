@@ -400,6 +400,36 @@ other session sub-routes. Scope = the whole session tree, like `/timeline`.
   is defended (the merge never drops or duplicates a node).
 - The query is bounded by the tree size and reuses `idx_ops_session_start`.
 
+### GET /api/sessions/:id/related
+
+Heuristic cross-harness links (SOW-0071): sessions from a DIFFERENT harness that
+started in the same working directory while this session was running. Neither
+harness records parent-child edges when one spawns another via a shell tool
+(e.g. claude-code running `codex` via Bash); this endpoint surfaces them as
+"possibly related" soft links, NOT deterministic edges. 404 `NOT_FOUND` for an
+unknown `:id`; HEAD and 405 behave exactly as the other session sub-routes.
+
+```json
+{
+  "related": [
+    {
+      "id":"...","source_format":"codex","agent_name":"codex",
+      "status":"completed","start_ts":<us>,"end_ts":<us>,
+      "reason":"same cwd, started during this session (different harness)"
+    }
+  ]
+}
+```
+
+- A candidate qualifies iff: same `cwd` as `:id`, a different `source_format`
+  (via the sources JOIN), and its `start_ts` falls within `:id`'s
+  `[start_ts, COALESCE(end_ts, now)]` window (started while this session was
+  running). Ordered by `start_ts ASC` (the earliest spawn first); `LIMIT 10`.
+- `reason` is a human-readable explanation of the match (shown in the UI so the
+  operator understands WHY these are related).
+- The query is on indexed columns (`idx_sessions_cwd`, `start_ts`), bounded by
+  `LIMIT 10`.
+
 ### GET /api/stats
 
 Cross-session aggregates over the filtered set.
