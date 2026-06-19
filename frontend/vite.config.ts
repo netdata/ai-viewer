@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 // The Go binary serves the built SPA and the /api surface from the same
 // origin, so production fetches are relative (`/api/...`). In dev, Vite
@@ -9,7 +10,7 @@ import react from '@vitejs/plugin-react';
 const DEV_API_TARGET = process.env.AI_VIEWER_API ?? 'http://127.0.0.1:7710';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     proxy: {
       '/api': {

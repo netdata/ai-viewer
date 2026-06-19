@@ -1,0 +1,313 @@
+/*
+ * ai-viewer design system (SOW-0073). Single source of truth for tokens.
+ *
+ * Layers:
+ *   1. Tailwind v4 (utility framework + @theme processing)
+ *   2. Geist Sans + Geist Mono (self-hosted via @fontsource/*; no Google Fonts)
+ *   3. shadcn-style semantic CSS variables (background, foreground, primary,
+ *      secondary, muted, accent, destructive, border, input, ring, chart-*).
+ *      Defined per-theme on `:root` (dark default) and `:root[data-theme="light"]`.
+ *      Tailwind utilities map to these via `@theme inline` so `bg-background`,
+ *      `text-foreground`, etc. resolve correctly in both themes.
+ *   4. Legacy tokens (--bg-primary, --text-primary, --space-*, --radius-*,
+ *      --font-size-*, --shadow-*, --focus-ring) kept as a backward-compat
+ *      shim so existing CSS Modules continue to work during the migration.
+ *      Delete once every CSS Module is replaced with Tailwind utilities.
+ *   5. Base layer resets (the old global.css content) so the app doesn't
+ *      change visually until individual components are migrated.
+ *
+ * Theme switch: the existing state/theme.ts toggles `data-theme` on <html>;
+ * the no-flash inline script in index.html sets it on first paint. Nothing
+ * new to wire — only the variable definitions changed.
+ */
+
+@import "tailwindcss";
+
+/* Self-hosted fonts (SIL OFL). Imported via @fontsource so the app has no
+ * dependency on Google Fonts CDN. We declare @font-face via the package and
+ * expose --font-sans / --font-mono CSS variables. */
+@import "@fontsource/geist-sans/400.css";
+@import "@fontsource/geist-sans/500.css";
+@import "@fontsource/geist-sans/600.css";
+@import "@fontsource/geist-sans/700.css";
+@import "@fontsource/geist-mono/400.css";
+@import "@fontsource/geist-mono/500.css";
+
+/* ----------------------------------------------------------------------------
+ * 3. Semantic CSS variables (shadcn-style).
+ *    Naming follows shadcn's standard: --background, --foreground, --primary,
+ *    --primary-foreground, --secondary, --secondary-foreground, --muted,
+ *    --muted-foreground, --accent, --accent-foreground, --destructive,
+ *    --destructive-foreground, --border, --input, --ring, --card, --popover,
+ *    --chart-1..5. Sidebar / chart slots kept lean until the matching pages
+ *    are built.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  /* Dark (default — matches existing app behavior). Tuned for a dashboard:
+   * deep neutral background, restrained accent, semantic reds/greens/ambers
+   * matching the existing status colors so the migration is visually quiet. */
+  --background: oklch(0.145 0 0);              /* near-black neutral */
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.18 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.18 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.7 0.15 250);             /* cool blue, matches existing accent feel */
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.25 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.22 0 0);
+  --muted-foreground: oklch(0.65 0 0);
+  --accent: oklch(0.25 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.65 0.2 25);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.7 0.15 250);
+
+  /* Status (semantic mapping — keeps the existing app's running/completed/
+     failed/abandoned/interrupted coloring). */
+  --status-completed: oklch(0.72 0.17 145);    /* green */
+  --status-running: oklch(0.78 0.16 75);      /* amber */
+  --status-failed: oklch(0.65 0.22 25);       /* red */
+  --status-abandoned: oklch(0.55 0.01 250);   /* gray */
+  --status-interrupted: oklch(0.7 0.18 50);   /* orange */
+
+  /* Chart palette (Stats + Topology). Designed to read in dark + light. */
+  --chart-1: oklch(0.7 0.15 250);
+  --chart-2: oklch(0.72 0.17 145);
+  --chart-3: oklch(0.78 0.16 75);
+  --chart-4: oklch(0.65 0.22 25);
+  --chart-5: oklch(0.65 0.18 320);
+
+  /* Source color slots — one per known source so the sessions table +
+     topology can color-code by source consistently across pages. */
+  --source-claude-code: oklch(0.7 0.15 30);
+  --source-codex: oklch(0.72 0.17 145);
+  --source-opencode: oklch(0.7 0.15 250);
+  --source-aiagent-v3: oklch(0.7 0.18 320);
+  --source-aiagent-v2: oklch(0.65 0.18 200);
+
+  /* Elevation / focus. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --focus-ring: 0 0 0 2px var(--background), 0 0 0 4px var(--ring);
+
+  /* Font tokens. */
+  --font-sans: "Geist Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+
+  /* Spacing scale (4 px base — matches existing system). */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Radius scale. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* Legacy typography tokens (kept for backward-compat with CSS Modules that
+     still reference them; remove when all modules are migrated). */
+  --font-size-xs: 0.6875rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.875rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.5rem;
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.55 0.2 250);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.96 0.005 250);
+  --secondary-foreground: oklch(0.145 0 0);
+  --muted: oklch(0.96 0.005 250);
+  --muted-foreground: oklch(0.45 0.01 250);
+  --accent: oklch(0.96 0.005 250);
+  --accent-foreground: oklch(0.145 0 0);
+  --destructive: oklch(0.55 0.22 25);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(0.92 0.005 250);
+  --input: oklch(0.92 0.005 250);
+  --ring: oklch(0.55 0.2 250);
+
+  --status-completed: oklch(0.55 0.17 145);
+  --status-running: oklch(0.65 0.16 75);
+  --status-failed: oklch(0.55 0.22 25);
+  --status-abandoned: oklch(0.55 0.01 250);
+  --status-interrupted: oklch(0.65 0.18 50);
+
+  --chart-1: oklch(0.55 0.2 250);
+  --chart-2: oklch(0.55 0.17 145);
+  --chart-3: oklch(0.65 0.16 75);
+  --chart-4: oklch(0.55 0.22 25);
+  --chart-5: oklch(0.55 0.18 320);
+
+  --source-claude-code: oklch(0.55 0.18 30);
+  --source-codex: oklch(0.55 0.17 145);
+  --source-opencode: oklch(0.55 0.2 250);
+  --source-aiagent-v3: oklch(0.55 0.18 320);
+  --source-aiagent-v2: oklch(0.5 0.18 200);
+
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-2: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --shadow-3: 0 12px 32px rgba(15, 23, 42, 0.12);
+
+  color-scheme: light;
+}
+
+/* ----------------------------------------------------------------------------
+ * Tailwind v4 theme bridge — `@theme inline` makes shadcn-style CSS variables
+ * available as Tailwind utilities (`bg-background`, `text-foreground`,
+ * `border-border`, etc.). The `inline` modifier means Tailwind reads the
+ * variable at runtime (not at build time), so a theme switch is instant.
+ * ------------------------------------------------------------------------- */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-status-completed: var(--status-completed);
+  --color-status-running: var(--status-running);
+  --color-status-failed: var(--status-failed);
+  --color-status-abandoned: var(--status-abandoned);
+  --color-status-interrupted: var(--status-interrupted);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-source-claude-code: var(--source-claude-code);
+  --color-source-codex: var(--source-codex);
+  --color-source-opencode: var(--source-opencode);
+  --color-source-aiagent-v3: var(--source-aiagent-v3);
+  --color-source-aiagent-v2: var(--source-aiagent-v2);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --radius: 0.5rem;        /* default shadcn radius */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+}
+
+/* ----------------------------------------------------------------------------
+ * 4. Legacy tokens — mapped to the new semantic variables so existing CSS
+ * Modules continue to resolve during the migration. Delete in a follow-up
+ * SOW once every CSS Module is replaced with Tailwind utilities.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --bg-primary: var(--background);
+  --bg-secondary: var(--card);
+  --bg-tertiary: var(--muted);
+  --text-primary: var(--foreground);
+  --text-secondary: var(--muted-foreground);
+  --accent: var(--primary);
+  --success: var(--status-completed);
+  --warning: var(--status-running);
+  --error: var(--status-failed);
+  --info: var(--chart-1);
+}
+
+/* ----------------------------------------------------------------------------
+ * 5. Base layer — preserves the existing visual behavior for as long as any
+ * un-migrated CSS Module is rendered. Tailwind's preflight handles box-sizing,
+ * margins, etc., so this is only the explicit bits from the old global.css.
+ * ------------------------------------------------------------------------- */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Tabular numerals everywhere we render numeric columns in tables. */
+.tabular-nums,
+table td.num,
+table th.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Smooth scroll for in-page anchor jumps and overflow regions. */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Respect the OS reduced-motion preference across all our animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

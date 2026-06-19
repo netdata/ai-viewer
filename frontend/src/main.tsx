@@ -5,8 +5,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import { ThemeProvider } from './state/theme';
 import { createAppQueryClient } from './api/queryClient';
-import './theme/tokens.css';
-import './theme/global.css';
+import './theme/app.css';
 
 // App entry. Provider order: QueryClient (server state) → Theme (data-theme on
 // <html>) → Router → App. The no-flash theme script in index.html has already

@@ -27,6 +27,7 @@
     "check:coverage-thresholds:selftest": "bash scripts/check-coverage-thresholds.test.sh"
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.3.1",
     "@tanstack/react-query": "5.101.0",
     "d3-array": "3.2.4",
     "d3-force": "3.0.0",
@@ -35,13 +36,18 @@
     "d3-selection": "3.0.0",
     "d3-zoom": "3.0.0",
     "js-yaml": "4.2.0",
+    "lucide-react": "^1.21.0",
+    "motion": "^12.40.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "react-router-dom": "7.18.0"
+    "react-router-dom": "7.18.0",
+    "tailwindcss": "^4.3.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.11.3",
     "@eslint/js": "9.39.4",
+    "@fontsource/geist-mono": "^5.2.5",
+    "@fontsource/geist-sans": "^5.2.5",
     "@playwright/test": "1.61.0",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.2",
@@ -58,6 +64,8 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitest/coverage-v8": "4.1.9",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "eslint": "9.39.4",
     "eslint-import-resolver-typescript": "4.4.5",
     "eslint-plugin-import": "2.32.0",
@@ -68,6 +76,7 @@
     "jest-axe": "10.0.0",
     "jiti": "2.7.0",
     "jsdom": "29.1.1",
+    "tailwind-merge": "^3.6.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.61.1",
     "vite": "^8.0.16",
