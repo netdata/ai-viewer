@@ -343,6 +343,7 @@ ORDER BY provider, model;
 ```
 
 For Chunk 10 itself (before the full pipeline is wired), the seed list is built from:
+
 - The synthetic events the v2/v3 adapter test fixtures emit (providers + models referenced in `testdata/aiagent_v[23]/**/expected.jsonl`).
 - A hand-list of common providers/models the operator's workstation is known to use (anthropic claude-*, openai gpt-*, google gemini-*, etc.).
 - The `--add-provider` / `--add-model` mechanism for anything else needed.

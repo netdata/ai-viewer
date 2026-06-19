@@ -1,4 +1,4 @@
-# SOW-NNNN - <Title>
+# SOW-NNNN - {Title}
 
 ## Status
 
@@ -91,12 +91,12 @@ Validation plan:
 
 Artifact impact plan:
 
-- AGENTS.md: <expected update or reason likely unaffected>
-- Runtime project skills: <expected update or reason likely unaffected>
-- Specs: <expected update or reason likely unaffected>
-- End-user/operator docs: <expected update or reason likely unaffected>
-- End-user/operator skills: <expected update or reason likely unaffected>
-- SOW lifecycle: <split/merge/status/follow-up/regression handling>
+- AGENTS.md: {expected update or reason likely unaffected}
+- Runtime project skills: {expected update or reason likely unaffected}
+- Specs: {expected update or reason likely unaffected}
+- End-user/operator docs: {expected update or reason likely unaffected}
+- End-user/operator skills: {expected update or reason likely unaffected}
+- SOW lifecycle: {split/merge/status/follow-up/regression handling}
 
 Open-source reference evidence:
 

@@ -4,6 +4,7 @@
 # material, embedded/build output, dependencies, coverage reports, local test
 # output, and local binary output. They also carry the ignored-file policy
 # explicitly because Codacy ignores UI ignored-file settings when this file exists.
+# testdata/** added (SOW-0072): test fixtures are not production code.
 exclude_paths:
   - ".agents/sow/current/**"
   - ".agents/sow/done/**"
@@ -17,6 +18,7 @@ exclude_paths:
   - "frontend/dist/**"
   - "frontend/playwright-report/**"
   - "frontend/test-results/**"
+  - "testdata/**"
   - "bin/**"
 
 # SOW-0046: eslint-8 exclusions are tool-scoped to non-runtime frontend tests,
@@ -46,3 +48,17 @@ engines:
       - "frontend/src/**/*.test.tsx"
       - "frontend/src/test/**"
       - "frontend/tests/**"
+  # Disabled: TSQLLint is a Microsoft SQL Server linter — its rules (SET ANSI,
+  # data compression, schema-qualify, keyword capitalization) are T-SQL concepts
+  # that do not exist in SQLite. Every TSQLLint finding on the migration files
+  # is a false positive. SQLite schema/migration correctness is validated by the
+  # Go test suite (schema_contract_test.go + migration tests), not by TSQLLint.
+  tsqllint:
+    enabled: false
+  # Disabled: Stylelint expects kebab-case class names, but the project uses
+  # camelCase CSS Modules consistently (e.g. .summaryBar, .filterGroup — React's
+  # CSS Modules convention). The scss rule is a broken Codacy config ("Unknown
+  # rule scss_function-disallowed-list"). CSS is validated via the Vite/PostCSS
+  # build pipeline + the bundle-size gate; no local stylelint exists.
+  stylelint:
+    enabled: false

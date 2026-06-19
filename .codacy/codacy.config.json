@@ -1956,12 +1956,13 @@
     ".codacy/generated/**",
     "CLAUDE.md",
     "GEMINI.md",
+    "bin/**",
     "cmd/ai-viewer-serve/frontend_dist/**",
-    "frontend/node_modules/**",
     "frontend/coverage/**",
     "frontend/dist/**",
+    "frontend/node_modules/**",
     "frontend/playwright-report/**",
     "frontend/test-results/**",
-    "bin/**"
+    "testdata/**"
   ]
 }

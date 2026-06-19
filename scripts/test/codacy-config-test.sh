@@ -26,6 +26,7 @@ CODACY_REPOSITORY_EXCLUDES=(
   "frontend/dist/**"
   "frontend/playwright-report/**"
   "frontend/test-results/**"
+  "testdata/**"
   "bin/**"
 )
 
@@ -378,6 +379,7 @@ exclude_paths:
   - "frontend/dist/**"
   - "frontend/playwright-report/**"
   - "frontend/test-results/**"
+  - "testdata/**"
   - "bin/**"
 engines:
   eslint-8:
@@ -394,6 +396,10 @@ engines:
       - "frontend/src/**/*.test.tsx"
       - "frontend/src/test/**"
       - "frontend/tests/**"
+  tsqllint:
+    enabled: false
+  stylelint:
+    enabled: false
 YAML
 )"
   actual_yaml="$(

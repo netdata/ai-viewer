@@ -40,8 +40,8 @@ The adapter reads from the following tables. Other tables (`account`, `account_s
 
 Per `anomalyco/opencode @ 2b3ddf9 :: packages/opencode/src/session/session.sql.ts:16-59`:
 
-| column | SQLite type | notes |
-|---|---|---|
+| column + SQLite type | description |
+|---|---|
 | `id` TEXT PK | `ses_<sonyflake>` |
 | `project_id` TEXT NOT NULL | FK → `project.id` ON DELETE CASCADE |
 | `workspace_id` TEXT NULL | FK to `workspace.id`; NULL for all 6785 operator sessions (workspace is a Console/cloud feature) |
