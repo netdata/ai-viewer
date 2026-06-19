@@ -324,3 +324,61 @@
   text-overflow: ellipsis;
   max-width: 200px;
 }
+
+/* SOW-0067: only the label BUTTON is the drill affordance (keyboard reachable).
+   The row itself is NOT styled as clickable — a row-wide cursor/hover would
+   imply the whole row is interactive when only the button is. */
+.drillRow {
+  cursor: default;
+}
+
+.drillLink {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.drillLink:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.drillRow:hover .drillLink {
+  text-decoration-color: var(--text-primary);
+}
+
+/* Sortable column-header buttons (SOW-0067 comparison table). Reset to inherit
+   the th styling; only the cursor + focus ring signal interactivity. */
+.sortBtn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: inherit;
+}
+
+.sortBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* Small disclosure note (series/row truncation footers). */
+.note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}

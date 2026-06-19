@@ -108,11 +108,35 @@ describe('FilterBar', () => {
 
   it('Clear filters removes all filter params', async () => {
     const user = userEvent.setup();
-    renderBar('/?q=x&agents=a&status=failed');
+    renderBar('/?q=x&agents=a&status=failed&range=7d&from=123');
     await user.click(screen.getByRole('button', { name: 'Clear filters' }));
-    const loc = screen.getByTestId('loc');
-    expect(loc.textContent).not.toContain('q=');
-    expect(loc.textContent).not.toContain('agents=');
-    expect(loc.textContent).not.toContain('status=');
+    const loc = screen.getByTestId('loc').textContent ?? '';
+    expect(loc).not.toContain('q=');
+    expect(loc).not.toContain('agents=');
+    expect(loc).not.toContain('status=');
+    expect(loc).not.toContain('from=');
+    // The preset mirror must also be cleared so the select does not display a
+    // preset that no longer applies (SOW-0067).
+    expect(loc).not.toContain('range=');
+  });
+
+  it('selecting a time-range preset writes a from bound + range mirror (SOW-0067)', async () => {
+    const user = userEvent.setup();
+    renderBar('/');
+    await user.selectOptions(screen.getByLabelText(/time range preset/i), '7d');
+    const loc = screen.getByTestId('loc').textContent ?? '';
+    expect(loc).toContain('range=7d');
+    expect(loc).toContain('from=');
+    // 'to' stays open so live data keeps flowing.
+    expect(loc).not.toContain('to=');
+  });
+
+  it('All time clears the from bound and the range mirror', async () => {
+    const user = userEvent.setup();
+    renderBar('/?range=7d&from=123');
+    await user.selectOptions(screen.getByLabelText(/time range preset/i), 'all');
+    const loc = screen.getByTestId('loc').textContent ?? '';
+    expect(loc).not.toContain('from=');
+    expect(loc).not.toContain('range=');
   });
 });

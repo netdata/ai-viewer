@@ -24,14 +24,17 @@ type statsBody struct {
 		DurationUS       int64   `json:"duration_us"`
 	} `json:"totals"`
 	ByModel []struct {
-		Name      string  `json:"name"`
-		Provider  string  `json:"provider"`
-		Calls     int64   `json:"calls"`
-		TokensIn  int64   `json:"tokens_in"`
-		TokensOut int64   `json:"tokens_out"`
-		CostUSD   float64 `json:"cost_usd"`
-		Failures  int64   `json:"failures"`
-		PctOfCost float64 `json:"pct_of_cost"`
+		Name             string  `json:"name"`
+		Provider         string  `json:"provider"`
+		Calls            int64   `json:"calls"`
+		TokensIn         int64   `json:"tokens_in"`
+		TokensOut        int64   `json:"tokens_out"`
+		TokensCacheRead  int64   `json:"tokens_cache_read"`
+		TokensCacheWrite int64   `json:"tokens_cache_write"`
+		CostUSD          float64 `json:"cost_usd"`
+		Failures         int64   `json:"failures"`
+		DurationUS       int64   `json:"duration_us"`
+		PctOfCost        float64 `json:"pct_of_cost"`
 	} `json:"by_model"`
 	ByTool []struct {
 		Namespace  string  `json:"namespace"`
@@ -42,22 +45,33 @@ type statsBody struct {
 		PctOfCalls float64 `json:"pct_of_calls"`
 	} `json:"by_tool"`
 	ByAgent []struct {
-		Name          string  `json:"name"`
-		Sessions      int64   `json:"sessions"`
-		Failures      int64   `json:"failures"`
-		TokensIn      int64   `json:"tokens_in"`
-		TokensOut     int64   `json:"tokens_out"`
-		CostUSD       float64 `json:"cost_usd"`
-		PctOfSessions float64 `json:"pct_of_sessions"`
+		Name             string  `json:"name"`
+		Sessions         int64   `json:"sessions"`
+		Failures         int64   `json:"failures"`
+		TokensIn         int64   `json:"tokens_in"`
+		TokensOut        int64   `json:"tokens_out"`
+		TokensCacheRead  int64   `json:"tokens_cache_read"`
+		TokensCacheWrite int64   `json:"tokens_cache_write"`
+		CostUSD          float64 `json:"cost_usd"`
+		PctOfSessions    float64 `json:"pct_of_sessions"`
 	} `json:"by_agent"`
 	ByStatus []struct {
-		Status string `json:"status"`
-		Count  int64  `json:"count"`
+		Status    string  `json:"status"`
+		Count     int64   `json:"count"`
+		CostUSD   float64 `json:"cost_usd"`
+		TokensIn  int64   `json:"tokens_in"`
+		TokensOut int64   `json:"tokens_out"`
 	} `json:"by_status"`
 	BySource []struct {
-		Source   string `json:"source"`
-		Sessions int64  `json:"sessions"`
-		Failures int64  `json:"failures"`
+		Source          string  `json:"source"`
+		Format          string  `json:"format"`
+		Sessions        int64   `json:"sessions"`
+		Failures        int64   `json:"failures"`
+		CostUSD         float64 `json:"cost_usd"`
+		TokensIn        int64   `json:"tokens_in"`
+		TokensOut       int64   `json:"tokens_out"`
+		TokensCacheRead int64   `json:"tokens_cache_read"`
+		OpCount         int64   `json:"op_count"`
 	} `json:"by_source"`
 }
 
@@ -349,5 +363,127 @@ func TestStats_MethodNotAllowed(t *testing.T) {
 	p.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rr.Code)
+	}
+}
+
+// TestStats_RowEnrichment pins the SOW-0067 by_* row enrichment: each
+// dimension row carries the metrics it naturally owns so the comparison
+// table is honest (no silently-hidden columns). group=all widens to all
+// three sessions. Expected values are derived from seedGraph:
+//   - by_model (llm ops): one llm op o1 (claude-opus-4-7/anthropic):
+//     calls=1, tokens_in=500, tokens_out=1000, cache_read=3000,
+//     cache_write=500, cost=0.15, duration=1000.
+//   - by_agent (sessions): nedi=rootA, worker=childA1+childA2.
+//   - by_status (sessions): completed=rootA+childA1, failed=childA2.
+//   - by_source (sessions): one source src1 (format aiagent_v3) with all
+//     three sessions; cost/tokens/cache/op_count aggregated across them.
+func TestStats_RowEnrichment(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	seedGraph(t, db, seedBase())
+
+	code, body, _ := getStats(t, p, "group=all")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+
+	// by_model: the single llm op carries cache tokens + duration now.
+	if len(body.ByModel) != 1 {
+		t.Fatalf("by_model rows = %d, want 1 (one llm op)", len(body.ByModel))
+	}
+	m := body.ByModel[0]
+	if m.Name != "claude-opus-4-7" {
+		t.Errorf("by_model name = %q, want claude-opus-4-7", m.Name)
+	}
+	if m.Calls != 1 {
+		t.Errorf("by_model calls = %d, want 1", m.Calls)
+	}
+	if m.TokensIn != 500 || m.TokensOut != 1000 {
+		t.Errorf("by_model tokens in/out = %d/%d, want 500/1000", m.TokensIn, m.TokensOut)
+	}
+	if m.TokensCacheRead != 3000 || m.TokensCacheWrite != 500 {
+		t.Errorf("by_model cache read/write = %d/%d, want 3000/500", m.TokensCacheRead, m.TokensCacheWrite)
+	}
+	if m.DurationUS != 1000 {
+		t.Errorf("by_model duration_us = %d, want 1000", m.DurationUS)
+	}
+	if m.CostUSD != 0.15 {
+		t.Errorf("by_model cost = %v, want 0.15", m.CostUSD)
+	}
+
+	// by_agent: worker aggregates the two child sessions (cache comes from
+	// session rollups; children have no cache so worker cache = 0).
+	findAgent := func(name string) int {
+		for i := range body.ByAgent {
+			if body.ByAgent[i].Name == name {
+				return i
+			}
+		}
+		return -1
+	}
+	workerIdx := findAgent("worker")
+	nediIdx := findAgent("nedi")
+	if workerIdx < 0 || nediIdx < 0 {
+		t.Fatalf("by_agent missing worker/nedi: %+v", body.ByAgent)
+	}
+	worker := body.ByAgent[workerIdx]
+	nedi := body.ByAgent[nediIdx]
+	if worker.Sessions != 2 || worker.Failures != 1 {
+		t.Errorf("worker sessions/failures = %d/%d, want 2/1", worker.Sessions, worker.Failures)
+	}
+	if worker.TokensIn != 150 || worker.TokensOut != 260 {
+		t.Errorf("worker tokens in/out = %d/%d, want 150/260", worker.TokensIn, worker.TokensOut)
+	}
+	if worker.TokensCacheRead != 0 {
+		t.Errorf("worker cache_read = %d, want 0 (children have no cache)", worker.TokensCacheRead)
+	}
+	if math.Abs(worker.CostUSD-0.03) > 1e-9 {
+		t.Errorf("worker cost = %v, want 0.03", worker.CostUSD)
+	}
+	if nedi.TokensCacheRead != 3000 || nedi.TokensCacheWrite != 500 {
+		t.Errorf("nedi cache read/write = %d/%d, want 3000/500", nedi.TokensCacheRead, nedi.TokensCacheWrite)
+	}
+
+	// by_status: cost + tokens per status (failed-session cost is answerable).
+	failedIdx := -1
+	for i := range body.ByStatus {
+		if body.ByStatus[i].Status == "failed" {
+			failedIdx = i
+		}
+	}
+	if failedIdx < 0 {
+		t.Fatalf("by_status missing failed: %+v", body.ByStatus)
+	}
+	failed := body.ByStatus[failedIdx]
+	if failed.Count != 1 || failed.TokensIn != 50 || failed.TokensOut != 60 {
+		t.Errorf("failed status count/tokens = %d/%d/%d, want 1/50/60", failed.Count, failed.TokensIn, failed.TokensOut)
+	}
+	if math.Abs(failed.CostUSD-0.01) > 1e-9 {
+		t.Errorf("failed status cost = %v, want 0.01", failed.CostUSD)
+	}
+
+	// by_source: one harness source with full economics + format label.
+	if len(body.BySource) != 1 {
+		t.Fatalf("by_source rows = %d, want 1", len(body.BySource))
+	}
+	s := body.BySource[0]
+	if s.Format != "aiagent_v3" {
+		t.Errorf("by_source format = %q, want aiagent_v3", s.Format)
+	}
+	if s.Sessions != 3 || s.Failures != 1 {
+		t.Errorf("by_source sessions/failures = %d/%d, want 3/1", s.Sessions, s.Failures)
+	}
+	if s.OpCount != 6 {
+		t.Errorf("by_source op_count = %d, want 6", s.OpCount)
+	}
+	if s.TokensIn != 1150 || s.TokensOut != 2260 {
+		t.Errorf("by_source tokens in/out = %d/%d, want 1150/2260", s.TokensIn, s.TokensOut)
+	}
+	if s.TokensCacheRead != 3000 {
+		t.Errorf("by_source cache_read = %d, want 3000", s.TokensCacheRead)
+	}
+	if math.Abs(s.CostUSD-0.33) > 1e-9 {
+		t.Errorf("by_source cost = %v, want 0.33", s.CostUSD)
 	}
 }

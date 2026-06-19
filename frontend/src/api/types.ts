@@ -128,8 +128,9 @@ export interface SessionDetail {
 
 /**
  * One payload_refs row (presenter payloadRef). The byte-streaming route
- * (GET /api/payloads/<id>) is Phase 2 and not yet registered, so no `url`
- * field is present — only the ref metadata is surfaced today.
+ * (GET /api/payloads/<id>, SOW-0033) IS registered, but session-detail does not
+ * advertise it — no `url` field is present; only the ref metadata is surfaced
+ * (the Trace drawer's Preview button builds the URL client-side from the id).
  */
 export interface PayloadRef {
   id: number;
@@ -340,8 +341,11 @@ export interface StatModelRow {
   calls: number;
   tokens_in: number;
   tokens_out: number;
+  tokens_cache_read: number;
+  tokens_cache_write: number;
   cost_usd: number;
   failures: number;
+  duration_us: number;
   pct_of_cost: number;
 }
 
@@ -360,6 +364,8 @@ export interface StatAgentRow {
   failures: number;
   tokens_in: number;
   tokens_out: number;
+  tokens_cache_read: number;
+  tokens_cache_write: number;
   cost_usd: number;
   pct_of_sessions: number;
 }
@@ -367,12 +373,23 @@ export interface StatAgentRow {
 export interface StatStatusRow {
   status: SessionStatus;
   count: number;
+  cost_usd: number;
+  tokens_in: number;
+  tokens_out: number;
 }
 
 export interface StatSourceRow {
+  /** source_id — the filterable value (drives the Sources chip drill-down). */
   source: string;
+  /** source_format label (claude-code, codex, …) — shown in the table. */
+  format: string;
   sessions: number;
   failures: number;
+  cost_usd: number;
+  tokens_in: number;
+  tokens_out: number;
+  tokens_cache_read: number;
+  op_count: number;
 }
 
 export interface StatErrorRow {

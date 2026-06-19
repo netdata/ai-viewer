@@ -350,6 +350,10 @@ export function useFilters(): UseFiltersResult {
       next.delete('from');
       next.delete('to');
       next.delete('q');
+      // The FilterBar time-range preset mirrors its choice in a `range` param
+      // (SOW-0067); clear it too so "Clear filters" leaves a clean URL and the
+      // preset select does not display a value that no longer applies.
+      next.delete('range');
       return next;
     });
   }, [setSearchParams]);

@@ -9,13 +9,13 @@ import (
 // slice is initialised to an empty (non-nil) slice so the JSON serialises
 // as [] rather than null on an empty result set.
 type statsResponse struct {
-	Totals        statsTotals     `json:"totals"`
-	ByModel       []statModelRow  `json:"by_model"`
-	ByTool        []statToolRow   `json:"by_tool"`
-	ByAgent       []statAgentRow  `json:"by_agent"`
-	ByStatus      []statStatusRow `json:"by_status"`
-	BySource      []statSourceRow `json:"by_source"`
-	ByErrorClass  []statErrorRow  `json:"by_error_class"`
+	Totals       statsTotals     `json:"totals"`
+	ByModel      []statModelRow  `json:"by_model"`
+	ByTool       []statToolRow   `json:"by_tool"`
+	ByAgent      []statAgentRow  `json:"by_agent"`
+	ByStatus     []statStatusRow `json:"by_status"`
+	BySource     []statSourceRow `json:"by_source"`
+	ByErrorClass []statErrorRow  `json:"by_error_class"`
 }
 
 type statsTotals struct {
@@ -32,14 +32,17 @@ type statsTotals struct {
 }
 
 type statModelRow struct {
-	Name      string  `json:"name"`
-	Provider  string  `json:"provider"`
-	Calls     int64   `json:"calls"`
-	TokensIn  int64   `json:"tokens_in"`
-	TokensOut int64   `json:"tokens_out"`
-	CostUSD   float64 `json:"cost_usd"`
-	Failures  int64   `json:"failures"`
-	PctOfCost float64 `json:"pct_of_cost"`
+	Name             string  `json:"name"`
+	Provider         string  `json:"provider"`
+	Calls            int64   `json:"calls"`
+	TokensIn         int64   `json:"tokens_in"`
+	TokensOut        int64   `json:"tokens_out"`
+	TokensCacheRead  int64   `json:"tokens_cache_read"`
+	TokensCacheWrite int64   `json:"tokens_cache_write"`
+	CostUSD          float64 `json:"cost_usd"`
+	Failures         int64   `json:"failures"`
+	DurationUS       int64   `json:"duration_us"`
+	PctOfCost        float64 `json:"pct_of_cost"`
 }
 
 type statToolRow struct {
@@ -52,24 +55,41 @@ type statToolRow struct {
 }
 
 type statAgentRow struct {
-	Name          string  `json:"name"`
-	Sessions      int64   `json:"sessions"`
-	Failures      int64   `json:"failures"`
-	TokensIn      int64   `json:"tokens_in"`
-	TokensOut     int64   `json:"tokens_out"`
-	CostUSD       float64 `json:"cost_usd"`
-	PctOfSessions float64 `json:"pct_of_sessions"`
+	Name             string  `json:"name"`
+	Sessions         int64   `json:"sessions"`
+	Failures         int64   `json:"failures"`
+	TokensIn         int64   `json:"tokens_in"`
+	TokensOut        int64   `json:"tokens_out"`
+	TokensCacheRead  int64   `json:"tokens_cache_read"`
+	TokensCacheWrite int64   `json:"tokens_cache_write"`
+	CostUSD          float64 `json:"cost_usd"`
+	PctOfSessions    float64 `json:"pct_of_sessions"`
 }
 
 type statStatusRow struct {
-	Status string `json:"status"`
-	Count  int64  `json:"count"`
+	Status    string  `json:"status"`
+	Count     int64   `json:"count"`
+	CostUSD   float64 `json:"cost_usd"`
+	TokensIn  int64   `json:"tokens_in"`
+	TokensOut int64   `json:"tokens_out"`
 }
 
+// statSourceRow is one row in the by_source breakdown. SOW-0067 enriches it
+// with full economics (cost/tokens/cache/op_count) + the harness format label
+// so the Statistics comparison table can answer "which harness is most
+// efficient". `Source` is the source_id (the filterable value driving the
+// Sources chip drill-down); `Format` is the source_format label (e.g.
+// claude-code, codex) shown in the table.
 type statSourceRow struct {
-	Source   string `json:"source"`
-	Sessions int64  `json:"sessions"`
-	Failures int64  `json:"failures"`
+	Source          string  `json:"source"`
+	Format          string  `json:"format"`
+	Sessions        int64   `json:"sessions"`
+	Failures        int64   `json:"failures"`
+	CostUSD         float64 `json:"cost_usd"`
+	TokensIn        int64   `json:"tokens_in"`
+	TokensOut       int64   `json:"tokens_out"`
+	TokensCacheRead int64   `json:"tokens_cache_read"`
+	OpCount         int64   `json:"op_count"`
 }
 
 // statErrorRow is one row in the by_error_class breakdown: how many failed

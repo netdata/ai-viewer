@@ -69,34 +69,63 @@ Tab layout:
 
 A larger D3 view aggregating all sessions in the active filter. Same node/edge model as the per-session topology, but counts span the full filtered set. Useful for "which tools does my agent actually use, weighted by cost".
 
-### `/stats` — Statistics dashboard (SOW-0007)
+### `/stats` — Statistics dashboard (SOW-0007, redesigned SOW-0067)
 
 The unified statistics-and-analytics dashboard. Its **own route** — `/` stays
 focused on the sessions list. Uses the global FilterBar (timeframe `from`/`to`
 plus the dimensional filters) like every other page; the charts re-fetch on filter
-change.
+change. **SOW-0067 adds a time-range preset control to the FilterBar itself**
+(Last 1h / 24h / 7d / 30d / All) so the operator can scope every chart without
+hand-editing the URL — the preset writes the already-supported `from`/`to` params.
 
 Layout:
 
-- **Line charts** — per-day cost / tokens / sessions (`session_starts`) / failures
-  over the selected range, from
-  `GET /api/stats/aggregate?bucket=daily&group_by=total` (one metric per chart, or
-  a metric toggle). Sessions are plotted from the additive `session_starts` metric
+- **Trends (multi-series line chart)** — per-day cost / tokens / sessions
+  (`session_starts`) / failures / **failure rate** / duration over the selected
+  range, from `GET /api/stats/aggregate?bucket=daily&group_by=<dim>` (SOW-0067).
+  A **"Group by" control** selects the overlay dimension
+  (`total`/`model`/`provider`/`tool`/`agent`/`cwd`/`source_format`); the chart
+  renders one polyline per group value (≤8 visible series, the rest rolled into
+  an "other" bucket) with a text legend so color is never the sole signal. The
+  LineChart primitive already supports multiple series (one `<path>` per series);
+  SOW-0067 only wires the control through. **Failure rate** is a client-derived
+  pseudo-metric: the page fetches the `failures` and `calls` aggregates for the
+  same group_by and divides per bucket — ratios do not aggregate, so the server
+  cannot SUM a rate; this two-fetch + per-bucket divide is the correct approach.
+  Sessions are plotted from the additive `session_starts` metric
   (`data-model.md` §Rollup tables), never a non-additive distinct count. A series
   with a SINGLE data point (one bucket) renders a small filled dot at that point —
   a lone-`M` polyline draws nothing, so the marker keeps a one-bucket trend
   visible; multi-point series draw the polyline only.
-- **Horizontal bar charts** — top-N model / provider / tool / agent / cwd, from
-  `GET /api/stats/top` (one chart per dimension, dimension/metric selectable). Each
-  bar's value label sits just after the bar end by default; a long bar whose
-  outside label would clip the right edge draws the label INSIDE the bar end
-  (end-anchored, higher-contrast text token) so it always stays within the SVG
-  viewport.
+- **Horizontal bar charts (Top-N)** — top-N model / provider / tool / agent / cwd,
+  from `GET /api/stats/top` (dimension/metric selectable). Each bar's value label
+  sits just after the bar end by default; a long bar whose outside label would
+  clip the right edge draws the label INSIDE the bar end (end-anchored,
+  higher-contrast text token) so it always stays within the SVG viewport.
+- **Multi-metric comparison table (SOW-0067)** — the operator picks a "group by"
+  dimension (model / source / agent / tool / status / error_class) and sees a
+  STABLE column set across all values: Name · (Calls or Sessions) · Failures ·
+  Failure% · Cost · Tokens in · Tokens out · Cache read · Cache-hit% · Duration.
+  Cells render the value where the dimension owns that metric and an em-dash "—"
+  where it genuinely does not (e.g. tokens/cache for tools) — columns are NEVER
+  silently hidden (SOW-0067 honesty fix). Cache-hit% is client-derived
+  (`cache_read/(cache_read+tokens_in)`). Each row is **clickable** (SOW-0067
+  drill-down): clicking a model row sets the global `models` filter (and so on),
+  re-scoping the whole dashboard to that slice. Sortable by clicking a column
+  header. A "Comparison table" header carries a truncation footer when a dimension
+  exceeds the row cap.
+- **Failure analysis (SOW-0067)** — error-class distribution table + horizontal
+  share bar over the failed-session set, sourced from the `by_error_class`
+  breakdown. Shown when at least one failed session has a classified error_class.
 - **Deep-search box** — a text input that posts its query to `GET /api/search`;
   results list matched ops and logs and link to the relevant session/op
   (`rest-api.md` — `op_id`/`session_id`/`log_id` linkage). When the matched source
   has log indexing disabled the results note `logs_indexed: false`
   (`data-model.md` §Full-text search).
+
+**CSV export (SOW-0067, AC#5):** every data section — trends, top-N, the
+comparison table, and failure analysis — carries an "Export CSV" button producing
+the rows currently in view (header row names the dimension + metric).
 
 Charts reuse the D3 line + bar primitives from SOW-0006 in `viz/` — **no new chart
 library** — and honor the same rendering conventions: SVG below the per-chart point

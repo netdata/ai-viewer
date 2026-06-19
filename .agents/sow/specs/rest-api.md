@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-JSON over HTTP. All implemented endpoints return `application/json` except `/api/events` (text/event-stream); the Phase-2 `/api/payloads/:ref` would carry a variable content type once implemented, but in Phase 1 it is unregistered and returns the JSON `NOT_FOUND` envelope. Pagination, time-range filtering, and structured errors are consistent across endpoints.
+JSON over HTTP. All implemented endpoints return `application/json` except `/api/events` (text/event-stream) and `/api/payloads/<id>` (variable content type, SOW-0033). Pagination, time-range filtering, and structured errors are consistent across endpoints.
 
 ## Conventions
 
@@ -355,11 +355,12 @@ Cross-session aggregates over the filtered set.
     "tokens_cache_read": ..., "tokens_cache_write": ...,
     "failures": ..., "duration_us": ...
   },
-  "by_model":    [ { "name":"...","provider":"...","calls":...,"tokens_in":...,"tokens_out":...,"cost_usd":...,"failures":...,"pct_of_cost":0.42 } ],
+  "by_model":    [ { "name":"...","provider":"...","calls":...,"tokens_in":...,"tokens_out":...,"tokens_cache_read":...,"tokens_cache_write":...,"cost_usd":...,"failures":...,"duration_us":...,"pct_of_cost":0.42 } ],
   "by_tool":     [ { "namespace":"...","name":"...","calls":...,"failures":...,"total_us":...,"pct_of_calls":0.12 } ],
-  "by_agent":    [ { "name":"...","sessions":...,"failures":...,"tokens_in":...,"tokens_out":...,"cost_usd":...,"pct_of_sessions":0.20 } ],
-  "by_status":   [ { "status":"completed","count":... }, { "status":"failed","count":... } ],
-  "by_source":   [ { "source":"...","sessions":...,"failures":... } ]
+  "by_agent":    [ { "name":"...","sessions":...,"failures":...,"tokens_in":...,"tokens_out":...,"tokens_cache_read":...,"tokens_cache_write":...,"cost_usd":...,"pct_of_sessions":0.20 } ],
+  "by_status":   [ { "status":"completed","count":...,"cost_usd":...,"tokens_in":...,"tokens_out":... }, { "status":"failed","count":...,"cost_usd":...,"tokens_in":...,"tokens_out":... } ],
+  "by_source":   [ { "source":"...","format":"...","sessions":...,"failures":...,"cost_usd":...,"tokens_in":...,"tokens_out":...,"tokens_cache_read":...,"op_count":... } ],
+  "by_error_class": [ { "error_class":"...","sessions":...,"ops":...,"cost_usd":... } ]
 }
 ```
 
@@ -373,6 +374,21 @@ delivered by SOW-0007 are the dedicated endpoints below — `/api/stats/aggregat
 and `/api/stats/top`. (An earlier SOW-0007 draft proposed transparently
 rollup-backing `/api/stats`; that was dropped as ill-fitting — the summary's shape
 and filter semantics differ fundamentally from the rollups.)
+
+**SOW-0067 row enrichment.** The by_* rows carry the metrics each dimension
+naturally owns so the Statistics comparison table is honest (it renders every
+applicable column and an em-dash for genuinely-N/A cells, instead of hiding
+columns). `by_model` and `by_agent` add `tokens_cache_read`/`tokens_cache_write`
+(session/op rollups already store them); `by_model` adds `duration_us` (sum of
+llm-op spans — "which model is slowest"); `by_source` adds `cost_usd`/
+`tokens_*`/`op_count` (harness-efficiency comparison) plus the source_format
+`format` label (joined from `sources`); `by_status` adds
+`cost_usd`/`tokens_*` ("how much did failed sessions cost"). **Cache-hit ratio is
+NOT a server field** — it is a client-derived ratio
+`cache_read / (cache_read + tokens_in)` (ratios do not aggregate, so the server
+cannot SUM them); the frontend computes it per row from `tokens_cache_read` +
+`tokens_in`. `by_tool` carries only call/duration fields (tool ops have no model
+tokens) — tokens/cost/cache cells render as "—" for tools.
 
 ### GET /api/stats/aggregate
 
@@ -558,14 +574,15 @@ ingester but no handler serves them yet; returns a structured `NOT_FOUND` today.
 
 Catalog table contents with filters and sorting.
 
-### GET /api/payloads/:ref
+### GET /api/payloads/
 
-**Phase 2 — not implemented in Phase 1.** The route is not registered (returns a
-structured `NOT_FOUND`), and Phase 1 deliberately does **not** emit a `url` on
-`payload_refs` (a viewer must not advertise a route it does not serve). The
-`payload_refs` entries still carry `id`/`kind`/`format`/`compression`/bytes so a
-later phase can add the streaming route + link. The shape below is the planned
-contract.
+Streams a payload's bytes by numeric ref (SOW-0033). The route is registered as
+a prefix handler (`/api/payloads/`); the `<id>` is the `payload_refs.id`
+(parsed, `> 0`). A 4 KB UTF-8 text **preview** is served when the client asks
+for the JSON envelope (`GET /api/payloads/<id>` with the default accept path);
+a full byte **download** is served when `?full=1` (capped at 10 MB). `payload_refs` entries
+carry `id`/`kind`/`format`/`compression`/bytes so the viewer can link and serve
+them. The shape below is the served contract.
 
 Streams the payload bytes. Headers:
 

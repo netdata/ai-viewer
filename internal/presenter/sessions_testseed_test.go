@@ -138,6 +138,8 @@ type opRow struct {
 	status                string
 	errorClass            string
 	tokensIn, tokensOut   int64
+	tokensCacheRead       int64 // SOW-0067: op-level cache tokens (by_model cache-hit)
+	tokensCacheWrite      int64
 	costUSD               float64
 	ctxUsed, ctxMax       int64
 	childSessionID        string
@@ -166,12 +168,13 @@ func seedOp(t *testing.T, db *sql.DB, o opRow) {
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq, kind, name, tool_namespace, model, provider,
     start_ts, end_ts, duration_us, status, error_class,
-    tokens_in, tokens_out, cost_usd, ctx_used, ctx_max, child_session_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, ctx_used, ctx_max, child_session_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		o.id, o.turnID, o.sessionID, nullStr(o.parentOpID), o.seq, o.kind, o.name,
 		nullStr(o.toolNamespace), nullStr(o.model), nullStr(o.provider),
 		o.startTS, endTS, nullInt(o.durationUS), o.status, nullStr(o.errorClass),
-		o.tokensIn, o.tokensOut, o.costUSD, nullInt(o.ctxUsed), nullInt(o.ctxMax),
+		o.tokensIn, o.tokensOut, o.tokensCacheRead, o.tokensCacheWrite,
+		o.costUSD, nullInt(o.ctxUsed), nullInt(o.ctxMax),
 		nullStr(o.childSessionID),
 	); err != nil {
 		t.Fatalf("seed op %s: %v", o.id, err)
@@ -287,7 +290,8 @@ func seedGraphOps(t *testing.T, db *sql.DB, base int64) {
 	seedOp(t, db, opRow{
 		id: "o1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "llm", name: "claude-opus-4-7",
 		model: "claude-opus-4-7", provider: "anthropic", startTS: base + 1_100, endTS: base + 2_100,
-		durationUS: 1_000, status: "completed", tokensIn: 500, tokensOut: 1000, costUSD: 0.15,
+		durationUS: 1_000, status: "completed", tokensIn: 500, tokensOut: 1000,
+		tokensCacheRead: 3000, tokensCacheWrite: 500, costUSD: 0.15,
 		ctxUsed: 12000, ctxMax: 200000,
 	})
 	seedOp(t, db, opRow{

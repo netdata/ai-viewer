@@ -76,9 +76,9 @@ type opDetail struct {
 }
 
 // payloadRef is one payload_refs row. The byte-streaming route
-// (GET /api/payloads/<id>) is Phase 2 and not yet registered, so the row
-// carries only its metadata — no `url` field is emitted until the route and
-// a view that consumes it land together (rest-api.md §GET /api/payloads).
+// (GET /api/payloads/<id>, SOW-0033) IS registered, but session-detail does not
+// advertise it: the row carries only metadata and no `url` field (the Trace
+// drawer's Preview button constructs the URL client-side from the ref id).
 type payloadRef struct {
 	ID            int64   `json:"id"`
 	Kind          string  `json:"kind"`

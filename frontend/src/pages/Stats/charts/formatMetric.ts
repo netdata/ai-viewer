@@ -17,6 +17,9 @@ export function formatMetricValue(metric: string, value: number): string {
       return formatCost(value);
     case 'duration_us':
       return formatDuration(value);
+    case 'failure_rate':
+      // Frontend-derived ratio (failures/calls); render as a percentage.
+      return `${(value * 100).toFixed(1)}%`;
     case 'tokens_in':
     case 'tokens_out':
     case 'calls':

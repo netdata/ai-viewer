@@ -13,6 +13,7 @@ import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import type {
   AggregateResponse,
   SearchResponse,
+  StatsResponse,
   TopResponse,
 } from '../../api/types';
 import { ApiError } from '../../api/client';
@@ -31,13 +32,14 @@ import { STAT_PARAM_KEYS } from './shareState';
 
 const aggSpy = vi.fn();
 const topSpy = vi.fn();
+const statsSpy = vi.fn();
 const searchSpy = vi.fn();
 const liveSpy = vi.fn();
 
 vi.mock('../../api/stats', () => ({
   useAggregate: (...args: unknown[]) => aggSpy(...args) as unknown,
   useTop: (...args: unknown[]) => topSpy(...args) as unknown,
-  useStats: () => ({ data: undefined, isPending: false }),
+  useStats: (...args: unknown[]) => statsSpy(...args) as unknown,
   useSearch: (...args: unknown[]) => searchSpy(...args) as unknown,
 }));
 vi.mock('../../state/useLiveUpdates', () => ({
@@ -55,6 +57,83 @@ function queryResult<T>(over: Record<string, unknown>): T {
     error: null,
     ...over,
   } as T;
+}
+
+/** statsData builds a StatsResponse with one row per breakdown dimension. */
+function statsData(over: Partial<StatsResponse> = {}): StatsResponse {
+  return {
+    totals: {
+      session_count: 10,
+      turn_count: 20,
+      op_count: 40,
+      tokens_in: 1000,
+      tokens_out: 2000,
+      tokens_cache_read: 3000,
+      tokens_cache_write: 500,
+      cost_usd: 1.5,
+      failures: 3,
+      duration_us: 9_000_000,
+    },
+    by_model: [
+      {
+        name: 'claude-opus-4-7',
+        provider: 'anthropic',
+        calls: 5,
+        tokens_in: 500,
+        tokens_out: 1000,
+        tokens_cache_read: 3000,
+        tokens_cache_write: 500,
+        cost_usd: 0.9,
+        failures: 1,
+        duration_us: 4_000_000,
+        pct_of_cost: 0.6,
+      },
+    ],
+    by_tool: [
+      {
+        namespace: 'shell',
+        name: 'Bash',
+        calls: 8,
+        failures: 2,
+        total_us: 5_000_000,
+        pct_of_calls: 0.8,
+      },
+    ],
+    by_agent: [
+      {
+        name: 'nedi',
+        sessions: 6,
+        failures: 1,
+        tokens_in: 500,
+        tokens_out: 1000,
+        tokens_cache_read: 3000,
+        tokens_cache_write: 500,
+        cost_usd: 0.9,
+        pct_of_sessions: 0.6,
+      },
+    ],
+    by_status: [
+      { status: 'completed', count: 7, cost_usd: 1.4, tokens_in: 900, tokens_out: 1900 },
+      { status: 'failed', count: 3, cost_usd: 0.1, tokens_in: 100, tokens_out: 100 },
+    ],
+    by_source: [
+      {
+        source: 'src1',
+        format: 'aiagent_v3',
+        sessions: 10,
+        failures: 3,
+        cost_usd: 1.5,
+        tokens_in: 1000,
+        tokens_out: 2000,
+        tokens_cache_read: 3000,
+        op_count: 40,
+      },
+    ],
+    by_error_class: [
+      { error_class: 'io_error', sessions: 2, ops: 5, cost_usd: 0.05 },
+    ],
+    ...over,
+  };
 }
 
 function aggregate(over: Partial<AggregateResponse> = {}): AggregateResponse {
@@ -185,9 +264,11 @@ function typeSearch(value: string): void {
 beforeEach(() => {
   aggSpy.mockReset();
   topSpy.mockReset();
+  statsSpy.mockReset();
   searchSpy.mockReset();
   liveSpy.mockReset();
   mountStates({});
+  statsSpy.mockReturnValue(queryResult({ data: undefined }));
 });
 
 afterEach(() => {
@@ -416,6 +497,7 @@ describe('Stats', () => {
     // getByLabelText throws if the control is unlabelled — these assertions ARE
     // the a11y check for the controls (full axe is Chunk 11).
     expect(screen.getByLabelText(/trend metric/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/group by/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/time bucket/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/breakdown dimension/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/breakdown metric/i)).toBeInTheDocument();
@@ -585,5 +667,103 @@ describe('Stats — shareable URL + copy link', () => {
     // The aria-live="polite" status region exists (empty until a copy happens).
     const status = screen.getByRole('status');
     expect(status).toHaveAttribute('aria-live', 'polite');
+  });
+});
+
+// ── SOW-0067: multi-series trend, failure-rate, honest comparison table ─────
+describe('Stats — SOW-0067 redesign', () => {
+  it('changing the Group-by select updates the useAggregate groupBy arg', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.selectOptions(screen.getByLabelText(/group by/i), 'model');
+    const lastOpts = aggSpy.mock.calls.at(-1)?.[1] as { groupBy: string };
+    expect(lastOpts.groupBy).toBe('model');
+  });
+
+  it('selecting Failure rate fetches BOTH failures and calls (derived rate)', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.selectOptions(screen.getByLabelText(/trend metric/i), 'failure_rate');
+    // The latest two useAggregate calls carry metrics failures + calls (the
+    // page divides them client-side because ratios do not aggregate on the
+    // rollup fast path).
+    const metrics = aggSpy.mock.calls
+      .slice(-2)
+      .map((c) => (c[1] as { metric: string }).metric)
+      .sort();
+    expect(metrics).toEqual(['calls', 'failures']);
+  });
+
+  it('renders the comparison table with honest "—" cells for N/A metrics', () => {
+    statsSpy.mockReturnValue(queryResult({ data: statsData() }));
+    renderPage();
+    // The Tool dimension does not own tokens/cache/cost → those cells are "—".
+    fireEvent.change(screen.getByLabelText(/comparison dimension/i), {
+      target: { value: 'by_tool' },
+    });
+    const region = screen.getByRole('region', { name: /comparison breakdown/i });
+    // Header has the full stable column set (no silently-hidden columns).
+    const headers = within(region).getAllByRole('columnheader').map((h) => h.textContent ?? '');
+    expect(headers.some((h) => /tokens in/i.test(h))).toBe(true);
+    expect(headers.some((h) => /cache-hit/i.test(h))).toBe(true);
+    // The Bash row shows "—" in the N/A cells (tools have no model tokens).
+    expect(within(region).getByText('shell.Bash')).toBeInTheDocument();
+    expect(within(region).getAllByText('—').length).toBeGreaterThan(0);
+  });
+
+  it('shows a real cache-hit % for the model dimension (data exists)', () => {
+    statsSpy.mockReturnValue(queryResult({ data: statsData() }));
+    renderPage();
+    fireEvent.change(screen.getByLabelText(/comparison dimension/i), {
+      target: { value: 'by_model' },
+    });
+    const region = screen.getByRole('region', { name: /comparison breakdown/i });
+    // claude-opus-4-7 cache_hit = 3000/(3000+500) = 85.7%.
+    expect(within(region).getByText('85.7%')).toBeInTheDocument();
+  });
+
+  it('clicking a comparison row drills down to the sessions list with the filter', async () => {
+    const user = userEvent.setup();
+    statsSpy.mockReturnValue(queryResult({ data: statsData() }));
+    const { sink } = renderPageAt('/stats');
+    // Default dimension is by_model; the label is a real (keyboard-reachable)
+    // button — clicking it navigates with the filter applied.
+    const region = screen.getByRole('region', { name: /comparison breakdown/i });
+    const drillBtn = within(region).getByRole('button', { name: 'claude-opus-4-7' });
+    await user.click(drillBtn);
+    await waitFor(() => {
+      expect(sink.params.get('models')).toBe('claude-opus-4-7');
+    });
+  });
+
+  it('by_error_class rows are NOT interactive (no honest error_class filter)', () => {
+    statsSpy.mockReturnValue(queryResult({ data: statsData() }));
+    renderPage();
+    fireEvent.change(screen.getByLabelText(/comparison dimension/i), {
+      target: { value: 'by_error_class' },
+    });
+    const region = screen.getByRole('region', { name: /comparison breakdown/i });
+    // io_error renders as plain text, NOT a drill button — drilling to
+    // status=failed would be a misleading wider result.
+    expect(within(region).queryByRole('button', { name: 'io_error' })).toBeNull();
+    expect(within(region).getByText('io_error')).toBeInTheDocument();
+  });
+
+  it('every data section has an Export CSV button (AC#5)', () => {
+    statsSpy.mockReturnValue(queryResult({ data: statsData() }));
+    renderPage();
+    const exportButtons = screen.getAllByRole('button', { name: /export csv/i });
+    // Trend + Top-N + Comparison + Failure analysis = 4 export buttons.
+    expect(exportButtons.length).toBe(4);
+  });
+
+  it('renders the failure-analysis section when error-class data is present', () => {
+    statsSpy.mockReturnValue(queryResult({ data: statsData() }));
+    renderPage();
+    expect(screen.getByRole('heading', { name: /failure analysis/i })).toBeInTheDocument();
+    // io_error appears in BOTH the failure table and the share bar — scope to
+    // the table region to assert it uniquely.
+    const region = screen.getByRole('region', { name: /error class breakdown/i });
+    expect(within(region).getByText('io_error')).toBeInTheDocument();
   });
 });

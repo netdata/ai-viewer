@@ -1,4 +1,9 @@
-import type { StatsBucket, StatsMetric, TopDimension } from '../../api/types';
+import type {
+  AggregateGroupBy,
+  StatsBucket,
+  StatsMetric,
+  TopDimension,
+} from '../../api/types';
 
 // The /stats chart controls live in the URL so the whole view (filters + chart
 // controls) is shareable / bookmarkable (ui-pages.md §/stats "Copy-share-link").
@@ -12,18 +17,31 @@ import type { StatsBucket, StatsMetric, TopDimension } from '../../api/types';
 // (functional setSearchParams), so changing a chart control preserves the
 // filter params and vice-versa (same merge-patch contract as applyPatch).
 
+/**
+ * The trend metric. Extends the server `StatsMetric` enum with one
+ * FRONTEND-ONLY derived value: `failure_rate`. A rate cannot be SUM-ed by the
+ * rollup fast path (ratios do not aggregate), so the server has no
+ * `failure_rate` metric; instead the page fetches the `failures` AND `calls`
+ * aggregates for the same group_by and divides per bucket
+ * (rest-api.md §GET /api/stats — SOW-0067). `topMetric` stays the plain server
+ * enum because the top-N ranking is a single absolute metric.
+ */
+export type TrendMetric = StatsMetric | 'failure_rate';
+
 /** The own (chart-control) param names. Distinct from the filter keys. */
 export const STAT_PARAM_KEYS = {
   trendMetric: 'stat_metric',
   bucket: 'stat_bucket',
+  trendGroupBy: 'stat_group',
   topDimension: 'top_dim',
   topMetric: 'top_metric',
 } as const;
 
 /** Decoded, page-facing chart-control state. */
 export interface StatControls {
-  trendMetric: StatsMetric;
+  trendMetric: TrendMetric;
   bucket: StatsBucket;
+  trendGroupBy: AggregateGroupBy;
   topDimension: TopDimension;
   topMetric: StatsMetric;
 }
@@ -35,6 +53,7 @@ export type StatControlsPatch = Partial<StatControls>;
 export const STAT_CONTROL_DEFAULTS: StatControls = {
   trendMetric: 'cost',
   bucket: 'daily',
+  trendGroupBy: 'total',
   topDimension: 'model',
   topMetric: 'cost',
 };
@@ -51,7 +70,20 @@ const METRIC_VALUES = new Set<StatsMetric>([
   'duration_us',
   'sessions',
 ]);
+const TREND_METRIC_VALUES = new Set<TrendMetric>([
+  ...METRIC_VALUES,
+  'failure_rate',
+]);
 const BUCKET_VALUES = new Set<StatsBucket>(['hourly', 'daily']);
+const GROUP_BY_VALUES = new Set<AggregateGroupBy>([
+  'model',
+  'provider',
+  'tool',
+  'agent',
+  'cwd',
+  'source_format',
+  'total',
+]);
 const DIMENSION_VALUES = new Set<TopDimension>([
   'model',
   'provider',
@@ -59,6 +91,12 @@ const DIMENSION_VALUES = new Set<TopDimension>([
   'agent',
   'cwd',
 ]);
+
+function parseTrendMetric(raw: string | null): TrendMetric {
+  return raw !== null && TREND_METRIC_VALUES.has(raw as TrendMetric)
+    ? (raw as TrendMetric)
+    : STAT_CONTROL_DEFAULTS.trendMetric;
+}
 
 function parseMetric(raw: string | null, fallback: StatsMetric): StatsMetric {
   return raw !== null && METRIC_VALUES.has(raw as StatsMetric)
@@ -72,6 +110,12 @@ function parseBucket(raw: string | null): StatsBucket {
     : STAT_CONTROL_DEFAULTS.bucket;
 }
 
+function parseGroupBy(raw: string | null): AggregateGroupBy {
+  return raw !== null && GROUP_BY_VALUES.has(raw as AggregateGroupBy)
+    ? (raw as AggregateGroupBy)
+    : STAT_CONTROL_DEFAULTS.trendGroupBy;
+}
+
 function parseDimension(raw: string | null): TopDimension {
   return raw !== null && DIMENSION_VALUES.has(raw as TopDimension)
     ? (raw as TopDimension)
@@ -82,11 +126,9 @@ function parseDimension(raw: string | null): TopDimension {
  *  clamping every value to its valid enum (unknown → default, never throws). */
 export function readStatControls(params: URLSearchParams): StatControls {
   return {
-    trendMetric: parseMetric(
-      params.get(STAT_PARAM_KEYS.trendMetric),
-      STAT_CONTROL_DEFAULTS.trendMetric,
-    ),
+    trendMetric: parseTrendMetric(params.get(STAT_PARAM_KEYS.trendMetric)),
     bucket: parseBucket(params.get(STAT_PARAM_KEYS.bucket)),
+    trendGroupBy: parseGroupBy(params.get(STAT_PARAM_KEYS.trendGroupBy)),
     topDimension: parseDimension(params.get(STAT_PARAM_KEYS.topDimension)),
     topMetric: parseMetric(
       params.get(STAT_PARAM_KEYS.topMetric),
@@ -111,6 +153,9 @@ export function applyStatPatch(
   }
   if (patch.bucket !== undefined) {
     next.set(STAT_PARAM_KEYS.bucket, patch.bucket);
+  }
+  if (patch.trendGroupBy !== undefined) {
+    next.set(STAT_PARAM_KEYS.trendGroupBy, patch.trendGroupBy);
   }
   if (patch.topDimension !== undefined) {
     next.set(STAT_PARAM_KEYS.topDimension, patch.topDimension);

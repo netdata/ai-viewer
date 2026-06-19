@@ -19,11 +19,12 @@ describe('readStatControls', () => {
   it('reads each control param into its typed value', () => {
     const params = new URLSearchParams(
       `${STAT_PARAM_KEYS.trendMetric}=tokens_in&${STAT_PARAM_KEYS.bucket}=hourly` +
-        `&${STAT_PARAM_KEYS.topDimension}=tool&${STAT_PARAM_KEYS.topMetric}=failures`,
+        `&${STAT_PARAM_KEYS.trendGroupBy}=model&${STAT_PARAM_KEYS.topDimension}=tool&${STAT_PARAM_KEYS.topMetric}=failures`,
     );
     expect(readStatControls(params)).toEqual({
       trendMetric: 'tokens_in',
       bucket: 'hourly',
+      trendGroupBy: 'model',
       topDimension: 'tool',
       topMetric: 'failures',
     });
@@ -32,7 +33,7 @@ describe('readStatControls', () => {
   it('falls back to the default for an unknown/invalid value (no throw)', () => {
     const params = new URLSearchParams(
       `${STAT_PARAM_KEYS.trendMetric}=bogus&${STAT_PARAM_KEYS.bucket}=weekly` +
-        `&${STAT_PARAM_KEYS.topDimension}=nonsense&${STAT_PARAM_KEYS.topMetric}=`,
+        `&${STAT_PARAM_KEYS.trendGroupBy}=nonsense&${STAT_PARAM_KEYS.topDimension}=nonsense&${STAT_PARAM_KEYS.topMetric}=`,
     );
     expect(() => readStatControls(params)).not.toThrow();
     expect(readStatControls(params)).toEqual(STAT_CONTROL_DEFAULTS);
@@ -54,6 +55,15 @@ describe('readStatControls', () => {
     const c = readStatControls(params);
     expect(c.trendMetric).toBe('sessions'); // valid server enum → kept, not clamped
     expect(c.topMetric).toBe('sessions');
+  });
+
+  it('accepts failure_rate as a valid TREND metric only (derived, not a server metric)', () => {
+    // failure_rate is a frontend-derived trend metric (SOW-0067).
+    const trendParams = new URLSearchParams(`${STAT_PARAM_KEYS.trendMetric}=failure_rate`);
+    expect(readStatControls(trendParams).trendMetric).toBe('failure_rate');
+    // It is NOT a valid topMetric (top-N is a single absolute metric) — clamped.
+    const topParams = new URLSearchParams(`${STAT_PARAM_KEYS.topMetric}=failure_rate`);
+    expect(readStatControls(topParams).topMetric).toBe(STAT_CONTROL_DEFAULTS.topMetric);
   });
 });
 
@@ -86,14 +96,26 @@ describe('applyStatPatch', () => {
     const next = applyStatPatch(new URLSearchParams(''), {
       trendMetric: 'sessions',
       bucket: 'hourly',
+      trendGroupBy: 'source_format',
       topDimension: 'cwd',
       topMetric: 'tokens_out',
     });
     expect(readStatControls(next)).toEqual({
       trendMetric: 'sessions',
       bucket: 'hourly',
+      trendGroupBy: 'source_format',
       topDimension: 'cwd',
       topMetric: 'tokens_out',
     });
+  });
+
+  it('round-trips the derived failure_rate trend metric + a group_by', () => {
+    const next = applyStatPatch(new URLSearchParams(''), {
+      trendMetric: 'failure_rate',
+      trendGroupBy: 'model',
+    });
+    const c = readStatControls(next);
+    expect(c.trendMetric).toBe('failure_rate');
+    expect(c.trendGroupBy).toBe('model');
   });
 });
