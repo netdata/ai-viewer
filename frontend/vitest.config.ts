@@ -1,5 +1,9 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // The coverage dir lists (measured set + per-directory line floors) live in a
 // shared ESM module that BOTH this config and scripts/check-coverage-config.mjs
 // read, so the gate Vitest enforces and the verifier that checks it for vacuous
@@ -28,6 +32,11 @@ const perDirThresholds = Object.fromEntries(
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
   test: {
     globals: true,
     environment: 'jsdom',

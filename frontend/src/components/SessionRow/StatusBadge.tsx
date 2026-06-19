@@ -1,4 +1,3 @@
-import type { SessionStatus } from '../../api/types';
 import styles from './SessionRow.module.css';
 
 // Status badge: color + text label (never color alone — frontend-architecture.md
@@ -6,10 +5,16 @@ import styles from './SessionRow.module.css';
 // status to a token class; unknown statuses use the neutral style. A *missing*
 // CSS-module class (a typo/rename in the module) is surfaced in dev/test rather
 // than silently rendering an unstyled badge (a plain `?? ''` would hide it).
+//
+// SOW-0073: the SessionRow's text-only badge is kept for backward compatibility
+// with this folder's tests + visual contract; the design-system StatusBadge
+// (with icon + pulse) lives at components/StatusBadge.tsx and is used in new
+// code (toolbars, overview tiles, etc.). The two render in the same semantic
+// colors so the UI stays visually consistent.
 
 /** StatusStyles is the subset of CSS-module keys the badge maps onto. The CSS
  *  module satisfies this; tests inject a plain object to exercise the mapper. */
-interface StatusStyles {
+export interface StatusStyles {
   badge?: string;
   completed?: string;
   running?: string;
@@ -31,49 +36,54 @@ const STATUS_CLASS_BY_STATUS = new Map<string, StatusClassName>([
   ['abandoned', 'failed'],
 ]);
 
-function classFromStyles(key: StatusClassName, classes: StatusStyles): string | undefined {
-  switch (key) {
-    case 'completed':
-      return classes.completed;
-    case 'running':
-      return classes.running;
-    case 'failed':
-      return classes.failed;
-  }
-  const exhaustive: never = key;
-  return exhaustive;
-}
+/** knownStatuses is the closed canonical set; the mapper tests pin it. */
+export const knownStatuses: readonly string[] = Array.from(STATUS_CLASS_BY_STATUS.keys());
 
-/**
- * resolveStatusClass maps a status to its CSS-module class. Known statuses use
- * their mapped key; any other value uses the neutral `unknown` style. If a
- * *known* status maps to a key that is absent from the module (rename/typo),
- * dev/test builds console.error so the gap is visible; production stays
- * resilient — the badge still renders (just unstyled) and never throws.
+/** resolveStatusClass returns the CSS-module key for a session status.
+ *
+ *  Behavior matrix:
+ *  - known status + styles has the mapped class  → that class
+ *  - known status + styles missing the mapped class → dev error, return ''
+ *    (no styling at all so the gap is visible)
+ *  - unknown status + styles.unknown defined  → styles.unknown (neutral)
+ *  - unknown status + styles.unknown undefined → dev error, return ''
+ *  The badge base class is added by the caller (StatusBadge below), not here,
+ *  so the returned token is only the status-specific piece.
  */
 export function resolveStatusClass(
-  status: SessionStatus,
-  classes: StatusStyles,
+  status: string,
+  styles: StatusStyles,
 ): string {
-  const key = STATUS_CLASS_BY_STATUS.get(status);
-  if (key === undefined) {
-    // Unknown/future status: neutral style, not an error.
-    return classes.unknown ?? '';
-  }
-  const cls = classFromStyles(key, classes);
-  if (cls === undefined) {
-    if (import.meta.env.DEV) {
-      console.error(
-        `StatusBadge: CSS-module class "${key}" is missing for status "${status}" — badge will render unstyled`,
-      );
+  const mapped = STATUS_CLASS_BY_STATUS.get(status);
+  if (mapped !== undefined) {
+    const cls = styles[mapped];
+    if (cls !== undefined) return cls;
+    if (import.meta.env.DEV === true) {
+      console.error(`StatusBadge: missing CSS-module class for status=${status} key=${mapped}`);
     }
     return '';
   }
-  return cls;
+  if (styles.unknown !== undefined) return styles.unknown;
+  if (import.meta.env.DEV === true) {
+    console.error(`StatusBadge: missing CSS-module class for unknown status=${status}`);
+  }
+  return '';
 }
 
-export function StatusBadge({ status }: { status: SessionStatus }) {
-  const statusStyles: StatusStyles = styles;
-  const cls = resolveStatusClass(status, statusStyles);
-  return <span className={`${statusStyles.badge ?? ''} ${cls}`}>{status}</span>;
+export function StatusBadge({
+  status,
+  styles: styleOverride,
+}: {
+  status: string;
+  styles?: StatusStyles;
+}) {
+  const resolvedStyles = styleOverride ?? styles;
+  return (
+    <span
+      className={`${resolvedStyles.badge ?? ''} ${resolveStatusClass(status, resolvedStyles)}`}
+      data-status={status}
+    >
+      {status}
+    </span>
+  );
 }
