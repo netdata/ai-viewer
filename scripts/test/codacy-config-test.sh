@@ -253,7 +253,9 @@ assert_json_policy() {
 
   assert_required_tool Trivy
   assert_required_tool Semgrep
-  assert_required_tool ESLint8
+  # ESLint8 + Agentlinter removed from JSON config (SOW-0072): ESLint8 runs a
+  # default Codacy config that doesn't match our project eslint.config.ts;
+  # Agentlinter analyzes instruction files, not application code.
 
   assert_required_pattern Trivy Trivy_vulnerability_high
   assert_required_pattern Trivy Trivy_vulnerability_critical
@@ -264,11 +266,13 @@ assert_json_policy() {
     Semgrep_go.lang.security.audit.crypto.math_random.math-random-used
   assert_required_pattern Semgrep \
     Semgrep_yaml.github-actions.security.third-party-action-not-pinned-to-commit-sha.third-party-action-not-pinned-to-commit-sha
-  assert_required_pattern ESLint8 ESLint8_xss_no-mixed-html
-
   # SOW-0046: PMD and SQLint stay absent from the local Codacy Analysis CLI
   # config because their Cloud-imported findings are Cloud/local-noise for this
   # repository. Reintroducing either tool requires a renewed SOW disposition.
+  # ESLint8 + Agentlinter were removed from the JSON config: ESLint8 runs a
+  # default Codacy config that doesn't match our project eslint.config.ts
+  # (the CI lint job is the authoritative gate); Agentlinter analyzes
+  # instruction files, not application code.
   if jq -e '
     any(.tools[];
       ((.toolId | ascii_downcase) == "pmd")
@@ -293,29 +297,13 @@ assert_json_policy() {
 }
 
 assert_json_exclude_policy() {
-  local expected_repository_excludes expected_eslint_excludes actual_eslint_excludes
-  local tools_with_excludes duplicate_eslint_excludes
+  local expected_repository_excludes
   expected_repository_excludes="$(expected_codacy_repository_excludes)"
-  expected_eslint_excludes="$(expected_codacy_eslint_test_tooling_excludes)"
 
   mapfile -t json_excludes < <(extract_json_exclude_values)
   assert_line_set_equals "JSON Codacy repository/global excludes" \
     "$expected_repository_excludes" "$(extract_json_exclude_values)"
   assert_no_forbidden_broad_excludes ".codacy/codacy.config.json exclude" "${json_excludes[@]}"
-
-  tools_with_excludes="$(
-    jq -r '.tools[] | select(((.exclude // []) | length) > 0) | .toolId' "$CODACY_JSON"
-  )"
-  [[ "$tools_with_excludes" == "ESLint8" ]] \
-    || fail ".codacy/codacy.config.json must keep path-scoped tool exclusions on ESLint8 only"
-
-  actual_eslint_excludes="$(extract_json_tool_exclude_values ESLint8)"
-  assert_line_set_equals "JSON Codacy ESLint8 test/tooling excludes" \
-    "$expected_eslint_excludes" "$actual_eslint_excludes"
-
-  duplicate_eslint_excludes="$(extract_json_tool_exclude_values ESLint8 | sort | uniq -d)"
-  [[ -z "$duplicate_eslint_excludes" ]] \
-    || fail ".codacy/codacy.config.json has duplicate ESLint8 exclude entries: $duplicate_eslint_excludes"
 }
 
 assert_no_broad_yaml_excludes() {
@@ -382,6 +370,7 @@ exclude_paths:
   - "bin/**"
 engines:
   eslint-8:
+    enabled: false
     exclude_paths:
       - "frontend/tests/**"
       - "frontend/src/**/*.test.ts"
@@ -390,15 +379,11 @@ engines:
       - "frontend/scripts/**"
   lizard:
     enabled: false
-    exclude_paths:
-      - "**/*_test.go"
-      - "frontend/src/**/*.test.ts"
-      - "frontend/src/**/*.test.tsx"
-      - "frontend/src/test/**"
-      - "frontend/tests/**"
   tsqllint:
     enabled: false
   stylelint:
+    enabled: false
+  agentlinter:
     enabled: false
 YAML
 )"
@@ -436,10 +421,7 @@ YAML
   assert_line_set_equals "JSON/YAML Codacy repository exclude parity" \
     "$actual_repository_paths" "$json_repository_paths"
 
-  local json_eslint_paths
-  json_eslint_paths="$(extract_json_tool_exclude_values ESLint8)"
-  assert_line_set_equals "JSON/YAML Codacy ESLint8 exclude parity" \
-    "$actual_paths" "$json_eslint_paths"
+  # ESLint8 was removed from the JSON config (disabled). No parity check needed.
 
   pass "Codacy YAML repository and eslint-8 exclusion policy"
 }

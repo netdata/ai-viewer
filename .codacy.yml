@@ -29,7 +29,13 @@ exclude_paths:
 # self-tests/build integration plus repository-wide secrets/spec-drift gates.
 # Runtime frontend and Go source remain analyzable.
 engines:
+  # Disabled: ESLint8 runs a DEFAULT Codacy config that does not match our
+  # project's eslint.config.ts. It flags _-prefixed unused vars (which our
+  # local eslint correctly ignores via argsIgnorePattern) and patterns we
+  # don't enforce locally. The CI `lint` job (npx eslint src/ with our flat
+  # config) IS the authoritative ESLint gate.
   eslint-8:
+    enabled: false
     exclude_paths:
       - "frontend/tests/**"
       - "frontend/src/**/*.test.ts"
@@ -37,30 +43,24 @@ engines:
       - "frontend/src/test/**"
       - "frontend/scripts/**"
   # Disabled: Lizard cyclomatic complexity + NLOC. CCN-8 and NLOC-50 thresholds
-  # produce false positives for React components (JSX conditionals inflate CCN
-  # without indicating real complexity) and Go format parsers (switch-heavy by
-  # construction). Complexity is tracked via the project's 400-line file-size
-  # convention (AGENTS.md) + the function-size guidelines in the project-coding
-  # skill + code review. Lizard test-file exclusions remain as documentation.
+  # produce false positives for React components (JSX conditionals inflate CCN)
+  # and Go format parsers (switch-heavy by construction). Complexity is tracked
+  # via AGENTS.md conventions + code review.
   lizard:
     enabled: false
-    exclude_paths:
-      - "**/*_test.go"
-      - "frontend/src/**/*.test.ts"
-      - "frontend/src/**/*.test.tsx"
-      - "frontend/src/test/**"
-      - "frontend/tests/**"
-  # Disabled: TSQLLint is a Microsoft SQL Server linter — its rules (SET ANSI,
-  # data compression, schema-qualify, keyword capitalization) are T-SQL concepts
-  # that do not exist in SQLite. Every TSQLLint finding on the migration files
-  # is a false positive. SQLite schema/migration correctness is validated by the
-  # Go test suite (schema_contract_test.go + migration tests), not by TSQLLint.
+  # Disabled: TSQLLint is a Microsoft SQL Server linter — every finding on the
+  # SQLite migration files is a false positive. Correctness is validated by the
+  # Go test suite (schema_contract_test.go + migration tests).
   tsqllint:
     enabled: false
-  # Disabled: Stylelint expects kebab-case class names, but the project uses
-  # camelCase CSS Modules consistently (e.g. .summaryBar, .filterGroup — React's
-  # CSS Modules convention). The scss rule is a broken Codacy config ("Unknown
-  # rule scss_function-disallowed-list"). CSS is validated via the Vite/PostCSS
-  # build pipeline + the bundle-size gate; no local stylelint exists.
+  # Disabled: Stylelint expects kebab-case class names; the project uses
+  # camelCase CSS Modules by design (React's convention). CSS is validated via
+  # the Vite/PostCSS build pipeline + the bundle-size gate.
   stylelint:
+    enabled: false
+  # Disabled: Agentlinter analyzes AI-agent instruction files (AGENTS.md), not
+  # application code. "Duplicate instructions" is by design (AGENTS.md is a
+  # symlink target from CLAUDE.md/GEMINI.md, intentionally a superset of
+  # ~/.AGENTS.md per the bootstrap-repo pattern).
+  agentlinter:
     enabled: false

@@ -97,9 +97,9 @@ The example below shows the live first-tier prices for `claude-opus-4-7` exactly
 | `currency` | string | ✓ | ISO 4217. Always `USD` in v2. Future SOW adds multi-currency. |
 | `providers[]` | array | ✓ | One entry per canonical provider name. |
 | `providers[].name` | string | ✓ | Canonical provider name. Must match `ops.provider` exactly after case-fold. |
-| `providers[].aliases[]` | optional | Lowercase synonyms (e.g. `claude` for `anthropic`). |
+| `providers[].aliases[]` | array | optional | Lowercase synonyms (e.g. `claude` for `anthropic`). |
 | `providers[].models[].name` | string | ✓ | Canonical model name. Must match `ops.model` exactly after case-fold. |
-| `providers[].models[].aliases[]` | optional | Versioned suffixes, marketing names. |
+| `providers[].models[].aliases[]` | array | optional | Versioned suffixes, marketing names. |
 | `providers[].models[].ctx_max` | int | optional | Max context window. Seeds `catalog_models.ctx_max`. |
 | `providers[].models[].tiers[]` | array | ✓ | Time-banded price tiers. **Must contain at least one tier.** Sorted by `effective_date` descending at load time. |
 | `providers[].models[].tiers[].effective_date` | YYYY-MM-DD | ✓ | The date this price tier took effect. |

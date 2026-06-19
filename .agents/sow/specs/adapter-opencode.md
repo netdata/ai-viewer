@@ -79,8 +79,8 @@ Observed row counts on the operator's DB: 6778 sessions; 5493 root (parent_id NU
 
 Per `session.sql.ts:61-73`:
 
-| column | type | notes |
-|---|---|---|
+| column + SQLite type | notes |
+|---|---|
 | `id` TEXT PK | `msg_<sonyflake>` |
 | `session_id` TEXT NOT NULL | FK → `session.id` CASCADE |
 | `time_created` INTEGER NOT NULL | ms epoch |
@@ -142,8 +142,8 @@ Observed: 127345 messages on the operator's DB (117440 assistant, 9907 user, `-2
 
 Per `session.sql.ts:75-91`:
 
-| column | type | notes |
-|---|---|---|
+| column + SQLite type | notes |
+|---|---|
 | `id` TEXT PK | `prt_<sonyflake>` — lexicographically sortable as time |
 | `message_id` TEXT NOT NULL | FK → `message.id` CASCADE |
 | `session_id` TEXT NOT NULL | denormalized; equals the host session even for sub-agent dispatch parts |
@@ -193,8 +193,8 @@ Observed tool-state distribution on the operator's DB: 197044 completed, 2423 er
 
 Per `session.sql.ts:112-129`:
 
-| column | type | notes |
-|---|---|---|
+| column + SQLite type | notes |
+|---|---|
 | `id` TEXT PK | `evt_<sonyflake>` |
 | `session_id` TEXT NOT NULL | FK → `session.id` CASCADE |
 | `type` TEXT NOT NULL | currently always `agent-switched` or `model-switched` |
@@ -210,8 +210,8 @@ Observed: 3985 rows (1992 agent-switched + 1993 model-switched). The TypeScript 
 
 Per `anomalyco/opencode @ 2b3ddf9 :: packages/opencode/src/project/project.sql` (referenced from session.sql.ts):
 
-| column | type | notes |
-|---|---|---|
+| column + SQLite type | notes |
+|---|---|
 | `id` TEXT PK | hex SHA-ish hash of worktree path |
 | `worktree` TEXT NOT NULL | absolute path on disk |
 | `vcs` TEXT NULL | `git`/`hg`/null |
@@ -336,10 +336,11 @@ The delta-query layer is the bridge between the watermark cursor and the pure ma
 **Checkpoint-after-emit invariant (SOW-0005 P1.1, data-loss fix).** A `SourceProgress` checkpoint carrying cursor `W` is emitted ONLY after every session affected by rows ≤ `W` in this run has been reloaded, mapped, and emitted. The pipeline (`processChanges` → `batchProcessor`) runs in BOUNDED BATCHES: each batch pages ≤ `progressEveryRows` delta rows forward ACROSS the tracked tables (one shared row budget, so a session touched by several tables is reloaded once per batch — cross-table dedupe), `reloadAndEmit`s that batch's affected sessions, and ONLY THEN advances the persisted cursor + checkpoints. On ctx-cancel/error mid-batch the LAST fully-committed cursor (the previous batch's) is returned, never the in-progress batch's scanned watermark — so a restart from the persisted cursor can never resume PAST rows whose canonical events were never emitted. The earlier scheme that emitted a `SourceProgress` every `progressEveryRows` rows DURING paging (before the affected sessions were emitted) advanced the watermark ahead of content and is replaced.
 
 **No warning/error/content EMISSION while a source-DB read tx is open (SOW-0005 round-5 P2-1).** Every warning/error the adapter raises ultimately reaches `onError` → a `SourceErrorEvent` send on the adapter's out channel (`adapter.go` `OnError`); a content event is a send on the same channel. A blocking send (a slow/backpressured ingester) must NEVER happen while a source-DB read transaction is open, or it would pin the WAL snapshot on the live multi-GB opencode database and delay opencode's own checkpoint. Therefore:
-   - The delta scanners (`scanOnePage`), the boundary re-scan (`scanBoundaryBucket`), and the full-session-tree load (`loadAndMapSession`) BUFFER every WARN/ERROR raised inside a tx into an in-memory `warnSink` (a non-blocking slice append), instead of calling the live `onError` under the open snapshot.
-   - The tx is committed/rolled back FIRST (explicitly, not via a deferred rollback that would still be open during a flush), and ONLY THEN are the buffered warnings flushed through the real `onError`.
-   - Content events are likewise emitted only after the tx closes: `loadAndMapSession` runs the pure mapper AFTER `tx.Commit()` and returns the events for the caller (`reloadAndEmit`) to emit — so neither a warning nor a content event reaches the channel with the snapshot held.
-   - A FATAL row error (a corrupt REQUIRED watermark/owning-id cell — round-4 P2-1 / round-5 P2-2) is RETURNED (the page is aborted so the cursor does not advance), and its surfacing to `onError` also happens after the tx is closed.
+
+- The delta scanners (`scanOnePage`), the boundary re-scan (`scanBoundaryBucket`), and the full-session-tree load (`loadAndMapSession`) BUFFER every WARN/ERROR raised inside a tx into an in-memory `warnSink` (a non-blocking slice append), instead of calling the live `onError` under the open snapshot.
+- The tx is committed/rolled back FIRST (explicitly, not via a deferred rollback that would still be open during a flush), and ONLY THEN are the buffered warnings flushed through the real `onError`.
+- Content events are likewise emitted only after the tx closes: `loadAndMapSession` runs the pure mapper AFTER `tx.Commit()` and returns the events for the caller (`reloadAndEmit`) to emit — so neither a warning nor a content event reaches the channel with the snapshot held.
+- A FATAL row error (a corrupt REQUIRED watermark/owning-id cell — round-4 P2-1 / round-5 P2-2) is RETURNED (the page is aborted so the cursor does not advance), and its surfacing to `onError` also happens after the tx is closed.
 
 **Per-batch full-tree re-emit is an accepted v1 tradeoff (SOW-0005 round-4 P2-5).** Affected-session dedupe is PER BATCH, not across batches: a session whose rows span multiple batches (a large session being backfilled, or a session that changed across several poll cycles) has its WHOLE tree reloaded and re-emitted once per batch it appears in. This is intentional — it is the simplest scheme that preserves the checkpoint-after-emit crash-safety invariant (a batch's cursor is only committed after that batch's sessions are emitted, so dedupe state cannot outlive a committed checkpoint without risking a resume that skips an un-emitted session). The re-emission is absorbed idempotently by the ingester's upserts + the idempotent catalog, and the cost is bounded by real session size (well under the defensive cap). Cross-batch coalescing (a session-level dedupe cache spanning the whole run) is a deferred optimization, not a v1 requirement — it would add state that complicates the crash-safety reasoning for a saving that only matters for the rare multi-batch session.
 
@@ -417,6 +418,7 @@ Formally: `runBoundary := boundaryReal && (changed || probeGateOpen)`.
 **`boundaryReal` is the single cold-`Tail` guard, applied CONSISTENTLY to every trigger (SOW-0005 round-7 P2-1).** `boundaryReal` gates the WHOLE unified trigger above — both the `changed` path and the gate-open path — so it is impossible for any boundary-re-scan path to replay a never-emitted cold snapshot. It means the cursor's boundary `T` is a position whose bucket was ALREADY emitted, so re-scanning it is idempotent rather than a cold replay. It starts **true for a WARM `Tail`** (resumed from a Scan cursor — Scan already emitted the boundary) and **false for a COLD `Tail`** (HEAD snapshot, follow-from-now: the boundary bucket was never emitted); `pollOnce` flips it true once the cursor first advances (the new boundary is the just-emitted forward position). The earlier `priorProbe` flag — which guarded only the `changed == false` path and was a SEPARATE, partial cold guard — is **removed** (round-7 P2-1): a cold Tail whose first poll happened to be WAL-driven, or whose first safety-net probe ran with `priorProbe` already set, could otherwise replay the HEAD-snapshot boundary bucket on the `changed == false` path. `boundaryReal == false` until the first genuine cursor advance now suppresses the re-scan on ALL paths, closing that hole and collapsing two guards into one.
 
 This precision is what reconciles the fix with the existing contracts:
+
 - A steady-state IDLE DB **WITHIN the 60 s net** with no WAL event has `changed == false` AND `probeGateOpen == false`, so the boundary re-scan never runs on an idle poll. AC#6's zero-expensive-query idle property is untouched (the cheap `MAX(id)` idle path is unchanged — strict `>` against the monotonic `MaxIDSeen` — and the gated `MAX(time_updated)` probe is still issued only when `shouldProbeTimeUpdated` is true); the round-2 counting-driver / `TestP1A_OldRowUpdateDoesNotReArmIdleScan` tests stay green. The re-scan fires only when something changed OR the gate OPENS — a WAL event or the 60 s net tick — which is exactly the safety net's purpose (a once-per-60 s bounded bucket re-emit on an otherwise-idle DB is the accepted cost of guaranteeing a missed-WAL in-place update is eventually surfaced).
 - A **cold `Tail` HEAD snapshot** never replays its boundary session: `boundaryReal == false` until the cursor first advances suppresses the re-scan on EVERY path (round-7 P2-1) — the cheap-`MAX(id)` change path, the gated `MAX(time_updated)` probe path, the WAL-driven gate-open path, and the safety-net gate-open path. So even a post-snapshot forward change whose new row id sorts *below* the snapshot `MAX(id)` (which trips the `time_updated` probe rather than the cheap `MAX(id)` path) does NOT replay the snapshot boundary; and a cold Tail's first WAL-driven or safety-net probe (the round-7 P2-1 hole) is suppressed too. Once the cursor advances past the snapshot, `boundaryReal` flips true and the boundary is a genuinely-emitted position thereafter. A WARM `Tail` (resumed from a Scan cursor) starts `boundaryReal == true` because Scan already emitted the boundary.
 - A genuine in-place boundary update (opencode re-stamps a row's `time_updated` to the same ms → WAL mtime changes, but no id/max-time advance) is caught on the gate-open path: immediately on the WAL-driven probe, or — if the WAL hint is **missed** (a dropped fsnotify event, a watcher whose `Add` failed, or timer-only polling) — on the next 60 s safety-net probe. It is also caught when it **co-occurs with a true INSERT**: the cheap `MAX(id)` path makes `changed == true`, which arms the re-scan against the pre-advance `T` before the forward delta advances the cursor (round-7 P1-1).
@@ -629,7 +631,7 @@ These are opencode-configured aliases, not the canonical Anthropic/OpenAI/Google
 
 ### Tool calls and Models — concrete field map
 
-Op | Source field |
+| Op | Source field |
 |---|---|
 | `op.kind=tool, name` | `part.data.tool` (raw; e.g. `read`, `bash`, `github_get_file_contents`) |
 | `op.tool_namespace` | derived: prefix-up-to-first-underscore of `part.data.tool` when the tool name contains `_` (MCP convention); empty for builtins like `read`/`bash`/`grep` |
