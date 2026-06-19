@@ -40,9 +40,12 @@ describe('lineChartLayout', () => {
   });
 
   it('maps the min/max value to the plot band (y inverted: max near the top)', () => {
+    // Use real microsecond timestamps (post-2020) so the filter that drops
+    // zero/NaN bucket_ts (the SOW-0076 fix that prevents the 1970-2017 X-axis
+    // spread) does not swallow the test data.
     const buckets: AggregateBucketInput[] = [
-      { bucket_ts: 0, series: [{ key: 'a', value: 0 }] },
-      { bucket_ts: 10, series: [{ key: 'a', value: 100 }] },
+      { bucket_ts: 1700000000000000, series: [{ key: 'a', value: 0 }] },
+      { bucket_ts: 1700001000000000, series: [{ key: 'a', value: 100 }] },
     ];
     const out = lineChartLayout(buckets, DIMS);
     const pts = out.series[0]?.points ?? [];

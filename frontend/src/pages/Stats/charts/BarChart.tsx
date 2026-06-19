@@ -85,6 +85,14 @@ export function BarChart({ items, dimension, metric }: BarChartProps) {
           const valueInside = outsideX > VIEW_WIDTH - PADDING.right;
           return (
             <g key={bar.key}>
+              {/* Subtle row hover target (transparent rect for the full row). */}
+              <rect
+                x={0}
+                y={rowY}
+                width={VIEW_WIDTH}
+                height={bar.h}
+                fill="transparent"
+              />
               {/* Category label (text differentiator — never color-only). */}
               <text x={PADDING.left} y={textY + 4} className={styles.barKey}>
                 {bar.label}
@@ -93,10 +101,10 @@ export function BarChart({ items, dimension, metric }: BarChartProps) {
               <rect
                 data-bar={bar.key}
                 x={LABEL_BAND + bar.x}
-                y={rowY}
+                y={rowY + 2}
                 width={bar.w}
-                height={bar.h}
-                rx={3}
+                height={bar.h - 4}
+                rx={4}
                 fill={seriesColorVar(i)}
                 className={styles.bar}
               />

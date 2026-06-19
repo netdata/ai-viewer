@@ -57,15 +57,15 @@ function normalizedSeriesTokenIndex(index: number): number {
 function seriesTokenAt(index: number): string {
   switch (normalizedSeriesTokenIndex(index)) {
     case 0:
-      return '--accent';
+      return '--chart-1';
     case 1:
-      return '--success';
+      return '--chart-2';
     case 2:
-      return '--warning';
+      return '--chart-3';
     case 3:
-      return '--error';
+      return '--chart-4';
     case 4:
-      return '--info';
+      return '--chart-5';
     default:
       return '--text-secondary';
   }
@@ -162,7 +162,14 @@ export function lineChartLayout(
   const { x0, x1, y0, y1 } = plotBand(dims);
 
   // Sort buckets by time once so every series inherits ascending x order.
-  const sorted = [...buckets].sort((a, b) => a.bucket_ts - b.bucket_ts);
+  // Filter out zero/NaN bucket_ts values: a sentinel zero from the backend
+  // would otherwise pin the X scale to 1970 and crowd every real data point
+  // into the rightmost few pixels (the visible "1970, 1985, 2001, 2017"
+  // tick spread we saw before the fix). Defensive against the contract
+  // occasionally emitting 0 for the "no data yet" bucket.
+  const sorted = [...buckets]
+    .filter((b) => Number.isFinite(b.bucket_ts) && b.bucket_ts > 0)
+    .sort((a, b) => a.bucket_ts - b.bucket_ts);
 
   // Domain bounds across all buckets/series.
   let tLo = Infinity;

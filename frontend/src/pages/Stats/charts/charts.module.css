@@ -1,22 +1,29 @@
 /*
- * Styling for the /stats dashboard charts (LineChart, BarChart). Mirrors the
- * Trace tab's viz conventions: gridlines use --border at low opacity, axis/label
- * text uses --text-secondary in the mono font, and every color is a theme token
- * so the charts track light/dark automatically (no hard-coded hex). Series/bar
- * FILLS are set inline from viz/statsCharts var() references (theme tokens too).
+ * Chart visuals for the /stats dashboard (SOW-0076). All colors come from the
+ * design-system tokens so a theme flip recolors everything automatically; no
+ * hard-coded hex. The D3-based layout (viz/statsCharts) emits `var(--chart-N)`
+ * for series colors; this file paints axes, gridlines, and chrome.
  */
 
 .chart {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 
 .svg {
   width: 100%;
   height: auto;
   display: block;
+  overflow: visible;
+}
+
+/* Subtle chart background so the plot band reads as a designed surface, not a
+   blank canvas. Behind the gridlines. */
+.chartBg {
+  fill: var(--muted);
+  opacity: 0.35;
 }
 
 /* Axis groups carry no paint themselves; their child lines/text are styled. */
@@ -27,27 +34,42 @@
 .gridline {
   stroke: var(--border);
   stroke-width: 1;
-  opacity: 0.5;
+  stroke-dasharray: 2 3;
+  opacity: 0.6;
+  fill: none;
+}
+
+/* Bottom + left axis baselines (solid, no dash). Slightly stronger than the
+   gridlines so the eye anchors to them. */
+.axisBaseline {
+  stroke: var(--border);
+  stroke-width: 1;
+  fill: none;
+  opacity: 0.9;
 }
 
 .yLabel {
-  fill: var(--text-secondary);
+  fill: var(--muted-foreground);
   font-size: 10px;
   font-family: var(--font-mono);
   text-anchor: end;
+  font-variant-numeric: tabular-nums;
 }
 
 .xLabel {
-  fill: var(--text-secondary);
+  fill: var(--muted-foreground);
   font-size: 10px;
   font-family: var(--font-mono);
   text-anchor: middle;
+  font-variant-numeric: tabular-nums;
 }
 
 .line {
   /* Stroke color comes from the inline var() per series. */
   stroke-linejoin: round;
   stroke-linecap: round;
+  /* A very subtle drop shadow lifts the line off the gridlines for depth. */
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.08));
 }
 
 /* Single-point marker dot; fill is the series' inline var() (theme token). */
@@ -57,31 +79,37 @@
 
 /* Bar chart: category key (left band) + value text (after the bar). */
 .barKey {
-  fill: var(--text-primary);
-  font-size: var(--font-size-sm);
+  fill: var(--foreground);
+  font-size: 11px;
   font-family: var(--font-sans);
   text-anchor: start;
+  font-weight: 500;
 }
 
 .barValue {
-  fill: var(--text-secondary);
-  font-size: var(--font-size-sm);
+  fill: var(--muted-foreground);
+  font-size: 11px;
   font-family: var(--font-mono);
   text-anchor: start;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Value label drawn INSIDE a long bar's end (end-anchored). Uses the stronger
-   text token for legibility over the colored fill; anchor is also set inline so
-   the rendered text box stays within the viewBox. */
 .barValueInside {
-  fill: var(--text-primary);
-  font-size: var(--font-size-sm);
+  fill: var(--background);
+  font-size: 11px;
   font-family: var(--font-mono);
   text-anchor: end;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .bar {
   /* Fill comes from the inline var() per bar. */
+  transition: filter 150ms ease-out;
+}
+
+.bar:hover {
+  filter: brightness(1.08);
 }
 
 /* Text legend — the series differentiator (color is never the only signal). */
@@ -91,32 +119,41 @@
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2) var(--space-4);
+  gap: var(--space-2) var(--space-3);
 }
 
 .legendItem {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  color: var(--muted-foreground);
+}
+
+.legendItem:hover {
+  background: var(--muted);
+  color: var(--foreground);
 }
 
 .swatch {
-  width: 12px;
-  height: 12px;
-  border-radius: var(--radius-sm);
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
   flex: 0 0 auto;
 }
 
 .legendLabel {
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Accessible empty-state message (role="status"). */
 .empty {
-  color: var(--text-secondary);
-  font-size: var(--font-size-base);
-  padding: var(--space-4);
+  color: var(--muted-foreground);
+  font-size: var(--font-size-sm);
+  padding: var(--space-6);
   margin: 0;
+  text-align: center;
 }
