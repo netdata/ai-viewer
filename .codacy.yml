@@ -34,3 +34,15 @@ engines:
       - "frontend/src/**/*.test.tsx"
       - "frontend/src/test/**"
       - "frontend/scripts/**"
+  # SOW-0072: Lizard cyclomatic complexity is excluded from ALL test files.
+  # Table-driven Go tests (`for _, tc := range cases` + `t.Run` per case) and
+  # frontend test suites naturally exceed the CCN-8 threshold; the complexity
+  # is inherent to thorough test coverage, NOT a code-smell. Production code
+  # stays fully analyzed. Tests are still covered by ESLint/TS/go test/race.
+  lizard:
+    exclude_paths:
+      - "**/*_test.go"
+      - "frontend/src/**/*.test.ts"
+      - "frontend/src/**/*.test.tsx"
+      - "frontend/src/test/**"
+      - "frontend/tests/**"
