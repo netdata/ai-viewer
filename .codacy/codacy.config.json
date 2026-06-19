@@ -797,8 +797,10 @@
     "frontend/coverage/**",
     "frontend/dist/**",
     "frontend/node_modules/**",
+    "frontend/package-lock.json",
     "frontend/playwright-report/**",
     "frontend/test-results/**",
+    "go.sum",
     "testdata/**"
   ]
 }

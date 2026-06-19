@@ -1,17 +1,9 @@
 ---
 # Codacy configuration file (docs: https://docs.codacy.com/repositories-configure/codacy-configuration-file).
 #
-# This file controls EXCLUDE PATHS and LANGUAGE ENABLEMENT. It does NOT
-# enable/disable individual tools — per Codacy docs: "Tool enablement or
-# disablement must be performed on the Code patterns page." The tools we
-# disable (TSQLLint, Stylelint, Lizard, ESLint8, Agentlinter) are toggled
-# off on the Codacy dashboard → Settings → Code Patterns.
-#
-# What this file DOES:
-#   - excludes non-runtime paths (SOW files, generated output, deps, test
-#     fixtures) from all analysis
-#   - disables SQL language analysis (kills TSQLLint — a SQL Server linter
-#     that produces 100% false positives on our SQLite migration files)
+# Controls exclude paths, language enablement, and engine configs. Per Codacy
+# docs, tool enable/disable is dashboard-only (Code Patterns page).
+# TSQLLint/Stylelint/Lizard/ESLint8/Agentlinter are disabled there.
 exclude_paths:
   - ".agents/sow/current/**"
   - ".agents/sow/done/**"
@@ -21,12 +13,25 @@ exclude_paths:
   - "GEMINI.md"
   - "cmd/ai-viewer-serve/frontend_dist/**"
   - "frontend/node_modules/**"
+  - "frontend/package-lock.json"
   - "frontend/coverage/**"
   - "frontend/dist/**"
   - "frontend/playwright-report/**"
   - "frontend/test-results/**"
   - "testdata/**"
   - "bin/**"
+  - "go.sum"
 languages:
   sql:
     enabled: false
+engines:
+  duplication:
+    exclude_paths:
+      - "testdata/**"
+      - "frontend/package-lock.json"
+      - "go.sum"
+      - "**/*_test.go"
+      - "frontend/src/**/*.test.ts"
+      - "frontend/src/**/*.test.tsx"
+      - "frontend/src/test/**"
+      - "frontend/tests/**"

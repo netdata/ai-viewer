@@ -22,12 +22,14 @@ CODACY_REPOSITORY_EXCLUDES=(
   "GEMINI.md"
   "cmd/ai-viewer-serve/frontend_dist/**"
   "frontend/node_modules/**"
+  "frontend/package-lock.json"
   "frontend/coverage/**"
   "frontend/dist/**"
   "frontend/playwright-report/**"
   "frontend/test-results/**"
   "testdata/**"
   "bin/**"
+  "go.sum"
 )
 
 CODACY_ESLINT_TEST_TOOLING_EXCLUDES=(
@@ -347,15 +349,28 @@ exclude_paths:
   - "GEMINI.md"
   - "cmd/ai-viewer-serve/frontend_dist/**"
   - "frontend/node_modules/**"
+  - "frontend/package-lock.json"
   - "frontend/coverage/**"
   - "frontend/dist/**"
   - "frontend/playwright-report/**"
   - "frontend/test-results/**"
   - "testdata/**"
   - "bin/**"
+  - "go.sum"
 languages:
   sql:
     enabled: false
+engines:
+  duplication:
+    exclude_paths:
+      - "testdata/**"
+      - "frontend/package-lock.json"
+      - "go.sum"
+      - "**/*_test.go"
+      - "frontend/src/**/*.test.ts"
+      - "frontend/src/**/*.test.tsx"
+      - "frontend/src/test/**"
+      - "frontend/tests/**"
 YAML
 )"
   actual_yaml="$(
