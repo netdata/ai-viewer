@@ -1,5 +1,11 @@
+/*
+ * Tabs — the Session Detail tab strip (SOW-0073 lift). Underlines on the
+ * active tab use the design system primary color; the entire strip sits in a
+ * card so it integrates with the redesigned page chrome.
+ */
+
 .tabs {
-  display: flex;
+  display: inline-flex;
   gap: var(--space-1);
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--space-4);
@@ -11,18 +17,32 @@
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-family: var(--font-sans);
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
   padding: var(--space-2) var(--space-3);
   cursor: pointer;
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+  transition: color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out;
 }
 
 .tab:hover {
-  color: var(--text-primary);
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .tabActive {
-  color: var(--text-primary);
-  border-bottom-color: var(--accent);
+  color: var(--foreground);
+  border-bottom-color: var(--primary);
+}
+
+.tabActive:hover {
+  background: transparent;
 }

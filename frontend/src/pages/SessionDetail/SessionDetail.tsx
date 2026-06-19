@@ -10,7 +10,6 @@ import { TraceTab } from './TraceTab';
 import { TopologyTab } from './TopologyTab';
 import { TimelineTab } from './TimelineTab';
 import { RawDataTab } from './RawDataTab';
-import styles from './SessionDetail.module.css';
 
 // Session detail page (ui-pages.md §/sessions/:id). Tabs Overview + Trace +
 // Topology + Timeline + Logs + Raw Data are all real. The active tab lives in
@@ -60,17 +59,29 @@ export function SessionDetail() {
   const notFound = isError && error instanceof ApiError && error.status === 404;
 
   return (
-    <section aria-labelledby="session-detail-title">
-      <h1 id="session-detail-title" className={styles.title}>
-        Session <code className={styles.id}>{id}</code>
-      </h1>
+    <section aria-labelledby="session-detail-title" className="flex flex-col gap-6 px-6 py-5">
+      <div>
+        <h1 id="session-detail-title" className="text-2xl font-semibold tracking-tight">
+          Session detail
+        </h1>
+        <p className="mt-1 flex items-center gap-2 font-mono text-xs text-muted-foreground">
+          <span className="text-[10px] font-sans uppercase tracking-wider">id</span>
+          <code className="rounded bg-muted px-1.5 py-0.5 text-foreground">{id}</code>
+        </p>
+      </div>
 
       {notFound ? (
-        <EmptyState>Session not found.</EmptyState>
+        <div className="rounded-lg border border-dashed border-border bg-card/50 p-12">
+          <EmptyState>Session not found.</EmptyState>
+        </div>
       ) : isPending ? (
-        <LoadingState label="Loading session…" />
+        <div className="rounded-lg border border-border bg-card p-12">
+          <LoadingState label="Loading session…" />
+        </div>
       ) : isError ? (
-        <ErrorState error={error} title="Failed to load session" />
+        <div className="rounded-lg border border-border bg-card p-12">
+          <ErrorState error={error} title="Failed to load session" />
+        </div>
       ) : (
         <>
           <Tabs tabs={TABS} active={tab} onSelect={setTab} ariaLabel="Session views" />
@@ -79,7 +90,7 @@ export function SessionDetail() {
             id={`tabpanel-${tab}`}
             aria-labelledby={`tab-${tab}`}
             aria-live="polite"
-            className={styles.panel}
+            className="rounded-lg border border-border bg-card p-5"
           >
             {tab === 'overview' && <OverviewTab detail={data} />}
             {tab === 'logs' && <LogsTab sessionId={id} />}

@@ -4,6 +4,7 @@ import { StatCard } from '../../../components/StatCard';
 import { StatusBadge } from '../../../components/SessionRow';
 import { useSessionRelated } from '../../../api/sessions';
 import { cacheHitRate, formatCost, formatDuration, formatNumber, formatPct } from '../../../lib/format';
+import { cn } from '../../../lib/utils';
 import type { ChildSummary, SessionDetailResponse, TurnDetail } from '../../../api/types';
 import styles from './OverviewTab.module.css';
 
@@ -129,31 +130,48 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
         </section>
       ) : null}
 
-      <section className={styles.tools} aria-labelledby="tools-used-title">
-        <h2 id="tools-used-title" className={styles.toolsTitle}>
+      <section className="mt-6" aria-labelledby="tools-used-title">
+        <h2 id="tools-used-title" className="mb-3 text-base font-semibold tracking-tight">
           Tools used
         </h2>
         {tools.length === 0 ? (
-          <p className={styles.noTools}>No tool calls in this session.</p>
+          <p className="rounded-md border border-dashed border-border bg-card/50 px-4 py-3 text-sm text-muted-foreground">
+            No tool calls in this session.
+          </p>
         ) : (
-          <table className={styles.toolsTable}>
-            <thead>
-              <tr>
-                <th>Tool</th>
-                <th className={styles.num}>Calls</th>
-                <th className={styles.num}>Failures</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tools.map((t) => (
-                <tr key={t.name}>
-                  <td className={styles.toolName}>{t.name}</td>
-                  <td className={styles.num}>{formatNumber(t.calls)}</td>
-                  <td className={styles.num}>{formatNumber(t.failures)}</td>
+          <div className="overflow-hidden rounded-lg border border-border">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40 text-[11px] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th scope="col" className="px-4 py-2 text-left font-medium">Tool</th>
+                  <th scope="col" className="px-4 py-2 text-right font-medium">Calls</th>
+                  <th scope="col" className="px-4 py-2 text-right font-medium">Failures</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {tools.map((t, i) => (
+                  <tr
+                    key={t.name}
+                    className={cn(
+                      'border-t border-border/50 transition-colors hover:bg-muted/40',
+                      i % 2 === 1 && 'bg-muted/20',
+                    )}
+                  >
+                    <td className="px-4 py-2 font-medium text-foreground">{t.name}</td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums text-foreground">
+                      {formatNumber(t.calls)}
+                    </td>
+                    <td className={cn(
+                      'px-4 py-2 text-right font-mono tabular-nums',
+                      t.failures > 0 ? 'text-status-failed' : 'text-muted-foreground',
+                    )}>
+                      {formatNumber(t.failures)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </div>
