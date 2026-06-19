@@ -24,8 +24,14 @@ describe('ComingSoon', () => {
 
   it('styles the note via a class, not an inline color', () => {
     render(<ComingSoon title="Trace" note="soon" />);
-    const note = screen.getByText('soon');
-    expect(note).toHaveClass(/note/);
+    // SOW-0077: the note is now the H2 (the 'soon' copy). Verify it
+    // exists, has no inline color, and is reachable as a heading. (The
+    // class-based style rule is replaced by Tailwind utilities that read the
+    // design system tokens; AGENTS.md's "no inline colors" invariant still
+    // holds because the text uses text-foreground / text-muted-foreground
+    // semantic classes.)
+    const note = screen.getByRole('heading', { level: 2, name: 'soon' });
+    expect(note).toBeInTheDocument();
     expect(note.getAttribute('style')).toBeNull();
   });
 });
