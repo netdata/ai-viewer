@@ -101,6 +101,7 @@ For every reviewer round during a SOW, record in the SOW under `## Reviews`:
 - The final PRODUCTION GRADE count (e.g. `5/5 PG after fix`).
 
 Do not record full prompts or raw reviewer output in the SOW — those are technical detail. The SOW `## Reviews` is an audit trail of outcomes and verdicts, not a technical dump.
+
 - Record what was changed in response.
 
 This becomes part of the SOW's audit trail and helps future SOWs learn which reviewers catch which classes of issues.

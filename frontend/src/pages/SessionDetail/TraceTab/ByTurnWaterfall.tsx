@@ -26,7 +26,7 @@ const TRACK_WIDTH = 720;
 
 export interface ByTurnWaterfallProps {
   turns: TurnDetail[];
-  onSelect: (node: TraceNode) => void;
+  onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
   /** Force the expanded per-op Waterfall's render path (tests). When omitted the
    *  expanded turn decides SVG vs Canvas from ITS OWN op count (one turn is far

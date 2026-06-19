@@ -62,7 +62,7 @@ export interface TopologyRendererProps {
   width: number;
   height: number;
   selectedId: string | null;
-  onNodeClick: (node: PositionedNode) => void;
+  onNodeClick: (_node: PositionedNode) => void;
   /** Force a render path (tests); defaults to node-count vs SVG_NODE_CEILING. */
   useCanvas?: boolean;
 }
@@ -165,7 +165,7 @@ function TopologySvg({
       });
     const selection = select(svg);
     selection.call(zoomBehavior);
-    selection.call((s) => zoomBehavior.transform(s, zoomIdentity));
+    selection.call((s) => { zoomBehavior.transform(s, zoomIdentity); });
     return () => {
       selection.on('.zoom', null);
     };
@@ -182,7 +182,7 @@ function TopologySvg({
     e.stopPropagation(); // prevent the zoom/pan behavior from also firing
     draggingRef.current = { id: p.node.id, lastScreenX: e.clientX, lastScreenY: e.clientY };
     const target = e.currentTarget;
-    if (target && typeof target.setPointerCapture === 'function') {
+    if (typeof target.setPointerCapture === 'function') {
       target.setPointerCapture(e.pointerId);
     }
   }, []);
@@ -211,7 +211,7 @@ function TopologySvg({
     if (!drag) return;
     e.stopPropagation();
     const target = e.currentTarget;
-    if (target && typeof target.releasePointerCapture === 'function') {
+    if (typeof target.releasePointerCapture === 'function') {
       target.releasePointerCapture(e.pointerId);
     }
     draggingRef.current = null;
@@ -352,7 +352,7 @@ function TopologyCanvas({
       });
     const selection = select(c);
     selection.call(zoomBehavior);
-    selection.call((s) => zoomBehavior.transform(s, zoomIdentity));
+    selection.call((s) => { zoomBehavior.transform(s, zoomIdentity); });
     return () => {
       selection.on('.zoom', null);
     };

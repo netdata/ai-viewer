@@ -40,7 +40,7 @@ import styles from './TopologyTab.module.css';
 const VIEW_WIDTH = 900;
 const VIEW_HEIGHT = 560;
 
-const METRICS: ReadonlyArray<{ key: TopologyMetric; label: string }> = [
+const METRICS: readonly { key: TopologyMetric; label: string }[] = [
   { key: 'cost', label: 'Cost' },
   { key: 'tokens', label: 'Tokens' },
   { key: 'duration', label: 'Duration' },
@@ -48,7 +48,7 @@ const METRICS: ReadonlyArray<{ key: TopologyMetric; label: string }> = [
   { key: 'ctx_pct', label: 'Context %' },
 ];
 
-const MODES: ReadonlyArray<{ key: TopologyLayoutMode; label: string }> = [
+const MODES: readonly { key: TopologyLayoutMode; label: string }[] = [
   { key: 'force-seeded', label: 'Seeded force' },
   { key: 'force-plain', label: 'Plain force' },
   { key: 'hierarchical', label: 'Hierarchical' },

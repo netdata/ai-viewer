@@ -32,8 +32,8 @@ export type ForceWorkerResponse = { positioned: PositionedNode[] } | { error: st
 // The worker global. Typed locally so this module compiles without DOM "lib"
 // pollution; `self` in a module worker is a DedicatedWorkerGlobalScope.
 const ctx = self as unknown as {
-  onmessage: ((e: MessageEvent<ForceWorkerRequest>) => void) | null;
-  postMessage: (message: ForceWorkerResponse) => void;
+  onmessage: ((_e: MessageEvent<ForceWorkerRequest>) => void) | null;
+  postMessage: (_message: ForceWorkerResponse) => void;
 };
 
 function errorMessage(err: unknown): string {

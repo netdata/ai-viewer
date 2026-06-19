@@ -86,7 +86,7 @@ export function SessionRowBody({ session }: SessionRowProps) {
         )}
       </td>
       <td className={styles.mono}>{session.model || '—'}</td>
-      <td className={styles.source}>{sourceLabel(session.source_id ?? '')}</td>
+      <td className={styles.source}>{sourceLabel(session.source_id)}</td>
       <td className={styles.mono}>{formatTimestamp(session.start_ts)}</td>
       <td>{formatDuration(durationUs(session))}</td>
       <td>

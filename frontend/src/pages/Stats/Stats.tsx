@@ -45,7 +45,7 @@ import styles from './Stats.module.css';
 // invalidated by SSE (a result list jumping on every ingest is poor UX).
 
 /** The trend-metric options — the server enum PLUS the client-derived failure_rate. */
-const TREND_METRIC_OPTIONS: ReadonlyArray<{ value: TrendMetric; label: string }> = [
+const TREND_METRIC_OPTIONS: readonly { value: TrendMetric; label: string }[] = [
   { value: 'cost', label: 'Cost' },
   { value: 'tokens_in', label: 'Tokens in' },
   { value: 'tokens_out', label: 'Tokens out' },
@@ -57,7 +57,7 @@ const TREND_METRIC_OPTIONS: ReadonlyArray<{ value: TrendMetric; label: string }>
 ];
 
 /** The top-N ranking metric options (plain server enum — no derived rate). */
-const METRIC_OPTIONS: ReadonlyArray<{ value: StatsMetric; label: string }> = [
+const METRIC_OPTIONS: readonly { value: StatsMetric; label: string }[] = [
   { value: 'cost', label: 'Cost' },
   { value: 'tokens_in', label: 'Tokens in' },
   { value: 'tokens_out', label: 'Tokens out' },
@@ -68,7 +68,7 @@ const METRIC_OPTIONS: ReadonlyArray<{ value: StatsMetric; label: string }> = [
 ];
 
 /** The top-N ranking dimensions (TopDimension excludes total/source_format). */
-const DIMENSION_OPTIONS: ReadonlyArray<{ value: TopDimension; label: string }> = [
+const DIMENSION_OPTIONS: readonly { value: TopDimension; label: string }[] = [
   { value: 'model', label: 'Model' },
   { value: 'provider', label: 'Provider' },
   { value: 'tool', label: 'Tool' },
@@ -77,7 +77,7 @@ const DIMENSION_OPTIONS: ReadonlyArray<{ value: TopDimension; label: string }> =
 ];
 
 /** The trend group-by overlay dimensions (includes total/source_format). */
-const GROUP_BY_OPTIONS: ReadonlyArray<{ value: AggregateGroupBy; label: string }> = [
+const GROUP_BY_OPTIONS: readonly { value: AggregateGroupBy; label: string }[] = [
   { value: 'total', label: 'Total' },
   { value: 'model', label: 'Model' },
   { value: 'provider', label: 'Provider' },
@@ -91,7 +91,7 @@ const GROUP_BY_OPTIONS: ReadonlyArray<{ value: AggregateGroupBy; label: string }
 const TOP_N = 20;
 
 /** Breakdown dimensions for the multi-metric comparison table. */
-const BREAKDOWN_DIMS: ReadonlyArray<{ value: string; label: string }> = [
+const BREAKDOWN_DIMS: readonly { value: string; label: string }[] = [
   { value: 'by_model', label: 'Model' },
   { value: 'by_source', label: 'Source' },
   { value: 'by_agent', label: 'Agent' },
@@ -249,7 +249,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={trendMetric}
-                onChange={(e) => setControl({ trendMetric: e.target.value as TrendMetric })}
+                onChange={(e) => { setControl({ trendMetric: e.target.value as TrendMetric }); }}
               >
                 {TREND_METRIC_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -263,7 +263,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={trendGroupBy}
-                onChange={(e) => setControl({ trendGroupBy: e.target.value as AggregateGroupBy })}
+                onChange={(e) => { setControl({ trendGroupBy: e.target.value as AggregateGroupBy }); }}
               >
                 {GROUP_BY_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -277,7 +277,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={bucket}
-                onChange={(e) => setControl({ bucket: e.target.value as StatsBucket })}
+                onChange={(e) => { setControl({ bucket: e.target.value as StatsBucket }); }}
               >
                 <option value="daily">Daily</option>
                 <option value="hourly">Hourly</option>
@@ -286,7 +286,7 @@ export function Stats() {
             <button
               type="button"
               className={styles.copyButton}
-              onClick={() => downloadCSV('trend', trendMetric, trendBucketsToRows(trendBuckets))}
+              onClick={() => { downloadCSV('trend', trendMetric, trendBucketsToRows(trendBuckets)); }}
             >
               Export CSV
             </button>
@@ -321,7 +321,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={topDimension}
-                onChange={(e) => setControl({ topDimension: e.target.value as TopDimension })}
+                onChange={(e) => { setControl({ topDimension: e.target.value as TopDimension }); }}
               >
                 {DIMENSION_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -335,7 +335,7 @@ export function Stats() {
               <select
                 className={styles.select}
                 value={topMetric}
-                onChange={(e) => setControl({ topMetric: e.target.value as StatsMetric })}
+                onChange={(e) => { setControl({ topMetric: e.target.value as StatsMetric }); }}
               >
                 {METRIC_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -403,7 +403,7 @@ export function Stats() {
                 className={styles.select}
                 aria-label="Comparison dimension"
                 value={breakdownDim}
-                onChange={(e) => setBreakdownDim(e.target.value)}
+                onChange={(e) => { setBreakdownDim(e.target.value); }}
               >
                 {BREAKDOWN_DIMS.map((d) => (
                   <option key={d.value} value={d.value}>
@@ -415,11 +415,11 @@ export function Stats() {
                 type="button"
                 className={styles.copyButton}
                 onClick={() =>
-                  downloadCSV(
+                  { downloadCSV(
                     `comparison-${breakdownDim}`,
                     'metrics',
                     comparisonToRows(buildBreakdownRows(stats.data, breakdownDim)),
-                  )
+                  ); }
                 }
               >
                 Export CSV
@@ -455,7 +455,7 @@ export function Stats() {
               type="button"
               className={styles.copyButton}
               onClick={() =>
-                downloadCSV(
+                { downloadCSV(
                   'failure-analysis',
                   'metrics',
                   stats.data.by_error_class.map((row) => ({
@@ -464,7 +464,7 @@ export function Stats() {
                     ops: row.ops,
                     cost: row.cost_usd,
                   })),
-                )
+                ); }
               }
             >
               Export CSV
@@ -877,7 +877,7 @@ function BreakdownTable({
       className={numeric ? styles.numCol : undefined}
       aria-sort={sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
-      <button type="button" className={styles.sortBtn} onClick={() => onSort(key)}>
+      <button type="button" className={styles.sortBtn} onClick={() => { onSort(key); }}>
         {label}
         {sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
       </button>
@@ -914,7 +914,7 @@ function BreakdownTable({
                     <button
                       type="button"
                       className={styles.drillLink}
-                      onClick={() => onDrillDown(row.drill as FilterPatch)}
+                      onClick={() => { onDrillDown(row.drill!); }}
                     >
                       {row.label}
                     </button>

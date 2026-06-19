@@ -72,7 +72,7 @@ export function SessionsList() {
           <input
             type="checkbox"
             checked={showSecondary}
-            onChange={(e) => setShowSecondary(e.target.checked)}
+            onChange={(e) => { setShowSecondary(e.target.checked); }}
           />
           <span>Show secondary</span>
         </label>

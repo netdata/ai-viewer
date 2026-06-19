@@ -108,6 +108,17 @@ export default defineConfig(
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
+      // Codacy parity (SOW-0046): the type/style rules Codacy enforces that
+      // were not previously in the local config. Added alongside the matching
+      // code fixes so local lint catches the same patterns Codacy reports.
+      '@typescript-eslint/array-type': 'error',
+      '@typescript-eslint/no-confusing-void-expression': 'error',
+      '@typescript-eslint/no-unnecessary-condition': 'error',
+      '@typescript-eslint/non-nullable-type-assertion-style': 'error',
+      '@typescript-eslint/no-unnecessary-type-arguments': 'error',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+      '@typescript-eslint/no-empty-function': 'error',
+      '@typescript-eslint/no-invalid-void-type': 'error',
       '@typescript-eslint/consistent-type-imports': [
         'error',
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
@@ -139,6 +150,26 @@ export default defineConfig(
         'error',
         { tags: [], roles: ['tabpanel', 'region'], allowExpressionValues: true },
       ],
+    },
+  },
+  // The Codacy-parity type/style rules above are scoped to PRODUCT SOURCE.
+  // Test files (.test/.spec) use legitimate mock patterns these strict rules
+  // flag as noise — empty stub methods (canvas setters, Worker.postMessage),
+  // `as` casts on mocks, shorthand `() => mock()` arrows, defensive `??` — so
+  // they are turned off for tests. This matches the Codacy review scope (the
+  // source-file findings SOW-0046 addresses) and avoids low-value churn across
+  // every test mock; the rules still fully cover product source.
+  {
+    files: ['**/*.test.{ts,tsx}', '**/*.spec.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/array-type': 'off',
+      '@typescript-eslint/no-confusing-void-expression': 'off',
+      '@typescript-eslint/no-unnecessary-condition': 'off',
+      '@typescript-eslint/non-nullable-type-assertion-style': 'off',
+      '@typescript-eslint/no-unnecessary-type-arguments': 'off',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'off',
+      '@typescript-eslint/no-empty-function': 'off',
+      '@typescript-eslint/no-invalid-void-type': 'off',
     },
   },
   // This flat-config file is itself in the lint set. It legitimately consumes

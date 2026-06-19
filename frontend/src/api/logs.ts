@@ -62,7 +62,7 @@ export function fetchSessionLogs(
 export function useSessionLogs(
   id: string,
   opts: { severities?: string[] } = {},
-): UseInfiniteQueryResult<InfiniteData<LogsResponse>, Error> {
+): UseInfiniteQueryResult<InfiniteData<LogsResponse>> {
   const severities = opts.severities ?? [];
   return useInfiniteQuery({
     queryKey: logsQueryKey(id, severities),

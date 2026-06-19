@@ -11,7 +11,7 @@ import styles from './Layout.module.css';
 // content via <Outlet/>. The FilterBar applies to every page; routes interpret
 // the URL-synced filters themselves.
 
-const NAV: ReadonlyArray<{ to: string; label: string }> = [
+const NAV: readonly { to: string; label: string }[] = [
   { to: '/', label: 'Sessions' },
   { to: '/topology', label: 'Topology' },
   { to: '/stats', label: 'Statistics' },

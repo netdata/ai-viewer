@@ -496,6 +496,7 @@ natively answer only a time-range (`from`/`to`) filter alongside the requested
 `sessions.source_id` (finer than the rollups' `source_format` key, so a
 `source_format`-level filter would over-count sibling sources) — forces the live
 fold. Therefore:
+
 - **Rollup fast path** — taken when the ONLY filters present are `from`/`to` (no
   dimension filter and no `sources`): closed buckets are summed from
   `rollup_hourly`/`rollup_daily` (`WHERE dimension=? AND bucket_ts ∈ [from,

@@ -54,7 +54,7 @@ function trackMatrix(k: number, tx: number): string {
 
 export interface WaterfallProps {
   nodes: TraceNode[];
-  onSelect: (node: TraceNode) => void;
+  onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
   /** Force a render path (tests); defaults to op-count vs the SVG ceiling. */
   useCanvas: boolean;
@@ -103,7 +103,7 @@ const EMPTY_BOUNDARIES: ReadonlySet<string> = new Set<string>();
 interface InnerProps {
   rows: WaterfallRow[];
   ticks: { value: number; x: number }[];
-  onSelect: (node: TraceNode) => void;
+  onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
   boundaries: ReadonlySet<string>;
 }

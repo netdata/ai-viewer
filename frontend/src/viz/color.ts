@@ -81,7 +81,7 @@ function ensureCache(): Map<string, string> {
   if (cache === null) {
     refreshThemeColors();
   }
-  return cache as Map<string, string>;
+  return cache!;
 }
 
 /**
@@ -203,7 +203,7 @@ export function colorForAgent(agentName: string): string {
  */
 export function startThemeColorWatch(): () => void {
   if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') {
-    return () => {};
+    return () => { /* no-op disposer: there is no observer to disconnect outside a DOM context */ };
   }
   const observer = new MutationObserver(() => {
     refreshThemeColors();

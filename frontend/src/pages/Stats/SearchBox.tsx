@@ -27,8 +27,8 @@ const DEBOUNCE_MS = 300;
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), ms);
-    return () => clearTimeout(id);
+    const id = setTimeout(() => { setDebounced(value); }, ms);
+    return () => { clearTimeout(id); };
   }, [value, ms]);
   return debounced;
 }
@@ -57,7 +57,7 @@ export function SearchBox({ filters }: SearchBoxProps) {
           className={styles.searchInput}
           placeholder="Full-text query…"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setQuery(e.target.value); }}
           autoComplete="off"
         />
       </label>

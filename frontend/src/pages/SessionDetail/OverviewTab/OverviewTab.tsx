@@ -46,7 +46,7 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
   // enhancement — a query error does NOT break the Overview, but the error is
   // surfaced (AGENTS.md §6 — no silent failures).
   const related = useSessionRelated(s.id);
-  if (related.isError && related.error) {
+  if (related.isError) {
     console.error('Possibly related query failed', related.error);
   }
   // tokens_in is the FRESH/uncached input (canonical token contract); the cache

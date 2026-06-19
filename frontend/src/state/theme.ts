@@ -74,7 +74,7 @@ interface ThemeContextValue {
   /** The concrete theme currently applied. */
   resolved: ResolvedTheme;
   /** Set an explicit preference; 'auto' clears the persisted override. */
-  setPreference: (next: ThemePreference) => void;
+  setPreference: (_next: ThemePreference) => void;
   /** Cycle Auto -> Dark -> Light -> Auto (keyboard shortcut `t`). */
   cyclePreference: () => void;
 }

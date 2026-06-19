@@ -285,7 +285,7 @@ export function runHierarchicalLayout(
   // never re-enqueued, so a back-edge cannot loop).
   let head = 0;
   while (head < queue.length) {
-    const id = queue[head++] as string;
+    const id = queue[head++]!;
     const d = depth.get(id) ?? 0;
     for (const next of adjacency.get(id) ?? []) {
       if (!depth.has(next)) {

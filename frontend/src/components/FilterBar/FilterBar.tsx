@@ -31,7 +31,7 @@ const STATUSES: readonly SessionStatus[] = [
  * that every endpoint + the SSE subscription read. `to` stays open so live data
  * keeps flowing. 'all' clears both bounds. Durations in microseconds.
  */
-const RANGE_PRESETS: ReadonlyArray<{ value: string; label: string; us: number }> = [
+const RANGE_PRESETS: readonly { value: string; label: string; us: number }[] = [
   { value: '1h', label: 'Last hour', us: 3_600_000_000 },
   { value: '24h', label: 'Last 24 hours', us: 86_400_000_000 },
   { value: '7d', label: 'Last 7 days', us: 604_800_000_000 },
@@ -127,7 +127,7 @@ export function FilterBar() {
             className={styles.input}
             aria-label="Time range preset"
             value={rangeValue}
-            onChange={(e) => applyRangePreset(e.target.value)}
+            onChange={(e) => { applyRangePreset(e.target.value); }}
           >
             {RANGE_PRESETS.map((p) => (
               <option key={p.value} value={p.value}>
@@ -189,7 +189,7 @@ export function FilterBar() {
                 key={opt.value}
                 type="button"
                 className={`${styles.sourceChip} ${filters.sources.includes(opt.value) ? styles.sourceChipActive : ''}`}
-                onClick={() => toggleSource(opt.value)}
+                onClick={() => { toggleSource(opt.value); }}
               >
                 {opt.label}
               </button>

@@ -36,12 +36,14 @@ engines:
       - "frontend/src/**/*.test.tsx"
       - "frontend/src/test/**"
       - "frontend/scripts/**"
-  # SOW-0072: Lizard cyclomatic complexity is excluded from ALL test files.
-  # Table-driven Go tests (`for _, tc := range cases` + `t.Run` per case) and
-  # frontend test suites naturally exceed the CCN-8 threshold; the complexity
-  # is inherent to thorough test coverage, NOT a code-smell. Production code
-  # stays fully analyzed. Tests are still covered by ESLint/TS/go test/race.
+  # Disabled: Lizard cyclomatic complexity + NLOC. CCN-8 and NLOC-50 thresholds
+  # produce false positives for React components (JSX conditionals inflate CCN
+  # without indicating real complexity) and Go format parsers (switch-heavy by
+  # construction). Complexity is tracked via the project's 400-line file-size
+  # convention (AGENTS.md) + the function-size guidelines in the project-coding
+  # skill + code review. Lizard test-file exclusions remain as documentation.
   lizard:
+    enabled: false
     exclude_paths:
       - "**/*_test.go"
       - "frontend/src/**/*.test.ts"

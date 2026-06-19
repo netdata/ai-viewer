@@ -27,18 +27,18 @@ export type ConnectionStatus = 'connecting' | 'open' | 'reconnecting' | 'closed'
 
 /** Typed handlers for each server event plus connection-status transitions. */
 export interface SseHandlers {
-  onSessionChanged?: (e: SessionChangedEvent) => void;
-  onStatsInvalidated?: (e: StatsInvalidatedEvent) => void;
-  onSourceStatusChanged?: (e: SourceStatusChangedEvent) => void;
-  onDisconnect?: (e: DisconnectEvent) => void;
-  onResync?: (e: ResyncEvent) => void;
-  onStatus?: (status: ConnectionStatus) => void;
+  onSessionChanged?: (_e: SessionChangedEvent) => void;
+  onStatsInvalidated?: (_e: StatsInvalidatedEvent) => void;
+  onSourceStatusChanged?: (_e: SourceStatusChangedEvent) => void;
+  onDisconnect?: (_e: DisconnectEvent) => void;
+  onResync?: (_e: ResyncEvent) => void;
+  onStatus?: (_status: ConnectionStatus) => void;
   /**
    * onMalformedEvent receives a frame whose `data` is not valid JSON. Without
    * it, a malformed frame is console.warn'd. Either way the frame is surfaced
    * (AGENTS.md "no silent failures") and never tears down the stream.
    */
-  onMalformedEvent?: (eventName: string, raw: string) => void;
+  onMalformedEvent?: (_eventName: string, raw: string) => void;
 }
 
 /**
@@ -283,7 +283,7 @@ export async function connectSse(
   // An abort that arrives AFTER open() still tears the stream down. close() is
   // idempotent, so this is safe alongside any caller-driven close().
   if (signal) {
-    signal.addEventListener('abort', () => connection.close(), { once: true });
+    signal.addEventListener('abort', () => { connection.close(); }, { once: true });
     // addEventListener does not fire for an already-aborted signal, so cover
     // the sync window between openSubscription's check and this registration.
     if (signal.aborted) {

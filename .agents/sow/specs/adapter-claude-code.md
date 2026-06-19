@@ -269,6 +269,7 @@ The adapter should treat `toolUseResult` as opaque structured payload for ops of
 #### Synthetic assistant messages
 
 `message.model` is normally a Claude model id (observed: `"claude-opus-4-7"`, `"claude-opus-4-6"`). It may also be the literal string `"<synthetic>"` — Claude Code's marker for assistant turns it injects locally (not from the LLM). These records still have `content` blocks (often a `text` block with a status/error message) and zero usage. The adapter must:
+
 - Treat `<synthetic>` as `Provider=anthropic, Model="<synthetic>"` so it doesn't pollute model statistics; OR
 - Tag with `extras_json.synthetic=true` and skip the LLM-op emission entirely. **This spec chooses the second**: synthetic assistant messages are emitted as a `LogEntry` with `severity=INF` and no `OpStarted/OpFinalized` pair, because they do not represent a real model call.
 
@@ -1071,6 +1072,7 @@ When the operator runs `claude --resume <sessionId>` the producer appends new re
 ### 10.10 MCP tool naming and namespacing
 
 MCP tools appear as `mcp__<server>__<tool>` (double-underscore separator) in `assistant.tool_use.name`. The adapter splits on `__` to derive:
+
 - `Op.Name = <tool>` (last segment)
 - `Op.ToolNamespace = mcp:<server>` (middle segment, prefixed `mcp:` so a built-in tool named `read` doesn't collide with an MCP tool `mcp__foo__read`).
 

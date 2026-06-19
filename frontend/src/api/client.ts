@@ -139,7 +139,7 @@ export function post<T>(
 
 /** del issues a DELETE; resolves to void (the API returns 204). */
 export function del(path: string, signal?: AbortSignal): Promise<void> {
-  return request<void>(
+  return request<undefined>(
     path,
     signal ? { method: 'DELETE', signal } : { method: 'DELETE' },
   );
@@ -151,7 +151,7 @@ export function del(path: string, signal?: AbortSignal): Promise<void> {
  * headers with an empty body.
  */
 export function head(path: string, signal?: AbortSignal): Promise<void> {
-  return request<void>(
+  return request<undefined>(
     path,
     signal ? { method: 'HEAD', signal } : { method: 'HEAD' },
   );

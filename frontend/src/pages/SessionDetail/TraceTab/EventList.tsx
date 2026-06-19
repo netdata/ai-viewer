@@ -19,7 +19,7 @@ const VIEWPORT_HEIGHT = 420;
 
 export interface EventListProps {
   nodes: TraceNode[];
-  onSelect: (node: TraceNode) => void;
+  onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
 }
 

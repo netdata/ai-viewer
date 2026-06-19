@@ -50,6 +50,7 @@ else
   echo -e "  ${RED}FAIL${NC}: active code must assign \$last_migration FROM internal/store/migrations/*.sql on one line (not a literal)." >&2
   fail=1
 fi
+# shellcheck disable=SC2016
 if printf '%s\n' "$active" | grep -qE 'grep .*"\$last_migration"'; then
   echo -e "  ${GREEN}PASS${NC}: the seed poll greps for the dynamically-derived \$last_migration"
 else

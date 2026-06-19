@@ -21,7 +21,7 @@ export interface TabSpec<K extends string> {
 export interface TabsProps<K extends string> {
   tabs: readonly TabSpec<K>[];
   active: K;
-  onSelect: (key: K) => void;
+  onSelect: (_key: K) => void;
   ariaLabel: string;
 }
 

@@ -157,7 +157,7 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
           <select
             className={styles.filterSelect}
             value={kindFilter}
-            onChange={(e) => setKindFilter(e.target.value)}
+                onChange={(e) => { setKindFilter(e.target.value); }}
             aria-label="Filter by op kind"
           >
             {KIND_OPTIONS.map((k) => (
@@ -167,7 +167,7 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
           <select
             className={styles.filterSelect}
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+                onChange={(e) => { setStatusFilter(e.target.value); }}
             aria-label="Filter by status"
           >
             {STATUS_OPTIONS.map((s) => (
@@ -178,7 +178,7 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
             <select
               className={styles.filterSelect}
               value={agentFilter}
-              onChange={(e) => setAgentFilter(e.target.value)}
+                onChange={(e) => { setAgentFilter(e.target.value); }}
               aria-label="Filter by sub-agent"
             >
               <option value="all">All sub-agents</option>

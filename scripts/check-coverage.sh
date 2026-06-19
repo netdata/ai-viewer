@@ -29,6 +29,7 @@
 #       2 = usage/profile error.
 set -euo pipefail
 
+# shellcheck disable=SC2034
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; GRAY='\033[0;90m'; NC='\033[0m'
 
 PROFILE="${1:-coverage.out}"

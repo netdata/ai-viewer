@@ -73,7 +73,7 @@ export function zoomEventFilter(event: Event): boolean {
  */
 export function attachZoom<E extends Element>(
   surface: E,
-  onZoom: (event: D3ZoomEvent<E, unknown>) => void,
+  onZoom: (_event: D3ZoomEvent<E, unknown>) => void,
   opts?: AttachZoomOpts,
 ): { behavior: ZoomBehavior<E, unknown>; dispose: () => void } {
   const scaleExtent = opts?.scaleExtent ?? SCALE_EXTENT;
@@ -85,7 +85,7 @@ export function attachZoom<E extends Element>(
   const selection = select(surface);
   selection.call(behavior);
   // Start un-panned/un-zoomed (d3's documented selection.call idiom).
-  selection.call((s) => behavior.transform(s, zoomIdentity));
+  selection.call((s) => { behavior.transform(s, zoomIdentity); });
 
   if (!plainWheelPan) {
     // No plain-wheel-pan listener: a plain wheel is rejected by the filter

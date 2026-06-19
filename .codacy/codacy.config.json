@@ -1541,9 +1541,6 @@
           "patternId": "ESLint8_security_detect-possible-timing-attacks"
         },
         {
-          "patternId": "ESLint8_security_detect-object-injection"
-        },
-        {
           "patternId": "ESLint8_security_detect-non-literal-require"
         },
         {

@@ -99,7 +99,7 @@ export function fetchSessionsPage(
 export function useSessionsInfinite(
   filters: Filters,
   group: 'root' | 'all' = 'root',
-): UseInfiniteQueryResult<InfiniteData<SessionListResponse>, Error> {
+): UseInfiniteQueryResult<InfiniteData<SessionListResponse>> {
   return useInfiniteQuery({
     queryKey: sessionsQueryKey(filters, group),
     queryFn: ({ pageParam, signal }) =>

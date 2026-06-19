@@ -77,7 +77,7 @@ export interface TimelineRendererProps {
   tStart: number;
   tEnd: number;
   selectedId: string | null;
-  onSpanClick: (span: PositionedSpan) => void;
+  onSpanClick: (_span: PositionedSpan) => void;
   /** Force a render path (tests); defaults to span-count vs VISIBLE_SPAN_CEILING. */
   useCanvas?: boolean;
 }
@@ -169,7 +169,7 @@ function cullWindowFor(
 function labelForSpan(s: PositionedSpan): string {
   const dur = s.instant
     ? 'instant'
-    : formatDuration((s.span.end_ts as number) - s.span.start_ts);
+    : formatDuration(s.span.end_ts! - s.span.start_ts);
   const kind = s.compaction ? 'compaction' : s.span.kind;
   return `${s.span.name || s.span.id} — ${kind} — ${dur}`;
 }

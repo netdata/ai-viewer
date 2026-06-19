@@ -317,6 +317,7 @@ if [ -f ".agents/sow/SOW.template.md" ]; then
     echo "      ${RED}--${NC}  template missing open-source reference evidence"
     sow_template_open_source_reference_missing=1
   fi
+  # shellcheck disable=SC2016
   if grep -qF "directory name, not a status value" ".agents/sow/SOW.template.md" 2>/dev/null && grep -qF '`completed` is the successful terminal status' ".agents/sow/SOW.template.md" 2>/dev/null && grep -qF "one commit" ".agents/sow/SOW.template.md" 2>/dev/null; then
     echo "      ${GREEN}OK${NC}  template includes completed-status and one-commit close rule"
     sow_template_completion_rule_missing=0

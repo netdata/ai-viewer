@@ -20,7 +20,7 @@ import styles from './SessionDetail.module.css';
 
 type TabKey = 'overview' | 'trace' | 'topology' | 'timeline' | 'logs' | 'raw';
 
-const TABS: ReadonlyArray<TabSpec<TabKey>> = [
+const TABS: readonly TabSpec<TabKey>[] = [
   { key: 'overview', label: 'Overview' },
   { key: 'trace', label: 'Trace' },
   { key: 'topology', label: 'Topology' },

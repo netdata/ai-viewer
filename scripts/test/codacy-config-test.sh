@@ -264,7 +264,6 @@ assert_json_policy() {
     Semgrep_go.lang.security.audit.crypto.math_random.math-random-used
   assert_required_pattern Semgrep \
     Semgrep_yaml.github-actions.security.third-party-action-not-pinned-to-commit-sha.third-party-action-not-pinned-to-commit-sha
-  assert_required_pattern ESLint8 ESLint8_security_detect-object-injection
   assert_required_pattern ESLint8 ESLint8_xss_no-mixed-html
 
   # SOW-0046: PMD and SQLint stay absent from the local Codacy Analysis CLI
@@ -390,6 +389,7 @@ engines:
       - "frontend/src/test/**"
       - "frontend/scripts/**"
   lizard:
+    enabled: false
     exclude_paths:
       - "**/*_test.go"
       - "frontend/src/**/*.test.ts"

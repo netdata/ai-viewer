@@ -7,6 +7,7 @@
 Authoritative upstream source: `ai-agent.git`. The v3 evidence format was introduced by `ai-agent.git/.agents/sow/done/SOW-0002-20260428-memory-review-reduction.md` and is described by `ai-agent.git/.agents/sow/specs/snapshots.md` ("v3 Evidence Format" section). The Go adapter is, conceptually, a re-implementation of `ai-agent.git/src/evidence/reader.ts` that emits ai-viewer canonical events instead of returning in-memory views.
 
 This spec is grounded in:
+
 - Direct inspection of 14 296 real session directories and 17 356 real `.jsonl` ledger files under `~/.ai-agent/sessions/` on the operator's workstation as of 2026-05-26.
 - The TypeScript producer source at `ai-agent.git/src/evidence/{types,writer,session-recorder,paths,reader,json-stream}.ts`.
 - The upstream spec at `ai-agent.git/.agents/sow/specs/snapshots.md`.
@@ -40,6 +41,7 @@ The viewer's ingester is configured with this root as its `location`. Under that
 ```
 
 Path construction is authoritative in `ai-agent.git/src/evidence/paths.ts`:
+
 - ledger: `path.join(sessionsDir, 'session', sessionId + '.jsonl')` (line 12)
 - turn dir: `path.posix.join('payloads', sessionId, 'turn-' + padNumber(turn))` (line 16)
 - payload filename stem: per-`EvidencePayloadKind` switch (lines 20-37)
@@ -53,6 +55,7 @@ Path construction is authoritative in `ai-agent.git/src/evidence/paths.ts`:
 The same `<sessions-dir>` root also holds the legacy v2 format. v2 files are top-level `<originId>.json.gz` (gzipped JSON snapshot, single file per session). The two formats coexist under the same root during migration; ai-agent currently writes both for compatibility (snapshots.md "Runtime Write Path" item 1).
 
 Observed real data at `~/.ai-agent/sessions/` (2026-05-26):
+
 - `<sessions-dir>/*.json.gz` — v2 snapshots, many tens of thousands of files
 - `<sessions-dir>/*.json.gz.tmp-<pid>-<ts>` — v2 aborted/in-flight writes, two files observed
 - `<sessions-dir>/session/<sessionId>.jsonl` — v3 ledgers, 17 356 files
@@ -62,6 +65,7 @@ Observed real data at `~/.ai-agent/sessions/` (2026-05-26):
 **v2/v3 boundary rule for the adapter:**
 
 The v3 adapter is responsible for `<sessions-dir>/session/` and `<sessions-dir>/payloads/`. It MUST ignore everything else at the root, including:
+
 - `*.json.gz` (v2 — owned by the aiagent_v2 adapter)
 - `*.json.gz.tmp-*` (v2 aborted writes)
 - `accounting.jsonl` (cross-session accounting ledger; not session evidence — see §2.3)
@@ -128,7 +132,7 @@ Field-by-field:
 | `callPath` | yes (de-facto) | string | colon-separated chain of agent invocations rooted at the originating headend (e.g. `feed-enrichment:web-search:web-fetch`). Useful UX hint; surface as part of `extras_json`. |
 | `parentSessionId` | yes (sub-agents) | string | **A first-class producer guarantee since the lineage fix `ai-agent@8a0078bc`**: `recordSessionStart()` now always writes `parentSessionId` onto the child's `session_start` (`session-recorder.ts:364-366`), superseding the prior "present on ~76% of sessions / remaining ~3.2% early-format leftovers" observation. Set on every non-root session (sub-agent, `history_compaction`, `tool_output`); absent on root headends (`cli`, `api`, `web`, `embed`, `slack`) by definition. Pre-fix snapshots on disk may still omit it, so the adapter treats it as the immediate-parent linkage fast path and keeps the parent-side `childSessions[]` synthesizer (§8.1) as the two-path safety net. Maps to canonical `ParentNativeID` (`mapper.go:118`). |
 | `parentOpId` | best-effort (sub-agents) | string | Added by the lineage fix `ai-agent@8a0078bc`, but written **best-effort**, not unconditionally: `recordSessionStart()` emits `this.options.parentOpId` (`session-recorder.ts:364-366`), which is the OPTIONAL `trace?.parentOpId` threaded from the spawning op — SOW-0030 plan item 3 is explicit ("write `parentOpId` **when the existing child creation boundary can provide it safely**"). So it can be absent even on post-fix snapshots. Also carried on parent-side `childSessions[]` refs (`session-tree.ts`). Identifies the parent op that spawned the child. Maps to canonical `ParentOpKey` (`mapper.go:119`), persisted into `sessions.extras_json.aiViewer.parentOpKey`. The adapter MUST tolerate its absence. |
-| `headendId` | yes (de-facto) | string | which entry-point launched the session. Observed distribution (1000 random session_starts): `cli=23.5%`, `sub-agent=62.2%`, `tool_output=9.6%`, `web=1.5%`, `api=1.2%`, `history_compaction=1.0%`, `slack=0.4%`, `embed=0.6%`. The adapter maps `cli|api|web|embed|slack` → canonical `Kind='root'`; `sub-agent|history_compaction` → `Kind='sub_agent'`; `tool_output` → `Kind='tool_internal'`. |
+| `headendId` | yes (de-facto) | string | which entry-point launched the session. Observed distribution (1000 random session_starts): `cli=23.5%`, `sub-agent=62.2%`, `tool_output=9.6%`, `web=1.5%`, `api=1.2%`, `history_compaction=1.0%`, `slack=0.4%`, `embed=0.6%`. The adapter maps `cli`, `api`, `web`, `embed`, `slack` → canonical `Kind='root'`; `sub-agent`, `history_compaction` → `Kind='sub_agent'`; `tool_output` → `Kind='tool_internal'`. |
 | `capturePayloads` | yes | bool | `true` when raw payloads were captured to disk; `false` when the run used `--no-capture-payloads` (still records refs with `captured:false`). |
 | `attributes.ledgerPath` | yes | string | always `"session/<sessionId>.jsonl"`. Self-referential; the adapter does not need it. Producer writes it at `session-recorder.ts:369-370`. |
 | `attributes.*` | optional | any | additional adapter-defined fields may appear in attributes per the producer type (`types.ts:41`). Adapter MUST stash unknown attribute keys into canonical `extras_json` rather than silently drop them. |
@@ -369,6 +373,7 @@ Producer: `session-recorder.ts:487-495`. Schema: `EvidenceSessionErrorBody` (`ty
 ### 3.7 Observed Record-Type Cardinality
 
 Across 100 random session ledgers:
+
 - `session_start`: 100 (one per ledger)
 - `turn_start`: 322
 - `turn_end`: 242
@@ -376,6 +381,7 @@ Across 100 random session ledgers:
 - `session_error`: 0
 
 Across 1000 random ledgers, distribution of the LAST record:
+
 - `session_summary`: 803 (80.3% — cleanly completed)
 - `session_start`: 183 (18.3% — orphans, never produced a single turn; usually crashed or aborted at startup)
 - `turn_start`: 14 (1.4% — interrupted mid-turn; matching `turn_end` never landed)
@@ -448,6 +454,7 @@ Note: `sdk_request`/`sdk_response` outnumber `llm_request`/`llm_response` by a s
 Authoritative implementation: `ai-agent.git/src/evidence/reader.ts:354-365` (`resolveEvidencePayloadPath`).
 
 Algorithm:
+
 1. If `!ref.captured` OR `ref.path` is empty/undefined → uncaptured; no file exists; surface as an uncaptured reference only.
 2. Resolve `payloadPath = path.resolve(sessionsDir, ...ref.path.split('/'))`.
 3. Compute `relative = path.relative(sessionsDir, payloadPath)`.
@@ -455,6 +462,7 @@ Algorithm:
 5. The file is gzip-compressed; uncompressed bytes match `originalBytes` and `sha256`.
 
 Canonical `PayloadRefEvent`:
+
 - `LocationURI` = `file://<absolute-path-to-gz>` (the file URI of the resolved path; the presenter, not the adapter, reads bytes on demand).
 - `PayloadKind` = v3 `kind` (one-to-one mapping; the canonical model's `kind` enum already mirrors v3's).
 - `Format` = v3 `format`.
@@ -562,6 +570,7 @@ On startup, the adapter walks `<sessions-dir>/session/` once (NOT recursive; the
 ### 7.2 Resume Semantics
 
 On startup:
+
 1. Load cursor from `sources.cursor` for this adapter+location.
 2. For each ledger file in `<sessions-dir>/session/`:
    - If the file is in the cursor and `size_on_disk == cursor.size` and `mtime_on_disk` is unchanged since last scan: skip (no new data).
@@ -573,6 +582,7 @@ On startup:
 ### 7.3 Durability
 
 Cursor is durable because:
+
 - The ingester writes it as part of the same SQLite transaction that writes the canonical rows from the corresponding records. If the ingester crashes mid-transaction, the cursor reverts atomically with the row writes; on restart the re-read is idempotent (every writer table upserts on a natural identity — SQL-layer idempotency, see `ingester.md` §Dedup and Idempotency).
 - The cursor's per-file byte `Offset` is the resume mechanism: on restart `Scan(since=cursor)` seeks past already-read bytes so completed records are not re-emitted. Resume is cursor-driven, not gated by a per-source `SourceSeq` high-water-mark (removed in SOW-0015; a scalar HWM cannot work when one `sourceID` aggregates many files whose `ledgerSeq` each restart at 1).
 
@@ -630,6 +640,7 @@ Real data on disk contains hundreds of these (e.g. `payloads/507f8109-.../turn-0
 ### 9.5 Failed turns (`turn_end.status='failed'`)
 
 2% of ops are `status='failed'` and the corresponding turns surface free-form messages in `turn_end.errors[]`. The adapter:
+
 - Sets canonical `turns.status='failed'`, `turns.error_class=''` (no taxonomy from v3).
 - Emits one `LogEntry{severity:'ERR', message: errors[j]}` per error string, attached to the turn.
 - Truncates extremely long error strings (observed up to ~10 KB) at a configurable cap (default 64 KB) and appends a `…[truncated]` marker. The full string remains in the ledger; the canonical store does not need to mirror every byte.

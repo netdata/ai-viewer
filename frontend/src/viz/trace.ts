@@ -123,7 +123,7 @@ export function buildOpTree(turns: TurnDetail[]): TraceNode[] {
   const reachable = new Set<TraceNode>();
   const stack = [...roots];
   while (stack.length > 0) {
-    const n = stack.pop() as TraceNode;
+    const n = stack.pop()!;
     if (reachable.has(n)) {
       continue;
     }
@@ -149,7 +149,7 @@ export function buildOpTree(turns: TurnDetail[]): TraceNode[] {
       reachable.add(node);
       stack.push(node);
       while (stack.length > 0) {
-        const n = stack.pop() as TraceNode;
+        const n = stack.pop()!;
         for (const child of n.children) {
           if (!reachable.has(child)) {
             reachable.add(child);
@@ -257,7 +257,7 @@ export function buildMergedTree(ops: TraceOp[]): TraceNode[] {
     const reachable = new Set<TraceNode>();
     const stack = [...roots];
     while (stack.length > 0) {
-      const n = stack.pop() as TraceNode;
+      const n = stack.pop()!;
       if (reachable.has(n)) {
         continue;
       }
@@ -286,7 +286,7 @@ export function buildMergedTree(ops: TraceOp[]): TraceNode[] {
         reachable.add(node);
         const hoistStack = [node];
         while (hoistStack.length > 0) {
-          const n = hoistStack.pop() as TraceNode;
+          const n = hoistStack.pop()!;
           for (const child of n.children) {
             if (!reachable.has(child)) {
               reachable.add(child);

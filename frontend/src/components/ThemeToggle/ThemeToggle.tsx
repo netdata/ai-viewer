@@ -10,7 +10,7 @@ import styles from './ThemeToggle.module.css';
 // by mutating a control's label on every OS-preference flip, which re-announces
 // the whole control and is noisy for screen-reader users.
 
-const OPTIONS: ReadonlyArray<{ value: ThemePreference; label: string; symbol: string }> = [
+const OPTIONS: readonly { value: ThemePreference; label: string; symbol: string }[] = [
   { value: 'auto', label: 'Auto (follow system)', symbol: 'A' },
   { value: 'dark', label: 'Dark', symbol: '◑' }, // ◑ — monochrome, theme-agnostic
   { value: 'light', label: 'Light', symbol: '○' }, // ○

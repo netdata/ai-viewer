@@ -154,7 +154,7 @@ export function layoutTimeline(lanes: TimelineLaneInput[], opts: TimelineOpts): 
       // is drawable/clickable as a marker (the renderer paints a tick, not a bar).
       const width = instant
         ? minBarWidth
-        : Math.max(minBarWidth, x(span.end_ts as number) - x0);
+        : Math.max(minBarWidth, x(span.end_ts!) - x0);
       spans.push({
         span,
         laneIndex,

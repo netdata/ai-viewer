@@ -19,7 +19,7 @@
 // keeps the known literals (so they autocomplete and switch-narrow) while still
 // accepting any other string — `(string & {})` prevents the union from
 // collapsing to plain `string` the way `T | string` would.
-type OpenEnum<T extends string> = T | (string & {});
+type OpenEnum<T extends string> = T | (string & Record<never, never>);
 
 /** internal/canonical/events.go SessionStatus (known values; open union). */
 export type SessionStatus = OpenEnum<

@@ -9,13 +9,14 @@ This skill is the durable record of how ai-viewer gets installed and run on the 
 
 ## TL;DR
 
-- **System install (recommended):** `scripts/install-system.sh` → binaries + data under `/opt/ai-viewer`, two **system** systemd units running **as the operator**, UI at **http://127.0.0.1:7710/**.
+- **System install (recommended):** `scripts/install-system.sh` → binaries + data under `/opt/ai-viewer`, two **system** systemd units running **as the operator**, UI at **<http://127.0.0.1:7710/>**.
 - **User install (no root):** `scripts/install-systemd-user.sh` → binaries in `~/.local/bin`, **user** systemd units, data in `~/.local/share/ai-viewer/`.
 - Both are localhost-only (no auth in v1 — workstation-scoped).
 
 ## The system install (`scripts/install-system.sh`)
 
 ### What it does
+
 1. Rebuilds from source (`scripts/build.sh` — frontend + both Go binaries).
 2. Probes the **installing operator's** well-known agent-data paths and renders `--source` flags for each that exists:
    - `~/.ai-agent/sessions` → `aiagent_v3` + `aiagent_v2` (same dir backs both)
@@ -27,6 +28,7 @@ This skill is the durable record of how ai-viewer gets installed and run on the 
 5. `systemctl daemon-reload`, `enable --now` both units, waits up to 20s for the server, prints the URL.
 
 ### Commands
+
 ```bash
 scripts/install-system.sh             # install or upgrade (rebuilds) + start + verify + print URL
 scripts/install-system.sh status      # systemctl status for both + the URL
@@ -46,6 +48,7 @@ scripts/install-system.sh uninstall   # stop + disable + remove units + /opt/ai-
 
 **1. Runs as the operator (`User=<operator>`), NOT a dedicated service user.**
 The operator's agent-data dirs (`~/.ai-agent`, `~/.claude`, `~/.codex`, `~/.local/share/opencode`) are owner-only (`0700`), so a dedicated `ai-viewer` user **cannot read them** without invasive recursive ACLs (fragile — new files don't inherit unless default ACLs are set; surprises dotfile managers/backup tools). Running as the operator is correct and simple here:
+
 - The app's purpose is "the operator's viewer for the operator's agent data"; localhost-only; read-only on sources by design (`os.O_RDONLY`).
 - It's the same privilege level the operator already grants every other agent CLI they run (opencode/codex/claude — all run as the operator).
 - A dedicated user for *this one tool* is security theater relative to the rest of the operator's stack and was actively breaking source access (the 0-sources bug during initial install — see History).
@@ -55,12 +58,14 @@ The operator's agent-data dirs (`~/.ai-agent`, `~/.claude`, `~/.codex`, `~/.loca
 Auto-discovery probes `$HOME`-relative paths. The explicit list is (a) auditable — the unit file shows exactly what the service reads, and (b) independent of `$HOME` resolution (irrelevant now that we run as the operator, but it survived because it's the cleaner contract). The committed template carries `__AI_VIEWER_SOURCES__`; the install script renders it.
 
 ### Verifying an install
+
 ```bash
 systemctl is-active ai-viewer-ingest.service ai-viewer-serve.service   # both → active
 curl -s http://127.0.0.1:7710/api/health | python3 -m json.tool         # status + sources[] (want len ≥ 1)
 journalctl -u ai-viewer-ingest -u ai-viewer-serve -f                    # live tail
 scripts/install-system.sh status                                       # the bundled status command
 ```
+
 - `/api/health.status` is `degraded` on a fresh install until sources catch up (parse errors from real-data edge cases + historical staleness) — that's **correct** (errors are surfaced, not hidden). It is NOT an install failure.
 - `/api/health.sources` is empty for the first few seconds (sources register on the first batch flush, after the adapters scan) — wait, don't panic.
 

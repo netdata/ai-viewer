@@ -20,7 +20,7 @@ export interface FlameGraphProps {
   nodes: TraceNode[];
   /** Pre-order roots of the tree (for depth-based stacking). */
   roots: TraceNode[];
-  onSelect: (node: TraceNode) => void;
+  onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
   useCanvas: boolean;
 }
@@ -129,7 +129,7 @@ function FlameCanvas({
 }: {
   cells: FlameCell[];
   height: number;
-  onSelect: (node: TraceNode) => void;
+  onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);

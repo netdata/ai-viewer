@@ -318,7 +318,7 @@ export function filtersToSubscription(filters: Filters): SubscriptionFilterReque
 export interface UseFiltersResult {
   filters: Filters;
   /** Merge a patch into the URL search params (pushes a history entry). */
-  setFilters: (patch: FilterPatch) => void;
+  setFilters: (_patch: FilterPatch) => void;
   /** Clear every filter, leaving any non-filter params intact. */
   clearFilters: () => void;
 }
