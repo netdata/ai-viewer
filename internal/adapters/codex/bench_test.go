@@ -15,9 +15,16 @@ import (
 )
 
 const (
-	codexBenchScanFiles                = 32
-	codexBenchScanExpectedEvents int64 = 676
-	codexBenchTailExpectedEvents int64 = 21
+	codexBenchScanFiles = 32
+	// SOW-0021 migrated per-turn metadata off the interim turn_meta LogEntry
+	// onto TurnFinalizedEvent.Extras (the real turns.extras_json carrier, no
+	// data lost — asserted by TestMapper_TurnFinalizedCarriesExtras). That
+	// removed exactly one event per turn: 32 in the scan corpus (676 -> 644)
+	// and 1 in the tail append (21 -> 20). The counts were left stale until
+	// this calibration; the bench only runs locally (CI does the compile-smoke),
+	// so the drift was not CI-gated.
+	codexBenchScanExpectedEvents int64 = 644
+	codexBenchTailExpectedEvents int64 = 20
 )
 
 // BenchmarkCodexScan_SyntheticCorpus exercises first backfill over a
