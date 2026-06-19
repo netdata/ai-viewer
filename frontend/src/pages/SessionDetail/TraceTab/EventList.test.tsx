@@ -106,12 +106,40 @@ describe('EventList', () => {
     const rows = within(table).getAllByRole('row');
     // Row order: header, tool (measured), llm (point event).
     const llmRow = rows[2] as HTMLElement;
-    // The duration cell renders an em-dash, not "0µs"/"0".
-    expect(within(llmRow).getByText('—')).toBeInTheDocument();
+    // The duration cell renders an em-dash, not "0µs"/"0". (The Sub-agent
+    // column ALSO renders "—" for these single-session nodes with no agent
+    // tag, so scope the assertion to the LLM row's duration cell.)
+    const llmDurationCell = llmRow.querySelectorAll('td');
+    // The Duration column is the 5th cell (Time, Kind, Name, Sub-agent, Duration).
+    expect(llmDurationCell[4]?.textContent).toBe('—');
     expect(within(llmRow).queryByText('0µs')).not.toBeInTheDocument();
     // The measured op still shows its real duration.
     const toolRow = rows[1] as HTMLElement;
     expect(within(toolRow).getByText('400µs')).toBeInTheDocument();
+  });
+
+  it('shows a per-row sub-agent indicator (swatch + name) for whole-tree nodes (SOW-0070)', () => {
+    // Nodes carrying a sessionAgent (the whole-tree trace) render a Sub-agent
+    // cell with the agent name; nodes without it (single-session) render "—".
+    const nodes: TraceNode[] = [
+      {
+        op: op({ id: 'root', name: 'root-op' }),
+        depth: 0,
+        children: [],
+        sessionId: 'root',
+        sessionAgent: 'nedi',
+      },
+      {
+        op: op({ id: 'child', name: 'child-op' }),
+        depth: 1,
+        children: [],
+        sessionId: 'child',
+        sessionAgent: 'worker',
+      },
+    ];
+    render(<EventList nodes={nodes} onSelect={vi.fn()} selectedId={null} />);
+    expect(screen.getByText('nedi')).toBeInTheDocument();
+    expect(screen.getByText('worker')).toBeInTheDocument();
   });
 
   it('highlights the selected row and renders a failed op with the error style', () => {

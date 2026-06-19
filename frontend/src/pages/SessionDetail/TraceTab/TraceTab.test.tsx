@@ -3,13 +3,18 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'jest-axe';
 import type { OpDetail, SessionDetailResponse, TurnDetail } from '../../../api/types';
+
+vi.mock('../../../api/sessions', () => ({
+  useSessionTrace: () => ({ data: undefined, isPending: false, isError: false, error: null }),
+}));
+
 import { TraceTab } from './TraceTab';
 
 // TraceTab is the centerpiece APM view (ui-pages.md §/sessions/:id #3). It builds
-// the waterfall (default) + flame (toggle) + a virtualized event list from the
-// SAME op tree out of the session-detail response (turns→ops), and a click on
-// any span/row opens the shared SpanDetailDrawer. These RTL tests drive the
-// component against an in-memory detail object (no network).
+// the waterfall (default) + flame (toggle) + a virtualized event list. The
+// whole-tree trace fetch (useSessionTrace, SOW-0070) is mocked to return no
+// data, so these tests exercise the single-session fallback path (buildOpTree
+// from detail.turns); the whole-tree merge has its own unit tests in viz/trace.
 
 function op(over: Partial<OpDetail>): OpDetail {
   return {

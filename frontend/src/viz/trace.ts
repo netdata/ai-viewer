@@ -1,6 +1,6 @@
 import { scaleLinear } from 'd3-scale';
 import { ticks as d3Ticks } from 'd3-array';
-import type { OpDetail, TurnDetail } from '../api/types';
+import type { OpDetail, TraceOp, TurnDetail } from '../api/types';
 
 // Pure geometry/layout for the Trace tab (ui-pages.md §/sessions/:id #3 Trace).
 // Lives in viz/ so React components consume plain data and never import D3
@@ -21,11 +21,18 @@ import type { OpDetail, TurnDetail } from '../api/types';
 // session's tree (the child session's ops are fetched and rendered separately);
 // any op that names a boundary as its parent is hoisted to top-level.
 
-/** TraceNode is one op plus its derived tree position. */
+/** TraceNode is one op plus its derived tree position. The session tags are
+ *  populated only by buildMergedTree (whole-tree trace, SOW-0070); the
+ *  single-session buildOpTree leaves them undefined. */
 export interface TraceNode {
   op: OpDetail;
   depth: number;
   children: TraceNode[];
+  /** Owning session id (whole-tree trace only). */
+  sessionId?: string;
+  /** Owning session agent name (whole-tree trace only; drives the sub-agent
+   *  color + filter). */
+  sessionAgent?: string;
 }
 
 /** end returns an op's closed end, or null when it is still ongoing/instant. */
@@ -175,6 +182,174 @@ export function buildOpTree(turns: TurnDetail[]): TraceNode[] {
   assign(roots, 0);
 
   return roots;
+}
+
+/**
+ * buildMergedTree builds ONE op tree spanning sub-session boundaries from the
+ * whole-tree trace op list (SOW-0070). Within each session, ops nest by
+ * parent_op_id (the same authoritative parentage buildOpTree uses); an op
+ * carrying child_session_id=C is a leaf in its session's tree, and the op-roots
+ * of session C splice under it — so a sub-session's work nests beneath the op
+ * that spawned it.
+ *
+ * Defenses: a child_session_id whose session is absent from the op set stays a
+ * leaf (nothing to splice); a cross-session parent cycle cannot form because
+ * the splice direction is strictly session→its parent's boundary op (a session
+ * is never spliced under its own descendant op). Each node is tagged with its
+ * sessionId/sessionAgent so the client colors + filters by sub-agent.
+ *
+ * Per-session cycle handling mirrors buildOpTree: a closed parent_op_id cycle
+ * within a session has no root, so a reachability+hoist pass (run per-session,
+ * before the splice) promotes its FIRST member to a root and keeps the rest
+ * nested under it (inner re-DFS) — no node is ever DROPPED or DUPLICATED, and
+ * the cycle's nesting is preserved (one root), the same contract the
+ * single-session trace has.
+ */
+export function buildMergedTree(ops: TraceOp[]): TraceNode[] {
+  if (ops.length === 0) {
+    return [];
+  }
+
+  // Per-session: materialize nodes (preserving feed order) + index by op id
+  // WITHIN the session. parent_op_id is scoped to a session (two sessions may
+  // reuse an op id), so the byId map is keyed by (sessionId, opId).
+  const byKey = new Map<string, TraceNode>();
+  const sessionOps = new Map<string, TraceNode[]>();
+  for (const op of ops) {
+    const node: TraceNode = {
+      op,
+      depth: 0,
+      children: [],
+      sessionId: op.session_id,
+      sessionAgent: op.session_agent_name,
+    };
+    byKey.set(`${op.session_id}\0${op.id}`, node);
+    const list = sessionOps.get(op.session_id);
+    if (list) {
+      list.push(node);
+    } else {
+      sessionOps.set(op.session_id, [node]);
+    }
+  }
+
+  // Per-session roots: attach each node to its parent_op_id WITHIN its session,
+  // or collect as a root. A child_session_id boundary is a leaf (isLeafBoundary)
+  // — its sub-session's ops splice in the next pass.
+  const sessionRoots = new Map<string, TraceNode[]>();
+  for (const [sid, nodes] of sessionOps) {
+    const roots: TraceNode[] = [];
+    for (const node of nodes) {
+      const parentId = node.op.parent_op_id;
+      const parent = parentId != null ? byKey.get(`${sid}\0${parentId}`) : undefined;
+      if (parent && parent !== node && !isLeafBoundary(parent.op)) {
+        parent.children.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+    // Cycle break (mirrors buildOpTree): a closed parent_op_id cycle within the
+    // session (A→B→A) has no root, so its members were attached to each other
+    // above and are unreachable from `roots` — they would silently vanish. Walk
+    // down from the current roots marking every reachable node; any node still
+    // unvisited is a cycle member (or sits under one) and is hoisted to a root
+    // so it is never dropped. `nodes` is in stable feed order, so the first
+    // unreachable member of each cycle hoists first — deterministic.
+    const reachable = new Set<TraceNode>();
+    const stack = [...roots];
+    while (stack.length > 0) {
+      const n = stack.pop() as TraceNode;
+      if (reachable.has(n)) {
+        continue;
+      }
+      reachable.add(n);
+      for (const child of n.children) {
+        stack.push(child);
+      }
+    }
+    for (const node of nodes) {
+      if (!reachable.has(node)) {
+        // Detach from the parent that swallowed it, then promote to a root.
+        const parentId = node.op.parent_op_id;
+        const parent = parentId != null ? byKey.get(`${sid}\0${parentId}`) : undefined;
+        if (parent) {
+          const idx = parent.children.indexOf(node);
+          if (idx >= 0) {
+            parent.children.splice(idx, 1);
+          }
+        }
+        roots.push(node);
+        // Mark this hoisted root AND its descendants reachable (inner DFS), so a
+        // later cycle member that is a descendant of this new root is NOT hoisted
+        // redundantly — it stays nested under it, preserving the tree shape
+        // (faithful port of buildOpTree's cycle-break; without this, a 3+ member
+        // cycle would flatten to separate roots instead of nesting).
+        reachable.add(node);
+        const hoistStack = [node];
+        while (hoistStack.length > 0) {
+          const n = hoistStack.pop() as TraceNode;
+          for (const child of n.children) {
+            if (!reachable.has(child)) {
+              reachable.add(child);
+              hoistStack.push(child);
+            }
+          }
+        }
+      }
+    }
+    sessionRoots.set(sid, roots);
+  }
+
+  // Cross-session splice: for every boundary op (child_session_id set), attach
+  // the named session's roots under it. A session is only spliced under a
+  // boundary op that LIVES IN A DIFFERENT session (a session cannot be its own
+  // ancestor), so no cross-session cycle can form.
+  for (const [, nodes] of sessionOps) {
+    for (const node of nodes) {
+      const childSid = node.op.child_session_id;
+      if (childSid === null || childSid === node.sessionId) {
+        continue;
+      }
+      const childRoots = sessionRoots.get(childSid);
+      if (childRoots && childRoots.length > 0) {
+        node.children.push(...childRoots);
+      }
+    }
+  }
+
+  // The whole-tree roots = the root session's roots. The root session is the
+  // one whose id no boundary op points at as a child (i.e. it is never spliced
+  // under another session). Compute the set of sessions that ARE spliced under
+  // a boundary op; the top-level forest is the roots of every session NOT in
+  // that set. (For a well-formed single-root tree this is exactly the root
+  // session; the forest form tolerates multiple roots.)
+  const spliced = new Set<string>();
+  for (const [, nodes] of sessionOps) {
+    for (const node of nodes) {
+      const childSid = node.op.child_session_id;
+      if (childSid !== null && childSid !== node.sessionId && sessionOps.has(childSid)) {
+        spliced.add(childSid);
+      }
+    }
+  }
+  const forest: TraceNode[] = [];
+  for (const [sid, roots] of sessionRoots) {
+    if (!spliced.has(sid)) {
+      forest.push(...roots);
+    }
+  }
+
+  // Re-assign depth across the merged tree (splice changed child depths).
+  const assign = (siblings: TraceNode[], depth: number): void => {
+    for (const n of siblings) {
+      n.depth = depth;
+      if (n.children.length > 0) {
+        assign(n.children, depth + 1);
+      }
+    }
+  };
+  assign(forest, 0);
+
+  return forest;
 }
 
 /** flattenTree returns a depth-first pre-order list (== visual row order). */

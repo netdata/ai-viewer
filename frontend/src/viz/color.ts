@@ -95,6 +95,7 @@ export function refreshThemeColors(): void {
     NEUTRAL_TOKEN,
     ...STATUS_TOKEN_BY_STATUS.values(),
     ...KIND_TOKEN_BY_KIND.values(),
+    ...AGENT_PALETTE_TOKENS,
   ]);
   for (const name of names) {
     next.set(name, readToken(name));
@@ -150,6 +151,48 @@ export function colorForFailureRatio(ratio: number): string {
 export function colorForActorKind(kind: string): string {
   const token = kind === 'agent' ? AGENT_TOKEN : kind === 'tool' ? TOOL_TOKEN : NEUTRAL_TOKEN;
   return tokenValue(token);
+}
+
+// ── Sub-agent palette (SOW-0070 whole-tree trace) ───────────────────────────
+//
+// The trace spans multiple sub-agent sessions; each op row carries a colored
+// indicator keyed by its session_agent_name so the operator sees which
+// sub-agent executed it. The palette is a small set of theme tokens cycled by a
+// DETERMINISTIC string hash of the agent name, so (a) a given agent is the same
+// color across renders/refreshes, and (b) the palette tracks light/dark via
+// tokens (no hardcoded hex). Color is never the only signal — the agent name is
+// also rendered + filterable.
+
+const AGENT_PALETTE_TOKENS = [
+  '--accent',
+  '--success',
+  '--warning',
+  '--error',
+  '--info',
+  NEUTRAL_TOKEN,
+] as const;
+
+/** hashAgentName is a small deterministic string hash (djb2) → bucket index. */
+function hashAgentName(name: string): number {
+  let h = 5381;
+  for (let i = 0; i < name.length; i++) {
+    h = ((h << 5) + h + name.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+/**
+ * colorForAgent returns a stable theme-token color for a session agent name
+ * (SOW-0070). The same agent is always the same color; the palette cycles
+ * through theme tokens so it tracks light/dark. An empty/unknown name falls
+ * back to the neutral token.
+ */
+export function colorForAgent(agentName: string): string {
+  if (agentName.length === 0) {
+    return tokenValue(NEUTRAL_TOKEN);
+  }
+  const token = AGENT_PALETTE_TOKENS[hashAgentName(agentName) % AGENT_PALETTE_TOKENS.length];
+  return tokenValue(token ?? NEUTRAL_TOKEN);
 }
 
 /**

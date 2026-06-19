@@ -30,10 +30,10 @@ import styles from './SpanDetailDrawer.module.css';
 //     op: its kind/label, failure %, and the value of the currently-selected size
 //     metric. Op-only fields are omitted, not zeroed.
 //
-// The payload byte-preview route (GET /api/payloads/:ref) is deferred to SOW-0033
-// (it reads source-file byte ranges, a security surface); until it lands the
-// 'op' drawer shows each ref's metadata and a DISABLED "preview coming soon"
-// control, structured so the byte-preview wires in trivially later.
+// The payload byte-preview route (GET /api/payloads/:id, SOW-0033) is live: the
+// 'op' drawer shows each ref's metadata plus an active Preview button that
+// fetches the first ~4 KB on click. Failed ops also surface error_message
+// (SOW-0070).
 
 /**
  * SpanDetail is the source-aware drawer payload. The discriminant `kind` selects
@@ -289,6 +289,9 @@ function OpBody({ op, titleId }: { op: OpDetail; titleId: string }) {
           <Field label="Child session" value={op.child_session_id} mono />
         ) : null}
         {failed ? <Field label="Error" value={op.error_class ?? ''} highlight="error" /> : null}
+        {failed && op.error_message ? (
+          <Field label="Error message" value={op.error_message} highlight="error" />
+        ) : null}
       </dl>
 
       <section className={styles.payloads} aria-labelledby={`${titleId}-payloads`}>

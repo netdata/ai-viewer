@@ -13,6 +13,7 @@ import type {
   TimelineResponse,
   TopologyMetric,
   TopologyResponse,
+  TraceResponse,
 } from './types';
 
 // Session endpoints + TanStack Query hooks. Query keys are structured so SSE
@@ -190,6 +191,28 @@ export function useTimeline(id: string): UseQueryResult<TimelineResponse> {
   return useQuery({
     queryKey: ['session-timeline', id] as const,
     queryFn: ({ signal }) => fetchTimeline(id, signal),
+    enabled: id.length > 0,
+  });
+}
+
+/**
+ * fetchSessionTrace GETs the whole-tree trace (every op of every session in the
+ * resolved tree, tagged by owning session — rest-api.md §GET /api/sessions/:id/
+ * trace, SOW-0070). The client builds a merged op tree from the flat op list.
+ */
+export function fetchSessionTrace(id: string, signal?: AbortSignal): Promise<TraceResponse> {
+  return get<TraceResponse>(`/sessions/${encodeURIComponent(id)}/trace`, signal);
+}
+
+/**
+ * useSessionTrace is the query hook for the Trace tab's whole-tree op list.
+ * Distinct query key (['session-trace', id]) keeps its refetch independent of
+ * the detail's ['session', id] SSE invalidation.
+ */
+export function useSessionTrace(id: string): UseQueryResult<TraceResponse> {
+  return useQuery({
+    queryKey: ['session-trace', id] as const,
+    queryFn: ({ signal }) => fetchSessionTrace(id, signal),
     enabled: id.length > 0,
   });
 }

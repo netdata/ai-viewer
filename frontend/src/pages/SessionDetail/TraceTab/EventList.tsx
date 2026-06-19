@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import type { UIEvent } from 'react';
 import type { TraceNode } from '../../../viz/trace';
 import { isInstantOp, windowRange } from '../../../viz/trace';
-import { colorForOpKind } from '../../../viz/color';
+import { colorForAgent, colorForOpKind } from '../../../viz/color';
 import { formatDuration, formatTimestamp } from '../../../lib/format';
 import styles from './TraceTab.module.css';
 
@@ -58,6 +58,7 @@ export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
             <th className={styles.colTime}>Time</th>
             <th className={styles.colKind}>Kind</th>
             <th className={styles.colName}>Name</th>
+            <th className={styles.colAgent}>Sub-agent</th>
             <th className={styles.colNum}>Duration</th>
             <th className={styles.colStatus}>Status</th>
           </tr>
@@ -65,12 +66,13 @@ export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
         <tbody>
           {topPad > 0 ? (
             <tr aria-hidden="true" style={{ height: topPad }}>
-              <td colSpan={5} />
+              <td colSpan={6} />
             </tr>
           ) : null}
           {slice.map((node) => {
             const { op } = node;
             const failed = op.error_class !== null;
+            const agent = node.sessionAgent ?? '';
             return (
               <tr
                 key={op.id}
@@ -97,6 +99,23 @@ export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
                     {op.name || op.id}
                   </button>
                 </td>
+                {/* Sub-agent indicator (SOW-0070): a colored swatch + the agent
+                    name, keyed by the owning session's agent. Empty for the
+                    single-session trace (no sessionAgent on the node). */}
+                <td className={styles.colAgent}>
+                  {agent ? (
+                    <>
+                      <span
+                        className={styles.agentDot}
+                        style={{ background: colorForAgent(agent) }}
+                        aria-hidden="true"
+                      />
+                      {agent}
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 {/* Point-event ops (no measured span) show an em-dash, not
                     "0µs" — the source recorded no call duration (ui-pages.md
                     §Trace, P2#3). Measured ops keep their real duration. */}
@@ -109,7 +128,7 @@ export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
           })}
           {bottomPad > 0 ? (
             <tr aria-hidden="true" style={{ height: bottomPad }}>
-              <td colSpan={5} />
+              <td colSpan={6} />
             </tr>
           ) : null}
         </tbody>

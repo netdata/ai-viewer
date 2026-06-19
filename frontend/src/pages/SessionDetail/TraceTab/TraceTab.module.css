@@ -249,6 +249,22 @@
   width: 100%;
 }
 
+/* Sub-agent column (SOW-0070): the agent swatch mirrors the kind dot. */
+.colAgent {
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.agentDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: var(--space-2);
+  vertical-align: middle;
+}
+
 .eventNameButton {
   background: none;
   border: none;

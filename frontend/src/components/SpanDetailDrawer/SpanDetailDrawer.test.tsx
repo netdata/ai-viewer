@@ -132,6 +132,22 @@ describe('SpanDetailDrawer', () => {
     expect(within(dialog).getByText('RateLimitError')).toBeInTheDocument();
   });
 
+  it('shows error_message prominently when the failed op carries one (SOW-0070)', () => {
+    render(
+      <SpanDetailDrawer
+        detail={opDetail({
+          status: 'failed',
+          error_class: 'rate_limit',
+          error_message: '429 Too Many Requests',
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('rate_limit')).toBeInTheDocument();
+    expect(within(dialog).getByText('429 Too Many Requests')).toBeInTheDocument();
+  });
+
   it('lists payload_refs with kind + format, and an active preview button (op variant)', () => {
     render(
       <SpanDetailDrawer

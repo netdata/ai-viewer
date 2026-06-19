@@ -124,7 +124,7 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
         { "id":"...","kind":"llm","name":"...","model":"...","provider":"...",
           "parent_op_id":null,
           "start_ts":<us>,"end_ts":<us>,"duration_us":...,
-          "status":"...","error_class":null,
+          "status":"...","error_class":null,"error_message":null,
           "tokens_in":...,"tokens_out":...,"cost_usd":...,
           "ctx_used":...,"ctx_max":...,
           "child_session_id":null,
@@ -351,6 +351,54 @@ stacked" model (`ui-pages.md`).
   When the tree has no ops at all, both are `0`.
 
 The single op query is bounded by the tree size and uses `idx_ops_session_start`.
+
+### GET /api/sessions/:id/trace
+
+The **whole-tree trace** for the Trace tab (SOW-0070): every op of every session
+in the resolved tree (root + all sessions sharing its `root_session_id`), each
+tagged with the session it belongs to, so the client builds ONE merged op tree
+spanning sub-session boundaries. `:id` resolves to its root via
+`resolveRootSessionID` (same root-resolution as `/timeline` and `/topology`),
+so a sub-session id returns its whole tree. 404 `NOT_FOUND` for an unknown
+`:id`; control-byte `:id` → `BAD_REQUEST`; HEAD and 405 behave exactly as the
+other session sub-routes. Scope = the whole session tree, like `/timeline`.
+
+```json
+{
+  "root_id": "<root session id>",
+  "ops": [
+    {
+      "id":"...","turn_seq":1,"kind":"llm","name":"...","model":"...","provider":"...",
+      "parent_op_id":null,"child_session_id":null,
+      "start_ts":<us>,"end_ts":<us>,"duration_us":...,
+      "status":"...","error_class":null,"error_message":null,
+      "tokens_in":...,"tokens_out":...,"cost_usd":...,
+      "ctx_used":...,"ctx_max":...,
+      "session_id":"...","session_agent_name":"nedi","session_kind":"root",
+      "payload_refs":[ ...same shape as /sessions/:id opDetail.payload_refs... ]
+    }
+  ]
+}
+```
+
+- **ops** is a FLAT list of every op in the tree (root + all descendants),
+  ordered by `(session.start_ts, session.id, op.start_ts, op.seq, op.id)` for a
+  deterministic, stable feed. Each op carries the full `opDetail` field set PLUS
+  the session tags `session_id`, `session_agent_name`, `session_kind` (so the
+  client colors/filters by sub-agent without a second round-trip) and
+  `turn_seq` (the op's turn sequence within its session, for per-session
+  parent/turn ordering).
+- **`error_message`** is the op's free-text error message (`ops.error_message`,
+  nullable) — surfaced for failed ops (SOW-0070 AC3); also added to the
+  `/sessions/:id` `opDetail` in the same SOW.
+- **Merge model.** The client builds the merged tree: within each session, ops
+  nest by `parent_op_id` (the same authoritative parentage the single-session
+  Trace uses); an op carrying `child_session_id=C` is a leaf in its session's
+  tree, and the op-roots of session C splice under it — so a sub-session's work
+  nests beneath the op that spawned it. A `child_session_id` whose session is
+  absent from the tree (e.g. pruned) stays a leaf; a cross-session parent cycle
+  is defended (the merge never drops or duplicates a node).
+- The query is bounded by the tree size and reuses `idx_ops_session_start`.
 
 ### GET /api/stats
 

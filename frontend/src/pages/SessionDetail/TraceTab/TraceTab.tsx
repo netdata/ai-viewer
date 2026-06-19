@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { SessionDetailResponse } from '../../../api/types';
+import { useSessionTrace } from '../../../api/sessions';
 import { SpanDetailDrawer } from '../../../components/SpanDetailDrawer';
 import { EmptyState } from '../../../components/StatusViews';
 import {
+  buildMergedTree,
   buildOpTree,
   flattenTree,
   SVG_SPAN_CEILING,
@@ -16,15 +18,20 @@ import { EventList } from './EventList';
 import styles from './TraceTab.module.css';
 
 // Trace (APM) tab — the centerpiece view (ui-pages.md §/sessions/:id #3). Builds
-// ONE op tree from the session-detail response (turns→ops; nesting derived from
-// the authoritative parent_op_id in viz/trace) and renders it as: a waterfall
-// (default) with a Detailed|By-turn sub-view (decision #6), a flame-graph
-// (toggle), and an always-present virtualized event list. Source-aware: a
-// point-event op (end_ts == start_ts) draws as an instant tick, never a
-// zero-width bar (decision #7). A click on any span/row opens the shared span
-// detail drawer. Above the SVG span ceiling the visuals switch to Canvas +
-// culling (viz/trace) so a big trace stays fast. Op-kind/status colors come from
-// theme tokens (viz/color), re-read on a data-theme MutationObserver.
+// ONE op tree from the WHOLE session tree (SOW-0070): fetched from
+// /api/sessions/:id/trace, every op of every session in the tree, merged so a
+// sub-session's ops nest under the child_session_id op that spawned them. Each
+// op is tagged with its owning session so the Event List shows a per-row
+// sub-agent indicator and the operator can filter by sub-agent. Falls back to
+// the single-session tree (buildOpTree from detail.turns) while the whole-tree
+// fetch is in flight, so the tab never blocks. Renderings: a waterfall (default)
+// with a Detailed|By-turn sub-view (decision #6), a flame-graph (toggle), and an
+// always-present virtualized event list. Source-aware: a point-event op
+// (end_ts == start_ts) draws as an instant tick, never a zero-width bar
+// (decision #7). A click on any span/row opens the shared span detail drawer.
+// Above the SVG span ceiling the visuals switch to Canvas + culling (viz/trace)
+// so a big trace stays fast. Op-kind/status colors come from theme tokens
+// (viz/color), re-read on a data-theme MutationObserver.
 
 type View = 'waterfall' | 'flame';
 type WaterfallMode = 'detailed' | 'byturn';
@@ -35,22 +42,45 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
   const [selected, setSelected] = useState<TraceNode | null>(null);
   const [kindFilter, setKindFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [agentFilter, setAgentFilter] = useState<string>('all');
 
   // Keep the viz palette in sync with theme flips while this tab is mounted.
   useEffect(() => startThemeColorWatch(), []);
 
-  const roots = useMemo(() => buildOpTree(detail.turns), [detail.turns]);
+  // Whole-tree trace (SOW-0070): every op of every session in the tree, tagged
+  // by owning session. While it loads (or on error) fall back to the
+  // single-session tree so the tab is never empty.
+  const trace = useSessionTrace(detail.session.id);
+  const roots = useMemo(() => {
+    if (trace.data && trace.data.ops.length > 0) {
+      return buildMergedTree(trace.data.ops);
+    }
+    return buildOpTree(detail.turns);
+  }, [trace.data, detail.turns]);
   const flatAll = useMemo(() => flattenTree(roots), [roots]);
 
-  // Apply the kind + status filters to the flat op list (SOW-0070).
+  // Distinct sub-agent names drive the sub-agent filter (SOW-0070 AC4). Empty
+  // (single-session trace) → no filter control is rendered.
+  const agentOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const n of flatAll) {
+      if (n.sessionAgent) {
+        names.add(n.sessionAgent);
+      }
+    }
+    return [...names].sort();
+  }, [flatAll]);
+
+  // Apply the kind + status + sub-agent filters to the flat op list (SOW-0070).
   const flat = useMemo(() => {
     return flatAll.filter((n) => {
       if (kindFilter !== 'all' && n.op.kind !== kindFilter) return false;
       if (statusFilter === 'failed' && n.op.error_class === null) return false;
       if (statusFilter === 'completed' && n.op.status !== 'completed') return false;
+      if (agentFilter !== 'all' && (n.sessionAgent ?? '') !== agentFilter) return false;
       return true;
     });
-  }, [flatAll, kindFilter, statusFilter]);
+  }, [flatAll, kindFilter, statusFilter, agentFilter]);
   // Op ids that start a new turn (after the first) — for the Detailed view's
   // turn-boundary rules (decision #6).
   const turnBoundaryIds = useMemo(() => turnBoundaries(detail), [detail]);
@@ -144,6 +174,19 @@ export function TraceTab({ detail }: { detail: SessionDetailResponse }) {
               <option key={s} value={s}>{s === 'all' ? 'All statuses' : s}</option>
             ))}
           </select>
+          {agentOptions.length > 1 ? (
+            <select
+              className={styles.filterSelect}
+              value={agentFilter}
+              onChange={(e) => setAgentFilter(e.target.value)}
+              aria-label="Filter by sub-agent"
+            >
+              <option value="all">All sub-agents</option>
+              {agentOptions.map((a) => (
+                <option key={a} value={a}>{a}</option>
+              ))}
+            </select>
+          ) : null}
         </fieldset>
 
         <span className={styles.opCount}>

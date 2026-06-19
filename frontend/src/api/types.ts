@@ -158,6 +158,9 @@ export interface OpDetail {
   duration_us: number | null;
   status: string;
   error_class: string | null;
+  /** Free-text error message (ops.error_message); surfaced for failed ops
+   *  (SOW-0070 AC3). Nullable; absent on non-failed ops. */
+  error_message?: string | null;
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
@@ -301,6 +304,28 @@ export interface TimelineResponse {
   lanes: TimelineLane[];
   t_start: number;
   t_end: number;
+}
+
+// ── GET /api/sessions/:id/trace (SOW-0070 whole-tree trace) ─────────────────
+
+/**
+ * One op in the whole-tree trace. Carries the full OpDetail field set PLUS the
+ * owning-session tags (session_id / session_agent_name / session_kind) and the
+ * op's turn_seq, so the client builds ONE merged op tree spanning sub-session
+ * boundaries and colors/filters by sub-agent without a second round-trip
+ * (rest-api.md §GET /api/sessions/:id/trace).
+ */
+export interface TraceOp extends OpDetail {
+  turn_seq: number;
+  session_id: string;
+  session_agent_name: string;
+  session_kind: string;
+}
+
+/** GET /api/sessions/:id/trace envelope. ops is the flat whole-tree op list. */
+export interface TraceResponse {
+  root_id: string;
+  ops: TraceOp[];
 }
 
 // ── GET /api/sessions/:id/logs ──────────────────────────────────────────────

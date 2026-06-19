@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { OpDetail, TurnDetail } from '../api/types';
+import type { OpDetail, TraceOp, TurnDetail } from '../api/types';
 import {
+  buildMergedTree,
   buildOpTree,
   flattenTree,
   traceTimeBounds,
@@ -551,5 +552,139 @@ describe('SVG_SPAN_CEILING', () => {
   it('is a positive threshold used to pick SVG vs Canvas', () => {
     expect(SVG_SPAN_CEILING).toBeGreaterThan(0);
     expect(Number.isInteger(SVG_SPAN_CEILING)).toBe(true);
+  });
+});
+
+// ── buildMergedTree (SOW-0070 whole-tree trace) ─────────────────────────────
+
+/** traceOp builds a TraceOp fixture (OpDetail + the whole-tree session tags). */
+function traceOp(over: Partial<TraceOp> & Pick<TraceOp, 'id' | 'session_id' | 'session_agent_name'>): TraceOp {
+  return {
+    kind: 'llm',
+    name: 'n',
+    model: '',
+    provider: '',
+    parent_op_id: null,
+    start_ts: 0,
+    end_ts: 1,
+    duration_us: 1,
+    status: 'completed',
+    error_class: null,
+    tokens_in: 0,
+    tokens_out: 0,
+    cost_usd: 0,
+    ctx_used: null,
+    ctx_max: null,
+    child_session_id: null,
+    payload_refs: [],
+    turn_seq: 1,
+    session_kind: 'root',
+    ...over,
+  };
+}
+
+describe('buildMergedTree (whole-tree trace, SOW-0070)', () => {
+  it('splices a child session op-tree under its spawning child_session_id op', () => {
+    // Root session: a session-op that spawns childA (child_session_id set) +
+    // a plain llm op. Child session: its own llm op.
+    const ops: TraceOp[] = [
+      traceOp({ id: 'rSession', session_id: 'root', session_agent_name: 'nedi', kind: 'session', child_session_id: 'childA' }),
+      traceOp({ id: 'rLLM', session_id: 'root', session_agent_name: 'nedi', kind: 'llm' }),
+      traceOp({ id: 'cLLM', session_id: 'childA', session_agent_name: 'worker', kind: 'llm' }),
+    ];
+    const roots = buildMergedTree(ops);
+    // One root forest entry (the root session's roots).
+    expect(roots.length).toBeGreaterThanOrEqual(1);
+    // The child session's op nests under the spawning session-op.
+    const flat = flattenTree(roots);
+    const sessionNode = flat.find((n) => n.op.id === 'rSession');
+    expect(sessionNode).toBeDefined();
+    expect(sessionNode?.children.find((c) => c.op.id === 'cLLM')).toBeDefined();
+    // Each node carries its session tag (sub-agent color/filter).
+    const childLLM = flat.find((n) => n.op.id === 'cLLM');
+    expect(childLLM?.sessionAgent).toBe('worker');
+    expect(childLLM?.sessionId).toBe('childA');
+  });
+
+  it('leaves a child_session_id op a leaf when its session is absent', () => {
+    // The child session has no ops in the trace set (pruned); the boundary op
+    // stays a leaf — never fabricates a splice.
+    const ops: TraceOp[] = [
+      traceOp({ id: 'boundary', session_id: 'root', session_agent_name: 'nedi', child_session_id: 'ghost' }),
+      traceOp({ id: 'rLLM', session_id: 'root', session_agent_name: 'nedi' }),
+    ];
+    const flat = flattenTree(buildMergedTree(ops));
+    expect(flat.find((n) => n.op.id === 'boundary')?.children.length).toBe(0);
+  });
+
+  it('returns an empty forest for an empty op list', () => {
+    expect(buildMergedTree([])).toEqual([]);
+  });
+
+  it('preserves nesting on a per-session parent_op_id cycle (one hoisted root, descendants stay nested)', () => {
+    // A closed cycle A→B→A within one session has no root; the reachability pass
+    // hoists the FIRST member to a root and keeps the other nested under it
+    // (faithful port of buildOpTree — the inner re-DFS marks descendants
+    // reachable so they are not redundantly hoisted). No node is dropped.
+    const ops: TraceOp[] = [
+      traceOp({ id: 'A', session_id: 's', session_agent_name: 'a', parent_op_id: 'B' }),
+      traceOp({ id: 'B', session_id: 's', session_agent_name: 'a', parent_op_id: 'A' }),
+    ];
+    const forest = buildMergedTree(ops);
+    const flat = flattenTree(forest);
+    expect(flat.map((n) => n.op.id).sort()).toEqual(['A', 'B']);
+    // Exactly ONE root (the first hoisted); the other stays nested under it.
+    expect(forest.length).toBe(1);
+  });
+
+  it('preserves nesting on a 3-member per-session cycle + a non-cycle descendant', () => {
+    // A→B→C→A (3-cycle) + D under B. The cycle has no root; the reachability
+    // pass hoists the first member (A) and keeps the rest nested (faithful port
+    // of buildOpTree's inner re-DFS). No node dropped or duplicated; the tree
+    // stays nested (one root), not flattened.
+    const ops: TraceOp[] = [
+      traceOp({ id: 'A', session_id: 's', session_agent_name: 'a', parent_op_id: 'C' }),
+      traceOp({ id: 'B', session_id: 's', session_agent_name: 'a', parent_op_id: 'A' }),
+      traceOp({ id: 'C', session_id: 's', session_agent_name: 'a', parent_op_id: 'B' }),
+      traceOp({ id: 'D', session_id: 's', session_agent_name: 'a', parent_op_id: 'B' }),
+    ];
+    const forest = buildMergedTree(ops);
+    const flat = flattenTree(forest);
+    const ids = flat.map((n) => n.op.id).sort();
+    expect(ids).toEqual(['A', 'B', 'C', 'D']);
+    expect(new Set(ids).size).toBe(ids.length); // no duplicates
+    // One root (A); the cycle + descendant stay nested under it, not flattened.
+    expect(forest.length).toBe(1);
+    expect(forest[0]?.op.id).toBe('A');
+  });
+
+  it('nests ops by parent_op_id within a single session', () => {
+    const ops: TraceOp[] = [
+      traceOp({ id: 'parent', session_id: 's', session_agent_name: 'a' }),
+      traceOp({ id: 'child', session_id: 's', session_agent_name: 'a', parent_op_id: 'parent' }),
+    ];
+    const flat = flattenTree(buildMergedTree(ops));
+    expect(flat.find((n) => n.op.id === 'parent')?.children.find((c) => c.op.id === 'child')).toBeDefined();
+  });
+
+  it('scopes parent_op_id to its session (reused op id in two sessions does not cross-link)', () => {
+    // Two sessions both use op id 'shared' as a parent target within their own
+    // session; the child in session B must NOT attach to the parent in session A.
+    const ops: TraceOp[] = [
+      traceOp({ id: 'shared', session_id: 'A', session_agent_name: 'a' }),
+      traceOp({ id: 'aChild', session_id: 'A', session_agent_name: 'a', parent_op_id: 'shared' }),
+      traceOp({ id: 'shared', session_id: 'B', session_agent_name: 'b' }),
+      traceOp({ id: 'bChild', session_id: 'B', session_agent_name: 'b', parent_op_id: 'shared' }),
+    ];
+    const flat = flattenTree(buildMergedTree(ops));
+    // bChild attaches to B's 'shared', not A's. Verify bChild's parent is the
+    // B-session node by checking it is NOT a root (it has a parent) and its
+    // sibling is aChild under A's shared.
+    const aShared = flat.find((n) => n.sessionId === 'A' && n.op.id === 'shared');
+    const bShared = flat.find((n) => n.sessionId === 'B' && n.op.id === 'shared');
+    expect(aShared?.children.find((c) => c.op.id === 'aChild')).toBeDefined();
+    expect(bShared?.children.find((c) => c.op.id === 'bChild')).toBeDefined();
+    // A's shared does NOT accidentally own bChild.
+    expect(aShared?.children.find((c) => c.op.id === 'bChild')).toBeUndefined();
   });
 });

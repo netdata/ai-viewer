@@ -66,6 +66,7 @@ type opDetail struct {
 	DurationUS     *int64       `json:"duration_us"`
 	Status         string       `json:"status"`
 	ErrorClass     *string      `json:"error_class"`
+	ErrorMessage   *string      `json:"error_message"`
 	TokensIn       int64        `json:"tokens_in"`
 	TokensOut      int64        `json:"tokens_out"`
 	CostUSD        float64      `json:"cost_usd"`

@@ -240,6 +240,13 @@ export async function connectSse(
       // ['session-topology', id] prefix partial-matches every size-metric sub-key.
       void queryClient.invalidateQueries({ queryKey: ['session-timeline', e.session_id] });
       void queryClient.invalidateQueries({ queryKey: ['session-topology', e.session_id] });
+      // The whole-tree Trace (SOW-0070) is cached under ['session-trace', id],
+      // decoupled from the detail query like Timeline/Topology. A live append to
+      // any session in the tree must refresh it too, or new ops never reach the
+      // merged trace. Any session in the tree shares the root's events frame
+      // (SSE filters scope the whole tree), so invalidating on e.session_id
+      // refreshes the open root's trace regardless of which child appended.
+      void queryClient.invalidateQueries({ queryKey: ['session-trace', e.session_id] });
       // The cross-session /topology graph is built from the same filtered
       // session set as the list, so the same event that refreshes ['sessions']
       // (a session appearing/disappearing/changing cost) must refresh it too.

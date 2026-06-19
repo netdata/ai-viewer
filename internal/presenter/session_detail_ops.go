@@ -78,7 +78,7 @@ FROM turns WHERE session_id = ? ORDER BY seq ASC, id ASC`, sessionID)
 func (p *Presenter) loadOps(ctx context.Context, sessionID string, turns []turnDetail, turnIndex map[string]int) (map[string]opLoc, error) {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT id, turn_id, parent_op_id, kind, name, IFNULL(model, ''), IFNULL(provider, ''),
-       start_ts, end_ts, duration_us, status, error_class,
+       start_ts, end_ts, duration_us, status, error_class, error_message,
        tokens_in, tokens_out, cost_usd, ctx_used, ctx_max, child_session_id
 FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 	if err != nil {
@@ -89,22 +89,23 @@ FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 	opIndex := map[string]opLoc{}
 	for rows.Next() {
 		var (
-			op       opDetail
-			turnID   string
-			parentID sql.NullString
-			endTS    sql.NullInt64
-			duration sql.NullInt64
-			errClass sql.NullString
-			ctxUsed  sql.NullInt64
-			ctxMax   sql.NullInt64
-			childID  sql.NullString
+			op         opDetail
+			turnID     string
+			parentID   sql.NullString
+			endTS      sql.NullInt64
+			duration   sql.NullInt64
+			errClass   sql.NullString
+			errMessage sql.NullString
+			ctxUsed    sql.NullInt64
+			ctxMax     sql.NullInt64
+			childID    sql.NullString
 		)
 		if err := rows.Scan(&op.ID, &turnID, &parentID, &op.Kind, &op.Name, &op.Model, &op.Provider,
-			&op.StartTS, &endTS, &duration, &op.Status, &errClass,
+			&op.StartTS, &endTS, &duration, &op.Status, &errClass, &errMessage,
 			&op.TokensIn, &op.TokensOut, &op.CostUSD, &ctxUsed, &ctxMax, &childID); err != nil {
 			return nil, err
 		}
-		fillOpNullables(&op, parentID, endTS, duration, errClass, ctxUsed, ctxMax, childID)
+		fillOpNullables(&op, parentID, endTS, duration, errClass, errMessage, ctxUsed, ctxMax, childID)
 		op.PayloadRefs = []payloadRef{}
 		ti, ok := turnIndex[turnID]
 		if !ok {
@@ -119,7 +120,7 @@ FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 // fillOpNullables copies the scanned sql.Null* values into the opDetail
 // pointer fields. Extracted so loadOps stays within the function-length
 // budget.
-func fillOpNullables(op *opDetail, parentID sql.NullString, endTS, duration sql.NullInt64, errClass sql.NullString, ctxUsed, ctxMax sql.NullInt64, childID sql.NullString) {
+func fillOpNullables(op *opDetail, parentID sql.NullString, endTS, duration sql.NullInt64, errClass, errMessage sql.NullString, ctxUsed, ctxMax sql.NullInt64, childID sql.NullString) {
 	if parentID.Valid {
 		v := parentID.String
 		op.ParentOpID = &v
@@ -135,6 +136,10 @@ func fillOpNullables(op *opDetail, parentID sql.NullString, endTS, duration sql.
 	if errClass.Valid {
 		v := errClass.String
 		op.ErrorClass = &v
+	}
+	if errMessage.Valid {
+		v := errMessage.String
+		op.ErrorMessage = &v
 	}
 	if ctxUsed.Valid {
 		v := ctxUsed.Int64
@@ -153,9 +158,9 @@ func fillOpNullables(op *opDetail, parentID sql.NullString, endTS, duration sql.
 // attachPayloadRefs reads every payload_ref for the session's ops in one
 // query (joined on ops.session_id) and appends each to its op via the
 // opIndex map, indexing back into the shared turns slice. Only the ref
-// metadata is surfaced; the byte-streaming route (GET /api/payloads/<id>) is
-// Phase 2 and unregistered, so no url is built here (rest-api.md §GET
-// /api/payloads).
+// metadata is surfaced here; the byte-streaming route (GET /api/payloads/<id>,
+// SOW-0033) is registered, but no url is built here (the Trace drawer's Preview
+// button builds it client-side from the ref id — rest-api.md §GET /api/payloads).
 func (p *Presenter) attachPayloadRefs(ctx context.Context, sessionID string, turns []turnDetail, opIndex map[string]opLoc) error {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
