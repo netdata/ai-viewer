@@ -431,4 +431,117 @@ describe('SpanDetailDrawer', () => {
     );
     expect(await axe(node.container)).toHaveNoViolations();
   });
+
+  // ── PayloadRow preview fetch/toggle/error (coverage gap) ───────────────────
+
+  it('fetches and shows the payload preview on click, then toggles on re-click', async () => {
+    const user = userEvent.setup();
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response('payload content here', {
+        status: 200,
+        headers: { 'X-Payload-Truncated': 'false' },
+      }),
+    );
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      render(
+        <SpanDetailDrawer
+          detail={opDetail({
+            payload_refs: [
+              { id: 42, kind: 'llm_request', format: 'http', compression: null, original_bytes: 100, stored_bytes: 100 },
+            ],
+          })}
+          onClose={vi.fn()}
+        />,
+      );
+      const previewBtn = screen.getByRole('button', { name: /preview/i });
+      await user.click(previewBtn);
+      // The fetch fires with the payload id.
+      expect(mockFetch).toHaveBeenCalledWith('/api/payloads/42');
+      // The content renders in a <pre>.
+      expect(await screen.findByText(/payload content here/)).toBeInTheDocument();
+      // The button is now "Hide".
+      expect(screen.getByRole('button', { name: /hide/i })).toBeInTheDocument();
+      // Click again → toggles OFF (no new fetch).
+      await user.click(screen.getByRole('button', { name: /hide/i }));
+      expect(screen.getByRole('button', { name: /preview/i })).toBeInTheDocument();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows a truncation note when the preview is truncated', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('first 4kb', {
+          status: 200,
+          headers: { 'X-Payload-Truncated': 'true', 'X-Payload-Total-Bytes': '8192' },
+        }),
+      ),
+    );
+    try {
+      render(
+        <SpanDetailDrawer
+          detail={opDetail({
+            payload_refs: [
+              { id: 1, kind: 'llm_request', format: 'http', compression: null, original_bytes: 8192, stored_bytes: 4096 },
+            ],
+          })}
+          onClose={vi.fn()}
+        />,
+      );
+      await user.click(screen.getByRole('button', { name: /preview/i }));
+      expect(await screen.findByText(/truncated/)).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows an error when the preview fetch fails (non-OK response)', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('not found', { status: 404 })),
+    );
+    try {
+      render(
+        <SpanDetailDrawer
+          detail={opDetail({
+            payload_refs: [
+              { id: 99, kind: 'llm_response', format: 'sse', compression: 'gzip', original_bytes: 10, stored_bytes: 5 },
+            ],
+          })}
+          onClose={vi.fn()}
+        />,
+      );
+      await user.click(screen.getByRole('button', { name: /preview/i }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(/404/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows an error when the preview fetch throws (network failure)', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+    try {
+      render(
+        <SpanDetailDrawer
+          detail={opDetail({
+            payload_refs: [
+              { id: 1, kind: 'llm_request', format: 'http', compression: null, original_bytes: 1, stored_bytes: 1 },
+            ],
+          })}
+          onClose={vi.fn()}
+        />,
+      );
+      await user.click(screen.getByRole('button', { name: /preview/i }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(/network down/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
