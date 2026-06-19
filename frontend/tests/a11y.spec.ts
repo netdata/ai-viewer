@@ -97,19 +97,16 @@ test.describe('a11y', () => {
       expect(blocking, `serious/critical violations on /sources (${theme} theme)`).toEqual([]);
     });
 
-    // The Phase-3 stub routes (ComingSoon placeholders) and the NotFound catch-all
-    // are still routes the operator can reach, so the "axe on every route" gate
-    // (App.tsx route table) must cover them too — a stub page can still ship a
-    // contrast or landmark violation. Each renders an <h1> as its accessible
+    // The NotFound catch-all is still a route the operator can reach, so the
+    // "axe on every route" gate must cover it — a stub page can still ship a
+    // contrast or landmark violation. It renders an <h1> as its accessible
     // landmark; we key the ready-gate on that heading by name.
-    const STUB_ROUTES: ReadonlyArray<{ path: string; heading: string; label: string }> = [
-      { path: '/tools', heading: 'Tools', label: '/tools' },
-      { path: '/models', heading: 'Models', label: '/models' },
-      { path: '/agents', heading: 'Agents', label: '/agents' },
-      // Unknown path -> NotFound (the `*` route). Picks a path no real route claims.
+    // (/tools, /models, /agents were removed in commit 861b45b — the routes no
+    // longer exist, so only the NotFound `*` route remains in this block.)
+    const CATCH_ALL_ROUTES: ReadonlyArray<{ path: string; heading: string; label: string }> = [
       { path: '/no-such-route', heading: 'Not found', label: '* (NotFound)' },
     ];
-    for (const { path, heading, label } of STUB_ROUTES) {
+    for (const { path, heading, label } of CATCH_ALL_ROUTES) {
       test(`${label} has no serious/critical axe violations (${theme})`, async ({ page }) => {
         const blocking = await axeRoute(page, theme, path, async (p) => {
           await expect(p.getByRole('heading', { name: heading, level: 1 })).toBeVisible();

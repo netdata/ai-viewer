@@ -387,6 +387,13 @@ engines:
       - "frontend/src/**/*.test.tsx"
       - "frontend/src/test/**"
       - "frontend/scripts/**"
+  lizard:
+    exclude_paths:
+      - "**/*_test.go"
+      - "frontend/src/**/*.test.ts"
+      - "frontend/src/**/*.test.tsx"
+      - "frontend/src/test/**"
+      - "frontend/tests/**"
 YAML
 )"
   actual_yaml="$(
