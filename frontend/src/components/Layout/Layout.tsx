@@ -6,6 +6,7 @@ import { SlidersHorizontal } from 'lucide-react';
 import { FilterBar } from '../FilterBar';
 import { AppSidebar } from './AppSidebar';
 import { AppTopbar } from './AppTopbar';
+import { CommandPalette } from './CommandPalette';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
 import { filtersToSubscription } from '../../state/filters';
 import { useHealth } from '../../api/sources';
@@ -27,6 +28,7 @@ export function Layout() {
   // honest regardless of which page is mounted.
   const sseStatus = useLiveUpdates(filtersToSubscription({ agents: [], models: [], tools: [], sources: [], status: [], q: '' }));
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const { data: health } = useHealth();
   const healthOk = (health?.status ?? 'ok') !== 'degraded';
 
@@ -60,6 +62,8 @@ export function Layout() {
           <Outlet />
         </main>
       </div>
+
+      <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
     </div>
   );
 }
