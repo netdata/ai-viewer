@@ -1,8 +1,9 @@
+import { Fragment, type ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 import { StatCard } from '../../../components/StatCard';
 import { StatusBadge } from '../../../components/SessionRow';
 import { cacheHitRate, formatCost, formatDuration, formatNumber, formatPct } from '../../../lib/format';
-import type { SessionDetailResponse, TurnDetail } from '../../../api/types';
+import type { ChildSummary, SessionDetailResponse, TurnDetail } from '../../../api/types';
 import styles from './OverviewTab.module.css';
 
 // Overview tab (ui-pages.md §/sessions/:id #1). Header (agent/model/status) plus
@@ -87,30 +88,7 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
               </tr>
             </thead>
             <tbody>
-              {detail.child_sessions.map((c) => {
-                const dur = c.end_ts !== null && c.end_ts > c.start_ts ? c.end_ts - c.start_ts : null;
-                return (
-                  <tr key={c.id} className={c.status === 'failed' ? styles.childFailed : undefined}>
-                    <td>
-                      <Link to={`/sessions/${encodeURIComponent(c.id)}`}>
-                        {c.agent_name || c.native_id}
-                      </Link>
-                    </td>
-                    <td className={styles.childModel}>{c.model || '—'}</td>
-                    <td>
-                      <StatusBadge status={c.status} />
-                      {c.status === 'failed' && c.error_class ? (
-                        <span className={styles.childError}>{c.error_class}</span>
-                      ) : null}
-                    </td>
-                    <td className={styles.childDur}>{dur !== null ? formatDuration(dur) : '—'}</td>
-                    <td className={styles.num}>{formatNumber(c.op_count)}</td>
-                    <td className={styles.num}>{formatNumber(c.tokens_in)}</td>
-                    <td className={styles.num}>{formatNumber(c.failure_count)}</td>
-                    <td className={styles.num}>{formatCost(c.cost_usd)}</td>
-                  </tr>
-                );
-              })}
+              <ChildTreeRows nodes={detail.child_sessions} depth={0} />
             </tbody>
           </table>
         </section>
@@ -144,5 +122,49 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * ChildTreeRows renders the child-sessions tree as indented table rows
+ * (SOW-0069). The nested `child_sessions` is walked depth-first; each level
+ * indents the Agent cell so the full execution tree (parent → children →
+ * grandchildren) reads at a glance. Direct children are depth 0 (no indent).
+ */
+function ChildTreeRows({ nodes, depth }: { nodes: ChildSummary[]; depth: number }): ReactElement {
+  return (
+    <>
+      {nodes.map((c) => {
+        const dur = c.end_ts !== null && c.end_ts > c.start_ts ? c.end_ts - c.start_ts : null;
+        const kids = c.child_sessions ?? [];
+        return (
+          <Fragment key={c.id}>
+            <tr className={c.status === 'failed' ? styles.childFailed : undefined}>
+              <td>
+                <span className={styles.childIndent} style={{ ['--depth' as string]: depth }}>
+                  {depth > 0 ? <span aria-hidden="true">└ </span> : null}
+                  <Link to={`/sessions/${encodeURIComponent(c.id)}`}>
+                    {c.agent_name || c.native_id}
+                  </Link>
+                </span>
+              </td>
+              <td className={styles.childModel}>{c.model || '—'}</td>
+              <td>
+                <StatusBadge status={c.status} />
+                {c.status === 'failed' && c.error_class ? (
+                  <span className={styles.childError}>{c.error_class}</span>
+                ) : null}
+              </td>
+              <td className={styles.childDur}>{dur !== null ? formatDuration(dur) : '—'}</td>
+              <td className={styles.num}>{formatNumber(c.op_count)}</td>
+              <td className={styles.num}>{formatNumber(c.tokens_in)}</td>
+              <td className={styles.num}>{formatNumber(c.failure_count)}</td>
+              <td className={styles.num}>{formatCost(c.cost_usd)}</td>
+            </tr>
+            {kids.length > 0 && <ChildTreeRows nodes={kids} depth={depth + 1} />}
+          </Fragment>
+        );
+      })}
+    </>
   );
 }

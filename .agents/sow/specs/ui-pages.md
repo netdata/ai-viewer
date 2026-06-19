@@ -265,12 +265,13 @@ read this to know the current contract without re-reading the code.
   response** `session` row — NOT `/api/stats`
   (cross-session only; see `rest-api.md` §GET /api/stats). Plus a tools-used
   summary derived from the response's ops (`kind === 'tool'`), aggregated by
-  op `name` with call + failure counts. Plus a **child-sessions** section
-  listing `detail.child_sessions` (agent, model, status, ops, failures, cost),
-  each row linking to that child's detail page `/sessions/:child.id`; rendered
-  only when the session has children (a leaf session shows no child-sessions
-  section). This is the drill-down target the SessionsList child-count link
-  promises (§`/` SessionsList).
+  op `name` with call + failure counts. Plus a **child-sessions tree** (SOW-0069)
+  rendering `detail.child_sessions` as a recursive, indented tree (agent, model,
+  status, duration, ops, tokens, failures, cost) — the FULL execution tree
+  (parent → children → grandchildren), each node linking to its own detail page
+  `/sessions/:child.id`; rendered only when the session has children (a leaf
+  session shows no child-sessions section). This is the drill-down target the
+  SessionsList child-count link promises (§`/` SessionsList).
 - **Logs tab**: `useSessionLogs(id, { severities })` with a severity
   multi-select (DBG/INF/WRN/ERR) and a "Load more" control. Renders log rows
   (ts, severity, source, op id, message) via the `LogRow` primitive. The

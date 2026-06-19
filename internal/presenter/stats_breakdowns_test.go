@@ -60,7 +60,7 @@ func TestRatioHelpers(t *testing.T) {
 }
 
 // TestLoadHelpers_QueryErrorBranches drives the session-detail loader
-// error branches against a closed DB so loadSession / loadChildSessions /
+// error branches against a closed DB so loadSession / loadChildTree /
 // loadTurns / loadOps / attachPayloadRefs each propagate their query
 // error rather than panicking on a nil result set.
 func TestLoadHelpers_QueryErrorBranches(t *testing.T) {
@@ -71,8 +71,8 @@ func TestLoadHelpers_QueryErrorBranches(t *testing.T) {
 	if _, err := p.loadSession(ctx, "x"); err == nil {
 		t.Error("loadSession: want error on closed DB")
 	}
-	if _, err := p.loadChildSessions(ctx, "x"); err == nil {
-		t.Error("loadChildSessions: want error on closed DB")
+	if _, err := p.loadChildTree(ctx, "x"); err == nil {
+		t.Error("loadChildTree: want error on closed DB")
 	}
 	if _, _, err := p.loadTurns(ctx, "x"); err == nil {
 		t.Error("loadTurns: want error on closed DB")

@@ -2,6 +2,7 @@ package presenter
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,12 +56,18 @@ type sessionDetailBody struct {
 			} `json:"payload_refs"`
 		} `json:"ops"`
 	} `json:"turns"`
-	ChildSessions []struct {
-		ID        string `json:"id"`
-		Kind      string `json:"kind"`
-		AgentName string `json:"agent_name"`
-		Status    string `json:"status"`
-	} `json:"child_sessions"`
+	ChildSessions []childDetailJSON `json:"child_sessions"`
+}
+
+// childDetailJSON is the recursive test mirror of presenter.childSummary: a
+// child node carries its own nested child_sessions (SOW-0069), so the test can
+// assert the full execution tree (parent → children → grandchildren).
+type childDetailJSON struct {
+	ID            string            `json:"id"`
+	Kind          string            `json:"kind"`
+	AgentName     string            `json:"agent_name"`
+	Status        string            `json:"status"`
+	ChildSessions []childDetailJSON `json:"child_sessions"`
 }
 
 func getSessionDetail(t *testing.T, p *Presenter, id string) (int, sessionDetailBody, errorEnvelope) {
@@ -297,6 +304,212 @@ func TestSessionDetail_NotFound(t *testing.T) {
 	}
 	if env.Error.Code != CodeNotFound {
 		t.Fatalf("code = %q, want %q", env.Error.Code, CodeNotFound)
+	}
+}
+
+// TestSessionDetail_ChildTreeIsNested pins SOW-0069: child_sessions is the FULL
+// descendant tree, nested. A root with a child that itself has a grandchild
+// returns child_sessions[0].child_sessions populated with the grandchild. The
+// fixture is self-contained (a 3-level tree) so the shared seedGraph is
+// untouched.
+func TestSessionDetail_ChildTreeIsNested(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcT", "aiagent_v3", "/tmp/t", base)
+	seedSession(t, db, sessionRow{
+		id: "rootT", sourceID: "srcT", nativeID: "nT", rootID: "rootT",
+		kind: "root", agent: "nedi", status: "completed",
+		startTS: base + 1_000, endTS: base + 9_000, opCount: 1,
+	})
+	seedSession(t, db, sessionRow{
+		id: "childT", sourceID: "srcT", nativeID: "nC", parentID: "rootT", rootID: "rootT",
+		kind: "sub_agent", agent: "worker", status: "completed",
+		startTS: base + 2_000, endTS: base + 8_000, opCount: 1,
+	})
+	seedSession(t, db, sessionRow{
+		id: "grandT", sourceID: "srcT", nativeID: "nG", parentID: "childT", rootID: "rootT",
+		kind: "sub_agent", agent: "sub-worker", status: "completed",
+		startTS: base + 3_000, endTS: base + 7_000, opCount: 1,
+	})
+
+	code, body, _ := getSessionDetail(t, p, "rootT")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(body.ChildSessions) != 1 || body.ChildSessions[0].ID != "childT" {
+		t.Fatalf("child_sessions = %+v, want [childT]", body.ChildSessions)
+	}
+	child := body.ChildSessions[0]
+	if len(child.ChildSessions) != 1 || child.ChildSessions[0].ID != "grandT" {
+		t.Fatalf("childT.child_sessions = %+v, want [grandT] (nested tree, SOW-0069)", child.ChildSessions)
+	}
+}
+
+// TestSessionDetail_ChildTreeBranching pins SOW-0069 for a branching tree (not
+// just a linear chain): a root with two children, one of which has two of its
+// own children. Asserts both roots render AND the nested grandchildren attach
+// to the correct parent (not the sibling).
+func TestSessionDetail_ChildTreeBranching(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcB", "aiagent_v3", "/tmp/b", base)
+	seedSession(t, db, sessionRow{
+		id: "rootB", sourceID: "srcB", nativeID: "nRB", rootID: "rootB",
+		kind: "root", agent: "nedi", status: "completed",
+		startTS: base + 1_000, endTS: base + 9_000, opCount: 1,
+	})
+	// Two direct children of rootB.
+	seedSession(t, db, sessionRow{
+		id: "A", sourceID: "srcB", nativeID: "nA", parentID: "rootB", rootID: "rootB",
+		kind: "sub_agent", agent: "alpha", status: "completed",
+		startTS: base + 2_000, endTS: base + 8_000, opCount: 1,
+	})
+	seedSession(t, db, sessionRow{
+		id: "B", sourceID: "srcB", nativeID: "nB", parentID: "rootB", rootID: "rootB",
+		kind: "sub_agent", agent: "bravo", status: "completed",
+		startTS: base + 2_500, endTS: base + 7_000, opCount: 1,
+	})
+	// A has two children; B is a leaf.
+	seedSession(t, db, sessionRow{
+		id: "C", sourceID: "srcB", nativeID: "nC", parentID: "A", rootID: "rootB",
+		kind: "sub_agent", agent: "charlie", status: "completed",
+		startTS: base + 3_000, endTS: base + 5_000, opCount: 1,
+	})
+	seedSession(t, db, sessionRow{
+		id: "D", sourceID: "srcB", nativeID: "nD", parentID: "A", rootID: "rootB",
+		kind: "sub_agent", agent: "delta", status: "completed",
+		startTS: base + 3_500, endTS: base + 4_500, opCount: 1,
+	})
+
+	code, body, _ := getSessionDetail(t, p, "rootB")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	// Two roots: A and B (ordered by start_ts).
+	if len(body.ChildSessions) != 2 {
+		t.Fatalf("roots = %d, want 2 (A, B)", len(body.ChildSessions))
+	}
+	if body.ChildSessions[0].ID != "A" || body.ChildSessions[1].ID != "B" {
+		t.Fatalf("root order = %s,%s want A,B", body.ChildSessions[0].ID, body.ChildSessions[1].ID)
+	}
+	// A's children are C and D; B is a leaf (no nested child_sessions).
+	if len(body.ChildSessions[0].ChildSessions) != 2 {
+		t.Fatalf("A.child_sessions = %d, want 2 (C, D)", len(body.ChildSessions[0].ChildSessions))
+	}
+	if len(body.ChildSessions[1].ChildSessions) != 0 {
+		t.Fatalf("B.child_sessions = %d, want 0 (leaf)", len(body.ChildSessions[1].ChildSessions))
+	}
+}
+
+// TestSessionDetail_ChildTreeCycleGuard pins SOW-0069's `c.ID == id` defense:
+// a malformed parent_session_id cycle that routes the queried id back into its
+// OWN descendant set must NOT surface the id as its own child. Seed a 3-node
+// cycle rootCyc -> A -> B -> rootCyc (rootCyc.parent_session_id = B). Without
+// the guard, rootCyc would reappear nested under B; with it, the response is
+// the acyclic remainder (A -> B) and rootCyc is absent.
+func TestSessionDetail_ChildTreeCycleGuard(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcCy", "aiagent_v3", "/tmp/cy", base)
+	// rootCyc's OWN parent_session_id points at B (malformed cycle). The cycle
+	// is circular on the FK (rootCyc -> B -> A -> rootCyc), so insert rootCyc
+	// parent-less first, then A and B, then complete the cycle via UPDATE (each
+	// step keeps the FK satisfied).
+	seedSession(t, db, sessionRow{
+		id: "rootCyc", sourceID: "srcCy", nativeID: "nRC", rootID: "rootCyc",
+		kind: "root", agent: "nedi", status: "completed",
+		startTS: base + 1_000, endTS: base + 9_000, opCount: 1,
+	})
+	seedSession(t, db, sessionRow{
+		id: "A", sourceID: "srcCy", nativeID: "nA", parentID: "rootCyc", rootID: "rootCyc",
+		kind: "sub_agent", agent: "alpha", status: "completed",
+		startTS: base + 2_000, endTS: base + 8_000, opCount: 1,
+	})
+	seedSession(t, db, sessionRow{
+		id: "B", sourceID: "srcCy", nativeID: "nB", parentID: "A", rootID: "rootCyc",
+		kind: "sub_agent", agent: "bravo", status: "completed",
+		startTS: base + 3_000, endTS: base + 7_000, opCount: 1,
+	})
+	if _, err := db.Exec(`UPDATE sessions SET parent_session_id = 'B' WHERE id = 'rootCyc'`); err != nil {
+		t.Fatalf("complete cycle: %v", err)
+	}
+
+	code, body, _ := getSessionDetail(t, p, "rootCyc")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	// The acyclic remainder: one root (A) with one child (B). rootCyc must NOT
+	// appear anywhere in its own child tree.
+	if len(body.ChildSessions) != 1 || body.ChildSessions[0].ID != "A" {
+		t.Fatalf("roots = %+v, want [A] (rootCyc must be skipped by the cycle guard)", body.ChildSessions)
+	}
+	if len(body.ChildSessions[0].ChildSessions) != 1 || body.ChildSessions[0].ChildSessions[0].ID != "B" {
+		t.Fatalf("A.child_sessions = %+v, want [B]", body.ChildSessions[0].ChildSessions)
+	}
+	// Walk the whole tree and assert rootCyc never appears.
+	var assertAbsent func(nodes []childDetailJSON)
+	assertAbsent = func(nodes []childDetailJSON) {
+		for _, n := range nodes {
+			if n.ID == "rootCyc" {
+				t.Fatalf("rootCyc surfaced in its own child tree (cycle guard failed): %+v", n)
+			}
+			assertAbsent(n.ChildSessions)
+		}
+	}
+	assertAbsent(body.ChildSessions)
+}
+
+// TestSessionDetail_ChildTreeDepthCap pins the cycle defense-in-depth: a parent
+// cycle deeper than childTreeMaxDepth is truncated (the CTE's depth cap), so a
+// malformed cycle cannot yield an unbounded nested payload. A real acyclic tree
+// at the cap depth still resolves.
+func TestSessionDetail_ChildTreeDepthCap(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcD", "aiagent_v3", "/tmp/d", base)
+	seedSession(t, db, sessionRow{
+		id: "rootD", sourceID: "srcD", nativeID: "nRD", rootID: "rootD",
+		kind: "root", agent: "nedi", status: "completed",
+		startTS: base, endTS: base + 1_000, opCount: 1,
+	})
+	// Build a chain rootD -> c1 -> c2 -> ... -> c(childTreeMaxDepth+2), deeper
+	// than the cap. The cap must truncate (no panic, bounded payload).
+	prev := "rootD"
+	for i := 1; i <= childTreeMaxDepth+2; i++ {
+		id := fmt.Sprintf("c%d", i)
+		seedSession(t, db, sessionRow{
+			id: id, sourceID: "srcD", nativeID: id, parentID: prev, rootID: "rootD",
+			kind: "sub_agent", agent: "chain", status: "completed",
+			startTS: base + int64(i)*1_000, endTS: base + int64(i)*1_000 + 500, opCount: 1,
+		})
+		prev = id
+	}
+
+	code, body, _ := getSessionDetail(t, p, "rootD")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	// The depth cap truncates; assert the tree is bounded by walking to the
+	// deepest leaf and confirming it does not exceed childTreeMaxDepth levels.
+	depth := 0
+	cur := body.ChildSessions
+	for len(cur) > 0 {
+		depth++
+		if depth > childTreeMaxDepth+5 {
+			t.Fatalf("tree depth unbounded (exceeded cap by > 5): cycle defense failed")
+		}
+		cur = cur[0].ChildSessions
+	}
+	if depth > childTreeMaxDepth {
+		t.Fatalf("tree depth = %d, want <= cap %d", depth, childTreeMaxDepth)
 	}
 }
 

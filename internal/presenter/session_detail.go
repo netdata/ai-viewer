@@ -88,21 +88,25 @@ type payloadRef struct {
 	StoredBytes   *int64  `json:"stored_bytes"`
 }
 
-// childSummary is one direct-child session in the child_sessions list.
+// childSummary is one node in the child_sessions tree. SOW-0069: child_sessions
+// is a NESTED tree — each child carries its own descendants in Children (down
+// to leaves), resolved server-side by loadChildTree, so the Overview can render
+// the full execution tree (parent → children → grandchildren).
 type childSummary struct {
-	ID           string  `json:"id"`
-	NativeID     string  `json:"native_id"`
-	Kind         string  `json:"kind"`
-	AgentName    string  `json:"agent_name"`
-	Model        string  `json:"model"`
-	Status       string  `json:"status"`
-	StartTS      int64   `json:"start_ts"`
-	EndTS        *int64  `json:"end_ts"`
-	TokensIn     int64   `json:"tokens_in"`
-	TokensOut    int64   `json:"tokens_out"`
-	CostUSD      float64 `json:"cost_usd"`
-	OpCount      int64   `json:"op_count"`
-	FailureCount int64   `json:"failure_count"`
+	ID           string         `json:"id"`
+	NativeID     string         `json:"native_id"`
+	Kind         string         `json:"kind"`
+	AgentName    string         `json:"agent_name"`
+	Model        string         `json:"model"`
+	Status       string         `json:"status"`
+	StartTS      int64          `json:"start_ts"`
+	EndTS        *int64         `json:"end_ts"`
+	TokensIn     int64          `json:"tokens_in"`
+	TokensOut    int64          `json:"tokens_out"`
+	CostUSD      float64        `json:"cost_usd"`
+	OpCount      int64          `json:"op_count"`
+	FailureCount int64          `json:"failure_count"`
+	Children     []childSummary `json:"child_sessions,omitempty"`
 }
 
 // sessionDetailResponse is the JSON envelope of GET /api/sessions/:id.
@@ -158,7 +162,7 @@ func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string) (s
 		return sessionDetailResponse{}, "session.detail.turns", err
 	}
 
-	children, err := p.loadChildSessions(ctx, id)
+	children, err := p.loadChildTree(ctx, id)
 	if err != nil {
 		return sessionDetailResponse{}, "session.detail.children", err
 	}
@@ -212,34 +216,130 @@ FROM sessions WHERE id = ?`, id).Scan(
 	return s, nil
 }
 
-// loadChildSessions reads the direct children (parent_session_id = id)
-// ordered by start_ts.
-func (p *Presenter) loadChildSessions(ctx context.Context, id string) ([]childSummary, error) {
+// childTreeNode is the internal pointer-based node used to build the child
+// sessions tree (loadChildTree). Pointer nesting lets a child's subtree
+// complete before the child value is copied into its parent (Go value
+// semantics would otherwise freeze a stale, child-less copy).
+type childTreeNode struct {
+	summary childSummary
+	parent  string
+	kids    []*childTreeNode
+}
+
+// copyChildTree converts a pointer node tree into the by-value childSummary
+// tree the API emits. Each node's Children are fully resolved before the node
+// itself is copied into its parent, so no stale (child-less) value survives.
+func copyChildTree(n *childTreeNode) childSummary {
+	out := n.summary
+	if len(n.kids) > 0 {
+		out.Children = make([]childSummary, 0, len(n.kids))
+		for _, k := range n.kids {
+			out.Children = append(out.Children, copyChildTree(k))
+		}
+	}
+	return out
+}
+
+// childTreeMaxDepth caps the recursive descendant fetch (SOW-0069). Session
+// trees are naturally shallow (typically 2-4 levels); the cap is cycle
+// defense-in-depth against malformed parent_session_id data and bounds the
+// nested payload size.
+const childTreeMaxDepth = 20
+
+// loadChildTree resolves the FULL descendant tree rooted at id's direct children
+// (SOW-0069): one recursive CTE fetches every descendant (depth-capped), then
+// the flat rows are nested in Go by parent_session_id. Returns the list of
+// direct-children trees (each carrying its own nested Children). A leaf parent
+// yields an empty (non-nil) slice.
+func (p *Presenter) loadChildTree(ctx context.Context, id string) ([]childSummary, error) {
+	// Anchor on the direct children (parent = id), recurse down via
+	// parent_session_id. depth starts at 1 (direct child) and the WHERE
+	// depth <= childTreeMaxDepth caps the traversal.
 	rows, err := p.db.QueryContext(ctx, `
-SELECT id, native_id, kind, IFNULL(agent_name, ''), IFNULL(model, ''), status,
-       start_ts, end_ts, tokens_in, tokens_out, cost_usd, op_count, failure_count
-FROM sessions WHERE parent_session_id = ? ORDER BY start_ts ASC, id ASC`, id)
+WITH RECURSIVE descendants(id, parent, depth) AS (
+    SELECT id, parent_session_id, 1 FROM sessions WHERE parent_session_id = ?
+    UNION ALL
+    SELECT s.id, s.parent_session_id, d.depth + 1
+    FROM sessions s JOIN descendants d ON s.parent_session_id = d.id
+    WHERE d.depth < ?
+)
+SELECT s.id, s.native_id, s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''),
+       s.status, s.start_ts, s.end_ts, s.tokens_in, s.tokens_out, s.cost_usd,
+       s.op_count, s.failure_count, d.parent
+FROM sessions s JOIN descendants d ON s.id = d.id
+ORDER BY s.start_ts ASC, s.id ASC`, id, childTreeMaxDepth)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := make([]childSummary, 0, 4)
+	// First pass: read every descendant into a node keyed by id, and remember
+	// each node's parent so the second pass can nest.
+	type node struct {
+		summary childSummary
+		parent  string
+	}
+	byID := make(map[string]*node)
+	var order []string // preserve first-seen (start_ts) order for stable child lists
 	for rows.Next() {
 		var (
-			c     childSummary
-			endTS sql.NullInt64
+			c      childSummary
+			endTS  sql.NullInt64
+			parent string
 		)
 		if err := rows.Scan(&c.ID, &c.NativeID, &c.Kind, &c.AgentName, &c.Model,
 			&c.Status, &c.StartTS, &endTS, &c.TokensIn, &c.TokensOut, &c.CostUSD,
-			&c.OpCount, &c.FailureCount); err != nil {
+			&c.OpCount, &c.FailureCount, &parent); err != nil {
 			return nil, err
 		}
 		if endTS.Valid {
 			v := endTS.Int64
 			c.EndTS = &v
 		}
-		out = append(out, c)
+		// Defense-in-depth (SOW-0069): a session is never its own child. A
+		// malformed parent_session_id cycle can otherwise surface the queried
+		// id among its own descendants, nesting it as its own child. Skip it.
+		if c.ID == id {
+			continue
+		}
+		if _, ok := byID[c.ID]; !ok {
+			byID[c.ID] = &node{summary: c, parent: parent}
+			order = append(order, c.ID)
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Build the tree with pointers internally so a child's own subtree is
+	// complete BEFORE the child value is copied into its parent's Children
+	// (Go value semantics would otherwise freeze a stale, child-less copy).
+	pnodes := make(map[string]*childTreeNode, len(order))
+	for _, id := range order {
+		pnodes[id] = &childTreeNode{summary: byID[id].summary, parent: byID[id].parent}
+	}
+	// Attach each node to its parent's kids (pointer append — propagates).
+	var roots []*childTreeNode
+	for _, id := range order {
+		n := pnodes[id]
+		if n.parent == id {
+			continue // defensive: a self-parenting row (impossible) would loop
+		}
+		if parent, ok := pnodes[n.parent]; ok {
+			parent.kids = append(parent.kids, n)
+		} else {
+			// Parent is the queried id (direct child) or otherwise not in the
+			// descendant set (e.g. its branch was depth-capped) → root of the
+			// returned forest.
+			roots = append(roots, n)
+		}
+	}
+
+	// Recursively copy the pointer tree into the value tree the JSON encoder
+	// emits ([]childSummary by value). make already guarantees a non-nil slice.
+	out := make([]childSummary, 0, len(roots))
+	for _, r := range roots {
+		out = append(out, copyChildTree(r))
+	}
+	return out, nil
 }

@@ -93,6 +93,15 @@
   color: white;
 }
 
+/* SOW-0069: tree indent for nested child rows. Each depth level indents the
+   Agent cell by a fixed step so the execution tree reads at a glance. */
+.childIndent {
+  --depth: 0;
+  display: inline-block;
+  padding-left: calc(var(--depth) * var(--space-4));
+  white-space: nowrap;
+}
+
 .childDur {
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);

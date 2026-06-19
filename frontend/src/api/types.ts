@@ -197,6 +197,8 @@ export interface ChildSummary {
   cost_usd: number;
   op_count: number;
   failure_count: number;
+  /** This child's own children (SOW-0069 nested tree). Absent on leaves. */
+  child_sessions?: ChildSummary[];
 }
 
 export interface SessionDetailResponse {

@@ -137,10 +137,19 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
     }
   ],
   "child_sessions": [
-    { ...summary fields per child session... }
+    { ..."agent_name","model","status","cost_usd","tokens_in","op_count",...,
+      "child_sessions": [ ...this child's own children, recursively (SOW-0069)... ] }
   ]
 }
 ```
+
+`child_sessions` is a **nested tree** (SOW-0069), not a flat list: each child
+carries its own `child_sessions`, recursing down to the leaves, so the Overview
+can render the complete execution tree (parent → children → grandchildren). The
+descendants are resolved server-side in a single recursive query, depth-capped
+(20 levels) as cycle defense-in-depth; a child with no descendants omits
+`child_sessions` (or returns `[]`). Direct consumers that read only the
+top-level list are unaffected (the nesting is additive).
 
 Each op row carries `parent_op_id` — the canonical id of the op it nests under
 (`ops.parent_op_id`, set by the ingest writer), or `null` for a top-level op. The

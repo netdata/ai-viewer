@@ -230,4 +230,45 @@ describe('OverviewTab', () => {
     expect(screen.queryByRole('region', { name: /^Child sessions/ })).toBeNull();
     expect(screen.queryByText(/^Child sessions/)).toBeNull();
   });
+
+  it('renders the nested grandchild under its parent (SOW-0069 recursive tree)', () => {
+    // A child that itself has a child_sessions entry (the grandchild). The tree
+    // renders both, the grandchild indented one level under the parent.
+    renderTab(
+      detail(
+        [],
+        [
+          child({
+            id: 'child-1',
+            agent_name: 'worker',
+            child_sessions: [
+              child({
+                id: 'grand-1',
+                agent_name: 'sub-worker',
+                kind: 'sub_agent',
+              }),
+            ],
+          }),
+        ],
+      ),
+    );
+    const section = screen.getByRole('region', { name: /^Child sessions/ });
+    // Both the child and the nested grandchild appear, each linking to its detail.
+    expect(within(section).getByRole('link', { name: 'worker' })).toHaveAttribute(
+      'href',
+      '/sessions/child-1',
+    );
+    expect(within(section).getByRole('link', { name: 'sub-worker' })).toHaveAttribute(
+      'href',
+      '/sessions/grand-1',
+    );
+    // The grandchild row is indented (its Agent cell carries the tree marker).
+    const grandRow = within(section)
+      .getByRole('link', { name: 'sub-worker' })
+      .closest('tr');
+    expect(grandRow).not.toBeNull();
+    // The grandchild cell carries the indent span with a depth>0 marker ("└ ").
+    const grandCell = within(section).getByText('sub-worker').parentElement;
+    expect(grandCell?.textContent).toContain('└');
+  });
 });
