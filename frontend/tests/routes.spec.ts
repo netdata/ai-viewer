@@ -20,30 +20,9 @@ test.describe('routes', () => {
     await expect(page.getByText('No sessions match the current filters.')).toHaveCount(0);
   });
 
-  // Every still-scaffolded Phase-2/3 route renders the shared ComingSoon
-  // placeholder (components/ComingSoon.tsx: <h1 id="coming-soon-title">{title}</h1>).
-  // The path→title map mirrors the route table in src/App.tsx and the title each
-  // page passes (src/pages/<Name>/<Name>.tsx). One test per route.
-  //
-  // NOTE: /topology is NO LONGER a placeholder — SOW-0006 (chunk 6b) shipped the
-  // real cross-session Topology page (App.tsx → <Topology/>), so it is covered by
-  // tests/viz-topology.spec.ts instead and is intentionally absent here.
-  const comingSoonRoutes: Array<{ path: string; title: string }> = [
-    { path: '/tools', title: 'Tools' },
-    { path: '/models', title: 'Models' },
-    { path: '/agents', title: 'Agents' },
-  ];
-  for (const { path, title } of comingSoonRoutes) {
-    test(`${path} renders the ComingSoon placeholder ("${title}")`, async ({ page }) => {
-      await page.goto(path);
-      // The ComingSoon landmark heading carries id="coming-soon-title" and the
-      // route's own title; assert both so a mis-wired route can't pass.
-      const heading = page.locator('h1#coming-soon-title');
-      await expect(heading).toBeVisible();
-      await expect(heading).toHaveText(title);
-      await expect(page.getByRole('heading', { name: title, level: 1 })).toBeVisible();
-    });
-  }
+  // /tools, /models, /agents were removed in commit 861b45b (the routes no
+  // longer exist — they hit NotFound now). The only remaining non-data route
+  // is the NotFound catch-all, covered by the test below.
 
   test('an unknown client path renders the SPA-fallback NotFound', async ({ page }) => {
     // Hard navigation to a path the client router does not match. The Go SPA
