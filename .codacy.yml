@@ -1,10 +1,17 @@
 ---
-# SOW-0046: repository-wide exclusions are intentionally limited to non-runtime
-# SOW work-ledger files, duplicate instruction symlinks, generated analyzer
-# material, embedded/build output, dependencies, coverage reports, local test
-# output, and local binary output. They also carry the ignored-file policy
-# explicitly because Codacy ignores UI ignored-file settings when this file exists.
-# testdata/** added (SOW-0072): test fixtures are not production code.
+# Codacy configuration file (docs: https://docs.codacy.com/repositories-configure/codacy-configuration-file).
+#
+# This file controls EXCLUDE PATHS and LANGUAGE ENABLEMENT. It does NOT
+# enable/disable individual tools — per Codacy docs: "Tool enablement or
+# disablement must be performed on the Code patterns page." The tools we
+# disable (TSQLLint, Stylelint, Lizard, ESLint8, Agentlinter) are toggled
+# off on the Codacy dashboard → Settings → Code Patterns.
+#
+# What this file DOES:
+#   - excludes non-runtime paths (SOW files, generated output, deps, test
+#     fixtures) from all analysis
+#   - disables SQL language analysis (kills TSQLLint — a SQL Server linter
+#     that produces 100% false positives on our SQLite migration files)
 exclude_paths:
   - ".agents/sow/current/**"
   - ".agents/sow/done/**"
@@ -20,47 +27,6 @@ exclude_paths:
   - "frontend/test-results/**"
   - "testdata/**"
   - "bin/**"
-
-# SOW-0046: eslint-8 exclusions are tool-scoped to non-runtime frontend tests,
-# test support, and standalone frontend scripts only. These paths are not
-# repository-wide Codacy exclusions.
-# Tests and test support stay covered by native ESLint/TypeScript/Vitest/Playwright
-# as applicable. Standalone frontend scripts stay covered by dedicated script
-# self-tests/build integration plus repository-wide secrets/spec-drift gates.
-# Runtime frontend and Go source remain analyzable.
-engines:
-  # Disabled: ESLint8 runs a DEFAULT Codacy config that does not match our
-  # project's eslint.config.ts. It flags _-prefixed unused vars (which our
-  # local eslint correctly ignores via argsIgnorePattern) and patterns we
-  # don't enforce locally. The CI `lint` job (npx eslint src/ with our flat
-  # config) IS the authoritative ESLint gate.
-  eslint-8:
-    enabled: false
-    exclude_paths:
-      - "frontend/tests/**"
-      - "frontend/src/**/*.test.ts"
-      - "frontend/src/**/*.test.tsx"
-      - "frontend/src/test/**"
-      - "frontend/scripts/**"
-  # Disabled: Lizard cyclomatic complexity + NLOC. CCN-8 and NLOC-50 thresholds
-  # produce false positives for React components (JSX conditionals inflate CCN)
-  # and Go format parsers (switch-heavy by construction). Complexity is tracked
-  # via AGENTS.md conventions + code review.
-  lizard:
-    enabled: false
-  # Disabled: TSQLLint is a Microsoft SQL Server linter — every finding on the
-  # SQLite migration files is a false positive. Correctness is validated by the
-  # Go test suite (schema_contract_test.go + migration tests).
-  tsqllint:
-    enabled: false
-  # Disabled: Stylelint expects kebab-case class names; the project uses
-  # camelCase CSS Modules by design (React's convention). CSS is validated via
-  # the Vite/PostCSS build pipeline + the bundle-size gate.
-  stylelint:
-    enabled: false
-  # Disabled: Agentlinter analyzes AI-agent instruction files (AGENTS.md), not
-  # application code. "Duplicate instructions" is by design (AGENTS.md is a
-  # symlink target from CLAUDE.md/GEMINI.md, intentionally a superset of
-  # ~/.AGENTS.md per the bootstrap-repo pattern).
-  agentlinter:
+languages:
+  sql:
     enabled: false

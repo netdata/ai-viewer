@@ -332,24 +332,9 @@ assert_yaml_policy() {
 
   assert_no_broad_yaml_excludes
 
-  if ! awk '
-    /^# SOW-0046: repository-wide exclusions are intentionally limited to non-runtime/ { saw_repository = 1 }
-    /^# SOW work-ledger files, duplicate instruction symlinks, generated analyzer/ { saw_work_ledger = 1 }
-    /^# material, embedded\/build output, dependencies, coverage reports, local test/ { saw_artifacts = 1 }
-    /^# output, and local binary output\. They also carry the ignored-file policy/ { saw_local_outputs = 1 }
-    /^# explicitly because Codacy ignores UI ignored-file settings when this file exists\./ { saw_ui = 1 }
-    /^# SOW-0046: eslint-8 exclusions are tool-scoped/ { saw_scope = 1 }
-    /^# test support, and standalone frontend scripts only\. These paths are not/ { saw_not_global = 1 }
-    /^# repository-wide Codacy exclusions\./ { saw_repository_scope = 1 }
-    /^# Tests and test support stay covered by native ESLint\/TypeScript\/Vitest\/Playwright/ { saw_native = 1 }
-    /^# as applicable\. Standalone frontend scripts stay covered by dedicated script/ { saw_script_scope = 1 }
-    /^# self-tests\/build integration plus repository-wide secrets\/spec-drift gates\./ { saw_script_gates = 1 }
-    /^# Runtime frontend and Go source remain analyzable\./ { saw_runtime = 1 }
-    END { exit (saw_repository && saw_work_ledger && saw_artifacts && saw_local_outputs && saw_ui && saw_scope && saw_not_global && saw_repository_scope && saw_native && saw_script_scope && saw_script_gates && saw_runtime) ? 0 : 1 }
-  ' "$CODACY_YAML"; then
-    fail ".codacy.yml is missing the SOW-0046 native-gate rationale comments"
-  fi
-
+  # Verify the YAML matches the expected supported-directive-only policy
+  # (exclude_paths + languages; NO engines.enabled:false — that directive is
+  # not supported by Codacy per the docs and is silently ignored).
   local expected_yaml actual_yaml
   expected_yaml="$(cat <<'YAML'
 ---
@@ -368,22 +353,8 @@ exclude_paths:
   - "frontend/test-results/**"
   - "testdata/**"
   - "bin/**"
-engines:
-  eslint-8:
-    enabled: false
-    exclude_paths:
-      - "frontend/tests/**"
-      - "frontend/src/**/*.test.ts"
-      - "frontend/src/**/*.test.tsx"
-      - "frontend/src/test/**"
-      - "frontend/scripts/**"
-  lizard:
-    enabled: false
-  tsqllint:
-    enabled: false
-  stylelint:
-    enabled: false
-  agentlinter:
+languages:
+  sql:
     enabled: false
 YAML
 )"
@@ -401,14 +372,8 @@ YAML
     printf '%s\n' "Actual effective .codacy.yml policy:" >&2
     printf '%s\n' "$actual_yaml" >&2
     diff -u <(printf '%s\n' "$expected_yaml") <(printf '%s\n' "$actual_yaml") >&2 || true
-    fail ".codacy.yml must contain only the exact eslint-8 test/tooling exclusions"
+    fail ".codacy.yml does not match the expected supported-directive policy"
   fi
-
-  local expected_paths actual_paths
-  expected_paths="$(expected_codacy_eslint_test_tooling_excludes)"
-  actual_paths="$(extract_yaml_list_values eslint)"
-  [[ "$actual_paths" == "$expected_paths" ]] \
-    || fail "eslint-8 exclusions are not exactly the allowed test/tooling paths"
 
   local expected_repository_paths actual_repository_paths
   expected_repository_paths="$(expected_codacy_repository_excludes)"
