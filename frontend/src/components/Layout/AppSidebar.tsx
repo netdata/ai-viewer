@@ -181,7 +181,12 @@ function NavGroup({
                   className={cn(
                     'group relative flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
                     isActive
-                      ? 'bg-accent text-foreground'
+                      // SOW-0078 bugfix: bg-accent + text-foreground in dark mode
+                      // resolved to light blue + white, which was unreadable.
+                      // bg-primary + text-primary-foreground resolves to the
+                      // saturated brand blue + black in dark (high contrast)
+                      // and brand blue + white in light (high contrast).
+                      ? 'bg-primary text-primary-foreground'
                       : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
                   )}
                   aria-current={isActive ? 'page' : undefined}
@@ -189,7 +194,7 @@ function NavGroup({
                   {isActive ? (
                     <span
                       aria-hidden
-                      className="absolute inset-y-1.5 left-0 w-0.5 rounded-r-full bg-primary"
+                      className="absolute inset-y-1.5 left-0 w-0.5 rounded-r-full bg-foreground/80"
                     />
                   ) : null}
                   <item.Icon

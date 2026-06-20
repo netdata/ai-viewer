@@ -1,6 +1,6 @@
-# Design System (SOW-0073)
+# Design System (SOW-0073 + follow-ups)
 
-The single source of truth for ai-viewer's visual language. Established 2026-06-19 by SOW-0073; updated by every page-redesign SOW after.
+The single source of truth for ai-viewer's visual language. Established 2026-06-19 by SOW-0073; updated by every page-redesign SOW after (SOW-0074 Session Detail internals, SOW-0075 Topology view, SOW-0076 Stats charts, SOW-0077 secondary pages, SOW-0074.1 CommandPalette ⌘K).
 
 ## Layers
 
@@ -190,5 +190,6 @@ The Sessions page (`pages/SessionsList/SessionsList.tsx`) is the design referenc
 
 - `.agents/sow/specs/ux-stack-research.md` — stack decisions + version research.
 - `src/theme/app.css` — single source of truth for tokens.
-- `.agents/sow/done/SOW-0073-screenshots/post/` — proof of the redesigned surfaces.
+- `.agents/sow/done/SOW-0073-screenshots/post/` — proof of the redesigned surfaces (per-page before/after + final gallery).
 - `.agents/sow/done/SOW-0073-20260619-visual-foundation.md` — the SOW that established this system.
+- `.agents/sow/done/SOW-0073-20260619-visual-foundation.md` SOW-0074/0075/0076/0077 follow-ups (Session Detail internals, Topology view, Stats charts, secondary pages) and SOW-0074.1 (CommandPalette ⌘K wiring).
