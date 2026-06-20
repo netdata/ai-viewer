@@ -29,9 +29,13 @@ export interface BarChartProps {
   dimension: string;
   /** The selected metric (drives value formatting + the aria description). */
   metric: string;
+  /** Optional click handler — SOW-0087 chunk 3 (B5/B6). When provided,
+   *  each bar becomes a focusable + clickable button. The handler is
+   *  called with the bar's key (the dimension value, e.g. "gpt-4o"). */
+  onBarClick?: ((key: string) => void) | undefined;
 }
 
-export function BarChart({ items, dimension, metric }: BarChartProps) {
+export function BarChart({ items, dimension, metric, onBarClick }: BarChartProps) {
   const titleId = useId();
   const descId = useId();
 
@@ -97,7 +101,9 @@ export function BarChart({ items, dimension, metric }: BarChartProps) {
               <text x={PADDING.left} y={textY + 4} className={styles.barKey}>
                 {bar.label}
               </text>
-              {/* The bar, offset past the label band; fill is a theme var(). */}
+              {/* The bar, offset past the label band; fill is a theme var().
+                 When onBarClick is provided, the bar is a clickable rect with
+                 role=button and keyboard support (SOW-0087 chunk 3). */}
               <rect
                 data-bar={bar.key}
                 x={LABEL_BAND + bar.x}
@@ -107,6 +113,29 @@ export function BarChart({ items, dimension, metric }: BarChartProps) {
                 rx={4}
                 fill={seriesColorVar(i)}
                 className={styles.bar}
+                role={onBarClick === undefined ? undefined : 'button'}
+                tabIndex={onBarClick === undefined ? undefined : 0}
+                aria-label={
+                  onBarClick === undefined
+                    ? undefined
+                    : `${bar.label}: ${formatMetricValue(metric, bar.value)} — click to filter sessions`
+                }
+                onClick={onBarClick === undefined ? undefined : () => { onBarClick(bar.key); }}
+                onKeyDown={
+                  onBarClick === undefined
+                    ? undefined
+                    : (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onBarClick(bar.key);
+                        }
+                      }
+                }
+                style={
+                  onBarClick === undefined
+                    ? undefined
+                    : { cursor: 'pointer' }
+                }
               />
               {/* Value text: outside the bar end by default; inside (end-anchored,
                   higher-contrast token) when an outside label would clip. */}

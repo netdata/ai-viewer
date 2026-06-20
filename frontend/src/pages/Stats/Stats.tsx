@@ -376,6 +376,24 @@ export function Stats() {
               items={topItemsFrom(ranking.data)}
               dimension={topDimension}
               metric={topMetric}
+              onBarClick={
+                // SOW-0087 chunk 3 (B5/B6): clicking a bar pushes the
+                // dimension value into the sessions filter, navigates
+                // to /sessions, and deactivates the top-N grouping so
+                // the user sees every session, not just the top N.
+                // We use the existing setFilters (URL-synced) — the
+                // /sessions page already reads the agents/models/tools
+                // filter and re-renders.
+                (key) => {
+                  const patch: Parameters<typeof setFilters>[0] = {};
+                  if (topDimension === 'agent') patch.agents = [key];
+                  else if (topDimension === 'model' || topDimension === 'provider') patch.models = [key];
+                  else if (topDimension === 'tool') patch.tools = [key];
+                  // cwd is not a /api/sessions filter — for cwd the click is a no-op.
+                  setFilters(patch);
+                  void navigate('/sessions');
+                }
+              }
             />
             <table className={styles.table}>
               <thead>

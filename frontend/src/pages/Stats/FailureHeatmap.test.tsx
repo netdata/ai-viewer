@@ -21,15 +21,17 @@ const FILTER: Filters = {
 
 function mkFetchMock(responses: FetchResponse[]): typeof globalThis.fetch {
   let call = 0;
-  return vi.fn(async (input: RequestInfo | URL) => {
-    const url = typeof input === 'string' ? input : input.toString();
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : (input as URL).toString();
     expect(url).toMatch(/^\/api\/sessions\?/);
     const r = responses[call] ?? { items: [] };
     call += 1;
-    return new Response(JSON.stringify(r), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
+    return Promise.resolve(
+      new Response(JSON.stringify(r), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
   }) as unknown as typeof globalThis.fetch;
 }
 
@@ -74,8 +76,8 @@ describe('FailureHeatmap', () => {
   });
 
   it('renders an error message when fetch fails', async () => {
-    globalThis.fetch = vi.fn(async () => {
-      return new Response('{"error":"boom"}', { status: 500 });
+    globalThis.fetch = vi.fn(() => {
+      return Promise.resolve(new Response('{"error":"boom"}', { status: 500 }));
     }) as unknown as typeof globalThis.fetch;
     render(<FailureHeatmap filters={FILTER} />);
     await waitFor(() => {

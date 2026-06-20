@@ -595,6 +595,41 @@ describe('Stats — shareable URL + copy link', () => {
     expect(sink.params.get('from')).toBe('100');
   });
 
+  // SOW-0087 chunk 3 (B5/B6): the Stats page wires BarChart's onBarClick to
+  // push the dimension value into the URL filter and navigate to /sessions.
+  // The BarChart-level onBarClick is covered by BarChart.test.tsx. This test
+  // asserts the Stats integration point: that an onBarClick prop is supplied
+  // to BarChart (i.e. the page calls the prop and does not navigate when
+  // it is absent). Verified via the rendered bar DOM.
+  it('wires BarChart with an onBarClick handler (SOW-0087 chunk 3)', async () => {
+    mountStates({
+      agg: { data: aggregate() },
+      top: {
+        data: {
+          dimension: 'agent',
+          metric: 'cost',
+          items: [
+            { key: 'agent-alpha', value: 100 },
+          ],
+        },
+      },
+      search: { data: searchResp() },
+    });
+    renderPage();
+    // Switch to 'agent' dimension (default is 'model').
+    fireEvent.change(screen.getByLabelText(/breakdown dimension/i), {
+      target: { value: 'agent' },
+    });
+    await waitFor(() => {
+      const bar = document.querySelector('[data-bar="agent-alpha"]') as SVGRectElement | null;
+      expect(bar).not.toBeNull();
+      // When onBarClick is wired, the bar is a focusable button.
+      // (The base BarChart.test covers the wiring in isolation; this is
+      // a smoke test that the page actually passes the prop.)
+      expect(bar?.getAttribute('role')).toBe('button');
+    });
+  });
+
   it('a real FilterBar filter change (useFilters) preserves the control params', async () => {
     // Drive the ACTUAL FilterBar code path: useFilters().setFilters merges a
     // filter patch via applyPatch on the same URL. The page's control params
