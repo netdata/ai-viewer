@@ -395,6 +395,31 @@ describe('SessionsList', () => {
     expect(compact).toBeChecked();
   });
 
+  it('the Minimal density toggle hides Model, Source, Tokens columns (SOW-0087 chunk 1)', async () => {
+    const user = userEvent.setup();
+    infiniteSpy.mockReturnValue(
+      result({
+        data: {
+          pages: [
+            page([
+              makeSession({ id: 'a', agent_name: 'agent-alpha', model: 'gpt-4o' }),
+            ]),
+          ],
+          pageParams: [''],
+        },
+      }),
+    );
+    renderPage();
+    // Sanity: model column visible in Comfortable mode
+    expect(screen.getByText('gpt-4o')).toBeInTheDocument();
+    // Click Minimal
+    await user.click(screen.getByRole('radio', { name: /Minimal row density/i }));
+    // Model and Tokens should now be hidden
+    expect(screen.queryByText('gpt-4o')).not.toBeInTheDocument();
+    // Agent column still visible
+    expect(screen.getByText('agent-alpha')).toBeInTheDocument();
+  });
+
   it('the Refresh button triggers a refetch', async () => {
     const user = userEvent.setup();
     const refetchSpy = vi.fn();

@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useFilters, filtersToSubscription } from '../../state/filters';
 import { useSessionsInfinite } from '../../api/sessions';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
 import { SessionRowBody } from '../../components/SessionRow';
 import { ErrorState } from '../../components/StatusViews';
+import { DurationBar, Sparkline } from '../../components/Sparkline';
+void Sparkline; // SOW-0087: wired into a 'Last 24h' column in a follow-up commit
 import { HomeSummaryCard } from './HomeSummaryCard';
 import type { SessionListItem } from '../../api/types';
 import {
@@ -57,7 +59,7 @@ export function SessionsList() {
   const [showSecondary, setShowSecondary] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>('start_ts');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
+  const [density, setDensity] = useState<'comfortable' | 'compact' | 'minimal'>('comfortable');
 
   const group = showSecondary ? 'all' : 'root';
   const { data, isPending, isError, error, hasNextPage, isFetchingNextPage, fetchNextPage, refetch } =
@@ -173,7 +175,7 @@ export function SessionsList() {
           <ToggleGroup
             type="single"
             value={density}
-            onValueChange={(v) => { if (v) setDensity(v as 'comfortable' | 'compact'); }}
+            onValueChange={(v) => { if (v) setDensity(v as 'comfortable' | 'compact' | 'minimal'); }}
             aria-label="Row density"
             size="sm"
           >
@@ -182,6 +184,9 @@ export function SessionsList() {
             </ToggleGroupItem>
             <ToggleGroupItem value="compact" aria-label="Compact row density">
               Compact
+            </ToggleGroupItem>
+            <ToggleGroupItem value="minimal" aria-label="Minimal row density">
+              Minimal
             </ToggleGroupItem>
           </ToggleGroup>
 
@@ -267,9 +272,23 @@ function SessionsTable({
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (key: SortKey) => void;
-  density: 'comfortable' | 'compact';
+  density: 'comfortable' | 'compact' | 'minimal';
   onRowClick: (id: string) => void;
 }) {
+  // Minimal density hides 7 of the 11 columns; keeps Agent / Status /
+  // Started / Duration / Cost (the columns the operator uses to scan
+  // the table at a glance). Comfortable + Compact show everything.
+  const isMinimal = density === 'minimal';
+  // Computed once per render so all rows can size their DurationBar the
+  // same way (max duration in the current view).
+  const maxDurationUs: number = useMemo(() => {
+    let m = 0;
+    for (const s of items) {
+      const d = s.end_ts !== null && s.start_ts > 0 ? s.end_ts - s.start_ts : 0;
+      if (d > m) m = d;
+    }
+    return m;
+  }, [items]);
   const pad = density === 'compact' ? 'py-1.5' : 'py-2.5';
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -291,12 +310,16 @@ function SessionsTable({
                   onClick={() => { onSort('agent_name'); }}
                 />
               </th>
-              <th scope="col" className={cn('px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
-                Model
-              </th>
-              <th scope="col" className={cn('px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
-                Source
-              </th>
+              {isMinimal ? null : (
+                <th scope="col" className={cn('px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
+                  Model
+                </th>
+              )}
+              {isMinimal ? null : (
+                <th scope="col" className={cn('px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
+                  Source
+                </th>
+              )}
               <th scope="col" className={cn('px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
                 <SortHeader
                   label="Started"
@@ -316,24 +339,28 @@ function SessionsTable({
                   onClick={() => { onSort('status'); }}
                 />
               </th>
-              <th scope="col" className={cn('px-3 py-2 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
-                <SortHeader
-                  label="Tokens in"
-                  align="right"
-                  active={sortKey === 'tokens_in'}
-                  dir={sortDir}
-                  onClick={() => { onSort('tokens_in'); }}
-                />
-              </th>
-              <th scope="col" className={cn('px-3 py-2 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
-                <SortHeader
-                  label="Tokens out"
-                  align="right"
-                  active={sortKey === 'tokens_out'}
-                  dir={sortDir}
-                  onClick={() => { onSort('tokens_out'); }}
-                />
-              </th>
+              {isMinimal ? null : (
+                <th scope="col" className={cn('px-3 py-2 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
+                  <SortHeader
+                    label="Tokens in"
+                    align="right"
+                    active={sortKey === 'tokens_in'}
+                    dir={sortDir}
+                    onClick={() => { onSort('tokens_in'); }}
+                  />
+                </th>
+              )}
+              {isMinimal ? null : (
+                <th scope="col" className={cn('px-3 py-2 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
+                  <SortHeader
+                    label="Tokens out"
+                    align="right"
+                    active={sortKey === 'tokens_out'}
+                    dir={sortDir}
+                    onClick={() => { onSort('tokens_out'); }}
+                  />
+                </th>
+              )}
               <th scope="col" className={cn('px-3 py-2 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground')}>
                 <SortHeader
                   label="Cost"
@@ -361,6 +388,8 @@ function SessionsTable({
                 session={s}
                 zebra={idx % 2 === 1}
                 rowPad={pad}
+                isMinimal={isMinimal}
+                maxDurationUs={maxDurationUs}
                 onRowClick={() => { onRowClick(s.id); }}
               />
             ))}
@@ -375,14 +404,21 @@ function SessionTableRow({
   session,
   zebra,
   rowPad,
+  isMinimal,
+  maxDurationUs,
   onRowClick,
 }: {
   session: SessionListItem;
   zebra: boolean;
   rowPad: string;
+  isMinimal: boolean;
+  maxDurationUs: number;
   onRowClick: () => void;
 }) {
-  const durationUs = session.end_ts === null ? null : session.end_ts - session.start_ts;
+  const durationUs: number | null = session.end_ts === null
+    ? null
+    : session.end_ts - session.start_ts;
+  const safeDurationUs: number = durationUs === null ? 0 : durationUs;
   const badge = kindLabel(session.kind);
   const sourceColor = sourceColorVar(session.source_id);
 
@@ -415,31 +451,41 @@ function SessionTableRow({
           {badge ? <KindBadge label={badge} /> : null}
         </div>
       </td>
-      <td className={cn('px-3 align-middle font-mono text-xs text-muted-foreground', rowPad)}>
-        <span className="truncate">{session.model || '—'}</span>
-      </td>
-      <td className={cn('px-3 align-middle text-xs', rowPad)}>
-        <span
-          className="inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-medium"
-          style={{
-            color: `var(${sourceColor})`,
-            borderColor: `color-mix(in oklch, var(${sourceColor}) 30%, transparent)`,
-            backgroundColor: `color-mix(in oklch, var(${sourceColor}) 8%, transparent)`,
-          }}
-        >
+      {isMinimal ? null : (
+        <td className={cn('px-3 align-middle font-mono text-xs text-muted-foreground', rowPad)}>
+          <span className="truncate">{session.model || '—'}</span>
+        </td>
+      )}
+      {isMinimal ? null : (
+        <td className={cn('px-3 align-middle text-xs', rowPad)}>
           <span
-            aria-hidden
-            className="inline-block size-1.5 rounded-full"
-            style={{ backgroundColor: `var(${sourceColor})` }}
-          />
-          {sourceLabel(session.source_id)}
-        </span>
-      </td>
+            className="inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-medium"
+            style={{
+              color: `var(${sourceColor})`,
+              borderColor: `color-mix(in oklch, var(${sourceColor}) 30%, transparent)`,
+              backgroundColor: `color-mix(in oklch, var(${sourceColor}) 8%, transparent)`,
+            }}
+          >
+            <span
+              aria-hidden
+              className="inline-block size-1.5 rounded-full"
+              style={{ backgroundColor: `var(${sourceColor})` }}
+            />
+            {sourceLabel(session.source_id)}
+          </span>
+        </td>
+      )}
       <td className={cn('px-3 align-middle font-mono text-xs text-muted-foreground tabular-nums', rowPad)}>
         {formatTimestamp(session.start_ts)}
       </td>
       <td className={cn('px-3 text-right align-middle font-mono text-xs tabular-nums text-muted-foreground', rowPad)}>
-        {formatDuration(durationUs)}
+        <span className="inline-flex items-center gap-2 justify-end">
+          <DurationBar
+            durationUs={safeDurationUs}
+            maxDurationUs={maxDurationUs}
+          />
+          <span>{formatDuration(durationUs)}</span>
+        </span>
       </td>
       <td className={cn('px-3 align-middle', rowPad)}>
         <div className="flex items-center gap-1.5">
@@ -452,12 +498,16 @@ function SessionTableRow({
           ) : null}
         </div>
       </td>
-      <td className={cn('px-3 text-right align-middle font-mono text-xs tabular-nums', rowPad)}>
-        {formatNumber(session.tokens_in)}
-      </td>
-      <td className={cn('px-3 text-right align-middle font-mono text-xs tabular-nums', rowPad)}>
-        {formatNumber(session.tokens_out)}
-      </td>
+      {isMinimal ? null : (
+        <td className={cn('px-3 text-right align-middle font-mono text-xs tabular-nums', rowPad)}>
+          {formatNumber(session.tokens_in)}
+        </td>
+      )}
+      {isMinimal ? null : (
+        <td className={cn('px-3 text-right align-middle font-mono text-xs tabular-nums', rowPad)}>
+          {formatNumber(session.tokens_out)}
+        </td>
+      )}
       <td className={cn('px-3 text-right align-middle font-mono text-xs tabular-nums', rowPad)}>
         {formatCost(session.cost_usd)}
       </td>
