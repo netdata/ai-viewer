@@ -78,6 +78,8 @@ export const COVERAGE_INCLUDE = [
   // /agents, /models, /tools (SOW-0081). Pure presentational.
   'src/components/EntityList/**/*.{ts,tsx}',
   'src/components/EntitySummaryStrip/**/*.{ts,tsx}',
+  // Inline-SVG Sparkline + DurationBar primitives (SOW-0085 B2/F1).
+  'src/components/Sparkline/**/*.{ts,tsx}',
   'src/components/SessionRow/**/*.{ts,tsx}',
   'src/components/ThemeToggle/**/*.{ts,tsx}',
   'src/components/Tabs/**/*.{ts,tsx}',
@@ -190,6 +192,7 @@ export const PER_DIR_GLOBS = [
   'src/components/FilterBar/**',
   'src/components/EntityList/**',
   'src/components/EntitySummaryStrip/**',
+  'src/components/Sparkline/**',
   // src/pages/SessionsList — measured via 'src/pages/SessionsList/**/*.{ts,tsx}'
   // above (HomeSummaryCard.tsx is the only file in this dir after
   // SessionsList.tsx moved to COVERAGE_EXCLUDED; the per-dir floor below
