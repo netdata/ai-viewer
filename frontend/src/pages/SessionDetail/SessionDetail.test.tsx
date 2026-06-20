@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { TooltipProvider } from '../../components/ui/tooltip';
 import { ApiError } from '../../api/client';
 
 // SessionDetail is the tabbed detail shell. useSessionDetail and useLiveUpdates
@@ -58,9 +59,11 @@ const OK = result({
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/sessions/:id" element={<SessionDetail />} />
-      </Routes>
+      <TooltipProvider>
+        <Routes>
+          <Route path="/sessions/:id" element={<SessionDetail />} />
+        </Routes>
+      </TooltipProvider>
     </MemoryRouter>,
   );
 }
@@ -164,5 +167,22 @@ describe('SessionDetail', () => {
     detailSpy.mockReturnValue(OK);
     renderAt('/sessions/s1');
     expect(liveSpy).toHaveBeenCalledWith({ session_id: 's1' });
+  });
+
+  // SOW-0087 chunk 4 (A14): Pin button toggles a localStorage-backed
+  // pinned list. The aria-pressed attribute flips; the button label
+  // changes from 'Pin' to 'Unpin'.
+  it('toggles the Pin button and updates aria-pressed (SOW-0087 chunk 4)', async () => {
+    window.localStorage.clear();
+    detailSpy.mockReturnValue(OK);
+    const user = userEvent.setup();
+    renderAt('/sessions/s1');
+    const pin = screen.getByRole('button', { name: /pin this session/i });
+    expect(pin.getAttribute('aria-pressed')).toBe('false');
+    await user.click(pin);
+    expect(screen.getByRole('button', { name: /unpin this session/i })).toBeInTheDocument();
+    expect(window.localStorage.getItem('ai-viewer.pinned-sessions.v1')).toContain('s1');
+    await user.click(screen.getByRole('button', { name: /unpin this session/i }));
+    expect(screen.getByRole('button', { name: /pin this session/i })).toBeInTheDocument();
   });
 });
