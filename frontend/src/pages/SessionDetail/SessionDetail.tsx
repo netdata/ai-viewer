@@ -10,6 +10,7 @@ import { TraceTab } from './TraceTab';
 import { TopologyTab } from './TopologyTab';
 import { TimelineTab } from './TimelineTab';
 import { RawDataTab } from './RawDataTab';
+import { SessionBreadcrumb } from './SessionBreadcrumb';
 
 // Session detail page (ui-pages.md §/sessions/:id). Tabs Overview + Trace +
 // Topology + Timeline + Logs + Raw Data are all real. The active tab lives in
@@ -41,6 +42,8 @@ export function SessionDetail() {
   const tab = parseTab(searchParams.get('tab'));
 
   const { data, isPending, isError, error } = useSessionDetail(id);
+  void error; // referenced below via ApiError check
+  void error; // referenced below via ApiError check
 
   // Live refresh of the open session; session_changed invalidates ['session', id].
   useLiveUpdates({ session_id: id });
@@ -58,11 +61,22 @@ export function SessionDetail() {
 
   const notFound = isError && error instanceof ApiError && error.status === 404;
 
+  // Breadcrumb (SOW-0083 D1): show the session's position in the tree.
+  // For root sessions (parent_session_id === null) we render a simpler
+  // "Sessions / [agent_name]" breadcrumb. For sub-sessions we add the
+  // parent as a middle segment.
+  const session = data?.session;
+  const parentSessionId = session?.parent_session_id ?? null;
+
   return (
     <section aria-labelledby="session-detail-title" className="flex flex-col gap-6 px-6 py-5">
       <div>
-        <h1 id="session-detail-title" className="text-2xl font-semibold tracking-tight">
-          Session detail
+        <SessionBreadcrumb
+          parentSessionId={parentSessionId}
+          currentLabel={session?.agent_name ? `${session.agent_name} (${id.slice(0, 8)}…)` : id}
+        />
+        <h1 id="session-detail-title" className="mt-3 text-2xl font-semibold tracking-tight">
+          {session?.agent_name ?? 'Session detail'}
         </h1>
         <p className="mt-1 flex items-center gap-2 font-mono text-xs text-muted-foreground">
           <span className="text-[10px] font-sans uppercase tracking-wider">id</span>

@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronDown, CircleAlert, ExternalLink, Inbox } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleAlert, ExternalLink, Inbox } from 'lucide-react';
 import { useSessionsInfinite } from '../../api/sessions';
 import { useFilters, filtersToSubscription } from '../../state/filters';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
@@ -106,6 +106,10 @@ function FailuresInner({ windowValue, onWindowChange }: FailuresInnerProps) {
   const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
   const summary = useMemo(() => summarize(items), [items]);
   const errorClassCounts = useMemo(() => countErrorClasses(items), [items]);
+
+  // Row expansion state (SOW-0083 A13): only one row can be expanded at a
+  // time. Clicking another row collapses the first.
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
 
   return (
     <section aria-labelledby="failures-title" className="flex flex-col gap-6 px-6 py-5">
@@ -238,7 +242,16 @@ function FailuresInner({ windowValue, onWindowChange }: FailuresInnerProps) {
                   </tr>
                 ))
               ) : (
-                items.map((s) => <FailureRow key={s.id} session={s} />)
+                items.map((s: SessionListItem) => (
+                  <FailureRow
+                    key={s.id}
+                    session={s}
+                    isExpanded={expandedRowId === s.id}
+                    onToggle={() => {
+                      setExpandedRowId((prev) => (prev === s.id ? null : s.id));
+                    }}
+                  />
+                ))
               )}
             </tbody>
           </table>
@@ -261,52 +274,134 @@ function FailuresInner({ windowValue, onWindowChange }: FailuresInnerProps) {
   );
 }
 
-function FailureRow({ session }: { session: SessionListItem }) {
+function FailureRow({
+  session,
+  isExpanded,
+  onToggle,
+}: {
+  session: SessionListItem;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
   const sessionHref = `/sessions/${encodeURIComponent(session.id)}`;
   return (
-    <tr className="border-t border-border/50 transition-colors hover:bg-muted/30">
-      <td className="px-4 py-2 font-medium text-foreground">{session.agent_name || session.native_id}</td>
-      <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{session.model || '—'}</td>
-      <td className="px-4 py-2">
-        {session.error_class ? (
-          <span className="inline-flex items-center gap-1.5 rounded-md bg-status-failed/10 px-2 py-0.5 font-mono text-xs text-status-failed">
-            <CircleAlert className="size-3" aria-hidden />
-            {session.error_class}
-          </span>
-        ) : (
-          <span className="font-mono text-xs text-muted-foreground">—</span>
+    <Fragment>
+      <tr
+        className={cn(
+          'cursor-pointer border-t border-border/50 transition-colors hover:bg-muted/30',
+          isExpanded && 'bg-muted/40',
         )}
-      </td>
-      <td className="px-4 py-2 font-mono text-xs text-muted-foreground tabular-nums">
-        {formatTimestamp(session.start_ts)}
-      </td>
-      <td className="px-4 py-2 text-right font-mono text-xs tabular-nums text-foreground">
-        {formatCost(session.cost_usd)}
-      </td>
-      <td className="px-4 py-2 text-right font-mono text-xs tabular-nums text-muted-foreground">
-        {formatNumber(session.tokens_in + session.tokens_out)}
-      </td>
-      <td className="px-4 py-2">
-        <span className={cn(
-          'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium',
-          session.status === 'failed' && 'bg-status-failed/10 text-status-failed',
-          session.status === 'abandoned' && 'bg-muted text-muted-foreground',
-          session.status === 'interrupted' && 'bg-status-running/10 text-status-running',
-        )}>
-          {session.status}
-        </span>
-      </td>
-      <td className="px-4 py-2 text-right">
-        <Link
-          to={sessionHref}
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          aria-label={`Open session ${session.agent_name || session.native_id}`}
+        onClick={onToggle}
+        aria-expanded={isExpanded}
+        aria-controls={`failure-detail-${session.id}`}
+        data-testid={`failure-row-${session.id}`}
+      >
+        <td className="px-4 py-2 font-medium text-foreground">
+          <span className="flex items-center gap-2">
+            <ChevronRight
+              className={cn(
+                'size-3 shrink-0 text-muted-foreground transition-transform',
+                isExpanded && 'rotate-90',
+              )}
+              aria-hidden
+            />
+            {session.agent_name || session.native_id}
+          </span>
+        </td>
+        <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{session.model || '—'}</td>
+        <td className="px-4 py-2">
+          {session.error_class ? (
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-status-failed/10 px-2 py-0.5 font-mono text-xs text-status-failed">
+              <CircleAlert className="size-3" aria-hidden />
+              {session.error_class}
+            </span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="px-4 py-2 font-mono text-xs text-muted-foreground tabular-nums">
+          {formatTimestamp(session.start_ts)}
+        </td>
+        <td className="px-4 py-2 text-right font-mono text-xs tabular-nums text-foreground">
+          {formatCost(session.cost_usd)}
+        </td>
+        <td className="px-4 py-2 text-right font-mono text-xs tabular-nums text-muted-foreground">
+          {formatNumber(session.tokens_in + session.tokens_out)}
+        </td>
+        <td className="px-4 py-2">
+          <span className={cn(
+            'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium',
+            session.status === 'failed' && 'bg-status-failed/10 text-status-failed',
+            session.status === 'abandoned' && 'bg-muted text-muted-foreground',
+            session.status === 'interrupted' && 'bg-status-running/10 text-status-running',
+          )}>
+            {session.status}
+          </span>
+        </td>
+        <td className="px-4 py-2 text-right">
+          <Link
+            to={sessionHref}
+            onClick={(e) => { e.stopPropagation(); }}
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            aria-label={`Open session ${session.agent_name || session.native_id}`}
+          >
+            Open
+            <ExternalLink className="size-3" aria-hidden />
+          </Link>
+        </td>
+      </tr>
+      {isExpanded ? (
+        <tr id={`failure-detail-${session.id}`} className="border-t border-border/50 bg-muted/20">
+          <td colSpan={8} className="px-4 py-3">
+            <FailureDetailSummary session={session} />
+          </td>
+        </tr>
+      ) : null}
+    </Fragment>
+  );
+}
+
+// FailureDetailSummary — SOW-0083 A13. Inline 1-line summary shown
+// when the operator expands a /failures row. No new fetch — derived
+// from the SessionListItem data the page already has. Shows the
+// agent, model, turns/ops/failures counts, and a hint of where in
+// the tree this session sits (root vs sub).
+function FailureDetailSummary({ session }: { session: SessionListItem }) {
+  const position = session.parent_session_id == null ? 'root session' : 'sub-session';
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+      <span>
+        <span className="text-[10px] uppercase tracking-wider">Position</span>{' '}
+        <span className="font-mono text-foreground">{position}</span>
+      </span>
+      <span>
+        <span className="text-[10px] uppercase tracking-wider">Turns</span>{' '}
+        <span className="font-mono tabular-nums text-foreground">{formatNumber(session.turn_count)}</span>
+      </span>
+      <span>
+        <span className="text-[10px] uppercase tracking-wider">Ops</span>{' '}
+        <span className="font-mono tabular-nums text-foreground">{formatNumber(session.op_count)}</span>
+      </span>
+      <span>
+        <span className="text-[10px] uppercase tracking-wider">Failures</span>{' '}
+        <span
+          className={cn(
+            'font-mono tabular-nums',
+            session.failure_count > 0 ? 'text-status-failed' : 'text-foreground',
+          )}
         >
-          Open
-          <ExternalLink className="size-3" aria-hidden />
+          {formatNumber(session.failure_count)}
+        </span>
+      </span>
+      {session.parent_session_id !== null ? (
+        <Link
+          to={`/sessions/${encodeURIComponent(session.parent_session_id)}`}
+          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+        >
+          View parent →
         </Link>
-      </td>
-    </tr>
+      ) : null}
+    </div>
   );
 }
 

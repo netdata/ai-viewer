@@ -45,6 +45,12 @@ function mkSession(overrides: Partial<SessionListItem>): SessionListItem {
     end_ts: 1_700_000_010,
     turn_count: 3,
     op_count: 4,
+    parent_session_id: null,
+    root_session_id: 's1',
+    source_id: 'codex',
+    kind: 'root',
+    failure_count: 1,
+    child_session_count: 0,
     ...overrides,
   } as SessionListItem;
 }
@@ -170,6 +176,81 @@ describe('Failures page', () => {
     // timeout appears in BOTH the chip strip AND the row
     const timeoutChips = screen.getAllByText('timeout');
     expect(timeoutChips.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('expands a row on click to show the 1-line summary (SOW-0083 A13)', async () => {
+    const response: SessionListResponse = {
+      items: [
+        mkSession({ id: 'a', turn_count: 5, op_count: 12, failure_count: 2 }),
+      ],
+      
+    };
+    sessionsSpy.mockReturnValue({
+      data: { pages: [response], pageParams: [null] },
+      isPending: false,
+      isError: false,
+      error: null,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: () => {},
+    });
+    renderFailures();
+    // No summary visible before click
+    expect(screen.queryByText(/root session/i)).not.toBeInTheDocument();
+    // Click the agent cell (more reliable than the tr's row)
+    const fireEvent = (await import('@testing-library/react')).fireEvent;
+    const agentCell = screen.getByText('agent-1').closest('tr');
+    expect(agentCell).not.toBeNull();
+    fireEvent.click(agentCell as HTMLElement);
+    // Summary appears: position label + turns/ops/failures counts
+    expect(screen.getByText(/root session/i)).toBeInTheDocument();
+    expect(screen.getByText('5')).toBeInTheDocument(); // turns
+    expect(screen.getByText('12')).toBeInTheDocument(); // ops
+    expect(screen.getByText('2')).toBeInTheDocument(); // failures
+  });
+
+  it('collapses a row on a second click', async () => {
+    const response: SessionListResponse = {
+      items: [mkSession({ id: 'a' })],
+      
+    };
+    sessionsSpy.mockReturnValue({
+      data: { pages: [response], pageParams: [null] },
+      isPending: false,
+      isError: false,
+      error: null,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: () => {},
+    });
+    renderFailures();
+    const fireEvent = (await import('@testing-library/react')).fireEvent;
+    const row = screen.getByTestId('failure-row-a');
+    fireEvent.click(row);
+    expect(screen.getByText(/root session/i)).toBeInTheDocument();
+    fireEvent.click(row);
+    expect(screen.queryByText(/root session/i)).not.toBeInTheDocument();
+  });
+
+  it('shows "sub-session" position when parent_session_id is set', async () => {
+    const response: SessionListResponse = {
+      items: [mkSession({ id: 'a', parent_session_id: 'parent-1' })],
+      
+    };
+    sessionsSpy.mockReturnValue({
+      data: { pages: [response], pageParams: [null] },
+      isPending: false,
+      isError: false,
+      error: null,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: () => {},
+    });
+    renderFailures();
+    const fireEvent = (await import('@testing-library/react')).fireEvent;
+    fireEvent.click(screen.getByTestId('failure-row-a'));
+    expect(screen.getByText(/sub-session/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /View parent/i })).toHaveAttribute('href', '/sessions/parent-1');
   });
 
   it('renders the error message when isError is true', () => {
