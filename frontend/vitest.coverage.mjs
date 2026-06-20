@@ -80,6 +80,8 @@ export const COVERAGE_INCLUDE = [
   'src/components/EntitySummaryStrip/**/*.{ts,tsx}',
   // Inline-SVG Sparkline + DurationBar primitives (SOW-0085 B2/F1).
   'src/components/Sparkline/**/*.{ts,tsx}',
+  // Heatmap grid primitive (SOW-0087 chunk 2 — /stats heatmap).
+  'src/components/Heatmap/**/*.{ts,tsx}',
   'src/components/SessionRow/**/*.{ts,tsx}',
   'src/components/ThemeToggle/**/*.{ts,tsx}',
   'src/components/Tabs/**/*.{ts,tsx}',
@@ -193,6 +195,7 @@ export const PER_DIR_GLOBS = [
   'src/components/EntityList/**',
   'src/components/EntitySummaryStrip/**',
   'src/components/Sparkline/**',
+  'src/components/Heatmap/**',
   // src/pages/SessionsList — measured via 'src/pages/SessionsList/**/*.{ts,tsx}'
   // above (HomeSummaryCard.tsx is the only file in this dir after
   // SessionsList.tsx moved to COVERAGE_EXCLUDED; the per-dir floor below

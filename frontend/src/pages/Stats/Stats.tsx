@@ -16,6 +16,7 @@ import type {
   TopResponse,
 } from '../../api/types';
 import { LineChart } from './charts/LineChart';
+import { FailureHeatmap } from './FailureHeatmap';
 import { BarChart } from './charts/BarChart';
 import { SearchBox } from './SearchBox';
 import { formatCost, formatDuration, formatNumber } from '../../lib/format';
@@ -534,6 +535,18 @@ export function Stats() {
           Search ops &amp; logs
         </h2>
         <SearchBox filters={filters} />
+      </section>
+
+      {/* Heatmap (SOW-0087 chunk 2 — B3). Failures by day-of-week ×
+         hour-of-day. The data is computed client-side from /api/sessions
+         filtered to status IN (failed, abandoned, interrupted) over the
+         last 7 days. A future backend endpoint could pre-aggregate this
+         server-side. */}
+      <section aria-label="Heatmap" className="space-y-2">
+        <h2 className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          Failures by hour of day (last 7 days)
+        </h2>
+        <FailureHeatmap filters={filters} />
       </section>
 
       {/* Quick filters (SOW-0086 A8) — one-click chips that push common
