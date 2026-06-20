@@ -121,7 +121,7 @@ function SummaryStat({ label, value, accent }: { label: string; value: string; a
 const SERIES_LIMIT = 8;
 
 export function Stats() {
-  const { filters } = useFilters();
+  const { filters, setFilters } = useFilters();
   const navigate = useNavigate();
 
   // Chart controls live in the URL (shareState.ts), NOT page-local state, so the
@@ -534,6 +534,59 @@ export function Stats() {
           Search ops &amp; logs
         </h2>
         <SearchBox filters={filters} />
+      </section>
+
+      {/* Quick filters (SOW-0086 A8) — one-click chips that push common
+         filter combinations to the URL. */}
+      <section aria-label="Quick filters" className="space-y-2">
+        <h2 className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          Quick filters
+        </h2>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              setFilters({
+                from: today.getTime() * 1000,
+                status: [],
+              });
+            }}
+          >
+            Today only
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setFilters({
+                status: ['completed', 'running'],
+              });
+            }}
+          >
+            Exclude failures
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setFilters({
+                agents: [],
+                models: [],
+                tools: [],
+                status: [],
+                sources: [],
+                from: undefined,
+                to: undefined,
+                q: undefined,
+              });
+            }}
+          >
+            Reset all
+          </Button>
+        </div>
       </section>
     </section>
   );

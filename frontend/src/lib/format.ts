@@ -20,7 +20,15 @@ export function formatTimestamp(us: number | null | undefined): string {
   if (Number.isNaN(d.getTime())) {
     return '—';
   }
-  return d.toLocaleString();
+  // Consistent short format across the app (SOW-0086 C4). Example: "Jun 19, 14:30".
+  // Uses the operator's local TZ. No seconds — too noisy for table cells.
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 /**

@@ -111,6 +111,25 @@ Same shape as /agents/:name, but filtered to the tool.
 - Toolbar: source filter + severity filter
 - Content: log entries table (source, file, line, severity, message, time)
 
+### `/sessions/:id` — Session Detail (SOW-0074, SOW-0083)
+
+- Breadcrumb above H1: "Sessions / [parent session] / [current id]" with a "← Back to sessions" link.
+- Tabbed layout: Overview / Trace / Topology / Timeline / Logs / Raw Data.
+- H1 shows the agent name (not just "Session detail").
+- The breadcrumb's parent link lets the operator walk up the sub-session tree without using browser back.
+
+### `/failures` — Recent failures (SOW-0079, SOW-0083)
+
+- Rows expand on click to show a 1-line summary (root vs sub-session position, turns/ops/failures counts) plus a "View parent" link for sub-sessions.
+- Second click on the same row collapses the summary.
+- The existing "Open" link still navigates to the full Session Detail (with `e.stopPropagation`).
+
+### ⌘K Command Palette (SOW-0074.1, SOW-0084)
+
+- Route navigation (existing): Sessions / Topology / Stats / etc.
+- Theme switching (existing): Auto / Dark / Light.
+- **Search results (SOW-0084)**: when the query has non-whitespace content, fetches `/api/search` and shows the top 4 ops + top 4 logs above the route list. Each result links to the matching session.
+
 ## Per-page state machine
 
 Every page implements the same 4-state UI:
