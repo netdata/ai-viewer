@@ -15,7 +15,7 @@ import { formatNumber } from '../../lib/format';
 export interface EntitySummaryTile {
   label: string;
   value: number | string | null;
-  format: 'number' | 'cost' | 'percent';
+  format: 'number' | 'cost' | 'percent' | 'text';
   tone?: 'default' | 'failed' | 'success' | undefined;
 }
 
@@ -50,7 +50,9 @@ function Tile({ tile }: { tile: EntitySummaryTile }) {
             ? `${(Number(tile.value) * 100).toFixed(1)}%`
             : tile.format === 'cost'
               ? `$${Number(tile.value).toFixed(2)}`
-              : formatNumber(Number(tile.value))}
+              : tile.format === 'text'
+                ? String(tile.value)
+                : formatNumber(Number(tile.value))}
         </span>
       )}
     </div>

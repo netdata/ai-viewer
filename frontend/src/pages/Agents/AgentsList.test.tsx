@@ -80,10 +80,11 @@ describe('AgentsList', () => {
   it('renders a card per agent, sorted by session count (descending)', () => {
     statsSpy.mockReturnValue({ data: FULL_STATS, isPending: false, isError: false });
     renderPage();
-    const grid = document.querySelector('.grid.grid-cols-1');
-    expect(grid).not.toBeNull();
-    const { getAllByText } = within(grid as HTMLElement);
-    const agentLinks = getAllByText(/^agent-(alpha|beta|gamma)$/);
+    // Use scoped query to avoid ambiguity with the sidebar/topbar text.
+    const main = document.querySelector('section[aria-labelledby="agents-title"]');
+    expect(main).not.toBeNull();
+    const mainWithin: { getAllByText: (s: string | RegExp) => HTMLElement[] } = within(main as HTMLElement);
+    const agentLinks = mainWithin.getAllByText(/^agent-(alpha|beta|gamma)$/);
     // alpha has most sessions → first
     expect(agentLinks[0]).toHaveTextContent('agent-alpha');
     expect(agentLinks[1]).toHaveTextContent('agent-beta');

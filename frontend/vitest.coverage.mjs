@@ -95,6 +95,8 @@ export const COVERAGE_INCLUDE = [
   'src/pages/Agents/**/*.{ts,tsx}',
   'src/pages/Models/**/*.{ts,tsx}',
   'src/pages/Tools/**/*.{ts,tsx}',
+  // /ingest-errors (SOW-0082): implemented (IngestErrors.tsx) and tested.
+  'src/pages/IngestErrors/**/*.{ts,tsx}',
   // Flat (non-dir) component file with a unit test (ComingSoon.test.tsx). Listed
   // by exact path so it is MEASURED and contributes to the global aggregate
   // floor; flat files carry no per-dir floor (they are not under a per-dir root
@@ -209,4 +211,5 @@ export const PER_DIR_GLOBS = [
   'src/pages/Agents/**',
   'src/pages/Models/**',
   'src/pages/Tools/**',
+  'src/pages/IngestErrors/**',
 ];

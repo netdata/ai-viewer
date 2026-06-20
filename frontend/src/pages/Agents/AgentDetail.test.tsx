@@ -1,9 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { TooltipProvider } from '../../components/ui/tooltip';
-import type { SessionListResponse, SessionListItem } from '../../api/types';
-import type { StatsResponse } from '../../api/types';
+import type { SessionListResponse, SessionListItem, StatsResponse } from '../../api/types';
 
 // Mock dependencies: useSessionsInfinite, useStats, useLiveUpdates,
 // useFilters. The AgentDetail page binds the URL agent name into the
@@ -230,7 +229,6 @@ describe('AgentDetail', () => {
 });
 
 // withinScoped is a tiny helper that scopes a query to a container element.
-import { within } from '@testing-library/react';
 function withinScoped(container: HTMLElement, text: string): HTMLElement | null {
   return within(container).queryByText(text);
 }
