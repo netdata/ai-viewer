@@ -104,6 +104,24 @@ export function SessionsList() {
               <StatPill label="Active" value={stats.running} tone="running" />
               <StatPill label="Failed" value={stats.failed} tone="failed" />
               <StatPill label="Completed" value={stats.completed} tone="completed" />
+              <StatPill
+                label="Reliability"
+                value={stats.reliabilityPct === null ? '—' : `${stats.reliabilityPct.toFixed(0)}%`}
+                tone={
+                  stats.reliabilityPct === null
+                    ? undefined
+                    : stats.reliabilityPct >= 90
+                      ? 'completed'
+                      : stats.reliabilityPct >= 70
+                        ? undefined
+                        : 'failed'
+                }
+                title={
+                  stats.reliabilityPct === null
+                    ? 'No completed or failed sessions in this view yet'
+                    : `${stats.completed} completed of ${stats.completed + stats.failed} ended sessions (${stats.reliabilityPct.toFixed(1)}%)`
+                }
+              />
               <StatPill label="Tokens" value={formatNumber(stats.tokensIn + stats.tokensOut)} />
               <StatPill label="Cost" value={formatCost(stats.costUsd)} />
             </div>
@@ -119,11 +137,11 @@ export function SessionsList() {
             aria-label="Session kind filter"
             size="sm"
           >
-            <ToggleGroupItem value="root" aria-label="Primary sessions only">
-              Primary
+            <ToggleGroupItem value="root" aria-label="Roots only — hide sub-agents and forks">
+              Roots only
             </ToggleGroupItem>
-            <ToggleGroupItem value="all" aria-label="All sessions including sub-agents">
-              All
+            <ToggleGroupItem value="all" aria-label="All — show sub-agents and forks too">
+              Sub-agents and forks
             </ToggleGroupItem>
           </ToggleGroup>
 
@@ -523,10 +541,12 @@ function StatPill({
   label,
   value,
   tone,
+  title,
 }: {
   label: string;
   value: string | number;
-  tone?: 'running' | 'completed' | 'failed';
+  tone?: 'running' | 'completed' | 'failed' | undefined;
+  title?: string | undefined;
 }) {
   const toneColor =
     tone === 'running'
@@ -537,7 +557,7 @@ function StatPill({
           ? 'text-status-completed'
           : 'text-foreground';
   return (
-    <div className="flex items-baseline gap-1.5">
+    <div className="flex items-baseline gap-1.5" title={title}>
       <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
@@ -605,6 +625,8 @@ function summarize(items: SessionListItem[]) {
   let running = 0;
   let failed = 0;
   let completed = 0;
+  let abandoned = 0;
+  let interrupted = 0;
   let tokensIn = 0;
   let tokensOut = 0;
   let costUsd = 0;
@@ -612,11 +634,30 @@ function summarize(items: SessionListItem[]) {
     if (s.status === 'running') running++;
     else if (s.status === 'failed') failed++;
     else if (s.status === 'completed') completed++;
+    else if (s.status === 'abandoned') abandoned++;
+    else if (s.status === 'interrupted') interrupted++;
     tokensIn += s.tokens_in;
     tokensOut += s.tokens_out;
     costUsd += s.cost_usd;
   }
-  return { running, failed, completed, tokensIn, tokensOut, costUsd };
+  // Reliability: completed / (completed + failed). Abandoned and interrupted
+  // are NOT counted in the denominator — they reflect operator action, not
+  // agent reliability. Returns null if there are no completed-or-failed
+  // sessions in the current view (avoids 0/0 producing Infinity%).
+  const reliabilityDenom = completed + failed;
+  const reliabilityPct =
+    reliabilityDenom > 0 ? (completed / reliabilityDenom) * 100 : null;
+  return {
+    running,
+    failed,
+    completed,
+    abandoned,
+    interrupted,
+    tokensIn,
+    tokensOut,
+    costUsd,
+    reliabilityPct,
+  };
 }
 
 function sortItems(items: SessionListItem[], key: SortKey, dir: SortDir): SessionListItem[] {

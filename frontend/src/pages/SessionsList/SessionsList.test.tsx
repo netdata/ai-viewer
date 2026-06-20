@@ -282,7 +282,7 @@ describe('SessionsList', () => {
     expect(infiniteSpy.mock.calls.at(-1)?.[1]).toBe('root');
     // SOW-0073: the Show secondary checkbox became a Primary / All
     // ToggleGroup in the page toolbar.
-    await user.click(screen.getByRole('radio', { name: /all sessions including sub-agents/i }));
+    await user.click(screen.getByText('Sub-agents and forks'));
     expect(infiniteSpy.mock.calls.at(-1)?.[1]).toBe('all');
   });
 
@@ -295,7 +295,7 @@ describe('SessionsList', () => {
     expect(screen.getByText(/Live snapshot of every AI coding-agent session/i)).toBeInTheDocument();
   });
 
-  it('renders the stats summary strip (Active/Failed/Completed/Tokens/Cost) when items are present', () => {
+  it('renders the stats summary strip (Active/Failed/Completed/Reliability/Tokens/Cost) when items are present', () => {
     infiniteSpy.mockReturnValue(
       result({
         data: {
@@ -304,6 +304,7 @@ describe('SessionsList', () => {
               makeSession({ id: 'r', status: 'running' }),
               makeSession({ id: 'f', status: 'failed' }),
               makeSession({ id: 'c', status: 'completed' }),
+              makeSession({ id: 'c2', status: 'completed' }),
             ]),
           ],
           pageParams: [''],
@@ -311,22 +312,60 @@ describe('SessionsList', () => {
       }),
     );
     renderPage();
-    // The stats summary strip is rendered only when items.length > 0. Scope
-    // by role: each label is wrapped in a span that is the only element with
-    // its exact text in that context. We use getAllByText and check >= 1.
     expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
+    // 2 completed of (2 completed + 1 failed) ended sessions -> 66.67% reliability.
+    expect(screen.getAllByText('Reliability').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('67%')).toBeInTheDocument();
     expect(screen.getAllByText('Tokens').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Cost').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders reliability as a dash when there are no ended sessions in view', () => {
+    infiniteSpy.mockReturnValue(
+      result({
+        data: {
+          pages: [page([makeSession({ id: 'r', status: 'running' })])],
+          pageParams: [''],
+        },
+      }),
+    );
+    renderPage();
+    expect(screen.getAllByText('Reliability').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+
+  it('colors reliability red when below 70%', () => {
+    infiniteSpy.mockReturnValue(
+      result({
+        data: {
+          pages: [
+            page([
+              makeSession({ id: 'f1', status: 'failed' }),
+              makeSession({ id: 'f2', status: 'failed' }),
+              makeSession({ id: 'f3', status: 'failed' }),
+              makeSession({ id: 'c1', status: 'completed' }),
+            ]),
+          ],
+          pageParams: [''],
+        },
+      }),
+    );
+    renderPage();
+    // 1/4 = 25% reliability
+    const value = screen.getByText('25%');
+    expect(value.className).toContain('text-status-failed');
   });
 
   it('renders the toolbar (Primary/All, Sort, Density, Refresh)', () => {
     infiniteSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
     renderPage();
-    // Primary / All toggle
-    expect(screen.getByRole('radio', { name: /Primary sessions only/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /All sessions including sub-agents/i })).toBeInTheDocument();
+    // Roots only / Sub-agents and forks toggle (SOW-0079 P0.4: the labels
+    // used to be 'Primary'/'All' — renamed to make what they actually do
+    // obvious to a first-time visitor).
+    expect(screen.getByRole('radio', { name: /Roots only/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('radio', { name: /Sub-agents and forks/i }).length).toBeGreaterThanOrEqual(1);
     // Sort direction toggle
     expect(screen.getByRole('radio', { name: /Newest first/i })).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: /Oldest first/i })).toBeInTheDocument();

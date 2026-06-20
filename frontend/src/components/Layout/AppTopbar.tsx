@@ -67,29 +67,31 @@ export function AppTopbar({
 
       <div className="flex-1" />
 
-      {/* Search — opens the command palette with focus on the search field */}
-      <div className="hidden md:block md:w-72">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              onClick={onOpenCommandPalette}
-              className={cn(
-                'group flex h-9 w-full items-center gap-2 rounded-md border border-border bg-card px-3 text-left text-sm text-muted-foreground',
-                'hover:border-border/80 hover:text-foreground',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              )}
-            >
-              <Search className="size-3.5 shrink-0" aria-hidden />
-              <span className="flex-1 truncate">Search sessions, ops, payloads…</span>
-              <kbd className="hidden items-center gap-0.5 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline-flex">
-                <Command className="size-2.5" />K
-              </kbd>
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Open command palette</TooltipContent>
-        </Tooltip>
-      </div>
+      {/* Search — opens the command palette with focus on the search field.
+         On mobile (< sm) we render only an icon button so the trigger is
+         still discoverable; on sm+ the full search field is visible. */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={onOpenCommandPalette}
+            aria-label="Open command palette"
+            className={cn(
+              'group flex h-9 items-center gap-2 rounded-md border border-border bg-card text-left text-sm text-muted-foreground',
+              'hover:border-border/80 hover:text-foreground',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              'w-9 justify-center px-0 sm:w-72 sm:justify-start sm:px-3',
+            )}
+          >
+            <Search className="size-3.5 shrink-0" aria-hidden />
+            <span className="hidden flex-1 truncate sm:inline">Search sessions, ops, payloads…</span>
+            <kbd className="hidden items-center gap-0.5 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline-flex">
+              <Command className="size-2.5" />K
+            </kbd>
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Open command palette</TooltipContent>
+      </Tooltip>
 
       <LiveIndicator status={sseStatus} compact />
 
