@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useFilters, filtersToSubscription } from '../../state/filters';
 import { useSessionsInfinite } from '../../api/sessions';
+import { useHomeSummary, todayMidnightUs } from '../../api/home';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
 import { SessionRowBody } from '../../components/SessionRow';
 import { ErrorState } from '../../components/StatusViews';
@@ -64,12 +65,39 @@ export function SessionsList() {
 
   useLiveUpdates(filtersToSubscription(filters));
 
+  // Home summary card (SOW-0079 P0.1) — uses the existing /api/stats
+  // endpoint with two filter sets, parallelized.
+  const home = useHomeSummary();
+  const homeData = home.data;
+  const todayFrom = homeData?.todayFromUs ?? todayMidnightUs();
+  const reliabilityPct = homeData && homeData.today && homeData.today.sessionCount > 0
+    ? Math.round(
+        ((homeData.today.sessionCount - homeData.today.failures) / homeData.today.sessionCount) * 100,
+      )
+    : null;
+
   const items = data?.pages.flatMap((p) => p.items) ?? [];
   const sorted = sortItems(items, sortKey, sortDir);
   const stats = summarize(items);
 
   return (
     <div className="flex min-h-full flex-col">
+      {/* Home summary card (SOW-0079 P0.1). 5 tiles, each clickable to a
+         filtered view. Loads in parallel with the sessions list; shows
+         skeleton placeholders while pending. Answers scenario #1
+         ('What\'s happening right now?') in 5 seconds. */}
+      <div className="px-6 pt-5">
+        <HomeSummaryCard
+          isLoading={home.isPending}
+          activeCount={homeData?.running?.sessionCount ?? null}
+          todayCost={homeData?.today?.costUsd ?? null}
+          todayFailures={homeData?.today?.failures ?? null}
+          todaySessions={homeData?.today?.sessionCount ?? null}
+          reliabilityPct={reliabilityPct}
+          todayFrom={todayFrom}
+        />
+      </div>
+
       {/* Page header */}
       <div className="border-b border-border bg-background px-6 py-5">
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -87,7 +115,7 @@ export function SessionsList() {
             </p>
           </div>
 
-          {/* Stats summary */}
+          {/* Stats summary (visible page) */}
           {items.length > 0 ? (
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
               <StatPill label="Active" value={stats.running} tone="running" />
@@ -669,3 +697,146 @@ function kindLabel(kind: SessionListItem['kind']): string | null {
 export const _testHelpers = { sortItems, summarize, sourceLabel, sourceColorVar, kindLabel };
 // Use the body export so existing tests that import SessionRowBody keep working.
 export { SessionRowBody };
+
+/* ------------------------------------------------------------------
+ * HomeSummaryCard — SOW-0079 P0.1.
+ * 5 tiles, each clickable, each answering a "what's happening right now"
+ * question. Loads as skeleton placeholders while the home summary query
+ * is pending. Visual + a11y consistent with the rest of the SOW-0073
+ * design system.
+ * ------------------------------------------------------------------ */
+function HomeSummaryCard({
+  isLoading,
+  activeCount,
+  todayCost,
+  todayFailures,
+  todaySessions,
+  reliabilityPct,
+  todayFrom,
+}: {
+  isLoading: boolean;
+  activeCount: number | null;
+  todayCost: number | null;
+  todayFailures: number | null;
+  todaySessions: number | null;
+  reliabilityPct: number | null;
+  todayFrom: number;
+}) {
+  return (
+    <div
+      className={cn(
+        'grid grid-cols-2 gap-3 rounded-lg border border-border bg-card p-4 sm:grid-cols-3 lg:grid-cols-5',
+      )}
+      aria-label="Today’s overview"
+    >
+      <HomeTile
+        label="Active"
+        sublabel="running now"
+        value={activeCount}
+        format={formatNumber}
+        isLoading={isLoading}
+        tone="running"
+        href="/?status=running"
+      />
+      <HomeTile
+        label="Today’s spend"
+        sublabel="since local midnight"
+        value={todayCost}
+        format={formatCost}
+        isLoading={isLoading}
+        tone="foreground"
+        href={`/stats?from=${todayFrom}`}
+      />
+      <HomeTile
+        label="Failed today"
+        sublabel="sessions"
+        value={todayFailures}
+        format={formatNumber}
+        isLoading={isLoading}
+        tone={todayFailures !== null && todayFailures > 0 ? 'failed' : 'foreground'}
+        href={`/failures?from=${todayFrom}`}
+      />
+      <HomeTile
+        label="Sessions today"
+        sublabel="all sources"
+        value={todaySessions}
+        format={formatNumber}
+        isLoading={isLoading}
+        tone="foreground"
+      />
+      <HomeTile
+        label="Reliability"
+        sublabel="success rate"
+        value={reliabilityPct}
+        format={pctFormatter}
+        isLoading={isLoading}
+        tone={reliabilityPct !== null && reliabilityPct < 90 ? 'failed' : 'completed'}
+        href={`/stats?from=${todayFrom}`}
+      />
+    </div>
+  );
+}
+
+function HomeTile({
+  label,
+  sublabel,
+  value,
+  format,
+  isLoading,
+  tone,
+  href,
+}: {
+  label: string;
+  sublabel: string;
+  value: number | null;
+  format: (n: number) => string;
+  isLoading: boolean;
+  tone: 'foreground' | 'running' | 'failed' | 'completed';
+  href?: string;
+}) {
+  const toneClass =
+    tone === 'running'
+      ? 'text-status-running'
+      : tone === 'failed'
+        ? 'text-status-failed'
+        : tone === 'completed'
+          ? 'text-status-completed'
+          : 'text-foreground';
+
+  const body = (
+    <div
+      className={cn(
+        'flex flex-col gap-1 rounded-md px-2 py-1.5',
+        href !== undefined && 'transition-colors hover:bg-accent/60 focus-visible:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+      )}
+    >
+      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className="font-mono text-lg font-semibold tabular-nums">
+        {isLoading || value === null ? (
+          <span aria-hidden className="inline-block h-5 w-16 rounded bg-muted" />
+        ) : (
+          <span className={toneClass}>{format(value)}</span>
+        )}
+      </div>
+      <div className="text-[10px] text-muted-foreground">{sublabel}</div>
+    </div>
+  );
+
+  if (href === undefined) {
+    return <div className="block">{body}</div>;
+  }
+  return (
+    <Link
+      to={href}
+      className="block rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {body}
+    </Link>
+  );
+}
+
+function pctFormatter(n: number): string {
+  return `${n.toFixed(0)}%`;
+}

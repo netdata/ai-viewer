@@ -23,6 +23,15 @@ vi.mock('../../state/useLiveUpdates', () => ({
   useLiveUpdates: (...args: unknown[]) => liveSpy(...args) as unknown,
 }));
 
+// useHomeSummary is also mocked: the home card lives above the table and
+// calls /api/stats twice; the SessionsList tests don't need its real data
+// and don't want the QueryClientProvider requirement to leak into them.
+const homeSpy = vi.fn();
+vi.mock('../../api/home', () => ({
+  useHomeSummary: (...args: unknown[]) => homeSpy(...args) as unknown,
+  todayMidnightUs: () => 0,
+}));
+
 import { SessionsList } from './SessionsList';
 
 /** result builds a useSessionsInfinite-shaped return with sensible defaults. */
@@ -90,6 +99,9 @@ function renderPage() {
 beforeEach(() => {
   infiniteSpy.mockReset();
   liveSpy.mockReset();
+  // Default home summary: the loading shape (no data, isPending). Individual
+  // tests that need a populated home can call homeSpy.mockReturnValue({...}).
+  homeSpy.mockReturnValue({ data: undefined, isPending: true } as never);
 });
 
 afterEach(() => {
