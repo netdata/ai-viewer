@@ -13,6 +13,8 @@ import {
   Monitor,
   Eye,
   CornerDownLeft,
+  Search,
+  FileText,
 } from 'lucide-react';
 import {
   Dialog,
@@ -21,6 +23,8 @@ import {
   DialogDescription,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { Skeleton } from '../ui/skeleton';
+import { useSearch } from '../../api/stats';
 import { cn } from '../../lib/utils';
 import { THEME_PREFERENCE_STORAGE_NAME } from '../../state/theme';
 
@@ -145,6 +149,17 @@ export function CommandPalette({
     );
   }, [commands, query]);
 
+  // Live search results (SOW-0084 D4): when the query has non-whitespace
+  // content, fetch ranked matches from /api/search and show them above the
+  // command list. The search endpoint is disabled until q has content.
+  const trimmedQuery = query.trim();
+  const search = useSearch(
+    // Empty filter object — the palette is global; filters would constrain.
+    { agents: [], models: [], tools: [], status: [], sources: [] },
+    trimmedQuery,
+    { limit: 8 },
+  );
+
   // Keep the active row in view as the user arrows through.
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -226,6 +241,78 @@ export function CommandPalette({
           aria-label="Commands"
           className="max-h-[60vh] overflow-y-auto p-2"
         >
+          {/* SOW-0084 D4: live search results, shown above commands when the
+             query has non-whitespace content. Each result links to the
+             matching session. */}
+          {trimmedQuery !== '' ? (
+            <div className="mb-2">
+              <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                <Search className="mr-1 inline size-3" aria-hidden /> Search results
+              </p>
+              {search.isPending ? (
+                <div className="space-y-2 px-2 py-1">
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-2/3" />
+                  <Skeleton className="h-4 w-1/2" />
+                </div>
+              ) : search.isError ? (
+                <p className="px-2 py-2 text-xs text-muted-foreground">
+                  Search failed.
+                </p>
+              ) : search.data.ops.length === 0 && search.data.logs.length === 0 ? (
+                <p className="px-2 py-2 text-xs text-muted-foreground">
+                  No ops or log entries match.
+                </p>
+              ) : (
+                <ul role="none">
+                  {[...search.data.ops.slice(0, 4).map((o) => ({
+                    key: 'op:' + o.op_id,
+                    sessionId: o.session_id,
+                    kind: o.kind,
+                    name: o.name,
+                    snippet: o.snippet,
+                  })), ...search.data.logs.slice(0, 4).map((l) => ({
+                    key: 'log:' + l.log_id,
+                    sessionId: l.session_id,
+                    kind: l.severity,
+                    name: '',
+                    snippet: l.snippet,
+                  }))].map((r) => {
+                    const snippet = r.snippet.trim();
+                    return (
+                      <li key={r.key} role="presentation">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onOpenChange(false);
+                            void navigate(`/sessions/${encodeURIComponent(r.sessionId)}`);
+                          }}
+                          className="flex w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-muted"
+                          aria-label={`Open session ${r.sessionId}`}
+                        >
+                          <FileText className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                          <span className="min-w-0 flex-1">
+                            <span className="block font-mono text-xs text-foreground">
+                              {r.sessionId}
+                              {r.kind ? (
+                                <span className="ml-2 text-muted-foreground">{r.kind}</span>
+                              ) : null}
+                            </span>
+                            {snippet ? (
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {snippet}
+                              </span>
+                            ) : null}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          ) : null}
+
           {filtered.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-muted-foreground">
               No results.
