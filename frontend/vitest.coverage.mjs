@@ -74,6 +74,10 @@ export const COVERAGE_INCLUDE = [
   'src/api/logs.ts',
   'src/api/home.ts',
   'src/components/FilterBar/**/*.{ts,tsx}',
+  // Reusable per-entity card grid + summary strip primitives shared by
+  // /agents, /models, /tools (SOW-0081). Pure presentational.
+  'src/components/EntityList/**/*.{ts,tsx}',
+  'src/components/EntitySummaryStrip/**/*.{ts,tsx}',
   'src/components/SessionRow/**/*.{ts,tsx}',
   'src/components/ThemeToggle/**/*.{ts,tsx}',
   'src/components/Tabs/**/*.{ts,tsx}',
@@ -86,6 +90,11 @@ export const COVERAGE_INCLUDE = [
   // (Failures.test.tsx). Listed here AND in PER_DIR_GLOBS so it is both
   // measured and gated per-dir.
   'src/pages/Failures/**/*.{ts,tsx}',
+  // /agents, /models, /tools + per-entity detail pages (SOW-0081).
+  // Listed AND gated per-dir.
+  'src/pages/Agents/**/*.{ts,tsx}',
+  'src/pages/Models/**/*.{ts,tsx}',
+  'src/pages/Tools/**/*.{ts,tsx}',
   // Flat (non-dir) component file with a unit test (ComingSoon.test.tsx). Listed
   // by exact path so it is MEASURED and contributes to the global aggregate
   // floor; flat files carry no per-dir floor (they are not under a per-dir root
@@ -177,6 +186,8 @@ export const COVERAGE_EXCLUDED = [
  *  COVERAGE_INCLUDE in lockstep (see the LOCKSTEP INVARIANT above). */
 export const PER_DIR_GLOBS = [
   'src/components/FilterBar/**',
+  'src/components/EntityList/**',
+  'src/components/EntitySummaryStrip/**',
   // src/pages/SessionsList — measured via 'src/pages/SessionsList/**/*.{ts,tsx}'
   // above (HomeSummaryCard.tsx is the only file in this dir after
   // SessionsList.tsx moved to COVERAGE_EXCLUDED; the per-dir floor below
@@ -195,4 +206,7 @@ export const PER_DIR_GLOBS = [
   'src/pages/Stats/**',
   'src/pages/Topology/**',
   'src/pages/Failures/**',
+  'src/pages/Agents/**',
+  'src/pages/Models/**',
+  'src/pages/Tools/**',
 ];
