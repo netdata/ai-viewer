@@ -55,6 +55,25 @@ Object.defineProperty(globalThis, 'localStorage', {
   value: memoryStorage,
 });
 
+// Radix UI primitives (Tooltip, Popover, DropdownMenu, etc.) call ResizeObserver
+// during mount. jsdom does not implement it. Install a minimal no-op shim so
+// tests that render any Radix-using component don't crash.
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  class ResizeObserverShim {
+    observe(): void { /* no-op shim for jsdom */ }
+    unobserve(): void { /* no-op shim for jsdom */ }
+    disconnect(): void { /* no-op shim for jsdom */ }
+  }
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    configurable: true,
+    value: ResizeObserverShim,
+  });
+  Object.defineProperty(window, 'ResizeObserver', {
+    configurable: true,
+    value: ResizeObserverShim,
+  });
+}
+
 // Global test setup: jest-dom matchers + automatic DOM cleanup between tests so
 // each render starts from a clean document.
 afterEach(() => {

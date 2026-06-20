@@ -7,6 +7,7 @@ import {
   Bot,
   Brain,
   Wrench,
+  TriangleAlert,
   BookOpen,
   Settings,
   Eye,
@@ -29,6 +30,7 @@ type NavItem = {
 
 const PRIMARY_NAV: readonly NavItem[] = [
   { to: '/', label: 'Sessions', Icon: LayoutGrid, description: 'All sessions, live + history' },
+  { to: '/failures', label: 'Recent failures', Icon: TriangleAlert, description: 'Failed, abandoned, interrupted sessions' },
   { to: '/topology', label: 'Topology', Icon: Network, description: 'Actor + tool call graph' },
   { to: '/stats', label: 'Statistics', Icon: BarChart3, description: 'Cost, tokens, failures over time' },
   { to: '/sources', label: 'Sources', Icon: Database, description: 'Configured source paths and health' },
@@ -44,6 +46,7 @@ const SECONDARY_NAV: readonly NavItem[] = [
 // this; the sidebar uses it to mark the active item unambiguously.
 export function getPageTitle(pathname: string): string {
   if (pathname === '/') return 'Sessions';
+  if (pathname.startsWith('/failures')) return 'Recent failures';
   if (pathname.startsWith('/topology')) return 'Topology';
   if (pathname.startsWith('/stats')) return 'Statistics';
   if (pathname.startsWith('/sources')) return 'Sources';

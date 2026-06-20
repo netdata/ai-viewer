@@ -9,7 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // read, so the gate Vitest enforces and the verifier that checks it for vacuous
 // globs / missing floors cannot diverge (SOW-0012 review F3). See
 // vitest.coverage.mjs for the lockstep invariant and the full rationale.
-import { COVERAGE_INCLUDE, PER_DIR_GLOBS, PER_DIR_LINES } from './vitest.coverage.mjs';
+import { COVERAGE_INCLUDE, COVERAGE_EXCLUDED, PER_DIR_GLOBS, PER_DIR_LINES } from './vitest.coverage.mjs';
 
 // Vitest config kept separate from vite.config.ts so the production build
 // never pulls in test-only globals/jsdom. Coverage is scoped to the source
@@ -59,6 +59,11 @@ export default defineConfig({
       // Measured set — shared with the config verifier (vitest.coverage.mjs).
       // `include` wants a mutable array; the shared constant is readonly, so copy.
       include: [...COVERAGE_INCLUDE],
+      // Intentional exclusions (each entry in the shared COVERAGE_EXCLUDED list
+      // has a per-entry rationale in vitest.coverage.mjs). The config verifier
+      // requires the same list to enforce disk-completeness (so a new source
+      // file cannot silently escape both coverage AND the verifier).
+      exclude: [...COVERAGE_EXCLUDED],
       thresholds: {
         // Global floor — applies to EVERY included file in aggregate (the
         // pre-existing project-wide gate; unchanged).

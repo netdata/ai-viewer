@@ -285,4 +285,88 @@ describe('SessionsList', () => {
     await user.click(screen.getByRole('radio', { name: /all sessions including sub-agents/i }));
     expect(infiniteSpy.mock.calls.at(-1)?.[1]).toBe('all');
   });
+
+  it('renders the page header (title + subtitle) when not pending', () => {
+    infiniteSpy.mockReturnValue(
+      result({ data: { pages: [page([makeSession({ id: 's', agent_name: 'one' })])], pageParams: [''] } }),
+    );
+    renderPage();
+    expect(screen.getByRole('heading', { level: 1, name: /Sessions/i })).toBeInTheDocument();
+    expect(screen.getByText(/Live snapshot of every AI coding-agent session/i)).toBeInTheDocument();
+  });
+
+  it('renders the stats summary strip (Active/Failed/Completed/Tokens/Cost) when items are present', () => {
+    infiniteSpy.mockReturnValue(
+      result({
+        data: {
+          pages: [
+            page([
+              makeSession({ id: 'r', status: 'running' }),
+              makeSession({ id: 'f', status: 'failed' }),
+              makeSession({ id: 'c', status: 'completed' }),
+            ]),
+          ],
+          pageParams: [''],
+        },
+      }),
+    );
+    renderPage();
+    // The stats summary strip is rendered only when items.length > 0. Scope
+    // by role: each label is wrapped in a span that is the only element with
+    // its exact text in that context. We use getAllByText and check >= 1.
+    expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Tokens').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Cost').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders the toolbar (Primary/All, Sort, Density, Refresh)', () => {
+    infiniteSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
+    renderPage();
+    // Primary / All toggle
+    expect(screen.getByRole('radio', { name: /Primary sessions only/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /All sessions including sub-agents/i })).toBeInTheDocument();
+    // Sort direction toggle
+    expect(screen.getByRole('radio', { name: /Newest first/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Oldest first/i })).toBeInTheDocument();
+    // Density toggle
+    expect(screen.getByRole('radio', { name: /Comfortable row density/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Compact row density/i })).toBeInTheDocument();
+    // Refresh button
+    expect(screen.getByRole('button', { name: /Refresh/i })).toBeInTheDocument();
+  });
+
+  it('the "Newest first" sort toggle is the default and clicking "Oldest first" flips it', async () => {
+    const user = userEvent.setup();
+    infiniteSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
+    renderPage();
+    expect(screen.getByRole('radio', { name: /Newest first/i })).toBeChecked();
+    await user.click(screen.getByRole('radio', { name: /Oldest first/i }));
+    expect(screen.getByRole('radio', { name: /Oldest first/i })).toBeChecked();
+  });
+
+  it('the Compact density toggle is clickable', async () => {
+    const user = userEvent.setup();
+    infiniteSpy.mockReturnValue(result({ data: { pages: [page([])], pageParams: [''] } }));
+    renderPage();
+    const compact = screen.getByRole('radio', { name: /Compact row density/i });
+    expect(compact).not.toBeChecked();
+    await user.click(compact);
+    expect(compact).toBeChecked();
+  });
+
+  it('the Refresh button triggers a refetch', async () => {
+    const user = userEvent.setup();
+    const refetchSpy = vi.fn();
+    infiniteSpy.mockReturnValue(
+      result({
+        data: { pages: [page([])], pageParams: [''] },
+        refetch: refetchSpy,
+      }),
+    );
+    renderPage();
+    await user.click(screen.getByRole('button', { name: /Refresh/i }));
+    expect(refetchSpy).toHaveBeenCalledTimes(1);
+  });
 });

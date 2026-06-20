@@ -5,6 +5,7 @@ import { SessionDetail } from './pages/SessionDetail';
 import { Sources } from './pages/Sources';
 import { Topology } from './pages/Topology';
 import { Stats } from './pages/Stats';
+import { Failures } from './pages/Failures';
 import { NotFound } from './pages/NotFound';
 
 // Route table. Every route nests under Layout (header + global FilterBar +
@@ -20,6 +21,7 @@ export function App() {
         <Route path="sources" element={<Sources />} />
         <Route path="topology" element={<Topology />} />
         <Route path="stats" element={<Stats />} />
+        <Route path="failures" element={<Failures />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

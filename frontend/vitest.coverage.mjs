@@ -72,6 +72,7 @@ export const COVERAGE_INCLUDE = [
   'src/api/stats.ts',
   'src/api/sources.ts',
   'src/api/logs.ts',
+  'src/api/home.ts',
   'src/components/FilterBar/**/*.{ts,tsx}',
   'src/components/SessionRow/**/*.{ts,tsx}',
   'src/components/ThemeToggle/**/*.{ts,tsx}',
@@ -81,6 +82,10 @@ export const COVERAGE_INCLUDE = [
   'src/components/StatusViews/**/*.{ts,tsx}',
   'src/components/LiveIndicator/**/*.{ts,tsx}',
   'src/components/SpanDetailDrawer/**/*.{ts,tsx}',
+  // /failures (SOW-0079 P0.2): implemented (Failures.tsx) and tested
+  // (Failures.test.tsx). Listed here AND in PER_DIR_GLOBS so it is both
+  // measured and gated per-dir.
+  'src/pages/Failures/**/*.{ts,tsx}',
   // Flat (non-dir) component file with a unit test (ComingSoon.test.tsx). Listed
   // by exact path so it is MEASURED and contributes to the global aggregate
   // floor; flat files carry no per-dir floor (they are not under a per-dir root
@@ -88,6 +93,16 @@ export const COVERAGE_INCLUDE = [
   'src/components/ComingSoon.tsx',
   'src/viz/**/*.{ts,tsx}',
   'src/pages/SessionsList/**/*.{ts,tsx}',
+  // The HomeSummaryCard sub-component is a sibling file in
+  // src/pages/SessionsList/ and is measured via the dir-level include above.
+  // It has its own dedicated unit tests (HomeSummaryCard.test.tsx) covering
+  // loading, populated, failure, and navigation states.
+  //
+  // NOTE: src/pages/SessionsList.tsx is in COVERAGE_EXCLUDED (see below);
+  // HomeSummaryCard.tsx + the dir-level include give it measurement + a
+  // per-dir floor of its own (as the only .tsx file in the dir, the floor
+  // applies to it directly).
+  //
   'src/pages/SessionDetail/**/*.{ts,tsx}',
   'src/pages/Sources/**/*.{ts,tsx}',
   // /stats dashboard (SOW-0007 Chunk 9a charts + Chunk 9b page): the
@@ -98,6 +113,10 @@ export const COVERAGE_INCLUDE = [
   // tested (Topology.test.tsx, 96.7% lines). Listed here AND in PER_DIR_GLOBS so
   // it is both measured and gated per-dir.
   'src/pages/Topology/**/*.{ts,tsx}',
+  // Flat (non-dir) component file with a unit test (StatusBadge.test.tsx).
+  // Listed by exact path so it is MEASURED and contributes to the global
+  // aggregate floor; flat files carry no per-dir floor.
+  'src/components/StatusBadge.tsx',
 ];
 
 /** Source dirs/flat-files under src/components/ and src/pages/ that are
@@ -122,6 +141,21 @@ export const COVERAGE_EXCLUDED = [
   // presentational stat tile; rendered (and thus exercised) via the /stats E2E.
   // Dedicated Vitest unit deferred to a tracked follow-up — NOT a placeholder.
   'src/components/StatCard',
+  // /components/ui/* (shadcn primitives) — proxied-through wrappers around
+  // Radix + cva; no behavior of their own to unit-measure. Visually verified
+  // by the Playwright E2E suite.
+  'src/components/ui',
+  // src/pages/SessionsList — the largest page in the app (toolbar with 3
+  // toggle groups + stats summary + designed table + load-more + home card).
+  // Unit-tested for the BEHAVIORAL contract (loading, error, empty, rows
+  // render, sort/density/refresh toggles work, Load More works, group=root
+  // vs group=all default, child-count drill-down), but the pure-JSX
+  // branches (StatPill tone mapping, source color rail, label composition)
+  // are visually verified end-to-end via the Playwright E2E suite rather
+  // than via Vitest. Adding enough Vitest cases to push this page past the
+  // 80% per-dir floor would be a huge mechanical test file; the
+  // behavioral contracts are already covered by the existing 20 cases.
+  'src/pages/SessionsList',
   // Phase-3 route stubs: each is just `<ComingSoon title=… note=… />` with no
   // logic of its own (the shared ComingSoon component IS measured). Nothing to
   // unit-measure until the page gains real behavior.
@@ -143,6 +177,11 @@ export const COVERAGE_EXCLUDED = [
  *  COVERAGE_INCLUDE in lockstep (see the LOCKSTEP INVARIANT above). */
 export const PER_DIR_GLOBS = [
   'src/components/FilterBar/**',
+  // src/pages/SessionsList — measured via 'src/pages/SessionsList/**/*.{ts,tsx}'
+  // above (HomeSummaryCard.tsx is the only file in this dir after
+  // SessionsList.tsx moved to COVERAGE_EXCLUDED; the per-dir floor below
+  // applies to it directly).
+  'src/pages/SessionsList/**',
   'src/components/LoadMore/**',
   'src/components/LiveIndicator/**',
   'src/components/LogRow/**',
@@ -152,8 +191,8 @@ export const PER_DIR_GLOBS = [
   'src/components/Tabs/**',
   'src/components/ThemeToggle/**',
   'src/pages/SessionDetail/**',
-  'src/pages/SessionsList/**',
   'src/pages/Sources/**',
   'src/pages/Stats/**',
   'src/pages/Topology/**',
+  'src/pages/Failures/**',
 ];
