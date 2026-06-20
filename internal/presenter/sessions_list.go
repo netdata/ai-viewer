@@ -23,6 +23,7 @@ type sessionListItem struct {
 	ErrorClass        string  `json:"error_class"`
 	StartTS           int64   `json:"start_ts"`
 	EndTS             *int64  `json:"end_ts"`
+	LastActivityTS    *int64  `json:"last_activity_ts"`
 	TokensIn          int64   `json:"tokens_in"`
 	TokensOut         int64   `json:"tokens_out"`
 	CostUSD           float64 `json:"cost_usd"`
@@ -77,7 +78,8 @@ func buildSessionListQuery(f sessionFilter) (string, []any) {
 SELECT
     s.id, s.native_id, s.root_session_id, s.parent_session_id, s.source_id,
     s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''), s.status,
-    s.start_ts, s.end_ts, s.tokens_in, s.tokens_out, s.cost_usd,
+    s.start_ts, s.end_ts, s.last_activity_ts,
+    s.tokens_in, s.tokens_out, s.cost_usd,
     s.turn_count, s.op_count, s.failure_count,
     IFNULL(s.error_class, '') AS error_class,
     (SELECT COUNT(*) FROM sessions c WHERE c.parent_session_id = s.id) AS child_session_count
@@ -139,14 +141,15 @@ func (p *Presenter) querySessions(ctx context.Context, f sessionFilter) ([]sessi
 // end-timestamp columns onto the pointer fields of sessionListItem.
 func scanSessionListItem(rows *sql.Rows) (sessionListItem, error) {
 	var (
-		it     sessionListItem
-		parent sql.NullString
-		endTS  sql.NullInt64
+		it        sessionListItem
+		parent    sql.NullString
+		endTS     sql.NullInt64
+		lastActTS sql.NullInt64
 	)
 	if err := rows.Scan(
 		&it.ID, &it.NativeID, &it.RootSessionID, &parent, &it.SourceID,
 		&it.Kind, &it.AgentName, &it.Model, &it.Status,
-		&it.StartTS, &endTS, &it.TokensIn, &it.TokensOut, &it.CostUSD,
+		&it.StartTS, &endTS, &lastActTS, &it.TokensIn, &it.TokensOut, &it.CostUSD,
 		&it.TurnCount, &it.OpCount, &it.FailureCount, &it.ErrorClass, &it.ChildSessionCount,
 	); err != nil {
 		return sessionListItem{}, err
@@ -158,6 +161,10 @@ func scanSessionListItem(rows *sql.Rows) (sessionListItem, error) {
 	if endTS.Valid {
 		v := endTS.Int64
 		it.EndTS = &v
+	}
+	if lastActTS.Valid {
+		v := lastActTS.Int64
+		it.LastActivityTS = &v
 	}
 	return it, nil
 }

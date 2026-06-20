@@ -391,7 +391,27 @@ export function Stats() {
                   else if (topDimension === 'tool') patch.tools = [key];
                   // cwd is not a /api/sessions filter — for cwd the click is a no-op.
                   setFilters(patch);
-                  void navigate('/sessions');
+                  // Navigate to /sessions WITH the current filters in the
+                  // URL so the Sessions page opens already filtered.
+                  // We read searchParams (from the closure) AFTER
+                  // setFilters commits — but setFilters is async via the
+                  // router, so the closure's searchParams may be stale.
+                  // To avoid the staleness, we compute the merged params
+                  // by hand here (a copy of the FilterPatch merge).
+                  const next = new URLSearchParams(searchParams);
+                  if (patch.agents !== undefined) {
+                    if (patch.agents.length === 0) next.delete('agents');
+                    else next.set('agents', patch.agents.join(','));
+                  }
+                  if (patch.models !== undefined) {
+                    if (patch.models.length === 0) next.delete('models');
+                    else next.set('models', patch.models.join(','));
+                  }
+                  if (patch.tools !== undefined) {
+                    if (patch.tools.length === 0) next.delete('tools');
+                    else next.set('tools', patch.tools.join(','));
+                  }
+                  void navigate({ pathname: '/sessions', search: next.toString() });
                 }
               }
             />

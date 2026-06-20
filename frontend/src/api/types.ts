@@ -82,6 +82,10 @@ export interface SessionListItem {
   error_class?: string;
   start_ts: number;
   end_ts: number | null;
+  /** UNIX µs of the most recent op the session produced. SOW-0087 chunk 5
+   *  (A10): used to flag "stale running" sessions that haven't produced an
+   *  op in a while. Optional — older DB rows may lack the column. */
+  last_activity_ts?: number | null;
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
@@ -113,6 +117,8 @@ export interface SessionDetail {
   error_class: string | null;
   start_ts: number;
   end_ts: number | null;
+  /** UNIX µs of the most recent op the session produced. SOW-0087 chunk 5. */
+  last_activity_ts?: number | null;
   tokens_in: number;
   tokens_out: number;
   /** Cached input tokens READ (cache-read rate); separate from tokens_in (fresh). */

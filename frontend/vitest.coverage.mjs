@@ -82,6 +82,8 @@ export const COVERAGE_INCLUDE = [
   'src/components/Sparkline/**/*.{ts,tsx}',
   // Heatmap grid primitive (SOW-0087 chunk 2 — /stats heatmap).
   'src/components/Heatmap/**/*.{ts,tsx}',
+  // Stale-badge primitive (SOW-0087 chunk 5 — running-session staleness).
+  'src/components/StaleBadge/**/*.{ts,tsx}',
   'src/components/SessionRow/**/*.{ts,tsx}',
   'src/components/ThemeToggle/**/*.{ts,tsx}',
   'src/components/Tabs/**/*.{ts,tsx}',
@@ -196,6 +198,7 @@ export const PER_DIR_GLOBS = [
   'src/components/EntitySummaryStrip/**',
   'src/components/Sparkline/**',
   'src/components/Heatmap/**',
+  'src/components/StaleBadge/**',
   // src/pages/SessionsList — measured via 'src/pages/SessionsList/**/*.{ts,tsx}'
   // above (HomeSummaryCard.tsx is the only file in this dir after
   // SessionsList.tsx moved to COVERAGE_EXCLUDED; the per-dir floor below

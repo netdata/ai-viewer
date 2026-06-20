@@ -25,6 +25,7 @@ type sessionDetail struct {
 	ErrorClass        *string `json:"error_class"`
 	StartTS           int64   `json:"start_ts"`
 	EndTS             *int64  `json:"end_ts"`
+	LastActivityTS    *int64  `json:"last_activity_ts"`
 	TokensIn          int64   `json:"tokens_in"`
 	TokensOut         int64   `json:"tokens_out"`
 	TokensCacheRead   int64   `json:"tokens_cache_read"`
@@ -179,23 +180,25 @@ func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string) (s
 // the id is unknown so the handler can map it to 404.
 func (p *Presenter) loadSession(ctx context.Context, id string) (sessionDetail, error) {
 	var (
-		s        sessionDetail
-		parent   sql.NullString
-		errClass sql.NullString
-		endTS    sql.NullInt64
+		s         sessionDetail
+		parent    sql.NullString
+		errClass  sql.NullString
+		endTS     sql.NullInt64
+		lastActTS sql.NullInt64
 	)
 	err := p.db.QueryRowContext(ctx, `
 SELECT
     id, native_id, root_session_id, parent_session_id, source_id, kind,
     IFNULL(agent_name, ''), IFNULL(model, ''), IFNULL(provider, ''),
-    status, error_class, start_ts, end_ts, tokens_in, tokens_out,
+    status, error_class, start_ts, end_ts, last_activity_ts,
+    tokens_in, tokens_out,
     tokens_cache_read, tokens_cache_write, cost_usd,
     turn_count, op_count, failure_count,
     (SELECT COUNT(*) FROM sessions c WHERE c.parent_session_id = sessions.id)
 FROM sessions WHERE id = ?`, id).Scan(
 		&s.ID, &s.NativeID, &s.RootSessionID, &parent, &s.SourceID, &s.Kind,
 		&s.AgentName, &s.Model, &s.Provider, &s.Status, &errClass,
-		&s.StartTS, &endTS, &s.TokensIn, &s.TokensOut,
+		&s.StartTS, &endTS, &lastActTS, &s.TokensIn, &s.TokensOut,
 		&s.TokensCacheRead, &s.TokensCacheWrite, &s.CostUSD,
 		&s.TurnCount, &s.OpCount, &s.FailureCount, &s.ChildSessionCount,
 	)
@@ -213,6 +216,10 @@ FROM sessions WHERE id = ?`, id).Scan(
 	if endTS.Valid {
 		v := endTS.Int64
 		s.EndTS = &v
+	}
+	if lastActTS.Valid {
+		v := lastActTS.Int64
+		s.LastActivityTS = &v
 	}
 	return s, nil
 }

@@ -630,6 +630,77 @@ describe('Stats — shareable URL + copy link', () => {
     });
   });
 
+  // The onBarClick handler has 3 dimension branches (agent / model-or-provider
+  // / tool). The base test covers agent; this one covers model so the
+  // coverage gate doesn't drop.
+  it('clicking a model bar pushes ?models=<key>', async () => {
+    mountStates({
+      agg: { data: aggregate() },
+      top: {
+        data: {
+          dimension: 'model',
+          metric: 'cost',
+          items: [{ key: 'gpt-4o', value: 100 }],
+        },
+      },
+      search: { data: searchResp() },
+    });
+    const sink: ParamsSink = { params: new URLSearchParams() };
+    render(
+      <TooltipProvider delayDuration={0}>
+        <MemoryRouter initialEntries={['/stats']}>
+          <Stats />
+          <LocationProbe onParams={(p) => (sink.params = p)} />
+        </MemoryRouter>
+      </TooltipProvider>,
+    );
+    const bar = document.querySelector('[data-bar="gpt-4o"]') as SVGRectElement | null;
+    expect(bar).not.toBeNull();
+    fireEvent.click(bar!);
+    await waitFor(() => {
+      expect(sink.params.get('models')).toBe('gpt-4o');
+    });
+  });
+
+  // Same coverage gate — exercises the tool branch.
+  it('clicking a tool bar pushes ?tools=<key>', async () => {
+    mountStates({
+      agg: { data: aggregate() },
+      top: {
+        data: {
+          dimension: 'tool',
+          metric: 'cost',
+          items: [{ key: 'filesystem::read', value: 100 }],
+        },
+      },
+      search: { data: searchResp() },
+    });
+    const sink: ParamsSink = { params: new URLSearchParams() };
+    render(
+      <TooltipProvider delayDuration={0}>
+        <MemoryRouter initialEntries={['/stats']}>
+          <Stats />
+          <LocationProbe onParams={(p) => (sink.params = p)} />
+        </MemoryRouter>
+      </TooltipProvider>,
+    );
+    // Default topDimension is 'model' — switch to 'tool' so the
+    // onBarClick closure uses the tool branch.
+    fireEvent.change(screen.getByLabelText(/breakdown dimension/i), {
+      target: { value: 'tool' },
+    });
+    await waitFor(() => {
+      const bar = document.querySelector('[data-bar="filesystem::read"]') as SVGRectElement | null;
+      expect(bar).not.toBeNull();
+      fireEvent.click(bar!);
+    });
+    await waitFor(() => {
+      // useSearchParams decodes the URL automatically; the raw value
+      // is the unescaped tool slug.
+      expect(sink.params.get('tools')).toBe('filesystem::read');
+    });
+  });
+
   it('a real FilterBar filter change (useFilters) preserves the control params', async () => {
     // Drive the ACTUAL FilterBar code path: useFilters().setFilters merges a
     // filter patch via applyPatch on the same URL. The page's control params
