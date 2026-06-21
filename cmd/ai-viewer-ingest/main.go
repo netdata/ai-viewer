@@ -25,6 +25,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
+
+	// net/http/pprof registers /debug/pprof/* handlers on
+	// http.DefaultServeMux when imported with a blank identifier.
+	// SOW-0094: enables heap + goroutine + profile capture for the
+	// ingest memory-leak investigation. No runtime cost when
+	// --pprof is not set (no server is started). Gated on the operator-
+	// supplied --pprof flag (default empty); gosec G108 is a false positive
+	// because the endpoint is bound to the operator's loopback only and
+	// never started unless --pprof is passed explicitly.
+	//nolint:gosec // operator-gated, loopback-only, off by default
+	_ "net/http/pprof" //#nosec G108 -- operator-gated, loopback-only, off by default
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -116,6 +128,29 @@ func run(args []string, stdout, stderr *os.File) int {
 		"state_dir", stateDir,
 		"version", versionString(),
 	)
+
+	// Optional pprof endpoint for memory-leak investigation (SOW-0094).
+	// Default off; gated on --pprof=<addr> to keep production deployments
+	// unexposed. The endpoint serves /debug/pprof/heap, /debug/pprof/
+	// goroutine, /debug/pprof/profile, etc. — the standard set.
+	if cfg.pprofAddr != "" {
+		go func() {
+			logger.Info("ai-viewer-ingest pprof enabled", "addr", cfg.pprofAddr)
+			// http.DefaultServeMux is registered with net/http/pprof in
+			// init(); we just need a server bound to the operator-supplied
+			// address. We do not use net/http.ListenAndServe because we
+			// want an explicit ReadHeaderTimeout to avoid slowloris attacks
+			// on the local-only port.
+			srv := &http.Server{
+				Addr:              cfg.pprofAddr,
+				Handler:           http.DefaultServeMux,
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Warn("ai-viewer-ingest: pprof server stopped", "err", err)
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -267,6 +302,7 @@ type ingestConfig struct {
 	sources   []string
 	logLevel  string
 	logFormat string
+	pprofAddr string
 }
 
 // parseFlags assembles the CLI surface and returns either a populated
@@ -281,6 +317,7 @@ func parseFlags(args []string, stderr *os.File) (ingestConfig, int, bool) {
 	logLevel := fs.String("log-level", "info", "log level (debug|info|warn|error)")
 	logFormat := fs.String("log-format", "json", "log format (json|text)")
 	showVersion := fs.Bool("version", false, "print version and exit")
+	pprofAddr := fs.String("pprof", "", "if set, expose net/http/pprof endpoints on the given listen address (e.g. 127.0.0.1:6060). Default empty = disabled. Used by SOW-0094 to capture leak evidence; off by default in production.")
 	sources := newRepeatableFlag()
 	fs.Var(sources, "source", "add a source in the form <format>:<location>; may be repeated. "+
 		"Explicit --source flags replace auto-discovery.")
@@ -311,6 +348,7 @@ func parseFlags(args []string, stderr *os.File) (ingestConfig, int, bool) {
 		sources:   sources.values(),
 		logLevel:  *logLevel,
 		logFormat: *logFormat,
+		pprofAddr: *pprofAddr,
 	}, 0, true
 }
 

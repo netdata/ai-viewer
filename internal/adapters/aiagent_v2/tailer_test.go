@@ -165,11 +165,17 @@ func TestTail_PeriodicProgress(t *testing.T) {
 	defer cancel()
 	go func() { _ = a.Tail(ctx, out) }()
 
+	// The tail now emits SourceProgress only when the cursor actually
+	// changes (SOW-0094 — emitting the full cursor every 5 s on a 482k-
+	// file source dominated the heap). Drive a file event so the cursor
+	// changes, then wait for the resulting SourceProgress.
+	writeSnapshot(t, root, "tick-origin", simpleSnapshot(2, "tick-origin"))
+
 	if _, ok := waitForEvent(t, out, 7*time.Second, func(ev canonical.Event) bool {
 		_, is := ev.(canonical.SourceProgressEvent)
 		return is
 	}); !ok {
-		t.Fatalf("no periodic SourceProgress within 7s")
+		t.Fatalf("no SourceProgress after a file change within 7s")
 	}
 }
 

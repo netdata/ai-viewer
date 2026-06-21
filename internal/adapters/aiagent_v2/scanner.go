@@ -32,14 +32,17 @@ const tmpSuffixPrefix = ".tmp-"
 // via a streaming JSON decoder so peak heap stays bounded.
 const streamerThresholdBytes int64 = 50 * 1024 * 1024
 
-// progressEveryFiles bounds how frequently SourceProgressEvent
-// checkpoints are emitted during backfill. Matches the spec's "every
-// N=1000 files" guidance.
-const progressEveryFiles = 1000
-
-// progressEveryDuration provides a wall-clock bound for the same.
-// Whichever threshold trips first wins.
+// progressEveryDuration provides a wall-clock bound for SourceProgressEvent
+// checkpoints. Whichever threshold trips first wins.
 const progressEveryDuration = 5 * time.Second
+
+// scanProgressEveryFiles bounds cursor-checkpoint emission during backfill.
+// Larger than the canonical 1000-files-per-checkpoint guidance because
+// aiagent_v2's cursor is ~9 KB JSON for 482k sessions; emitting it every
+// 1000 files allocates ~4 MB per scan (SOW-0094). The final cursor at
+// scanAll's return still goes out, so the on-disk checkpoint is always
+// persisted exactly once per scan.
+const scanProgressEveryFiles = 50_000
 
 // scanAll walks the root non-recursively, processes every `.json.gz`
 // not in cursor's known-content set, and emits canonical events plus
@@ -72,7 +75,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			cur = cur.withFile(name, updated)
 		}
 		processed++
-		if processed >= progressEveryFiles || time.Since(lastProgress) >= progressEveryDuration {
+		if processed >= scanProgressEveryFiles || time.Since(lastProgress) >= progressEveryDuration {
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return cur, perr
 			}

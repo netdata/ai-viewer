@@ -70,6 +70,12 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	}
 	tick := time.NewTicker(tailTickInterval)
 	defer tick.Stop()
+	// lastEmittedFileCount is the cursor.Files size we last emitted a
+	// checkpoint for. Tail ticks without a real change (no fsnotify
+	// events, no debounce flush) emit nothing — for a source with 482k
+	// files, the cursor JSON is ~9 KB, so emitting it every 5 s is ~6 MB
+	// / min of allocation pressure that GC has to chase (SOW-0094).
+	lastEmittedFileCount := len(cur.Files)
 
 	for {
 		select {
@@ -110,8 +116,18 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			}
 			dirty = make(map[string]struct{}, 16)
 		case <-tick.C:
-			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
-				return perr
+			// Only emit a checkpoint on the tail tick if the cursor has
+			// changed since the last emit. For sources with many files
+			// (e.g. aiagent_v2 has 482k sessions, cursor ≈ 9 KB JSON),
+			// emitting the full cursor every 5 s allocates ~6 MB / min and
+			// dominated the heap profile at 4 GB RSS after a few hours
+			// (SOW-0094 root cause). The cursor only changes when a file
+			// is added or removed; idle tail ticks are pure overhead.
+			if len(cur.Files) != lastEmittedFileCount {
+				if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
+					return perr
+				}
+				lastEmittedFileCount = len(cur.Files)
 			}
 		}
 	}
