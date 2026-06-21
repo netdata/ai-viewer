@@ -343,6 +343,7 @@ function TurnViewPane({
     const refsByOp = new Map<string, PayloadRef[]>();
     const turnRefs = focusedTurnRefs.data?.refs ?? [];
     for (const r of turnRefs) {
+      if (r.op_id === undefined) continue;
       const arr = refsByOp.get(r.op_id) ?? [];
       arr.push(r);
       refsByOp.set(r.op_id, arr);
