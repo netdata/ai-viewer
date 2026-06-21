@@ -70,7 +70,7 @@ date. The chunks are independent and shippable separately.
 
 ## Status
 
-- [x] Chunk 1: `/api/sources` cursor opt-in
-- [x] Chunk 2: `/api/search` parallel + CTE
-- [ ] Chunk 3: `/api/topology` indexes
-- [ ] (Follow-up) Chunk 4: `/api/sessions/:id` 1.3s on biggest session
+- [x] Chunk 1: `/api/sources` cursor opt-in ✅ `52883a1`
+- [x] Chunk 2: `/api/search` parallel + CTE ✅ `7b89ab4`
+- [x] Chunk 3: `/api/topology` indexes ✅ `accd3a0`
+- [x] Chunk 4: `/api/sessions/:id` recursive CTE fix ✅ `53ac117`
