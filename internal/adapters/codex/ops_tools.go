@@ -43,6 +43,7 @@ func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) can
 		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
 	}
 	m.trackOp(p.CallID, m.activeTurnID, turnSeq, opSeq, name, namespace)
+	ts.hasOpenToolCall = true
 	return out
 }
 
@@ -107,6 +108,11 @@ func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) c
 		out = append(out, m.payloadRef(advance(tsUs), op.turnSeq, op.opSeq, "tool_response", "json", bodyBytes))
 	}
 	delete(m.openOps, p.CallID)
+	// SOW-0089 chunk 5c: clear the per-turn open-tool flag when this op closes.
+	// We can't blindly zero ts.hasOpenToolCall because multiple in-flight
+	// tool calls can coexist in the same turn; instead we recompute from
+	// the remaining openOps under this turn.
+	m.refreshHasOpenToolCall(op.turnID)
 	// Record the finalized op (with the status it was finalized with) so a LATER
 	// exec_command_end (output-first ~15-32% ordering) can merge its Extras via an
 	// OpStarted re-emit (F4) AND only emit a correcting OpFinalized when its

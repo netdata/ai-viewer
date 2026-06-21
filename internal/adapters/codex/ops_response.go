@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -101,16 +102,54 @@ func (m *fileMapper) mapMessage(rec record, advance func(int64) canonical.EventB
 // the fingerprint was already seen, it returns nil so the UI sees exactly one
 // user op per logical input. A user message also opens a new turn under the
 // active turn_id when none is open (old-CLI user-message boundary, spec edge #3).
+//
+// SOW-0089 chunk 5c — sub-turn splitting. When the active codex turn has
+// ALREADY seen a user_input op (count >= 1) AND has no in-flight tool call
+// awaiting its *_output, we finalize the current turn (synthetic
+// TurnFinalizedEvent, status=completed, end_ts=now) and open a new sub-turn
+// with synthetic codex_turn_id "sub:<counter>". The new sub-turn inherits
+// the parent's model/sandbox/effort/approval_policy (snapped from
+// turn_context — the codex format doesn't re-emit these per user_input).
+//
+// Skipping the split when hasOpenToolCall is true avoids orphaning a
+// function_call whose *_output is still pending — we'd produce two turns
+// with the tool call in the prior turn and its output in the new turn,
+// which the in-flight tracker (m.openOps) can't represent. The split
+// happens on the NEXT user_input after the tool resolves.
 func (m *fileMapper) emitUserInput(advance func(int64) canonical.EventBase, tsUs int64, text, format string, bodyBytes int64) []canonical.Event {
 	if !m.firstSeenUser(userFingerprint(text)) {
 		return nil
 	}
-	ts := m.ensureTurn(tsUs)
 	out := make([]canonical.Event, 0, 4)
+
+	// Sub-turn split: close the current turn (if it has user inputs already)
+	// and open a new sub-turn. NO split if a tool call is in flight.
+	if m.haveActiveTurn {
+		if active, ok := m.turns[m.activeTurnID]; ok {
+			if active.userInputCount >= 1 && !active.hasOpenToolCall && !active.finalized {
+				out = append(out, m.finalizeTurnForSubSplit(advance, active, tsUs)...)
+				// Open the new sub-turn with a synthetic codex_turn_id. openTurn
+				// resets ts.userInputCount to 0 and ts.hasOpenToolCall to false via
+				// the new turnState constructor. Per-turn policy snapshots (sandbox,
+				// effort, approvalPolicy) carry over via the prior turn's
+				// turnExtras, NOT via ts.model — the model/provider are owned by
+				// fileMapper (file-level state, not per-turn).
+				m.subTurnCounter++
+				subID := fmt.Sprintf("sub:%d", m.subTurnCounter)
+				subTs := m.openTurn(subID, tsUs)
+				subTs.sandbox = active.sandbox
+				subTs.effort = active.effort
+				subTs.approvalPolicy = active.approvalPolicy
+			}
+		}
+	}
+
+	ts := m.ensureTurn(tsUs)
 	if ev := m.emitTurnStarted(ts, advance(tsUs)); ev != nil {
 		out = append(out, ev)
 	}
 	turnSeq, opSeq := m.nextOp(ts)
+	ts.userInputCount++
 	out = append(out,
 		canonical.OpStartedEvent{
 			EventBase:       advance(tsUs),
@@ -243,4 +282,27 @@ func phaseFromRaw(raw []byte) string {
 		return ""
 	}
 	return env.Payload.Phase
+}
+
+// finalizeTurnForSubSplit (SOW-0089 chunk 5c) emits a synthetic
+// TurnFinalizedEvent for `ts` (the active codex turn) to close it BEFORE we
+// open a new sub-turn at a user_input boundary. The event carries:
+//
+//   - Status: "completed" (a sub-split is NOT a failure — the codex task
+//     itself is still alive; we're just visualizing one user/assistant
+//     exchange as its own turn).
+//   - EndTs: tsUs (the timestamp of the new user_input that triggered the
+//     split — operator sees an accurate duration for the prior sub-turn).
+//   - The full per-turn extras (rollup, sandbox, ttft_ms, etc) so the
+//     finalized sub-turn's row in turns.extras_json is complete.
+//
+// We mark ts.finalized=true so a subsequent task_complete (for the parent
+// codex task) does NOT re-finalize this turn (finalizeTurn is idempotent
+// on the flag — see mapper_turn.go).
+func (m *fileMapper) finalizeTurnForSubSplit(advance func(int64) canonical.EventBase, ts *turnState, tsUs int64) []canonical.Event {
+	if ts.finalized {
+		return nil
+	}
+	base := advance(tsUs)
+	return []canonical.Event{m.finalizeTurn(ts, base, tsUs, "completed", "")}
 }

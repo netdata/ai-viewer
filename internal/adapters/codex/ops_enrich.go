@@ -185,6 +185,27 @@ func (m *fileMapper) recordFinalizedOp(callID string, op *openOp, status, errCla
 	}
 }
 
+// refreshHasOpenToolCall (SOW-0089 chunk 5c) recomputes ts.hasOpenToolCall from
+// the live openOps map. Called when a tool call finalizes (its output
+// arrived) so subsequent user_input events can decide whether to split a
+// sub-turn. We don't store a per-turn count — openOps is keyed by call_id
+// globally, so we have to filter by ts.codexTurnID on each refresh. Cheap
+// (openOps has at most a handful of entries at any time).
+func (m *fileMapper) refreshHasOpenToolCall(turnID string) {
+	ts, ok := m.turns[turnID]
+	if !ok {
+		return
+	}
+	hasOpen := false
+	for _, op := range m.openOps {
+		if op.turnID == turnID {
+			hasOpen = true
+			break
+		}
+	}
+	ts.hasOpenToolCall = hasOpen
+}
+
 // enrichWebSearch handles event_msg.web_search_end (F7/G4, spec rule #11). It
 // pairs POSITIONALLY with the OLDEST open web_search op (the FRONT of the
 // openWebSearch FIFO queue), because web_search_call carries no correlation key;

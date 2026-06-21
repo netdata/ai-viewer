@@ -74,6 +74,19 @@ type turnState struct {
 	// lastLLMCtxUsed is the cumulative total_token_usage observed for the turn's
 	// last LLM op (spec rule #17). The op's CtxUsed is set from this at finalize.
 	lastLLMCtxUsed int64
+
+	// userInputCount (SOW-0089 chunk 5c) counts user_input ops emitted into this
+	// turn. When the count is >= 1 AND a NEW user_input arrives, the mapper
+	// closes the active turn (synthetic TurnFinalizedEvent, status=completed)
+	// and opens a sub-turn with codex_turn_id "sub:<counter>" so the operator
+	// sees each user/assistant exchange as its own turn. Reset only when a new
+	// codex turn_id opens (turn_context / task_started).
+	userInputCount int
+	// hasOpenToolCall tracks whether the turn has an unmatched function_call
+	// (no corresponding *_output yet). Used to defer sub-turn splitting —
+	// splitting mid-tool-call would orphan the open call. Reset on
+	// function_call_output (close) or on the next sub-turn open.
+	hasOpenToolCall bool
 }
 
 // openOp records where an in-flight op was emitted so its finalize / enrichment

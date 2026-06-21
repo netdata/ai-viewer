@@ -97,3 +97,79 @@ This only affects codex; other adapters don't change. No schema migration (we al
 - Codex sub-turn splitting inside Claude Code sessions (rare, the Claude Code adapter already emits one turn per user message).
 - Hash collisions in related sessions (sha256 over short prompts has known birthday-bound issues at ~10⁹ entries; not relevant at 1,295 sessions).
 - Re-ingestion speedup (currently ~30 min for the full workstation; SOW-0010 tracks).
+
+---
+
+# ui-turn-view chunk 2 — turn-view polish (SOW-0090, deferred to a follow-up)
+
+The TurnView component (chunk 2) is functional but visually rough:
+
+  - The system-prompt text dumps as inline JSON because the payload body is
+    the JSON-enveloped response_item. Markdown rendering doesn't help —
+    it's literal JSON. We should pre-extract the readable text from
+    response_item.message envelopes before feeding it to the markdown
+    renderer.
+  - The Copy-turn button copies the rendered DOM text (good) but doesn't
+    include the JSON metadata. A 'copy as markdown' option might be useful.
+  - The StaleBadge + OverviewTiles combination can show "stale · 26m" +
+    Status: stale at the same time — redundant. The OverviewTiles Status
+    tile should suppress the stale badge when the session is already stale
+    (one indicator, not two).
+  - The session detail URL `?op=<id>` highlights the step but doesn't
+    scroll the page to it when the page is taller than the viewport. (The
+    TurnView component itself scrolls correctly; the page-level
+    IntersectionObserver is missing.)
+
+These are all nice-to-haves, not blocking. The headline UX win (the operator
+can now see "is this the turn I'm interested in?") is shipped via chunk 2.
+
+## chunk 5c — codex sub-turn splitting at user_input boundaries
+
+### Problem
+
+Codex files (rollout-*.jsonl) carry N user prompts in a single codex task
+(task_started ↔ task_complete). The current adapter emits ONE turn per codex
+task — so a 1,000-exchange session appears in the UI as 1 turn with 2,000+
+ops. The operator's verbatim: "codex sessions miss turns, although it is
+obvious there are repeated 'reasoning' and 'message' entries".
+
+Verified against the production SQLite: the busiest codex session has 18
+turns (one per codex task) but 4,186 ops across them — average 230 ops per
+turn. Three of those turns have 524+, 1901+, and 777+ ops respectively
+(because each contains many user/assistant/tool exchanges).
+
+### Fix
+
+Codex-only. When emitUserInput fires AND the current codex turn has already
+seen at least one user_input op AND there is no in-flight tool call pending,
+the mapper:
+
+  1. Synthesizes a TurnFinalizedEvent for the active turn (status=completed,
+     end_ts=now). This is a sub-turn boundary, NOT a codex task boundary —
+     the actual task_complete still fires later and closes the LAST sub-turn.
+  2. Opens a new sub-turn with a synthetic codex_turn_id ("sub:N"). The
+     new sub-turn inherits the model's known sandbox/effort/approval_policy
+     from the prior turn (snapped from turn_context, which doesn't repeat
+     per user_input within a codex task).
+  3. The new user_input lands in the new sub-turn.
+
+Implementation details:
+
+  - per-turn userInputCount + per-turn hasOpenToolCall tracking (state on
+    fileMapper.turns[codexTurnID])
+  - the synthetic TurnFinalizedEvent carries status="completed" and the
+    actual end_ts of the user_input op (so the operator sees accurate
+    durations)
+  - on the next task_complete, the mapper closes the LAST open sub-turn
+    (the rest are already completed); earlier sub-turns are NOT
+    re-finalized (idempotent via the turnState.finalized flag)
+
+### Re-ingestion cost
+
+The codex re-ingest is bounded: ~3,157 rollout files in the production
+codex source. The adapter is purely additive (sub-turn Seq values are
+monotone per session), so a full re-ingest preserves all existing data
+while populating the new sub-turn boundaries.
+
+Estimated re-ingest time: ~5–10 minutes on the production workstation
+(matches the SOW-0010 baseline; no optimization needed for this scope).

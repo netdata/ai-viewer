@@ -117,6 +117,10 @@ type fileMapper struct {
 	turnOrder []string
 	// turnSeqCounter is the last assigned 1-based turn Seq. Monotone per file.
 	turnSeqCounter int
+	// subTurnCounter (SOW-0089 chunk 5c) increments for every synthetic
+	// sub-turn opened when a new user_input arrives mid-codex-task. Used to
+	// build the synthetic codex_turn_id "sub:<n>". Monotone per file.
+	subTurnCounter int
 	// activeTurnID is the turn_id of the most-recently-opened turn, used to
 	// attribute a session-level token_count (no turn_id) to the right turn
 	// (spec rule #17, "Token accounting nuance") and to drive the absent-turn_id

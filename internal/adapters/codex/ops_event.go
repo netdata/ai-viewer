@@ -126,28 +126,46 @@ func (m *fileMapper) mapTaskStarted(rec record, advance func(int64) canonical.Ev
 func (m *fileMapper) mapTaskComplete(rec record, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
 	p := rec.EventMsg
 	ts, ok := m.turns[p.TurnID]
-	if !ok || ts.finalized {
-		// task_complete with no open turn (or already closed): surface and skip
-		// so a stray completion does not double-close (spec edge robustness).
+	if !ok {
+		// task_complete with no open turn: surface and skip so a stray
+		// completion does not double-close (spec edge robustness).
 		return []canonical.Event{m.logEntry(advance(tsUs), "WRN", "task_complete_no_turn", map[string]any{"turn_id": p.TurnID})}
+	}
+	// SOW-0089 chunk 5c — sub-turn routing. When chunk 5c splits a codex task
+	// into N sub-turns at user_input boundaries, the original turn (the one
+	// keyed by the codex turn_id, here "t1") is finalized synthetically at
+	// the LAST user_input. The final sub-turn ("sub:<n>") remains active and
+	// holds the LAST user_input + the LAST assistant reply. When
+	// task_complete arrives with the ORIGINAL turn_id, we route the close
+	// to the LAST still-open turn (which is the most-recent sub-turn, not
+	// the original "t1" — which is already finalized).
+	target := ts
+	if ts.finalized {
+		if last := m.mostRecentOpenTurn(); last != nil {
+			target = last
+		} else {
+			// No open sub-turn to finalize — surface and skip (the original
+			// turn was already finalized by a sub-split and nothing came after).
+			return []canonical.Event{m.logEntry(advance(tsUs), "WRN", "task_complete_no_turn", map[string]any{"turn_id": p.TurnID})}
+		}
 	}
 	endUs := tsUs
 	if ca := completedAtMicros(rec.Raw); ca > 0 {
 		endUs = ca
 	}
 	if ttft := ttftMillis(rec.Raw); ttft > 0 {
-		ts.ttftMs = ttft
+		target.ttftMs = ttft
 	}
 	base := func() canonical.EventBase { return advance(endUs) }
 	out := make([]canonical.Event, 0, 4)
 	// Apply the accumulated ctx to the turn's last LLM op (spec rule #17).
-	if ev, ok := m.applyLLMCtx(ts, base); ok {
+	if ev, ok := m.applyLLMCtx(target, base); ok {
 		out = append(out, ev)
 	}
 	// Finalize dangling ops BEFORE the turn close so they share the turn (spec
 	// rule #4, edge #9: status completed inferred at task_complete).
-	out = append(out, m.finalizeDanglingOps(p.TurnID, base, endUs, "completed")...)
-	out = append(out, m.finalizeTurn(ts, base(), endUs, "completed", ""))
+	out = append(out, m.finalizeDanglingOps(target.codexTurnID, base, endUs, "completed")...)
+	out = append(out, m.finalizeTurn(target, base(), endUs, "completed", ""))
 	return out
 }
 
