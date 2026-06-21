@@ -107,6 +107,14 @@ INSERT INTO sessions (
 	); err != nil {
 		t.Fatalf("seed session %s: %v", s.id, err)
 	}
+	// Mirror migration 0011's backfill: populate duration_us from end_ts -
+	// start_ts (NULL when end_ts IS NULL). The cross-topology default
+	// metric (duration) reads this column directly.
+	if _, err := db.Exec(
+		`UPDATE sessions SET duration_us = CASE WHEN end_ts IS NOT NULL THEN end_ts - start_ts ELSE NULL END WHERE id = ?`,
+		s.id); err != nil {
+		t.Fatalf("seed session %s: backfill duration_us: %v", s.id, err)
+	}
 }
 
 // turnRow is the declarative seed input for one turns row.

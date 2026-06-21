@@ -23,7 +23,7 @@ import (
 // the latest; it sets schema_meta.version='8'. It is a sources-table-shape
 // change serve validates at startup, so a v8 binary must refuse a pre-0008
 // store (whose sources table lacks the column).
-const SchemaVersion = 10
+const SchemaVersion = 11
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema
 // version disagrees with the binary's expected version. The main()

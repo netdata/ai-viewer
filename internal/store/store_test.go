@@ -149,7 +149,7 @@ func TestOpen_RunsMigrations(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "10" {
+	if version != "11" {
 		t.Fatalf("schema_meta.version: want %q, got %q", "10", version)
 	}
 
@@ -185,7 +185,7 @@ func TestOpen_Idempotent(t *testing.T) {
 		// expectedMigrations grows by one each time a new SQL file is
 		// added under migrations/. Update the constant in lockstep with
 		// the new migration so this contract test stays meaningful.
-		const expectedMigrations = 10
+		const expectedMigrations = 11
 		if count != expectedMigrations {
 			t.Fatalf("round %d: _schema_migrations rows: want %d, got %d", round, expectedMigrations, count)
 		}
@@ -198,7 +198,7 @@ func TestOpen_Idempotent(t *testing.T) {
 			`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 			t.Fatalf("round %d: read schema_meta.version: %v", round, err)
 		}
-		if version != "10" {
+		if version != "11" {
 			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "10", version)
 		}
 

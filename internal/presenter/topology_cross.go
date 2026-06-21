@@ -188,7 +188,17 @@ func crossSizeExpr(metric topologyMetric, alias string) string {
 	case metricCtxPct:
 		return "0"
 	default: // duration
-		return "(CASE WHEN " + alias + ".end_ts IS NOT NULL THEN " + alias + ".end_ts - " + alias + ".start_ts ELSE 0 END)"
+		// Use the stored `duration_us` column (migration 0011) so the
+		// optimizer can use `idx_sessions_duration` for the ORDER BY.
+		// The raw column (no COALESCE) is required: wrapping the column
+		// reference in an expression would force a temp B-tree sort on
+		// top of the index scan (verified by EXPLAIN QUERY PLAN before
+		// and after the change). NULL rows (in-progress sessions) sort
+		// before non-NULL in DESC order, which preserves the visual
+		// ranking: in-progress sessions sink to the bottom of the
+		// long-running-session list, matching the pre-migration
+		// behavior where end_ts-IS-NULL sessions got duration=0.
+		return alias + ".duration_us"
 	}
 }
 
