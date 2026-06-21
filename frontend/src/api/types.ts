@@ -194,7 +194,12 @@ export interface OpDetail {
   ctx_used: number | null;
   ctx_max: number | null;
   child_session_id: string | null;
-  payload_refs: PayloadRef[];
+  /** Refs to payload bytes on disk. Present when the session-detail response
+   *  was fetched with ?include=payload_refs; ABSENT (undefined) on the slim
+   *  default response (SOW-0092 chunk 1+). TurnView consumers lazy-fetch
+   *  via /api/sessions/:id/payload_refs?op=<id> when the operator
+   *  focuses an op. */
+  payload_refs?: PayloadRef[];
 }
 
 /** One turns row with its ordered ops (presenter turnDetail). */

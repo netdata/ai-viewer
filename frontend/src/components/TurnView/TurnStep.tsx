@@ -201,9 +201,13 @@ export function TurnStep({
   }, [focused]);
 
   // For tool ops, fetch up to two payloads (request + response) in parallel.
-  // For all other ops, fetch the first payload_ref.
-  const firstRef = op.payload_refs[0] ?? null;
-  const secondRef = op.kind === 'tool' ? (op.payload_refs[1] ?? null) : null;
+  // For all other ops, fetch the first payload_ref. payload_refs may be
+  // ABSENT on the slim default session-detail response (SOW-0092); TurnViewPane
+  // splices refs in via useOpPayloadRefs + useTurnPayloadRefs when the
+  // operator focuses a turn.
+  const payloadRefs = op.payload_refs ?? [];
+  const firstRef = payloadRefs[0] ?? null;
+  const secondRef = op.kind === 'tool' ? (payloadRefs[1] ?? null) : null;
   const primary = usePayloadContent(firstRef?.id ?? null);
   const secondary = usePayloadContent(secondRef?.id ?? null);
 
@@ -258,13 +262,13 @@ export function TurnStep({
         <SessionBody childSessionId={op.child_session_id} />
       ) : op.kind === 'tool' ? (
         <div className={styles.toolBody}>
-          {op.payload_refs[0] ? (
-            <ToolSection label="Params" payloadState={primary} payloadKind={op.payload_refs[0].kind} />
+          {firstRef ? (
+            <ToolSection label="Params" payloadState={primary} payloadKind={firstRef.kind} />
           ) : null}
-          {op.payload_refs[1] ? (
-            <ToolSection label="Response" payloadState={secondary} payloadKind={op.payload_refs[1].kind} />
+          {secondRef ? (
+            <ToolSection label="Response" payloadState={secondary} payloadKind={secondRef.kind} />
           ) : null}
-          {op.payload_refs.length === 0 ? (
+          {payloadRefs.length === 0 ? (
             <p className={styles.emptyBody}>No payloads for this op.</p>
           ) : null}
         </div>
@@ -284,7 +288,7 @@ export function TurnStep({
         <PayloadError message={primary.error} onRetry={primary.retry} />
       ) : primary.loading ? (
         <p className={styles.loadingBody}>Loading…</p>
-      ) : op.payload_refs.length === 0 ? (
+      ) : payloadRefs.length === 0 ? (
         <p className={styles.emptyBody}>No payload for this op.</p>
       ) : null}
     </article>

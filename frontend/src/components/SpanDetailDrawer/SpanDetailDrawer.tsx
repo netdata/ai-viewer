@@ -325,15 +325,18 @@ function OpBody({ op, titleId }: { op: TraceOpFields | OpDetail; titleId: string
         <h3 id={`${titleId}-payloads`} className={styles.payloadsTitle}>
           Payloads
         </h3>
-        {('payload_refs' in op ? op.payload_refs : []).length === 0 ? (
-          <p className={styles.noPayloads}>No payloads for this op.</p>
-        ) : (
-          <ul className={styles.payloadList}>
-            {('payload_refs' in op ? op.payload_refs : []).map((ref) => (
-              <PayloadRow key={ref.id} payload={ref} />
-            ))}
-          </ul>
-        )}
+        {(() => {
+          const refs: PayloadRef[] = 'payload_refs' in op ? (op.payload_refs ?? []) : [];
+          return refs.length === 0 ? (
+            <p className={styles.noPayloads}>No payloads for this op.</p>
+          ) : (
+            <ul className={styles.payloadList}>
+              {refs.map((ref) => (
+                <PayloadRow key={ref.id} payload={ref} />
+              ))}
+            </ul>
+          );
+        })()}
       </section>
     </>
   );
