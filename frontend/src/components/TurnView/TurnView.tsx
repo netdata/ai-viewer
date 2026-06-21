@@ -38,7 +38,7 @@ export function TurnView({
 }: {
   turn: TurnDetail;
   /** When set, scrolls the matching op into view + pulses it. */
-  focusOpId?: string | null;
+  focusOpId?: string;
 }) {
   return (
     <section

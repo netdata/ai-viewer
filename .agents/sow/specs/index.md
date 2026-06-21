@@ -38,7 +38,7 @@ This directory contains the **living specifications** of ai-viewer: what it does
 
 - [frontend-architecture.md](frontend-architecture.md) — React app shape, state management, routing.
 - [ui-pages.md](ui-pages.md) — page inventory: filters, list, detail, topology, timeline, statistics, analytics.
-- [ui-turn-view.md](ui-turn-view.md) — TurnView component contract: step renderers, payload fetching, scroll-to behavior, markdown rendering.
+- [ui-turn-view.md](ui-turn-view.md) — TurnView component contract + the unified Session Detail shell (3-zone resizable layout).
 
 ### Cross-cutting
 

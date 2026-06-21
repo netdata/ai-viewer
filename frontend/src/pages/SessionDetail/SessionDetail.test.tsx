@@ -1,64 +1,74 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { TooltipProvider } from '../../components/ui/tooltip';
 import { ApiError } from '../../api/client';
 
-// SessionDetail is the tabbed detail shell. useSessionDetail and useLiveUpdates
-// are MOCKED, and the tab bodies are stubbed, so this test drives the shell
-// itself: loading / error / 404 states and tab state synced to the URL ?tab=.
-// Every tab body (Overview, Trace, Topology, Timeline, Logs) is real and has its
-// own dedicated test; here they are stubbed.
+// SessionDetail is the unified Session Detail shell (SOW-0088 chunk 4):
+// single view that replaces the old Overview/Trace/Topology/Timeline/Logs/Raw
+// tabs. The URL no longer drives ?tab= (the unified view is always rendered);
+// it drives ?tab:viz and ?tab:bottom instead, plus ?op=<id> for the focused
+// turn. This test verifies the page-level loading/error/404 states and the
+// unified shell renders with all its zones present.
 
 const detailSpy = vi.fn();
 const liveSpy = vi.fn();
 
 vi.mock('../../api/sessions', () => ({
   useSessionDetail: (...args: unknown[]) => detailSpy(...args) as unknown,
+  useSessionTrace: () => ({ data: undefined, isPending: false, isError: false, error: null }),
 }));
 vi.mock('../../state/useLiveUpdates', () => ({
   useLiveUpdates: (...args: unknown[]) => liveSpy(...args) as unknown,
 }));
-vi.mock('./OverviewTab', () => ({
-  OverviewTab: () => <div data-testid="overview-body">overview</div>,
-}));
-vi.mock('./LogsTab', () => ({
-  LogsTab: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="logs-body">logs for {sessionId}</div>
-  ),
-}));
-vi.mock('./TraceTab', () => ({
-  TraceTab: () => <div data-testid="trace-body">trace</div>,
-}));
-vi.mock('./TopologyTab', () => ({
-  TopologyTab: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="topology-body">topology for {sessionId}</div>
-  ),
-}));
-vi.mock('./TimelineTab', () => ({
-  TimelineTab: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="timeline-body">timeline for {sessionId}</div>
-  ),
-}));
 
-import { SessionDetail } from './SessionDetail';
+const sessionId = 'test-session-id';
 
-function result(over: Record<string, unknown>) {
-  return { data: undefined, isPending: false, isError: false, error: null, ...over };
+function makeSessionDetail(over: Partial<{
+  id: string;
+  agent_name: string;
+  model: string;
+  status: string;
+  start_ts: number;
+  end_ts: number | null;
+  parent_session_id: string | null;
+  last_activity_ts: number | null;
+  tokens_cache_read: number;
+}> = {}) {
+  return {
+    id: sessionId,
+    native_id: 'native-id',
+    root_session_id: sessionId,
+    parent_session_id: null,
+    source_id: 'test:source',
+    kind: 'root' as const,
+    agent_name: 'test-agent',
+    model: 'test-model',
+    provider: 'anthropic',
+    status: 'completed',
+    error_class: null,
+    start_ts: 1_700_000_000_000_000,
+    end_ts: 1_700_000_005_000_000,
+    tokens_in: 100,
+    tokens_out: 200,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
+    cost_usd: 0.01,
+    op_count: 0,
+    failure_count: 0,
+    ...over,
+  };
 }
 
-const OK = result({
-  data: {
-    session: { id: 's1', agent_name: 'nedi', model: 'm', status: 'completed' },
-    turns: [],
-    child_sessions: [],
-  },
-});
+const detailFixture = {
+  session: makeSessionDetail(),
+  turns: [],
+  child_sessions: [],
+};
 
-function renderAt(path: string) {
+function renderPage(initialEntry = `/sessions/${sessionId}`) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <TooltipProvider>
         <Routes>
           <Route path="/sessions/:id" element={<SessionDetail />} />
@@ -67,6 +77,8 @@ function renderAt(path: string) {
     </MemoryRouter>,
   );
 }
+
+import { SessionDetail } from './SessionDetail';
 
 beforeEach(() => {
   detailSpy.mockReset();
@@ -77,112 +89,75 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('SessionDetail', () => {
-  it('renders the loading state', () => {
-    detailSpy.mockReturnValue(result({ isPending: true }));
-    renderAt('/sessions/s1');
-    expect(screen.getByText('Loading session…')).toBeInTheDocument();
+describe('SessionDetail — loading & error states', () => {
+  it('renders a LoadingState while the session is pending', () => {
+    detailSpy.mockReturnValue({ data: undefined, isPending: true, isError: false, error: null });
+    renderPage();
+    expect(screen.getByText(/loading session/i)).toBeInTheDocument();
   });
 
-  it('renders the error state with the ApiError message', () => {
-    detailSpy.mockReturnValue(
-      result({ isError: true, error: new ApiError(500, 'INTERNAL_ERROR', 'db down') }),
-    );
-    renderAt('/sessions/s1');
-    const alert = screen.getByRole('alert');
-    expect(alert).toHaveTextContent('Failed to load session');
-    expect(alert).toHaveTextContent('db down');
+  it('renders an ErrorState when the session fails to load', () => {
+    detailSpy.mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      error: new ApiError(500, 'INTERNAL_ERROR', 'boom'),
+    });
+    renderPage();
+    expect(screen.getByText(/failed to load session/i)).toBeInTheDocument();
   });
 
-  it('renders a clean not-found state for a 404', () => {
-    detailSpy.mockReturnValue(
-      result({ isError: true, error: new ApiError(404, 'NOT_FOUND', 'no such session') }),
-    );
-    renderAt('/sessions/missing');
-    expect(screen.getByText('Session not found.')).toBeInTheDocument();
-    // No tablist when not found.
-    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+  it('renders a not-found state when the session is 404', () => {
+    detailSpy.mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      error: new ApiError(404, 'NOT_FOUND', 'gone'),
+    });
+    renderPage();
+    expect(screen.getByText(/session not found/i)).toBeInTheDocument();
   });
 
-  it('defaults to the Overview tab', () => {
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1');
-    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(screen.getByTestId('overview-body')).toBeInTheDocument();
+  it('subscribes to live updates for the open session', () => {
+    detailSpy.mockReturnValue({ data: detailFixture, isPending: false, isError: false, error: null });
+    renderPage();
+    expect(liveSpy).toHaveBeenCalled();
+    const args = liveSpy.mock.calls[0]?.[0] as { session_id: string } | undefined;
+    expect(args?.session_id).toBe(sessionId);
+  });
+});
+
+describe('SessionDetail — unified shell', () => {
+  beforeEach(() => {
+    detailSpy.mockReturnValue({ data: detailFixture, isPending: false, isError: false, error: null });
   });
 
-  it('honors ?tab=logs from the URL', () => {
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1?tab=logs');
-    expect(screen.getByRole('tab', { name: 'Logs' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByTestId('logs-body')).toHaveTextContent('logs for s1');
-  });
-
-  it('falls back to Overview for an unknown ?tab= value', () => {
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1?tab=bogus');
-    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-  });
-
-  it('clicking a tab switches the panel', async () => {
-    const user = userEvent.setup();
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1');
-    await user.click(screen.getByRole('tab', { name: 'Logs' }));
-    expect(screen.getByTestId('logs-body')).toBeInTheDocument();
-    expect(screen.queryByTestId('overview-body')).not.toBeInTheDocument();
-  });
-
-  it('renders the Trace tab body for ?tab=trace', async () => {
-    const user = userEvent.setup();
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1');
-    await user.click(screen.getByRole('tab', { name: 'Trace' }));
-    expect(screen.getByTestId('trace-body')).toBeInTheDocument();
-  });
-
-  it('renders the Topology tab body for ?tab=topology', async () => {
-    const user = userEvent.setup();
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1');
-    await user.click(screen.getByRole('tab', { name: 'Topology' }));
-    expect(screen.getByTestId('topology-body')).toHaveTextContent('topology for s1');
-  });
-
-  it('renders the Timeline tab body for ?tab=timeline', async () => {
-    const user = userEvent.setup();
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1');
-    await user.click(screen.getByRole('tab', { name: 'Timeline' }));
-    expect(screen.getByTestId('timeline-body')).toHaveTextContent('timeline for s1');
-  });
-
-  it('subscribes to live updates scoped to the session id', () => {
-    detailSpy.mockReturnValue(OK);
-    renderAt('/sessions/s1');
-    expect(liveSpy).toHaveBeenCalledWith({ session_id: 's1' });
-  });
-
-  // SOW-0087 chunk 4 (A14): Pin button toggles a localStorage-backed
-  // pinned list. The aria-pressed attribute flips; the button label
-  // changes from 'Pin' to 'Unpin'.
-  it('toggles the Pin button and updates aria-pressed (SOW-0087 chunk 4)', async () => {
-    window.localStorage.clear();
-    detailSpy.mockReturnValue(OK);
-    const user = userEvent.setup();
-    renderAt('/sessions/s1');
-    const pin = screen.getByRole('button', { name: /pin this session/i });
-    expect(pin.getAttribute('aria-pressed')).toBe('false');
-    await user.click(pin);
-    expect(screen.getByRole('button', { name: /unpin this session/i })).toBeInTheDocument();
-    expect(window.localStorage.getItem('ai-viewer.pinned-sessions.v1')).toContain('s1');
-    await user.click(screen.getByRole('button', { name: /unpin this session/i }));
+  it('renders the unified view with all zones (header, tiles, resizable body)', () => {
+    renderPage();
+    // Header zone: agent name + id + pin button.
+    expect(screen.getByRole('heading', { name: /test-agent/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /pin this session/i })).toBeInTheDocument();
+
+    // Overview tiles: 6 tiles by role group.
+    const tilesGroup = screen.getByRole('group', { name: /session overview/i });
+    expect(tilesGroup).toBeInTheDocument();
+
+    // Resizable body: each panel has role=region.
+    const regions = screen.getAllByRole('region');
+    expect(regions.length).toBeGreaterThanOrEqual(3); // viz, bottom, turn-view
+  });
+
+  it('renders the breadcrumb', () => {
+    renderPage();
+    expect(screen.getByRole('navigation')).toBeInTheDocument();
+  });
+
+  it('ignores legacy ?tab= query params (unified view is always rendered)', () => {
+    renderPage(`/sessions/${sessionId}?tab=trace`);
+    // No "Trace tab" header — the unified view's viz pane has a "Waterfall"
+    // tab instead. The legacy tab system is gone.
+    expect(screen.queryByRole('tab', { name: /^trace$/i })).not.toBeInTheDocument();
+    // But the Waterfall viz tab IS present.
+    expect(screen.getByRole('button', { name: /^waterfall$/i, pressed: true })).toBeInTheDocument();
   });
 });

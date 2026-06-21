@@ -1,0 +1,60 @@
+/* OverviewTiles — 6-tile condensed stat strip for the unified Session Detail
+ * view. Responsive: wraps to 3×2 on narrow viewports. */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px);
+  background: var(--bg-card, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+}
+
+@media (max-width: 768px) {
+  .tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+  padding: var(--space-2, 8px);
+  border-left: 2px solid var(--border);
+  min-width: 0;
+}
+
+.tile:first-child {
+  border-left: 0;
+}
+
+.label {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.value {
+  font-size: var(--font-size-base, 14px);
+  color: var(--text-primary);
+  font-weight: 500;
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value[data-tone='error'] {
+  color: var(--error, #dc2626);
+  font-weight: 600;
+}

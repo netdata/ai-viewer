@@ -1,0 +1,236 @@
+/* UnifiedView — the 3-zone resizable Session Detail shell. */
+
+.unified {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  height: calc(100vh - 200px); /* Fill viewport minus header chrome. */
+  min-height: 600px;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.outerGroup {
+  height: 100%;
+  width: 100%;
+}
+
+.innerGroup {
+  height: 100%;
+  width: 100%;
+}
+
+.leftColumn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rightColumn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-primary, var(--background));
+  border-left: 1px solid var(--border);
+}
+
+.vizPanel,
+.bottomPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vizContent,
+.bottomContent {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-card, var(--card));
+}
+
+/* Tab bar shared by viz + bottom zones. */
+.tabBar {
+  display: flex;
+  gap: 0;
+  padding: 0 var(--space-3, 12px);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary, var(--card));
+  flex: 0 0 auto;
+}
+
+.tab {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  font-size: var(--font-size-sm, 13px);
+  font-family: var(--font-sans);
+  color: var(--text-secondary, var(--muted-foreground));
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.tab:hover {
+  color: var(--text-primary);
+}
+
+.tab[data-active='true'] {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
+/* Resize handles. */
+.resizeHandleV,
+.resizeHandleH {
+  background: var(--border);
+  transition: background-color 120ms ease;
+}
+
+.resizeHandleV {
+  width: 1px;
+  height: 100%;
+  margin: 0;
+  cursor: row-resize;
+}
+
+.resizeHandleH {
+  height: 100%;
+  width: 4px;
+  cursor: col-resize;
+}
+
+.resizeHandleV:hover,
+.resizeHandleH:hover,
+[data-resize-handle-active] {
+  background: var(--primary);
+}
+
+/* Turn pane (right column). */
+.turnPane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.turnPaneHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.turnPaneTitle {
+  margin: 0;
+  font-size: var(--font-size-base, 14px);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.turnPaneMeta {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-family: var(--font-mono, monospace);
+}
+
+.clearFocus {
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  font-size: var(--font-size-xs, 11px);
+  font-family: var(--font-sans);
+  color: var(--primary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 3px);
+  cursor: pointer;
+}
+
+.clearFocus:hover {
+  background: var(--bg-tertiary);
+}
+
+.turnList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3, 12px);
+}
+
+.turnListItem {
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  overflow: hidden;
+}
+
+.hiddenHint {
+  margin: 0;
+  padding: var(--space-3, 12px);
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-style: italic;
+  text-align: center;
+}
+
+.turnPickerHint {
+  margin: 0;
+  padding: 0 var(--space-3, 12px) var(--space-2, 8px);
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-style: italic;
+  flex: 0 0 auto;
+}
+
+.turnPickerItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  width: 100%;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 3px);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.turnPickerItem:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--primary);
+}
+
+.turnPickerSeq {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  font-size: var(--font-size-xs, 11px);
+  color: var(--primary);
+  min-width: 36px;
+}
+
+.turnPickerMeta {
+  flex: 1 1 auto;
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.turnPickerTs {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+}

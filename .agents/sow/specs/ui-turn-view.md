@@ -132,3 +132,145 @@ The TurnView is rendered in the right sidebar of the unified Session Detail shel
 - Diff rendering between consecutive assistant messages. Future SOW.
 - Inline rendering of the sub-session's own turns (a sub-session step currently just links out). Future SOW.
 - Token-level highlighting in LLM responses (requires tokenizer + offset tables). Not planned.
+
+---
+
+# ui-session-unified-view — unified Session Detail shell (SOW-0088 chunks 3+4)
+
+**Date**: 2026-06-21
+**Status**: Living spec for the new session-detail chrome.
+
+## Why this exists
+
+The operator's verbatim feedback (SOW-0088 inception): *"I have the impression that all the different session views should only be one."* The current Session Detail page is 6 tabs (Overview, Trace, Turns, Topology, Timeline, Logs, Raw). Switching tabs throws away the operator's mental context — they were looking at a span, clicked Overview to check tokens, and now have to find the span again. The unified view collapses every per-session view into ONE 3-zone shell so the operator never loses context.
+
+This spec is the contract for the unified shell. It does NOT replace the TurnView component (covered by `ui-turn-view.md` above) — TurnView is one of the panes in this shell.
+
+## The shape
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  Breadcrumb · Session header · Pin button                          │
+├────────────────────────────────────────────────────────────────────┤
+│  Overview tiles (full width):                                      │
+│   [Status] [Active] [Duration] [Tokens in→out] [Cost] [Failures]  │
+├──────────────────────────────────┬─────────────────────────────────┤
+│  Visualization tabs              │                                 │
+│  [Waterfall][Topology][Timeline] │   Turn View (right sidebar)      │
+│  [Statistics]                    │                                 │
+│  ┌────────────────────────────┐  │   [turn picker chips]            │
+│  │   <viz with inner scroll>  │  │   ┌──────────────────────────┐  │
+│  └────────────────────────────┘  │   │   Turn #1 · 4 ops        │  │
+│                                  │   │   ────────────────────  │  │
+│  Bottom tabs (resizable ↑↓)      │   │   👤 User prompt         │  │
+│  [Event list][Logs][Raw]         │   │   🧠 Reasoning           │  │
+│  ┌────────────────────────────┐  │   │   🛠️ Tool call/response  │  │
+│  │   <event list / logs / raw │  │   │   💬 Assistant           │  │
+│  │    with inner scroll>      │  │   │                          │  │
+│  └────────────────────────────┘  │   │   [focused step pulses]   │  │
+│                                  │   └──────────────────────────┘  │
+│  <resize handle between viz and bottom>                          │
+└──────────────────────────────────┴─────────────────────────────────┘
+        ↑ resize handle between left (viz+bottom) and right (turn view) ↑
+```
+
+## Zones
+
+| Zone | Component | Resizable? | Scrollable? | Persisted |
+|---|---|---|---|---|
+| Header (breadcrumb + pin) | existing `SessionDetail` header | no | no | n/a |
+| Overview tiles | condensed `OverviewStats` row | no | no | n/a |
+| Left column (viz + bottom) | `PanelGroup` (vertical) | yes (inner split) | each pane scrolls independently | localStorage `ai-viewer.session.vbottom` |
+| Right column (turn view) | single panel | yes (width vs left column) | yes (turn view scrolls) | localStorage `ai-viewer.session.vright` |
+| Visualization tabs | `<VizTabs>` inside the left top panel | no | inner scroll | n/a |
+| Bottom tabs | `<BottomTabs>` inside the left bottom panel | no | inner scroll | n/a |
+
+The viz and bottom tabs share the LEFT column; the turn view is the RIGHT column. Both columns are resizable horizontally; the viz/bottom split is resizable vertically.
+
+## Click-on-graph → scroll-to-turn
+
+This is the critical UX bridge. When the operator clicks ANY span / op / event in the LEFT pane:
+
+1. The span detail drawer opens (existing behavior, unchanged) — local to the left pane.
+2. **NEW**: a URL search param `?op=<op.id>` is set. The right pane reads it.
+3. The right pane finds the turn that owns this op and renders it.
+4. The right pane scrolls the matching step into view + pulses it (existing focusOpId behavior from `ui-turn-view.md`).
+
+The click-on-graph path:
+
+- Waterfall click → setSelected(op) → URL updates `?op=<id>` → right pane focuses
+- Event list row click → same path
+- By-turn card click → same path
+- Topology node click → does NOT update ?op (topology nodes aren't ops)
+
+The URL is shareable: paste `?op=<id>` and the right pane lands on the matching turn.
+
+## Visualization tabs
+
+The current Trace tab becomes the Waterfall tab in the new shell. Other tabs in the viz zone:
+
+- **Waterfall** (default) — the existing Waterfall + ByTurnWaterfall with Detailed/By-turn toggle.
+- **Topology** — the existing per-session Topology tab.
+- **Timeline** — the existing Timeline tab.
+- **Statistics** — the existing /stats page limited to this session (token rollup, cost, duration histogram).
+
+## Bottom tabs
+
+Three bottom tabs, all reading the same session data:
+
+- **Event list** — the existing EventList (rename from current Trace tab's bottom section).
+- **Logs** — the existing LogsTab.
+- **Raw** — the existing RawDataTab.
+
+These three are equivalent in importance; the default is Event list.
+
+## Overview tiles
+
+A condensed strip of 6 stat tiles:
+
+| Tile | Source | Meaning |
+|---|---|---|
+| Status | sessions.status | completed / failed / running / abandoned / interrupted |
+| Duration | sessions.start_ts / end_ts | human-readable |
+| Tokens in | aggregate over all turns | compact (e.g. "70.9k") |
+| Tokens out | aggregate | compact |
+| Cost | sum(cost_usd) over all turns | `$X.XXXX` |
+| Failures | count of ops with error_class != null | integer |
+
+The current full OverviewTab is removed from the tab strip but its components are reused inside the tiles row. The "Status pulse" running animation, the ContextPressure badge, the agent/model summary — all stay reachable via the tiles' tooltips.
+
+## Persistence
+
+- Left/bottom vertical split: `react-resizable-panels` `autoSaveId="ai-viewer.session.vbottom"` (default 65/35).
+- Left/right horizontal split: `autoSaveId="ai-viewer.session.vright"` (default 70/30).
+- Default layout: 65% viz / 35% event list vertically; 70% left / 30% right horizontally. The defaults make the right pane usable (~480px on a 1440px viewport) without overwhelming the visualization.
+- Active tab in the viz zone: URL `?tab=viz:waterfall` (etc). Falls back to `waterfall`.
+- Active tab in the bottom zone: URL `?tab=bottom:events` (etc). Falls back to `events`.
+- Focused op: URL `?op=<id>` (shared with the existing per-tab `focusOpId` plumbing).
+
+## Empty / loading / error states
+
+The unified view inherits all per-pane empty/loading/error states (e.g. Topology shows "no edges yet" if there are no agent↔tool relationships). The outer shell renders a single `<LoadingState>` / `<ErrorState>` if the session itself fails to load.
+
+## What this replaces
+
+- Existing `TraceTab` → its top (viz) becomes the Waterfall viz tab; its bottom (Event list) becomes the Event list bottom tab.
+- Existing `TurnsTab` → removed as a top-level tab; its content is now the right sidebar (Turn View).
+- Existing `TopologyTab`, `TimelineTab`, `LogsTab`, `RawDataTab` → folded into viz/bottom tabs.
+- Existing `OverviewTab` → condensed to the top tiles row.
+
+The legacy tabs are removed from the `?tab=` URL schema. A bookmark to `?tab=trace` falls back to the unified view with Waterfall/Event list pre-selected.
+
+## Accessibility
+
+- Each panel has `role="region"` and `aria-label`.
+- The resize handles have `aria-label="Resize panel"` and are keyboard-resizable (arrow keys).
+- The URL params for focused op and active tabs are keyboard-accessible via standard browser back/forward.
+- The turn view's scroll-to behavior respects `prefers-reduced-motion` (existing).
+
+## Out of scope (deferred)
+
+- Drag-and-drop to reorder steps within a turn.
+- Inline editing of a turn's steps.
+- Cross-session comparison in the right sidebar.
+- Pinning specific turns to the top of the right pane.
