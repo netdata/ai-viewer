@@ -16,13 +16,13 @@ import (
 )
 
 // payloadPreviewBytes is the default preview size (4 KB). The full download is
-// capped at payloadMaxBytes. payloadJsonCapBytes is the cap for JSON-format
+// capped at payloadMaxBytes. payloadJSONCapBytes is the cap for JSON-format
 // payloads (codex/claude_code/opencode envelopes), which the TurnView needs
 // whole for extractReadableText to strip the envelope.
 const (
-	payloadPreviewBytes  = 4096
-	payloadJsonCapBytes  = 1 * 1024 * 1024 // 1 MB — most JSON envelopes fit
-	payloadMaxBytes      = 10 * 1024 * 1024 // 10 MB
+	payloadPreviewBytes = 4096
+	payloadJSONCapBytes = 1 * 1024 * 1024  // 1 MB — most JSON envelopes fit
+	payloadMaxBytes     = 10 * 1024 * 1024 // 10 MB
 )
 
 // payloadRefRow is the DB row for a payload_refs entry.
@@ -101,7 +101,7 @@ func (p *Presenter) handlePayloadPreview(w http.ResponseWriter, r *http.Request)
 	// payloads (e.g. plain-text bash output) keep the small preview cap.
 	maxBytes := payloadPreviewBytes
 	if ref.Format == "json" {
-		maxBytes = payloadJsonCapBytes
+		maxBytes = payloadJSONCapBytes
 	}
 	full := r.URL.Query().Has("full")
 	if full {

@@ -89,15 +89,15 @@ func collectText(node any, depth int) (string, bool) {
 		return "", false
 	case []any:
 		var parts []string
-		any := false
+		foundAny := false
 		for _, child := range v {
 			s, ok := collectText(child, depth+1)
 			if ok {
 				parts = append(parts, s)
-				any = true
+				foundAny = true
 			}
 		}
-		if !any {
+		if !foundAny {
 			return "", false
 		}
 		return strings.Join(parts, "\n"), true
@@ -112,7 +112,7 @@ func collectText(node any, depth int) (string, bool) {
 		// Otherwise recurse into each value EXCEPT the text-content keys
 		// (already handled; recursing into them would just yield "" again).
 		var parts []string
-		any := false
+		foundAny := false
 		for k, child := range v {
 			if k == "text" || k == "content_text" || k == "output_text" {
 				continue
@@ -120,10 +120,10 @@ func collectText(node any, depth int) (string, bool) {
 			s, ok := collectText(child, depth+1)
 			if ok {
 				parts = append(parts, s)
-				any = true
+				foundAny = true
 			}
 		}
-		if !any {
+		if !foundAny {
 			return "", false
 		}
 		return strings.Join(parts, "\n"), true

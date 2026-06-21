@@ -448,6 +448,8 @@ func dispatchSubcommand(args []string, stdout, stderr *os.File) (int, bool) {
 	switch args[0] {
 	case "rollups-backfill":
 		return runBackfill(args[1:], stdout, stderr), true
+	case "fts-content-backfill":
+		return runBackfillFTSContent(args[1:], stdout, stderr), true
 	case "reprice":
 		return runReprice(args[1:], stdout, stderr), true
 	default:
