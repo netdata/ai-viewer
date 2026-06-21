@@ -21,9 +21,15 @@
 // collapsing to plain `string` the way `T | string` would.
 type OpenEnum<T extends string> = T | (string & Record<never, never>);
 
-/** internal/canonical/events.go SessionStatus (known values; open union). */
+/** internal/canonical/events.go SessionStatus (known values; open union).
+ *  `stale` is a derived value produced by the presenter's effective_status
+ *  computation (SOW-0089 chunk 5a) — the persisted `status` column never
+ *  carries this value. Frontend code that wants the operator-facing status
+ *  (the value the UI should render) should prefer `effective_status` over
+ *  `status`. The two fields are kept distinct so the persisted snapshot is
+ *  still available for raw source reporting / debugging. */
 export type SessionStatus = OpenEnum<
-  'running' | 'completed' | 'failed' | 'abandoned' | 'interrupted'
+  'running' | 'completed' | 'failed' | 'abandoned' | 'interrupted' | 'stale'
 >;
 
 /** internal/canonical/events.go SessionKind (known values; open union). */
@@ -79,6 +85,9 @@ export interface SessionListItem {
   agent_name: string;
   model: string;
   status: SessionStatus;
+  /** Operator-facing status (SOW-0089 chunk 5a) — derived from the snapshot
+   *  + freshness signals. Prefer this over `status` for any UI decision. */
+  effective_status?: SessionStatus;
   error_class?: string;
   start_ts: number;
   end_ts: number | null;
@@ -114,6 +123,9 @@ export interface SessionDetail {
   model: string;
   provider: string;
   status: SessionStatus;
+  /** Operator-facing status (SOW-0089 chunk 5a) — derived from the snapshot
+   *  + freshness signals. Prefer this over `status` for any UI decision. */
+  effective_status?: SessionStatus;
   error_class: string | null;
   start_ts: number;
   end_ts: number | null;

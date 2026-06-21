@@ -11,6 +11,13 @@ import (
 // plus the columns the detail view surfaces (provider, error, cache
 // tokens). The computed children list lives at the response top level
 // (child_sessions), not nested here, matching rest-api.md.
+//
+// `effective_status` (SOW-0089 chunk 5a) is the derived status from
+// deriveEffectiveStatus — same shape as `status` but NEVER returns
+// "running" once the session has gone idle (see session_status.go for the
+// rules). The frontend prefers `effective_status` over `status` for any
+// UX decision; the persisted `status` is kept for backwards-compat + raw
+// source reporting.
 type sessionDetail struct {
 	ID                string  `json:"id"`
 	NativeID          string  `json:"native_id"`
@@ -22,6 +29,7 @@ type sessionDetail struct {
 	Model             string  `json:"model"`
 	Provider          string  `json:"provider"`
 	Status            string  `json:"status"`
+	EffectiveStatus   string  `json:"effective_status"`
 	ErrorClass        *string `json:"error_class"`
 	StartTS           int64   `json:"start_ts"`
 	EndTS             *int64  `json:"end_ts"`
@@ -221,6 +229,16 @@ FROM sessions WHERE id = ?`, id).Scan(
 		v := lastActTS.Int64
 		s.LastActivityTS = &v
 	}
+	// SOW-0089 chunk 5a: derive the operator-facing status from the snapshot
+	// + freshness signals. Done on every read so a session that the watcher
+	// reports as "running" but the file has gone stale on (most codex
+	// sessions) flips to "stale" without a re-ingest.
+	s.EffectiveStatus = string(deriveEffectiveStatus(
+		s.Status,
+		endTS.Int64,
+		lastActTS.Int64,
+		p.now().UnixMicro(),
+	))
 	return s, nil
 }
 

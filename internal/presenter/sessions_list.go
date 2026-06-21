@@ -20,6 +20,7 @@ type sessionListItem struct {
 	AgentName         string  `json:"agent_name"`
 	Model             string  `json:"model"`
 	Status            string  `json:"status"`
+	EffectiveStatus   string  `json:"effective_status"`
 	ErrorClass        string  `json:"error_class"`
 	StartTS           int64   `json:"start_ts"`
 	EndTS             *int64  `json:"end_ts"`
@@ -123,9 +124,15 @@ func (p *Presenter) querySessions(ctx context.Context, f sessionFilter) ([]sessi
 	}
 	defer func() { _ = rows.Close() }()
 
+	// SOW-0089 chunk 5a: every row's effective_status is derived from the
+	// snapshot + freshness signals. Compute the wall clock once for the page
+	// (microsecond resolution is plenty for a 10-minute staleness threshold)
+	// and pass it to the scanner so all rows agree.
+	pageNowUs := p.now().UnixMicro()
+
 	items := make([]sessionListItem, 0, f.limit)
 	for rows.Next() {
-		it, scanErr := scanSessionListItem(rows)
+		it, scanErr := scanSessionListItem(rows, pageNowUs)
 		if scanErr != nil {
 			return nil, scanErr
 		}
@@ -139,7 +146,11 @@ func (p *Presenter) querySessions(ctx context.Context, f sessionFilter) ([]sessi
 
 // scanSessionListItem scans one list row, mapping the nullable parent and
 // end-timestamp columns onto the pointer fields of sessionListItem.
-func scanSessionListItem(rows *sql.Rows) (sessionListItem, error) {
+// `nowUs` is the wall clock to use when deriving `effective_status`
+// (SOW-0089 chunk 5a); it MUST be the same value for every row on a page
+// so a session crossing the stale threshold mid-pagination reports the same
+// status on page 1 and page 2.
+func scanSessionListItem(rows *sql.Rows, nowUs int64) (sessionListItem, error) {
 	var (
 		it        sessionListItem
 		parent    sql.NullString
@@ -166,6 +177,12 @@ func scanSessionListItem(rows *sql.Rows) (sessionListItem, error) {
 		v := lastActTS.Int64
 		it.LastActivityTS = &v
 	}
+	it.EffectiveStatus = string(deriveEffectiveStatus(
+		it.Status,
+		endTS.Int64,
+		lastActTS.Int64,
+		nowUs,
+	))
 	return it, nil
 }
 

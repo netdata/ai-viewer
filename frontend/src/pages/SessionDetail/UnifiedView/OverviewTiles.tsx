@@ -57,7 +57,12 @@ function aggregateTurns(detail: SessionDetailResponse): AggregateStats {
 export function OverviewTiles({ detail }: { detail: SessionDetailResponse }) {
   const session = detail.session;
   const stats = aggregateTurns(detail);
-  const isRunning = session.status === 'running';
+  // SOW-0089 chunk 5a: use the derived effective_status for the "is the
+  // session live?" check, so the Overview tile flips to "stale · Nm" as
+  // soon as the activity threshold trips (without waiting for ingest to
+  // notice the source died).
+  const displayStatus = session.effective_status ?? session.status;
+  const isRunning = displayStatus === 'running';
 
   // StaleBadge needs nowUs; Date.now() is impure so we read it once per
   // mount + every 30s while the panel is visible (the stale badge is
@@ -78,8 +83,8 @@ export function OverviewTiles({ detail }: { detail: SessionDetailResponse }) {
     <div className={styles.tiles} role="group" aria-label="Session overview">
       <div className={styles.tile} data-kind="status">
         <span className={styles.label}>Status</span>
-        <span className={styles.value} data-status={session.status}>
-          {isRunning ? <StaleBadge lastActivityTs={session.last_activity_ts ?? null} status={session.status} nowUs={nowUs} /> : session.status}
+        <span className={styles.value} data-status={displayStatus}>
+          {isRunning ? <StaleBadge lastActivityTs={session.last_activity_ts ?? null} status={displayStatus} nowUs={nowUs} /> : displayStatus}
         </span>
       </div>
 

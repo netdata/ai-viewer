@@ -15,6 +15,7 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
   failed: 'Failed',
   abandoned: 'Abandoned',
   interrupted: 'Interrupted',
+  stale: 'Stale',
 };
 
 const STATUS_DESCRIPTION: Record<SessionStatus, string> = {
@@ -23,18 +24,25 @@ const STATUS_DESCRIPTION: Record<SessionStatus, string> = {
   failed: 'This session ended with at least one failure.',
   abandoned: 'This session was closed without a clean finish.',
   interrupted: 'This session was cut off (e.g. process killed).',
+  stale: 'Was running but no activity in the last 10 minutes — process is probably gone.',
 };
 
 // Maps each status to its --status-* token and its matching lucide icon.
+// 'stale' (SOW-0089 chunk 5a) is a derived-only status — the persisted
+// `status` column never carries it, but the presenter's effective_status
+// computation can produce it. We render stale as a pause icon with the
+// same yellow "running" token so the operator immediately sees "this was
+// running, but it isn't anymore".
 const STATUS_META: Record<
   SessionStatus,
-  { token: 'completed' | 'running' | 'failed' | 'abandoned' | 'interrupted'; Icon: typeof Loader2 }
+  { token: 'completed' | 'running' | 'failed' | 'abandoned' | 'interrupted' | 'stale'; Icon: typeof Loader2 }
 > = {
   completed: { token: 'completed', Icon: CheckCircle2 },
   running: { token: 'running', Icon: Loader2 },
   failed: { token: 'failed', Icon: AlertTriangle },
   abandoned: { token: 'abandoned', Icon: CircleDashed },
   interrupted: { token: 'interrupted', Icon: Pause },
+  stale: { token: 'running', Icon: Pause },
 };
 
 export function StatusBadge({

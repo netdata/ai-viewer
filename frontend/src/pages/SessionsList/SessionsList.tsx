@@ -489,7 +489,7 @@ function SessionTableRow({
       </td>
       <td className={cn('px-3 align-middle', rowPad)}>
         <div className="flex items-center gap-1.5">
-          <StatusBadge status={session.status} />
+          <StatusBadge status={session.effective_status ?? session.status} />
           {session.status === 'failed' && session.error_class ? (
             <span className="inline-flex items-center gap-1 rounded-md bg-status-failed/10 px-1.5 py-0.5 text-[11px] text-status-failed">
               <CircleAlert className="size-3" aria-hidden />
@@ -680,12 +680,19 @@ function summarize(items: SessionListItem[]) {
   let tokensIn = 0;
   let tokensOut = 0;
   let costUsd = 0;
+  // SOW-0089 chunk 5a: the stat counts use `effective_status` (when present)
+  // so the Reliability figure reflects what the operator sees in the list,
+  // not the raw ingest snapshot. A session the source reported as "running"
+  // but that the watcher hasn't seen activity from in 10+ minutes counts
+  // toward `completed` for the reliability calculation — the operator's
+  // mental model is that the session is done.
   for (const s of items) {
-    if (s.status === 'running') running++;
-    else if (s.status === 'failed') failed++;
-    else if (s.status === 'completed') completed++;
-    else if (s.status === 'abandoned') abandoned++;
-    else if (s.status === 'interrupted') interrupted++;
+    const status = s.effective_status ?? s.status;
+    if (status === 'running') running++;
+    else if (status === 'failed') failed++;
+    else if (status === 'completed' || status === 'stale') completed++;
+    else if (status === 'abandoned') abandoned++;
+    else if (status === 'interrupted') interrupted++;
     tokensIn += s.tokens_in;
     tokensOut += s.tokens_out;
     costUsd += s.cost_usd;
