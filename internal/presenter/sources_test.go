@@ -178,10 +178,21 @@ func TestSources_SourceMetaOmittedAndPresent(t *testing.T) {
 	})
 }
 
-// doSources issues GET /api/sources against the presenter handler.
+// doSources issues GET /api/sources against the presenter handler. By
+// default (no include= flag) the response OMITS cursors — this matches
+// the operator-facing Sources page. Tests that assert cursor contents
+// pass ?include=cursors via doSourcesWithCursors.
 func doSources(t *testing.T, p *Presenter) (int, sourcesBody) {
+	return doSourcesWith(t, p, "")
+}
+
+func doSourcesWithCursors(t *testing.T, p *Presenter) (int, sourcesBody) {
+	return doSourcesWith(t, p, "?include=cursors")
+}
+
+func doSourcesWith(t *testing.T, p *Presenter, query string) (int, sourcesBody) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/sources", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/sources"+query, nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	var body sourcesBody
@@ -199,7 +210,7 @@ func TestSources_EmptyReturns200WithEmptyItems(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
-	code, body := doSources(t, p)
+	code, body := doSourcesWithCursors(t, p)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d", code)
 	}
@@ -240,7 +251,7 @@ func TestSources_ListsConfiguredSources(t *testing.T) {
 		}
 	}
 
-	code, body := doSources(t, p)
+	code, body := doSourcesWithCursors(t, p)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d", code)
 	}
@@ -413,4 +424,53 @@ func TestSources_DBErrorLogCarriesRequestID(t *testing.T) {
 	if got, _ := errLine["request_id"].(string); got != rid {
 		t.Fatalf("error log request_id = %q, want %q (matches X-Request-ID)", got, rid)
 	}
+}
+
+// TestSources_DefaultOmitsCursor pins the perf-critical default: the
+// operator-facing /api/sources response carries the source metadata
+// + observability counters but OMITS the per-source cursor blob
+// (1–15 MB per source, ~70 MB total for a typical multi-source
+// install). The cursor field is required for the diagnostic page
+// only and must be opted into via ?include=cursors — fetching the
+// default response never pays the cursor cost.
+func TestSources_DefaultOmitsCursor(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	now := fixedTime.UnixMicro()
+	if _, err := db.Exec(
+		`INSERT INTO sources (id, format, location, enabled, last_seen_at, parse_errors, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"aiagent_v3:/tmp/omit", "aiagent_v3", "/tmp/omit", 1, now, 0, now,
+	); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO source_progress (source_id, last_seq, last_ts_us, cursor, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		"aiagent_v3:/tmp/omit", 50, now-1000, `{"files":{"x":{"offset":42}}}`, now,
+	); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
+
+	code, body := doSources(t, p)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(body.Items))
+	}
+	raw, _ := jsonEncode(body)
+	if strings.Contains(string(raw), `"offset":42`) {
+		t.Errorf("default response must NOT include cursor text; got %s", raw)
+	}
+	if strings.Contains(string(raw), `"cursor"`) {
+		t.Errorf("default response must NOT include the cursor key at all; got %s", raw)
+	}
+}
+
+// jsonEncode is a thin wrapper kept for readability — the test
+// asserts on the raw JSON bytes of the response envelope to confirm
+// the cursor field is omitted at the wire level.
+func jsonEncode(v any) ([]byte, error) {
+	return json.Marshal(v)
 }

@@ -37,7 +37,7 @@ type sourceItem struct {
 	ParseErrors int64           `json:"parse_errors"`
 	LastSeenAt  *int64          `json:"last_seen_at"`
 	CreatedAt   int64           `json:"created_at"`
-	Cursor      string          `json:"cursor"`
+	Cursor      string          `json:"cursor,omitempty"`
 	LastSeq     int64           `json:"last_seq"`
 	LastTsUS    *int64          `json:"last_ts_us"`
 	UpdatedAt   *int64          `json:"updated_at"`
@@ -87,8 +87,15 @@ type sourceItemsFailureResponse struct {
 // handleSources answers GET /api/sources. Returns every configured
 // source with the matching source_progress cursor + last_seq
 // observability counter (max SourceSeq seen; NOT a dedup gate). The
-// Sources admin panel (lands in Chunk 15) uses this endpoint to render
-// its per-source diagnostics.
+// Sources admin panel uses this endpoint to render its per-source
+// diagnostics.
+//
+// The per-source Cursor field (a JSON blob of file offsets, typically
+// 1–15 MB) is OMItted by default — the operator-facing Sources page
+// only needs the metadata (status, parse_errors, last_seen_at). It
+// inflates the response by ~10× per source. Opt in via
+// ?include=cursors for the diagnostic page that needs the per-file
+// resume state.
 func (p *Presenter) handleSources(w http.ResponseWriter, r *http.Request) {
 	// HEAD parity: same headers as GET, empty body. writeJSON skips
 	// the body when r.Method == HEAD.
@@ -97,10 +104,12 @@ func (p *Presenter) handleSources(w http.ResponseWriter, r *http.Request) {
 			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
 		return
 	}
+	includeCursors := r.URL.Query().Get("include") == "cursors"
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	items, failure := p.collectSourceItems(ctx)
+	items, failure := p.collectSourceItems(ctx, includeCursors)
 	if failure.err != nil {
 		p.writeSourcesFailure(ctx, w, r, failure)
 		return
@@ -108,8 +117,13 @@ func (p *Presenter) handleSources(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, p.logger, sourcesResponse{Items: items})
 }
 
-func (p *Presenter) collectSourceItems(ctx context.Context) ([]sourceItem, sourceItemsFailure) {
-	rows, err := p.db.QueryContext(ctx, `
+func (p *Presenter) collectSourceItems(ctx context.Context, includeCursors bool) ([]sourceItem, sourceItemsFailure) {
+	// When the caller opts out of cursors, the SQL projection skips the
+	// cursor column entirely — saves ~10 MB of network + JSON marshaling
+	// on the operator-facing Sources page.
+	var q string
+	if includeCursors {
+		q = `
 SELECT
     s.id,
     s.format,
@@ -126,7 +140,28 @@ SELECT
 FROM sources s
 LEFT JOIN source_progress sp ON sp.source_id = s.id
 ORDER BY s.created_at, s.id
-`)
+`
+	} else {
+		q = `
+SELECT
+    s.id,
+    s.format,
+    s.location,
+    s.enabled,
+    s.parse_errors,
+    s.last_seen_at,
+    s.created_at,
+    '',
+    IFNULL(sp.last_seq, 0),
+    sp.last_ts_us,
+    sp.updated_at,
+    s.meta_json
+FROM sources s
+LEFT JOIN source_progress sp ON sp.source_id = s.id
+ORDER BY s.created_at, s.id
+`
+	}
+	rows, err := p.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, sourceItemsFailure{kind: sourceItemsFailureQuery, err: err}
 	}
