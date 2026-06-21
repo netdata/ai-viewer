@@ -9,6 +9,8 @@ import type { OpDetail } from '../../api/types';
 import { usePayloadContent } from './payloadStore';
 import { Markdown } from './Markdown';
 import { CopyButton } from './CopyButton';
+import { OpIdBadge } from './OpIdBadge';
+import { formatElapsed, formatWallClock } from './stepMeta';
 import styles from './TurnStep.module.css';
 
 const ICONS = {
@@ -172,9 +174,19 @@ function SessionBody({ childSessionId }: { childSessionId: string }) {
 export function TurnStep({
   op,
   focused,
+  turnStartTs,
+  stepIndex,
+  stepTotal,
 }: {
   op: OpDetail;
   focused: boolean;
+  /** Unix-micro timestamp of the parent turn's start; drives the
+   *  "+1.2s" elapsed-since-turn-start indicator on each step. */
+  turnStartTs: number;
+  /** 1-based position of this step within the turn. */
+  stepIndex: number;
+  /** Total steps in the turn (for "step 4 / 7" labeling). */
+  stepTotal: number;
 }) {
   const { label, Icon, variant } = headerFor(op);
   const stepRef = useRef<HTMLDivElement | null>(null);
@@ -228,6 +240,18 @@ export function TurnStep({
         </span>
         {hasProseContent ? <CopyButton text={proseText} kind="prose" /> : null}
       </header>
+      <div className={styles.stepMetaRow} aria-label="Step metadata">
+        <span className={styles.stepMetaItem} title={`Step ${stepIndex} of ${stepTotal}`}>
+          {stepIndex}/{stepTotal}
+        </span>
+        <span className={styles.stepMetaItem} title={`Elapsed since turn start (${turnStartTs} µs)`}>
+          {formatElapsed(op.start_ts - turnStartTs)}
+        </span>
+        <span className={styles.stepMetaItem} title={`Wall-clock start (UTC): ${new Date(op.start_ts / 1000).toISOString()}`}>
+          {formatWallClock(op.start_ts)}
+        </span>
+        <OpIdBadge opId={op.id} />
+      </div>
 
       {/* Body dispatch. */}
       {op.kind === 'session' && op.child_session_id !== null ? (

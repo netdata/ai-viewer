@@ -62,9 +62,15 @@ export function TurnView({
       </header>
 
       <ol className={styles.steps}>
-        {turn.ops.map((op) => (
+        {turn.ops.map((op, idx) => (
           <li key={op.id} className={styles.stepLi}>
-            <TurnStep op={op} focused={focusOpId === op.id} />
+            <TurnStep
+              op={op}
+              focused={focusOpId === op.id}
+              turnStartTs={turn.start_ts}
+              stepIndex={idx + 1}
+              stepTotal={turn.ops.length}
+            />
           </li>
         ))}
       </ol>

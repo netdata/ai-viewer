@@ -572,3 +572,71 @@ describe('CopyButton — fallback path', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-step metadata row (SOW-0090 chunk 8)
+// ---------------------------------------------------------------------------
+
+describe('TurnView — step metadata row', () => {
+  it('renders step index, elapsed since turn start, and wall-clock time', () => {
+    const turnStartTs = 1_700_000_000_000_000;
+    const ops = [
+      makeOp({ id: 'op-meta-a', kind: 'tool', name: 'read_file', start_ts: turnStartTs + 1_200_000, payload_refs: [] }),
+      makeOp({ id: 'op-meta-b', kind: 'tool', name: 'read_file', start_ts: turnStartTs + 5_500_000, payload_refs: [] }),
+      makeOp({ id: 'op-meta-c', kind: 'llm', name: 'message', start_ts: turnStartTs + 1_234_567, payload_refs: [] }),
+    ];
+    const turn = makeTurn({ start_ts: turnStartTs, ops });
+    renderInRouter(<TurnView turn={turn} />);
+
+    // Each step shows its 1-based index and total.
+    expect(within(screen.getByTestId('turn-step-op-meta-a')).getByText('1/3')).toBeInTheDocument();
+    expect(within(screen.getByTestId('turn-step-op-meta-b')).getByText('2/3')).toBeInTheDocument();
+    expect(within(screen.getByTestId('turn-step-op-meta-c')).getByText('3/3')).toBeInTheDocument();
+
+    // Elapsed since turn start: +1.2s, +5.5s, +1.2s (1.234s rounds down per Math.floor semantics).
+    expect(within(screen.getByTestId('turn-step-op-meta-a')).getByText('+1.2s')).toBeInTheDocument();
+    expect(within(screen.getByTestId('turn-step-op-meta-b')).getByText('+5.5s')).toBeInTheDocument();
+  });
+
+  it('renders the op-id badge with the first 8 chars + a copy button', () => {
+    const op = makeOp({ id: 'abcdef0123456789extra', kind: 'tool', name: 'read_file', payload_refs: [] });
+    const turn = makeTurn({ ops: [op] });
+    renderInRouter(<TurnView turn={turn} />);
+
+    const step = screen.getByTestId('turn-step-abcdef0123456789extra');
+    const badge = within(step).getByRole('button', { name: /copy op id/i });
+    expect(badge).toBeInTheDocument();
+    expect(within(badge).getByText('abcdef01')).toBeInTheDocument();
+    expect(badge.getAttribute('title')).toBe('abcdef0123456789extra');
+  });
+
+  it('copies the full op id (not the short form) when the badge is clicked', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const op = makeOp({ id: '21cd490e83b974aee895cbd88d5bfbfd', kind: 'tool', name: 'read_file', payload_refs: [] });
+    const turn = makeTurn({ ops: [op] });
+    renderInRouter(<TurnView turn={turn} />);
+
+    const badge = within(screen.getByTestId('turn-step-21cd490e83b974aee895cbd88d5bfbfd')).getByRole('button', { name: /copy op id/i });
+    await user.click(badge);
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('21cd490e83b974aee895cbd88d5bfbfd');
+    });
+  });
+
+  it('renders wall-clock time in UTC with Z suffix', () => {
+    // 2026-06-21T11:42:18Z = Date.UTC(2026, 5, 21, 11, 42, 18) * 1000 µs
+    const tsUs = Date.UTC(2026, 5, 21, 11, 42, 18) * 1000;
+    const op = makeOp({ id: 'op-clock', kind: 'llm', name: 'message', start_ts: tsUs, payload_refs: [] });
+    const turn = makeTurn({ start_ts: tsUs, ops: [op] });
+    renderInRouter(<TurnView turn={turn} />);
+
+    expect(within(screen.getByTestId('turn-step-op-clock')).getByText('11:42:18Z')).toBeInTheDocument();
+  });
+});

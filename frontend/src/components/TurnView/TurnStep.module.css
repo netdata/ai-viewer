@@ -71,6 +71,63 @@
   font-weight: 600;
 }
 
+/* Metadata row (SOW-0090 chunk 8): step index / elapsed / wall-clock /
+ * op-id badge. Sits between the step header and the body so the operator
+ * sees pacing + shareable op-id at a glance without scrolling. */
+.stepMetaRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 12px);
+  flex-wrap: wrap;
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-family: var(--font-mono, monospace);
+  padding-left: calc(22px + var(--space-2, 8px));
+}
+
+.stepMetaItem {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+}
+
+.opIdBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 4px;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs, 11px);
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.opIdBadge:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.opIdBadge[data-copied='true'] {
+  border-color: var(--success, #16a34a);
+  color: var(--success, #16a34a);
+}
+
+.opIdShort {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs, 11px);
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
 /* Variant accents — a 3px left border on each card to distinguish kinds. */
 .variant_user       { border-left: 3px solid var(--primary); }
 .variant_reasoning  { border-left: 3px solid #a855f7; }       /* purple */
