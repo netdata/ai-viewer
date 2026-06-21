@@ -57,3 +57,4 @@ CRUSH.local.md
 
 # Playwright MCP local cache (regenerated per run; never commit)
 /.playwright-mcp/
+*.png
