@@ -302,11 +302,13 @@ func expectedSchema() []tableContract {
 				{Name: "op_count", Type: "INTEGER", NotNull: true, DfltVal: "0"},
 				{Name: "failure_count", Type: "INTEGER", NotNull: true, DfltVal: "0"},
 				{Name: "extras_json", Type: "TEXT"},
+				{Name: "first_user_message_hash", Type: "TEXT"},
 			},
 			indexes: []index{
 				{Name: "idx_sessions_activity", Cols: []string{"last_activity_ts"}},
 				{Name: "idx_sessions_agent", Cols: []string{"agent_name"}},
 				{Name: "idx_sessions_cwd", Cols: []string{"cwd"}},
+				{Name: "idx_sessions_first_user_message_hash", Cols: []string{"first_user_message_hash"}, Partial: true},
 				{Name: "idx_sessions_model", Cols: []string{"model"}},
 				{Name: "idx_sessions_parent", Cols: []string{"parent_session_id"}},
 				{Name: "idx_sessions_provider", Cols: []string{"provider"}},

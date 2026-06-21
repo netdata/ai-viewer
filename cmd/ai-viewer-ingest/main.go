@@ -72,12 +72,11 @@ func main() {
 func run(args []string, stdout, stderr *os.File) int {
 	// Thin subcommand dispatch. Existing invocations pass only flags
 	// (leading '-'), so the daemon path below is preserved. A bare
-	// "rollups-backfill" first arg routes to the one-shot recompute.
-	if len(args) > 0 && args[0] == "rollups-backfill" {
-		return runBackfill(args[1:], stdout, stderr)
-	}
-	if len(args) > 0 && args[0] == "reprice" {
-		return runReprice(args[1:], stdout, stderr)
+	// subcommand first arg routes to a one-shot helper. The subcommand
+	// dispatch is split into a small table so the surrounding `run` stays
+	// below the cyclomatic-complexity gate (SOW-0089 chunk 5b).
+	if exitCode, ok := dispatchSubcommand(args, stdout, stderr); ok {
+		return exitCode
 	}
 
 	cfg, exitCode, ok := parseFlags(args, stderr)
@@ -435,4 +434,23 @@ func versionString() string {
 		}
 	}
 	return "dev"
+}
+
+// dispatchSubcommand handles the bare-subcommand routes (a single first
+// arg matching a known helper name). Returns (exitCode, handled). For any
+// other input — flags-only, unknown subcommand — handled=false so the
+// caller falls through to the daemon path. Extracted from run to keep
+// cyclomatic complexity below the project gate.
+func dispatchSubcommand(args []string, stdout, stderr *os.File) (int, bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	switch args[0] {
+	case "rollups-backfill":
+		return runBackfill(args[1:], stdout, stderr), true
+	case "reprice":
+		return runReprice(args[1:], stdout, stderr), true
+	default:
+		return 0, false
+	}
 }

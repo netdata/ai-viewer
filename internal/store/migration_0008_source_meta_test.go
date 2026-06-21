@@ -24,11 +24,15 @@ import (
 
 const migration0008Name = "0008_source_meta.sql"
 
-// TestMigration0008_BumpsSchemaVersionTo8 pins the lockstep contract: applying
-// the full migration chain (which ends at 0008) leaves schema_meta.version '8'.
-func TestMigration0008_BumpsSchemaVersionTo8(t *testing.T) {
+// TestMigration0008_BumpsSchemaVersionTo8_Internal pins migration 0008's OWN
+// bump (version '8' after applying THROUGH 0008, not the chain head). Once
+// 0009 makes the chain head '9', a head-anchored 0008 assertion would no
+// longer pin 0008 itself; this stops-at-0008 assertion keeps it meaningful
+// — mirroring how TestMigration0006_BumpsSchemaVersionTo6_Internal was made
+// to pin 0006 once 0007 became the head.
+func TestMigration0008_BumpsSchemaVersionTo8_Internal(t *testing.T) {
 	t.Parallel()
-	db := openMigratedSQLite(t)
+	db := openChainThrough(t, migration0008Name)
 	var version string
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
@@ -148,8 +152,8 @@ func TestMigration0008_IsIdempotent(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "8" {
-		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "8")
+	if version != "9" {
+		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "9")
 	}
 
 	if got := scanIntInternal(t, db,
