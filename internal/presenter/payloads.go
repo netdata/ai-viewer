@@ -16,10 +16,13 @@ import (
 )
 
 // payloadPreviewBytes is the default preview size (4 KB). The full download is
-// capped at payloadMaxBytes.
+// capped at payloadMaxBytes. payloadJsonCapBytes is the cap for JSON-format
+// payloads (codex/claude_code/opencode envelopes), which the TurnView needs
+// whole for extractReadableText to strip the envelope.
 const (
-	payloadPreviewBytes = 4096
-	payloadMaxBytes     = 10 * 1024 * 1024 // 10 MB
+	payloadPreviewBytes  = 4096
+	payloadJsonCapBytes  = 1 * 1024 * 1024 // 1 MB — most JSON envelopes fit
+	payloadMaxBytes      = 10 * 1024 * 1024 // 10 MB
 )
 
 // payloadRefRow is the DB row for a payload_refs entry.
@@ -87,7 +90,19 @@ func (p *Presenter) handlePayloadPreview(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Determine the max bytes to return.
+	// Determine the max bytes to return. JSON envelopes (codex
+	// response_item.message, claude_code assistant message, opencode
+	// parts[]) are typically 5–50 KB and ALWAYS parseable as JSON when
+	// delivered whole. The 4 KB preview cap is fine for the SpanDetailDrawer
+	// (truncated prose is still readable) but for the TurnView the
+	// extractReadableText heuristic (SOW-0090 chunk 7+) requires a
+	// complete JSON document to strip the envelope. We raise the cap to
+	// 1 MB for JSON formats so the envelope almost always fits; non-JSON
+	// payloads (e.g. plain-text bash output) keep the small preview cap.
 	maxBytes := payloadPreviewBytes
+	if ref.Format == "json" {
+		maxBytes = payloadJsonCapBytes
+	}
 	full := r.URL.Query().Has("full")
 	if full {
 		maxBytes = payloadMaxBytes
@@ -95,6 +110,14 @@ func (p *Presenter) handlePayloadPreview(w http.ResponseWriter, r *http.Request)
 
 	// Resolve the payload to bytes.
 	data, truncated, totalBytes, err := p.resolvePayload(r.Context(), ref, roots, maxBytes)
+	// JSON-aware truncation: when we cut the file at maxBytes, the result
+	// often lands mid-string. truncateToJSONBoundary drops trailing bytes
+	// after the closing brace/bracket that completes the top-level JSON
+	// document. The X-Payload-Truncated flag stays true (we're still
+	// showing less than the full payload); only the byte count changes.
+	if truncated && ref.Format == "json" {
+		data = truncateToJSONBoundary(data)
+	}
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := CodeInternalError
@@ -411,4 +434,67 @@ func readFilePayload(path string, fileSize int64, maxBytes int) ([]byte, bool, i
 	}
 	truncated := fileSize > int64(maxBytes)
 	return buf[:n], truncated, fileSize, nil
+}
+
+// truncateToJSONBoundary walks the input bytes looking for the position
+// after which depth returns to zero AND we have seen at least one
+// opening brace or bracket (the document has been completed). It returns
+// the input unchanged when no complete document is found — the caller
+// still serves the bytes; the client then has whatever partial JSON
+// was readable.
+//
+// Why: server-side 4 KB payload previews often cut a JSON envelope
+// mid-string. The turn view's extractReadableText (frontend) tries to
+// JSON.parse the response; a truncated document fails and the user sees
+// a wall of JSON. By truncating at a clean JSON boundary, we deliver a
+// parseable document whenever the cap is large enough to contain one.
+//
+// The walker is intentionally minimal — it tracks brace/bracket depth,
+// respects double-quoted strings (including backslash escapes), and
+// ignores single-quoted strings, comments, and trailing commas (JSON
+// itself does not have those, so they're not relevant here).
+func truncateToJSONBoundary(data []byte) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+	// Quick reject: not starting with { or [ is not a JSON document.
+	if data[0] != '{' && data[0] != '[' {
+		return data
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	seenOpen := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString {
+			switch b {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			seenOpen = true
+		case '}', ']':
+			depth--
+			if seenOpen && depth == 0 {
+				// Complete document. Return up to and including this byte.
+				return data[:i+1]
+			}
+		}
+	}
+	// No complete document within the input. Return as-is so the caller
+	// still has something to show.
+	return data
 }

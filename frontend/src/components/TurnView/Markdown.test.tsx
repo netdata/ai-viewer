@@ -182,3 +182,34 @@ describe('Markdown — custom highlight theme (SOW-0090 chunk 10)', () => {
     expect(container.querySelector('code')).toBeInTheDocument();
   });
 });
+
+describe('extractReadableText — truncated JSON envelope (SOW-0090 chunk 7+)', () => {
+  it('returns verbatim when JSON is opened but not closed within the buffer', () => {
+    // Server-side JSON-aware truncation lands a clean boundary when one
+    // exists; otherwise the bytes are passed through unchanged. The
+    // operator sees the partial JSON so they still know it was an envelope.
+    const raw = '{"timestamp":"2026-06-20T21:08:39.295Z","type":"response_item","payload":{"type":"message","content":[{"type":"input_text","text":"<permissions instructions>';
+    expect(extractReadableText(raw)).toBe(raw);
+  });
+
+  it('extracts text from a JSON envelope that DOES close within the buffer', () => {
+    const raw = '{"payload":{"content":[{"text":"hello world"}]}}';
+    expect(extractReadableText(raw)).toBe('hello world');
+  });
+
+  it('handles a real-world codex envelope with closing content array', () => {
+    const raw = JSON.stringify({
+      timestamp: '2026-06-20T21:08:39.295Z',
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'developer',
+        content: [
+          { type: 'input_text', text: 'first block' },
+          { type: 'input_text', text: 'second block' },
+        ],
+      },
+    });
+    expect(extractReadableText(raw)).toBe('first block\nsecond block');
+  });
+});
