@@ -1,0 +1,195 @@
+/* /search — SOW-0091 dedicated full-text search page.
+ * Single large input at top, three result sections below (content,
+ * ops, logs). Cards use the same chrome as the rest of the app
+ * (var(--bg-card), var(--border)) so the page feels native. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5, 20px);
+  padding: var(--space-5, 20px) var(--space-6, 24px);
+  max-width: 1100px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+
+.title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin: 0;
+  font-size: var(--font-size-xl, 20px);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: var(--font-size-sm, 13px);
+  color: var(--text-secondary, var(--muted-foreground));
+  max-width: 720px;
+}
+
+.searchField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+
+.label {
+  font-size: var(--font-size-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  background: var(--bg-card, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base, 14px);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5, 20px);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+}
+
+.sectionTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin: 0;
+  font-size: var(--font-size-sm, 13px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.sectionCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  min-width: 24px;
+  height: 20px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary, var(--muted-foreground));
+  border-radius: 999px;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs, 11px);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+
+.card {
+  background: var(--bg-card, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  transition: border-color 120ms ease;
+}
+
+.card:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 12px);
+  flex-wrap: wrap;
+}
+
+.cardLink {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: var(--font-size-sm, 13px);
+}
+
+.cardLink:hover {
+  color: var(--accent);
+}
+
+.cardMeta {
+  font-size: var(--font-size-xs, 11px);
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm, 3px);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-primary);
+}
+
+.code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs, 11px);
+  background: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm, 3px);
+  color: var(--text-primary);
+}
+
+.snippet {
+  margin: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm, 13px);
+  color: var(--text-primary);
+  line-height: 1.5;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--space-3, 12px);
+  font-size: var(--font-size-sm, 13px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-style: italic;
+}

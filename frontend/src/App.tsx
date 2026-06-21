@@ -10,6 +10,7 @@ import { AgentsList, AgentDetail } from './pages/Agents';
 import { ModelsList, ModelDetail } from './pages/Models';
 import { ToolsList, ToolDetail } from './pages/Tools';
 import { IngestErrors } from './pages/IngestErrors';
+import { Search } from './pages/Search';
 import { NotFound } from './pages/NotFound';
 
 // Route table. Every route nests under Layout (header + global FilterBar +
@@ -33,6 +34,7 @@ export function App() {
         <Route path="tools" element={<ToolsList />} />
         <Route path="tools/:name" element={<ToolDetail />} />
         <Route path="ingest-errors" element={<IngestErrors />} />
+        <Route path="search" element={<Search />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

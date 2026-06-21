@@ -136,6 +136,10 @@ export const COVERAGE_INCLUDE = [
   // tested (Topology.test.tsx, 96.7% lines). Listed here AND in PER_DIR_GLOBS so
   // it is both measured and gated per-dir.
   'src/pages/Topology/**/*.{ts,tsx}',
+  // /search page (SOW-0091): dedicated full-text content search across
+  // ops, logs, and prompt/response text. Listed here AND in PER_DIR_GLOBS so
+  // it is both measured and gated per-dir.
+  'src/pages/Search/**/*.{ts,tsx}',
   // Flat (non-dir) component file with a unit test (StatusBadge.test.tsx).
   // Listed by exact path so it is MEASURED and contributes to the global
   // aggregate floor; flat files carry no per-dir floor.
@@ -224,6 +228,7 @@ export const PER_DIR_GLOBS = [
   'src/pages/Sources/**',
   'src/pages/Stats/**',
   'src/pages/Topology/**',
+  'src/pages/Search/**',
   'src/pages/Failures/**',
   'src/pages/Agents/**',
   'src/pages/Models/**',

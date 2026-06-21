@@ -12,6 +12,7 @@ import {
   BookOpen,
   Settings,
   Eye,
+  Search,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
@@ -36,6 +37,7 @@ const PRIMARY_NAV: readonly NavItem[] = [
   { to: '/topology', label: 'Topology', Icon: Network, description: 'Actor + tool call graph' },
   { to: '/stats', label: 'Statistics', Icon: BarChart3, description: 'Cost, tokens, failures over time' },
   { to: '/sources', label: 'Sources', Icon: Database, description: 'Configured source paths and health' },
+  { to: '/search', label: 'Search', Icon: Search, description: 'Full-text search across ops, logs, prompts' },
 ];
 
 const SECONDARY_NAV: readonly NavItem[] = [
@@ -53,6 +55,7 @@ export function getPageTitle(pathname: string): string {
   if (pathname.startsWith('/topology')) return 'Topology';
   if (pathname.startsWith('/stats')) return 'Statistics';
   if (pathname.startsWith('/sources')) return 'Sources';
+  if (pathname.startsWith('/search')) return 'Search';
   if (pathname.startsWith('/agents')) return 'Agents';
   if (pathname.startsWith('/models')) return 'Models';
   if (pathname.startsWith('/tools')) return 'Tools';
