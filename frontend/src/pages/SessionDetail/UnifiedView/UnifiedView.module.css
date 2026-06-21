@@ -85,24 +85,64 @@
   font-weight: 600;
 }
 
-/* Resize handles. */
+/* Resize handles.
+ *
+ * GOTCHA: a previous version set `height: 100%` on .resizeHandleV. In the
+ * inner PanelGroup (column flex, splitting viz+event list vertically),
+ * that stretched the handle to fill the whole column, leaving 0 height
+ * for the two flex panels (which use `flex: 65 1 0px` and
+ * `flex: 35 1 0px` with `flex-basis: 0px`) — the panels' flex-grow
+ * distributes ONLY the free space left after the handle's natural size,
+ * so a 504.5px-tall handle left the two panels at 0px. The fix is to
+ * size the handle to its own content (a 1px-wide visible line + a wider
+ * hit area for the row-resize cursor) and let flex-basis 0 + flex-grow
+ * give the panels the rest of the space.
+ */
 .resizeHandleV,
 .resizeHandleH {
   background: var(--border);
   transition: background-color 120ms ease;
+  flex: 0 0 auto;
+  align-self: stretch;
 }
 
 .resizeHandleV {
-  width: 1px;
-  height: 100%;
+  width: 4px;
+  height: auto;
   margin: 0;
   cursor: row-resize;
+  position: relative;
+}
+/* The 1px visible line on the .resizeHandleV (vertical separator
+ * between two row-stacked panels). The 4px width is the hit area for
+ * the row-resize cursor; the 1px line in the middle is what the user
+ * actually sees. */
+.resizeHandleV::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--border);
 }
 
 .resizeHandleH {
-  height: 100%;
-  width: 4px;
+  height: 4px;
+  width: auto;
   cursor: col-resize;
+  position: relative;
+}
+.resizeHandleH::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  margin-top: -0.5px;
+  background: var(--border);
 }
 
 .resizeHandleV:hover,
