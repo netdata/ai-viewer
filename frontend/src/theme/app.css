@@ -152,6 +152,8 @@
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0.55 0.2 250);
   --primary-foreground: oklch(1 0 0);
+  --bg-sunken: oklch(0.96 0.005 250);
+  --text-primary: var(--foreground);
   --secondary: oklch(0.96 0.005 250);
   --secondary-foreground: oklch(0.145 0 0);
   --muted: oklch(0.96 0.005 250);
@@ -267,6 +269,7 @@
   --bg-primary: var(--background);
   --bg-secondary: var(--card);
   --bg-tertiary: var(--muted);
+  --bg-sunken: var(--muted);
   --text-primary: var(--foreground);
   --text-secondary: var(--muted-foreground);
   --accent: var(--primary);
@@ -298,7 +301,21 @@ body {
 }
 
 a {
-  color: var(--primary);
+  /* No color set here — links inherit from --foreground so the body
+     text color carries through. Specific links that need the primary
+     blue apply text-primary (or any other utility) explicitly.
+
+     The previous rule set `color: var(--primary)` here, which was
+     correct on its own but had the side effect of ALWAYS winning over
+     Tailwind utilities like `text-primary-foreground` (the element
+     selector has specificity 0,0,1 and this rule comes AFTER the
+     Tailwind utilities in the cascade — see SOW-0088 chunk 1).
+
+     Result: the active sidebar item in the topbar / sidebar was
+     rendered blue-on-blue (primary background + primary text) in
+     both light and dark themes, defeating the dark-mode contrast
+     bugfix shipped in SOW-0078. Removing the override lets the
+     Tailwind utility win. */
   text-decoration: none;
 }
 
