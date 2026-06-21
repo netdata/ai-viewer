@@ -21,16 +21,29 @@ import (
 // client colors/filters by sub-agent and orders within a session without a
 // second round-trip. error_message is surfaced for failed ops (AC3).
 
-// traceOp is one op in the whole-tree trace, carrying its owning session's tags.
-// Embeds the opDetail fields (mirrors opDetail's JSON so the client's OpDetail
-// shape is reused) plus the trace-only session/turn tags.
+// traceOp is one op in the whole-tree trace, carrying ONLY the fields the
+// trace consumers (Waterfall, FlameGraph, EventList, ByTurnWaterfall) use.
+// The full opDetail shape (tokens, cost, ctx, provider, model) is delivered
+// via /api/sessions/:id (session detail) — the trace endpoint is hit on
+// initial page load and shared by every viz tab, so keeping it minimal is
+// the highest-leverage perf change. The trace shape carries:
+//
+//   - id, kind, name, status, start_ts, end_ts, duration_us (the per-op span)
+//   - error_class (the failed-op filter + FlameGraph red styling)
+//   - error_message (rendered inline on failed ops in EventList)
+//   - parent_op_id, child_session_id (the tree structure)
+//   - session_id, session_agent_name, session_kind (the sub-agent tags)
+//   - turn_seq (the within-session turn ordering)
+//
+// Fields that the trace does NOT carry (and that the operator can fetch from
+// /api/sessions/:id when they click an op): model, provider, tokens_in/out,
+// cost_usd, ctx_used/max, payload_refs. Dropping them cuts the trace
+// response ~50% (3.9 MB → ~2 MB on a 7 680-op session).
 type traceOp struct {
 	ID             string  `json:"id"`
 	TurnSeq        int64   `json:"turn_seq"`
 	Kind           string  `json:"kind"`
 	Name           string  `json:"name"`
-	Model          string  `json:"model"`
-	Provider       string  `json:"provider"`
 	ParentOpID     *string `json:"parent_op_id"`
 	StartTS        int64   `json:"start_ts"`
 	EndTS          *int64  `json:"end_ts"`
@@ -38,11 +51,6 @@ type traceOp struct {
 	Status         string  `json:"status"`
 	ErrorClass     *string `json:"error_class"`
 	ErrorMessage   *string `json:"error_message"`
-	TokensIn       int64   `json:"tokens_in"`
-	TokensOut      int64   `json:"tokens_out"`
-	CostUSD        float64 `json:"cost_usd"`
-	CtxUsed        *int64  `json:"ctx_used"`
-	CtxMax         *int64  `json:"ctx_max"`
 	ChildSessionID *string `json:"child_session_id"`
 	SessionID      string  `json:"session_id"`
 	SessionAgent   string  `json:"session_agent_name"`
@@ -148,10 +156,9 @@ func (p *Presenter) buildTrace(ctx context.Context, rootID string, includeRefs b
 // drained before return.
 func (p *Presenter) loadTraceOps(ctx context.Context, rootID string) ([]traceOp, error) {
 	q := `
-SELECT o.id, t.seq, o.kind, o.name, IFNULL(o.model, ''), IFNULL(o.provider, ''),
+SELECT o.id, t.seq, o.kind, o.name,
        o.parent_op_id, o.start_ts, o.end_ts, o.duration_us, o.status,
-       o.error_class, o.error_message,
-       o.tokens_in, o.tokens_out, o.cost_usd, o.ctx_used, o.ctx_max, o.child_session_id,
+       o.error_class, o.error_message, o.child_session_id,
        o.session_id, IFNULL(s.agent_name, ''), IFNULL(s.kind, '')
 FROM ops o
 JOIN sessions s ON s.id = o.session_id
@@ -173,13 +180,11 @@ ORDER BY s.start_ts ASC, s.id ASC, o.start_ts ASC, o.seq ASC, o.id ASC`
 			duration   sql.NullInt64
 			errClass   sql.NullString
 			errMessage sql.NullString
-			ctxUsed    sql.NullInt64
-			ctxMax     sql.NullInt64
 			childID    sql.NullString
 		)
-		if err := rows.Scan(&op.ID, &op.TurnSeq, &op.Kind, &op.Name, &op.Model, &op.Provider,
-			&parentID, &op.StartTS, &endTS, &duration, &op.Status, &errClass, &errMessage,
-			&op.TokensIn, &op.TokensOut, &op.CostUSD, &ctxUsed, &ctxMax, &childID,
+		if err := rows.Scan(&op.ID, &op.TurnSeq, &op.Kind, &op.Name,
+			&parentID, &op.StartTS, &endTS, &duration, &op.Status,
+			&errClass, &errMessage, &childID,
 			&op.SessionID, &op.SessionAgent, &op.SessionKind); err != nil {
 			return nil, err
 		}
@@ -202,14 +207,6 @@ ORDER BY s.start_ts ASC, s.id ASC, o.start_ts ASC, o.seq ASC, o.id ASC`
 		if errMessage.Valid {
 			v := errMessage.String
 			op.ErrorMessage = &v
-		}
-		if ctxUsed.Valid {
-			v := ctxUsed.Int64
-			op.CtxUsed = &v
-		}
-		if ctxMax.Valid {
-			v := ctxMax.Int64
-			op.CtxMax = &v
 		}
 		if childID.Valid {
 			v := childID.String

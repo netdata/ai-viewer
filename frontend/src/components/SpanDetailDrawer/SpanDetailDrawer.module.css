@@ -210,3 +210,18 @@
 .payloadPreviewContent code {
   font-family: inherit;
 }
+
+/* Note rendered when the drawer was opened from a slim trace shape that
+ * doesn't carry op metrics (SOW-0092). Directs the operator to the
+ * session-detail panel for the full breakdown rather than printing
+ * "$0.00 / 0 tokens" as if they were measured. */
+.fieldsNote {
+  margin: var(--space-2, 8px) 0 0;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  background: var(--bg-tertiary);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm, 3px);
+  font-style: italic;
+}

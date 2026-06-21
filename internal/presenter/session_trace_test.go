@@ -27,7 +27,6 @@ type traceOpT struct {
 	ParentOpID     *string `json:"parent_op_id"`
 	ChildSessionID *string `json:"child_session_id"`
 	Status         string  `json:"status"`
-	ErrorClass     *string `json:"error_class"`
 	ErrorMessage   *string `json:"error_message"`
 	SessionID      string  `json:"session_id"`
 	SessionAgent   string  `json:"session_agent_name"`
@@ -150,6 +149,9 @@ func TestTrace_ScopedToTreeViaChildID(t *testing.T) {
 }
 
 // TestTrace_ErrorMessage pins AC3: error_message is surfaced on a failed op.
+// (error_class is NOT carried on the trace endpoint — the trace shape is
+// the slim one documented at traceOp; full error metadata is delivered
+// via /api/sessions/:id when the operator clicks the failed op.)
 func TestTrace_ErrorMessage(t *testing.T) {
 	t.Parallel()
 	p, db, cleanup := newTestPresenter(t)
@@ -175,9 +177,6 @@ func TestTrace_ErrorMessage(t *testing.T) {
 	}
 	if len(body.Ops) != 1 || body.Ops[0].ID != "failOp" {
 		t.Fatalf("ops = %+v, want [failOp]", body.Ops)
-	}
-	if body.Ops[0].ErrorClass == nil || *body.Ops[0].ErrorClass != "rate_limit" {
-		t.Errorf("error_class = %v, want rate_limit", body.Ops[0].ErrorClass)
 	}
 	if body.Ops[0].ErrorMessage == nil || *body.Ops[0].ErrorMessage != "429 Too Many Requests" {
 		t.Errorf("error_message = %v, want '429 Too Many Requests'", body.Ops[0].ErrorMessage)

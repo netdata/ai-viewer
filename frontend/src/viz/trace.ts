@@ -1,6 +1,6 @@
 import { scaleLinear } from 'd3-scale';
 import { ticks as d3Ticks } from 'd3-array';
-import type { OpDetail, TraceOp, TurnDetail } from '../api/types';
+import type { TraceOp, TurnDetail, OpKind } from '../api/types';
 
 // Pure geometry/layout for the Trace tab (ui-pages.md §/sessions/:id #3 Trace).
 // Lives in viz/ so React components consume plain data and never import D3
@@ -21,11 +21,36 @@ import type { OpDetail, TraceOp, TurnDetail } from '../api/types';
 // session's tree (the child session's ops are fetched and rendered separately);
 // any op that names a boundary as its parent is hoisted to top-level.
 
+/** TraceOpFields is the union of fields TraceNode needs. Both OpDetail
+ *  (the full per-op shape delivered by /api/sessions/:id) and TraceOp
+ *  (the slim whole-tree trace shape delivered by /api/sessions/:id/trace)
+ *  satisfy this — the trace views only use the span + tree fields (start,
+ *  end, duration, status, parent_op_id, child_session_id, session_id,
+ *  session_agent_name), which both shapes carry. The op field is typed as
+ *  this structural union so the same TraceNode can be built from either
+ *  source without a cast. */
+export interface TraceOpFields {
+  id: string;
+  kind: OpKind;
+  name: string;
+  start_ts: number;
+  end_ts: number | null;
+  duration_us: number | null;
+  status: string;
+  error_class?: string | null;
+  error_message?: string | null;
+  parent_op_id?: string | null;
+  child_session_id: string | null;
+  session_id?: string;
+  session_agent_name?: string;
+  session_kind?: string;
+}
+
 /** TraceNode is one op plus its derived tree position. The session tags are
  *  populated only by buildMergedTree (whole-tree trace, SOW-0070); the
  *  single-session buildOpTree leaves them undefined. */
 export interface TraceNode {
-  op: OpDetail;
+  op: TraceOpFields;
   depth: number;
   children: TraceNode[];
   /** Owning session id (whole-tree trace only). */
@@ -36,7 +61,7 @@ export interface TraceNode {
 }
 
 /** end returns an op's closed end, or null when it is still ongoing/instant. */
-function closedEnd(op: OpDetail): number | null {
+function closedEnd(op: TraceOpFields): number | null {
   return op.end_ts !== null && op.end_ts > op.start_ts ? op.end_ts : null;
 }
 
@@ -47,12 +72,12 @@ function closedEnd(op: OpDetail): number | null {
  * an instant tick/marker, never a zero-width bar (ui-pages.md §Trace
  * source-aware rendering; mirrors viz/timeline.isInstant).
  */
-export function isInstantOp(op: OpDetail): boolean {
+export function isInstantOp(op: TraceOpFields): boolean {
   return op.end_ts === null || op.end_ts <= op.start_ts;
 }
 
 /** A session-transition op (spawns a child session) is a leaf in this tree. */
-function isLeafBoundary(op: OpDetail): boolean {
+function isLeafBoundary(op: TraceOpFields): boolean {
   return op.child_session_id !== null;
 }
 
@@ -488,7 +513,7 @@ export interface FlameCell {
 }
 
 /** span returns an op's duration for flame sizing (closed window or 0). */
-function flameSpan(op: OpDetail): number {
+function flameSpan(op: TraceOpFields): number {
   const e = closedEnd(op);
   return e === null ? 0 : Math.max(0, e - op.start_ts);
 }

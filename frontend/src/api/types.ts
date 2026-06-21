@@ -327,17 +327,36 @@ export interface TimelineResponse {
 // ── GET /api/sessions/:id/trace (SOW-0070 whole-tree trace) ─────────────────
 
 /**
- * One op in the whole-tree trace. Carries the full OpDetail field set PLUS the
- * owning-session tags (session_id / session_agent_name / session_kind) and the
- * op's turn_seq, so the client builds ONE merged op tree spanning sub-session
- * boundaries and colors/filters by sub-agent without a second round-trip
- * (rest-api.md §GET /api/sessions/:id/trace).
+ * One op in the whole-tree trace (rest-api.md §GET /api/sessions/:id/trace).
+ * The shape mirrors the server's traceOp struct 1:1 so the client never has
+ * to cast. Carries the per-op span (id, kind, name, start_ts, end_ts,
+ * duration_us, status), the tree structure (parent_op_id, child_session_id),
+ * the sub-agent tags (session_id, session_agent_name, session_kind), the
+ * within-session turn ordering (turn_seq), and error_message (rendered
+ * inline on failed ops). It deliberately OMITS the heavy fields
+ * (tokens_in/out, cost_usd, ctx_used/max, provider, model, error_class)
+ * that the trace views (Waterfall, FlameGraph, EventList, ByTurnWaterfall)
+ * never render — fetching them on initial page load added ~50% to the
+ * 7 680-op session's trace response. Full metadata is delivered via
+ * /api/sessions/:id when the operator clicks an op.
  */
-export interface TraceOp extends OpDetail {
+export interface TraceOp {
+  id: string;
   turn_seq: number;
+  kind: OpKind;
+  name: string;
+  parent_op_id?: string | null;
+  start_ts: number;
+  end_ts: number | null;
+  duration_us: number | null;
+  status: string;
+  error_class?: string | null;
+  error_message?: string | null;
+  child_session_id: string | null;
   session_id: string;
   session_agent_name: string;
   session_kind: string;
+  payload_refs?: PayloadRef[];
 }
 
 /** GET /api/sessions/:id/trace envelope. ops is the flat whole-tree op list. */

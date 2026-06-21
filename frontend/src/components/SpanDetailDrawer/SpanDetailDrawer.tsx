@@ -9,7 +9,7 @@ import {
   formatPct,
   formatTimestamp,
 } from '../../lib/format';
-import { isInstantOp } from '../../viz/trace';
+import { isInstantOp, type TraceOpFields } from '../../viz/trace';
 import styles from './SpanDetailDrawer.module.css';
 
 // Shared right-side span detail drawer (ui-pages.md §Span detail drawer). NOT a
@@ -39,9 +39,15 @@ import styles from './SpanDetailDrawer.module.css';
  * SpanDetail is the source-aware drawer payload. The discriminant `kind` selects
  * which fields are real for the view that opened the drawer; the drawer renders
  * only those, so an unavailable field is never shown as a fabricated zero.
+ *
+ * 'op' carries TraceOpFields (the slim trace shape: span + tree + error + session
+ * tags) rather than the full OpDetail. The trace endpoint dropped tokens/cost/
+ * ctx/model/provider for high-volume perf (SOW-0092 chunk 2); the drawer shows
+ * the metrics section only when those fields are present, otherwise directs
+ * the operator to the session-detail panel for the full breakdown.
  */
 export type SpanDetail =
-  | { kind: 'op'; op: OpDetail }
+  | { kind: 'op'; op: TraceOpFields | OpDetail }
   | {
       kind: 'span';
       span: {
@@ -257,14 +263,22 @@ function headerOf(detail: SpanDetail): { kind: string; title: string } {
 /** OpBody is the full Trace-tab rendering: every op field + the payload_refs
  *  list. This is the only variant that shows token/cost/model/context/payloads —
  *  the Trace tab is the only source that carries them. */
-function OpBody({ op, titleId }: { op: OpDetail; titleId: string }) {
-  const failed = op.error_class !== null;
+function OpBody({ op, titleId }: { op: TraceOpFields | OpDetail; titleId: string }) {
+  const failed = op.error_class !== null && op.error_class !== undefined;
+  // Source-aware metrics: OpDetail carries model/tokens/cost/ctx; TraceOpFields
+  // does NOT (SOW-0092 dropped them for high-volume perf). We detect by
+  // checking for tokens_in (a non-zero on real ops, absent on the slim
+  // trace shape) — when absent, omit the metrics section entirely instead
+  // of rendering fabricated zeros (per the source-aware drawer contract
+  // documented at the top of this file).
+  const tokensIn = 'tokens_in' in op ? op.tokens_in : undefined;
+  const hasMetrics = tokensIn !== undefined;
   return (
     <>
       <dl className={styles.fields}>
         <Field label="Status" value={op.status} highlight={failed ? 'error' : undefined} />
-        {op.model ? <Field label="Model" value={op.model} mono /> : null}
-        {op.provider ? <Field label="Provider" value={op.provider} /> : null}
+        {'model' in op && op.model ? <Field label="Model" value={op.model} mono /> : null}
+        {'provider' in op && op.provider ? <Field label="Provider" value={op.provider} /> : null}
         <Field label="Start" value={formatTimestamp(op.start_ts)} mono />
         <Field label="End" value={formatTimestamp(op.end_ts)} mono />
         {/* Source-aware (P2): a point-event op is persisted with end_ts==start_ts
@@ -275,16 +289,29 @@ function OpBody({ op, titleId }: { op: OpDetail; titleId: string }) {
           value={isInstantOp(op) ? '—' : formatDuration(op.duration_us)}
           mono
         />
-        <Field label="Cost" value={formatCost(op.cost_usd)} mono />
-        <Field label="Tokens in" value={formatNumber(op.tokens_in)} mono />
-        <Field label="Tokens out" value={formatNumber(op.tokens_out)} mono />
-        {op.ctx_used !== null || op.ctx_max !== null ? (
-          <Field
-            label="Context"
-            value={`${formatNumber(op.ctx_used)} / ${formatNumber(op.ctx_max)}`}
-            mono
-          />
-        ) : null}
+        {hasMetrics ? (
+          // Safe to index op.tokens_in etc — hasMetrics proves tokens_in is present.
+          ((metricsOp) => (
+            <>
+              <Field label="Cost" value={formatCost(metricsOp.cost_usd)} mono />
+              <Field label="Tokens in" value={formatNumber(metricsOp.tokens_in)} mono />
+              <Field label="Tokens out" value={formatNumber(metricsOp.tokens_out)} mono />
+              {metricsOp.ctx_used !== null && metricsOp.ctx_max !== null ? (
+                <Field
+                  label="Context"
+                  value={`${formatNumber(metricsOp.ctx_used)} / ${formatNumber(metricsOp.ctx_max)}`}
+                  mono
+                />
+              ) : null}
+            </>
+          ))(op as OpDetail)
+        ) : (
+          <p className={styles.fieldsNote}>
+            Full op metrics (model, tokens, cost, context) are delivered by
+            /api/sessions/:id. The trace endpoint returns the slim shape for
+            high-volume perf (SOW-0092).
+          </p>
+        )}
         {op.child_session_id !== null ? (
           <Field label="Child session" value={op.child_session_id} mono />
         ) : null}
@@ -298,11 +325,11 @@ function OpBody({ op, titleId }: { op: OpDetail; titleId: string }) {
         <h3 id={`${titleId}-payloads`} className={styles.payloadsTitle}>
           Payloads
         </h3>
-        {op.payload_refs.length === 0 ? (
+        {('payload_refs' in op ? op.payload_refs : []).length === 0 ? (
           <p className={styles.noPayloads}>No payloads for this op.</p>
         ) : (
           <ul className={styles.payloadList}>
-            {op.payload_refs.map((ref) => (
+            {('payload_refs' in op ? op.payload_refs : []).map((ref) => (
               <PayloadRow key={ref.id} payload={ref} />
             ))}
           </ul>

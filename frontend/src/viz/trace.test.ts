@@ -557,26 +557,18 @@ describe('SVG_SPAN_CEILING', () => {
 
 // ── buildMergedTree (SOW-0070 whole-tree trace) ─────────────────────────────
 
-/** traceOp builds a TraceOp fixture (OpDetail + the whole-tree session tags). */
+/** traceOp builds a TraceOp fixture (slim whole-tree shape + session tags). */
 function traceOp(over: Partial<TraceOp> & Pick<TraceOp, 'id' | 'session_id' | 'session_agent_name'>): TraceOp {
   return {
     kind: 'llm',
     name: 'n',
-    model: '',
-    provider: '',
     parent_op_id: null,
     start_ts: 0,
     end_ts: 1,
     duration_us: 1,
     status: 'completed',
     error_class: null,
-    tokens_in: 0,
-    tokens_out: 0,
-    cost_usd: 0,
-    ctx_used: null,
-    ctx_max: null,
     child_session_id: null,
-    payload_refs: [],
     turn_seq: 1,
     session_kind: 'root',
     ...over,
