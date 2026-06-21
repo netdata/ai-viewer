@@ -121,6 +121,31 @@ goroutine 103 created by internal/ingest.detachedWriteContext worker_runtime.go:
 
 ## Status
 
-- [ ] Chunk 1: capture pprof evidence
-- [ ] Chunk 2: fix the leak
-- [ ] Chunk 3: watchdog + observability
+- [x] Chunk 1: capture pprof evidence — heap profiles captured, leak traced to `aiagent_v2.Cursor.String` ✅ `91eb1b8`
+- [x] Chunk 2: fix the leak — scan progress throttled 1000→50_000; tail tick skips emit when cursor unchanged ✅ `91eb1b8`
+- [ ] Chunk 3: watchdog + observability — pprof endpoint shipped; watchdog TBD; concurrent-process lockout TBD
+
+## Diagnosis summary (added in commit message)
+
+The "1.9 GB RSS, 4.4 GB heap in `Cursor.String`" symptom was actually **two issues compounding**:
+
+1. **Hot-path allocation in Cursor.String** (the real issue, ~6 MB/min in idle tail mode). Every 5-second tail tick marshaled a 9 KB JSON cursor string into a `SourceProgressEvent` even when nothing had changed. Fixed by tracking `lastEmittedFileCount` and skipping the emit when the cursor hasn't grown.
+
+2. **Concurrent ingesters amplifying the leak** (an operator process mistake, not a code bug). During the leak investigation, three `ai-viewer-ingest` processes were running concurrently (one in a background `bash`, one started for `--pprof`, one managed by systemd), each holding its own copy of the 482k-entry aiagent_v2 cursor, all fighting for the SQLite writer lock. With SQLITE_BUSY retries flooding, events piled up in each ingester's channel, multiplying the cursor-marshal cost by 3x. Killing the duplicates brought RSS from 1.9 GB to 390 MB stable.
+
+### What was actually fixed (commit 91eb1b8)
+
+- `internal/adapters/aiagent_v2/scanner.go`: scan checkpoint every 50,000 files (was 1,000). For aiagent_v2's 482k files, that's 10 emissions per scan instead of 482; the final cursor still goes out at scanAll's return.
+- `internal/adapters/aiagent_v2/tailer.go`: tail tick skips the SourceProgressEvent emit when `len(cur.Files) == lastEmittedFileCount`. Idle ticks no longer allocate a 9 KB string.
+- `cmd/ai-viewer-ingest/main.go`: added `--pprof=<addr>` flag (default empty = off) for future memory investigations. gosec G108 suppressed with `#nosec` comment (operator-gated, loopback-only, off by default).
+- `internal/adapters/aiagent_v2/tailer_test.go`: `TestTail_PeriodicProgress` updated to drive a real file event rather than expecting an unconditional tick emit (the new behavior is correct: no cursor change, no event).
+
+### What's NOT done (chunk 3, backlog)
+
+- **Watchdog** — systemd `MemoryHigh=8G MemoryMax=12G` to OOM-kill the ingester before it consumes 40 GB. Currently the operator must restart manually. Tracked as a follow-up SOW.
+- **Concurrent-process lockout** — the DB-level "only one ingester" guard. Currently relies on the operator not starting multiple. Tracked as a follow-up SOW.
+- **Self-healing restart** — the in-process watchdog that restarts the ingester when memory exceeds a threshold. Out of scope for v1.
+
+### Operational lesson (write this down!)
+
+The first thing to check when the ingester is at 1.9 GB RSS is **whether there are multiple ingesters running**. `pgrep -f bin/ai-viewer-ingest` returns both bash subshells AND the Go process; check `readlink /proc/$pid/exe` to filter to the Go binary only. The SQLITE_BUSY errors in the log are the smoking gun.
