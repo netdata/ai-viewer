@@ -123,7 +123,7 @@ func TestSearchLogHelperQueryBindsFilterAndPagination(t *testing.T) {
 	if strings.Contains(query, "needle") || strings.Contains(query, "src1") {
 		t.Fatalf("query interpolated user values instead of placeholders:\n%s", query)
 	}
-	wantArgs := []any{"needle", "src1", 4, int64(6)}
+	wantArgs := []any{"needle", "src1", 4, int64(6), "needle"}
 	if len(args) != len(wantArgs) {
 		t.Fatalf("args = %#v, want %#v", args, wantArgs)
 	}

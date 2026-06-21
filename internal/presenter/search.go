@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"modernc.org/sqlite"
@@ -206,39 +207,77 @@ func (p *Presenter) loadSearchResponse(ctx context.Context, req searchRequest) (
 		Content: []searchContentRow{},
 	}
 
-	ops, opsHasMore, err := p.searchOps(ctx, req.filter, req.match, req.limit, req.offset)
-	if err != nil {
-		return searchResponse{}, "search.ops", err
-	}
-	resp.Ops = ops
-
-	// logs_indexed reflects the per-source fts5_index_logs flag over the
-	// in-scope source set; when false the fts_logs query is skipped entirely
-	// (so logsHasMore stays false — there is nothing to paginate on that side).
+	// logs_indexed is a single cheap SELECT EXISTS (microseconds in practice);
+	// it gates the heavier searchLogs call. Running it first lets us fan out
+	// the remaining independent queries (ops / logs / content) in parallel
+	// across the 8-connection reader pool — same pool size as
+	// session_detail.go's parallel branch — cutting wall-clock latency
+	// roughly in half on a cold search. Without this gate, searchLogs would
+	// fire unconditionally and throw "no such table: fts_logs" on sources
+	// that disable log indexing; gating matches the pre-existing semantics
+	// (logs result omitted from the response when no source indexes logs).
 	indexed, err := p.logsIndexedInScope(ctx, req.filter)
 	if err != nil {
 		return searchResponse{}, "search.logs_indexed", err
 	}
 	resp.LogsIndexed = indexed
 
-	var logsHasMore bool
-	if indexed {
-		resp.Logs, logsHasMore, err = p.searchLogs(ctx, req.filter, req.match, req.limit, req.offset)
-		if err != nil {
-			return searchResponse{}, "search.logs", err
+	type opsResult struct {
+		ops     []searchOpRow
+		hasMore bool
+		err     error
+	}
+	type logsResult struct {
+		logs    []searchLogRow
+		hasMore bool
+		err     error
+	}
+	type contentResult struct {
+		content []searchContentRow
+		hasMore bool
+		err     error
+	}
+
+	var opsR opsResult
+	var logsR logsResult
+	var contentR contentResult
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		opsR.ops, opsR.hasMore, opsR.err = p.searchOps(ctx, req.filter, req.match, req.limit, req.offset)
+	}()
+	go func() {
+		defer wg.Done()
+		if !indexed {
+			return // gated; logs result stays at zero value (empty slice, false)
 		}
+		logsR.logs, logsR.hasMore, logsR.err = p.searchLogs(ctx, req.filter, req.match, req.limit, req.offset)
+	}()
+	go func() {
+		defer wg.Done()
+		contentR.content, contentR.hasMore, contentR.err = p.searchContent(ctx, req.filter, req.match, req.limit, req.offset)
+	}()
+	wg.Wait()
+
+	if opsR.err != nil {
+		return searchResponse{}, "search.ops", opsR.err
+	}
+	if logsR.err != nil {
+		return searchResponse{}, "search.logs", logsR.err
+	}
+	if contentR.err != nil {
+		return searchResponse{}, "search.content", contentR.err
 	}
 
-	// fts_content (SOW-0091): prompt/response text matches. Each source
-	// (ops, logs, content) gets its own up-to-?limit page; the cursor
-	// advances all three together (next_cursor when ANY has more).
-	content, contentHasMore, err := p.searchContent(ctx, req.filter, req.match, req.limit, req.offset)
-	if err != nil {
-		return searchResponse{}, "search.content", err
+	resp.Ops = opsR.ops
+	if indexed {
+		resp.Logs = logsR.logs
 	}
-	resp.Content = content
+	resp.Content = contentR.content
 
-	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore || contentHasMore, req.limit, req.offset, req.match, req.filter)
+	resp.NextCursor = searchNextCursor(opsR.hasMore || logsR.hasMore || contentR.hasMore, req.limit, req.offset, req.match, req.filter)
 	return resp, "", nil
 }
 
@@ -387,19 +426,42 @@ func (p *Presenter) searchOps(ctx context.Context, f sessionFilter, match string
 	// session_logs/sessions_list/topology_cross pattern. The extra row is trimmed
 	// before return; its presence is reported via hasMore so the caller emits
 	// next_cursor only when a further row truly exists.
+	//
+	// Two-stage query: the inner CTE does MATCH + ORDER BY bm25 + LIMIT (cheap,
+	// no row materialization beyond rowid); the outer query joins back to
+	// fts_ops + ops + sessions to compute snippet() and pull kind/name/model
+	// only for the limited row set. The outer query also re-states MATCH so
+	// FTS5's snippet() function has the matched terms in scope (without
+	// the outer MATCH, snippet() picks a wrong default column and returns
+	// the first indexed column value, e.g. "Bash" instead of the matching
+	// "error_text" snippet). Without the split, snippet() is evaluated on
+	// every MATCH-matching row (a common term like "permissions" matches
+	// tens of thousands of ops; snippet() then dominates total latency,
+	// taking tens of seconds end to end). The split drops the dominant
+	// query from seconds to ms.
 	q := `
+WITH top AS (
+  SELECT fts_ops.rowid, bm25(fts_ops) AS rank
+  FROM fts_ops
+  JOIN ops o ON o.id = fts_ops.op_id
+  JOIN sessions s ON o.session_id = s.id
+  WHERE fts_ops MATCH ? AND ` + where + `
+  ORDER BY rank, fts_ops.op_id
+  LIMIT ? OFFSET ?
+)
 SELECT fts_ops.op_id, fts_ops.session_id, o.kind, o.name, IFNULL(o.model, ''),
-       snippet(fts_ops, -1, '[', ']', '…', 10) AS snip, bm25(fts_ops) AS rank
+       snippet(fts_ops, -1, '[', ']', '…', 10) AS snip, top.rank
 FROM fts_ops
 JOIN ops o ON o.id = fts_ops.op_id
-JOIN sessions s ON o.session_id = s.id
-WHERE fts_ops MATCH ? AND ` + where + `
-ORDER BY rank, fts_ops.op_id
-LIMIT ? OFFSET ?` // #nosec G201 G202 -- static SQL + ?-placeholders; where is the parameterized whereClause (filters.go)
-	args := make([]any, 0, len(whereArgs)+3)
+JOIN top ON top.rowid = fts_ops.rowid
+WHERE fts_ops MATCH ?
+ORDER BY top.rank, fts_ops.op_id` // #nosec G201 G202 -- static SQL + ?-placeholders; where is the parameterized whereClause (filters.go)
+	args := make([]any, 0, len(whereArgs)+4)
 	args = append(args, match)
 	args = append(args, whereArgs...)
 	args = append(args, limit+1, offset)
+	// outer MATCH re-stated so snippet() has matched terms in scope
+	args = append(args, match)
 
 	rows, err := p.db.QueryContext(ctx, q, args...) // #nosec G201 G701 -- static SQL + ?-placeholders; values bound via args
 	if err != nil {

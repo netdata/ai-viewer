@@ -179,7 +179,7 @@ export function useOpPayloadRefs(
 ): UseQueryResult<PayloadRefsEnvelope> {
   return useQuery({
     queryKey: ['opPayloadRefs', sessionID, opID ?? ''] as const,
-    queryFn: ({ signal }) => fetchOpPayloadRefs(sessionID, opID as string, signal),
+    queryFn: ({ signal }) => fetchOpPayloadRefs(sessionID, opID!, signal),
     enabled: !!opID,
   });
 }
@@ -207,7 +207,7 @@ export function useTurnPayloadRefs(
 ): UseQueryResult<PayloadRefsEnvelope> {
   return useQuery({
     queryKey: ['turnPayloadRefs', sessionID, turnID ?? ''] as const,
-    queryFn: ({ signal }) => fetchTurnPayloadRefs(sessionID, turnID as string, signal),
+    queryFn: ({ signal }) => fetchTurnPayloadRefs(sessionID, turnID!, signal),
     enabled: !!turnID,
   });
 }
