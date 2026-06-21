@@ -35,6 +35,8 @@ vi.mock('../../../api/sessions', () => ({
   useSessionTopology: () => ({ data: undefined, isPending: false, isError: false, error: null }),
   useSessionTimeline: () => ({ data: undefined, isPending: false, isError: false, error: null }),
   useSessionLogs: () => ({ data: undefined, isPending: false, isError: false, error: null }),
+  useOpPayloadRefs: () => ({ data: undefined, isPending: false, isError: false, error: null }),
+  useTurnPayloadRefs: () => ({ data: undefined, isPending: false, isError: false, error: null }),
 }));
 
 function makeOp(over: Partial<{ id: string; kind: string; name: string }> = {}) {

@@ -32,7 +32,7 @@ export function SessionDetail() {
   const [searchParams] = useSearchParams();
   void searchParams; // legacy ?tab= is intentionally ignored
 
-  const { data, isPending, isError, error } = useSessionDetail(id, { includePayloadRefs: true });
+  const { data, isPending, isError, error } = useSessionDetail(id);
   void error; // referenced below via ApiError check
   const pinned = usePinned();
   void error;

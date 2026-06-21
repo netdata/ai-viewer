@@ -47,7 +47,8 @@
 import { useEffect, useMemo } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { useSearchParams } from 'react-router-dom';
-import type { SessionDetailResponse } from '../../../api/types';
+import type { SessionDetailResponse, PayloadRef } from '../../../api/types';
+import { useOpPayloadRefs, useTurnPayloadRefs } from '../../../api/sessions';
 import { TurnView } from '../../../components/TurnView';
 import { EmptyState } from '../../../components/StatusViews';
 import { TraceTab } from '../TraceTab';
@@ -322,6 +323,44 @@ function TurnViewPane({
     return detail.turns.find((t) => t.id === focusedTurnId) ?? null;
   }, [focusedTurnId, detail.turns]);
 
+  // SOW-0092 chunk 3: the session-detail page ships the slim shape (no
+  // payload_refs) by default. The right sidebar TurnView renders per-op
+  // payload previews, so it needs the refs for the ops it actually
+  // shows — at most one turn worth (~5-50 refs). We lazy-fetch the refs
+  // for the FOCUSED op (the one the operator clicked to enter the right
+  // pane); the few refs for sibling ops in the same turn that TurnView
+  // also renders get fetched as a single batch via ?turn=<id> when the
+  // pane mounts. The two requests share a 30 s in-memory cache so the
+  // operator's session-navigation flow stays snappy.
+  const focusedOpRefs = useOpPayloadRefs(detail.session.id, focusOpId);
+  const focusedTurnRefs = useTurnPayloadRefs(detail.session.id, focusedTurnId);
+
+  const decoratedTurn = useMemo(() => {
+    if (!focusedTurn) return null;
+    // Build a payload_refs index from BOTH responses (op-scoped first,
+    // turn-scoped fills in the rest). Empty when both are still loading
+    // and the slim session shape left every op's refs as [].
+    const refsByOp = new Map<string, PayloadRef[]>();
+    const turnRefs = focusedTurnRefs.data?.refs ?? [];
+    for (const r of turnRefs) {
+      const arr = refsByOp.get(r.op_id) ?? [];
+      arr.push(r);
+      refsByOp.set(r.op_id, arr);
+    }
+    // Op-scoped query takes precedence (fresher on focus change).
+    if (focusedOpRefs.data !== undefined && focusOpId !== null) {
+      refsByOp.set(focusOpId, focusedOpRefs.data.refs);
+    }
+    const ops = focusedTurn.ops.map((op) => {
+      const refs = refsByOp.get(op.id);
+      if (refs === undefined || refs.length === 0) return op;
+      return { ...op, payload_refs: refs };
+    });
+    // Build a new turn object with the spliced refs. If nothing changed,
+    // ops === focusedTurn.ops structurally so the parent memoizes anyway.
+    return { ...focusedTurn, ops };
+  }, [focusedTurn, focusedTurnRefs.data, focusedOpRefs.data, focusOpId]);
+
   if (focusedTurn) {
     return (
       <div className={styles.turnPane}>
@@ -339,7 +378,7 @@ function TurnViewPane({
           </span>
         </header>
         <TurnView
-          turn={focusedTurn}
+          turn={decoratedTurn ?? focusedTurn}
           {...(focusOpId !== null ? { focusOpId: focusOpId } : {})}
           initialStepKindFilter={initialStepKindFilter}
           onStepKindFilterChange={onStepKindFilterChange}

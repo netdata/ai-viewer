@@ -8,6 +8,7 @@ import {
 import { get, buildQuery } from './client';
 import type { Filters } from '../state/filters';
 import type {
+  PayloadRef,
   RelatedResponse,
   SessionDetailResponse,
   SessionListResponse,
@@ -129,11 +130,11 @@ export function fetchSessionDetail(
 }
 
 /** useSessionDetail is the query hook for the session detail page.
- *  includePayloadRefs defaults to false — most consumers (the unified
- *  view, the trace, the topology) fetch payloads lazily via
- *  /api/payloads/:id and don't need the per-op refs metadata. The
- *  legacy TurnView passes true because it renders payload metadata
- *  inline; switching it to lazy-fetch is a separate SOW. */
+ *  includePayloadRefs defaults to false — the unified view / trace /
+ *  topology fetch payloads lazily via /api/payloads/:id and don't need
+ *  the per-op refs metadata upfront. The legacy TurnView (the right
+ *  sidebar in the unified view) lazy-fetches the refs for the focused
+ *  op via useOpPayloadRefs when ?op= is set. */
 export function useSessionDetail(
   id: string,
   opts: { includePayloadRefs?: boolean } = {},
@@ -144,6 +145,70 @@ export function useSessionDetail(
     queryFn: ({ signal }) =>
       fetchSessionDetail(id, { includePayloadRefs, signal }),
     enabled: id.length > 0,
+  });
+}
+
+/** PayloadRefsEnvelope is the response shape for /api/sessions/:id/payload_refs.
+ *  It is always non-nil: an empty match serializes as `[]`, not `null`,
+ *  so callers iterate without a null guard. */
+export interface PayloadRefsEnvelope {
+  refs: PayloadRef[];
+}
+
+/** fetchOpPayloadRefs GETs the payload_refs for ONE op (SOW-0092 chunk 3).
+ *  Tiny response (~169 bytes for a typical single-ref op) — TurnView
+ *  uses this to lazy-fetch the refs for the focused op without paying
+ *  the cost of the full per-session payload_refs scan. */
+export function fetchOpPayloadRefs(
+  sessionID: string,
+  opID: string,
+  signal?: AbortSignal,
+): Promise<PayloadRefsEnvelope> {
+  return get<PayloadRefsEnvelope>(
+    `/sessions/${encodeURIComponent(sessionID)}/payload_refs?op=${encodeURIComponent(opID)}`,
+    signal,
+  );
+}
+
+/** useOpPayloadRefs lazy-loads the payload_refs for a single op. Disabled
+ *  when opID is empty (no focused op). Cache key is per-op so revisiting
+ *  a focused op doesn't refetch. */
+export function useOpPayloadRefs(
+  sessionID: string,
+  opID: string | null,
+): UseQueryResult<PayloadRefsEnvelope> {
+  return useQuery({
+    queryKey: ['opPayloadRefs', sessionID, opID ?? ''] as const,
+    queryFn: ({ signal }) => fetchOpPayloadRefs(sessionID, opID as string, signal),
+    enabled: !!opID,
+  });
+}
+
+/** fetchTurnPayloadRefs GETs the payload_refs for ALL ops in ONE turn.
+ *  Tiny response (5-50 refs typical). The UnifiedView's TurnViewPane
+ *  uses this to fetch the refs for sibling ops in the focused turn so
+ *  the operator can navigate the turn's steps without per-op fetches. */
+export function fetchTurnPayloadRefs(
+  sessionID: string,
+  turnID: string,
+  signal?: AbortSignal,
+): Promise<PayloadRefsEnvelope> {
+  return get<PayloadRefsEnvelope>(
+    `/sessions/${encodeURIComponent(sessionID)}/payload_refs?turn=${encodeURIComponent(turnID)}`,
+    signal,
+  );
+}
+
+/** useTurnPayloadRefs lazy-loads the payload_refs for one turn. Disabled
+ *  when turnID is empty (no focused turn). Cache key is per-turn. */
+export function useTurnPayloadRefs(
+  sessionID: string,
+  turnID: string | null,
+): UseQueryResult<PayloadRefsEnvelope> {
+  return useQuery({
+    queryKey: ['turnPayloadRefs', sessionID, turnID ?? ''] as const,
+    queryFn: ({ signal }) => fetchTurnPayloadRefs(sessionID, turnID as string, signal),
+    enabled: !!turnID,
   });
 }
 

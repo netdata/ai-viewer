@@ -17,6 +17,8 @@ const liveSpy = vi.fn();
 vi.mock('../../api/sessions', () => ({
   useSessionDetail: (...args: unknown[]) => detailSpy(...args) as unknown,
   useSessionTrace: () => ({ data: undefined, isPending: false, isError: false, error: null }),
+  useOpPayloadRefs: () => ({ data: undefined, isPending: false, isError: false, error: null }),
+  useTurnPayloadRefs: () => ({ data: undefined, isPending: false, isError: false, error: null }),
 }));
 vi.mock('../../state/useLiveUpdates', () => ({
   useLiveUpdates: (...args: unknown[]) => liveSpy(...args) as unknown,

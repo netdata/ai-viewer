@@ -149,9 +149,18 @@ export interface SessionDetail {
  * (GET /api/payloads/<id>, SOW-0033) IS registered, but session-detail does not
  * advertise it — no `url` field is present; only the ref metadata is surfaced
  * (the Trace drawer's Preview button builds the URL client-side from the id).
+ *
+ * op_id is the owning op's id. Included on responses from
+ * /api/sessions/:id/payload_refs (SOW-0092 chunk 3 — the lazy-fetch
+ * endpoint the TurnViewPane uses) and on every payload_refs row
+ * returned inline by /api/sessions/:id (so the client can group refs
+ * by op_id when splicing). ABSENT on the slim default session-detail
+ * response where payload_refs is omitted — the lazy endpoint is the
+ * source of truth in that case.
  */
 export interface PayloadRef {
   id: number;
+  op_id?: string;
   kind: string;
   format: string;
   compression: string | null;
