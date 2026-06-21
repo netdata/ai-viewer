@@ -1,6 +1,7 @@
 package presenter
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -234,5 +235,55 @@ func TestTrace_MethodNotAllowed(t *testing.T) {
 	p.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rr.Code)
+	}
+}
+
+// TestTrace_PayloadRefsOptIn asserts the default trace response omits
+// payload_refs (saves ~30-40% response size on a typical session; the
+// trace is consumed by Waterfall/FlameGraph/EventList/ByTurnWaterfall
+// which never render payload previews), and that ?include=payload_refs
+// opts in to the full set.
+func TestTrace_PayloadRefsOptIn(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcTr", "aiagent_v3", "/tmp/tr", base)
+	seedSession(t, db, sessionRow{
+		id: "rootTr", sourceID: "srcTr", nativeID: "nR", rootID: "rootTr",
+		kind: "root", agent: "nedi", status: "completed",
+	})
+	seedTurn(t, db, turnRow{id: "tR", sessionID: "rootTr", seq: 1, startTS: base + 1_000, endTS: base + 9_000, status: "completed", opCount: 1})
+	seedOp(t, db, opRow{id: "rLLM", turnID: "tR", sessionID: "rootTr", seq: 1, kind: "llm", name: "claude", model: "claude", provider: "anthropic", startTS: base + 1_100, endTS: base + 1_400, status: "completed", tokensIn: 10, tokensOut: 2})
+	if _, err := db.Exec(`INSERT INTO payload_refs (op_id, kind, format, location_uri, original_bytes, stored_bytes) VALUES (?, ?, ?, ?, ?, ?)`, "rLLM", "llm_response", "json", "file:///tmp/r.json", 100, 100); err != nil {
+		t.Fatalf("seed payload_ref: %v", err)
+	}
+
+	// Default: payload_refs field is OMITTED from each op's JSON.
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/rootTr/trace", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	raw := rr.Body.Bytes()
+	if !bytes.Contains(raw, []byte(`"id":"rLLM"`)) {
+		t.Fatalf("default response missing rLLM op: %s", raw)
+	}
+	// payload_refs MUST be absent from the default response.
+	if bytes.Contains(raw, []byte(`"payload_refs"`)) {
+		t.Errorf("default response should NOT contain payload_refs, got: %s", raw)
+	}
+
+	// Opt-in: payload_refs field is present per op.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/sessions/rootTr/trace?include=payload_refs", nil)
+	rr2 := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("opt-in status = %d, want 200", rr2.Code)
+	}
+	raw2 := rr2.Body.Bytes()
+	if !bytes.Contains(raw2, []byte(`"payload_refs"`)) {
+		t.Errorf("opt-in response should contain payload_refs, got: %s", raw2)
 	}
 }

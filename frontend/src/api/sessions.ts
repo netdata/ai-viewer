@@ -111,24 +111,38 @@ export function useSessionsInfinite(
   });
 }
 
-/** fetchSessionDetail GETs the full session detail (session/turns/children). */
+/** fetchSessionDetail GETs the full session detail (session/turns/children).
+ *  Pass includePayloadRefs=true to add `?include=payload_refs` so the
+ *  server includes each op's payload_refs metadata (1.5 refs/op on a
+ *  typical session — ~30% of response size). The TurnView page passes
+ *  true because it renders payload metadata inline; the unified view
+ *  passes false because it fetches payloads lazily via /api/payloads/:id. */
 export function fetchSessionDetail(
   id: string,
-  signal?: AbortSignal,
+  opts: { includePayloadRefs?: boolean; signal?: AbortSignal } = {},
 ): Promise<SessionDetailResponse> {
+  const qs = opts.includePayloadRefs ? '?include=payload_refs' : '';
   return get<SessionDetailResponse>(
-    `/sessions/${encodeURIComponent(id)}`,
-    signal,
+    `/sessions/${encodeURIComponent(id)}${qs}`,
+    opts.signal,
   );
 }
 
-/** useSessionDetail is the query hook for the session detail page. */
+/** useSessionDetail is the query hook for the session detail page.
+ *  includePayloadRefs defaults to false — most consumers (the unified
+ *  view, the trace, the topology) fetch payloads lazily via
+ *  /api/payloads/:id and don't need the per-op refs metadata. The
+ *  legacy TurnView passes true because it renders payload metadata
+ *  inline; switching it to lazy-fetch is a separate SOW. */
 export function useSessionDetail(
   id: string,
+  opts: { includePayloadRefs?: boolean } = {},
 ): UseQueryResult<SessionDetailResponse> {
+  const includePayloadRefs = opts.includePayloadRefs ?? false;
   return useQuery({
-    queryKey: ['session', id] as const,
-    queryFn: ({ signal }) => fetchSessionDetail(id, signal),
+    queryKey: ['session', id, includePayloadRefs] as const,
+    queryFn: ({ signal }) =>
+      fetchSessionDetail(id, { includePayloadRefs, signal }),
     enabled: id.length > 0,
   });
 }

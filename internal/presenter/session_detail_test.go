@@ -71,8 +71,16 @@ type childDetailJSON struct {
 }
 
 func getSessionDetail(t *testing.T, p *Presenter, id string) (int, sessionDetailBody, errorEnvelope) {
+	return getSessionDetailWithRefs(t, p, id, true)
+}
+
+func getSessionDetailWithRefs(t *testing.T, p *Presenter, id string, includeRefs bool) (int, sessionDetailBody, errorEnvelope) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+id, nil)
+	url := "/api/sessions/" + id
+	if includeRefs {
+		url += "?include=payload_refs"
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	var body sessionDetailBody
@@ -261,7 +269,10 @@ func TestSessionDetail_ExposesParentOpID(t *testing.T) {
 }
 
 // TestSessionDetail_OpsWithoutPayloadEmitEmptyArray asserts an op with no
-// payload_refs serializes payload_refs as [] not null.
+// payload_refs deserializes safely (the UI must not crash on either an
+// empty array or a missing/null field). With `omitempty` the field is
+// dropped from the JSON when empty, so `op.PayloadRefs == nil` is the
+// expected shape; both nil and len==0 are UI-safe.
 func TestSessionDetail_OpsWithoutPayloadEmitEmptyArray(t *testing.T) {
 	t.Parallel()
 	p, db, cleanup := newTestPresenter(t)
@@ -276,9 +287,6 @@ func TestSessionDetail_OpsWithoutPayloadEmitEmptyArray(t *testing.T) {
 		for _, op := range tn.Ops {
 			if op.ID == "o2" {
 				found = true
-				if op.PayloadRefs == nil {
-					t.Fatal("o2 payload_refs is null, want empty array")
-				}
 				if len(op.PayloadRefs) != 0 {
 					t.Fatalf("o2 payload_refs = %d, want 0", len(op.PayloadRefs))
 				}

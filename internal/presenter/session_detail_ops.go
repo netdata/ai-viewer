@@ -18,7 +18,21 @@ type opLoc struct {
 // those ops) and groups them in Go. This avoids the N+1 query pattern a
 // per-turn / per-op fetch would create. Turns are ordered by seq; ops by
 // (turn_id, seq); payload_refs by (op_id, id) (insertion order).
-func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string) ([]turnDetail, error) {
+//
+// loadOps must complete before attachPayloadRefs (attachPayloadRefs uses
+// the opIndex loadOps returns to find each ref's target op), so the
+// queries run sequentially. The order is important: turns first (smallest
+// result, defines the shape of the response), then ops (bulk of the
+// response size), then payload_refs (only when includeRefs is true).
+//
+// When includeRefs is false, the payload_refs query is skipped and the
+// returned turns carry an empty (but non-nil) PayloadRefs slice on each
+// op; the JSON marshaller omits the empty slice (PayloadRefs is
+// json:"payload_refs,omitempty") so the response is materially smaller —
+// the largest sessions in production carry 1-2 payload_refs per op, which
+// at 7k ops adds ~1 MB of metadata the operator rarely needs upfront
+// (TurnView fetches refs only for the focused op).
+func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string, includeRefs bool) ([]turnDetail, error) {
 	turns, turnIndex, err := p.loadTurns(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -31,8 +45,10 @@ func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string) ([]t
 	if err != nil {
 		return nil, err
 	}
-	if err := p.attachPayloadRefs(ctx, sessionID, turns, opIndex); err != nil {
-		return nil, err
+	if includeRefs {
+		if err := p.attachPayloadRefs(ctx, sessionID, turns, opIndex); err != nil {
+			return nil, err
+		}
 	}
 	return turns, nil
 }

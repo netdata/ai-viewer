@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"sync"
 )
 
 // GET /api/sessions/:id/trace — the whole-tree trace (SOW-0070). Every op of
@@ -24,29 +25,37 @@ import (
 // Embeds the opDetail fields (mirrors opDetail's JSON so the client's OpDetail
 // shape is reused) plus the trace-only session/turn tags.
 type traceOp struct {
-	ID             string       `json:"id"`
-	TurnSeq        int64        `json:"turn_seq"`
-	Kind           string       `json:"kind"`
-	Name           string       `json:"name"`
-	Model          string       `json:"model"`
-	Provider       string       `json:"provider"`
-	ParentOpID     *string      `json:"parent_op_id"`
-	StartTS        int64        `json:"start_ts"`
-	EndTS          *int64       `json:"end_ts"`
-	DurationUS     *int64       `json:"duration_us"`
-	Status         string       `json:"status"`
-	ErrorClass     *string      `json:"error_class"`
-	ErrorMessage   *string      `json:"error_message"`
-	TokensIn       int64        `json:"tokens_in"`
-	TokensOut      int64        `json:"tokens_out"`
-	CostUSD        float64      `json:"cost_usd"`
-	CtxUsed        *int64       `json:"ctx_used"`
-	CtxMax         *int64       `json:"ctx_max"`
-	ChildSessionID *string      `json:"child_session_id"`
-	SessionID      string       `json:"session_id"`
-	SessionAgent   string       `json:"session_agent_name"`
-	SessionKind    string       `json:"session_kind"`
-	PayloadRefs    []payloadRef `json:"payload_refs"`
+	ID             string  `json:"id"`
+	TurnSeq        int64   `json:"turn_seq"`
+	Kind           string  `json:"kind"`
+	Name           string  `json:"name"`
+	Model          string  `json:"model"`
+	Provider       string  `json:"provider"`
+	ParentOpID     *string `json:"parent_op_id"`
+	StartTS        int64   `json:"start_ts"`
+	EndTS          *int64  `json:"end_ts"`
+	DurationUS     *int64  `json:"duration_us"`
+	Status         string  `json:"status"`
+	ErrorClass     *string `json:"error_class"`
+	ErrorMessage   *string `json:"error_message"`
+	TokensIn       int64   `json:"tokens_in"`
+	TokensOut      int64   `json:"tokens_out"`
+	CostUSD        float64 `json:"cost_usd"`
+	CtxUsed        *int64  `json:"ctx_used"`
+	CtxMax         *int64  `json:"ctx_max"`
+	ChildSessionID *string `json:"child_session_id"`
+	SessionID      string  `json:"session_id"`
+	SessionAgent   string  `json:"session_agent_name"`
+	SessionKind    string  `json:"session_kind"`
+	// PayloadRefs is OMITTED by default — the trace is consumed by
+	// Waterfall/FlameGraph/EventList/ByTurnWaterfall, none of which render
+	// payload previews. The 1.5-refs/op average * 7k ops × 5KB/serialized-ref
+	// makes the default response ~5 MB; adding payload_refs only when a
+	// caller explicitly opts in via ?include=payload_refs cuts the default
+	// ~3× AND skips a full-table-scan query (attachTracePayloadRefs).
+	// Marshal as null when omitted (Go nil-slice semantics) so a client can
+	// distinguish "not requested" from "requested but empty".
+	PayloadRefs []payloadRef `json:"payload_refs,omitempty"`
 }
 
 // traceResponse is the JSON envelope of GET /api/sessions/:id/trace. ops is
@@ -82,7 +91,16 @@ func (p *Presenter) handleSessionTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := p.buildTrace(ctx, rootID)
+	// Opt-in payload_refs: by default the trace is consumed by
+	// Waterfall/FlameGraph/EventList/ByTurnWaterfall, none of which render
+	// payload previews. The default response skips the payload_refs scan
+	// (a full-tree table query) AND omits the field, cutting the response
+	// size ~3×. Callers that DO need refs (the session-detail TurnView
+	// fetching per-op payloads, or future trace-with-preview surfaces) pass
+	// ?include=payload_refs to opt in.
+	includeRefs := r.URL.Query().Get("include") == "payload_refs"
+
+	resp, err := p.buildTrace(ctx, rootID, includeRefs)
 	if err != nil {
 		p.writeDBError(ctx, w, r, "session.trace.build", err)
 		return
@@ -93,14 +111,30 @@ func (p *Presenter) handleSessionTrace(w http.ResponseWriter, r *http.Request) {
 // buildTrace assembles the whole-tree trace for the resolved root: one query
 // over every op of every session in the tree, ordered deterministically, with
 // each op tagged by its owning session. payload_refs are attached in a second
-// (also tree-scoped) query.
-func (p *Presenter) buildTrace(ctx context.Context, rootID string) (traceResponse, error) {
+// (also tree-scoped) query when includeRefs is true; the default omits them
+// (see handleSessionTrace's include=payload_refs opt-in).
+//
+// The two reads (ops over the tree + refs over the tree) run in parallel
+// via a goroutine when includeRefs is true — the reader's pool has 8
+// connections and the two queries are independent. On the production DB
+// this halves the wall-clock latency of the include=payload_refs path.
+func (p *Presenter) buildTrace(ctx context.Context, rootID string, includeRefs bool) (traceResponse, error) {
 	ops, err := p.loadTraceOps(ctx, rootID)
 	if err != nil {
 		return traceResponse{}, err
 	}
-	if err := p.attachTracePayloadRefs(ctx, rootID, ops); err != nil {
-		return traceResponse{}, err
+	if includeRefs {
+		var refsErr error
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			refsErr = p.attachTracePayloadRefs(ctx, rootID, ops)
+		}()
+		wg.Wait()
+		if refsErr != nil {
+			return traceResponse{}, refsErr
+		}
 	}
 	return traceResponse{RootID: rootID, Ops: ops}, nil
 }

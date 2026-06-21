@@ -82,7 +82,7 @@ type opDetail struct {
 	CtxUsed        *int64       `json:"ctx_used"`
 	CtxMax         *int64       `json:"ctx_max"`
 	ChildSessionID *string      `json:"child_session_id"`
-	PayloadRefs    []payloadRef `json:"payload_refs"`
+	PayloadRefs    []payloadRef `json:"payload_refs,omitempty"`
 }
 
 // payloadRef is one payload_refs row. The byte-streaming route
@@ -142,7 +142,15 @@ func (p *Presenter) handleSessionDetail(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
 
-	resp, op, err := p.loadSessionDetailResponse(ctx, id)
+	// payload_refs add ~30% to the response size on a typical session and
+	// require a separate query. The operator-facing pages that consume this
+	// endpoint (TurnView + UnifiedView's right sidebar) fetch per-op
+	// payloads lazily via /api/payloads/:id — they do NOT need the
+	// payload_refs metadata up front. Default off; opt in via
+	// ?include=payload_refs for callers that need the ref list.
+	includeRefs := r.URL.Query().Get("include") == "payload_refs"
+
+	resp, op, err := p.loadSessionDetailResponse(ctx, id, includeRefs)
 	if isNoRows(err) {
 		writeJSONError(w, r, p.logger, http.StatusNotFound,
 			CodeNotFound, "session not found", map[string]any{"id": id})
@@ -161,13 +169,13 @@ func (p *Presenter) writeSessionMethodNotAllowed(w http.ResponseWriter, r *http.
 		CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
 }
 
-func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string) (sessionDetailResponse, string, error) {
+func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string, includeRefs bool) (sessionDetailResponse, string, error) {
 	sess, err := p.loadSession(ctx, id)
 	if err != nil {
 		return sessionDetailResponse{}, "session.detail.session", err
 	}
 
-	turns, err := p.loadTurnsWithOps(ctx, id)
+	turns, err := p.loadTurnsWithOps(ctx, id, includeRefs)
 	if err != nil {
 		return sessionDetailResponse{}, "session.detail.turns", err
 	}
