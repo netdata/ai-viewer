@@ -152,8 +152,8 @@ func TestMigration0008_IsIdempotent(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "9" {
-		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "9")
+	if version != "10" {
+		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "10")
 	}
 
 	if got := scanIntInternal(t, db,
