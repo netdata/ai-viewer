@@ -6,10 +6,11 @@
 // "is this the turn I'm interested in?" with full prompt + reasoning + tool
 // request/response + assistant output.
 
-import { useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Clipboard } from 'lucide-react';
 import type { TurnDetail } from '../../api/types';
 import { TurnStep } from './TurnStep';
+import { StepFilter, type StepKindFilter, matchStepFilter } from './StepFilter';
 import styles from './TurnView.module.css';
 
 function formatTokens(n: number): string {
@@ -35,11 +36,81 @@ function formatDuration(start: number, end: number | null): string {
 export function TurnView({
   turn,
   focusOpId,
+  initialStepKindFilter,
+  onStepKindFilterChange,
 }: {
   turn: TurnDetail;
   /** When set, scrolls the matching op into view + pulses it. */
   focusOpId?: string;
+  /** Initial filter value (typically from the URL `?stepKindFilter=`).
+   *  Defaults to 'all' when omitted. */
+  initialStepKindFilter?: StepKindFilter;
+  /** Optional change callback so the parent can write the new filter back
+   *  to the URL. If omitted, the filter is purely local state. */
+  onStepKindFilterChange?: (next: StepKindFilter) => void;
 }) {
+  const [activeFilter, setActiveFilter] = useState<StepKindFilter>(initialStepKindFilter ?? 'all');
+
+  const handleFilterChange = useCallback(
+    (next: StepKindFilter): void => {
+      setActiveFilter(next);
+      onStepKindFilterChange?.(next);
+    },
+    [onStepKindFilterChange],
+  );
+
+  // Counts per kind so the filter pills can render 'Tool (4)' etc. Recomputed
+  // when the turn changes; cheap (≤ ~50 ops per turn in practice).
+  const counts = useMemo<Record<StepKindFilter, number>>(() => {
+    const inc = (r: Record<StepKindFilter, number>, k: StepKindFilter): void => {
+      r[k] += 1;
+    };
+    const result: Record<StepKindFilter, number> = {
+      all: turn.ops.length,
+      user: 0,
+      reasoning: 0,
+      assistant: 0,
+      tool: 0,
+      session: 0,
+      compaction: 0,
+      internal: 0,
+      llm: 0,
+      generic: 0,
+      system: 0,
+    };
+    for (const op of turn.ops) {
+      if (op.kind === 'internal' && op.name === 'user_input') {
+        inc(result, 'user');
+        inc(result, 'internal');
+      } else if (op.kind === 'reasoning') {
+        inc(result, 'reasoning');
+      } else if (op.kind === 'llm' && op.name === 'message') {
+        inc(result, 'assistant');
+        inc(result, 'llm');
+      } else if (op.kind === 'tool') {
+        inc(result, 'tool');
+      } else if (op.kind === 'session') {
+        inc(result, 'session');
+      } else if (op.kind === 'compaction') {
+        inc(result, 'compaction');
+      } else if (op.kind === 'system') {
+        inc(result, 'system');
+      } else {
+        inc(result, 'generic');
+      }
+    }
+    return result;
+  }, [turn.ops]);
+
+  // Filtered list. The step-index labels stay tied to the ORIGINAL
+  // position in the turn (1-based + total), not the filtered position, so
+  // 'step 4/31' is a stable reference even after toggling the filter.
+  const visibleOps = useMemo(
+    () =>
+      turn.ops.filter((op) => matchStepFilter(activeFilter, op.kind, op.name)),
+    [turn.ops, activeFilter],
+  );
+
   return (
     <section
       className={styles.turn}
@@ -61,19 +132,31 @@ export function TurnView({
         <CopyTurnButton turn={turn} />
       </header>
 
-      <ol className={styles.steps}>
-        {turn.ops.map((op, idx) => (
-          <li key={op.id} className={styles.stepLi}>
-            <TurnStep
-              op={op}
-              focused={focusOpId === op.id}
-              turnStartTs={turn.start_ts}
-              stepIndex={idx + 1}
-              stepTotal={turn.ops.length}
-            />
-          </li>
-        ))}
-      </ol>
+      <StepFilter active={activeFilter} counts={counts} onChange={handleFilterChange} />
+
+      {visibleOps.length === 0 ? (
+        <p className={styles.emptyFilter} role="status">
+          No steps of this kind in this turn.
+        </p>
+      ) : (
+        <ol className={styles.steps}>
+          {turn.ops.map((op) => {
+            if (!matchStepFilter(activeFilter, op.kind, op.name)) return null;
+            const originalIndex = turn.ops.indexOf(op);
+            return (
+              <li key={op.id} className={styles.stepLi}>
+                <TurnStep
+                  op={op}
+                  focused={focusOpId === op.id}
+                  turnStartTs={turn.start_ts}
+                  stepIndex={originalIndex + 1}
+                  stepTotal={turn.ops.length}
+                />
+              </li>
+            );
+          })}
+        </ol>
+      )}
     </section>
   );
 }

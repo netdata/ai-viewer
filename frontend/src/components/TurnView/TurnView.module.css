@@ -87,3 +87,68 @@
   margin: 0;
   padding: 0;
 }
+
+/* Step-filter strip (SOW-0090 chunk 9): compact pill buttons that limit
+ * which step kinds render. Sits between the turn header and the step list.
+ * Each pill shows kind + count; the active pill gets the accent color. */
+.stepFilter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1, 4px);
+  padding-bottom: var(--space-2, 8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.stepFilterPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: var(--font-size-xs, 11px);
+  font-family: var(--font-sans);
+  color: var(--text-secondary, var(--muted-foreground));
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.stepFilterPill:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.stepFilterPill[data-active='true'] {
+  background: var(--accent);
+  color: var(--accent-foreground, var(--background));
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.stepFilterCount {
+  display: inline-block;
+  padding: 0 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary, var(--muted-foreground));
+  border-radius: 999px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.stepFilterPill[data-active='true'] .stepFilterCount {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--accent-foreground, var(--background));
+}
+
+.emptyFilter {
+  padding: var(--space-6, 24px);
+  text-align: center;
+  color: var(--text-secondary, var(--muted-foreground));
+  font-size: var(--font-size-sm, 13px);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-card, var(--card));
+}

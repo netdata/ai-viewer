@@ -640,3 +640,97 @@ describe('TurnView — step metadata row', () => {
     expect(within(screen.getByTestId('turn-step-op-clock')).getByText('11:42:18Z')).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Step filter (SOW-0090 chunk 9)
+// ---------------------------------------------------------------------------
+
+describe('TurnView — step filter', () => {
+  const mixedTurn = (): TurnDetail =>
+    makeTurn({
+      ops: [
+        makeOp({ id: 'op-u1', kind: 'internal', name: 'user_input', payload_refs: [] }),
+        makeOp({ id: 'op-r1', kind: 'reasoning', name: '', payload_refs: [] }),
+        makeOp({ id: 'op-a1', kind: 'llm', name: 'message', payload_refs: [] }),
+        makeOp({ id: 'op-t1', kind: 'tool', name: 'read_file', payload_refs: [] }),
+        makeOp({ id: 'op-t2', kind: 'tool', name: 'write_file', payload_refs: [] }),
+        makeOp({ id: 'op-r2', kind: 'reasoning', name: '', payload_refs: [] }),
+      ],
+    });
+
+  it("renders every step when filter is 'all' (default)", () => {
+    renderInRouter(<TurnView turn={mixedTurn()} />);
+    for (const id of ['op-u1', 'op-r1', 'op-a1', 'op-t1', 'op-t2', 'op-r2']) {
+      expect(screen.getByTestId(`turn-step-${id}`)).toBeInTheDocument();
+    }
+  });
+
+  it("filters to tool calls only when 'tool' is active", async () => {
+    const user = userEvent.setup();
+    renderInRouter(<TurnView turn={mixedTurn()} />);
+    await user.click(screen.getByRole('tab', { name: /^tool/i }));
+    expect(screen.getByTestId('turn-step-op-t1')).toBeInTheDocument();
+    expect(screen.getByTestId('turn-step-op-t2')).toBeInTheDocument();
+    expect(screen.queryByTestId('turn-step-op-r1')).toBeNull();
+    expect(screen.queryByTestId('turn-step-op-u1')).toBeNull();
+    expect(screen.queryByTestId('turn-step-op-a1')).toBeNull();
+  });
+
+  it("filters to reasoning only when 'reasoning' is active", async () => {
+    const user = userEvent.setup();
+    renderInRouter(<TurnView turn={mixedTurn()} />);
+    await user.click(screen.getByRole('tab', { name: /reasoning/i }));
+    expect(screen.getByTestId('turn-step-op-r1')).toBeInTheDocument();
+    expect(screen.getByTestId('turn-step-op-r2')).toBeInTheDocument();
+    expect(screen.queryByTestId('turn-step-op-t1')).toBeNull();
+  });
+
+  it("filters to user prompts only when 'user' is active", async () => {
+    const user = userEvent.setup();
+    renderInRouter(<TurnView turn={mixedTurn()} />);
+    await user.click(screen.getByRole('tab', { name: /user/i }));
+    expect(screen.getByTestId('turn-step-op-u1')).toBeInTheDocument();
+    expect(screen.queryByTestId('turn-step-op-r1')).toBeNull();
+  });
+
+  it("preserves the original step index when filtering", async () => {
+    const user = userEvent.setup();
+    renderInRouter(<TurnView turn={mixedTurn()} />);
+    await user.click(screen.getByRole('tab', { name: /^tool/i }));
+    // Array order is [op-u1, op-r1, op-a1, op-t1, op-t2, op-r2] — op-t1
+    // is at 0-based index 3 (so 4/6), op-t2 at index 4 (so 5/6). The
+    // step index stays tied to the ORIGINAL position so 'step 4' is a
+    // stable reference after toggling the filter.
+    expect(within(screen.getByTestId('turn-step-op-t1')).getByText('4/6')).toBeInTheDocument();
+    expect(within(screen.getByTestId('turn-step-op-t2')).getByText('5/6')).toBeInTheDocument();
+  });
+
+  it('honors the initialStepKindFilter prop', () => {
+    renderInRouter(<TurnView turn={mixedTurn()} initialStepKindFilter="reasoning" />);
+    expect(screen.getByTestId('turn-step-op-r1')).toBeInTheDocument();
+    expect(screen.getByTestId('turn-step-op-r2')).toBeInTheDocument();
+    expect(screen.queryByTestId('turn-step-op-t1')).toBeNull();
+  });
+
+  it('invokes onStepKindFilterChange when a pill is clicked', async () => {
+    const _user = userEvent.setup();
+    const onChange = vi.fn();
+    renderInRouter(<TurnView turn={mixedTurn()} onStepKindFilterChange={onChange} />);
+    await _user.click(screen.getByRole('tab', { name: /tool/i }));
+    expect(onChange).toHaveBeenCalledWith('tool');
+  });
+
+  it('renders the empty-state when no steps match the filter', () => {
+    // A turn with no session forks → filter 'session' should show empty.
+    renderInRouter(<TurnView turn={mixedTurn()} initialStepKindFilter="session" />);
+    expect(screen.getByRole('status')).toHaveTextContent(/no steps of this kind/i);
+  });
+
+  it('renders the count badges on every pill', () => {
+    renderInRouter(<TurnView turn={mixedTurn()} />);
+    const allPill = screen.getByRole('tab', { name: /all/i });
+    expect(within(allPill).getByText('6')).toBeInTheDocument();
+    const toolPill = screen.getByRole('tab', { name: /^tool/i });
+    expect(within(toolPill).getByText('2')).toBeInTheDocument();
+  });
+});

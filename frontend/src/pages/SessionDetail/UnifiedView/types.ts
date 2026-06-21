@@ -30,3 +30,20 @@ export function parseVizTab(raw: string | null): VizTabKey {
 export function parseBottomTab(raw: string | null): BottomTabKey {
   return raw !== null && BOTTOM_TAB_KEYS.has(raw as BottomTabKey) ? (raw as BottomTabKey) : 'events';
 }
+
+// Re-exported for callers; the TurnView component owns the canonical list.
+import { type StepKindFilter as _StepKindFilter } from '../../../components/TurnView/StepFilter';
+export type StepKindFilter = _StepKindFilter;
+export const STEP_KIND_FILTER_VALUES: ReadonlySet<string> = new Set([
+  'all', 'user', 'reasoning', 'assistant', 'tool', 'session', 'compaction',
+]);
+
+/** StepKindFilter (SOW-0090 chunk 9): the URL-persisted filter applied to
+ *  the right-sidebar turn view. Local allow-list mirrors FILTER_KINDS in
+ *  TurnView/StepFilter.tsx so a stale URL value (e.g. a kind we removed)
+ *  parses to 'all' rather than rendering nothing. */
+
+export function parseStepKindFilter(raw: string | null): StepKindFilter {
+  const set = STEP_KIND_FILTER_VALUES as ReadonlySet<StepKindFilter>;
+  return raw !== null && set.has(raw) ? raw : 'all';
+}

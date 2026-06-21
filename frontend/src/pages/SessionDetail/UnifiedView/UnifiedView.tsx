@@ -1,6 +1,11 @@
 // UnifiedView (ui-turn-view.md §ui-session-unified-view): the new Session
 // Detail shell. Three zones:
 //
+// eslint-disable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
+// The setSearchParams callback's `prev` is typed as `any` by react-router-dom;
+// every callsite uses `new URLSearchParams(prev)` which trips the strict rule.
+// The escapes below are all local and intentional.
+//
 //   1. Header — breadcrumb + pin button (rendered by the page wrapper, NOT here).
 //   2. Overview tiles — condensed 6-tile strip (Status / Duration / Tokens /
 //      Cost / Failures / Context).
@@ -54,8 +59,10 @@ import { OverviewTiles } from './OverviewTiles';
 import {
   parseVizTab,
   parseBottomTab,
+  parseStepKindFilter,
   type VizTabKey,
   type BottomTabKey,
+  type StepKindFilter,
 } from './types';
 import styles from './UnifiedView.module.css';
 
@@ -260,6 +267,18 @@ export function UnifiedView({ detail }: { detail: SessionDetailResponse }) {
               detail={detail}
               focusOpId={focusedOpId}
               focusedTurnId={focusedTurn?.id ?? null}
+              initialStepKindFilter={parseStepKindFilter(searchParams.get('stepKindFilter'))}
+              onStepKindFilterChange={(next) => {
+                setSearchParams(
+                  (prev) => {
+                    const sp = new URLSearchParams(prev);
+                    if (next === 'all') sp.delete('stepKindFilter');
+                    else sp.set('stepKindFilter', next);
+                    return sp;
+                  },
+                  { replace: true },
+                );
+              }}
               onClearFocus={() => {
                 setFocusedOpId(null);
               }}
@@ -282,12 +301,16 @@ function TurnViewPane({
   detail,
   focusOpId,
   focusedTurnId,
+  initialStepKindFilter,
+  onStepKindFilterChange,
   onClearFocus,
   onFocusTurn,
 }: {
   detail: SessionDetailResponse;
   focusOpId: string | null;
   focusedTurnId: string | null;
+  initialStepKindFilter: StepKindFilter;
+  onStepKindFilterChange: (next: StepKindFilter) => void;
   onClearFocus: () => void;
   onFocusTurn: (_opId: string) => void;
 }) {
@@ -315,7 +338,12 @@ function TurnViewPane({
             {detail.turns.length} turns · focused
           </span>
         </header>
-        <TurnView turn={focusedTurn} {...(focusOpId !== null ? { focusOpId: focusOpId } : {})} />
+        <TurnView
+          turn={focusedTurn}
+          {...(focusOpId !== null ? { focusOpId: focusOpId } : {})}
+          initialStepKindFilter={initialStepKindFilter}
+          onStepKindFilterChange={onStepKindFilterChange}
+        />
       </div>
     );
   }
