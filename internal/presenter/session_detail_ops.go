@@ -41,6 +41,9 @@ func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string, incl
 		return turns, nil
 	}
 
+	// loadOps first, then attachPayloadRefs sequentially: the refs
+	// attach reads opIndex which is built by loadOps, so it has to come
+	// after. We don't fan them out in parallel (refs depends on opIndex).
 	opIndex, err := p.loadOps(ctx, sessionID, turns, turnIndex)
 	if err != nil {
 		return nil, err

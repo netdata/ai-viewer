@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"sync"
 )
 
 // sessionDetail is the full session row returned by GET
@@ -171,25 +172,53 @@ func (p *Presenter) writeSessionMethodNotAllowed(w http.ResponseWriter, r *http.
 }
 
 func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string, includeRefs bool) (sessionDetailResponse, string, error) {
-	sess, err := p.loadSession(ctx, id)
-	if err != nil {
-		return sessionDetailResponse{}, "session.detail.session", err
+	// Fan out the 3 sub-queries in parallel on the 8-connection reader
+	// pool. The dominant query is loadTurnsWithOps (turns + ops can be
+	// ~600ms on a 7k-op session), so running loadSession + loadChildTree
+	// concurrently hides their latency behind it.
+	type sessResult struct {
+		sess sessionDetail
+		err  error
 	}
-
-	turns, err := p.loadTurnsWithOps(ctx, id, includeRefs)
-	if err != nil {
-		return sessionDetailResponse{}, "session.detail.turns", err
+	type turnsResult struct {
+		turns []turnDetail
+		err   error
 	}
-
-	children, err := p.loadChildTree(ctx, id)
-	if err != nil {
-		return sessionDetailResponse{}, "session.detail.children", err
+	type childrenResult struct {
+		children []childSummary
+		err      error
 	}
-
+	var sr sessResult
+	var tr turnsResult
+	var cr childrenResult
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		sr.sess, sr.err = p.loadSession(ctx, id)
+	}()
+	go func() {
+		defer wg.Done()
+		tr.turns, tr.err = p.loadTurnsWithOps(ctx, id, includeRefs)
+	}()
+	go func() {
+		defer wg.Done()
+		cr.children, cr.err = p.loadChildTree(ctx, id)
+	}()
+	wg.Wait()
+	if sr.err != nil {
+		return sessionDetailResponse{}, "session.detail.session", sr.err
+	}
+	if tr.err != nil {
+		return sessionDetailResponse{}, "session.detail.turns", tr.err
+	}
+	if cr.err != nil {
+		return sessionDetailResponse{}, "session.detail.children", cr.err
+	}
 	return sessionDetailResponse{
-		Session:       sess,
-		Turns:         turns,
-		ChildSessions: children,
+		Session:       sr.sess,
+		Turns:         tr.turns,
+		ChildSessions: cr.children,
 	}, "", nil
 }
 
@@ -290,6 +319,17 @@ func (p *Presenter) loadChildTree(ctx context.Context, id string) ([]childSummar
 	// Anchor on the direct children (parent = id), recurse down via
 	// parent_session_id. depth starts at 1 (direct child) and the WHERE
 	// depth <= childTreeMaxDepth caps the traversal.
+	//
+	// GOTCHA: writing this as `FROM sessions s JOIN descendants d ON s.id = d.id`
+	// makes the SQLite planner choose `SCAN s USING INDEX idx_sessions_start`
+	// (530k rows on the production DB) as the driving table and filter against
+	// the small descendants set, costing ~1.2s per request even when the queried
+	// id has no descendants (404 path). Rewriting the join as
+	// `WHERE s.id IN (SELECT id FROM descendants)` forces the planner to
+	// execute the recursive CTE first and then look up each descendant by PK
+	// (an index hit per descendant). Verified by EXPLAIN QUERY PLAN: the
+	// IN-form drops from SCAN s (1.1-1.3s) to SEARCH s USING PRIMARY KEY
+	// (a handful of microseconds).
 	rows, err := p.db.QueryContext(ctx, `
 WITH RECURSIVE descendants(id, parent, depth) AS (
     SELECT id, parent_session_id, 1 FROM sessions WHERE parent_session_id = ?
@@ -300,8 +340,10 @@ WITH RECURSIVE descendants(id, parent, depth) AS (
 )
 SELECT s.id, s.native_id, s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''),
        s.status, s.start_ts, s.end_ts, s.tokens_in, s.tokens_out, s.cost_usd,
-       s.op_count, s.failure_count, d.parent
-FROM sessions s JOIN descendants d ON s.id = d.id
+       s.op_count, s.failure_count,
+       (SELECT parent FROM descendants WHERE id = s.id) AS parent
+FROM sessions s
+WHERE s.id IN (SELECT id FROM descendants)
 ORDER BY s.start_ts ASC, s.id ASC`, id, childTreeMaxDepth)
 	if err != nil {
 		return nil, err
