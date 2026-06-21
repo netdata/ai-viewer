@@ -97,3 +97,77 @@
   background: var(--bg-tertiary);
   font-weight: 600;
 }
+/* Custom highlight.js theme (SOW-0090 chunk 10) — maps the hljs-* token
+ * classes to our app's design tokens instead of importing
+ * highlight.js/styles/github-dark.css. Two goals:
+ *   1. Visual cohesion with the rest of the dark/light theme (no jarring
+ *      jump from the panel chrome into a separate color scheme).
+ *   2. Token roles map to semantic variables that follow our token
+ *      system — keyword = primary, string = success, comment = muted,
+ *      function = accent — so future theme changes propagate. */
+
+.prose .hljs-comment,
+.prose .hljs-quote {
+  color: var(--text-secondary, var(--muted-foreground));
+  font-style: italic;
+}
+
+.prose .hljs-keyword,
+.prose .hljs-selector-tag,
+.prose .hljs-literal,
+.prose .hljs-section,
+.prose .hljs-link {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.prose .hljs-string,
+.prose .hljs-attr,
+.prose .hljs-symbol,
+.prose .hljs-bullet,
+.prose .hljs-addition {
+  color: var(--success, #16a34a);
+}
+
+.prose .hljs-number,
+.prose .hljs-meta .hljs-string,
+.prose .hljs-regexp {
+  color: var(--accent);
+}
+
+.prose .hljs-title,
+.prose .hljs-name,
+.prose .hljs-attribute,
+.prose .hljs-variable,
+.prose .hljs-template-variable,
+.prose .hljs-type,
+.prose .hljs-selector-id,
+.prose .hljs-selector-class {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.prose .hljs-built_in,
+.prose .hljs-builtin-name,
+.prose .hljs-tag,
+.prose .hljs-params {
+  color: var(--text-primary);
+}
+
+.prose .hljs-emphasis { font-style: italic; }
+.prose .hljs-strong { font-weight: 700; }
+
+.prose .hljs-deletion {
+  color: var(--error, #dc2626);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.prose .hljs-meta {
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.prose .hljs-doctag,
+.prose .hljs-formula {
+  color: var(--text-secondary, var(--muted-foreground));
+  background: var(--bg-tertiary);
+}

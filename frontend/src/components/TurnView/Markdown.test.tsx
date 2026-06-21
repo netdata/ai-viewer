@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { extractReadableText } from './Markdown';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { render } from '@testing-library/react';
+import { extractReadableText, Markdown } from './Markdown';
 
 // extractReadableText (SOW-0090): the turn-view markdown renderer pre-processes
 // adapter payload bytes through this function before rendering. Adapters persist
@@ -145,5 +148,37 @@ describe('extractReadableText', () => {
     ]);
     // The walk recurses into array elements and finds both `text` fields.
     expect(extractReadableText(raw)).toBe('first\nsecond');
+  });
+});
+describe('Markdown — custom highlight theme (SOW-0090 chunk 10)', () => {
+  it('does not import any third-party highlight theme stylesheet', () => {
+    // The chunk 10 commit removed the import of
+    // 'highlight.js/styles/github-dark.css'. We verify that the source
+    // contains no such import (defense in depth — the CSS module loads
+    // through Vite and would surface any leak).
+    const source = readFileSync(join(__dirname, 'Markdown.tsx'), 'utf8');
+    expect(source).not.toMatch(/highlight\.js\/styles\//);
+  });
+
+  it('declares custom hljs-* rules in the CSS module', () => {
+    // The custom theme lives in Markdown.module.css so it bundles with
+    // the component (theme-aware via design tokens). We verify the
+    // file contains the four canonical token categories we styled:
+    // keyword, string, comment, number.
+    const css = readFileSync(join(__dirname, 'Markdown.module.css'), 'utf8');
+    expect(css).toMatch(/\.hljs-keyword/);
+    expect(css).toMatch(/\.hljs-string/);
+    expect(css).toMatch(/\.hljs-comment/);
+    expect(css).toMatch(/\.hljs-number/);
+  });
+
+  it('renders a fenced code block when the source is not valid JSON', () => {
+    // extractReadableText passes non-JSON through verbatim, so the
+    // fenced code block reaches the renderer. We just verify a <code>
+    // element appears; the tokenization is exercised in the browser
+    // where rehype-highlight runs against the real DOM.
+    const source = '```bash\nls -la /tmp\n```';
+    const { container } = render(<Markdown source={source} />);
+    expect(container.querySelector('code')).toBeInTheDocument();
   });
 });
