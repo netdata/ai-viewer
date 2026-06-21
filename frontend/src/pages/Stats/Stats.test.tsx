@@ -166,6 +166,7 @@ function searchResp(over: Partial<SearchResponse> = {}): SearchResponse {
     logs_indexed: true,
     ops: [],
     logs: [],
+    content: [],
     ...over,
   };
 }

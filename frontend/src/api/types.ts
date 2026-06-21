@@ -578,6 +578,18 @@ export interface SearchLogHit {
   rank: number;
 }
 
+/** One matched op whose prompt/response text matched /api/search (SOW-0091).
+ *  fts_content is a separate FTS5 index from fts_ops / fts_logs. The snippet
+ *  contains the matched excerpt from the indexed prompt/response text — the
+ *  operator reads it inline before clicking through to the session. */
+export interface SearchContentHit {
+  op_id: string;
+  session_id: string;
+  turn_id: string;
+  snippet: string;
+  rank: number;
+}
+
 /**
  * GET /api/search envelope (rest-api.md). `logs_indexed` reflects the per-source
  * `fts5_index_logs` flag: when log indexing is disabled `logs` is empty and the
@@ -587,6 +599,10 @@ export interface SearchLogHit {
 export interface SearchResponse {
   ops: SearchOpHit[];
   logs: SearchLogHit[];
+  /** SOW-0091: prompt/response text matches from the fts_content FTS5 index.
+   *  Each source (ops, logs, content) gets its own up-to-?limit page; the
+   *  cursor advances all three together. */
+  content: SearchContentHit[];
   logs_indexed: boolean;
   /** Opaque next-page cursor; present only when more rows exist (rest-api.md §Conventions). The dashboard SearchBox shows the first page only (top-N finder) and does not consume it; included for contract honesty and parity with the logs/sessions envelopes. */
   next_cursor?: string;

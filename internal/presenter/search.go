@@ -93,13 +93,27 @@ type searchLogRow struct {
 	Rank      float64 `json:"rank"`
 }
 
-// searchResponse is the JSON envelope of GET /api/search. Ops/Logs are
-// initialised non-nil so an empty result serialises as [] not null.
+// searchContentRow is one matched op whose indexed prompt/response text
+// matched the query (SOW-0091). fts_content is a separate FTS5 table
+// from fts_ops / fts_logs; we expose its matches under a distinct
+// `content` array so the UI can render them with the snippet text
+// inline (and link through to the matching op / session).
+type searchContentRow struct {
+	OpID      string  `json:"op_id"`
+	SessionID string  `json:"session_id"`
+	TurnID    string  `json:"turn_id"`
+	Snippet   string  `json:"snippet"`
+	Rank      float64 `json:"rank"`
+}
+
+// searchResponse is the JSON envelope of GET /api/search. Ops/Logs/Content
+// are initialised non-nil so an empty result serialises as [] not null.
 type searchResponse struct {
-	Ops         []searchOpRow  `json:"ops"`
-	Logs        []searchLogRow `json:"logs"`
-	LogsIndexed bool           `json:"logs_indexed"`
-	NextCursor  string         `json:"next_cursor,omitempty"`
+	Ops         []searchOpRow      `json:"ops"`
+	Logs        []searchLogRow     `json:"logs"`
+	Content     []searchContentRow `json:"content"`
+	LogsIndexed bool               `json:"logs_indexed"`
+	NextCursor  string             `json:"next_cursor,omitempty"`
 }
 
 type searchRequest struct {
@@ -186,7 +200,11 @@ func parseSearchRequest(v url.Values, now time.Time) (searchRequest, error) {
 }
 
 func (p *Presenter) loadSearchResponse(ctx context.Context, req searchRequest) (searchResponse, string, error) {
-	resp := searchResponse{Ops: []searchOpRow{}, Logs: []searchLogRow{}}
+	resp := searchResponse{
+		Ops:     []searchOpRow{},
+		Logs:    []searchLogRow{},
+		Content: []searchContentRow{},
+	}
 
 	ops, opsHasMore, err := p.searchOps(ctx, req.filter, req.match, req.limit, req.offset)
 	if err != nil {
@@ -210,7 +228,17 @@ func (p *Presenter) loadSearchResponse(ctx context.Context, req searchRequest) (
 			return searchResponse{}, "search.logs", err
 		}
 	}
-	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore, req.limit, req.offset, req.match, req.filter)
+
+	// fts_content (SOW-0091): prompt/response text matches. Each source
+	// (ops, logs, content) gets its own up-to-?limit page; the cursor
+	// advances all three together (next_cursor when ANY has more).
+	content, contentHasMore, err := p.searchContent(ctx, req.filter, req.match, req.limit, req.offset)
+	if err != nil {
+		return searchResponse{}, "search.content", err
+	}
+	resp.Content = content
+
+	resp.NextCursor = searchNextCursor(opsHasMore || logsHasMore || contentHasMore, req.limit, req.offset, req.match, req.filter)
 	return resp, "", nil
 }
 

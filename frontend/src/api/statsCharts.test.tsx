@@ -51,7 +51,7 @@ function topResponse(): TopResponse {
 
 /** searchResponse builds a minimal valid SearchResponse for the fetch mock. */
 function searchResponse(): SearchResponse {
-  return { ops: [], logs: [], logs_indexed: true };
+  return { ops: [], logs: [], content: [], logs_indexed: true };
 }
 
 /** captureUrl installs a fetch mock recording each requested URL. */
@@ -188,6 +188,7 @@ describe('stats search data layer', () => {
     captureUrl({
       ops: [{ op_id: 'o1', session_id: 's1', kind: 'tool', name: 'Bash', model: 'm', snippet: 'x', rank: 1 }],
       logs: [],
+      content: [],
       logs_indexed: false,
     } satisfies SearchResponse);
     const { result } = renderHook(() => useSearch(EMPTY, 'panic'), { wrapper });
