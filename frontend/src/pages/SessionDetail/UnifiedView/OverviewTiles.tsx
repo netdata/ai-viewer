@@ -84,6 +84,10 @@ export function OverviewTiles({ detail }: { detail: SessionDetailResponse }) {
       <div className={styles.tile} data-kind="status">
         <span className={styles.label}>Status</span>
         <span className={styles.value} data-status={displayStatus}>
+          {/* SOW-0090 polish: show the StaleBadge inline ONLY when the session
+              is currently running (process alive but idle). When effective_status
+              is already "stale" the tile's text shows it once — the badge would
+              be redundant. */}
           {isRunning ? <StaleBadge lastActivityTs={session.last_activity_ts ?? null} status={displayStatus} nowUs={nowUs} /> : displayStatus}
         </span>
       </div>
