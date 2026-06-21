@@ -266,6 +266,7 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions/{id}/topology", p.handleSessionTopology)
 	mux.HandleFunc("/api/sessions/{id}/timeline", p.handleSessionTimeline)
 	mux.HandleFunc("/api/sessions/{id}/trace", p.handleSessionTrace)
+	mux.HandleFunc("/api/sessions/{id}/payload_refs", p.handleSessionPayloadRefs)
 	mux.HandleFunc("/api/sessions/{id}/related", p.handleSessionRelated)
 	mux.HandleFunc("/api/topology", p.handleCrossTopology)
 	mux.HandleFunc("/api/stats", p.handleStats)

@@ -91,6 +91,7 @@ type opDetail struct {
 // drawer's Preview button constructs the URL client-side from the ref id).
 type payloadRef struct {
 	ID            int64   `json:"id"`
+	OpID          string  `json:"op_id"`
 	Kind          string  `json:"kind"`
 	Format        string  `json:"format"`
 	Compression   *string `json:"compression"`

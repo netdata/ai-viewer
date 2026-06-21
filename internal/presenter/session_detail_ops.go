@@ -193,12 +193,11 @@ ORDER BY pr.op_id ASC, pr.id ASC`, sessionID)
 	for rows.Next() {
 		var (
 			pr          payloadRef
-			opID        string
 			compression sql.NullString
 			origBytes   sql.NullInt64
 			storedBytes sql.NullInt64
 		)
-		if err := rows.Scan(&pr.ID, &opID, &pr.Kind, &pr.Format, &compression,
+		if err := rows.Scan(&pr.ID, &pr.OpID, &pr.Kind, &pr.Format, &compression,
 			&origBytes, &storedBytes); err != nil {
 			return err
 		}
@@ -214,7 +213,7 @@ ORDER BY pr.op_id ASC, pr.id ASC`, sessionID)
 			v := storedBytes.Int64
 			pr.StoredBytes = &v
 		}
-		loc, ok := opIndex[opID]
+		loc, ok := opIndex[pr.OpID]
 		if !ok {
 			continue
 		}
