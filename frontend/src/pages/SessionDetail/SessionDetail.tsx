@@ -9,6 +9,7 @@ import { ApiError } from '../../api/client';
 import { OverviewTab } from './OverviewTab';
 import { LogsTab } from './LogsTab';
 import { TraceTab } from './TraceTab';
+import { TurnsTab } from './TurnsTab';
 import { TopologyTab } from './TopologyTab';
 import { TimelineTab } from './TimelineTab';
 import { RawDataTab } from './RawDataTab';
@@ -22,11 +23,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/too
 // An unknown id (404) renders a clean "not found" state instead of the tabs. The
 // open session is live-refreshed over SSE (session_changed → ['session', id]).
 
-type TabKey = 'overview' | 'trace' | 'topology' | 'timeline' | 'logs' | 'raw';
+type TabKey = 'overview' | 'trace' | 'turns' | 'topology' | 'timeline' | 'logs' | 'raw';
 
 const TABS: readonly TabSpec<TabKey>[] = [
   { key: 'overview', label: 'Overview' },
   { key: 'trace', label: 'Trace' },
+  { key: 'turns', label: 'Turns' },
   { key: 'topology', label: 'Topology' },
   { key: 'timeline', label: 'Timeline' },
   { key: 'logs', label: 'Logs' },
@@ -146,6 +148,7 @@ export function SessionDetail() {
             {tab === 'overview' && <OverviewTab detail={data} />}
             {tab === 'logs' && <LogsTab sessionId={id} />}
             {tab === 'trace' && <TraceTab detail={data} />}
+            {tab === 'turns' && <TurnsTab detail={data} />}
             {tab === 'topology' && <TopologyTab sessionId={id} />}
             {tab === 'timeline' && <TimelineTab sessionId={id} />}
             {tab === 'raw' && <RawDataTab detail={data} />}

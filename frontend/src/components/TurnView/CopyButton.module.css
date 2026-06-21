@@ -1,0 +1,38 @@
+/* CopyButton — small, theme-aware, fits next to a code header or step header. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1, 4px);
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  font-size: var(--font-size-xs, 11px);
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 3px);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.button:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.button[data-copied='true'] {
+  background: color-mix(in oklch, var(--success, #16a34a) 14%, transparent);
+  color: var(--success, #16a34a);
+  border-color: color-mix(in oklch, var(--success, #16a34a) 40%, var(--border));
+}
+
+.label {
+  /* Visible on hover / focus; hidden on rest to keep the row tight. */
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.button:hover .label,
+.button:focus-visible .label,
+.button[data-copied='true'] .label {
+  opacity: 1;
+}

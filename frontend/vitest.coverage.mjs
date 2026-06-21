@@ -86,6 +86,10 @@ export const COVERAGE_INCLUDE = [
   'src/components/StaleBadge/**/*.{ts,tsx}',
   // ContextPressure badge (SOW-0087 chunk 6 — A7 context-window indicator).
   'src/components/ContextPressure/**/*.{ts,tsx}',
+  // TurnView + step renderers + payload hook (SOW-0088 chunk 2 — the rich
+  // turn renderer that finally answers "is this the turn I'm interested in?"
+  // with full prompt + reasoning + tool request/response + assistant output).
+  'src/components/TurnView/**/*.{ts,tsx}',
   'src/components/SessionRow/**/*.{ts,tsx}',
   'src/components/ThemeToggle/**/*.{ts,tsx}',
   'src/components/Tabs/**/*.{ts,tsx}',
@@ -202,6 +206,7 @@ export const PER_DIR_GLOBS = [
   'src/components/Heatmap/**',
   'src/components/StaleBadge/**',
   'src/components/ContextPressure/**',
+  'src/components/TurnView/**',
   // src/pages/SessionsList — measured via 'src/pages/SessionsList/**/*.{ts,tsx}'
   // above (HomeSummaryCard.tsx is the only file in this dir after
   // SessionsList.tsx moved to COVERAGE_EXCLUDED; the per-dir floor below

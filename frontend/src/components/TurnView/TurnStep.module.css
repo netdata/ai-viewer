@@ -1,0 +1,191 @@
+/* TurnStep — one op as a card. Variants give each kind its visual treatment
+ * (user prompt vs reasoning vs assistant vs tool vs session vs compaction). */
+
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  background: var(--bg-card, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  position: relative;
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+
+/* Focused step: pulse outline animation, 2 seconds total (200ms in,
+ * 1800ms fade). Respects prefers-reduced-motion: reduce — the animation
+ * rule itself is short enough that we just skip it under reduced motion;
+ * the scroll-into-view still happens. */
+.step[data-focused='true'] {
+  animation: turnstep-pulse 2s ease-out;
+}
+
+@keyframes turnstep-pulse {
+  0%   { box-shadow: 0 0 0 2px var(--accent); border-color: var(--accent); }
+  20%  { box-shadow: 0 0 0 2px var(--accent); border-color: var(--accent); }
+  100% { box-shadow: 0 0 0 0 transparent; border-color: var(--border); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step[data-focused='true'] {
+    animation: none;
+    border-color: var(--accent);
+  }
+}
+
+.stepHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  font-size: var(--font-size-sm, 13px);
+}
+
+.stepIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.stepTitle {
+  margin: 0;
+  font-size: var(--font-size-sm, 13px);
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1 1 auto;
+}
+
+.stepMeta {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-family: var(--font-mono, monospace);
+}
+
+.stepError {
+  color: var(--error, #dc2626);
+  font-weight: 600;
+}
+
+/* Variant accents — a 3px left border on each card to distinguish kinds. */
+.variant_user       { border-left: 3px solid var(--primary); }
+.variant_reasoning  { border-left: 3px solid #a855f7; }       /* purple */
+.variant_assistant  { border-left: 3px solid var(--success, #16a34a); }
+.variant_tool       { border-left: 3px solid #f59e0b; }       /* amber */
+.variant_session    { border-left: 3px solid #06b6d4; }       /* cyan */
+.variant_compaction { border-left: 3px solid var(--text-secondary); }
+.variant_generic    { border-left: 3px solid var(--border); }
+
+/* Body variants. Reasoning is italic + tinted; everything else is plain prose. */
+.proseBody {
+  padding-left: var(--space-4, 16px);
+  padding-right: var(--space-4, 16px);
+}
+
+.reasoningBody {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  background: color-mix(in oklch, #a855f7 8%, var(--bg-card, var(--card)));
+  border: 1px solid color-mix(in oklch, #a855f7 20%, var(--border));
+  border-radius: var(--radius-sm, 3px);
+  margin-left: var(--space-4, 16px);
+  font-style: italic;
+  opacity: 0.92;
+}
+
+/* Tool body — two stacked code blocks. */
+.toolBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  padding-left: var(--space-4, 16px);
+  padding-right: var(--space-4, 16px);
+}
+
+.codeBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+}
+
+.codeHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+}
+
+.codeLabel {
+  margin: 0;
+  font-size: var(--font-size-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary, var(--muted-foreground));
+}
+
+.sessionBody {
+  padding-left: var(--space-4, 16px);
+  padding-right: var(--space-4, 16px);
+  font-size: var(--font-size-sm, 13px);
+}
+
+.sessionLink {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.9em;
+}
+
+.truncationFooter {
+  margin: var(--space-1, 4px) 0 0;
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-style: italic;
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+  padding: var(--space-2, 8px);
+  background: color-mix(in oklch, var(--error, #dc2626) 10%, transparent);
+  border: 1px solid color-mix(in oklch, var(--error, #dc2626) 40%, var(--border));
+  border-radius: var(--radius-sm, 3px);
+  font-size: var(--font-size-sm, 13px);
+  margin-left: var(--space-4, 16px);
+  margin-right: var(--space-4, 16px);
+}
+
+.errorBlock p {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.errorBlock button {
+  align-self: flex-start;
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  background: var(--bg-card, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 3px);
+  font-size: var(--font-size-xs, 11px);
+  cursor: pointer;
+}
+
+.errorBlock button:hover {
+  background: var(--bg-tertiary);
+}
+
+.loadingBody,
+.emptyBody {
+  margin: 0;
+  padding-left: var(--space-4, 16px);
+  padding-right: var(--space-4, 16px);
+  font-size: var(--font-size-sm, 13px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-style: italic;
+}

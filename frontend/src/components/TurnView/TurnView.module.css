@@ -1,0 +1,89 @@
+/* TurnView — full-turn shell. One header, vertical list of step cards. */
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  padding: var(--space-4, 16px);
+  background: var(--bg-primary, var(--background));
+  color: var(--text-primary);
+  /* Allow the TurnView to scroll independently of its parent shell (used in
+   * the right sidebar of the unified Session Detail page in SOW-0088 chunk 4).
+   * The parent provides a fixed height; we let the .steps list absorb the
+   * overflow. */
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.turnHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  flex-wrap: wrap;
+  padding-bottom: var(--space-3, 12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.turnTitle {
+  margin: 0;
+  font-size: var(--font-size-base, 14px);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
+.turnMeta {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary, var(--muted-foreground));
+  font-family: var(--font-mono, monospace);
+  flex: 1 1 auto;
+}
+
+.turnStatus {
+  text-transform: lowercase;
+  color: var(--text-primary);
+}
+
+.turnTokens {
+  color: var(--text-primary);
+}
+
+.copyTurnButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1, 4px);
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  font-size: var(--font-size-xs, 11px);
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 3px);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.copyTurnButton:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.copyTurnButton[data-copied='true'] {
+  color: var(--success, #16a34a);
+  border-color: var(--success, #16a34a);
+}
+
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+}
+
+.stepLi {
+  margin: 0;
+  padding: 0;
+}

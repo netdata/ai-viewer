@@ -1,0 +1,99 @@
+/* Markdown prose styles (ui-turn-view.md §Markdown rendering). Tailwind
+ * typography (`@tailwindcss/typography`) is NOT in our dependency tree, so
+ * we hand-roll the common prose adjustments to keep the bundle small.
+ * Theme-aware: the `prose` class uses CSS variables that resolve correctly
+ * in both themes (see app.css §token bridge). */
+
+.prose {
+  font-size: var(--text-sm, 13px);
+  line-height: 1.55;
+  color: var(--text-primary);
+  word-wrap: break-word;
+}
+
+.prose p {
+  margin: 0 0 0.5em;
+}
+
+.prose p:last-child {
+  margin-bottom: 0;
+}
+
+.prose strong {
+  font-weight: 600;
+}
+
+.prose em {
+  font-style: italic;
+}
+
+.prose code {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.9em;
+  padding: 0.05em 0.3em;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.prose pre {
+  margin: 0;
+  padding: var(--space-2, 8px);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 3px);
+  overflow-x: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm, 13px);
+  line-height: 1.4;
+}
+
+.prose pre code {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font-size: inherit;
+}
+
+.prose ul,
+.prose ol {
+  margin: 0 0 0.5em 1.5em;
+  padding: 0;
+}
+
+.prose ul { list-style: disc; }
+.prose ol { list-style: decimal; }
+
+.prose li { margin: 0 0 0.15em; }
+
+.prose a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose blockquote {
+  margin: 0 0 0.5em;
+  padding-left: var(--space-3, 12px);
+  border-left: 2px solid var(--border);
+  color: var(--text-secondary, inherit);
+}
+
+.prose table {
+  border-collapse: collapse;
+  margin: 0 0 0.5em;
+  width: 100%;
+  font-size: inherit;
+}
+
+.prose th,
+.prose td {
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.prose th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+}
