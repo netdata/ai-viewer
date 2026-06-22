@@ -41,7 +41,7 @@ frontend/
 │   ├── api/                     # one module per endpoint + shared client
 │   │   ├── client.ts            # fetch wrapper (API_BASE, error envelope)
 │   │   ├── queryClient.ts       # React Query client
-│   │   ├── sessions.ts          # /api/sessions + /api/sessions/:id
+│   │   ├── sessions.ts          # /api/sessions + /api/sessions/:id + /api/sessions/compare
 │   │   ├── logs.ts              # /api/sessions/:id/logs
 │   │   ├── sources.ts           # /api/sources
 │   │   ├── stats.ts             # /api/stats
@@ -385,3 +385,21 @@ Rules:
 3. `go build -o bin/ai-viewer-serve ./cmd/ai-viewer-serve`
 
 The embedded build is the single-binary deploy target.
+
+## Compare page contract (SOW-0095)
+
+- **Route**: `GET /compare?ids=<csv, 2-4 ids>` registered in `App.tsx`.
+- **Hook**: `useCompareSessions(ids: string[])` lives in `frontend/src/api/sessions.ts`
+  next to `useSessionDetail`. Contract:
+  - `enabled: ids.length >= 2 && ids.length <= 4` (1-id or 5+ ids → no fetch; the
+    page renders the empty / error state directly).
+  - `queryKey: ['compare', ids.join(',')]` (cache by full id set, ordered).
+  - `queryFn`: `GET /api/sessions/compare?ids=<csv>`.
+  - Returns `{ data: CompareResponse | undefined; isLoading: boolean; error: Error | null }`.
+- **Types**: `CompareResponse`, `CompareSummary`, `CompareToolBucket`, `CompareErrorRef`,
+  `CompareModelBucket`, `CompareAgentBucket`, `CompareKindDistribution` are added to
+  `frontend/src/api/types.ts` mirroring the Go DTOs in `internal/presenter/compare.go`.
+- **Entry point**: a "Compare" button on `SessionRow` and on the `SessionDetail`
+  header navigates to `/compare?ids=<currentId>`. The compare page itself prompts
+  for the remaining ids when only one is present (a multi-select over the
+  recent-sessions query).

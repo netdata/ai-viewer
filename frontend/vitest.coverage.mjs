@@ -140,6 +140,7 @@ export const COVERAGE_INCLUDE = [
   // ops, logs, and prompt/response text. Listed here AND in PER_DIR_GLOBS so
   // it is both measured and gated per-dir.
   'src/pages/Search/**/*.{ts,tsx}',
+  'src/pages/Compare/**/*.{ts,tsx}',
   // Flat (non-dir) component file with a unit test (StatusBadge.test.tsx).
   // Listed by exact path so it is MEASURED and contributes to the global
   // aggregate floor; flat files carry no per-dir floor.
@@ -229,6 +230,7 @@ export const PER_DIR_GLOBS = [
   'src/pages/Stats/**',
   'src/pages/Topology/**',
   'src/pages/Search/**',
+  'src/pages/Compare/**',
   'src/pages/Failures/**',
   'src/pages/Agents/**',
   'src/pages/Models/**',

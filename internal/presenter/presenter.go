@@ -262,6 +262,7 @@ func (p *Presenter) Handler() http.Handler {
 	mux.HandleFunc("/api/sources", p.handleSources)
 	mux.HandleFunc("/api/sessions", p.handleSessionsList)
 	mux.HandleFunc("/api/sessions/{id}", p.handleSessionDetail)
+	mux.HandleFunc("/api/sessions/compare", p.handleCompareSessions) // static beats {id} in Go 1.22+ ServeMux
 	mux.HandleFunc("/api/sessions/{id}/logs", p.handleSessionLogs)
 	mux.HandleFunc("/api/sessions/{id}/topology", p.handleSessionTopology)
 	mux.HandleFunc("/api/sessions/{id}/timeline", p.handleSessionTimeline)

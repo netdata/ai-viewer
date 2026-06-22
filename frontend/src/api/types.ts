@@ -109,6 +109,78 @@ export interface SessionListResponse {
   next_cursor?: string;
 }
 
+// ── GET /api/sessions/compare ───────────────────────────────────────────────
+
+/** Per-metric block in compare responses. Directional metrics (lower is
+ *  better: duration_us, cost_usd) populate `best` / `worst`; neutral
+ *  metrics (op_count, tokens) leave them undefined. */
+export interface CompareMetricInt {
+  best?: string;
+  worst?: string;
+  per_session: Record<string, number>;
+}
+
+export interface CompareMetricFloat {
+  best?: string;
+  worst?: string;
+  per_session: Record<string, number>;
+}
+
+/** Per-tool bucket: common (intersection across all sessions), per-session
+ *  unique tools (added / removed relative to the intersection), and the
+ *  per-session histogram. */
+export interface CompareToolBucket {
+  common: string[];
+  added: Record<string, string[]>;
+  removed: Record<string, string[]>;
+  per_session: Record<string, Record<string, number>>;
+}
+
+/** Compact reference to a failed op, used in compare error lists. */
+export interface CompareErrorRef {
+  op_id: string;
+  kind: string;
+  name: string;
+  error_class: string;
+  /** UNIX µs. */
+  started_at_us: number;
+}
+
+export interface CompareErrorBucket {
+  /** Errors present in every compared session. */
+  common: CompareErrorRef[];
+  /** Errors present in only one session, keyed by session id. */
+  only_in: Record<string, CompareErrorRef[]>;
+}
+
+/** {shared, diverged} bucket for string-valued fields (model, agent). */
+export interface CompareStringBucket {
+  shared: string[];
+  diverged: Record<string, string[]>;
+}
+
+/** Per-session op-kind histogram. Absent kinds are zero on the client. */
+export interface CompareKindDistribution {
+  per_session: Record<string, Record<string, number>>;
+}
+
+export interface CompareSummary {
+  duration_us: CompareMetricInt;
+  cost_usd: CompareMetricFloat;
+  op_count: CompareMetricInt;
+  tokens: CompareMetricInt;
+}
+
+export interface CompareResponse {
+  sessions: SessionListItem[];
+  summary: CompareSummary;
+  tool_usage: CompareToolBucket;
+  errors: CompareErrorBucket;
+  models: CompareStringBucket;
+  agents: CompareStringBucket;
+  kind_distribution: CompareKindDistribution;
+}
+
 // ── GET /api/sessions/:id ───────────────────────────────────────────────────
 
 /** Full session row (presenter sessionDetail). */

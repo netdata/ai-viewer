@@ -124,6 +124,43 @@ Same shape as /agents/:name, but filtered to the tool.
 - Second click on the same row collapses the summary.
 - The existing "Open" link still navigates to the full Session Detail (with `e.stopPropagation`).
 
+### `/compare?ids=...` — Session diff comparison (SOW-0095)
+
+- URL contract: `?ids=<csv, 2-4 session ids>`. The ids parameter is required
+  and the page rejects 1-id or 5+ id inputs in the empty state ("Pick 2-4
+  sessions to compare") with a link to `/sessions`. Unknown ids surface as
+  an error state.
+- Layout: 2-4 summary cards on top (one per session, in request order), each
+  showing agent, model, status, op_count, duration, cost, tokens, started_at,
+  error_class, child count. Cards re-use the `SessionRow` visual primitive
+  scaled to the column count. Each metric on each card gets a small green
+  check (best per the metric's direction) or red ✗ (worst), with neutral
+  metrics left unmarked.
+- Tabbed body (4 tabs): **Overview**, **Tools**, **Errors**, **Kinds**.
+  - **Overview**: side-by-side summary table; rows are metrics (agent,
+    model, status, op_count, duration, cost, tokens, started_at,
+    error_class, child_count), columns are sessions. Each cell shows the
+    value plus a "vs best" delta (e.g. `+3.4×` for the worst on a
+    "lower is better" metric). Best cell per row gets a green tint;
+    worst gets a red tint.
+  - **Tools**: per-session tool histograms; "Common" column lists tool
+    names present in **all** sessions, "Only in A" / "Only in B" /
+    "Only in C" / "Only in D" columns list session-unique tool names with
+    call counts. The page picks the column count from the request (2-cols,
+    3-cols, or 4-cols of "Only in X" plus a Common column).
+  - **Errors**: same column layout as Tools. Each error row shows
+    `error_class` + op kind + op name + relative timestamp ("+3.2s after
+    session start"). Capped at 50 rows per column with a "+N more" link
+    to the per-session error query.
+  - **Kinds**: bar chart of per-session op-kind distribution. Reuses
+    `Stats/charts/BarChart` with one bar per kind, grouped by session.
+    Kinds with zero count in a session show a `0` label, not a gap.
+- Entry points: small "Compare" button on `SessionRow` and on the
+  `SessionDetail` header. Clicking the button on session X navigates to
+  `/compare?ids=X`; if only one id is present, the page prompts for the
+  remaining ids (a multi-select over recent sessions).
+- Empty / loading / error states follow the base 4-state pattern.
+
 ### ⌘K Command Palette (SOW-0074.1, SOW-0084)
 
 - Route navigation (existing): Sessions / Topology / Stats / etc.

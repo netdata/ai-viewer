@@ -430,6 +430,106 @@ unknown `:id`; HEAD and 405 behave exactly as the other session sub-routes.
 - The query is on indexed columns (`idx_sessions_cwd`, `start_ts`), bounded by
   `LIMIT 10`.
 
+### GET /api/sessions/compare
+
+Multi-session diff for analytical comparison (SOW-0095). Compares 2-4 sessions
+side-by-side and returns a structured diff: per-session summary, tool usage
+(added / removed / common), errors (only-in / common), model / agent divergence,
+op-kind distribution, and per-metric summary stats (best / worst).
+
+```
+?ids=<csv, 2-4 session ids>
+```
+
+Request:
+- `ids` is a comma-separated list of **2-4** session ids (order is preserved in
+  the response). Whitespace around ids is trimmed; empty strings yield 400.
+- The endpoint accepts HEAD and OPTIONS identically to the other session routes
+  (404 for unknown ids, 405 for non-GET methods).
+
+Response shape:
+
+```json
+{
+  "sessions": [
+    { ...sessionListItem, ordered per request... }
+  ],
+  "summary": {
+    "duration_us": { "best": "<session_id>", "worst": "<session_id>",
+                     "per_session": { "<id>": 1234567, ... } },
+    "cost_usd":    { "best": "<session_id>", "worst": "<session_id>",
+                     "per_session": { "<id>": 0.42, ... } },
+    "op_count":    { "best": "<session_id>", "worst": "<session_id>",
+                     "per_session": { "<id>": 6955, ... } },
+    "tokens":      { "best": "<session_id>", "worst": "<session_id>",
+                     "per_session": { "<id>": 250000, ... } }
+  },
+  "tool_usage": {
+    "common":  ["shell.Bash", "fs.read"],
+    "added":   { "<session_id>": ["web.search"] },
+    "removed": { "<session_id>": ["fs.write"] },
+    "per_session": { "<session_id>": { "shell.Bash": 12, ... } }
+  },
+  "errors": {
+    "common":   [ { "op_id":"...","kind":"llm","name":"claude-opus",
+                    "error_class":"rate_limit","started_at_us":1234567 } ],
+    "only_in":  { "<session_id>": [ { ...opErrorRef... } ] }
+  },
+  "models": {
+    "shared":   ["claude-opus-4"],
+    "diverged": { "<session_id>": ["claude-sonnet-4"] }
+  },
+  "agents": {
+    "shared":   ["root"],
+    "diverged": { "<session_id>": ["explore"] }
+  },
+  "kind_distribution": {
+    "per_session": {
+      "<session_id>": { "llm": 12, "tool": 47, "internal": 8 }
+    }
+  }
+}
+```
+
+Semantics:
+- `summary.<metric>.best` / `worst` use a metric-specific rule: `duration_us`
+  and `cost_usd` are "lower is better"; `op_count` and `tokens` are neutral
+  (the client decides the human-friendly indicator; the server reports raw
+  values). For neutral metrics, `best` is omitted or set to `null` (v1
+  implementation chooses one and pins it in tests).
+- `tool_usage.common` is the **intersection** of tool names across all sessions.
+  `added` / `removed` are computed per-session relative to the intersection:
+  `added` for session X = tool names used in X but not in all other sessions;
+  `removed` is the symmetric mirror (tools in some other session but not in X).
+  Call counts are always available in `per_session`.
+- `errors.common` is the intersection of error class+op-kind+name+session
+  reference (by op_id); `only_in` groups the per-session-unique errors.
+  Sorted by `started_at_us ASC` within each bucket.
+- `models.diverged` and `agents.diverged` are populated only when the
+  shared/diverged split is non-trivial; if all sessions share the same
+  model + agent, those keys are empty.
+- `kind_distribution` is a histogram of op kinds per session; the client uses
+  this to render a bar chart for "what kind of work did each session do".
+
+Errors:
+- 400 `BAD_REQUEST` for `?ids` missing, empty, or with 1 / 5+ entries.
+- 404 `NOT_FOUND` if **any** requested id is not in the DB (the response
+  payload identifies the missing id in the error message).
+- 405 `METHOD_NOT_ALLOWED` for non-GET / non-HEAD.
+
+Performance:
+- The per-session summary query reuses the `/api/sessions` list SELECT
+  clause, filtered by `id IN (?,?,...)` — the v11 `idx_sessions_duration`,
+  `idx_sessions_op_count`, `idx_sessions_cost`, `idx_sessions_tokens` all
+  apply (the topology sort indexes cover the list query's ORDER BY;
+  here they're used as covering indexes for the filter).
+- Each diff dimension is a single `GROUP BY` query against `idx_ops_session_id`
+  (and `idx_ops_kind`, `idx_ops_name` for the bucketed dimensions). For 4
+  sessions × ~7k ops each (the largest observed session in the current data),
+  the total per-endpoint cost is bounded by ~30k rows × 4 dimensions — well
+  within the existing per-endpoint budget (≤ 100 ms warm, ≤ 250 ms cold).
+- No new schema migration is required; v11 is sufficient.
+
 ### GET /api/stats
 
 Cross-session aggregates over the filtered set.

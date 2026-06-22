@@ -11,6 +11,7 @@ import { ModelsList, ModelDetail } from './pages/Models';
 import { ToolsList, ToolDetail } from './pages/Tools';
 import { IngestErrors } from './pages/IngestErrors';
 import { Search } from './pages/Search';
+import { Compare } from './pages/Compare';
 import { NotFound } from './pages/NotFound';
 
 // Route table. Every route nests under Layout (header + global FilterBar +
@@ -35,6 +36,7 @@ export function App() {
         <Route path="tools/:name" element={<ToolDetail />} />
         <Route path="ingest-errors" element={<IngestErrors />} />
         <Route path="search" element={<Search />} />
+        <Route path="compare" element={<Compare />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

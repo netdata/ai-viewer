@@ -289,6 +289,7 @@ GET  /api/sessions/:id          → session detail with turns and ops           
 GET  /api/sessions/:id/logs     → log entries for a session                                 (live)
 GET  /api/sessions/:id/topology → topology graph for a session (nodes, edges)               (implemented — SOW-0006)
 GET  /api/sessions/:id/timeline → ordered spans for the timeline view                       (implemented — SOW-0006)
+GET  /api/sessions/compare      → multi-session diff (2-4 ids) for analytical comparison   (live — SOW-0095)
 GET  /api/topology              → cross-session topology graph over the active filter        (implemented — SOW-0006)
 GET  /api/stats                 → cross-session statistics with filters                     (live)
 GET  /api/catalog/tools         → catalog_tools, with filters                               (Chunks 12+ — not yet implemented)
@@ -415,3 +416,68 @@ hub's `OnRemove` hook (`onSubRemoved`) and the notify poller never acquire
 ```
 
 The port 7710 is a placeholder; will be locked in during Phase 1 implementation when no conflicts are confirmed on the user's workstation.
+
+## Session diff (`/api/sessions/compare`, SOW-0095)
+
+The compare engine answers "what's different between these N sessions?" in a
+single round-trip. The output is shaped for the compare page (2-4 summary
+cards on top, 4 tabs of structured diffs below), not for direct column-by-
+column alignment (that's a v2 feature).
+
+### Per-session summary
+
+Reuses `sessionListItem` from the list endpoint. The compare handler runs the
+same SELECT clause the list handler uses for one row each, filtered by
+`id IN (?,?,...)`. The v11 topology sort indexes (`idx_sessions_duration`,
+`idx_sessions_op_count`, `idx_sessions_cost`, `idx_sessions_tokens`) cover
+the filter for the typical N=2-4 case — the planner chooses them as
+covering indexes even when the query is `id IN (...)` rather than
+`ORDER BY ...`.
+
+### Diff dimensions
+
+Each dimension is one SQL query, one Go pass, no N×|ops| loops:
+
+- **Summary stats** — `summary.<metric>.best` and `.worst` are computed
+  from the per-session summary values. For `duration_us` and `cost_usd`,
+  lower is better. For `op_count` and `tokens`, neutral (server omits
+  `best` / `worst`; client decides). All four are always present in
+  `per_session`; `best` / `worst` are present only for the directional
+  metrics.
+- **Tool usage** — `SELECT name, session_id, COUNT(*) FROM ops WHERE
+  session_id IN (...) AND kind = 'tool' GROUP BY name, session_id`. Pivot
+  in Go: per-session tool map; intersection across all sessions = `common`;
+  per-session diff = `added` / `removed` relative to the intersection.
+  This is O(N×T) where T is distinct tools across the N sessions; the
+  underlying GROUP BY is index-driven via `idx_ops_kind` + the
+  session-id filter.
+- **Errors** — `SELECT op_id, session_id, kind, name, error_class,
+  started_at_us FROM ops WHERE session_id IN (...) AND error_class IS
+  NOT NULL AND error_class != 'none' AND error_class != '' ORDER BY
+  session_id, started_at_us`. Per-session set; intersection = `common`;
+  per-session-unique = `only_in`.
+- **Models / agents** — read directly from the per-session summary; the
+  `model` and `agent_name` columns on `sessions` are populated at ingest.
+- **Kind distribution** — `SELECT session_id, kind, COUNT(*) FROM ops
+  WHERE session_id IN (...) GROUP BY session_id, kind`. One row per
+  (session, kind); pivot in Go.
+
+### Validation
+
+- 2-4 ids required (400 for 0, 1, or 5+). The N=2..4 limit is the v1
+  scope; future versions can raise it.
+- All ids must exist in the DB (404 for any unknown id, with the missing
+  id in the error message body).
+- The order of `sessions` in the response is exactly the order of `ids`
+  in the request — no implicit sorting. The compare page relies on this
+  for column alignment (card 1 = request id 1, etc.).
+
+### Out of scope (v1)
+
+- Per-op alignment (turn-by-turn sequence diff with Needleman-Wunsch-style
+  alignment). Deferred; the kind-distribution + summary diffs answer the
+  operator's first question ("why is B different?") without it.
+- Persisted comparison sets.
+- Per-payload diff.
+- Time-series diff.
+- Export to CSV.

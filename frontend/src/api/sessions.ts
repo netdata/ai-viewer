@@ -8,6 +8,7 @@ import {
 import { get, buildQuery } from './client';
 import type { Filters } from '../state/filters';
 import type {
+  CompareResponse,
   PayloadRef,
   RelatedResponse,
   SessionDetailResponse,
@@ -315,5 +316,30 @@ export function useSessionRelated(id: string): UseQueryResult<RelatedResponse> {
     queryKey: ['session-related', id] as const,
     queryFn: ({ signal }) => fetchSessionRelated(id, signal),
     enabled: id.length > 0,
+  });
+}
+
+/**
+ * fetchCompareSessions GETs a structured diff between 2-4 sessions
+ * (SOW-0095). The endpoint is `GET /api/sessions/compare?ids=<csv>`;
+ * the ids are joined with commas (no URL encoding inside the value;
+ * the session ids are uuid-like and contain no commas in practice).
+ * Server validates 2-4 ids; 1 id or 5+ ids → 400; unknown id → 404.
+ */
+export function fetchCompareSessions(ids: string[], signal?: AbortSignal): Promise<CompareResponse> {
+  return get<CompareResponse>('/sessions/compare?ids=' + ids.map(encodeURIComponent).join(','), signal);
+}
+
+/**
+ * useCompareSessions is the query hook for the /compare page. The hook
+ * is `enabled` only when the id set is the contractually valid 2-4; the
+ * page renders the empty / error state for other shapes (1 or 5+) and
+ * does not trigger a request.
+ */
+export function useCompareSessions(ids: string[]): UseQueryResult<CompareResponse> {
+  return useQuery({
+    queryKey: ['compare', ids.join(',')] as const,
+    queryFn: ({ signal }) => fetchCompareSessions(ids, signal),
+    enabled: ids.length >= 2 && ids.length <= 4,
   });
 }

@@ -1,0 +1,301 @@
+/* /compare page (SOW-0095). Layout: title + summary cards row +
+   tabbed body. Mirrors the design tokens used by SessionsList and
+   Search. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.5rem 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.title {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--foreground);
+  margin: 0;
+}
+
+.subtitle {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+
+.cta {
+  color: var(--primary);
+  text-decoration: none;
+}
+.cta:hover {
+  text-decoration: underline;
+}
+
+/* ── cards row ───────────────────────────────────────────────── */
+
+.cardsRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cardLink {
+  color: var(--foreground);
+  font-weight: 600;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cardLink:hover {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.statusBadge {
+  font-size: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+.statusCompleted { background: var(--success); color: var(--success-foreground); }
+.statusFailed    { background: var(--destructive); color: var(--destructive-foreground); }
+.statusRunning   { background: var(--warning); color: var(--warning-foreground); }
+.statusOther     { background: var(--muted); color: var(--muted-foreground); }
+
+.cardMeta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  font-size: 0.8125rem;
+  margin: 0;
+}
+.cardMeta dt {
+  color: var(--muted-foreground);
+}
+.cardMeta dd {
+  margin: 0;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.metricBest { color: var(--success); }
+.metricWorst { color: var(--destructive); }
+
+/* ── tabs ────────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab,
+.tabActive {
+  background: transparent;
+  border: none;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover {
+  color: var(--foreground);
+}
+.tabActive {
+  color: var(--foreground);
+  border-bottom-color: var(--primary);
+  font-weight: 500;
+}
+
+.tabBody {
+  min-height: 200px;
+}
+
+/* ── overview table ──────────────────────────────────────────── */
+
+.overviewWrap {
+  overflow-x: auto;
+}
+.overview {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.overview th,
+.overview td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.overview th {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+.overview thead th {
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.overview tbody th {
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+.overview td {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── tools / errors columns ──────────────────────────────────── */
+
+.diffColumns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+.diffCol {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+.diffColTitle {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+  margin: 0 0 0.75rem 0;
+}
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.listItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+.listItem:last-child {
+  border-bottom: none;
+}
+.toolName,
+.errorClass,
+.errorKind {
+  color: var(--foreground);
+}
+.errorClass {
+  font-weight: 500;
+  color: var(--destructive);
+  min-width: 6rem;
+}
+.errorKind {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.errorTs {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.count {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+}
+.empty {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  font-style: italic;
+  margin: 0;
+}
+.moreNote {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-style: italic;
+  padding-top: 0.25rem;
+}
+
+/* ── kinds bar chart ─────────────────────────────────────────── */
+
+.kinds {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.kindRow {
+  display: grid;
+  grid-template-columns: 8rem 1fr;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+}
+.kindRow > :nth-child(n+2) {
+  /* Per-session columns are added in the JSX; the first column is the
+   * kind label, the rest are the session bars. */
+}
+.kindLabel {
+  color: var(--muted-foreground);
+}
+.kindCell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.kindBar {
+  height: 0.5rem;
+  background: var(--primary);
+  border-radius: 999px;
+  min-width: 1px;
+  transition: width 0.2s ease-out;
+}
+.kindCount {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+/* ── skeleton / loading state ────────────────────────────────── */
+
+.skelLine {
+  height: 1rem;
+  margin: 0.25rem 0;
+}
+
+.emptyContent {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
