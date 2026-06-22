@@ -523,3 +523,15 @@ ai-viewer is **workstation-only** initially. It binds `127.0.0.1` by default. Th
 When the operator gives feedback about how the assistant operates, the assistant **must** update these artifacts in the same turn so the lesson is not lost. "I'll remember" is not a valid response — write it down. The Discipline Checklist above enforces this.
 
 Repeating a mistake the operator has already corrected is the most serious contract breach in this repository. Prevent it by writing the lesson into the artifact that will be loaded the next time the relevant task starts.
+
+## Hard-Won Lessons (SOWs 0093, 0094, 0095)
+
+- **SOW-0093 perf pattern**: opt-in heavy fields with `?include=X` (default = slim/fast). Matches SOW-0092's `?include=payload_refs` precedent.
+- **SOW-0093 CTE rule**: a recursive CTE driving a `JOIN` is planner-hostile. Rewrite as `WHERE s.id IN (SELECT id FROM cte)` to force the planner to evaluate the CTE first.
+- **SOW-0093 index rule**: `ORDER BY` on a derived column needs the derived value stored in a column. `COALESCE` around the column reference breaks index matching.
+- **SOW-0094 cursor-marshal throttle**: tail ticks without a cursor change must not re-marshal. For aiagent_v2 with 482k cursor entries, marshaling every 5s = 6MB/min of allocation pressure.
+- **SOW-0094 scan throttle**: 1,000 → 50,000 files per checkpoint. The final emit-at-end still persists the cursor exactly once.
+- **SOW-0094 multi-instance lockout**: take `syscall.Flock` on `<state_dir>/ingester.lock` (NOT a sibling) — systemd's `ProtectSystem=strict` makes the parent of state_dir read-only, so a sibling lockfile fails with EROFS.
+- **SOW-0094 systemd watchdog**: `MemoryHigh=4G` + `MemoryMax=8G` + `LimitNOFILE=65536` + `IOSchedulingClass=idle`. Soft-throttle → OOM-kill at 4× observed peak so a single bad scan won't trip it, but a real leak will.
+- **SOW-0095 INDEXED BY rule**: when a query has BOTH a selective `session_id IN (...)` filter AND a low-selectivity secondary filter (e.g. `kind='tool'`), the SQLite planner often picks the secondary index (e.g. `idx_ops_kind_name`) and scans+sorts the full table. Force the session_id index with `FROM ops INDEXED BY idx_ops_session_start`. Measured 1.9s → 3ms on the compare endpoint's tool histogram.
+- **SOW-0095 compare contract**: order in `response.sessions` MUST match the order of `ids` in the request. The compare page's column alignment relies on it; SQL `IN` doesn't guarantee order, so re-emit by id.
