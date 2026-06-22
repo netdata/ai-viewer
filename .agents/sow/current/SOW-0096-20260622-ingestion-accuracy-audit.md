@@ -88,12 +88,22 @@ These are the *known unknown-unknowns* we found by asking the right questions. T
 
 ### Implementation plan
 
-**Chunk 1 — Spec + 9-reviewer investigation (this SOW's first deliverable)**:
+**Chunk 0 — Canonical model + 5 follow-up SOWs (the fix pass, per CTO triage of reviewers 1-4)**:
 
-a. Update `canonical-events.md`, `observability.md`, `adapter-contract.md`, `index.md` with the per-adapter matrix + invariant framework contracts.
-b. Move this SOW from `pending/` to `current/`.
-c. Run the 9 external reviewers (per the §"Multi-reviewer plan" below) in parallel. Each gets the same SOW + a scope-specific brief. Each returns a structured findings report.
-d. Triage findings → produce a "v1 invariant set" document: per-adapter, per-invariant, with severity (P0/P1/P2), the SQL/Go test, and the expected fix-or-document decision.
+a. `SOW-0097`: extend canonical `OpKind` enum with `OpUserInput` and `OpAssistant`. Migration 0012. Update 5 adapters to emit the new kinds. Pin via `schema_contract_test.go` and the existing test suite. (The canonical contract change that makes invariants #2 and #4 expressible.)
+b. `SOW-0098`: add typed `OpStatus` enum (mirroring `SessionStatus`). Update 5 adapters to use the canonical literals. Pin via schema contract test. (The canonical contract change that makes invariant #8 robust.)
+c. `SOW-0099`: aiagent_v2 fixes — 100% failed LLM ops lack `error_class` (Reviewer 4 P1); 1,186,802 `system` ops with empty `name` (Reviewer 4 P2). Both are mapper-side fixes.
+d. `SOW-0100`: claude-code fixes — capture `tool_request` / `llm_response` / `llm_reasoning` payload_refs (Reviewer 2 P0/P1); emit `status='failed'` on LLM ops when `api_error` is observed (Reviewer 2 P1); 70% subagent-link rate (Reviewer 2 sidecar dependency P1).
+e. `SOW-0101`: codex fixes — capture `tool_response` for end-event-finalized tools (Reviewer 1 P0); decode `parent_thread_id` as subagent-link fallback (Reviewer 1 P1); 24,149 `internal` ops reclassified to `user_input` (depends on SOW-0097).
+f. `SOW-0102`: opencode fixes — determine if 0 `llm_request` / 0 `tool_request` is source-side or mapper-side (Reviewer 6 pending — need a fact-finding pass first).
+g. `SOW-0103`: UX fix — surface the 6 captured-but-unsurfaced fields (Reviewer 3 T11-canonical-1..4): `reasoning_kind`, `bytes_in`/`bytes_out`, `chars_in`/`chars_out`, turn-level `tokens_cache_read`/`tokens_cache_write`/`error_class`, `provider_alias`, `call_path`, `sha256`.
+
+**Chunk 1 — Spec + remaining reviewer investigation (this SOW's first deliverable)**:
+
+a. Update `canonical-events.md`, `observability.md`, `adapter-contract.md`, `index.md` with the per-adapter matrix + invariant framework contracts. (The per-adapter matrix is the authoritative reference for which adapter emits which op kinds + payload_refs; the SOW-0096-review-triage.md baseline table is the v0 of that matrix.)
+b. Move this SOW from `pending/` to `current/`. (Already done.)
+c. Run the 9 external reviewers (per the §"Multi-reviewer plan" below) in parallel. Each gets the same SOW + a scope-specific brief. Each returns a structured findings report. **Status: 4 of 9 done (codex, claude, canonical, v2). Paused per operator directive 2026-06-22 ("fix the issues first") — reviewers 5-8 will be re-dispatched against the post-fix state after SOW-0097..SOW-0103 land.**
+d. Triage findings → produce a "v1 invariant set" document: per-adapter, per-invariant, with severity (P0/P1/P2), the SQL/Go test, and the expected fix-or-document decision. **Status: triage v1 written (see SOW-0096-review-triage.md); the corrected baseline replaces the original SOW baseline.**
 
 **Chunk 2 — Invariant framework + per-adapter fixtures**:
 
@@ -191,7 +201,9 @@ The SOW ships with a `prompts/` directory containing the 9 self-contained review
 - `AGENTS.md` — Hard-Won Lessons append (per-adapter gotchas the reviewers uncover)
 - `frontend/src/components/AppTopbar.tsx` (chunk 3, optional) — drift indicator
 
-**Schema impact**: none. The schema is sufficient; the gaps are adapter-side.
+**Schema impact** (corrected post-review): **SQL schema: none** (v11 is sufficient; the gaps are adapter-side). **Canonical contract: invariants #2 ("user prompts captured") and #4 ("assistant output captured") require an explicit decision on op kinds** before the invariant SQL can be written — the canonical `OpKind` enum (`internal/canonical/events.go:77-92`) defines `llm`, `tool`, `session`, `reasoning`, `internal`, `system`, `compaction` but NOT `user_input` or `assistant`, and no adapter emits them. The DB has 0 ops of either kind. Two options: (a) extend the enum to add `OpUserInput` and `OpAssistant` and update the adapters to emit them, or (b) re-frame the invariants to use payload_ref presence (every LLM op should have a request payload_ref whose decoded `messages[N].role == 'user'`). This decision is Reviewer 7's call (framework design). See `SOW-0096-review-triage.md` for the corrected baseline + verification.
+
+Additionally: a typed `OpStatus` enum (mirroring the existing `SessionStatus` enum at `internal/canonical/events.go:49-69`) is missing — ops and turns carry bare `string` status, and the live data already shows the canonical literals `completed` / `failed` / `running` in use. The 11 invariants assume the canonical literals are uniformly emitted; an enum would let the SOW's CI tests pin the contract.
 
 ### Open decisions
 
