@@ -123,7 +123,7 @@ goroutine 103 created by internal/ingest.detachedWriteContext worker_runtime.go:
 
 - [x] Chunk 1: capture pprof evidence — heap profiles captured, leak traced to `aiagent_v2.Cursor.String` ✅ `91eb1b8`
 - [x] Chunk 2: fix the leak — scan progress throttled 1000→50_000; tail tick skips emit when cursor unchanged ✅ `91eb1b8`
-- [ ] Chunk 3: watchdog + observability — pprof endpoint shipped; watchdog TBD; concurrent-process lockout TBD
+- [x] Chunk 3: watchdog + lockout — systemd MemoryHigh=4G/MemoryMax=8G + multi-process flock at startup ✅ `c65aa78`
 
 ## Diagnosis summary (added in commit message)
 
