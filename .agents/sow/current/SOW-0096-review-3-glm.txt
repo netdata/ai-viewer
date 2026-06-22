@@ -1,0 +1,537 @@
+[0m
+> code-reviewer · glm-5.2-max
+[0m
+I'll perform this review as **Reviewer 3 (canonical model coverage)**. This is a read-only audit — I will not spawn any external reviewers (recursion safety) and will not modify anything.
+
+Let me start by reading the core files in my scope and gathering evidence in parallel.
+[0m→ [0mRead internal/canonical/events.go
+[0m✱ [0mGlob "internal/canonical/**/*.go"[90m 5 matches[0m
+[0m✱ [0mGlob "internal/store/**/*.go"[90m 14 matches[0m
+[0m→ [0mRead .agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md
+Now let me read the store schema (migrations define the actual SQL columns the invariants must run against), the frontend API types, and the canonical adapter interface.
+[0m→ [0mRead internal/canonical/adapter.go
+[0m✱ [0mGlob "internal/store/migrations/**/*.go"[90m 0 matches[0m
+[0m→ [0mRead internal/store/schema_contract_test.go
+[0m→ [0mRead frontend/src/api/types.ts
+This is already revealing a **critical structural finding**: the canonical `OpKind` enum (events.go:77-92) has `llm`, `tool`, `session`, `reasoning`, `internal`, `system`, `compaction` — but **NO `user_input` and NO `assistant` kind**. Yet the CTO's invariants #1, #2, #4 query `kind='user_input'` and `kind='assistant'`. Let me verify how user prompts are actually captured before asserting this.
+
+Let me read the specs and check adapter handling of user input, plus survey the mirrored harness repos.
+[0m✱ [0mGlob ".agents/sow/specs/*.md"[90m 0 matches[0m
+[0m✱ [0mGrep "first_user_message"[90m in internal · 14 matches[0m
+[0m✱ [0mGrep "user_input|user_message|UserInput|userPrompt|kind='user|kind = 'user"[90m in internal · 84 matches[0m
+[0m✱ [0mGlob "internal/adapters/**/*.go"[90m 100 matches[0m
+Critical evidence found. The codex adapter emits user prompts as `OpInternal` kind with `Name="user_input"` (mapper_subturn_test.go:104: `os.Kind != canonical.OpInternal || os.Name != "user_input"`), NOT as a dedicated `user_input` op kind. This explains the CTO's "24,149 internal ops (likely user_input misclassified)" note — they're NOT misclassified, they're an overloaded `internal` op. Let me check how the OTHER 4 adapters handle user prompts and assistant text.
+[0m✱ [0mGrep "user_message|user prompt|assistant text|assistant message|emitUser"[90m in internal/adapters · 67 matches[0m
+[0m✱ [0mGrep "OpInternal|"internal""[90m in internal/adapters · 14 matches[0m
+Let me read the key adapter files to nail down exactly how user prompts and assistant text are modeled across adapters — this is the crux of whether invariants #2 and #4 are structurally expressible.
+[0m→ [0mRead internal/adapters/codex/ops_response.go[90m [offset=40, limit=130][0m
+[0m→ [0mRead internal/adapters/opencode/mapper_emitters.go
+[0m→ [0mRead internal/adapters/claude_code/ops_user.go
+I now have definitive evidence on the core structural issue. Let me confirm the remaining adapters' user-prompt handling and survey the mirrored harness repos for Part B. Let me also check `reasoning_kind` UI surfacing and the fts_content path.
+[0m✱ [0mGrep "reasoning_kind|provider_alias|bytes_in|bytes_out|chars_in|chars_out|call_path"[90m in frontend/src · 0 matches[0m
+[0m✱ [0mGrep "role.*user|Role.*user|"user"|userPrompt|user_prompt|emitUser|assistant.*text|OpLLM|OpReasoning"[90m in internal/adapters/aiagent_v2 · 12 matches[0m
+[0m
+[0m$ [0mls -1 /opt/baddisk/monitoring/repos/ai/ 2>/dev/null | head -80
+1jehuang__jcode
+Aider-AI__aider
+alibaba__open-code-review
+anomalyco__opencode
+anthropics__claude-code
+anthropics__claude-for-legal
+anthropics__claude-plugins-official
+anthropics__defending-code-reference-harness
+anthropics__knowledge-work-plugins
+aws__amazon-q-developer-cli
+badlogic__pi-mono
+block__goose
+bytedance__deer-flow
+bytedance__trae-agent
+charmbracelet__crush
+ciembor__agent-rules-books
+CodebuffAI__codebuff
+colbymchenry__codegraph
+google-gemini__gemini-cli
+gptme__gptme
+jarmuine__claude-code
+Kuberwastaken__claude-code
+MoonshotAI__kimi-cli
+mufeedvh__code2prompt
+nexu-io__html-video
+nexu-io__open-design
+octopusreview__octopus
+openai__codex
+openinterpreter__open-interpreter
+plandex-ai__plandex
+QwenLM__qwen-code
+smtg-ai__claude-squad
+SWE-agent__SWE-agent
+thedotmack__claude-mem
+unclecode__crawl4ai
+yasasbanukaofficial__claude-code
+[0m
+[0m→ [0mRead internal/adapters/opencode/mapper_test.go[90m [offset=370, limit=40][0m
+The frontend grep returned **no files** — strong signal that `reasoning_kind`, `provider_alias`, `bytes_in/out`, `chars_in/out`, and `call_path` are captured in the DB but never surfaced in the UI. Let me confirm with camelCase variants and quickly survey the highest-value un-merged harness formats.
+[0m→ [0mRead internal/adapters/aiagent_v2/mapper_ops.go[90m [limit=45, offset=240][0m
+[0m✱ [0mGrep "reasoningKind|providerAlias|bytesIn|bytesOut|charsIn|charsOut|callPath|tool_namespace|toolNamespace"[90m in frontend/src · 0 matches[0m
+[0m
+[0m$ [0mfor r in google-gemini__gemini-cli Aider-AI__aider block__goose plandex-ai__plandex smtg-ai__claude-squad aws__amazon-q-developer-cli bytedance__trae-agent CodebuffAI__codebuff charmbracelet__crush gptme__gptme badlogic__pi-mono bytedance__deer-flow; do
+  d="/opt/baddisk/monitoring/repos/ai/$r"
+  if [ -d "$d" ]; then
+    echo "=== $r ==="
+    # find session/log artifacts hints: look at top-level dirs + any obvious storage
+    ls -1 "$d" 2>/dev/null | head -15
+    echo "--- storage/format hints ---"
+  fi
+done
+=== google-gemini__gemini-cli ===
+CONTRIBUTING.md
+Dockerfile
+docs
+esbuild.config.js
+eslint.config.js
+evals
+GEMINI.md
+integration-tests
+LICENSE
+Makefile
+memory-tests
+package.json
+package-lock.json
+packages
+perf-tests
+--- storage/format hints ---
+=== Aider-AI__aider ===
+aider
+benchmark
+CNAME
+CONTRIBUTING.md
+docker
+HISTORY.md
+LICENSE.txt
+MANIFEST.in
+pyproject.toml
+pytest.ini
+README.md
+requirements
+requirements.txt
+scripts
+tests
+--- storage/format hints ---
+=== block__goose ===
+AGENTS.md
+bin
+BUILDING_DOCKER.md
+BUILDING_LINUX.md
+Cargo.lock
+Cargo.toml
+CLAUDE.md
+clippy.toml
+CONTRIBUTING.md
+CONTRIBUTING_RECIPES.md
+crates
+CUSTOM_DISTROS.md
+deny.toml
+Dockerfile
+documentation
+--- storage/format hints ---
+=== plandex-ai__plandex ===
+app
+docs
+images
+LICENSE
+plans
+README.md
+releases
+scripts
+test
+--- storage/format hints ---
+=== smtg-ai__claude-squad ===
+app
+assets
+bump-version.sh
+CLA.md
+clean_hard.sh
+clean.sh
+cmd
+config
+CONTRIBUTING.md
+daemon
+go.mod
+go.sum
+install.sh
+keys
+LICENSE.md
+--- storage/format hints ---
+=== aws__amazon-q-developer-cli ===
+book.toml
+build-config
+Cargo.lock
+Cargo.toml
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+crates
+Cross.toml
+deny.toml
+docs
+knowledge_beta_improvements_agents
+LICENSE.APACHE
+LICENSE.MIT
+README.md
+rust-toolchain.toml
+--- storage/format hints ---
+=== bytedance__trae-agent ===
+CONTRIBUTING.md
+docs
+evaluation
+LICENSE
+Makefile
+pyproject.toml
+README.md
+server
+tests
+trae_agent
+trae_config.json.example
+trae_config.yaml.example
+uv.lock
+--- storage/format hints ---
+=== CodebuffAI__codebuff ===
+agents
+AGENTS.md
+assets
+bunfig.toml
+bun.lock
+cli
+common
+CONTRIBUTING.md
+docs
+eslint.config.js
+evals
+freebuff
+LICENSE
+NOTICE
+package.json
+--- storage/format hints ---
+=== charmbracelet__crush ===
+AGENTS.md
+CLA.md
+crush.json
+docs
+flake.lock
+flake.nix
+go.mod
+go.sum
+internal
+LICENSE.md
+main.go
+README.md
+schema.json
+scripts
+sqlc.yaml
+--- storage/format hints ---
+=== gptme__gptme ===
+AGENTS.md
+docker-compose.yml
+docs
+gptme
+gptme-extension
+gptme.toml
+LICENSE
+Makefile
+media
+poetry.lock
+pyproject.toml
+README.md
+scripts
+SECURITY.md
+site
+--- storage/format hints ---
+=== badlogic__pi-mono ===
+AGENTS.md
+biome.json
+CONTRIBUTING.md
+LICENSE
+package.json
+package-lock.json
+packages
+pi-test.bat
+pi-test.ps1
+pi-test.sh
+README.md
+scripts
+SECURITY.md
+test.sh
+tsconfig.base.json
+--- storage/format hints ---
+=== bytedance__deer-flow ===
+backend
+CHANGELOG.md
+CHANGELOG_zh.md
+CODE_OF_CONDUCT.md
+config.example.yaml
+contracts
+CONTRIBUTING.md
+deer-flow.code-workspace
+docker
+docs
+extensions_config.example.json
+frontend
+Install.md
+LICENSE
+Makefile
+--- storage/format hints ---
+[0m
+Frontend truly lacks those fields (no snake_case, no camelCase matches). Let me ground my Part B recommendations with quick evidence on the two strongest candidates (gemini-cli transcript format, crush SQLite storage) and confirm the deer-flow/aider formats.
+[0m$ [0mecho "=== gemini-cli: transcript/storage format ==="
+find /opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages -maxdepth 3 -type d -iname '*session*' -o -maxdepth 3 -type d -iname '*transcript*' -o -maxdepth 3 -type d -iname '*history*' -o -maxdepth 3 -type d -iname '*log*' 2>/dev/null | head
+rg -l --no-ignore-parent -i 'jsonl|\.gemini|transcript|chatHistory|conversation' /opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src 2>/dev/null | head -8
+echo
+echo "=== crush: sqlite storage (sqlc.yaml present) ==="
+sed -n '1,30p' /opt/baddisk/monitoring/repos/ai/charmbracelet__crush/schema.json 2>/dev/null
+echo "--- crush internal dirs ---"
+ls -1 /opt/baddisk/monitoring/repos/ai/charmbracelet__crush/internal 2>/dev/null | head
+echo
+echo "=== aider: chat history format ==="
+rg --no-ignore-parent -l 'aider\.chat\.history|\.aider\.input\.history|write_file.*history|chat_history' /opt/baddisk/monitoring/repos/ai/Aider-AI__aider/aider 2>/dev/null | head -5
+echo
+echo "=== goose: session file format ==="
+find /opt/baddisk/monitoring/repos/ai/block__goose/crates -maxdepth 2 -type d -iname '*session*' 2>/dev/null | head
+rg --no-ignore-parent -l 'session\.json|\.jsonl|yaml::|serde.*Session' /opt/baddisk/monitoring/repos/ai/block__goose/crates 2>/dev/null | head -5
+=== gemini-cli: transcript/storage format ===
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/index.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/context/contextManager.hotstart.test.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/context/system-tests/powerUserLifecycle.test.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/context/contextManager.test.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/context/contextManager.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/context/chatCompressionService.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/voice/whisperTranscriptionProvider.ts
+/opt/baddisk/monitoring/repos/ai/google-gemini__gemini-cli/packages/core/src/voice/whisperTranscriptionProvider.test.ts
+
+=== crush: sqlite storage (sqlc.yaml present) ===
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/charmbracelet/crush/internal/config/config",
+  "$ref": "#/$defs/Config",
+  "$defs": {
+    "Attribution": {
+      "properties": {
+        "trailer_style": {
+          "type": "string",
+          "enum": [
+            "none",
+            "co-authored-by",
+            "assisted-by"
+          ],
+          "description": "Style of attribution trailer to add to commits",
+          "default": "assisted-by"
+        },
+        "co_authored_by": {
+          "type": "boolean",
+          "description": "Deprecated: use trailer_style instead",
+          "deprecated": true
+        },
+        "generated_with": {
+          "type": "boolean",
+          "description": "Add Generated with Crush line to commit messages and issues and PRs",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+--- crush internal dirs ---
+agent
+ansiext
+app
+backend
+client
+clipboard
+cmd
+commands
+config
+csync
+
+=== aider: chat history format ===
+/opt/baddisk/monitoring/repos/ai/Aider-AI__aider/aider/models.py
+/opt/baddisk/monitoring/repos/ai/Aider-AI__aider/aider/utils.py
+/opt/baddisk/monitoring/repos/ai/Aider-AI__aider/aider/gui.py
+/opt/baddisk/monitoring/repos/ai/Aider-AI__aider/aider/args.py
+/opt/baddisk/monitoring/repos/ai/Aider-AI__aider/aider/commands.py
+
+=== goose: session file format ===
+/opt/baddisk/monitoring/repos/ai/block__goose/crates/goose-cli/src/cli.rs
+/opt/baddisk/monitoring/repos/ai/block__goose/crates/goose-cli/src/recipes/secret_discovery.rs
+/opt/baddisk/monitoring/repos/ai/block__goose/crates/goose/src/model_config.rs
+/opt/baddisk/monitoring/repos/ai/block__goose/crates/goose-cli/src/session/mod.rs
+/opt/baddisk/monitoring/repos/ai/block__goose/crates/goose-cli/src/recipes/recipe.rs
+[0m
+Strong evidence gathered. Let me do one final check — the `Status` field on ops is free-text `string` (events.go:313), not an enum, which is a risk for invariant #8/#9's `status='failed'` filter. Let me verify what status literals adapters actually emit, then I'll write the report.
+[0m$ [0mrg --no-ignore-parent -o 'Status:\s*"[a-z_]+"' internal/adapters --type go | sed 's/.*Status: *//;s/"//g' | sort | uniq -c | sort -rn | head -20
+31 ok
+     13 completed
+      2 failed
+      1 cancelled
+[0m
+[0m✱ [0mGrep "Status:\s*"(failed|error|errored|completed|ok|success|running|abandoned|interrupted)""[90m in internal/adapters · 44 matches[0m
+I have comprehensive evidence. The status-literal scan confirms a real canonical-model gap: `ok`, `completed`, `failed`, and `cancelled` all appear, and `OpFinalizedEvent.Status` is a free-text `string` with no typed enum (unlike `SessionStatus`). 
+
+Here is my structured findings report.
+
+---
+
+# REVIEWER 3 REPORT — Canonical Model Coverage + Un-Merged Harness Survey
+
+**Reviewer**: glm-5.2-max (Reviewer 3 / canonical-model scope)
+**Verdict**: **NEEDS WORK** — the SOW's central claim ("No DB migration; the schema is sufficient; the gaps are adapter-side, not schema-side") is **correct for invariants #3, #5–#10 but wrong for #2 and #4**. Two of the 11 invariants reference op kinds that do not exist in the canonical model. This is a structural contract gap, not an adapter population gap, and the SOW currently hides it.
+
+All file:line evidence is against `internal/canonical/events.go`, the schema contract test, the adapter packages, and `frontend/src/api/types.ts`.
+
+---
+
+## PART A — CANONICAL MODEL COMPLETENESS
+
+### ID: T2-canonical-1
+**Invariant**: #2 (USER PROMPTS)
+**Severity**: P1 (the invariant as written is structurally inexpressible — it cannot fail because it cannot run)
+**Description**: The canonical `OpKind` enum defines exactly seven kinds — `llm`, `tool`, `session`, `reasoning`, `internal`, `system`, `compaction`. There is **no `user_input` kind**. Invariant #2's test (`count(ops WHERE kind='user_input')`) returns 0 for every adapter regardless of whether user prompts are actually captured, because nothing in the canonical contract defines or emits that kind. The invariant therefore cannot distinguish "adapter captured the prompt" from "adapter didn't" — it always reports "didn't".
+**Evidence**:
+- `internal/canonical/events.go:77-92` — the full `OpKind` const block; `user_input` is absent.
+- `internal/store/schema_contract_test.go:364` — `ops.kind` is `TEXT NOT NULL` (free-text), so the column *could* hold the value, but the canonical Go type that adapters construct events from has no constant for it.
+- `internal/adapters/codex/ops_response.go:160-161` — codex emits user prompts as `Kind: canonical.OpInternal, Name: "user_input"`, i.e. an overloaded `internal` op, **not** `kind='user_input'`. This is the source of the CTO's "24,149 internal ops (likely user_input misclassified)" observation — they are *not* misclassified, they are the only representation of user input in the model, and they hide behind the `internal` kind that the UI hides by default (events.go:86-87).
+**Proposed invariant**: Either (a) rewrite #2 as `count(ops WHERE kind='internal' AND name='user_input')` and accept that it only works for codex, or (b) add `OpUserInput OpKind = "user_input"` to the canonical enum and migrate codex + add the others. The current framing does neither.
+**Suggested fix**: Make a **design decision** (operator-facing) and record it in `canonical-events.md`: *Is the user prompt a first-class op, or is it implicitly the turn boundary + the `llm_request` payload body?* Today the codebase does both inconsistently. Do not write the invariant until this is decided.
+**Open questions**: Does the operator need to *query* user prompts directly (e.g. "show me all sessions where I asked about X"), or is full-text search over `llm_request` bodies sufficient? If FTS-over-prompts is enough, `user_input` does not need to be an op kind.
+
+### ID: T2-canonical-2
+**Invariant**: #2 (USER PROMPTS)
+**Severity**: P2 (cross-adapter inconsistency / design smell)
+**Description**: Even setting the enum aside, the canonical model has **no documented contract for where a user prompt lives**. Each adapter invented its own representation:
+- codex: `internal` op named `user_input` + a body PayloadRef (`codex/ops_response.go:119-169`).
+- opencode: user message "must emit nothing" — it is purely a turn-boundary marker; the text is dropped (`opencode/mapper_test.go:376-394`, `opencode/mapper_emitters.go:20-28`).
+- claude-code: `ops_user.go` starts a turn but emits **no op** for user text; the user content lives only inside the `llm_request` PayloadRef body.
+A 6th adapter written tomorrow would have no canonical guidance on how to represent the user prompt. This is exactly the "completeness contract" gap the SOW's spec-delta #3 wants to close.
+**Evidence**: `internal/adapters/opencode/mapper_test.go:380` ("the assistant message IS the turn. The user message must emit nothing"); `internal/adapters/codex/ops_response.go:160`; `internal/adapters/claude_code/ops_user.go:17-25` (only `startUserTurn`, no op).
+**Proposed invariant**: A spec-level invariant: "the per-adapter matrix MUST state, for each adapter, one of: (a) emits a `user_input` op, (b) user text is in `llm_request` payload only, (c) not captured — known gap."
+**Suggested fix**: Land the per-adapter matrix in `canonical-events.md` before writing invariant code.
+
+### ID: T4-canonical-1
+**Invariant**: #4 (ASSISTANT OUTPUT)
+**Severity**: P1 (same structural inexpressibility as T2-canonical-1)
+**Description**: There is **no `assistant` OpKind**. Invariant #4's primary clause (`count(ops WHERE kind='assistant')`) is dead. The fallback clause `(kind='llm' AND has-response)` *is* expressible, so #4 can be salvaged by deleting the `kind='assistant'` branch — but only if that deletion is a documented decision, not an accident.
+**Evidence**: `internal/canonical/events.go:77-92` (no `assistant`); `internal/adapters/codex/ops_response.go:79` (assistant message → `Kind: canonical.OpLLM`); `internal/adapters/opencode/mapper_emitters.go:24-28` (assistant text → `llm_response` PayloadRef, not an op at all).
+**Proposed invariant**: `count(ops WHERE kind='llm') == count(ops WHERE kind='llm' AND EXISTS payload_ref kind='llm_response')` — drops the `assistant` clause entirely.
+**Suggested fix**: Strike `kind='assistant'` from invariant #4 in the SOW; document that assistant output is modeled as the LLM op's response payload.
+
+### ID: T8-canonical-1
+**Invariant**: #8 / #9 (ERROR CAPTURE)
+**Severity**: P1 (silent undercount risk on the most important invariant class)
+**Description**: `SessionStatus` is a typed string enum with five documented constants (`events.go:49-66`). **Ops and turns have no equivalent.** `OpFinalizedEvent.Status` (`events.go:313`) and `TurnFinalizedEvent.Status` (`events.go:252`) are bare `string`. Invariant #8 filters `status='failed'`, but nothing in the canonical model guarantees adapters emit exactly `'failed'`. A scan of adapter source shows **four** status literals in play: `ok` (31 sites, the ai-agent source format), `completed` (13 sites, the canonical emit), `failed` (2), `cancelled` (1). If any adapter emits `'error'` or `'errored'` for a failure (a very common convention), invariant #8 silently reports zero failures and the gap is invisible.
+**Evidence**:
+- `internal/canonical/events.go:313` — `Status string` (free-text, no enum).
+- `internal/canonical/events.go:252` — same for turns.
+- `rg` over `internal/adapters/**/*.go` for `Status: "..."` yields `ok`×31, `completed`×13, `failed`×2, `cancelled`×1.
+- Contrast: `SessionStatus` *is* an enum at `events.go:49-69`.
+**Proposed invariant**: Add `type OpStatus string` with constants (`StatusOpCompleted`, `StatusOpFailed`, `StatusOpCancelled`, `StatusOpRunning`), mirror for turns, and add a per-adapter normalization table to the matrix spec. Then #8/#9 become `status = OpFailed`.
+**Suggested fix**: Define the enum; **verify whether aiagent_v2's source `"ok"` is normalized to `"completed"` before the row is written** (I could not confirm the normalization path in `aiagent_v2/mapper.go` from this pass — flagging as an open question for reviewer #4). This is the single highest-risk silent gap in the invariant set.
+**Open questions**: Does the aiagent_v2 mapper normalize `ok`→`completed`? If not, the live DB already has mixed status strings and the invariant baseline numbers in the SOW are unreliable.
+
+### ID: T10-canonical-1
+**Invariant**: #10 (EXTERNAL SUBAGENTS)
+**Severity**: P2 (field exists and is correct; the gap is per-adapter capability, not schema)
+**Description**: `ChildSessionNativeID` exists in the canonical model (`events.go:298`) and the schema (`schema_contract_test.go:388`, `ops.child_session_id TEXT` with FK to sessions). The 0% population is **not** a canonical-model defect. The real question — which the SOW does not yet answer — is whether the *source formats* expose the parent→child id deterministically. For claude-code subagents and codex, the child session id may only be recoverable heuristically (the existing `/api/related` soft-link path, SOW-0071). The invariant therefore must be conditional on a per-adapter capability flag, not unconditional.
+**Evidence**: `events.go:296-298` (field present, optional); `schema_contract_test.go:404` (FK present).
+**Proposed invariant**: `count(kind='session' ops WITH child_session_id IS NOT NULL) / count(kind='session' ops) WHERE adapter_supports_deterministic_subagent_link(source_id) = 1`. The capability matrix is the gate.
+**Suggested fix**: Accept the field as sufficient; drive the 0% number down via per-adapter remediation SOWs (chunk 4), not a schema change. Refutes any claim that #10 needs migration.
+
+### ID: T6-canonical-1 / T7-canonical-1
+**Invariant**: #6 / #7 (TOOL PAYLOADS)
+**Severity**: P2 (confirmation — refutes a possible schema-blame)
+**Description**: The canonical `PayloadRefEvent.PayloadKind` explicitly lists both `tool_request` and `tool_response` (`events.go:345-347`), and the `payload_refs` natural-identity index (`schema_contract_test.go:426`) keys on `(op_id, kind, location_uri)`. Invariants #6 and #7 are **fully expressible** against the current schema. The 0% capture for aiagent_v2/v3/claude-code/opencode is pure adapter-side non-implementation, exactly as the SOW claims. No canonical change needed.
+**Evidence**: `events.go:345-347`; `schema_contract_test.go:411-431`.
+**Proposed invariant**: `count(ops kind='tool') == count(ops kind='tool' AND EXISTS payload_ref kind='tool_request')`.
+**Suggested fix**: Accept as known; this is the cleanest P0/P1 invariant to wire up.
+
+### ID: T11-canonical-1
+**Invariant**: #11 (TURN VIEWER PRESENTS ALL CAPTURED INFO)
+**Severity**: P2 (captured data is invisible to the operator)
+**Description**: `ops.reasoning_kind` is a first-class canonical field (`events.go:295`, values `'summary'|'raw'`) and a persisted column (`schema_contract_test.go:370`), but **no frontend file references it** — neither snake_case `reasoning_kind` nor camelCase `reasoningKind` appears anywhere under `frontend/src/`. The operator cannot distinguish a raw chain-of-thought from a distilled summary in the UI, even though the model captures the distinction. This matters for the operator's "what changed between runs" goal: reasoning-kind shifts (raw↔summary) are invisible.
+**Evidence**: `events.go:294-295`; `schema_contract_test.go:370`; `rg reasoning_kind|reasoningKind frontend/src` → no matches.
+**Proposed invariant**: "Every non-nullable-when-meaningful canonical field has either a UI surface or a documented intentional omission in `canonical-events.md`."
+**Suggested fix**: Surface `reasoning_kind` as a badge on reasoning ops in the Trace/Turn view, or document why it's omitted.
+
+### ID: T11-canonical-2
+**Invariant**: #11
+**Severity**: P2
+**Description**: The four tool-I/O sizing fields — `ops.bytes_in`, `ops.bytes_out` (`events.go:322-323`, `schema_contract_test.go:382-383`), `ops.chars_in`, `ops.chars_out` (`events.go:325-327`, `schema_contract_test.go:384-385`) — are captured and persisted but have **zero UI surface** (no snake/camel match in `frontend/src/`). For tool-heavy sessions these are the only signal of "which tool call pulled in a 50MB file", and they're invisible.
+**Evidence**: `events.go:322-327`; `schema_contract_test.go:382-385`; `rg 'bytes_in|bytes_out|chars_in|chars_out|bytesIn|bytesOut|charsIn|charsOut' frontend/src` → no matches.
+**Suggested fix**: Add to the tool-op detail drawer, or document omission.
+
+### ID: T11-canonical-3
+**Invariant**: #11
+**Severity**: P2
+**Description**: `TurnDetail` in the frontend (`frontend/src/api/types.ts:278-289`) surfaces `tokens_in`, `tokens_out`, `cost_usd` but **omits `tokens_cache_read` and `tokens_cache_write`**, which are canonical (`events.go:257-258`) and persisted (`schema_contract_test.go:342-343`). It also omits `turns.error_class` (`schema_contract_test.go:339`, `events.go:253`). The turn-level cache-hit ratio is a first-class cost-analysis signal that the operator currently cannot see per-turn.
+**Evidence**: `types.ts:278-289` (TurnDetail) vs `schema_contract_test.go:339-343`.
+**Suggested fix**: Extend `TurnDetail` with the two cache token fields + `error_class`; surface in the turn header.
+
+### ID: T11-canonical-4
+**Invariant**: #11
+**Severity**: P3 (minor)
+**Description**: `ops.provider_alias` (`events.go:293`, `schema_contract_test.go:369`), `sessions.call_path` (`events.go:174`, `schema_contract_test.go:289`), and `payload_refs.sha256` (`events.go:358`, `schema_contract_test.go:421`) are all captured and unreferenced by the frontend. `provider_alias` matters for opencode cost attribution; `call_path` matters for nested-agent topology debugging; `sha256` is rarely user-facing but useful for dedup audits.
+**Evidence**: `rg` over `frontend/src` for all six names (snake + camel) → no matches.
+**Suggested fix**: Document intentional omission, or surface `provider_alias` next to `provider` in stats.
+
+### ID: SOW-canonical-1
+**Invariant**: Cross-cutting (the SOW's own framing)
+**Severity**: P2 (the SOW understates the work)
+**Description**: The SOW states twice (`§Affected contracts and surfaces` line 57, `§Artifact impact plan` line 194) that "No DB migration" is needed and "the schema is sufficient; the gaps are adapter-side, not schema-side." This is **true for invariants #3, #5, #6, #7, #8, #9, #10** (all expressible today). It is **false for #2 and #4** — those need either (a) a canonical `OpKind` extension + adapter rewrites, or (b) an explicit re-framing of the invariant SQL. The SOW's current "no schema impact" framing will cause chunk-2 implementation to discover this mid-flight.
+**Evidence**: SOW lines 57, 194; `events.go:77-92`.
+**Suggested fix**: Amend the SOW's "Schema impact: none" to "Schema (SQL): none. Canonical contract: invariants #2 and #4 require an explicit decision on `user_input`/`assistant` op kinds (see T2-canonical-1, T4-canonical-1) before the invariant SQL can be written."
+
+---
+
+## PART B — UN-MERGED HARNESS COVERAGE
+
+All 12 candidate harnesses are present under `/opt/baddisk/monitoring/repos/ai/`. Assessment (format confidence: high where I read structure directly; medium where inferred from language/ecosystem):
+
+| Harness | Language | Source format | Session model | Ingest? | Canonical changes? |
+|---|---|---|---|---|---|
+| **google-gemini/gemini-cli** | TS/Node | JSONL transcripts (per-session files, `packages/core/src/context/contextManager.ts`) | turns + tool calls + Gemini "thoughts" (reasoning) | **Yes — top pick** | None (thoughts→OpReasoning, tools→OpTool); may want a Gemini-specific PayloadKind for multimodal content blocks |
+| **charmbracelet/crush** | Go | **SQLite** (`sqlc.yaml`, `schema.json`, `internal/agent`) | messages + tool calls + parts | **Yes — top pick** | None; closest analog to opencode, cleanest mapping |
+| **block/goose** | Rust | JSONL session files (`crates/goose-cli/src/session/mod.rs`) | turns + tool calls + reasoning | **Yes — top pick** | None |
+| Aider-AI/aider | Python | Markdown `.aider.chat.history.md` + input history | messages only, no span model | Maybe | Heavy parsing; no op/span concept — adapter would synthesize turns from message boundaries |
+| aws/amazon-q-developer-cli | Rust | chat history under `~/.aws/amazonq/` | messages + tool calls | Maybe | None structurally; verify env-reach value |
+| plandex-ai/plandex | Go | versioned "plan" state in `.plandex/` | plan ≠ session (different paradigm) | Defer | Plan/prop-diff model doesn't map cleanly to the turn/op span model |
+| smtg-ai/claude-squad | Go | wraps claude-code via tmux | none of its own | **Skip** | Duplicates claude-code; would double-count |
+| bytedance/trae-agent | Python | OpenAI-compatible chat logs | messages + tool calls | Low priority | None structurally |
+| CodebuffAI/codebuff | TS/Node | proprietary multi-agent tree | agents + tool calls | Low priority | Multi-agent tree may need richer nesting than OpSession provides |
+| gptme/gptme | Python | markdown/JSON chat history | messages | Low priority | Sparse |
+| badlogic/pi-mono | TS/Node | multi-model runtime | messages | Low priority | Niche adoption |
+| bytedance/deer-flow | Python | research workflow (backend+frontend) | workflow steps, not coding turns | **Skip** | Different domain (deep research), not the operator's coding-agent use case |
+
+### Top 3–5 for highest analytical leverage
+1. **gemini-cli** — distinct provider (Gemini), Google's official CLI, large active base, JSONL is parseable. Highest *new-information* value (currently zero Gemini visibility).
+2. **crush** — Go, SQLite-native, Charm ecosystem quality. Lowest *adapter-cost* (mirrors opencode's SQLite path almost exactly).
+3. **goose** — Block-backed, Rust, structured sessions, active. Broadens provider coverage (goose is multi-provider).
+4. **aider** (conditional) — enormous Python-community install base; the value is reach, the cost is markdown parsing. Worth it only if the operator cares about Python-community mindshare.
+5. **amazon-q-developer-cli** (conditional) — AWS enterprise channel; value is enterprise reach, not technical novelty.
+
+**Canonical-model impact of a 6th adapter**: the union of what these harnesses emit is already covered by the current `OpKind`/`PayloadRefEvent` set **except** for the user-input/assistant gap (Part A). A gemini-cli adapter would exercise `OpReasoning` (Gemini thoughts) more heavily than any current adapter, which would also stress the `reasoning_kind` UI-surface gap (T11-canonical-1). I recommend closing the Part A gaps before adding adapter #6, so the new adapter inherits a coherent contract.
+
+---
+
+## OVERALL ASSESSMENT
+
+The canonical model is **well-designed for invariants #3, #5–#10**: every field those invariants need exists in both the Go types and the SQL schema, with correct indexes and FKs. The reviewer confirms the SOW's "schema sufficient" claim for that subset and refutes any suggestion that #6/#7/#10 need migration.
+
+The canonical model is **incoherent for invariants #1, #2, #4**: those invariants query op kinds (`user_input`, `assistant`) that the `OpKind` enum does not define and no adapter emits. The SOW treats these as adapter-population gaps; they are in fact **canonical-contract gaps** that must be resolved (by enum extension or by invariant re-framing) before any invariant code is written. This is the single most important correction to the SOW.
+
+A secondary structural gap is the **absence of a typed `OpStatus`/`TurnStatus` enum** (T8-canonical-1): sessions have one, ops and turns do not, and the codebase already shows four status literals in flight. This makes the error-capture invariants (#8/#9) fragile in a way the SOW does not acknowledge.
+
+Finally, six canonical fields are captured-and-persisted-but-UI-invisible (T11-canonical-1..4), undermining invariant #11's "presents all captured information" promise.
+
+## THINGS THE CTO MISSED
+
+1. **The `user_input`/`assistant` op-kind absence is a canonical-contract defect, not an adapter gap.** The SOW's known-gaps baseline lists `count(ops WHERE kind='user_input')` as if it's a runnable query; it returns 0 for *every* adapter by construction, so it cannot detect the codex-vs-opencode inconsistency the CTO actually wants to catch.
+2. **codex's "24,149 internal ops (likely user_input misclassified)" is a misread.** Those `internal` ops ARE the user inputs, emitted intentionally (`codex/ops_response.go:160`). The real issue is that the *canonical model* gave codex no first-class kind to use, so it overloaded `internal`. Flagging them as "misclassified" would lead a fixer to delete them, destroying the only user-prompt signal codex has.
+3. **No typed `OpStatus` enum** — the `status='failed'` filter in #8/#9 is unguarded. The aiagent `"ok"` literal in particular needs verification that it's normalized before the DB write; if it isn't, the live-DB baseline numbers are already wrong.
+4. **Six captured-but-unsurfaced fields** (reasoning_kind, bytes/chars in-out, turn cache tokens + error_class, provider_alias, call_path, sha256). Invariant #11 cannot pass today regardless of adapter behavior.
+5. **The SOW's "Schema impact: none" line should be split** into "SQL schema: none" (true) and "Canonical contract: #2/#4 need a decision" (currently missing), so chunk-2 implementation doesn't stall on an undiscovered design question.
+6. **For Part B**: gemini-cli's heavy use of reasoning ("thoughts") would immediately expose the `reasoning_kind` UI gap — adding it as adapter #6 before fixing T11-canonical-1 would ship a new data dimension the operator still can't see.
