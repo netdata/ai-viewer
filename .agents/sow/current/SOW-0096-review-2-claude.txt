@@ -1,0 +1,113 @@
+I now have a complete, source-grounded picture. I've verified every CTO claim against the adapter code, fixtures, spec, and the DB-layer resolver — no live-DB or mirror access was available in this sandbox, so my counts are corroborated from code + the CTO's supplied baseline, with disk/DB-dependent root causes flagged as open questions. Here is my review.
+
+---
+
+# REVIEWER 2 — claude-code adapter: Ingestion Accuracy Findings
+
+**Evidence basis**: adapter source (`internal/adapters/claude_code/`), real-shape fixtures (`testdata/claude_code/`), spec (`.agents/sow/specs/adapter-claude-code.md`), canonical types (`internal/canonical/events.go`), and the DB-layer resolver (`internal/ingest/resolver.go`). Live prod DB and the `anthropics__claude-code` mirror are outside this session's filesystem boundary — DB counts are the CTO's baseline, **independently corroborated by what the code can and cannot emit**.
+
+**Headline**: The claude-code adapter emits **exactly two payload kinds** — `tool_response` (gated) and `log` (compaction). It never emits `tool_request`, `llm_request`, `llm_response`, or `llm_reasoning`. Every CTO gap for claude-code is **confirmed and real, not noise.** The mechanisms are below.
+
+---
+
+### T6-claude-1 — tool_request payloads: structurally never emitted (0%)
+- **Invariant**: #6 (tool request payloads)
+- **Severity**: P1 (capture gap; underlying bytes survive on disk)
+- **Description**: Every tool call's request arguments live in the source as the `tool_use` block's `input` object (`parser.go:119`, `contentBlock.Input json.RawMessage`). The adapter reads `input` **only** to extract `description` for the `Agent` tool (`ops_assistant.go:176` → `agentDescription` `ops_assistant.go:202-213`). For every other tool the `input` is discarded; **no `tool_request` PayloadRef is ever constructed.** A repo-wide grep confirms the only `PayloadKind:` literals the adapter emits are `tool_response` (`payloads.go:119`) and `log` (`payloads.go:151`). This exactly matches the baseline's 0 tool_request refs for 65,278 tool ops.
+- **Evidence**: `internal/adapters/claude_code/ops_assistant.go:146-164` (toolUseStarted ignores `input` for non-Agent tools); `parser.go:119`; `payloads.go` (no tool_request construction anywhere).
+- **Proposed invariant** (SQL): `SELECT COUNT(*) FROM ops o JOIN sessions s ON s.id=o.session_id WHERE s.format='claude-code' AND o.kind='tool' AND NOT EXISTS (SELECT 1 FROM payload_refs p WHERE p.op_id=o.id AND p.payload_kind='tool_request');` — expect == tool-op count today; target 0.
+- **Suggested fix**: In `emitAssistantToolUseOps`/`toolUseStarted`, emit a `tool_request` PayloadRef (`Format='json'`, `LocationURI=file://<transcript>`) for each `tool_use` block carrying a non-empty `input`. Scope it to the just-started tool op's `(TurnSeq, Seq)`. Same containment guard as `emitToolResultPayload`.
+
+---
+
+### T7-claude-1 — tool_response payloads only when top-level `toolUseResult` is present (~48%)
+- **Invariant**: #7 (tool response payloads)
+- **Severity**: P1 (count mismatch)
+- **Description**: `tool_response` is emitted **only** when the user record carries a **top-level** `toolUseResult` sibling (`rec.HasToolUseResult`, set at `parser_decode.go:77`/`92-101`), gated again at emit time (`ops_user.go:53`: `if rec.HasToolUseResult && !payloadEmitted`). The tool result *also* lives inside the `tool_result` content **block** (`content[].type=="tool_result"`, `.content`), which the adapter reads for status/error (`ops_user.go:43-63`) but **never** turns into a payload. So any tool result that has only the block and no top-level `toolUseResult` echo yields a finalized tool op with **no response payload** — consistent with 31,171 refs / 65,278 tool ops (≈48%). Also note: even when emitted, `LocationURI` is the **whole transcript file** with `OriginalBytes:-1` (`payloads.go:114-123`) — a coarse pointer, no byte offset/line index.
+- **Evidence**: `ops_user.go:43-63` (block read, no payload from `blk.Content`); `ops_user.go:53` (gate); `parser_decode.go:92-101` (`hasTopLevelToolUseResult`); `payloads.go:109-124`.
+- **Proposed invariant**: `... o.kind='tool' AND o.status='completed' AND NOT EXISTS(payload_kind='tool_response')` → should trend to 0.
+- **Suggested fix**: Emit `tool_response` from the matched `tool_result` block whenever a block exists, independent of the top-level `toolUseResult` (keep the top-level as the richer structured echo when present). This closes the ~52% gap. **Open question**: confirm on prod whether the missing 52% are genuinely block-only results vs. tools still running / Agent-spawn pseudo-tools — see diagnostic below.
+
+---
+
+### R3-claude-1 — reasoning content: op emitted, but no payload + signature dropped
+- **Invariant**: #3 (reasoning captured)
+- **Severity**: P1 (capture gap)
+- **Description**: Each `thinking` block produces a `reasoning` op with `BytesOut=len(thinking)` (`ops_assistant.go:108-131`) — so the op *count* (20,115) is right — but **no `llm_reasoning` PayloadRef** points at the thinking text, and the cryptographic `signature` (`parser.go:116`, which the spec §247 says to preserve) is parsed and **dropped**. The reasoning op therefore carries a byte count and nothing renderable.
+- **Evidence**: `ops_assistant.go:97-131`; `parser.go:115-116`; baseline: reasoning ops 20,115 / `llm_reasoning` refs 0.
+- **Proposed invariant**: `... o.kind='reasoning' AND NOT EXISTS(payload_kind='llm_reasoning')` → trend to 0.
+- **Suggested fix**: Emit an `llm_reasoning` PayloadRef on the reasoning op (`LocationURI=file://<transcript>`), and stash `signature` in the reasoning op's extras.
+
+---
+
+### A4-claude-1 — assistant text response: never captured as any payload (the biggest gap)
+- **Invariant**: #4 (assistant output captured)
+- **Severity**: **P1, arguably P0 for the product's purpose** (the model's actual answer has no canonical handle)
+- **Description**: The assistant's generated **text** (`content[].type=="text"`, `.text`) is the operator's primary artifact ("what did my agent say"). `mapAssistant` (`ops.go:34-58`) emits the LLM op (tokens only), reasoning ops, and tool_use ops — but the **text blocks are read only by `assistantTextTs` (`mapper.go:452-467`) to detect the sidechain completion marker.** No `llm_response` PayloadRef, no text storage anywhere. The LLM op finalize is hardcoded `Status:"completed"` with token counts and zero body (`ops_assistant.go:56-75`). Result: 122,679 LLM ops, **0 llm_response refs** — confirmed. The bytes survive in the on-disk transcript (so not permanent data loss), but the canonical model exposes **no pointer**, so the turn viewer has nothing to render as the response.
+- **Evidence**: `ops.go:34-58`; `mapper.go:446-467`; `ops_assistant.go:37-75`; baseline llm_response refs 0.
+- **Proposed invariant**: `... o.kind='llm' AND NOT EXISTS(payload_kind IN('llm_response','llm_request'))` → trend to 0.
+- **Suggested fix**: Emit `llm_response` (and optionally `llm_request`) PayloadRefs on the LLM op pointing at the transcript. The Anthropic `requestId` (`parser.go:95`, parsed-and-dropped) is the natural deterministic correlation key.
+
+---
+
+### E8-claude-1 — LLM ops can never be `failed`; api_error is a detached log
+- **Invariant**: #8 (LLM request errors → error_class)
+- **Severity**: P1
+- **Description**: `buildLLMFinalized` hardcodes `Status:"completed"` (`ops_assistant.go:62`) with no error path. A Claude Code `system/api_error` record is mapped to a **standalone LogEntry ERR** (`ops.go:85-90`) that is **not attached to any LLM op**. So invariant #8 (`kind='llm' AND status='failed'`) is **structurally ≈0** for claude-code even when the source recorded API errors — the error exists in logs but is disconnected from the op it belongs to.
+- **Evidence**: `ops_assistant.go:56-75`; `ops.go:65-97` (`mapSystem`, `api_error` arm); `parser.go:160-167` (`systemBody.APIError` parsed).
+- **Proposed invariant**: cross-check `COUNT(api_error log_entries)` vs `COUNT(ops kind='llm' status='failed')` per session — large divergence = unattached errors.
+- **Suggested fix**: Correlate `api_error` (and the `retryInMs`/`retryAttempt` fields already parsed at `parser.go:165-166`) to the preceding/sibling LLM op via `requestId` and finalize that op `status='failed'`, `error_class='api_error'`. Or **accept as known** and document that claude-code surfaces LLM errors only as logs (then invariant #8 must exempt claude-code).
+
+---
+
+### S10-claude-1 — op-level child link depends entirely on the `.meta.json` sidecar (0/835)
+- **Invariant**: #10 (subagents linked deterministically)
+- **Severity**: P1
+- **Description**: The op→child edge (`ops.child_session_id`) can be set two ways, and **both collapse to the sidecar**:
+  1. **Map-time** `ChildSessionNativeID` is set only if `m.toolUseToAgent[blk.ID]` is populated (`ops_assistant.go:171-175`), and that map is built solely from `subagents/agent-*.meta.json` (`scanner_meta.go:79-88`).
+  2. **DB-resolver** `linkOpChildrenByToolUse` (`resolver.go:300-340`) matches the op's `toolUseId` stash (always present, `ops_assistant.go:168-170`) against the **child session's** `toolUseId` stash — but the child's stash comes from its `.meta.json` too (`mapper.go:431-433`, `m.toolUseID` ← `cfg.toolUseID`). No sidecar → no child stash → no match. `linkOpChildren` (`resolver.go:239`) needs a `childNativeId` stash that is *also* sidecar-derived.
+  
+  The inline parent/child signals the source provides — `isSidechain`, `agentId`, `parentUuid`, `logicalParentUuid` — are **parsed but never consumed** (grep: the only hits are the struct fields at `parser.go:80-84`; zero readers). The fixture `b_subagent_sidechain/expected.jsonl:6` proves the link *works when the sidecar is present*; the prod 0/835 means the sidecar is absent (or the layout differs) in real data.
+- **Evidence**: `ops_assistant.go:166-180`; `scanner_meta.go:36-88`; `mapper.go:431-433`; `resolver.go:227-340`; grep showing `IsSidechain/AgentID/LogicalParentUUID/ParentUUID` unused.
+- **Suggested fix**: Add a sidecar-independent fallback. The directory layout (`<sessionId>/subagents/agent-<agentId>.jsonl`) already gives child→parent; to recover the **op→child** edge without `.meta.json`, the only inline bridge is positional/ordinal (Nth `Agent` op ↔ Nth subagent dir) which is **not deterministic** when a session spawns multiple agents — so without the sidecar a *guaranteed* op-level link is genuinely impossible from the data. Recommend: (a) treat the sidecar as required and **surface its absence as a SourceError/drift signal** (today a genuinely-absent sidecar is silently non-erroring per spec §606), and (b) fix invariant #10 per the next finding.
+
+---
+
+### S10-claude-2 — invariant #10 measures the wrong column (CTO MISSED)
+- **Invariant**: #10
+- **Severity**: P2 (invariant design)
+- **Description**: Invariant #10 as written counts `kind='session'` ops with `child_session_id`. But the **child→parent** direction (`sessions.parent_session_id`) is built from the **directory layout** (`discovery` sets `ParentNativeID` at `scanner_discovery.go:216`), which is **sidecar-independent**. It is entirely possible that prod has `parent_session_id` populated for claude-code sub_agent sessions while `ops.child_session_id` is 0 — i.e. the subagent *relationship* is captured, just not the op-level edge. The 0/835 op number alone does **not** prove "subagents aren't linked." The invariant should check **both directions**.
+- **Proposed diagnostic** (CTO must run on prod to disambiguate root cause of S10-claude-1):
+  ```sql
+  SELECT COUNT(*) FROM sessions WHERE format='claude-code' AND kind='sub_agent';                                   -- do child sessions exist at all?
+  SELECT COUNT(*) FROM sessions WHERE format='claude-code' AND kind='sub_agent' AND parent_session_id IS NOT NULL;  -- session-level link present?
+  SELECT COUNT(*) FROM sessions WHERE format='claude-code' AND kind='sub_agent'
+         AND json_extract(extras_json,'$.aiViewer.toolUseId') IS NOT NULL;                                          -- sidecar stash present?
+  ```
+  - If row 1 ≈ 0 → real data has **no separate subagent transcripts** (likely inline `isSidechain` records, which the discovery doesn't split — a **bigger** finding: subagent activity is being folded into the main session).
+  - If row 1 > 0 but row 3 ≈ 0 → subagent files exist **without** sidecars → session link works, op link can't.
+- **Suggested fix**: Redefine invariant #10 as "every `kind='session'` op links to a child OR its owning session has a discoverable child sharing its `toolUseId`," and add a companion session-level check on `parent_session_id`.
+
+---
+
+### T5/T1/U2-claude-1 — turns/tools/user-prompts: confirmed captured (positive)
+- **Invariant**: #1, #2, #5 — **PASS** for claude-code.
+- Turns open on string-content user records (`ops_user.go:17-25`) and assistant records (`ensureAssistantTurn`, `ops_assistant.go:16-22`); user prompts become turn-openers; tool ops are emitted per `tool_use` block (`ops_assistant.go:133-144`). Tool **error** responses (invariant #9) **are** captured: `toolResultStatus` sets `status='failed', error_class='tool_error'` on `is_error:true` blocks (`ops_user.go:78-83`). No defect; record as the contract these invariants verify.
+
+---
+
+## Overall assessment
+
+Every claude-code gap in the CTO's baseline is **real and confirmed at the source level**, not measurement noise. The root cause is uniform and simple: **the adapter emits canonical *ops* (LLM, tool, reasoning, session) but emits *payload artifacts* for almost nothing** — only `tool_response` (and only ~48% of those, gated on a top-level echo field) and the compaction `log`. The model's actual text responses, its reasoning text, its tool request arguments, and its LLM-request bodies have **zero `payload_refs`**, even though all of them sit inline in the transcript the adapter already reads. The data is on disk (so this is recoverability-gap, not hard data-loss), but the canonical model advertises a payload surface (`PayloadKind ∈ {llm_request, llm_response, llm_reasoning, tool_request, ...}`, `events.go:345-347`) that claude-code **never populates** — that mismatch between claimed and actual capture is exactly what SOW-0096's invariants must pin. The fixes are low-risk and additive (emit refs pointing at the already-open transcript); the only genuinely hard one is the op-level subagent link, which is architecturally sidecar-dependent.
+
+## Things the CTO missed
+
+1. **Invariant #8 is structurally 0 for claude-code** — LLM ops are hardcoded `status='completed'` (`ops_assistant.go:62`); `api_error` is a detached LogEntry. The baseline lists llm_request gaps but not that **no claude-code LLM op can ever be `failed`**. The invariant will read 0 forever unless the adapter correlates errors or claude-code is exempted.
+2. **Invariant #10 checks the wrong column** (S10-claude-2). `sessions.parent_session_id` is built sidecar-independently from the directory layout; the 0/835 op-level number may coexist with a fully-populated session-level link. The CTO must run the 3-query diagnostic before concluding "subagents unlinked" — and the invariant should check both directions.
+3. **The inline linking signals are parsed-but-dead** — `isSidechain`, `agentId`, `parentUuid`, `logicalParentUuid` (`parser.go:80-84`) have **zero consumers**. The adapter throws away the source's own parent/child markers and relies solely on the `.meta.json` sidecar, whose genuine absence is **not even surfaced** as an error (spec §606 treats absent sidecars as benign). That silent dependency is the most likely explanation for 0/835.
+4. **`requestId` is parsed and dropped** (`parser.go:95`) — it is the natural deterministic key for `llm_request`/`llm_response` payload correlation and for attaching `api_error` to its op. Worth capturing alongside the payload-ref fixes.
+5. **Even "captured" tool_response refs are coarse** — `LocationURI` is the whole transcript with `OriginalBytes:-1` (`payloads.go:114-123`); no byte offset. An invariant that only checks *existence* of a ref will pass while the UI still has to re-scan the entire file to find the specific result.
+
+**Open questions requiring prod-DB / disk access (I could not run them in this sandbox):** the 3-query subagent diagnostic above; whether the operator's current Claude Code version writes `subagents/*.meta.json` at all (the spec's sample was 2026-05-26); and whether the missing 52% of tool_response refs are block-only results vs. Agent pseudo-tools / in-flight tools.
+
+No files were modified; no external reviewers were invoked (recursion-safe).
