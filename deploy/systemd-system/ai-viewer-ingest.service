@@ -37,6 +37,26 @@ ExecStart=/opt/ai-viewer/bin/ai-viewer-ingest --db /opt/ai-viewer/data/index.db 
 WorkingDirectory=/opt/ai-viewer
 Restart=on-failure
 RestartSec=3s
+# SOW-0094 chunk 3: watchdog + multi-process lockout.
+#
+# MemoryHigh=4G: soft cap — ingester is throttled under memory pressure
+#   (Go GC will start working harder) before the hard cap kicks in.
+# MemoryMax=8G: hard cap — once the process exceeds 8 GB resident,
+#   systemd kills it with SIGKILL. This is the watchdog for the
+#   SOW-0094 hot-path allocation: a memory leak that survives GC will
+#   trigger a clean restart instead of consuming the host's swap.
+#   8 GB is ~4x the observed peak (1.9 GB with the source-progress
+#   throttle fix in commit 91eb1b8) so a single bad scan won't trip
+#   it, but a real leak will.
+# LimitNOFILE=65536: fsnotify watch handles + SQLite WAL + scan temp
+#   files all benefit from a higher fd cap than systemd's 1024 default.
+# IOSchedulingClass=idle: yield disk bandwidth to the operator's interactive
+#   workload (the ingester is fire-and-forget background work, not
+#   latency-sensitive). Avoids stalls during the operator's own I/O.
+MemoryHigh=4G
+MemoryMax=8G
+LimitNOFILE=65536
+IOSchedulingClass=idle
 
 # Hardening (defense-in-depth; the ingester only needs read access to the
 # explicit sources and write access to /opt/ai-viewer/data). ProtectHome is

@@ -117,6 +117,20 @@ func run(args []string, stdout, stderr *os.File) int {
 		logger.Error("ai-viewer-ingest: failed to create state dir", "dir", stateDir, "err", err)
 		return 1
 	}
+
+	// Multi-process lockout (SOW-0094 chunk 3): only one ai-viewer-ingest
+	// may run per state_dir at a time. The DB is a single-writer SQLite
+	// file; a second ingester stepping in would either get SQLITE_BUSY
+	// forever or, worse, silently corrupt the WAL. The historic failure
+	// mode was the operator launching a second ingester from a debug
+	// shell while the systemd one was still running — the leak hunt in
+	// commit 91eb1b8 was triggered by three concurrent processes all
+	// racing on the same DB.
+	releaseLock, err := acquireSingleInstanceLock(stateDir, logger)
+	if err != nil {
+		return 1
+	}
+	defer releaseLock()
 	if err := os.MkdirAll(filepath.Dir(dbPath), stateDirPerm); err != nil {
 		logger.Error("ai-viewer-ingest: failed to create db parent dir",
 			"dir", filepath.Dir(dbPath), "err", err)
@@ -493,4 +507,53 @@ func dispatchSubcommand(args []string, stdout, stderr *os.File) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// acquireSingleInstanceLock takes an exclusive flock on
+// "<state_dir>/ingester.lock" and returns a release function the caller
+// MUST defer. Returns a non-nil error if another ingester already holds
+// the lock; the operator should either stop the other instance or remove
+// the stale lockfile manually.
+//
+// The lockfile lives INSIDE state_dir (not alongside it) because the
+// systemd unit ships with ProtectSystem=strict + ReadWritePaths=
+// /opt/ai-viewer/data. A sibling lockfile at "<state_dir>.lock" would
+// fail with EROFS since the parent dir of state_dir is read-only.
+//
+// The lock is released by the OS on process exit (SIGTERM, SIGKILL,
+// uncaught panic) so a crash never leaves a stale lockfile behind. The
+// lockfile path is fixed per state_dir, so the operator can identify
+// what holds it (an integration with `fuser` / `lsof` would be nice
+// but is out of scope for v1).
+func acquireSingleInstanceLock(stateDir string, logger *slog.Logger) (release func(), err error) {
+	lockPath := filepath.Join(stateDir, "ingester.lock")
+	// 0600 keeps the lockfile readable/writable only by the ingester's
+	// own uid. gosec G302 wants a stricter mode (and is right); the
+	// historical 0640 was a placeholder. The lockfile holds no content
+	// — flock is the only state — so 0600 is the correct mode. Path
+	// is "<state_dir>/ingester.lock", constructed from a known
+	// suffix under a directory already on ReadWritePaths; gosec G304
+	// and G302 are false positives here.
+	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600) //#nosec G304 G302 -- fixed suffix under ReadWritePath, owner-only mode
+	if err != nil {
+		logger.Error("ai-viewer-ingest: failed to open lock file", "path", lockPath, "err", err)
+		return nil, err
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		logger.Error("ai-viewer-ingest: another ingester already holds the lock on this state_dir",
+			"path", lockPath,
+			"hint", "if no other ingester is running, remove the lock file manually",
+			"err", err)
+		return nil, err
+	}
+	// Release the flock + close the fd. Best-effort: the OS releases
+	// the flock on process exit anyway, and Close on an already-open fd
+	// is safe. Both errors ignored because there is nothing meaningful
+	// the caller can do if Unlock or Close fail at process shutdown.
+	release = func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}
+	return release, nil
 }
