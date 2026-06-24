@@ -151,7 +151,8 @@ type responseItemPayload struct {
 	Role             string          `json:"role"`
 	Name             string          `json:"name"`
 	CallID           string          `json:"call_id"`
-	Arguments        string          `json:"arguments"`
+	Arguments        json.RawMessage `json:"arguments"`
+	Action           json.RawMessage `json:"action"`
 	EncryptedContent json.RawMessage `json:"encrypted_content"`
 	Summary          json.RawMessage `json:"summary"`
 	Content          json.RawMessage `json:"content"`

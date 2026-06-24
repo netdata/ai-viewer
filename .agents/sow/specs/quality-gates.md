@@ -128,6 +128,44 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 - Gates any commit touching the rollups package.
 - Threshold: zero diff between the two materializations.
 
+### Go — Ingestion Parity (SOW-0097)
+
+`scripts/check-ingestion-parity.sh --fixtures` runs the deterministic
+source-to-canonical parity gate defined in `ingestion-parity.md` against
+sanitized fixture tests. The wrapper is the named local/CI gate: it runs the
+parity source extractor, canonical extractor, diff, ingest parity, and
+`ai-viewer-ingest check-parity` CLI fixture tests, matrix drift tests, plus the
+`internal/parity` fuzz seed corpus, in one fail-closed command instead of
+relying on scattered ad hoc package invocations.
+
+Threshold:
+
+- Every supported adapter has fixture coverage.
+- Every parity artifact class has positive and negative coverage.
+- Source manifest and canonical manifest diff is empty for clean fixtures.
+- Missing, empty, blank, partial, duplicate, extra, hash-mismatched,
+  length-mismatched, source-unavailable-mismatched, or unverifiable artifacts
+  fail closed.
+- Missing fixture, malformed manifest, source parse error, payload read error,
+  or malformed canonical DB exits non-zero.
+- `go test -run='^Fuzz' ./internal/parity` runs deterministic fuzz seeds for
+  parity source extractors and the diff engine; any crash or accepted malformed
+  proof exits non-zero.
+- Invoking the wrapper without `--fixtures`, losing the CLI check-parity or
+  matrix drift test surface, or losing any required parity package exits
+  non-zero.
+
+The full live parity gate is local/workstation-only:
+
+```bash
+ai-viewer-ingest check-parity --db /opt/ai-viewer/data/index.db --timeout 30m --source <adapter:path> ...
+```
+
+It reads private local source data and therefore does not run in GitHub CI. It
+must clearly report one of: `PASS full parity`, `FAIL parity`, `INCOMPLETE`, or
+`SAMPLE ONLY`. Timeout expiry reports `INCOMPLETE` and exits non-zero. Sample
+mode is diagnostic and never satisfies a full parity pass.
+
 ### Go — Aggregate / Search Perf (SOW-0007, best-effort)
 
 - `GET /api/stats/aggregate` p95 < 200 ms over a 1M-op fixture.
@@ -177,6 +215,11 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 ### Frontend — E2E
 
 - `npm run e2e` (Playwright headless) — runs the **gating** `chromium` project against the EMBEDDED SPA served by the built `ai-viewer-serve` binary on a deterministically seeded temp DB (`scripts/e2e-serve.sh`), never a bare `vite preview`.
+- The default E2E bind is `127.0.0.1:7710`. `AI_VIEWER_E2E_PORT`
+  overrides it for local gate runs, and `scripts/gates.sh` selects a documented
+  fallback port when `7710` is already bound by the installed workstation
+  service. `reuseExistingServer` stays `false`: an occupied port must never make
+  Playwright test an arbitrary existing server or live DB.
 - Coverage: every primary user flow plus error states (network failure, empty list, malformed SSE event). The five AC#4 scenarios (SOW-0012) and the spec that covers each:
   - **sessions-list filter** — `tests/sessions-filter.spec.ts` (FilterBar agents filter narrows the list, URL carries `?agents=`, a non-matching term collapses to the empty state, Clear restores the full list; the agent name is runtime-derived from `/api/sessions`).
   - **session-detail load** — `tests/deep-link.spec.ts` (hard nav to `/sessions/<id>` renders the detail Overview via the SPA fallback).

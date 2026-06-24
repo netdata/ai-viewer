@@ -2,8 +2,12 @@
 
 ## Status
 
-Status: open (proposed 2026-06-22)
-Sub-state: CTO-proposed; awaiting operator sign-off. Phase: Development (CTO-discretion review). This is a *measurement + framework* SOW, not a feature SOW. The deliverable is a list of known gaps, a per-adapter invariant set, and a Go+SQL+frontend mechanism that catches regressions on every CI run AND surfaces live-state drift in `/api/health`.
+Status: in-progress
+Sub-state: Active parent SOW, paused before framework implementation while SOW-0097 defines deterministic source-to-canonical parity gates. Reviewers 1-4 are verified in `SOW-0096-review-triage.md`; remaining reviewers 5-9 are intentionally deferred until the parity contract and adapter follow-up scopes are corrected, so the invariant framework is designed against a provable model instead of DB-only counts.
+
+## Correction - 2026-06-22
+
+The operator corrected the SOW-0097 direction: ingestion accuracy is not an enum/status cleanup problem. SOW-0097 is now the deterministic source-to-canonical parity-gate SOW. Any older language in this parent SOW about `check-invariants`, `OpUserInput`, `OpAssistant`, or typed op statuses is subordinate to the parity design: first prove source artifacts against canonical artifacts, then decide which enum/schema/UI changes are necessary.
 
 ## Pre-Implementation Gate
 
@@ -80,7 +84,7 @@ These are the *known unknown-unknowns* we found by asking the right questions. T
 - **Risk: reviewers' findings may be wrong**. The 9 reviewers are LLMs; their findings have the same truth value as my own analysis. CTO must verify every claim (per the `project-second-opinions` skill's "Claim verification" section) before committing fixes.
 - **Blast radius**: additive everywhere. The new invariant package is a new directory; no existing file is modified except for the 4 listed in "Affected contracts and surfaces". The fail-closed P0 path is the only behavior change to the hot ingest path, and it quarantines rather than rejects (so existing successful ingests continue to work).
 
-### Sensitive data handling
+### Sensitive data handling plan
 
 - The 11 invariants run against the live prod DB. The check results are JSON; they include per-adapter counts and per-session/turn/op IDs but NEVER payload content (the invariants are count + structural, not content). The `/api/invariants` response carries IDs only.
 - The fixture DBs under `internal/invariants/fixtures/` are sanitized subsets of real sessions (already the pattern in `internal/presenter/sessions_testseed_test.go`). No raw API keys, no operator PII.
@@ -88,15 +92,15 @@ These are the *known unknown-unknowns* we found by asking the right questions. T
 
 ### Implementation plan
 
-**Chunk 0 — Canonical model + 5 follow-up SOWs (the fix pass, per CTO triage of reviewers 1-4)**:
+**Chunk 0 — Deterministic parity gate + follow-up SOW correction**:
 
-a. `SOW-0097`: extend canonical `OpKind` enum with `OpUserInput` and `OpAssistant`. Migration 0012. Update 5 adapters to emit the new kinds. Pin via `schema_contract_test.go` and the existing test suite. (The canonical contract change that makes invariants #2 and #4 expressible.)
-b. `SOW-0098`: add typed `OpStatus` enum (mirroring `SessionStatus`). Update 5 adapters to use the canonical literals. Pin via schema contract test. (The canonical contract change that makes invariant #8 robust.)
-c. `SOW-0099`: aiagent_v2 fixes — 100% failed LLM ops lack `error_class` (Reviewer 4 P1); 1,186,802 `system` ops with empty `name` (Reviewer 4 P2). Both are mapper-side fixes.
-d. `SOW-0100`: claude-code fixes — capture `tool_request` / `llm_response` / `llm_reasoning` payload_refs (Reviewer 2 P0/P1); emit `status='failed'` on LLM ops when `api_error` is observed (Reviewer 2 P1); 70% subagent-link rate (Reviewer 2 sidecar dependency P1).
-e. `SOW-0101`: codex fixes — capture `tool_response` for end-event-finalized tools (Reviewer 1 P0); decode `parent_thread_id` as subagent-link fallback (Reviewer 1 P1); 24,149 `internal` ops reclassified to `user_input` (depends on SOW-0097).
-f. `SOW-0102`: opencode fixes — determine if 0 `llm_request` / 0 `tool_request` is source-side or mapper-side (Reviewer 6 pending — need a fact-finding pass first).
-g. `SOW-0103`: UX fix — surface the 6 captured-but-unsurfaced fields (Reviewer 3 T11-canonical-1..4): `reasoning_kind`, `bytes_in`/`bytes_out`, `chars_in`/`chars_out`, turn-level `tokens_cache_read`/`tokens_cache_write`/`error_class`, `provider_alias`, `call_path`, `sha256`.
+a. `SOW-0097`: define and implement deterministic ingestion parity gates. The gate compares independent source manifests against canonical manifests and fails on missing, empty, partial, duplicate, extra, or unverifiable artifacts. It covers user prompts, assistant messages, reasoning, LLM request/response payloads, tool request/response payloads, errors, sub-agent links, and turn/session boundaries.
+b. Canonical `OpKind` additions (`user_input`, `assistant`) and typed op/turn statuses are no longer the goal of SOW-0097. They are implementation details to adopt only if the parity spec proves the current canonical representation cannot cleanly represent source artifacts.
+c. `SOW-0099`: aiagent_v2 fixes — 100% failed LLM ops lack `error_class` (Reviewer 4 P1); 1,186,802 `system` ops with empty `name` (Reviewer 4 P2); plus any parity-gate failures for v2 that are proven mapper-side.
+d. `SOW-0100`: claude-code fixes — capture exact tool request, LLM response, reasoning, and subagent-link artifacts with exact selectors/hashes where source data exists.
+e. `SOW-0101`: codex fixes — capture missing tool responses, correct user-input/tool-request classification as driven by parity artifact classes, and decode parent-thread links.
+f. `SOW-0102`: opencode fixes — determine if 0 `llm_request` / 0 `tool_request` is source-side or mapper-side, then fix or document per the parity availability matrix.
+g. `SOW-0103` or a replacement UI SOW: surface captured-but-unsurfaced fields after the parity gate proves which artifacts are actually captured.
 
 **Chunk 1 — Spec + remaining reviewer investigation (this SOW's first deliverable)**:
 
@@ -201,9 +205,7 @@ The SOW ships with a `prompts/` directory containing the 9 self-contained review
 - `AGENTS.md` — Hard-Won Lessons append (per-adapter gotchas the reviewers uncover)
 - `frontend/src/components/AppTopbar.tsx` (chunk 3, optional) — drift indicator
 
-**Schema impact** (corrected post-review): **SQL schema: none** (v11 is sufficient; the gaps are adapter-side). **Canonical contract: invariants #2 ("user prompts captured") and #4 ("assistant output captured") require an explicit decision on op kinds** before the invariant SQL can be written — the canonical `OpKind` enum (`internal/canonical/events.go:77-92`) defines `llm`, `tool`, `session`, `reasoning`, `internal`, `system`, `compaction` but NOT `user_input` or `assistant`, and no adapter emits them. The DB has 0 ops of either kind. Two options: (a) extend the enum to add `OpUserInput` and `OpAssistant` and update the adapters to emit them, or (b) re-frame the invariants to use payload_ref presence (every LLM op should have a request payload_ref whose decoded `messages[N].role == 'user'`). This decision is Reviewer 7's call (framework design). See `SOW-0096-review-triage.md` for the corrected baseline + verification.
-
-Additionally: a typed `OpStatus` enum (mirroring the existing `SessionStatus` enum at `internal/canonical/events.go:49-69`) is missing — ops and turns carry bare `string` status, and the live data already shows the canonical literals `completed` / `failed` / `running` in use. The 11 invariants assume the canonical literals are uniformly emitted; an enum would let the SOW's CI tests pin the contract.
+**Schema impact** (corrected after operator feedback): **SQL schema is not the first lever.** SOW-0097 must first prove source-to-canonical parity. The canonical `OpKind` enum still lacks `user_input` and `assistant`, and ops/turns still carry bare `string` statuses, but those are supporting contract issues, not the root goal. The parity spec decides whether those enum changes are required, whether payload-ref artifact classes are sufficient, and whether exact fragment selectors can fit in existing `payload_refs.location_uri` / `sha256` / byte fields or require a schema extension.
 
 ### Open decisions
 
@@ -214,7 +216,7 @@ Additionally: a typed `OpStatus` enum (mirroring the existing `SessionStatus` en
 ### Out of scope (deferred to v2)
 
 - **Auto-remediation**: when a P0 violation is detected, automatically re-ingest the offending session from the source-of-truth JSONL. Deferred; the quarantine + operator review path is enough for v1.
-- **Per-harness content parity checks** (e.g. "this codex session's last user prompt should appear verbatim in the fts_content index"). Deferred; SOW-0091's fts_content backfill is the related work, and these checks would be a v2 expansion.
+- **FTS index parity** (e.g. "this codex session's last user prompt should appear verbatim in `fts_content`"). Deferred; SOW-0097 verifies source-to-canonical ingestion, not every derived search index.
 - **Webhooks / notifications** when drift is detected. Deferred; the operator can run `check-invariants` on a cron and forward the output to anything.
 - **Cross-session consistency** (e.g. "every session referenced by a `kind='session'` op must exist"). Deferred; the existing SOW-0071 related endpoint covers soft links; the hard-link check is a v2 addition.
 - **Ingesting un-merged harnesses** (gemini-cli, aider, goose, plandex, codebuff, trae-agent, etc.). Deferred; the gemini reviewer's "should we" question is the input to that decision.

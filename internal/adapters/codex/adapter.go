@@ -172,9 +172,9 @@ func (a *Adapter) coerceCursor(c canonical.Cursor) Cursor {
 
 // snapshotCursor builds a cursor from current on-disk rollout sizes so a cold
 // Tail does not re-emit historical events (Tail follows changes from now on;
-// existing content is Scan's job). Legacy flat .json files are not stat-tracked
-// here — they are not ingested in v1 and the cursor's LegacyJSON suppression is
-// Scan's concern. Mirrors claude_code.snapshotCursor.
+// existing content is Scan's job). Legacy flat .json files are static historical
+// snapshots and are not stat-tracked by Tail; Scan owns their one-time ingestion
+// through Cursor.LegacyJSON. Mirrors claude_code.snapshotCursor.
 func (a *Adapter) snapshotCursor() (Cursor, error) {
 	disc, err := discoverRollouts(a.root, a.onError)
 	if err != nil {

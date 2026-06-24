@@ -41,6 +41,7 @@ const Format = "opencode"
 type messageWithParts struct {
 	Message messageRow
 	Parts   []partRow
+	Input   *sessionInputRow
 }
 
 // mapSession projects one opencode session tree onto the canonical event
@@ -70,6 +71,12 @@ func mapSession(sourceID string, s sessionRow, msgs []messageWithParts, opts ...
 	out := make([]canonical.Event, 0, 16+4*len(msgs))
 
 	out = append(out, m.sessionStarted())
+
+	sessionMessageEvents, err := m.mapSessionMessages()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, sessionMessageEvents...)
 
 	for i := range msgs {
 		evs, err := m.mapMessage(msgs[i])
@@ -133,6 +140,11 @@ type sessionMapper struct {
 	failError *assistantError
 	failEndUs int64
 
+	userMessages    map[string]userMessageContext
+	consumedUserIDs map[string]struct{}
+	pendingUser     *userMessageContext
+	sessionMessages []sessionMessageRow
+
 	// uriBuilder is the chunk-D-injectable PayloadRef LocationURI builder (the
 	// opencode-sqlite:// seam — see mapper_ops.go payloadURIBuilder). nil in
 	// mapper-only unit tests, where defaultPayloadURI is used.
@@ -186,6 +198,15 @@ func WithOnWarn(warn func(error)) MapOption {
 	return func(m *sessionMapper) { m.warn = warn }
 }
 
+// WithSessionMessages injects session-scoped sidecar events from the
+// session_message table. These are not tied to a turn/op row, so the mapper
+// emits them immediately after SessionStarted and before turn synthesis.
+func WithSessionMessages(rows []sessionMessageRow) MapOption {
+	return func(m *sessionMapper) {
+		m.sessionMessages = append([]sessionMessageRow(nil), rows...)
+	}
+}
+
 // mwarn surfaces a decode failure via the injected warn callback when one is set
 // (a no-op otherwise), so the pure mapper degrades a field without aborting and
 // WITHOUT silently swallowing the error (SOW-0005 P2.6).
@@ -197,7 +218,12 @@ func (m *sessionMapper) mwarn(err error) {
 
 // newSessionMapper constructs a mapper for one session.
 func newSessionMapper(sourceID string, s sessionRow) *sessionMapper {
-	return &sessionMapper{sourceID: sourceID, session: s}
+	return &sessionMapper{
+		sourceID:        sourceID,
+		session:         s,
+		userMessages:    map[string]userMessageContext{},
+		consumedUserIDs: map[string]struct{}{},
+	}
 }
 
 // nativeID is the session's canonical native id (session.id).

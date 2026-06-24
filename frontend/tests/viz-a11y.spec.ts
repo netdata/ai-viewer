@@ -9,9 +9,9 @@ import { THEME_PREFERENCE_STORAGE_NAME as THEME_STORAGE_SLOT } from '../src/stat
 // tests/a11y.spec.ts exactly (same impact filter, same deterministic theme lock
 // via localStorage.aiViewerTheme + addInitScript, same data-theme assertion),
 // extended to the four AC#5 routes:
-//   - /sessions/:id ?tab=trace
-//   - /sessions/:id ?tab=topology
-//   - /sessions/:id ?tab=timeline
+//   - /sessions/:id (default Waterfall visualization)
+//   - /sessions/:id ?tab:viz=topology
+//   - /sessions/:id ?tab:viz=timeline
 //   - /topology (cross-session)
 // Both themes are checked because contrast (the most common serious/critical
 // violation) is theme-dependent, per frontend-architecture.md §dark/light.
@@ -69,9 +69,11 @@ test.describe('a11y — viz surfaces (AC#5)', () => {
       const blocking = await axeRoute(
         page,
         theme,
-        `/sessions/${encodeURIComponent(id)}?tab=trace`,
+        `/sessions/${encodeURIComponent(id)}`,
         async (p) => {
-          await expect(p.getByText(/\d+ ops/)).toBeVisible();
+          await expect(
+            p.getByRole('region', { name: /waterfall visualization/i }).getByText(/\d+ ops/),
+          ).toBeVisible();
           await expect(p.getByRole('group', { name: /waterfall/i })).toBeVisible();
         },
       );
@@ -86,9 +88,11 @@ test.describe('a11y — viz surfaces (AC#5)', () => {
       const blocking = await axeRoute(
         page,
         theme,
-        `/sessions/${encodeURIComponent(id)}?tab=topology`,
+        `/sessions/${encodeURIComponent(id)}?tab%3Aviz=topology`,
         async (p) => {
-          await expect(p.getByText(/\d+ nodes?/)).toBeVisible();
+          await expect(
+            p.getByRole('region', { name: /topology visualization/i }).getByText(/\d+ nodes?/),
+          ).toBeVisible();
           await expect(p.getByRole('group', { name: /topology/i })).toBeVisible();
         },
       );
@@ -103,9 +107,13 @@ test.describe('a11y — viz surfaces (AC#5)', () => {
       const blocking = await axeRoute(
         page,
         theme,
-        `/sessions/${encodeURIComponent(id)}?tab=timeline`,
+        `/sessions/${encodeURIComponent(id)}?tab%3Aviz=timeline`,
         async (p) => {
-          await expect(p.getByText(/\d+ spans?\s+·\s+\d+ lanes?/)).toBeVisible();
+          await expect(
+            p
+              .getByRole('region', { name: /timeline visualization/i })
+              .getByText(/\d+ spans?\s+·\s+\d+ lanes?/),
+          ).toBeVisible();
           await expect(p.getByRole('group', { name: /timeline/i })).toBeVisible();
         },
       );
@@ -141,7 +149,7 @@ test.describe('a11y — viz surfaces (AC#5)', () => {
       const blocking = await axeRoute(
         page,
         theme,
-        `/sessions/${encodeURIComponent(id)}?tab=logs`,
+        `/sessions/${encodeURIComponent(id)}?tab%3Abottom=logs`,
         async (p) => {
           // The Severity filter fieldset is always rendered on the Logs tab.
           await expect(p.getByRole('group', { name: 'Severity' })).toBeVisible();

@@ -1,6 +1,8 @@
 package opencode
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -36,7 +38,7 @@ func (m *sessionMapper) emitTextPayload(tc *turnContext, p partRow) []canonical.
 // step-start in practice). Returns no events of its own.
 //
 //nolint:unparam // []canonical.Event return is required by the part-emitter dispatch in mapPart, where sibling emitters (openLLMOp, emitToolOp, …) return real event slices through the same shape
-func (m *sessionMapper) recordPatch(tc *turnContext, data partData) []canonical.Event {
+func (m *sessionMapper) recordPatch(tc *turnContext, p partRow, data partData) []canonical.Event {
 	if tc.llmOpSeq == 0 || tc.llmExtras == nil {
 		return nil
 	}
@@ -46,7 +48,26 @@ func (m *sessionMapper) recordPatch(tc *turnContext, data partData) []canonical.
 	if len(data.Files) > 0 {
 		tc.llmExtras["patch_files"] = data.Files
 	}
+	patches, _ := tc.llmExtras["patches"].([]map[string]any)
+	entry := map[string]any{
+		"part_id":      p.ID,
+		"files_count":  int64(len(data.Files)),
+		"files_sha256": patchFilesSHA256(data.Files),
+	}
+	if data.Hash != "" {
+		entry["hash"] = data.Hash
+	}
+	tc.llmExtras["patches"] = append(patches, entry)
 	return nil
+}
+
+func patchFilesSHA256(files []string) string {
+	if files == nil {
+		files = []string{}
+	}
+	body, _ := json.Marshal(files)
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%x", sum)
 }
 
 // emitCompactionLog handles a compaction part (adapter-opencode.md §"Per-table
@@ -55,7 +76,7 @@ func (m *sessionMapper) emitCompactionLog(tc *turnContext, p partRow, data partD
 	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (compaction)"))
 	return []canonical.Event{m.logEntry(base, "INF", tc.turnSeq, tc.llmOpSeq,
 		fmt.Sprintf("session compacted (auto=%t)", data.Auto),
-		map[string]any{"auto": data.Auto})}
+		map[string]any{"auto": data.Auto, "part_id": p.ID})}
 }
 
 // emitRetryLog handles a retry part (adapter-opencode.md §"Per-table emit rules":
@@ -67,7 +88,7 @@ func (m *sessionMapper) emitCompactionLog(tc *turnContext, p partRow, data partD
 func (m *sessionMapper) emitRetryLog(tc *turnContext, p partRow, data partData) []canonical.Event {
 	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (retry)"))
 	msg := fmt.Sprintf("API retry attempt %d", data.Attempt)
-	extras := map[string]any{"attempt": data.Attempt}
+	extras := map[string]any{"attempt": data.Attempt, "part_id": p.ID}
 	if data.Error.Name != "" {
 		msg += ": " + data.Error.Name
 		extras["error.name"] = data.Error.Name
@@ -97,6 +118,7 @@ func (m *sessionMapper) emitFileLog(tc *turnContext, p partRow, data partData) [
 	putStr(extras, "filename", data.Filename)
 	putStr(extras, "url", data.URL)
 	putStr(extras, "mime", data.MIME)
+	putStr(extras, "part_id", p.ID)
 	base := m.nextBase(m.msToMicrosWarn(p.TimeCreatedMs, "part.time_created (file)"))
 	return []canonical.Event{m.logEntry(base, "INF", tc.turnSeq, tc.llmOpSeq, "file attachment", extras)}
 }

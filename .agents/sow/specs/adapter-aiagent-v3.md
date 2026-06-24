@@ -464,13 +464,150 @@ Algorithm:
 Canonical `PayloadRefEvent`:
 
 - `LocationURI` = `file://<absolute-path-to-gz>` (the file URI of the resolved path; the presenter, not the adapter, reads bytes on demand).
-- `PayloadKind` = v3 `kind` (one-to-one mapping; the canonical model's `kind` enum already mirrors v3's).
+- `PayloadKind` = v3 `kind` (one-to-one mapping for this adapter). The v3
+  names `sdk_request` and `sdk_response` are canonical payload-ref aliases for
+  the parity artifact classes `llm_sdk_request` and `llm_sdk_response`; the
+  parity extractor MUST normalize both naming styles to those classes.
 - `Format` = v3 `format`.
 - `Compression` = `gzip` when `captured=true`, empty string when `captured=false`.
 - `OriginalBytes` = v3 `originalBytes` when present; `-1` for unknown.
 - `StoredBytes` = v3 `compressedBytes` when present; `0` for uncaptured.
 
 Uncaptured refs are still emitted as `PayloadRefEvent` (with `Compression=""`, `LocationURI=""`) so the UI can report "payload was disabled / aborted / redacted" rather than silently drop the I/O fact.
+
+### 4.4 Source Manifest Parity
+
+The SOW-0097 parity gate has an independent aiagent_v3 source extractor under
+`internal/parity`. It reads `<sessions-dir>/session/*.jsonl` directly and emits
+source artifacts without calling the aiagent_v3 canonical mapper. Ledger line
+reads are bounded to the adapter scanner's 4 MiB line cap. If a source ledger
+line exceeds that cap, source extraction returns an error and `check-parity`
+reports the run as incomplete instead of allocating an unbounded buffer or
+trying to decode a pathological line. The extractor resolves candidate ledgers
+under the configured sessions root and refuses symlink escapes; it must not read
+a `session/*.jsonl` candidate whose resolved target is outside `<sessions-dir>`.
+
+The extractor emits:
+
+- `session_boundary` from `session_start` plus the terminal `session_summary` or
+  `session_error` when present. The source manifest uses the same
+  `headendId` -> canonical `Kind` mapping as §5.2, including
+  `tool_output -> tool_internal`; a ledger with only `session_start` remains
+  `status=running`. Canonical parity identity uses source-native parent/root
+  ids. If the parent or root ledger is absent and the `sessions` structural FK
+  cannot resolve, the canonical extractor MUST read
+  `extras_json.aiViewer.parentNativeId` and
+  `extras_json.aiViewer.rootNativeId` before falling back to an empty parent or
+  self-root identity.
+- Parent-side `childSessions[]` entries whose child ledger is absent also emit
+  a `session_boundary` with `availability=partial_source`. The identity matches
+  the canonical repair row produced by `synthesizedFromParent`: child session
+  native id, parent/root native ids, `kind=sub_agent`, `status=running`,
+  `started_at` from the first parent record that referenced the child, and no
+  terminal timestamp. If the child ledger has a real `session_start`, the real
+  ledger boundary is authoritative and no parent-side partial boundary is
+  emitted for that child; however, parent-side `childSessions[]` source evidence
+  MAY fill missing lineage fields (`parentSessionId`, `parentOpId`, `originId`)
+  for that real child boundary. Parent-side evidence must not overwrite values
+  already present in the child's own `session_start`, and it must not resolve
+  canonical lineage to a different parent/root than the child's source-owned
+  `parentSessionId` / `originId`. Self-referential `childSessions[]` entries
+  produced by `tool_output` bookkeeping are therefore repair hints only when
+  the child has no real `session_start` lineage; they are never authoritative
+  over a real child ledger.
+- `session_metadata` from each real `session_start`. The identity records
+  `originId`, `agentId`, `callPath`, `parentSessionId`, `parentOpId`,
+  `headendId`, `capturePayloads`, and the `attributes` object exactly as
+  supplied by that `session_start`. Canonical proof uses
+  `sessions.agent_name`, `sessions.call_path`, and source-owned keys persisted
+  in `sessions.extras_json` (`originId`, `parentSessionId`, `parentOpId`,
+  `headendId`, `capturePayloads`, and `attr.*`). Parent-side `childSessions[]`
+  evidence can repair `session_boundary` lineage and `subagent_link` artifacts,
+  but it MUST NOT fill `session_metadata` fields that were absent from the
+  child's own `session_start`. Parent-side synthesized child rows do not emit
+  `session_metadata` unless a real child `session_start` has supplied the
+  `capturePayloads` key.
+- `turn_boundary` from each `turn_start` / `turn_end` pair. Missing `turn_end`
+  leaves the turn `status=running`.
+- `op_boundary` from every `turn_end.ops[]` item, using the same canonical
+  translation as the adapter: `status ok -> completed`, `failed -> failed`,
+  `running -> running`, `opIndex -> op.seq`, and tool namespace from provider
+  only for `kind=tool`.
+- `system_op` from every `turn_end.ops[]` item whose `kind` is `system`. The
+  class is in addition to the ordinary `op_boundary` for the same source op and
+  is keyed as `op:<turnNo>:<opIndex>:system`.
+- `compaction_event` from every `turn_end.ops[]` item whose `kind` is `session`
+  and whose `provider` is `history-compaction`. ai-agent v3 records history
+  compaction as an internal maintenance child session: the parent op names
+  `history_compaction.turn_summarizer`, links the compaction child in
+  `childSessions[]`, and carries `attributes.archivedTurn` /
+  `attributes.currentTurn` when the producer knows the turn range. The parity
+  identity records the parent session id, turn/op sequence, op name/provider,
+  first child session id, archived/current turn values, status, and start/end
+  timestamps. Native artifact id is `op:<turnNo>:<opIndex>:compaction`.
+- `subagent_link` from every `turn_end.ops[].childSessions[]` entry. If a source
+  op lists more children than canonical can attach to one op, the parity diff
+  must fail instead of silently dropping the extra link.
+- `llm_error` / `tool_error` from failed `turn_end.ops[]` items that carry a
+  non-empty `error` string. The v3 op summary has no structured error-class
+  taxonomy, so `error_class` remains empty and `error_message_sha256` hashes the
+  source `error` string. Native artifact id is `op:<turn>:<opIndex>:error`.
+- `log_entry` from each `turn_end.warnings[]`, `turn_end.errors[]`, failed
+  `session_summary.error`, and `session_error.error` value emitted by the
+  adapter. The adapter persists exact parity metadata in
+  `log_entries.extras_json.aiViewer.parity`: `nativeArtifactId` is
+  `seq:<ledger-seq>:/warnings/<index>`, `seq:<ledger-seq>:/errors/<index>`, or
+  `seq:<ledger-seq>:/error`; `selectorURI` is
+  `file://<sessions-dir>/session/<sessionId>.jsonl?seq=<ledger-seq>`; and
+  `jsonPointer` points at the exact source string. This lets the parity gate
+  prove warning/error text rather than accepting a derived log row by shape.
+- payload artifacts from every `payloadRefs[]` item. Captured refs must resolve
+  under the configured sessions root, enforce the parity payload-file safety cap
+  before materializing compressed bytes and again after decompression, compute
+  the hash over uncompressed bytes, compare producer `originalBytes`,
+  `compressedBytes`, and `sha256` when present, mark mismatches as
+  `availability=source_corrupt` with typed `integrity_failures[]` entries for
+  every failed proof field, mark captured zero-byte logical payloads as
+  `availability=source_empty`, and map source kinds to parity classes:
+  `llm_request`, `llm_response`, `sdk_request -> llm_sdk_request`,
+  `sdk_response -> llm_sdk_response`, `reasoning_stream -> reasoning_text`,
+  `tool_request`, and `tool_response`.
+- uncaptured refs as `availability=source_unavailable` with a stable native
+  artifact id, so the gate records the source-side absence explicitly and can
+  still match the canonical empty `PayloadRefEvent` row. For metadata-only
+  payload refs with no file path, the native artifact id uses the enclosing
+  canonical turn/op sequence (`op:<turnNo>:<opIndex>:payload:<kind>:<ordinal>`),
+  not the payload ref's own `opIndex` field. The payload ref `opIndex` is a
+  producer payload ordinal used in payload filenames (`llm-0002-*`) and can
+  differ from the enclosing canonical op sequence when `tool_output` session
+  ops are interleaved into the turn.
+
+Machine-readable matrix rows:
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule | Evidence |
+|---|---|---|---|---|---|
+| `session_boundary` | `available` / `partial_source` | `identity_json` | `sessions` row | `session:<sessionId>` | Source Manifest Parity bullets above. |
+| `turn_boundary` | `available` | `identity_json` | `turns` row | `turn:<turnNo>` | Source Manifest Parity bullets above. |
+| `op_boundary` | `available` | `identity_json` | `ops` row | `op:<turnNo>:<opIndex>` | Source Manifest Parity bullets above. |
+| `user_prompt` | `not_source_visible` | n/a | none | no separate prompt artifact beyond request payload refs | `payloadRefs[]` schema in this section. |
+| `user_image` | `not_source_visible` | n/a | none | no separate image artifact in the v3 ledger schema | `payloadRefs[]` schema in this section. |
+| `assistant_message` | `not_source_visible` | n/a | none | no separate assistant-text artifact beyond response payload refs | `payloadRefs[]` schema in this section. |
+| `reasoning_text` | `available` / `source_empty` / `source_unavailable` | `semantic_text` | `payload_refs.kind=reasoning_stream` mapped to `reasoning_text` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `llm_request` | `available` / `source_empty` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=llm_request` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `llm_response` | `available` / `source_empty` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=llm_response` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `llm_sdk_request` | `available` / `source_empty` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=sdk_request` mapped to `llm_sdk_request` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `llm_sdk_response` | `available` / `source_empty` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=sdk_response` mapped to `llm_sdk_response` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `tool_request` | `available` / `source_empty` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=tool_request` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `tool_response` | `available` / `source_empty` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=tool_response` | producer payload ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `llm_error` | `available` | `identity_json` | failed LLM `ops` row | `op:<turnNo>:<opIndex>:error` | Source Manifest Parity bullets above. |
+| `tool_error` | `available` | `identity_json` | failed tool/session `ops` row | `op:<turnNo>:<opIndex>:error` | Source Manifest Parity bullets above. |
+| `subagent_link` | `available` | `identity_json` | parent op with child session link | `op:<turnNo>:<opIndex>:child_session:<childSessionId>` | Source Manifest Parity bullets above. |
+| `system_op` | `available` | `identity_json` | `ops.kind=system` row | `op:<turnNo>:<opIndex>:system` | Source Manifest Parity bullets above. |
+| `compaction_event` | `available` | `identity_json` | `history-compaction` session `ops` row plus `ops.extras_json` | `op:<turnNo>:<opIndex>:compaction` | Source Manifest Parity bullets above. |
+| `session_metadata` | `available` | `identity_json` | `sessions` row plus `sessions.extras_json` | `session:<sessionId>:metadata` | Source Manifest Parity bullets above. |
+| `log_entry` | `available` / `source_empty` | `semantic_text` | `log_entries` rows with parity extras | `seq:<ledger-seq>:/warnings/<i>`, `/errors/<i>`, or `/error` | Source Manifest Parity bullets above. |
+| `attachment_metadata` | `not_source_visible` | n/a | none | no attachment metadata field in the v3 ledger schema | `payloadRefs[]` schema in this section. |
+| `patch_metadata` | `not_source_visible` | n/a | none | no patch/file-change metadata field in the v3 ledger schema | `payloadRefs[]` schema in this section. |
 
 ## 5. Mapping to Canonical Events
 
@@ -480,10 +617,10 @@ The adapter consumes a v3 ledger and emits canonical events (`canonical-events.m
 
 | v3 source record | Canonical events emitted | Notes |
 |---|---|---|
-| `session_start` | one `SessionStartedEvent` | `NativeID`=`sessionId`; `ParentNativeID`=`parentSessionId` (when present); `Kind`=`headendId→Kind` (§5.2); `AgentName`=`agentId`; `Model`=empty (not known until first LLM op); `Extras`=`{callPath, headendId, originId, ledgerPath, capturePayloads, raw_attributes...}` |
+| `session_start` | one `SessionStartedEvent` | `NativeID`=`sessionId`; `ParentNativeID`=`parentSessionId` (when present); `ParentOpKey`=`parentOpId` (when present); `Kind`=`headendId→Kind` (§5.2); `AgentName`=`agentId`; `Model`=empty (not known until first LLM op); `Extras`=`{callPath, parentSessionId, parentOpId, headendId, originId, ledgerPath, capturePayloads, raw_attributes...}` |
 | `turn_start` | one `TurnStartedEvent` | `SessionNativeID`=`sessionId`; `Seq`=`turn` |
-| `turn_end` | one `TurnFinalizedEvent` + per-op (`OpStartedEvent`+`OpFinalizedEvent`) + per-payloadRef `PayloadRefEvent` + zero or more `LogEntry` from `warnings[]`/`errors[]` + zero or more `SessionStartedEvent` synthesized from each `ops[*].childSessions[]` (if needed for parent→child linkage when the child's own session_start is unknown yet — but typically the child has its own ledger and emits its own session_started; in steady state these synthesized events are no-ops because the ingester deduplicates on `NativeID`) | See §5.3 for op fan-out. |
-| `session_summary` | one `SessionFinalizedEvent` (Status=`completed`\|`failed`); optionally one `LogEntry` (severity=`ERR`) when `status='failed'` to surface the `error` string; optionally one `SessionUpdated` if the summary reveals an `agent_name` or `model` we did not already know | The `childSessions[]` array is reconciled defensively (already covered by per-turn parents), but if any child appears only in the summary (rare/edge), the adapter emits `SessionStartedEvent` for it on best-effort. |
+| `turn_end` | one `TurnFinalizedEvent` + per-op (`OpStartedEvent`+`OpFinalizedEvent`) + per-payloadRef `PayloadRefEvent` + zero or more `LogEntry` from `warnings[]`/`errors[]` + zero or more `SessionStartedEvent` synthesized from each `ops[*].childSessions[]` (if needed for parent→child linkage when the child's own session_start is unknown yet — but typically the child has its own ledger and emits its own session_started; in steady state these synthesized events are linkage hints only because the ingester deduplicates on `NativeID` and preserves real child `session_start` metadata) | See §5.3 for op fan-out. |
+| `session_summary` | one `SessionFinalizedEvent` (Status=`completed`\|`failed`); optionally one `LogEntry` (severity=`ERR`) when `status='failed'` to surface the `error` string; optionally one `SessionUpdated` if the summary reveals an `agent_name` or `model` we did not already know | The `childSessions[]` array is reconciled defensively (already covered by per-turn parents), but if any child appears only in the summary (rare/edge), the adapter emits a best-effort synthesized `SessionStartedEvent` marked `Extras.synthesizedFromParent=true`. That event is not authoritative over a real child `session_start`; the ingester may use it for missing linkage, but must not let it overwrite real child `kind`, `agent_name`, `call_path`, `capturePayloads`, or `attributes` metadata. |
 | `session_error` | one `SessionFinalizedEvent` (Status=`failed`, ErrorClass=`session_error`); one `LogEntry` (severity=`ERR`) | very rare; observe-but-handle. |
 
 ### 5.2 `headendId` → canonical `Kind` mapping
@@ -597,7 +734,7 @@ Cursor is durable because:
 Two independent mechanisms exist; the adapter uses the FIRST one that is present and consistent:
 
 1. **Child-side fast path** (preferred when present): `session_start.parentSessionId` is set on the child's own ledger. **Since the lineage fix `ai-agent@8a0078bc`, `parentSessionId` is a first-class producer guarantee** on every non-root session (`recordSessionStart()`, `session-recorder.ts:364-366`); `parentOpId` is written alongside it **best-effort** — only when the spawning boundary supplies the optional `trace?.parentOpId` (SOW-0030 plan item 3) — so it can be absent even on post-fix snapshots. When the adapter sees `parentSessionId`, it immediately emits `SessionStartedEvent.ParentNativeID = parentSessionId` (and `ParentOpKey = parentOpId` when present) and relies on the ingester to attach. **No parent file required.**
-2. **Parent-side canonical path** (safety net): when the parent's `turn_end.ops[].childSessions[*]` lists this child, the adapter learns linkage from the parent (synthesized `SessionStartedEvent`, `mapper.go:229-260`). This covers pre-fix snapshots on disk whose own `session_start` predates the guarantee and still lacks `parentSessionId`.
+2. **Parent-side canonical path** (safety net): when the parent's `turn_end.ops[].childSessions[*]` lists this child, the adapter learns linkage from the parent (synthesized `SessionStartedEvent`, `mapper.go:229-260`, marked `Extras.synthesizedFromParent=true`). This covers pre-fix snapshots on disk whose own `session_start` predates the guarantee and still lacks `parentSessionId`. If the child's own ledger later supplies a real `session_start` — or supplied one before the parent was replayed — the synthesized row remains only a linkage repair hint. It must not replace the real child `headendId`-derived canonical kind or erase session metadata copied from the real `session_start`.
 
 Out-of-order arrival: a child may be ingested before its parent's `turn_end` lands, OR vice versa. Both orderings are handled because canonical `SessionStartedEvent` is upserted by `NativeID`; the ingester reconciles parent/child as evidence accumulates.
 
@@ -697,7 +834,7 @@ These v3 fields/concepts do not map cleanly into `canonical-events.md` as it sta
 
 8. **`session` ops with multiple `childSessions[]`**. Theoretically a single `kind='session'` op could spawn more than one child (e.g. a fan-out call). Empirically every observed `session` op has exactly one `childSessions[*]` entry. Canonical `OpStartedEvent.ChildSessionNativeID` is a single field. **Recommendation:** leave Phase 1 as "first child only, additional children in `extras_json`"; revisit if a real fan-out case appears.
 
-9. **`history_compaction` semantics**. These sub-agents represent maintenance work (compacting older turns into summary form) rather than real user-visible operations. The UI should optionally filter them out from "main timeline" views. The canonical `kind='sub_agent'` does not distinguish them. **Recommendation:** add a `Subkind` or boolean `Maintenance` flag on canonical sessions, populated when `headendId='history_compaction'`.
+9. **`history_compaction` semantics**. These sub-agents represent maintenance work (compacting older turns into summary form) rather than real user-visible operations. SOW-0097 parity records source-visible compaction as `compaction_event` from the parent `history-compaction` session op and uses the child session metadata for topology. Residual UI recommendation: add a `Subkind` or boolean `Maintenance` flag on canonical sessions, populated when `headendId='history_compaction'`, so the presenter can optionally filter maintenance sessions out from main timeline views without pattern-matching agent names.
 
 10. **`opId` shape**. ai-agent v3 op ids are not UUIDs (e.g. `mp65agab-nrbosb`); they are domain-specific opaque strings unique within a session. Canonical `ops.id` is `TEXT` PRIMARY KEY — already permissive — so this is not a gap, just a note that the adapter MUST NOT assume UUIDs.
 

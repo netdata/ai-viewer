@@ -221,6 +221,7 @@ func TestParseLine_ResponseItemVariants(t *testing.T) {
 		{"function_call_output", `{"type":"function_call_output","call_id":"c1","output":"done"}`, "function_call_output"},
 		{"custom_tool_call", `{"type":"custom_tool_call","call_id":"c2","name":"x","input":"i","status":"completed"}`, "custom_tool_call"},
 		{"custom_tool_call_output", `{"type":"custom_tool_call_output","call_id":"c2","output":"o"}`, "custom_tool_call_output"},
+		{"tool_search_call", `{"type":"tool_search_call","call_id":"ts1","name":"search","arguments":{"query":"q"}}`, "tool_search_call"},
 		{"web_search_call", `{"type":"web_search_call","call_id":"w1","status":"completed","action":{"type":"search","query":"q"}}`, "web_search_call"},
 		{"image_generation_call", `{"type":"image_generation_call","id":"i1","status":"completed"}`, "image_generation_call"},
 		{"compaction", `{"type":"compaction","encrypted_content":"BBBB"}`, "compaction"},
@@ -246,6 +247,88 @@ func TestParseLine_ResponseItemVariants(t *testing.T) {
 	}
 }
 
+func TestParseLine_DirectResponseItemVariants(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		lineBody string
+		wantType string
+	}{
+		{"message", `"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]`, "message"},
+		{"reasoning", `"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]`, "reasoning"},
+		{"function_call", `"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"c1"`, "function_call"},
+		{"function_call_output", `"type":"function_call_output","call_id":"c1","output":"done"`, "function_call_output"},
+		{"custom_tool_call", `"type":"custom_tool_call","call_id":"c2","name":"x","input":"i","status":"completed"`, "custom_tool_call"},
+		{"custom_tool_call_output", `"type":"custom_tool_call_output","call_id":"c2","output":"o"`, "custom_tool_call_output"},
+		{"tool_search_call", `"type":"tool_search_call","call_id":"ts1","name":"search","arguments":{"query":"q"}`, "tool_search_call"},
+		{"web_search_call", `"type":"web_search_call","action":{"type":"search","query":"q"}`, "web_search_call"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			line := `{"timestamp":"2025-11-20T16:59:11.000Z",` + c.lineBody + `}`
+			rec, skip, err := parseLine([]byte(line))
+			if err != nil || skip {
+				t.Fatalf("parseLine(%s direct): err=%v skip=%v", c.name, err, skip)
+			}
+			if rec.Type() != recResponseItem {
+				t.Fatalf("Type() = %q, want %q for direct %s", rec.Type(), recResponseItem, c.name)
+			}
+			if rec.ResponseItem == nil {
+				t.Fatalf("ResponseItem nil for direct %s", c.name)
+			}
+			if rec.ResponseItem.Type != c.wantType {
+				t.Errorf("ResponseItem.Type = %q, want %q", rec.ResponseItem.Type, c.wantType)
+			}
+		})
+	}
+}
+
+func TestParseLine_DirectSessionMetaAndTurnContext(t *testing.T) {
+	t.Parallel()
+
+	metaLine := `{"timestamp":"2025-11-20T16:59:09.857Z","type":"session_meta","id":"session-direct","cwd":"<ROOT>","originator":"codex_exec","cli_version":"0.125.0","source":"exec"}`
+	meta, skip, err := parseLine([]byte(metaLine))
+	if err != nil || skip {
+		t.Fatalf("parseLine(direct session_meta): err=%v skip=%v", err, skip)
+	}
+	if meta.SessionMeta == nil || meta.SessionMeta.ID != "session-direct" || meta.SessionMeta.Originator != "codex_exec" {
+		t.Fatalf("direct session_meta decoded incorrectly: %+v", meta.SessionMeta)
+	}
+
+	turnLine := `{"timestamp":"2025-11-20T16:59:10.000Z","type":"turn_context","turn_id":"turn-direct","model":"gpt-5.1-codex-max","effort":"high","approval_policy":"never"}`
+	turn, skip, err := parseLine([]byte(turnLine))
+	if err != nil || skip {
+		t.Fatalf("parseLine(direct turn_context): err=%v skip=%v", err, skip)
+	}
+	if turn.TurnContext == nil || turn.TurnContext.TurnID != "turn-direct" || turn.TurnContext.Model != "gpt-5.1-codex-max" {
+		t.Fatalf("direct turn_context decoded incorrectly: %+v", turn.TurnContext)
+	}
+}
+
+func TestParseLine_LegacyJSONLSessionHeader(t *testing.T) {
+	t.Parallel()
+
+	line := `{"timestamp":"2025-09-10T19:21:08Z","id":"legacy-session","instructions":null,"git":{"commit_hash":"abc123","branch":"main","repository_url":"git@github.com:example/example.git"}}`
+	rec, skip, err := parseLine([]byte(line))
+	if err != nil || skip {
+		t.Fatalf("parseLine(legacy jsonl session header): err=%v skip=%v", err, skip)
+	}
+	if rec.Type() != recSessionMeta {
+		t.Fatalf("Type() = %q, want %q", rec.Type(), recSessionMeta)
+	}
+	if rec.SessionMeta == nil {
+		t.Fatal("SessionMeta payload not decoded")
+	}
+	if rec.SessionMeta.ID != "legacy-session" || rec.SessionMeta.Timestamp != "2025-09-10T19:21:08Z" {
+		t.Fatalf("legacy header decoded incorrectly: %+v", rec.SessionMeta)
+	}
+	if rec.SessionMeta.Git == nil || rec.SessionMeta.Git.Branch != "main" {
+		t.Fatalf("legacy git decoded incorrectly: %+v", rec.SessionMeta.Git)
+	}
+}
+
 // TestParseLine_ResponseItemOtherIsTolerated asserts the Rust #[serde(other)]
 // ResponseItem::Other catch-all behavior: a known-as-catch-all variant
 // (ghost_snapshot) is NOT a hard fail and NOT an unknown-payload error — it
@@ -260,6 +343,32 @@ func TestParseLine_GhostSnapshotSkippedSilently(t *testing.T) {
 	}
 	if !skip {
 		t.Fatal("ghost_snapshot must be skipped silently (skip=true)")
+	}
+	_ = rec
+}
+
+func TestParseLine_DirectGhostSnapshotSkippedSilently(t *testing.T) {
+	t.Parallel()
+	line := `{"timestamp":"2025-11-20T16:59:11.000Z","type":"ghost_snapshot","data":{}}`
+	rec, skip, err := parseLine([]byte(line))
+	if err != nil {
+		t.Fatalf("direct ghost_snapshot must not error, got %v", err)
+	}
+	if !skip {
+		t.Fatal("direct ghost_snapshot must be skipped silently (skip=true)")
+	}
+	_ = rec
+}
+
+func TestParseLine_RecordTypeStateSkippedSilently(t *testing.T) {
+	t.Parallel()
+	line := `{"record_type":"state"}`
+	rec, skip, err := parseLine([]byte(line))
+	if err != nil {
+		t.Fatalf("record_type state must not error, got %v", err)
+	}
+	if !skip {
+		t.Fatal("record_type state must be skipped silently (skip=true)")
 	}
 	_ = rec
 }

@@ -13,6 +13,15 @@ import (
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
+func TestScanBufferMaxCoversObservedLiveLine(t *testing.T) {
+	t.Parallel()
+
+	const wantLimit = 16 * 1024 * 1024
+	if scanBufferMax != wantLimit {
+		t.Fatalf("scanBufferMax = %d, want %d", scanBufferMax, wantLimit)
+	}
+}
+
 // TestReadOneLine_CompleteAndPartial covers the nil-error (complete line) and
 // io.EOF hold-back (partial trailing line) branches of readOneLine.
 func TestReadOneLine_CompleteAndPartial(t *testing.T) {

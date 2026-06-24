@@ -321,6 +321,81 @@ func TestWriter_SessionStartedInsertsRow(t *testing.T) {
 	}
 }
 
+func TestWriter_SyntheticSessionStartedDoesNotClobberRealSessionStartMetadata(t *testing.T) {
+	t.Parallel()
+
+	const src = "aiagent_v3:/tmp"
+	db := withWriter(t, src, func(ctx context.Context, tx *sql.Tx, w *writer) {
+		events := []canonical.Event{
+			canonical.SessionStartedEvent{
+				EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+				NativeID:     "root-session",
+				RootNativeID: "root-session",
+				Kind:         canonical.KindRoot,
+			},
+			canonical.SessionStartedEvent{
+				EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1200},
+				NativeID:       "child-session",
+				RootNativeID:   "root-session",
+				ParentNativeID: "root-session",
+				Kind:           canonical.KindToolInternal,
+				AgentName:      "tool-output-reader",
+				CallPath:       "root-agent:tool-output-reader",
+				Extras: map[string]any{
+					"capturePayloads": true,
+					"headendId":       "tool_output",
+					"originId":        "root-session",
+					"attr.ledgerPath": "session/child-session.jsonl",
+				},
+			},
+			canonical.SessionStartedEvent{
+				EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1500},
+				NativeID:       "child-session",
+				RootNativeID:   "root-session",
+				ParentNativeID: "root-session",
+				ParentOpKey:    "parent-op-1",
+				Kind:           canonical.KindSubAgent,
+				AgentName:      "summary-child",
+				CallPath:       "root-agent:summary-child",
+				Extras: map[string]any{
+					"synthesizedFromParent": true,
+					"ledgerPath":            "session/child-session.jsonl",
+					"status":                "ok",
+					"callPath":              "root-agent:summary-child",
+					"originId":              "root-session",
+				},
+			},
+		}
+		for _, ev := range events {
+			if err := w.apply(ctx, tx, ev); err != nil {
+				t.Fatalf("apply %T: %v", ev, err)
+			}
+		}
+	})
+
+	if kind := scanString(t, db, `SELECT kind FROM sessions WHERE native_id='child-session'`); kind != "tool_internal" {
+		t.Fatalf("kind = %q, want tool_internal from real child session_start", kind)
+	}
+	if agent := scanString(t, db, `SELECT agent_name FROM sessions WHERE native_id='child-session'`); agent != "tool-output-reader" {
+		t.Fatalf("agent_name = %q, want real child agent_name", agent)
+	}
+	if callPath := scanString(t, db, `SELECT call_path FROM sessions WHERE native_id='child-session'`); callPath != "root-agent:tool-output-reader" {
+		t.Fatalf("call_path = %q, want real child call_path", callPath)
+	}
+	if capture := scanInt(t, db, `SELECT json_extract(extras_json,'$.capturePayloads') FROM sessions WHERE native_id='child-session'`); capture != 1 {
+		t.Fatalf("capturePayloads = %d, want 1 from real child session_start", capture)
+	}
+	if headend := scanString(t, db, `SELECT json_extract(extras_json,'$.headendId') FROM sessions WHERE native_id='child-session'`); headend != "tool_output" {
+		t.Fatalf("headendId = %q, want tool_output from real child session_start", headend)
+	}
+	if ledger := scanString(t, db, `SELECT json_extract(extras_json,'$."attr.ledgerPath"') FROM sessions WHERE native_id='child-session'`); ledger != "session/child-session.jsonl" {
+		t.Fatalf("attr.ledgerPath = %q, want real child ledger path", ledger)
+	}
+	if parentOp := scanString(t, db, `SELECT json_extract(extras_json,'$.aiViewer.parentOpKey') FROM sessions WHERE native_id='child-session'`); parentOp != "parent-op-1" {
+		t.Fatalf("aiViewer.parentOpKey = %q, want synthetic linkage hint preserved", parentOp)
+	}
+}
+
 func TestWriter_SessionUpdatedCoalescesEmptyFields(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)

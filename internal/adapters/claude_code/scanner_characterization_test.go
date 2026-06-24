@@ -66,7 +66,7 @@ func TestReadTranscript_ReplayAtEOFDoesNotMarkChildComplete(t *testing.T) {
 	assertNoReplayEvents(t, emitted, out)
 	assertChildReplayState(t, mapper, wantTs)
 	completed := map[string]completionState{}
-	collectAgentDeferral(mapper, tr, map[string]agentOpFinalize{}, completed)
+	collectAgentDeferral(mapper, tr, map[string]agentOpFinalize{}, completed, map[string]struct{}{})
 	if len(completed) != 0 {
 		t.Fatalf("EOF replay marked child complete despite emit gate: %+v", completed)
 	}
@@ -293,8 +293,8 @@ func assertAgentReplayRef(t *testing.T, mapper *fileMapper, childID string) {
 	if ref.turnSeq != 1 {
 		t.Fatalf("agent op replay turn = %d, want 1", ref.turnSeq)
 	}
-	if ref.opSeq != 2 {
-		t.Fatalf("agent op replay op = %d, want 2", ref.opSeq)
+	if ref.opSeq != parentAgentOpSeq {
+		t.Fatalf("agent op replay op = %d, want %d", ref.opSeq, parentAgentOpSeq)
 	}
 }
 

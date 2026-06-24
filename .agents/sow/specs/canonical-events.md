@@ -221,15 +221,49 @@ type PayloadRefEvent struct {
     SessionNativeID string
     TurnSeq         int
     OpSeq           int
-    PayloadKind     string   // 'llm_request'|'llm_response'|'llm_sdk_request'|'llm_sdk_response'|'llm_reasoning'|'tool_request'|'tool_response'|'log'
+    PayloadKind     string   // 'llm_request'|'llm_response'|'llm_sdk_request'|'llm_sdk_response'|'sdk_request'|'sdk_response'|'llm_reasoning'|'reasoning_stream'|'tool_request'|'tool_response'|'log'
     Format          string   // 'http'|'sse'|'json'|'jsonrpc'|'text'|'binary'
     Compression     string   // 'gzip' | ''
-    LocationURI     string   // 'file://<absolute-path>'  -- source files only, never copied
-    OriginalBytes   int64
+    LocationURI     string   // source selector URI, e.g. file://...?json_pointer=...#L<n>
+    OriginalBytes   int64    // logical payload bytes when recoverable
     StoredBytes     int64
     SHA256          string   // hex; empty when source does not provide
 }
 ```
+
+## Ingestion Parity Artifact Mapping
+
+`PayloadRefEvent` and the surrounding session/turn/op events are the canonical
+representation that the ingestion parity gate verifies. The gate is defined in
+`ingestion-parity.md` and compares source manifests against canonical manifests.
+
+Rules:
+
+- A canonical payload artifact MUST identify the exact logical source artifact.
+- Payload kind aliases are normalized by the parity extractor:
+  `sdk_request -> llm_sdk_request`, `sdk_response -> llm_sdk_response`, and
+  `reasoning_stream -> reasoning_text`.
+  A URI pointing only to a containing file is insufficient for parity unless a
+  line/field/json-pointer selector or equivalent metadata identifies the exact
+  fragment.
+- Adapter-specific inline transcript selectors may refine the artifact class.
+  For claude-code, `llm_response` refs on an LLM op whose JSON pointer matches
+  `/message/content/<index>/text` are assistant-message artifacts, and
+  `tool_request` refs on the internal `user_input` op whose pointer is
+  `/message/content` are user-prompt artifacts.
+- `OriginalBytes` MUST be populated for source-available payload artifacts when
+  the logical payload bytes are recoverable. `-1` is allowed only when the
+  adapter spec documents that the source cannot provide or reconstruct the byte
+  length.
+- `SHA256` SHOULD be populated from the source when available. If the source
+  does not provide a hash but the bytes are recoverable, the parity extractor
+  computes the hash during verification.
+- User prompts and assistant messages are parity artifact classes independent of
+  op taxonomy. They may be represented by existing `kind + name` combinations
+  or by future first-class op kinds; the parity spec, not a UI convenience,
+  decides whether taxonomy changes are required.
+- Synthetic canonical artifacts MUST be marked and documented. They cannot hide
+  a missing source artifact.
 
 ### LogEntryEvent
 
@@ -247,6 +281,24 @@ type LogEntryEvent struct {
     Extras          map[string]any
 }
 ```
+
+For source-visible log artifacts that need exact source parity, adapters may
+store selector proof under `Extras.aiViewer.parity`:
+
+```json
+{
+  "aiViewer": {
+    "parity": {
+      "nativeArtifactId": "line:42:/payload/message",
+      "selectorURI": "file:///sessions/rollout.jsonl#L42",
+      "jsonPointer": "/payload/message"
+    }
+  }
+}
+```
+
+The canonical parity extractor uses this metadata when present; otherwise it
+falls back to the deterministic `log://...` selector derived from the log row.
 
 ### SourceProgressEvent
 

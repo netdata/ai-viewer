@@ -81,7 +81,9 @@ test.describe('a11y', () => {
         theme,
         `/sessions/${encodeURIComponent(id)}`,
         async (p) => {
-          await expect(p.getByRole('heading', { name: 'Tools used' })).toBeVisible();
+          await expect(p.getByRole('group', { name: 'Session overview' })).toBeVisible();
+          await expect(p.getByRole('region', { name: /waterfall visualization/i })).toBeVisible();
+          await expect(p.getByRole('region', { name: 'Turn view' })).toBeVisible();
         },
       );
       expect(

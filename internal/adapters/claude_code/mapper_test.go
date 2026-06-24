@@ -592,6 +592,56 @@ func TestMapper_RecordTypeCoverage(t *testing.T) {
 	}
 }
 
+func TestMapper_APIErrorEmitsFailedLLMOp(t *testing.T) {
+	t.Parallel()
+
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
+		`{"type":"system","subtype":"api_error","uuid":"sy1","sessionId":"s","content":"provider overloaded","error":{"status":529,"type":"overloaded_error","message":"overloaded","requestID":"req_1"},"retryInMs":38317.38269012852,"retryAttempt":1,"timestamp":"2026-05-26T10:00:02.000Z"}`,
+	)
+
+	var started canonical.OpStartedEvent
+	var finalized canonical.OpFinalizedEvent
+	var sawStart, sawFinal, sawErrLog bool
+	for _, ev := range events {
+		switch e := ev.(type) {
+		case canonical.OpStartedEvent:
+			if e.Kind == canonical.OpLLM && e.Name == "api_error" {
+				started = e
+				sawStart = true
+			}
+		case canonical.OpFinalizedEvent:
+			if e.TurnSeq == 1 && e.Seq == 2 {
+				finalized = e
+				sawFinal = true
+			}
+		case canonical.LogEntryEvent:
+			if e.Severity == "ERR" && e.Message == "api_error" {
+				sawErrLog = true
+			}
+		}
+	}
+	if !sawStart {
+		t.Fatal("api_error did not emit a failed LLM op start")
+	}
+	if started.Provider != provider || started.TurnSeq != 1 || started.Seq != 2 {
+		t.Fatalf("api_error LLM start = provider:%q turn:%d seq:%d, want anthropic turn=1 seq=2", started.Provider, started.TurnSeq, started.Seq)
+	}
+	if !sawFinal {
+		t.Fatal("api_error did not emit a failed LLM op finalization")
+	}
+	if finalized.Status != "failed" || finalized.ErrorClass != "api_error_529" || finalized.ErrorMessage != "overloaded" {
+		t.Fatalf("api_error finalize = status:%q class:%q msg:%q, want failed api_error_529 overloaded",
+			finalized.Status, finalized.ErrorClass, finalized.ErrorMessage)
+	}
+	if finalized.EndTs != started.Ts {
+		t.Fatalf("api_error EndTs = %d, want start timestamp %d", finalized.EndTs, started.Ts)
+	}
+	if !sawErrLog {
+		t.Fatal("api_error should still emit an ERR LogEntry")
+	}
+}
+
 // TestMapper_CustomTitleWinsOverLaterAITitle verifies P3: a custom-title sets
 // AgentName, and a LATER ai-title does NOT overwrite it (spec §3.7 precedence:
 // the operator's chosen title wins regardless of arrival order).
@@ -687,7 +737,6 @@ func TestMapper_FileHistorySnapshotEmptyBackupsNoUpdate(t *testing.T) {
 func TestMapper_FileAttachmentNoPayloadRefExtrasCarryFields(t *testing.T) {
 	t.Parallel()
 	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
-		`{"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"go"},"timestamp":"2026-05-26T10:00:00.000Z"}`,
 		`{"type":"attachment","uuid":"at1","sessionId":"s","attachment":{"type":"file","filename":"<HOME>/src/demo/main.go","displayPath":"main.go","content":{"type":"text","file":{"filePath":"<HOME>/src/demo/main.go","content":"package main"}}},"timestamp":"2026-05-26T10:00:01.000Z"}`,
 	)
 	// No PayloadRefEvent may be emitted for a file attachment.
@@ -719,10 +768,10 @@ func TestMapper_FileAttachmentNoPayloadRefExtrasCarryFields(t *testing.T) {
 	}
 }
 
-// TestMapper_NonFileAttachmentNoFieldExtras verifies a non-`file` attachment
-// (e.g. a reminder the harness injected) emits a LogEntry without the
-// file-specific extras and no PayloadRef.
-func TestMapper_NonFileAttachmentNoFieldExtras(t *testing.T) {
+// TestMapper_AttachmentWithoutPathFieldsNoPathExtras verifies an attachment
+// without path fields emits a LogEntry without invented filename/displayPath
+// values and no PayloadRef.
+func TestMapper_AttachmentWithoutPathFieldsNoPathExtras(t *testing.T) {
 	t.Parallel()
 	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
 		`{"type":"attachment","uuid":"at1","sessionId":"s","attachment":{"type":"todo_reminder","content":"do x"},"timestamp":"2026-05-26T10:00:01.000Z"}`,
@@ -737,6 +786,33 @@ func TestMapper_NonFileAttachmentNoFieldExtras(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestMapper_PathCarryingAttachmentExtrasCarryFields(t *testing.T) {
+	t.Parallel()
+	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
+		`{"type":"attachment","uuid":"at1","sessionId":"s","attachment":{"type":"edited_text_file","filename":"/repo/main.go","snippet":"1\tpackage main"},"timestamp":"2026-05-26T10:00:01.000Z"}`,
+	)
+	for _, ev := range events {
+		if _, ok := ev.(canonical.PayloadRefEvent); ok {
+			t.Fatalf("path-carrying attachment must not emit a PayloadRef; got %+v", ev)
+		}
+		le, ok := ev.(canonical.LogEntryEvent)
+		if !ok || le.Message != "attachment" {
+			continue
+		}
+		if le.Extras["attachmentType"] != "edited_text_file" {
+			t.Errorf("attachment LogEntry extras.attachmentType = %v, want edited_text_file", le.Extras["attachmentType"])
+		}
+		if le.Extras["filename"] != "/repo/main.go" {
+			t.Errorf("attachment LogEntry extras.filename = %v, want /repo/main.go", le.Extras["filename"])
+		}
+		if le.Extras["displayPath"] != nil {
+			t.Errorf("attachment without displayPath must not invent displayPath: %+v", le.Extras)
+		}
+		return
+	}
+	t.Fatal("path-carrying attachment must emit a LogEntry")
 }
 
 // TestMapper_PRLinksAccumulateAsArray pins P2.7: multiple pr-link records must

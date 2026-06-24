@@ -2,15 +2,17 @@ package claude_code
 
 import (
 	"encoding/json"
+	"strconv"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
 type toolUseStarted struct {
-	event  canonical.OpStartedEvent
-	toolID string
-	opName string
-	opSeq  int
+	event   canonical.OpStartedEvent
+	toolID  string
+	opName  string
+	opSeq   int
+	childID string
 }
 
 func (m *fileMapper) ensureAssistantTurn() {
@@ -19,6 +21,7 @@ func (m *fileMapper) ensureAssistantTurn() {
 	}
 	m.turnSeq = 1
 	m.opSeqInTurn = 0
+	m.turnFinalized = false
 }
 
 func (m *fileMapper) assistantModelUpdate(advance func(int64) canonical.EventBase, tsUs int64, model string) (canonical.SessionUpdatedEvent, bool) {
@@ -94,20 +97,43 @@ func assistantUsageExtras(u *assistantUsage) map[string]any {
 	return extras
 }
 
-func (m *fileMapper) emitAssistantReasoningOps(content []contentBlock, advance func(int64) canonical.EventBase, tsUs int64, llmSeq int) []canonical.Event {
+func (m *fileMapper) emitAssistantTextPayloads(rec record, content []contentBlock, advance func(int64) canonical.EventBase, tsUs int64, llmSeq int) ([]canonical.Event, error) {
+	out := make([]canonical.Event, 0, len(content))
+	for i := range content {
+		if content[i].Type != "text" {
+			continue
+		}
+		payload, err := m.emitInlinePayload(advance(tsUs), m.turnSeq, llmSeq, "llm_response", "text", rec, assistantTextPointer(i))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, payload)
+	}
+	return out, nil
+}
+
+func (m *fileMapper) emitAssistantReasoningOps(rec record, content []contentBlock, advance func(int64) canonical.EventBase, tsUs int64, llmSeq int) ([]canonical.Event, error) {
 	out := make([]canonical.Event, 0, len(content)*2)
 	for i := range content {
 		if content[i].Type != "thinking" {
 			continue
 		}
-		out = append(out, m.reasoningOpEvents(content[i], advance, tsUs, llmSeq)...)
+		events, err := m.reasoningOpEvents(rec, i, content[i], advance, tsUs, llmSeq)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, events...)
 	}
-	return out
+	return out, nil
 }
 
-func (m *fileMapper) reasoningOpEvents(blk contentBlock, advance func(int64) canonical.EventBase, tsUs int64, llmSeq int) []canonical.Event {
+func (m *fileMapper) reasoningOpEvents(rec record, index int, blk contentBlock, advance func(int64) canonical.EventBase, tsUs int64, llmSeq int) ([]canonical.Event, error) {
 	m.opSeqInTurn++
 	opSeq := m.opSeqInTurn
+	payload, err := m.emitInlinePayload(advance(tsUs), m.turnSeq, opSeq, "llm_reasoning", "text", rec, reasoningPointer(index))
+	if err != nil {
+		return nil, err
+	}
 	return []canonical.Event{
 		canonical.OpStartedEvent{
 			EventBase:       advance(tsUs),
@@ -127,10 +153,11 @@ func (m *fileMapper) reasoningOpEvents(blk contentBlock, advance func(int64) can
 			EndTs:           tsUs,
 			BytesOut:        int64(len(blk.Thinking)),
 		},
-	}
+		payload,
+	}, nil
 }
 
-func (m *fileMapper) emitAssistantToolUseOps(content []contentBlock, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
+func (m *fileMapper) emitAssistantToolUseOps(rec record, content []contentBlock, advance func(int64) canonical.EventBase, tsUs int64) ([]canonical.Event, error) {
 	out := make([]canonical.Event, 0, len(content))
 	for i := range content {
 		if content[i].Type != "tool_use" {
@@ -138,14 +165,20 @@ func (m *fileMapper) emitAssistantToolUseOps(content []contentBlock, advance fun
 		}
 		started := m.toolUseStarted(content[i], advance, tsUs)
 		out = append(out, started.event)
+		payload, err := m.emitInlinePayload(advance(tsUs), m.turnSeq, started.opSeq, "tool_request", "json", rec, toolUseInputPointer(i))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, payload)
 		m.rememberOpenToolUse(started)
 	}
-	return out
+	return out, nil
 }
 
 func (m *fileMapper) toolUseStarted(blk contentBlock, advance func(int64) canonical.EventBase, tsUs int64) toolUseStarted {
 	m.opSeqInTurn++
 	opName, namespace := splitToolName(blk.Name)
+	childID := ""
 	event := canonical.OpStartedEvent{
 		EventBase:       advance(tsUs),
 		SessionNativeID: m.nativeID,
@@ -156,27 +189,28 @@ func (m *fileMapper) toolUseStarted(blk contentBlock, advance func(int64) canoni
 		ToolNamespace:   namespace,
 	}
 	if blk.Name == "Agent" {
-		event = m.agentToolUseStarted(blk, event)
+		event, childID = m.agentToolUseStarted(blk, event)
 	} else {
 		event.Kind = canonical.OpTool
 	}
-	return toolUseStarted{event: event, toolID: blk.ID, opName: opName, opSeq: m.opSeqInTurn}
+	return toolUseStarted{event: event, toolID: blk.ID, opName: opName, opSeq: m.opSeqInTurn, childID: childID}
 }
 
-func (m *fileMapper) agentToolUseStarted(blk contentBlock, event canonical.OpStartedEvent) canonical.OpStartedEvent {
+func (m *fileMapper) agentToolUseStarted(blk contentBlock, event canonical.OpStartedEvent) (canonical.OpStartedEvent, string) {
 	event.Kind = canonical.OpSession
 	if blk.ID != "" {
 		event.Extras = map[string]any{"aiViewer": map[string]any{"toolUseId": blk.ID}}
 	}
+	childID := ""
 	if agentID, ok := m.toolUseToAgent[blk.ID]; ok && agentID != "" {
-		childID := childNativeID(m.nativeID, agentID)
+		childID = childNativeID(m.nativeID, agentID)
 		event.ChildSessionNativeID = childID
 		m.rememberAgentOp(childID, event.Seq)
 	}
 	if desc := agentDescription(blk.Input); desc != "" {
 		event.Name = desc
 	}
-	return event
+	return event, childID
 }
 
 func (m *fileMapper) rememberAgentOp(childID string, opSeq int) {
@@ -184,6 +218,14 @@ func (m *fileMapper) rememberAgentOp(childID string, opSeq int) {
 		m.agentOps = map[string]agentOpRef{}
 	}
 	m.agentOps[childID] = agentOpRef{turnSeq: m.turnSeq, opSeq: opSeq}
+}
+
+func (m *fileMapper) resolveAgentOp(childID string) {
+	delete(m.agentOps, childID)
+	if m.agentOpsResolved == nil {
+		m.agentOpsResolved = map[string]struct{}{}
+	}
+	m.agentOpsResolved[childID] = struct{}{}
 }
 
 func (m *fileMapper) rememberOpenToolUse(started toolUseStarted) {
@@ -194,6 +236,7 @@ func (m *fileMapper) rememberOpenToolUse(started toolUseStarted) {
 		turnSeq: m.turnSeq,
 		opSeq:   started.opSeq,
 		name:    started.opName,
+		childID: started.childID,
 	}
 }
 
@@ -210,4 +253,16 @@ func agentDescription(input json.RawMessage) string {
 		return ""
 	}
 	return m.Description
+}
+
+func assistantTextPointer(index int) string {
+	return "/message/content/" + strconv.Itoa(index) + "/text"
+}
+
+func reasoningPointer(index int) string {
+	return "/message/content/" + strconv.Itoa(index) + "/thinking"
+}
+
+func toolUseInputPointer(index int) string {
+	return "/message/content/" + strconv.Itoa(index) + "/input"
 }

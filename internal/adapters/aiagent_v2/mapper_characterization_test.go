@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -42,10 +43,22 @@ func TestMap_MixedSnapshotPinsTraversalSourceSeqAndRollups(t *testing.T) {
 	wantLocations := []string{
 		"file://" + filepath.ToSlash(filepath.Join(root, "payloads", "root", "request.json.gz")),
 		"file://" + filepath.ToSlash(filepath.Join(root, "payloads", "root", "response.json.gz")),
+		mixedInlinePayloadLocation(root, originID+".json.gz", "/opTree/turns/1/ops/1/childSession/turns/0/ops/0/request/payload"),
+		mixedInlinePayloadLocation(root, originID+".json.gz", "/opTree/turns/1/ops/1/childSession/turns/0/ops/0/response/payload"),
+		mixedInlinePayloadLocation(root, originID+".json.gz", "/opTree/steps/0/ops/0/request/payload"),
+		mixedInlinePayloadLocation(root, originID+".json.gz", "/opTree/steps/0/ops/0/response/payload"),
 	}
 	if diff := cmp.Diff(wantLocations, mixedPayloadLocations(events)); diff != "" {
 		t.Fatalf("payload locations mismatch (-want +got):\n%s", diff)
 	}
+}
+
+func mixedInlinePayloadLocation(root string, filename string, pointer string) string {
+	uri := url.URL{Scheme: "file", Path: filepath.Join(root, filename)}
+	values := uri.Query()
+	values.Set("json_pointer", pointer)
+	uri.RawQuery = values.Encode()
+	return uri.String()
 }
 
 type mixedEventLock struct {
@@ -73,6 +86,8 @@ func mixedExpectedEventLocks() []mixedEventLock {
 		{"TS:child-trace:1", "child-trace::T:1::start"},
 		{"OS:child-trace:1:0:-1:tool:rkind=:child=:orig=tool:reason=", "child-trace::T:1::O:0:child-tool::start"},
 		{"OF:child-trace:1:0:completed:0/0:0/0:0.00:70/110:7/11", "child-trace::T:1::O:0:child-tool::end"},
+		{"PR:child-trace:1:0:tool_request:15/0:", "child-trace::T:1::O:0:child-tool::payload:request"},
+		{"PR:child-trace:1:0:tool_response:15/0:", "child-trace::T:1::O:0:child-tool::payload:response"},
 		{"TF:child-trace:1:completed:0/0:0/0:0.00", "child-trace::T:1::end"},
 		{"SF:child-trace:completed:1700000008800000", "child-trace::end"},
 		{"TF:root-trace:1:completed:10/5:2/1:0.25", "root-trace::T:1::end"},
@@ -80,6 +95,8 @@ func mixedExpectedEventLocks() []mixedEventLock {
 		{"SU:root-trace:internal", "root-trace::S:0::kind"},
 		{"OS:root-trace:10000:0:-1:tool:rkind=:child=:orig=tool:reason=", "root-trace::S:0::O:0:step-tool::start"},
 		{"OF:root-trace:10000:0:completed:0/0:0/0:0.00:333/444:123/456", "root-trace::S:0::O:0:step-tool::end"},
+		{"PR:root-trace:10000:0:tool_request:15/0:", "root-trace::S:0::O:0:step-tool::payload:request"},
+		{"PR:root-trace:10000:0:tool_response:15/0:", "root-trace::S:0::O:0:step-tool::payload:response"},
 		{"OS:root-trace:10000:1:-1:llm:rkind=:child=:orig=llm:reason=", "root-trace::S:0::O:1:step-llm::start"},
 		{"OF:root-trace:10000:1:completed:30/7:3/2:0.50:0/0:0/0", "root-trace::S:0::O:1:step-llm::end"},
 		{"TF:root-trace:10000:completed:30/7:3/2:0.50", "root-trace::S:0::end"},

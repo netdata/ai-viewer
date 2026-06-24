@@ -121,9 +121,11 @@ fi
 
 # All sources have emitted; now request a CLEAN shutdown (SIGTERM) of ONLY this
 # ingester and WAIT for it. The ingester cancels its adapters, drains the worker,
-# and runs the final batch flush synchronously inside ing.Stop()
-# (internal/ingest: Stop() -> wg.Wait(); TestStop_DrainsPendingBatch), so the
-# clean exit GUARANTEES the emitted rows are committed.
+# runs the final batch flush, and runs one final resolver pass synchronously
+# inside ing.Stop() (internal/ingest: Stop() -> wg.Wait() -> linkOrphans;
+# TestStop_DrainsPendingBatch + TestStop_RunsFinalResolverPassAfterWorkerDrain),
+# so the clean exit GUARANTEES the emitted rows are committed and the
+# parent→child op links are repaired.
 kill -TERM "$ing_pid" 2>/dev/null || true
 wait "$ing_pid" 2>/dev/null || true
 
@@ -131,12 +133,12 @@ wait "$ing_pid" 2>/dev/null || true
 # (read-only open so we never write a stray WAL/-journal into the temp DB;
 # sqlite3 is already a repo dependency — scripts/refresh-pricing.sh). The fixtures
 # are version-controlled, so the counts are FIXED and exact: 4 sessions (3 roots +
-# 1 sub_agent child), 1 child row (deep-link/child-table coverage), 3
-# source_progress rows (one per --source). The guard is EXACT, not >=, because
+# 1 sub_agent child), 1 child row (deep-link coverage), 1 linked parent session-op,
+# 3 source_progress rows (one per --source). The guard is EXACT, not >=, because
 # both failure directions matter: too FEW = a partial seed (e.g. SIGTERM
-# interrupted Scan() before a fixture flushed); too MANY = unexpected fixture
-# drift or accidental duplication. Either must fail loudly so the E2E specs only
-# ever run against the known-good shape.
+# interrupted Scan() before a fixture flushed or resolver did not finish); too
+# MANY = unexpected fixture drift or accidental duplication. Either must fail
+# loudly so the E2E specs only ever run against the known-good shape.
 if [[ ! -s "$db" ]]; then
   echo -e "${RED}[ERROR]${NC} seed produced no DB file at $db" >&2
   cat "$tmp/ingest.log" >&2
@@ -144,16 +146,18 @@ if [[ ! -s "$db" ]]; then
 fi
 EXPECT_SESSIONS=4
 EXPECT_CHILDREN=1
+EXPECT_LINKED_OP_CHILDREN=1
 EXPECT_SOURCES=3
 sessions="$(sqlite3 "file:${db}?mode=ro" 'SELECT COUNT(*) FROM sessions;' 2>/dev/null || echo 0)"
 children="$(sqlite3 "file:${db}?mode=ro" 'SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL;' 2>/dev/null || echo 0)"
+linked_op_children="$(sqlite3 "file:${db}?mode=ro" "SELECT COUNT(*) FROM ops WHERE kind='session' AND child_session_id IS NOT NULL;" 2>/dev/null || echo 0)"
 sources="$(sqlite3 "file:${db}?mode=ro" 'SELECT COUNT(*) FROM source_progress;' 2>/dev/null || echo 0)"
-if [[ "${sessions:-0}" -ne "$EXPECT_SESSIONS" || "${children:-0}" -ne "$EXPECT_CHILDREN" || "${sources:-0}" -ne "$EXPECT_SOURCES" ]]; then
-  echo -e "${RED}[ERROR]${NC} partial/unexpected seed (exact counts required): sessions=${sessions} (want ${EXPECT_SESSIONS}), child sessions=${children} (want ${EXPECT_CHILDREN}), sources=${sources} (want ${EXPECT_SOURCES})" >&2
+if [[ "${sessions:-0}" -ne "$EXPECT_SESSIONS" || "${children:-0}" -ne "$EXPECT_CHILDREN" || "${linked_op_children:-0}" -ne "$EXPECT_LINKED_OP_CHILDREN" || "${sources:-0}" -ne "$EXPECT_SOURCES" ]]; then
+  echo -e "${RED}[ERROR]${NC} partial/unexpected seed (exact counts required): sessions=${sessions} (want ${EXPECT_SESSIONS}), child sessions=${children} (want ${EXPECT_CHILDREN}), linked child ops=${linked_op_children} (want ${EXPECT_LINKED_OP_CHILDREN}), sources=${sources} (want ${EXPECT_SOURCES})" >&2
   cat "$tmp/ingest.log" >&2
   exit 1
 fi
-echo -e "${GREEN}seed ok${NC} (${sessions} sessions incl. ${children} child, ${sources} sources from ${#FIXTURES[@]} fixtures)" >&2
+echo -e "${GREEN}seed ok${NC} (${sessions} sessions incl. ${children} child, ${linked_op_children} linked child op, ${sources} sources from ${#FIXTURES[@]} fixtures)" >&2
 
 # Boot the serve binary on 127.0.0.1:$PORT in the FOREGROUND. exec replaces this
 # shell so Playwright's webServer manages the process lifecycle directly and can

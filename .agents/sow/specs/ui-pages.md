@@ -188,7 +188,7 @@ To add a new page following the pattern:
 6. Tests: 1 file covering loading / error / empty / populated / drill-down
 7. Add the route to the `COVERAGE_INCLUDE` and `PER_DIR_GLOBS` in `vitest.coverage.mjs` (the verifier enforces lockstep)
 8. Screenshot in light + dark via `playwright_headless`
-9. Run all gates; run the 5-reviewer cycle; commit
+9. Run all gates; run the applicable external reviewer gate; commit
 10. Add the page to this catalog under "Page catalog"
 
 ## What lives outside the pattern

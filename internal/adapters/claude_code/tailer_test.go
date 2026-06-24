@@ -365,13 +365,22 @@ func TestTranscriptForRel(t *testing.T) {
 		wantNative string
 		wantParent string
 		wantKind   canonical.SessionKind
+		wantOK     bool
 	}{
-		{"-home-x/sess-1.jsonl", "sess-1", "", canonical.KindRoot},
-		{"-home-x/sess-1/subagents/agent-abc123.jsonl", "sess-1:agent:abc123", "sess-1", canonical.KindSubAgent},
-		{"-home-x/sess-1/subagents/wf/agent-def456.jsonl", "sess-1:agent:def456", "sess-1", canonical.KindSubAgent},
+		{"-home-x/sess-1.jsonl", "sess-1", "", canonical.KindRoot, true},
+		{"-home-x/sess-1/subagents/agent-abc123.jsonl", "sess-1:agent:abc123", "sess-1", canonical.KindSubAgent, true},
+		{"-home-x/sess-1/subagents/wf/agent-def456.jsonl", "sess-1:agent:def456", "sess-1", canonical.KindSubAgent, true},
+		{"-home-x/sess-1/subagents/workflows/wf-1/journal.jsonl", "", "", "", false},
 	}
 	for _, c := range cases {
 		got, ok := transcriptForRel(root, c.rel)
+		if ok != c.wantOK {
+			t.Errorf("transcriptForRel(%q): ok=%v, want %v", c.rel, ok, c.wantOK)
+			continue
+		}
+		if !c.wantOK {
+			continue
+		}
 		if !ok {
 			t.Errorf("transcriptForRel(%q): ok=false", c.rel)
 			continue

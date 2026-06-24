@@ -48,9 +48,9 @@ func mapRecord(rec record, sourceID, sessionRoot string) ([]canonical.Event, err
 	case recTurnEnd:
 		return mapTurnEnd(rec, base, sessionRoot)
 	case recSessionSummary:
-		return mapSessionSummary(rec, base, tsUs), nil
+		return mapSessionSummary(rec, base, tsUs, sessionRoot), nil
 	case recSessionError:
-		return mapSessionError(rec, base, tsUs), nil
+		return mapSessionError(rec, base, tsUs, sessionRoot), nil
 	default:
 		// Unreachable: parseLine refuses unknown record types.
 		return nil, fmt.Errorf("aiagent_v3: unhandled record type %q", rec.Common.RecordType)
@@ -98,6 +98,9 @@ func mapSessionStart(rec record, base canonical.EventBase) []canonical.Event {
 	}
 	if body.CallPath != "" {
 		extras["callPath"] = body.CallPath
+	}
+	if body.ParentSessionID != "" {
+		extras["parentSessionId"] = body.ParentSessionID
 	}
 	if body.ParentOpID != "" {
 		extras["parentOpId"] = body.ParentOpID
@@ -202,7 +205,8 @@ func mapTurnEnd(rec record, base canonical.EventBase, sessionRoot string) ([]can
 	}
 
 	// Warnings / errors as LogEntry rows (spec §9.5).
-	for _, msg := range body.Warnings {
+	for i, msg := range body.Warnings {
+		pointer := fmt.Sprintf("/warnings/%d", i)
 		out = append(out, canonical.LogEntryEvent{
 			EventBase:       advance(),
 			SessionNativeID: rec.Common.SessionID,
@@ -210,9 +214,11 @@ func mapTurnEnd(rec record, base canonical.EventBase, sessionRoot string) ([]can
 			Severity:        "WRN",
 			Source:          Format,
 			Message:         msg,
+			Extras:          v3LogParityExtras(sessionRoot, rec, pointer),
 		})
 	}
-	for _, msg := range body.Errors {
+	for i, msg := range body.Errors {
+		pointer := fmt.Sprintf("/errors/%d", i)
 		out = append(out, canonical.LogEntryEvent{
 			EventBase:       advance(),
 			SessionNativeID: rec.Common.SessionID,
@@ -220,6 +226,7 @@ func mapTurnEnd(rec record, base canonical.EventBase, sessionRoot string) ([]can
 			Severity:        "ERR",
 			Source:          Format,
 			Message:         msg,
+			Extras:          v3LogParityExtras(sessionRoot, rec, pointer),
 		})
 	}
 	return out, nil
@@ -264,7 +271,7 @@ func synthesizedChildSessionStarted(rec record, child childSessionRef, base cano
 	}
 }
 
-func mapSessionSummary(rec record, base canonical.EventBase, tsUs int64) []canonical.Event {
+func mapSessionSummary(rec record, base canonical.EventBase, tsUs int64, sessionRoot string) []canonical.Event {
 	body := rec.SessionSummary
 	status := canonical.StatusCompleted
 	if body.Status == "failed" {
@@ -334,6 +341,7 @@ func mapSessionSummary(rec record, base canonical.EventBase, tsUs int64) []canon
 			Severity:        "ERR",
 			Source:          Format,
 			Message:         body.Error,
+			Extras:          v3LogParityExtras(sessionRoot, rec, "/error"),
 		})
 	}
 	// Synthesize SessionStartedEvent for every child listed in the
@@ -347,7 +355,7 @@ func mapSessionSummary(rec record, base canonical.EventBase, tsUs int64) []canon
 	return events
 }
 
-func mapSessionError(rec record, base canonical.EventBase, tsUs int64) []canonical.Event {
+func mapSessionError(rec record, base canonical.EventBase, tsUs int64, sessionRoot string) []canonical.Event {
 	body := rec.SessionError
 	// Round-trip attributes into extras (SOW-0064).
 	var extras map[string]any
@@ -373,6 +381,7 @@ func mapSessionError(rec record, base canonical.EventBase, tsUs int64) []canonic
 			Severity:        "ERR",
 			Source:          Format,
 			Message:         body.Error,
+			Extras:          v3LogParityExtras(sessionRoot, rec, "/error"),
 		},
 	}
 	if extras != nil {

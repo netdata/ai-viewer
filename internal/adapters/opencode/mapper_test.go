@@ -59,11 +59,19 @@ func asgMsg(id string, createdMs int64, completedMs *int64, provider, model stri
 	return messageRow{ID: id, SessionID: "ses_x", TimeCreatedMs: createdMs, TimeUpdatedMs: createdMs, Data: raw}
 }
 
-// usrMsg builds a user messageRow (the mapper emits no turn for it; it only
-// anchors the assistant turn that follows).
+// usrMsg builds a user messageRow. It anchors the following assistant turn.
 func usrMsg(id string, createdMs int64) messageRow {
 	raw, _ := json.Marshal(map[string]any{"role": "user", "time": map[string]any{"created": createdMs}})
 	return messageRow{ID: id, SessionID: "ses_x", TimeCreatedMs: createdMs, TimeUpdatedMs: createdMs, Data: raw}
+}
+
+func inputRow(id string, text string) *sessionInputRow {
+	return inputRowPrompt(id, map[string]any{"text": text})
+}
+
+func inputRowPrompt(id string, prompt map[string]any) *sessionInputRow {
+	raw, _ := json.Marshal(prompt)
+	return &sessionInputRow{ID: id, SessionID: "ses_x", Prompt: raw, TimeCreatedMs: 1400}
 }
 
 // stepStart / stepFinish build the LLM-op delimiter parts. stepFinish carries
@@ -201,6 +209,16 @@ func opFinals(events []canonical.Event) []canonical.OpFinalizedEvent {
 	for _, ev := range events {
 		if f, ok := ev.(canonical.OpFinalizedEvent); ok {
 			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func payloadRefs(events []canonical.Event) []canonical.PayloadRefEvent {
+	var out []canonical.PayloadRefEvent
+	for _, ev := range events {
+		if p, ok := ev.(canonical.PayloadRefEvent); ok {
+			out = append(out, p)
 		}
 	}
 	return out
@@ -373,23 +391,70 @@ func finalizes(events []canonical.Event) []canonical.SessionFinalizedEvent {
 
 // --- Turn synthesis + per-turn token deltas -----------------------------------
 
-func TestMapSession_UserMessageEmitsNothing(t *testing.T) {
+func TestMapSession_UserMessageEmitsPromptOp(t *testing.T) {
 	s := rootSession("ses_x", 0)
 	c := int64(3000)
 	// A user message precedes the assistant turn (opencode pairs user→assistant;
-	// the assistant message IS the turn). The user message must emit nothing and
-	// must NOT consume a turn Seq.
+	// the assistant message IS the turn). The user message must not open a
+	// separate turn, but it is a source-visible prompt and must emit an internal
+	// user_input op inside the assistant turn.
+	user := usrMsg("msg_u", 1400)
+	assistant := asgMsg("msg_a", 1500, &c, "the-alias", "the-model", tokenCounts{Input: 50, Output: 5}, 0.1, "stop", "")
+	var assistantData messageData
+	if err := json.Unmarshal(assistant.Data, &assistantData); err != nil {
+		t.Fatalf("decode assistant: %v", err)
+	}
+	assistantData.ParentID = "msg_u"
+	assistant.Data, _ = json.Marshal(assistantData)
 	msgs := []messageWithParts{
-		mwp(usrMsg("msg_u", 1400)),
-		mwp(asgMsg("msg_a", 1500, &c, "the-alias", "the-model", tokenCounts{Input: 50, Output: 5}, 0.1, "stop", "")),
+		{Message: user, Input: inputRow("msg_u", "run tests")},
+		mwp(assistant),
 	}
 	evs := run(t, s, msgs)
 	if n := countKind(evs, canonical.EvTurnStarted); n != 1 {
-		t.Fatalf("TurnStarted = %d want 1 (user message must not open a turn)", n)
+		t.Fatalf("TurnStarted = %d want 1 (user message must not open a separate turn)", n)
+	}
+	starts := opStarts(evs)
+	if len(starts) == 0 || starts[0].Kind != canonical.OpInternal || starts[0].Name != "user_input" || starts[0].Seq != 1 {
+		t.Fatalf("first op start = %+v, want seq=1 internal user_input", starts)
+	}
+	finals := opFinals(evs)
+	if len(finals) == 0 || finals[0].Seq != 1 || finals[0].Status != "completed" || finals[0].EndTs != 1400000 {
+		t.Fatalf("first op final = %+v, want completed user_input at user timestamp", finals)
+	}
+	refs := payloadRefs(evs)
+	if len(refs) == 0 || refs[0].OpSeq != 1 || refs[0].PayloadKind != "tool_request" || refs[0].Format != "text" {
+		t.Fatalf("first payload ref = %+v, want user_prompt tool_request text on op seq 1", refs)
+	}
+	if refs[0].LocationURI != "opencode-sqlite://?input_id=msg_u&field=prompt.text" {
+		t.Fatalf("user prompt LocationURI = %q", refs[0].LocationURI)
 	}
 	tf := turnFinals(evs)
 	if len(tf) != 1 || tf[0].Seq != 1 {
 		t.Fatalf("turn finals = %+v want one turn with Seq=1", tf)
+	}
+}
+
+func TestMapSession_UserPromptSourceUnavailableWhenInputMissing(t *testing.T) {
+	s := rootSession("ses_x", 0)
+	c := int64(3000)
+	assistant := asgMsg("msg_a", 1500, &c, "the-alias", "the-model", tokenCounts{Input: 50, Output: 5}, 0.1, "stop", "")
+	var assistantData messageData
+	if err := json.Unmarshal(assistant.Data, &assistantData); err != nil {
+		t.Fatalf("decode assistant: %v", err)
+	}
+	assistantData.ParentID = "msg_u"
+	assistant.Data, _ = json.Marshal(assistantData)
+	evs := run(t, s, []messageWithParts{
+		mwp(usrMsg("msg_u", 1400)),
+		mwp(assistant),
+	})
+	refs := payloadRefs(evs)
+	if len(refs) == 0 || refs[0].OpSeq != 1 || refs[0].PayloadKind != "tool_request" {
+		t.Fatalf("first payload ref = %+v, want source-unavailable user prompt ref", refs)
+	}
+	if refs[0].LocationURI != "" || refs[0].OriginalBytes != -1 {
+		t.Fatalf("source-unavailable ref = uri %q originalBytes %d, want empty uri and -1", refs[0].LocationURI, refs[0].OriginalBytes)
 	}
 }
 
@@ -952,6 +1017,19 @@ func TestMapSession_PatchNotAnOpAddsExtras(t *testing.T) {
 				if len(arr) != 2 {
 					t.Fatalf("patch_files len = %d want 2", len(arr))
 				}
+				patches, _ := op.Extras["patches"].([]map[string]any)
+				if len(patches) != 1 {
+					t.Fatalf("patches len = %d want 1", len(patches))
+				}
+				if patches[0]["part_id"] != "prt_2" || patches[0]["hash"] != "deadbeef" {
+					t.Fatalf("patch parity metadata = %+v", patches[0])
+				}
+				if patches[0]["files_count"] != int64(2) {
+					t.Fatalf("patch files_count = %v want 2", patches[0]["files_count"])
+				}
+				if patches[0]["files_sha256"] != patchFilesSHA256([]string{"/x/a.go", "/x/b.go"}) {
+					t.Fatalf("patch files_sha256 = %v", patches[0]["files_sha256"])
+				}
 			}
 		}
 	}
@@ -977,6 +1055,9 @@ func TestMapSession_CompactionInfoLog(t *testing.T) {
 			found = true
 			if l.Source != Format {
 				t.Fatalf("log Source = %q want %q", l.Source, Format)
+			}
+			if l.Extras["part_id"] != "prt_2" {
+				t.Fatalf("compaction log extras[part_id] = %v, want prt_2", l.Extras["part_id"])
 			}
 		}
 	}
@@ -1017,6 +1098,9 @@ func TestMapSession_RetryWarnLog(t *testing.T) {
 	if retryLog.Extras["attempt"] != 3 {
 		t.Errorf("retry WRN extras[attempt] = %v, want 3", retryLog.Extras["attempt"])
 	}
+	if retryLog.Extras["part_id"] != "prt_2" {
+		t.Errorf("retry WRN extras[part_id] = %v, want prt_2", retryLog.Extras["part_id"])
+	}
 }
 
 // TestMapSession_RetryWarnLogNoErrorName pins the forward-compat fallback (P3-1):
@@ -1050,6 +1134,9 @@ func TestMapSession_RetryWarnLogNoErrorName(t *testing.T) {
 	}
 	if _, ok := retryLog.Extras["error.name"]; ok {
 		t.Errorf("retry WRN extras must omit error.name when absent; got %v", retryLog.Extras["error.name"])
+	}
+	if retryLog.Extras["part_id"] != "prt_2" {
+		t.Errorf("retry WRN extras[part_id] = %v, want prt_2", retryLog.Extras["part_id"])
 	}
 }
 
@@ -1101,6 +1188,9 @@ func TestMapSession_FilePartLogEntry(t *testing.T) {
 		if l.Extras["mime"] != "image/png" {
 			t.Errorf("file-attachment extras.mime = %v, want image/png", l.Extras["mime"])
 		}
+		if l.Extras["part_id"] != "prt_2" {
+			t.Errorf("file-attachment extras.part_id = %v, want prt_2", l.Extras["part_id"])
+		}
 		// Scoped to the turn and the open LLM op (prt_1 opened one).
 		if l.TurnSeq != 1 {
 			t.Errorf("file-attachment LogEntry TurnSeq = %d, want 1", l.TurnSeq)
@@ -1108,6 +1198,68 @@ func TestMapSession_FilePartLogEntry(t *testing.T) {
 	}
 	if found != 1 {
 		t.Fatalf("file-attachment INF LogEntry count = %d, want 1", found)
+	}
+}
+
+func TestMapSession_UserPromptImageFilesEmitPayloadRefs(t *testing.T) {
+	s := rootSession("ses_x", 0)
+	user := usrMsg("msg_u", 1400)
+	completed := int64(2200)
+	msgs := []messageWithParts{
+		{
+			Message: user,
+			Input: inputRowPrompt("msg_u", map[string]any{
+				"text": "inspect this",
+				"files": []any{
+					map[string]any{
+						"uri":         "file:///tmp/screenshot.png",
+						"mime":        "image/png",
+						"name":        "screenshot.png",
+						"description": "screen",
+					},
+					map[string]any{
+						"uri":  "file:///tmp/readme.txt",
+						"mime": "text/plain",
+						"name": "readme.txt",
+					},
+				},
+			}),
+		},
+		mwp(asgMsg("msg_a", 1500, &completed, "the-alias", "the-model", tokenCounts{Input: 10}, 0.1, "stop", ""),
+			stepStart("prt_1"),
+			stepFinish("prt_2", 10, 0, 0, 0, 0, 0.1),
+		),
+	}
+
+	refs := payloadRefs(run(t, s, msgs))
+	var textRefs, imageRefs, textFileRefs int
+	for _, ref := range refs {
+		if ref.PayloadKind != "tool_request" {
+			continue
+		}
+		switch ref.LocationURI {
+		case "opencode-sqlite://?input_id=msg_u&field=prompt.text":
+			textRefs++
+			if ref.Format != "text" || ref.OriginalBytes != int64(len("inspect this")) {
+				t.Fatalf("prompt text ref = format:%q bytes:%d", ref.Format, ref.OriginalBytes)
+			}
+		case "opencode-sqlite://?input_id=msg_u&field=prompt.files.0":
+			imageRefs++
+			if ref.Format != "json" || ref.OriginalBytes <= 0 {
+				t.Fatalf("prompt image ref = format:%q bytes:%d", ref.Format, ref.OriginalBytes)
+			}
+		case "opencode-sqlite://?input_id=msg_u&field=prompt.files.1":
+			textFileRefs++
+		}
+	}
+	if textRefs != 1 {
+		t.Fatalf("prompt text ref count = %d, want 1", textRefs)
+	}
+	if imageRefs != 1 {
+		t.Fatalf("prompt image ref count = %d, want 1", imageRefs)
+	}
+	if textFileRefs != 0 {
+		t.Fatalf("non-image prompt file refs = %d, want 0", textFileRefs)
 	}
 }
 

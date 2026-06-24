@@ -96,6 +96,22 @@ func (m *fileMapper) enrichFinalizedOp(callID string, advance func(int64) canoni
 	return out
 }
 
+// finalizeImageGeneration handles event_msg.image_generation_end (spec rule
+// #12). Unlike exec/mcp/patch end-events, it carries no extra telemetry; it is
+// the source-visible close signal for the media tool op.
+func (m *fileMapper) finalizeImageGeneration(rec record, advance func(int64) canonical.EventBase, tsUs int64) []canonical.Event {
+	p := rec.EventMsg
+	op, ok := m.openOps[p.CallID]
+	if !ok || op.finalized {
+		return m.enrichFinalizedOp(p.CallID, advance, tsUs, p.Type, nil, "", "")
+	}
+	op.finalized = true
+	delete(m.openOps, p.CallID)
+	m.refreshHasOpenToolCall(op.turnID)
+	m.recordFinalizedOp(p.CallID, op, "completed", "")
+	return m.finalizeWithExtras(op, advance, tsUs, "completed", "")
+}
+
 // correctFinalizedOp emits an OpFinalized that re-applies an authoritative
 // terminal status onto an already-finalized op's (turn,seq) row (G1). Used when an
 // exec_command_end exit_code (output-first ordering) must override the status the

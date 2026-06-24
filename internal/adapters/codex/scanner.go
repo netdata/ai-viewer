@@ -28,9 +28,8 @@ const progressEveryDuration = 5 * time.Second
 
 // scanAll walks the sessions root and reads every modern rollout from its
 // cursor offset to EOF, emitting events and periodic SourceProgress. Legacy
-// flat .json files emit exactly one informational SourceError each (first
-// sight) and are then suppressed via the cursor's LegacyJSON map (spec
-// §"Legacy"; rule #24 deferral). A modern file with no session_meta on its
+// flat .json files are static historical snapshots; scan ingests each valid
+// file once and records it in the cursor's LegacyJSON map. A modern file with no session_meta on its
 // first parseable line is skipped with a SourceError and its offset held at 0
 // so a later append retries (rule #24). At EOF a hanging open turn is finalized
 // failed/incomplete ONLY when the file mtime is stale ≥ 1 h (rule #23).
@@ -42,7 +41,10 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 	}
 	cur := normalizeScanCursor(start)
 	resolvedRoot := resolveScanRoot(root)
-	cur = reportLegacy(cur, disc.legacy, onError)
+	cur, err = scanLegacyRollouts(ctx, resolvedRoot, sourceID, disc.legacy, cur, out, onError)
+	if err != nil {
+		return cur, err
+	}
 	cur, err = scanModernRollouts(ctx, resolvedRoot, sourceID, disc.modern, cur, out, onError)
 	if err != nil {
 		return cur, err
@@ -75,6 +77,15 @@ func scanModernRollouts(ctx context.Context, resolvedRoot, sourceID string, roll
 			return cur, err
 		}
 		fc := cur.fileCursor(r.rel)
+		skip, skipErr := skipUnchangedEOFFinalizedRollout(r, fc)
+		if skipErr != nil {
+			onError(skipErr)
+			continue
+		}
+		if skip {
+			cur = cur.withFile(r.rel, fc)
+			continue
+		}
 		updated, n, err := readRollout(ctx, resolvedRoot, r, sourceID, fc, out, onError, seenIDs)
 		if err != nil {
 			if isContextStop(err) {
@@ -123,20 +134,6 @@ func (c Cursor) fileCursor(rel string) FileCursor {
 		return FileCursor{}
 	}
 	return c.Files[rel]
-}
-
-// reportLegacy emits one informational SourceError per not-yet-seen legacy file
-// and returns a cursor recording each as seen (suppression). The receiver is
-// not mutated. Deterministic order (the caller sorts the basenames).
-func reportLegacy(cur Cursor, legacy []string, onError func(error)) Cursor {
-	for _, base := range legacy {
-		if cur.legacyIngested(base) {
-			continue
-		}
-		onError(fmt.Errorf("codex: legacy flat .json rollout %q is not ingested in v1 (legacy_json_format=false); a Phase-2.5 follow-up may add support", base))
-		cur = cur.withLegacyIngested(base)
-	}
-	return cur
 }
 
 // readRollout parses one modern rollout from its cursor offset to EOF, emits

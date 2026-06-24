@@ -12,7 +12,7 @@ together. The ai-viewer project ingests codex JSONL files
 adapter. Your job: figure out what the codex CLI actually emits,
 what we capture, and what we miss.
 
-FILE PATHS (relative to repo root /home/costa/src/ai-viewer.git):
+FILE PATHS (relative to repo root /home/user/src/ai-viewer.git):
 
 Our codex adapter:
   internal/adapters/codex/adapter.go

@@ -15,6 +15,10 @@ func (m *mapEmitter) mapSession(v sessionVisit) {
 	}
 
 	sessionPath := v.node.TraceID
+	sessionPointer := v.jsonPointer
+	if sessionPointer == "" {
+		sessionPointer = "/opTree"
+	}
 	startedTs := sessionStartedTs(m.ctx, v.node)
 	startInput := sessionStartedInput{
 		node:           v.node,
@@ -29,10 +33,10 @@ func (m *mapEmitter) mapSession(v sessionVisit) {
 	}
 	m.append(buildSessionStarted(m.ctx, startInput))
 
-	m.mapTurns(v.node, v.depth, sessionPath)
-	m.mapSteps(v.node, v.depth, sessionPath)
+	m.mapTurns(v.node, v.depth, sessionPath, sessionPointer)
+	m.mapSteps(v.node, v.depth, sessionPath, sessionPointer)
 	m.emitSessionFinalized(v.node, sessionPath)
-	m.emitSessionErrorLog(v.node, sessionPath)
+	m.emitSessionErrorLog(v.node, sessionPath, sessionPointer)
 }
 
 type sessionStartedInput struct {
@@ -106,6 +110,9 @@ func addOptionalSessionExtras(extras map[string]any, node opTree) {
 	if node.ID != "" {
 		extras["nodeId"] = node.ID
 	}
+	if len(node.Attributes) > 0 {
+		extras["attributes"] = node.Attributes
+	}
 	if len(node.Totals) > 0 {
 		extras["totals"] = node.Totals
 	}
@@ -145,9 +152,13 @@ func buildSessionFinalized(ctx *mapContext, node opTree, sessionPath string) can
 	}
 }
 
-func (m *mapEmitter) emitSessionErrorLog(node opTree, sessionPath string) {
+func (m *mapEmitter) emitSessionErrorLog(node opTree, sessionPath string, sessionPointer string) {
 	if node.Success == nil || *node.Success || node.Error == "" {
 		return
+	}
+	extras, err := aiAgentV2LogParityExtras(m.ctx, sessionPointer+"/error")
+	if err != nil {
+		m.report(err)
 	}
 	m.append(canonical.LogEntryEvent{
 		EventBase:       baseEvent(m.ctx, sessionPath+"::sessionError", endTsOrStarted(node)),
@@ -155,5 +166,6 @@ func (m *mapEmitter) emitSessionErrorLog(node opTree, sessionPath string) {
 		Severity:        "ERR",
 		Source:          Format,
 		Message:         node.Error,
+		Extras:          extras,
 	})
 }

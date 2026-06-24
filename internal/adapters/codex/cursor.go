@@ -21,15 +21,14 @@ const cursorVersion = 1
 // Unlike claude_code's cursor, codex has no sidecar/sub-agent deferral (forks
 // and sub-agents are separate top-level rollout files linked by id), so the
 // MetaSeen/Parked/Finalized fields are intentionally absent here. The codex
-// addition is LegacyJSON: a per-file suppression map so an unsupported legacy
-// .json file emits exactly one informational SourceError and is then quiet.
+// addition is LegacyJSON: a per-file one-shot map for static legacy .json files
+// consumed during full scans.
 type Cursor struct {
 	// Files maps a rollout's relative path to its consumption state.
 	Files map[string]FileCursor `json:"files,omitempty"`
-	// LegacyJSON records which legacy flat .json files have already been seen
-	// (and a single informational SourceError emitted). Default off: a file
-	// absent from this map has not been reported yet. Observability/suppression
-	// only — not part of After() ordering.
+	// LegacyJSON records which legacy flat .json files have already been consumed
+	// by a full scan. Default off: a file absent from this map has not been
+	// consumed yet. Observability/suppression only — not part of After() ordering.
 	LegacyJSON map[string]LegacyFile `json:"legacy_json,omitempty"`
 	// Version is the on-disk format version. Defaults to cursorVersion on
 	// construction; ParseCursor refuses anything else.
@@ -66,10 +65,9 @@ type FileCursor struct {
 	EOFFinalizedSize int64 `json:"eof_finalized_size,omitempty"`
 }
 
-// LegacyFile is the per-legacy-file suppression record. Ingested is a misnomer
-// kept for cursor-JSON stability with the spec example (adapter-codex.md
-// §"Cursor"): for v1 it records that the file has been SEEN and its one-time
-// informational SourceError emitted, not that its content was ingested.
+// LegacyFile is the per-legacy-file consumption record. It keeps the original
+// cursor JSON field name from the spec and records that the static legacy file
+// has already been scanned.
 type LegacyFile struct {
 	Ingested bool `json:"ingested"`
 }
@@ -177,7 +175,7 @@ func (c Cursor) withFile(rel string, fc FileCursor) Cursor {
 }
 
 // legacyIngested reports whether the legacy .json file at basename has already
-// been seen and its one-time SourceError emitted. Defaults to false (off).
+// been consumed by a full scan. Defaults to false (off).
 func (c Cursor) legacyIngested(basename string) bool {
 	if c.LegacyJSON == nil {
 		return false
@@ -186,8 +184,7 @@ func (c Cursor) legacyIngested(basename string) bool {
 }
 
 // withLegacyIngested returns a new Cursor recording that the legacy .json file
-// at basename has been seen (its one informational SourceError emitted). The
-// receiver is not mutated.
+// at basename has been consumed by a full scan. The receiver is not mutated.
 func (c Cursor) withLegacyIngested(basename string) Cursor {
 	out := c.clone()
 	out.LegacyJSON[basename] = LegacyFile{Ingested: true}

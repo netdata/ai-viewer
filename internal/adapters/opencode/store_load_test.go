@@ -116,3 +116,81 @@ func TestLoadSessionTree_ZeroMessages(t *testing.T) {
 		t.Errorf("empty session emitted %d SessionStarted, want 1", n)
 	}
 }
+
+func TestLoadAndMapSession_SessionMessageSystemLogs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_switch", "", 1000, 1700, 0)
+	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+		VALUES
+		('evt_agent', 'ses_switch', 'agent-switched', 1, 1600, 1600, '{"agent":"reviewer"}'),
+		('evt_model', 'ses_switch', 'model-switched', 2, 1700, 1700, '{"model":{"id":"gpt-5","providerID":"openai","variant":"fast"}}')`); err != nil {
+		t.Fatalf("insert session_message rows: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, schema := introspect(t, path)
+
+	evs, skipped, err := loadAndMapSession(ctxBG(), db, schema, "opencode:test", "ses_switch", silentLogger(), func(error) {})
+	if err != nil {
+		t.Fatalf("loadAndMapSession: %v", err)
+	}
+	if skipped {
+		t.Fatal("loadAndMapSession reported skipped; want emit")
+	}
+
+	logs := logEntries(evs)
+	if len(logs) != 2 {
+		t.Fatalf("session_message log entries = %d, want 2: %#v", len(logs), logs)
+	}
+	assertSessionMessageLog(t, logs[0], "evt_agent", "agent-switched", 1, "session agent switched", map[string]any{
+		"agent": "reviewer",
+	})
+	assertSessionMessageLog(t, logs[1], "evt_model", "model-switched", 2, "session model switched", map[string]any{
+		"model_id":    "gpt-5",
+		"provider_id": "openai",
+		"variant":     "fast",
+	})
+}
+
+func logEntries(evs []canonical.Event) []canonical.LogEntryEvent {
+	var out []canonical.LogEntryEvent
+	for _, ev := range evs {
+		if log, ok := ev.(canonical.LogEntryEvent); ok {
+			out = append(out, log)
+		}
+	}
+	return out
+}
+
+func assertSessionMessageLog(t *testing.T, log canonical.LogEntryEvent, id, typ string, seq int64, message string, fields map[string]any) {
+	t.Helper()
+	if log.Message != message {
+		t.Fatalf("log message = %q, want %q", log.Message, message)
+	}
+	if log.Severity != "INF" {
+		t.Fatalf("log severity = %q, want INF", log.Severity)
+	}
+	if log.SessionNativeID != "ses_switch" {
+		t.Fatalf("log session = %q, want ses_switch", log.SessionNativeID)
+	}
+	if log.Extras["session_message_id"] != id {
+		t.Fatalf("log session_message_id = %#v, want %q", log.Extras["session_message_id"], id)
+	}
+	if log.Extras["session_message_type"] != typ {
+		t.Fatalf("log session_message_type = %#v, want %q", log.Extras["session_message_type"], typ)
+	}
+	if log.Extras["seq"] != seq {
+		t.Fatalf("log seq = %#v, want %d", log.Extras["seq"], seq)
+	}
+	if log.Extras["data_sha256"] == "" {
+		t.Fatal("log data_sha256 is empty")
+	}
+	for key, want := range fields {
+		if got := log.Extras[key]; got != want {
+			t.Fatalf("log extra %s = %#v, want %#v", key, got, want)
+		}
+	}
+}

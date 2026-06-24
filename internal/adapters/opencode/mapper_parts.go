@@ -72,9 +72,14 @@ type turnContext struct {
 	stepDeltas []tokenCounts
 }
 
+type userMessageContext struct {
+	message messageRow
+	input   *sessionInputRow
+}
+
 // mapMessage projects one message (assistant or user) plus its parts onto
 // canonical events. A user message anchors the following assistant turn but
-// emits nothing of its own. A malformed/empty message body is skipped with one
+// emits an internal user_input op inside that turn. A malformed/empty message body is skipped with one
 // WRN log (forward-compat; the column is NOT NULL so an empty body is a
 // corruption signal — types.go errEmptyData). The assistant turn is opened,
 // its parts walked in order, and the turn finalized with the message-level
@@ -97,9 +102,7 @@ func (m *sessionMapper) mapMessage(mwp messageWithParts) ([]canonical.Event, err
 	case roleAssistant:
 		return m.mapAssistantTurn(mwp, data)
 	case roleUser:
-		// User messages are turn anchors only; opencode pairs user→assistant and
-		// the assistant message IS the turn (adapter-opencode.md §"Turn
-		// synthesis"). Nothing to emit.
+		m.recordUserMessage(mwp)
 		return nil, nil
 	default:
 		// Unknown role: forward-compat skip with one WRN (types.go roleUnknown).
@@ -108,6 +111,12 @@ func (m *sessionMapper) mapMessage(mwp messageWithParts) ([]canonical.Event, err
 			fmt.Sprintf("unknown message role %q", data.Role),
 			map[string]any{"message_id": mwp.Message.ID})}, nil
 	}
+}
+
+func (m *sessionMapper) recordUserMessage(mwp messageWithParts) {
+	user := userMessageContext{message: mwp.Message, input: mwp.Input}
+	m.userMessages[mwp.Message.ID] = user
+	m.pendingUser = &user
 }
 
 // mapAssistantTurn opens a turn for an assistant message, walks its parts, and
@@ -128,6 +137,9 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 		SessionNativeID: m.nativeID(),
 		Seq:             tc.turnSeq,
 	})
+	if user := m.consumeUserForAssistant(data); user != nil {
+		out = append(out, m.emitUserPrompt(tc, user)...)
+	}
 
 	hasStepFinish, err := m.appendMappedParts(&out, tc, &data, mwp.Parts)
 	if err != nil {
@@ -138,6 +150,29 @@ func (m *sessionMapper) mapAssistantTurn(mwp messageWithParts, data messageData)
 	}
 	m.recordAssistantTerminal(&data, mwp.Message)
 	return out, nil
+}
+
+func (m *sessionMapper) consumeUserForAssistant(data messageData) *userMessageContext {
+	if data.ParentID != "" {
+		if _, consumed := m.consumedUserIDs[data.ParentID]; consumed {
+			return nil
+		}
+		user, ok := m.userMessages[data.ParentID]
+		if !ok {
+			return nil
+		}
+		m.consumedUserIDs[data.ParentID] = struct{}{}
+		if m.pendingUser != nil && m.pendingUser.message.ID == data.ParentID {
+			m.pendingUser = nil
+		}
+		return &user
+	}
+	user := m.pendingUser
+	if user != nil {
+		m.consumedUserIDs[user.message.ID] = struct{}{}
+	}
+	m.pendingUser = nil
+	return user
 }
 
 func (m *sessionMapper) appendMappedParts(out *[]canonical.Event, tc *turnContext, data *messageData, parts []partRow) (bool, error) {
@@ -199,7 +234,7 @@ func (m *sessionMapper) mapNonOpPart(tc *turnContext, p partRow, data partData) 
 	case partText:
 		return m.emitTextPayload(tc, p)
 	case partPatch:
-		return m.recordPatch(tc, data)
+		return m.recordPatch(tc, p, data)
 	case partCompaction:
 		return m.emitCompactionLog(tc, p, data)
 	case partRetry:

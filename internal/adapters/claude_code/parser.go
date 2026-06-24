@@ -65,6 +65,7 @@ var knownNoOpTypes = map[recordType]struct{}{
 	"content-replacement":     {},
 	"attribution-snapshot":    {},
 	"speculation-accept":      {},
+	"fork-context-ref":        {},
 	"marble-origami-commit":   {},
 	"marble-origami-snapshot": {},
 }
@@ -118,6 +119,7 @@ type contentBlock struct {
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
 	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
 	IsError   bool            `json:"is_error"`
 }
 
@@ -172,7 +174,10 @@ type record struct {
 	Env       envelope
 	User      *userMessage
 	Assistant *assistantMessage
-	System    *systemBody
+	// LineNo is the 1-based physical transcript line. Payload refs use it in
+	// file://...#L<n> selectors so parity can prove exact inline fragments.
+	LineNo int64
+	System *systemBody
 	// HasToolUseResult reports whether a `user` record carried a top-level
 	// toolUseResult body (the structured tool-result echo, spec §3.1). The
 	// mapper emits a PayloadRefEvent for it on the finalized tool op (§5.4).
@@ -185,9 +190,9 @@ type record struct {
 }
 
 // attachmentBody carries the fields of an `attachment` record the mapper's
-// log path consumes (spec §3.4, §338). A `file` attachment's filename and
-// displayPath are surfaced in the attachment LogEntry's extras; no PayloadRef
-// is emitted for any attachment (it has no owning op — P1.1b).
+// log path consumes (spec §3.4, §338). Path-carrying attachment subtypes surface
+// filename and displayPath in the LogEntry extras; no PayloadRef is emitted for
+// any attachment because attachments have no owning op.
 type attachmentBody struct {
 	Type        string `json:"type"`
 	Filename    string `json:"filename"`

@@ -158,6 +158,7 @@ func scanSessionMessageRow(idx columnIndex, n int, onWarn func(error)) (func(*sq
 			ID:            id,
 			SessionID:     sid,
 			Type:          d.str(idx, "type"),
+			Seq:           d.i64(idx, "seq"),
 			TimeCreatedMs: d.i64(idx, "time_created"),
 			TimeUpdatedMs: tuid,
 			Data:          d.bytes(idx, "data"),

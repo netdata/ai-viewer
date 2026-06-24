@@ -1,6 +1,6 @@
 # SOW-0094 — Ingester memory leak (root cause + watchdog)
 
-**Status:** in-progress
+**Status:** completed
 **Date:** 2026-06-22
 **Owner:** CTO (single-assignee; Production-Grade Loop CTO-discretion per AGENTS.md §"Phase: Development")
 
@@ -140,12 +140,16 @@ The "1.9 GB RSS, 4.4 GB heap in `Cursor.String`" symptom was actually **two issu
 - `cmd/ai-viewer-ingest/main.go`: added `--pprof=<addr>` flag (default empty = off) for future memory investigations. gosec G108 suppressed with `#nosec` comment (operator-gated, loopback-only, off by default).
 - `internal/adapters/aiagent_v2/tailer_test.go`: `TestTail_PeriodicProgress` updated to drive a real file event rather than expecting an unconditional tick emit (the new behavior is correct: no cursor change, no event).
 
-### What's NOT done (chunk 3, backlog)
+### Backlog captured after chunk 2 and resolved by chunk 3
 
-- **Watchdog** — systemd `MemoryHigh=8G MemoryMax=12G` to OOM-kill the ingester before it consumes 40 GB. Currently the operator must restart manually. Tracked as a follow-up SOW.
-- **Concurrent-process lockout** — the DB-level "only one ingester" guard. Currently relies on the operator not starting multiple. Tracked as a follow-up SOW.
-- **Self-healing restart** — the in-process watchdog that restarts the ingester when memory exceeds a threshold. Out of scope for v1.
+- **Watchdog** — delivered by commit `c65aa78` and recorded in commit `e907dd7` as systemd `MemoryHigh=4G` / `MemoryMax=8G`.
+- **Concurrent-process lockout** — delivered by commit `c65aa78` using startup locking so only one ingester instance owns the DB writer.
+- **Self-healing restart** — remains out of scope for v1. systemd memory enforcement is the v1 operational guard.
 
 ### Operational lesson (write this down!)
 
 The first thing to check when the ingester is at 1.9 GB RSS is **whether there are multiple ingesters running**. `pgrep -f bin/ai-viewer-ingest` returns both bash subshells AND the Go process; check `readlink /proc/$pid/exe` to filter to the Go binary only. The SQLITE_BUSY errors in the log are the smoking gun.
+
+## Outcome
+
+Completed. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene pass.

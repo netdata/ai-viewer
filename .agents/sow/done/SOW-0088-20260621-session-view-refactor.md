@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: 2026-06-21. Operator sign-off received on the full refactor (SOW-0088, SOW-0089, SOW-0090). This SOW is the umbrella; child SOWs split out as the work progresses. The first commits ship the 2 dark-theme contrast bugs the operator flagged (highest urgency).
+Sub-state: Completed by chunks 1-4. Companion backend and polish work is tracked in SOW-0089 and SOW-0090, which are closed separately in the same ledger cleanup.
 
 ## Pre-Implementation Gate
 
@@ -167,15 +167,20 @@ Make SessionDetail actually answer the operator's question — "is this the sess
 
 ## Execution Log
 
-Pending.
+### 2026-06-21
+
+- Chunk 1 shipped the two dark-theme contrast fixes in commit `7318799`.
+- Chunk 2 shipped the TurnView headline UX fix in commit `80de942`.
+- Chunks 3-4 shipped the unified Session Detail shell and resizable layout in commit `f62e8e1`.
+- Follow-up visual fix for the UnifiedView resize handle shipped in commit `6313783`.
 
 ## Validation
 
-Pending.
+Acceptance criteria are recorded as satisfied in this SOW's Requirements section. This 2026-06-22 ledger cleanup made no runtime changes and did not rerun application gates.
 
 ## Outcome
 
-Pending.
+Completed. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene pass.
 
 ## Followup
 

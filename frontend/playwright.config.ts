@@ -1,12 +1,21 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const e2ePortValue = process.env.AI_VIEWER_E2E_PORT ?? '7710';
+const e2ePort = Number(e2ePortValue);
+if (!Number.isInteger(e2ePort) || e2ePort < 1 || e2ePort > 65_535) {
+  throw new Error('AI_VIEWER_E2E_PORT must be an integer TCP port from 1 to 65535');
+}
+
+const e2eBaseURL = `http://127.0.0.1:${e2ePort}`;
+
 // E2E config (Chunk 18). The specs under ./tests exercise the EMBEDDED SPA
 // served by the built Go `ai-viewer-serve` binary against a deterministically
 // seeded temp DB (the real end-to-end target), NOT a bare `vite preview`. The
 // `webServer` block boots that binary via scripts/e2e-serve.sh, which ingests a
 // fixed set of committed fixtures and then `exec`s the server on
-// 127.0.0.1:7710 — Playwright owns the process lifecycle and tears it down. The
-// `e2e` npm script ("playwright test") gates whether CI runs this step.
+// the selected localhost port — Playwright owns the process lifecycle and tears
+// it down. The `e2e` npm script ("playwright test") gates whether CI runs this
+// step.
 export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
@@ -26,7 +35,7 @@ export default defineConfig({
   timeout: 15_000,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:7710',
+    baseURL: e2eBaseURL,
     trace: 'on-first-retry',
   },
   // Two projects (SOW-0012 AC#4):
@@ -58,13 +67,14 @@ export default defineConfig({
   //
   // reuseExistingServer is ALWAYS false (locally and in CI): the E2E target is
   // the freshly seeded binary, never a stray dev server. Reusing whatever already
-  // listens on 7710 would run the specs against an arbitrary server/DB and break
-  // the deterministic seeded-binary contract (D2/D3) — tests would assert against
-  // unknown data. With reuse off, an occupied 7710 makes Playwright error loudly
-  // (correct) rather than silently testing the wrong process.
+  // listens on the selected port would run the specs against an arbitrary
+  // server/DB and break the deterministic seeded-binary contract (D2/D3) —
+  // tests would assert against unknown data. With reuse off, an occupied port
+  // makes Playwright error loudly (correct) rather than silently testing the
+  // wrong process.
   webServer: {
-    command: 'bash ../scripts/e2e-serve.sh',
-    url: 'http://127.0.0.1:7710/api/health',
+    command: `bash ../scripts/e2e-serve.sh ${e2ePort}`,
+    url: `${e2eBaseURL}/api/health`,
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: 'pipe',

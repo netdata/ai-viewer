@@ -19,7 +19,7 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 
 	_, blocks, isString := classifyUserContent(rec.User)
 	if isString {
-		return []canonical.Event{m.startUserTurn(advance, tsUs)}, nil
+		return m.mapUserPrompt(rec, advance, tsUs)
 	}
 
 	return m.mapToolResultUser(rec, blocks, advance, tsUs)
@@ -29,8 +29,6 @@ func (m *fileMapper) mapUser(rec record, advance func(int64) canonical.EventBase
 // LLM op (started+finalized with usage), a nested reasoning op per thinking
 // block, and an op-start per tool_use block (finalized later on its
 // tool_result). A synthetic model emits a LogEntry only (spec §3.2, §5.4).
-//
-//nolint:unparam // error return is required by the record-type dispatch in mapRecord, where the sibling mapUser arm returns real errors; the uniform (evs, error) shape across all arms is intentional
 func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	tsUs := m.recordTs(rec)
 	msg := rec.Assistant
@@ -52,8 +50,21 @@ func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.Even
 	started, llmSeq := m.startAssistantLLM(advance, tsUs, msg)
 	out = append(out, started)
 	out = append(out, m.buildLLMFinalized(msg, advance(tsUs), m.turnSeq, llmSeq, tsUs))
-	out = append(out, m.emitAssistantReasoningOps(msg.Content, advance, tsUs, llmSeq)...)
-	out = append(out, m.emitAssistantToolUseOps(msg.Content, advance, tsUs)...)
+	textPayloads, err := m.emitAssistantTextPayloads(rec, msg.Content, advance, tsUs, llmSeq)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, textPayloads...)
+	reasoningEvents, err := m.emitAssistantReasoningOps(rec, msg.Content, advance, tsUs, llmSeq)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, reasoningEvents...)
+	toolEvents, err := m.emitAssistantToolUseOps(rec, msg.Content, advance, tsUs)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, toolEvents...)
 	return out, nil
 }
 
@@ -64,7 +75,6 @@ func (m *fileMapper) mapAssistant(rec record, advance func(int64) canonical.Even
 //nolint:unparam // error return is required by the record-type dispatch in mapRecord, where the sibling mapUser arm returns real errors; the uniform (evs, error) shape across all arms is intentional
 func (m *fileMapper) mapSystem(rec record, advance func(int64) canonical.EventBase) ([]canonical.Event, error) {
 	tsUs := m.recordTs(rec)
-	body := rec.System
 	switch rec.Env.Subtype {
 	case "compact_boundary":
 		return m.mapCompaction(rec, advance, tsUs), nil
@@ -81,13 +91,10 @@ func (m *fileMapper) mapSystem(rec record, advance func(int64) canonical.EventBa
 			Status:          "completed",
 			EndTs:           endUs,
 		}
+		m.turnFinalized = true
 		return []canonical.Event{fin}, nil
 	case "api_error":
-		ev := m.logEntry(advance(tsUs), "ERR", "api_error", rec)
-		if body != nil && len(body.APIError) > 0 {
-			ev.Extras["error"] = body.APIError
-		}
-		return []canonical.Event{ev}, nil
+		return m.mapAPIError(rec, advance, tsUs), nil
 	case "stop_hook_summary":
 		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "stop_hook_summary", rec)}, nil
 	default:

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { HealthResponse, SourceItem, SourcesResponse } from '../../api/types';
 import { ApiError } from '../../api/client';
 
@@ -116,6 +116,35 @@ describe('Sources', () => {
     expect(within(table).getByText(/^disabled$/i)).toBeInTheDocument();
     expect(within(table).getByText('2')).toBeInTheDocument();
     expect(within(table).getByText('99')).toBeInTheDocument();
+  });
+
+  it('maps source formats to their dedicated theme color variables', () => {
+    const expected = [
+      ['aiagent_v3', '--source-aiagent-v3'],
+      ['aiagent_v2', '--source-aiagent-v2'],
+      ['claude-code', '--source-claude-code'],
+      ['codex', '--source-codex'],
+      ['opencode', '--source-opencode'],
+      ['custom-format', '--border'],
+    ] as const;
+    sourcesSpy.mockReturnValue(
+      qr({
+        data: sourcesResp(
+          expected.map(([format], i) => makeSource({ id: `src-${i}`, format })),
+        ),
+      }),
+    );
+
+    renderPage();
+
+    const table = screen.getByRole('table');
+    for (const [format, cssVar] of expected) {
+      const badge = within(table).getByText(format);
+      expect(badge.getAttribute('style')).toContain(`color: var(${cssVar})`);
+      expect(badge.getAttribute('style')).toContain(
+        `border-color: color-mix(in oklch, var(${cssVar}) 30%, transparent)`,
+      );
+    }
   });
 
   it('wraps the table in a keyboard-focusable named region (scrollable-region-focusable)', () => {
@@ -238,5 +267,20 @@ describe('Sources', () => {
     sourcesSpy.mockReturnValue(qr({ data: sourcesResp([makeSource({})]) }));
     renderPage();
     expect(liveSpy).toHaveBeenCalledWith({});
+  });
+
+  it('refreshes sources and health from the toolbar action', () => {
+    const sourcesRefetch = vi.fn();
+    const healthRefetch = vi.fn();
+    sourcesSpy.mockReturnValue(
+      qr({ data: sourcesResp([makeSource({})]), refetch: sourcesRefetch }),
+    );
+    healthSpy.mockReturnValue(qr({ data: healthResp({}), refetch: healthRefetch }));
+
+    renderPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh sources and health' }));
+
+    expect(sourcesRefetch).toHaveBeenCalledTimes(1);
+    expect(healthRefetch).toHaveBeenCalledTimes(1);
   });
 });

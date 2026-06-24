@@ -5,6 +5,10 @@
 Status: open (proposed 2026-06-22)
 Sub-state: CTO-proposed. Reviewer 6 (kimi) of SOW-0096 is pending; this SOW is the fix-side plan that will be refined after Reviewer 6's fact-finding pass. Depends on SOW-0097 for the `user_input`/`assistant` kind emission.
 
+## Correction - 2026-06-22
+
+SOW-0097 has been reframed from `user_input`/`assistant` kind emission into a deterministic ingestion parity-gate SOW. Any references below to "after SOW-0097 lands, emit new op kinds" are provisional. The opencode fix must follow the SOW-0097 parity spec: first prove which request/message/tool artifacts exist in the opencode SQLite source, then map them to canonical artifacts or document source-unavailable cases.
+
 ## Pre-Implementation Gate
 
 ### Problem / root-cause model

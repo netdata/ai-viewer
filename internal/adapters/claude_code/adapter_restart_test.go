@@ -331,6 +331,7 @@ const (
 	parentAgentToolUseID = "toolu_agent_dur"
 	durAgentID           = "abc111def222ccc"
 	durParentSession     = "dur-parent"
+	parentAgentOpSeq     = 3
 )
 
 // writeParentWithAgentOp writes a parent transcript whose assistant record
@@ -372,27 +373,26 @@ func childToolUseLine(uuid, toolUseID, toolName, ts string) string {
 	return `{"type":"assistant","uuid":"` + uuid + `","isSidechain":true,"agentId":"` + durAgentID + `","sessionId":"` + durParentSession + `","message":{"id":"cm2","role":"assistant","model":"claude-opus-4-7","stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":3},"content":[{"type":"tool_use","id":"` + toolUseID + `","name":"` + toolName + `","input":{}}]},"timestamp":"` + ts + `"}`
 }
 
-// childOpFinalized reports the OpFinalizedEvent for the parent's Agent op (the
-// session op at parent turn 1, op 2 — after the LLM op at op 1), or false.
+// childOpFinalized reports the OpFinalizedEvent for the parent's Agent op, or false.
 func childOpFinalized(events []canonical.Event) (canonical.OpFinalizedEvent, bool) {
 	for _, ev := range events {
 		if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 			return of, true
 		}
 	}
 	return canonical.OpFinalizedEvent{}, false
 }
 
-// agentOpStartedWithChild reports the most recent Agent OpStarted (kind=session)
-// for the parent at turn 1, op 2 and whether its ChildSessionNativeID is set.
+// agentOpStartedWithChild reports the most recent parent Agent OpStarted and
+// whether its ChildSessionNativeID is set.
 func agentOpStartedChild(events []canonical.Event) (string, bool) {
 	child := ""
 	found := false
 	for _, ev := range events {
 		if os, ok := ev.(canonical.OpStartedEvent); ok &&
 			os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
-			os.TurnSeq == 1 && os.Seq == 2 {
+			os.TurnSeq == 1 && os.Seq == parentAgentOpSeq {
 			child = os.ChildSessionNativeID
 			found = true
 		}
@@ -401,13 +401,13 @@ func agentOpStartedChild(events []canonical.Event) (string, bool) {
 }
 
 // agentOpStartedToolUseId reports the toolUseId stash on the parent Agent OpStarted
-// (turn 1, op 2), or "" when absent. Mirrors the mapper-side extras shape.
+// or "" when absent. Mirrors the mapper-side extras shape.
 func agentOpStartedToolUseId(events []canonical.Event) string {
 	out := ""
 	for _, ev := range events {
 		if os, ok := ev.(canonical.OpStartedEvent); ok &&
 			os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
-			os.TurnSeq == 1 && os.Seq == 2 {
+			os.TurnSeq == 1 && os.Seq == parentAgentOpSeq {
 			if av, ok := os.Extras["aiViewer"].(map[string]any); ok {
 				if s, ok := av["toolUseId"].(string); ok {
 					out = s
@@ -491,7 +491,7 @@ func TestScanThenTail_LateMetaParentOpStashesToolUseIdNoReEmit(t *testing.T) {
 		case ev := <-tailOut:
 			if os, ok := ev.(canonical.OpStartedEvent); ok &&
 				os.SessionNativeID == durParentSession && os.Kind == canonical.OpSession &&
-				os.TurnSeq == 1 && os.Seq == 2 {
+				os.TurnSeq == 1 && os.Seq == parentAgentOpSeq {
 				reEmits++
 			}
 		case <-deadline:
@@ -555,7 +555,7 @@ func TestScanThenTail_AgentOpFinalizeDurable(t *testing.T) {
 		select {
 		case ev := <-tailOut:
 			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 				if of.EndTs != wantEnd {
 					t.Errorf("Agent op finalize EndTs = %d, want the child's terminal assistant-text ts %d", of.EndTs, wantEnd)
 				}
@@ -610,7 +610,7 @@ func TestScanThenTail_AgentOpNotPrematureToolUseTerminated(t *testing.T) {
 					return
 				}
 				if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-					of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+					of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 					select {
 					case premature <- of:
 					default:
@@ -780,7 +780,7 @@ func TestScanThenTail_ParkedCompletionDurableAcrossRestart(t *testing.T) {
 	finalizes := 0
 	for _, ev := range scan2 {
 		if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 			finalizes++
 		}
 	}
@@ -797,7 +797,7 @@ func TestScanThenTail_ParkedCompletionDurableAcrossRestart(t *testing.T) {
 		select {
 		case ev := <-tailOut:
 			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 				finalizes++
 			}
 		case <-deadline:
@@ -840,7 +840,7 @@ func TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay(t *testing.T) {
 	finalizes := 0
 	for _, ev := range scanEvents {
 		if _, ok := ev.(canonical.OpFinalizedEvent); ok {
-			if of := ev.(canonical.OpFinalizedEvent); of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+			if of := ev.(canonical.OpFinalizedEvent); of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 				finalizes++
 			}
 		}
@@ -883,7 +883,7 @@ func TestScanThenTail_AgentOpNoDoubleFinalizeOnReplay(t *testing.T) {
 		select {
 		case ev := <-tailOut:
 			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 				extra++
 			}
 		case <-deadline:
@@ -928,7 +928,7 @@ func TestScanThenTail_LateMetaRewriteNoDoubleFinalize(t *testing.T) {
 	finalizes := 0
 	for _, ev := range scanEvents {
 		if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+			of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 			finalizes++
 		}
 	}
@@ -975,7 +975,7 @@ func TestScanThenTail_LateMetaRewriteNoDoubleFinalize(t *testing.T) {
 		select {
 		case ev := <-tailOut:
 			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == 2 {
+				of.SessionNativeID == durParentSession && of.TurnSeq == 1 && of.Seq == parentAgentOpSeq {
 				extra++
 			}
 		case <-deadline:

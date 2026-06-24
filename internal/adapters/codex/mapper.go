@@ -245,6 +245,9 @@ func (m *fileMapper) mapRecord(rec record) ([]canonical.Event, error) {
 	if ts := m.recordTs(rec); ts > m.lastTsUs {
 		m.lastTsUs = ts
 	}
+	if rec.LegacySessionHeader && idx != 0 {
+		return nil, fmt.Errorf("codex: legacy session header after first record")
+	}
 
 	out := make([]canonical.Event, 0, 4)
 	sub := uint64(0)
@@ -376,6 +379,23 @@ func (m *fileMapper) logEntry(base canonical.EventBase, severity, message string
 		Message:         message,
 		Extras:          extras,
 	}
+}
+
+func (m *fileMapper) withParitySelector(extras map[string]any, nativeArtifactID string, jsonPointer string) map[string]any {
+	if extras == nil {
+		extras = map[string]any{}
+	}
+	aiViewer, _ := extras["aiViewer"].(map[string]any)
+	if aiViewer == nil {
+		aiViewer = map[string]any{}
+		extras["aiViewer"] = aiViewer
+	}
+	aiViewer["parity"] = map[string]any{
+		"nativeArtifactId": nativeArtifactID,
+		"selectorURI":      m.payloadURI(m.lineNo),
+		"jsonPointer":      jsonPointer,
+	}
+	return extras
 }
 
 // activeTurnSeq returns the Seq of the most-recently-opened turn, or 0 when no

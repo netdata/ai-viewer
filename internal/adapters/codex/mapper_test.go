@@ -246,6 +246,26 @@ func TestMapper_ReasoningKindRaw(t *testing.T) {
 	if r.ReasoningKind != "raw" {
 		t.Errorf("ReasoningKind = %q, want raw", r.ReasoningKind)
 	}
+	if got := countKind(events, canonical.EvPayloadRef); got != 1 {
+		t.Fatalf("PayloadRef count = %d, want 1 for opaque encrypted reasoning", got)
+	}
+}
+
+func TestMapper_EmptyReasoningEmitsNoPayloadRef(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"reasoning","summary":[]}}`,
+	}
+	events := runLines(t, m, lines)
+	if got := countKind(events, canonical.EvPayloadRef); got != 0 {
+		t.Fatalf("PayloadRef count = %d, want 0 for empty reasoning text", got)
+	}
+	if got := countReasoningOps(events); got != 1 {
+		t.Fatalf("reasoning ops = %d, want 1 structural op", got)
+	}
 }
 
 // TestMapper_EventReasoningIsLogOnlyNoDupOp asserts event_msg.agent_reasoning*
@@ -317,6 +337,34 @@ func TestMapper_ToolCallPairing(t *testing.T) {
 	}
 	if got := countKind(events, canonical.EvPayloadRef); got != 2 {
 		t.Errorf("PayloadRef count = %d, want 2 (request+response)", got)
+	}
+}
+
+func TestMapper_ToolSearchObjectArgumentsPayloadRef(t *testing.T) {
+	t.Parallel()
+	m := newTestMapper("sid")
+	lines := []string{
+		metaLine("sid", `"exec"`),
+		`{"timestamp":"` + tsCtx + `","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.5"}}`,
+		`{"timestamp":"` + tsItem + `","type":"response_item","payload":{"type":"tool_search_call","name":"search","call_id":"ts1","arguments":{"query":"q"}}}`,
+	}
+	events := runLines(t, m, lines)
+
+	var ref canonical.PayloadRefEvent
+	for _, ev := range events {
+		if r, ok := ev.(canonical.PayloadRefEvent); ok {
+			ref = r
+			break
+		}
+	}
+	if ref.PayloadKind != "tool_request" {
+		t.Fatalf("PayloadRef kind = %q, want tool_request; events=%v", ref.PayloadKind, events)
+	}
+	if !strings.Contains(ref.LocationURI, "json_pointer=%2Fpayload%2Farguments") {
+		t.Fatalf("PayloadRef LocationURI = %q, want /payload/arguments selector", ref.LocationURI)
+	}
+	if ref.OriginalBytes != int64(len(`{"query":"q"}`)) {
+		t.Fatalf("PayloadRef OriginalBytes = %d, want object JSON length", ref.OriginalBytes)
 	}
 }
 

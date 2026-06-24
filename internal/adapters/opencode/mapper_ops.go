@@ -269,6 +269,10 @@ func (m *sessionMapper) emitToolOp(tc *turnContext, p partRow, data partData) []
 	startUs := m.toolStartUs(data, p)
 	out = append(out, m.toolStartedEvent(tc, seq, startUs, data))
 	status, endPtr, errMsg, hasOutput := toolTerminal(data)
+	inputBytes := toolBytesIn(data)
+	if inputBytes > 0 {
+		out = append(out, m.payloadRef(m.nextBase(startUs), tc.turnSeq, seq, "tool_request", "json", p.ID, "state.input", inputBytes))
+	}
 	if hasOutput {
 		out = append(out, m.payloadRef(m.nextBase(startUs), tc.turnSeq, seq, "tool_response", "json", p.ID, "state.output", -1))
 	}

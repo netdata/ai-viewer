@@ -10,10 +10,14 @@ import styles from './charts.module.css';
 // viz/statsCharts (the D3 boundary); this file paints + labels.
 //
 // A11Y CONTRACT (same as LineChart, for Chunk 11's axe gate):
-//   - role="img" + aria-label naming the dimension + metric + a <title>/<desc>;
+//   - a sibling role="img" summary naming the dimension + metric;
 //   - EACH BAR is labelled with its key AND its formatted value as TEXT, so the
 //     ranking is readable without relying on bar length or color;
 //   - empty data renders an accessible "no data" message.
+// When bars are clickable, the SVG itself cannot be role="img": axe correctly
+// flags focusable children inside an image role as nested interactive content.
+// The clipped sibling summary preserves the chart-level accessible image while
+// the SVG remains a container for the focusable bar controls.
 
 const VIEW_WIDTH = 720;
 const ROW_HEIGHT = 28;
@@ -66,10 +70,16 @@ export function BarChart({ items, dimension, metric, onBarClick }: BarChartProps
 
   return (
     <div className={styles.chart}>
+      <div
+        id={`${titleId}-summary`}
+        role="img"
+        aria-label={label}
+        className={styles.srOnly}
+      />
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${height}`}
         className={styles.svg}
-        role="img"
+        role="group"
         aria-labelledby={`${titleId} ${descId}`}
       >
         <title id={titleId}>{`Top ${dimension} by ${metric}`}</title>

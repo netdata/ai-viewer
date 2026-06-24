@@ -1,8 +1,11 @@
 package aiagent_v2
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -55,8 +58,8 @@ func extractPayloadRef(raw json.RawMessage) (payloadRef, bool) {
 
 // extractPayloadRefs decodes all known ref wrappers from an op's
 // request/response `payload` raw JSON. Inline payloads and malformed
-// JSON are treated as "no refs" because raw payload extraction is
-// deliberately skipped for v2.
+// JSON are treated as "no refs"; the caller emits inline snapshot
+// selectors only when no producer refs exist for that side.
 func extractPayloadRefs(raw json.RawMessage) []payloadRef {
 	if !payloadRefCandidate(raw) {
 		return nil
@@ -275,7 +278,12 @@ func (m *mapEmitter) emitPayloadSide(in payloadEmitContext, side string, payload
 	if payload == nil {
 		return
 	}
-	for _, ref := range extractPayloadRefs(payload.Payload) {
+	refs := extractPayloadRefs(payload.Payload)
+	if len(refs) == 0 {
+		m.emitInlinePayloadSide(in, side, payload)
+		return
+	}
+	for _, ref := range refs {
 		m.appendPayloadRef(payloadRefEmit{
 			ref:           ref,
 			visit:         in.visit,
@@ -284,6 +292,120 @@ func (m *mapEmitter) emitPayloadSide(in payloadEmitContext, side string, payload
 			fallbackBytes: payload.Size,
 		})
 	}
+}
+
+func (m *mapEmitter) emitInlinePayloadSide(in payloadEmitContext, side string, payload *opPayload) {
+	if !inlinePayloadPresent(payload.Payload) {
+		return
+	}
+	logical, format, err := inlinePayloadLogicalBytes(payload.Payload)
+	if err != nil {
+		m.report(err)
+		return
+	}
+	pointer := in.visit.jsonPointer + "/" + side + "/payload"
+	location, err := inlineSnapshotPayloadLocation(m.ctx, pointer)
+	if err != nil {
+		m.report(err)
+		return
+	}
+	m.append(canonical.PayloadRefEvent{
+		EventBase:       baseEvent(m.ctx, inlinePayloadEventPath(in.visit.path, side), msToMicrosOrFallback(0, m.ctx.rootTs)),
+		SessionNativeID: in.visit.scope.sessionTrace,
+		TurnSeq:         in.visit.scope.turnSeq,
+		OpSeq:           in.visit.seq,
+		PayloadKind:     payloadKindForSide(in.kind, side),
+		Format:          format,
+		Compression:     "gzip",
+		LocationURI:     location,
+		OriginalBytes:   int64(len(logical)),
+	})
+}
+
+func inlinePayloadEventPath(opPath, side string) string {
+	return opPath + "::payload:" + side
+}
+
+func inlinePayloadPresent(raw json.RawMessage) bool {
+	_, ok := firstNonSpaceByte(raw)
+	return ok
+}
+
+func inlinePayloadLogicalBytes(raw json.RawMessage) ([]byte, string, error) {
+	var doc interface{}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, "", fmt.Errorf("aiagent_v2: decode inline payload: %w", err)
+	}
+	if err := decodePayloadEOF(decoder); err != nil {
+		return nil, "", fmt.Errorf("aiagent_v2: decode inline payload: %w", err)
+	}
+	if text, ok := doc.(string); ok {
+		return []byte(text), "text", nil
+	}
+	body, err := canonicalInlineJSONBytes(doc)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, "json", nil
+}
+
+func decodePayloadEOF(decoder *json.Decoder) error {
+	var extra interface{}
+	err := decoder.Decode(&extra)
+	if err == io.EOF {
+		return nil
+	}
+	if err == nil {
+		return fmt.Errorf("trailing JSON value")
+	}
+	return err
+}
+
+func canonicalInlineJSONBytes(value interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, fmt.Errorf("aiagent_v2: encode inline payload canonical JSON: %w", err)
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+func inlineSnapshotPayloadLocation(ctx *mapContext, pointer string) (string, error) {
+	path, err := resolveSnapshotPath(ctx.sessionsRoot, ctx.filename)
+	if err != nil {
+		return "", err
+	}
+	uri := url.URL{Scheme: "file", Path: path}
+	values := uri.Query()
+	values.Set("json_pointer", pointer)
+	uri.RawQuery = values.Encode()
+	return uri.String(), nil
+}
+
+func resolveSnapshotPath(root string, filename string) (string, error) {
+	if root == "" || filename == "" {
+		return "", fmt.Errorf("aiagent_v2: inline payload selector requires source root and snapshot filename")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("aiagent_v2: resolve root %q: %w", root, err)
+	}
+	cleanedRoot := filepath.Clean(absRoot)
+	cleaned := filepath.Clean(filename)
+	if !filepath.IsAbs(cleaned) {
+		cleaned = filepath.Clean(filepath.Join(cleanedRoot, cleaned))
+	}
+	rel, err := filepath.Rel(cleanedRoot, cleaned)
+	if err != nil {
+		return "", fmt.Errorf("aiagent_v2: relative snapshot %q: %w", filename, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("aiagent_v2: snapshot path escapes root: %q", filename)
+	}
+	return cleaned, nil
 }
 
 func payloadRefEventPath(opPath, side string, ref payloadRef) string {

@@ -46,16 +46,14 @@ async function opCountFor(request: APIRequestContext, id: string): Promise<numbe
   return body.items.find((s) => s.id === id)?.op_count ?? 0;
 }
 
-/** gotoTrace hard-navigates to the Trace tab (?tab=trace is URL-driven in
- *  SessionDetail) and waits for the trace toolbar's op-count to render. */
+/** gotoTrace hard-navigates to a session's unified detail view and waits for
+ *  the default Waterfall visualization's op-count to render. */
 async function gotoTrace(page: Page, id: string): Promise<void> {
-  await page.goto(`/sessions/${encodeURIComponent(id)}?tab=trace`);
-  // The detail title proves the SPA fallback + detail load (deep-link.spec.ts).
-  await expect(
-    page.getByRole('heading', { name: new RegExp('Session\\b'), level: 1 }),
-  ).toBeVisible();
-  // The Trace toolbar shows "<n> ops"; wait for it so the tree is built.
-  await expect(page.getByText(/\d+ ops/)).toBeVisible();
+  await page.goto(`/sessions/${encodeURIComponent(id)}`);
+  const vizRegion = page.getByRole('region', { name: /waterfall visualization/i });
+  await expect(vizRegion).toBeVisible();
+  // The Waterfall toolbar shows "<n> ops"; wait for it so the tree is built.
+  await expect(vizRegion.getByText(/\d+ ops/)).toBeVisible();
 }
 
 test.describe('trace tab (AC#1)', () => {

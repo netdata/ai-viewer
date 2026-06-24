@@ -92,7 +92,10 @@ test.describe('realtime', () => {
         resp.url().endsWith('/api/subscriptions') && resp.request().method() === 'POST',
       { timeout: 30_000 },
     );
-    await page.getByRole('link', { name: 'Sources' }).click();
+    await page
+      .getByRole('navigation', { name: 'Primary' })
+      .getByRole('link', { name: 'Sources', exact: true })
+      .click();
     await expect(page.getByRole('heading', { name: 'Sources', level: 1 })).toBeVisible();
     expect((await subOnSources).ok()).toBeTruthy();
 

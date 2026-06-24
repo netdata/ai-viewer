@@ -40,14 +40,15 @@ async function multiLaneSessionId(request: APIRequestContext): Promise<{ id: str
   return { id, lanes: tl.lanes.length };
 }
 
-/** gotoTimeline hard-navigates to a session's Timeline tab and waits for the
- *  span/lane count toolbar (proving the timeline query resolved). */
+/** gotoTimeline hard-navigates to a session's unified detail view, opens the
+ *  Timeline visualization, and waits for the span/lane count toolbar. */
 async function gotoTimeline(page: Page, id: string): Promise<void> {
-  await page.goto(`/sessions/${encodeURIComponent(id)}?tab=timeline`);
-  await expect(
-    page.getByRole('heading', { name: new RegExp('Session\\b'), level: 1 }),
-  ).toBeVisible();
-  await expect(page.getByText(/\d+ spans?\s+·\s+\d+ lanes?/)).toBeVisible();
+  await page.goto(`/sessions/${encodeURIComponent(id)}`);
+  await expect(page.getByRole('region', { name: /waterfall visualization/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Timeline' }).click();
+  const timelineRegion = page.getByRole('region', { name: /timeline visualization/i });
+  await expect(timelineRegion).toBeVisible();
+  await expect(timelineRegion.getByText(/\d+ spans?\s+·\s+\d+ lanes?/)).toBeVisible();
 }
 
 test.describe('timeline tab (AC#3)', () => {

@@ -31,7 +31,7 @@ SQLite store, and presents them through a web UI for analytical review.
 The primary user is an AI-agent builder who runs the same task multiple
 times and needs to see "what changed" between runs.
 
-Repo root: /home/costa/src/ai-viewer.git
+Repo root: /home/user/src/ai-viewer.git
 Live prod DB: /opt/ai-viewer/data/index.db (528,177 sessions, 5 sources)
 Adapter source: internal/adapters/<adapter>/
 Canonical types: internal/canonical/events.go

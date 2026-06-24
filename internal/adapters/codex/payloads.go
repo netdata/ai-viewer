@@ -2,6 +2,7 @@ package codex
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -61,8 +62,9 @@ func resolveWithinRoot(root, abs string) (string, bool, error) {
 
 // payloadURI builds the PayloadRef LocationURI for a body inline in this
 // rollout file at the given 1-based line number (spec rule #6/#7/#8, edge #7).
-// The form is "file://<symlink-resolved-abs>#L<line>" so the presenter reads the
-// exact record on demand without ai-viewer ever copying the body into SQLite.
+// The base form is "file://<symlink-resolved-abs>#L<line>"; pointer-backed refs
+// add a json_pointer query so parity can resolve the exact nested artifact
+// without ai-viewer ever copying the body into SQLite.
 //
 // Containment (Chunk D, security.md §6): the absolute path is resolved through
 // symlinks and verified to stay inside the configured sessions root via
@@ -98,13 +100,33 @@ func (m *fileMapper) payloadURI(lineNo int) string {
 	return uri + anchor
 }
 
+func (m *fileMapper) payloadURIWithPointer(lineNo int, pointer string) string {
+	uri := m.payloadURI(lineNo)
+	if pointer == "" {
+		return uri
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return uri
+	}
+	values := parsed.Query()
+	values.Set("json_pointer", pointer)
+	parsed.RawQuery = values.Encode()
+	return parsed.String()
+}
+
 // payloadRef builds a PayloadRefEvent for a body inline in this rollout at the
 // record currently being mapped (m.lineNo). It is scoped to the owning op
 // (turnSeq/opSeq) so it references an op that EXISTS — payload_refs.op_id is NOT
 // NULL REFERENCES ops(id), so an orphan ref would FK-roll-back the ingest batch
 // (mirrors claude_code's P1.1a discipline). OriginalBytes is the byte length of
-// the verbatim line so the presenter can budget a read; -1 when unknown.
+// the selected logical payload for pointer-backed refs, or the containing record
+// for whole-record fallback refs; -1 when unknown.
 func (m *fileMapper) payloadRef(base canonical.EventBase, turnSeq, opSeq int, kind, format string, originalBytes int64) canonical.PayloadRefEvent {
+	return m.payloadRefAtPointer(base, turnSeq, opSeq, kind, format, originalBytes, "")
+}
+
+func (m *fileMapper) payloadRefAtPointer(base canonical.EventBase, turnSeq, opSeq int, kind, format string, originalBytes int64, pointer string) canonical.PayloadRefEvent {
 	return canonical.PayloadRefEvent{
 		EventBase:       base,
 		SessionNativeID: m.nativeID,
@@ -112,7 +134,7 @@ func (m *fileMapper) payloadRef(base canonical.EventBase, turnSeq, opSeq int, ki
 		OpSeq:           opSeq,
 		PayloadKind:     kind,
 		Format:          format,
-		LocationURI:     m.payloadURI(m.lineNo),
+		LocationURI:     m.payloadURIWithPointer(m.lineNo, pointer),
 		OriginalBytes:   originalBytes,
 	}
 }

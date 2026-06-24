@@ -16,9 +16,9 @@ import (
 
 const (
 	opencodeBenchScanSessions = 256
-	// Each synthetic session emits session, assistant turn, LLM op, text, task,
-	// and child-session events.
-	opencodeBenchEventsPerSession = 10
+	// Each synthetic session emits session, assistant turn, user input, LLM op,
+	// text, task, tool payload, and child-session events.
+	opencodeBenchEventsPerSession = 11
 	// Scan includes the seed corpus plus the six-session second-batch remainder.
 	opencodeBenchScanRemainderSessions = 6
 	opencodeBenchScanProgressEvents    = 2

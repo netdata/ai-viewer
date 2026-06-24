@@ -59,8 +59,8 @@ func insertRowEmptyOwner(t *testing.T, path, table, ownerCol string) {
 		if ownerCol == "session_id" {
 			sid = ""
 		}
-		stmt = `INSERT INTO session_message (id, session_id, type, time_created, time_updated, data) VALUES (?,?,?,?,?,?)`
-		args = []any{"evt_bad", sid, "agent-switched", int64(100), int64(100), `{}`}
+		stmt = `INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)`
+		args = []any{"evt_bad", sid, "agent-switched", int64(1), int64(100), int64(100), `{}`}
 	default:
 		t.Fatalf("unsupported table %q", table)
 	}

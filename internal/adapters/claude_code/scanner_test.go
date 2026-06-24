@@ -106,6 +106,39 @@ func TestScan_UnknownTypePerVariantDedup(t *testing.T) {
 	}
 }
 
+func TestParseLineForkContextRefKnownNoOp(t *testing.T) {
+	t.Parallel()
+
+	_, skip, err := parseLine([]byte(`{"type":"fork-context-ref","agentId":"a1b2c3d4e5f6071","parentSessionId":"session-1","parentLastUuid":"u1","contextLength":503}`))
+	if err != nil {
+		t.Fatalf("parseLine fork-context-ref: %v", err)
+	}
+	if !skip {
+		t.Fatal("parseLine fork-context-ref skip = false, want true")
+	}
+}
+
+func TestScan_SkipsWorkflowJournal(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	proj := filepath.Join(root, "-home-user-x")
+	writeFileBytes(t, filepath.Join(proj, "session-1.jsonl"),
+		[]byte(`{"type":"user","uuid":"u1","sessionId":"session-1","message":{"role":"user","content":"hi"},"timestamp":"2026-05-26T10:00:00.000Z"}`+"\n"))
+	journal := filepath.Join(proj, "session-1", "subagents", "workflows", "wf-1", "journal.jsonl")
+	writeFileBytes(t, journal, []byte(strings.Join([]string{
+		`{"type":"started","key":"v2:redacted","agentId":"a1b2c3d4e5f6071"}`,
+		`{"type":"result","key":"v2:redacted","agentId":"a1b2c3d4e5f6071","result":{"status":"ok"}}`,
+	}, "\n")+"\n"))
+
+	_, errs := collectErrors(t, root)
+	for _, err := range errs {
+		if strings.Contains(err, "unknown record type") && (strings.Contains(err, "started") || strings.Contains(err, "result")) {
+			t.Fatalf("workflow journal surfaced as transcript error: %v", errs)
+		}
+	}
+}
+
 // TestScan_SymlinkEscapeRefused pins P2e (spec §6.1, security.md §6): a
 // transcript that is a symlink resolving OUTSIDE the projects root is refused
 // with a SourceError and never read. A legitimate transcript in the same

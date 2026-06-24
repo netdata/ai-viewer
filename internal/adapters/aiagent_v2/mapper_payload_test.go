@@ -2,6 +2,7 @@ package aiagent_v2
 
 import (
 	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -176,11 +177,9 @@ func TestMap_PayloadRefTraversalGuardRejects(t *testing.T) {
 	}
 }
 
-// TestMap_PayloadInlineSkipsRefEmission confirms that an inline
-// (non-ref) payload is silently skipped: no PayloadRefEvent and no
-// onError. Inline payloads are deferred per spec Canonical Model Gaps
-// item 10.
-func TestMap_PayloadInlineSkipsRefEmission(t *testing.T) {
+// TestMap_PayloadInlineEmitsSnapshotSelectors confirms that legacy inline
+// payloads get exact snapshot JSON-pointer refs instead of disappearing.
+func TestMap_PayloadInlineEmitsSnapshotSelectors(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	snap := simpleSnapshot(2, "inline")
@@ -194,14 +193,19 @@ func TestMap_PayloadInlineSkipsRefEmission(t *testing.T) {
 	}
 	var errs []error
 	events := mapSnapshot(snap, "src", snap.OpTree.TraceID, root, snap.OpTree.TraceID+".json.gz", func(e error) { errs = append(errs, e) })
-	for _, ev := range events {
-		if _, ok := ev.(canonical.PayloadRefEvent); ok {
-			t.Fatalf("inline payload should not emit PayloadRefEvent")
-		}
+	refs := payloadRefsFromEvents(events)
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 inline PayloadRefEvent rows, got %d", len(refs))
 	}
 	if len(errs) != 0 {
-		t.Fatalf("inline payload should not produce errors, got %v", errs)
+		t.Fatalf("inline payload selectors should not produce errors, got %v", errs)
 	}
+	byKind := map[string]canonical.PayloadRefEvent{}
+	for _, ref := range refs {
+		byKind[ref.PayloadKind] = ref
+	}
+	assertInlinePayloadRef(t, byKind["llm_request"], "json", inlinePayloadTestURI(t, root, "inline.json.gz", "/opTree/turns/0/ops/0/request/payload"), 45)
+	assertInlinePayloadRef(t, byKind["llm_response"], "text", inlinePayloadTestURI(t, root, "inline.json.gz", "/opTree/turns/0/ops/0/response/payload"), 14)
 }
 
 // TestExtractPayloadRef_VariousShapes hits the JSON-shape probe paths
@@ -276,6 +280,25 @@ func boolPtrState(ptr *bool) (bool, bool) {
 		return false, false
 	}
 	return *ptr, true
+}
+
+func inlinePayloadTestURI(t *testing.T, root string, name string, pointer string) string {
+	t.Helper()
+	uri := url.URL{Scheme: "file", Path: filepath.Join(root, name)}
+	values := uri.Query()
+	values.Set("json_pointer", pointer)
+	uri.RawQuery = values.Encode()
+	return uri.String()
+}
+
+func assertInlinePayloadRef(t *testing.T, got canonical.PayloadRefEvent, format string, location string, originalBytes int64) {
+	t.Helper()
+	if got.Format != format || got.Compression != "gzip" || got.LocationURI != location {
+		t.Fatalf("inline payload ref selector mismatch: %+v", got)
+	}
+	if got.OriginalBytes != originalBytes || got.StoredBytes != 0 || got.SHA256 != "" {
+		t.Fatalf("inline payload ref proof metadata mismatch: %+v", got)
+	}
 }
 
 func payloadRefsFromEvents(events []canonical.Event) []canonical.PayloadRefEvent {

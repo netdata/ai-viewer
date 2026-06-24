@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -28,7 +29,11 @@ func (m *fileMapper) mapEventMsg(rec record, advance func(int64) canonical.Event
 	case "turn_aborted":
 		return m.mapTurnAborted(rec, advance, tsUs), nil
 	case "user_message":
-		return m.emitUserInput(advance, tsUs, p.Message, "json", int64(len(rec.Raw))), nil
+		imageRefs := userMessageImagePayloadPointers(rec)
+		refs := make([]payloadPointer, 0, 1+len(imageRefs))
+		refs = append(refs, payloadPointer{path: "/payload/message", bytes: int64(len(p.Message))})
+		refs = append(refs, imageRefs...)
+		return m.emitUserInput(advance, tsUs, p.Message, "json", int64(len(rec.Raw)), refs), nil
 	case "agent_message":
 		// Dedup companion to response_item.message(assistant) (spec rule #19):
 		// no op; stash the message as the turn's last_agent_message preview and
@@ -51,7 +56,7 @@ func (m *fileMapper) mapEventMsg(rec record, advance func(int64) canonical.Event
 	case "web_search_end":
 		return m.enrichWebSearch(rec, advance, tsUs), nil
 	case "image_generation_end":
-		return m.enrichOp(rec, advance, tsUs, nil), nil
+		return m.finalizeImageGeneration(rec, advance, tsUs), nil
 	case "collab_agent_spawn_end":
 		// Parent→child sub-agent spawn (spec "Sub-Agent Linkage", F3): emit a
 		// session op whose ChildSessionNativeID is new_thread_id (NOT
@@ -60,6 +65,14 @@ func (m *fileMapper) mapEventMsg(rec record, advance func(int64) canonical.Event
 	case "collab_close_end", "collab_waiting_end":
 		// Recognized collab lifecycle markers (F3): keep visible as a DBG log; no
 		// canonical op (they carry no parent→child edge the topology view needs).
+		if payloadHasField(rec.Raw, "message") {
+			extras := map[string]any{}
+			if p.Message != "" {
+				extras["message"] = trimPreview(p.Message, previewMax)
+			}
+			extras = m.withParitySelector(extras, fmt.Sprintf("line:%d:/payload/message", m.lineNo), "/payload/message")
+			return []canonical.Event{m.logEntry(advance(tsUs), "DBG", p.Message, extras)}, nil
+		}
 		return []canonical.Event{m.logEntry(advance(tsUs), "DBG", "event_msg:"+p.Type, nil)}, nil
 	case "context_compacted":
 		// event_msg.context_compacted is the bare companion marker of the adjacent
@@ -73,14 +86,17 @@ func (m *fileMapper) mapEventMsg(rec record, advance func(int64) canonical.Event
 		}
 		return m.emitCompactionOp(advance, tsUs, map[string]any{"trigger": "auto"}, "json"), nil
 	case "error":
-		return []canonical.Event{m.logEntry(advance(tsUs), "ERR", "error", errorExtras(p))}, nil
-	case "thread_rolled_back":
-		return []canonical.Event{m.logEntry(advance(tsUs), "INF", "thread_rolled_back", nil)}, nil
-	case "entered_review_mode", "exited_review_mode":
+		message := p.Message
+		extras := errorExtras(p)
+		if payloadHasField(rec.Raw, "message") {
+			extras = m.withParitySelector(extras, fmt.Sprintf("line:%d:/payload/message", m.lineNo), "/payload/message")
+		} else if message == "" {
+			message = "error"
+		}
+		return []canonical.Event{m.logEntry(advance(tsUs), "ERR", message, extras)}, nil
+	case "thread_rolled_back", "entered_review_mode", "exited_review_mode", "item_completed":
+		// Plan/review lifecycle markers: INF log for now (spec gap #11).
 		return []canonical.Event{m.logEntry(advance(tsUs), "INF", p.Type, nil)}, nil
-	case "item_completed":
-		// Plan items (spec gap #11): INF log for now.
-		return []canonical.Event{m.logEntry(advance(tsUs), "INF", "item_completed", nil)}, nil
 	default:
 		// thread_goal_updated, guardian_assessment, view_image_tool_call,
 		// dynamic_tool_call_*, and any future persisted variant: keep visible.
@@ -332,6 +348,17 @@ func errorExtras(p *eventMsgPayload) map[string]any {
 		return nil
 	}
 	return map[string]any{"message": trimPreview(p.Message, previewMax)}
+}
+
+func payloadHasField(raw []byte, field string) bool {
+	var env struct {
+		Payload map[string]json.RawMessage `json:"payload"`
+	}
+	if json.Unmarshal(raw, &env) != nil || env.Payload == nil {
+		return false
+	}
+	_, ok := env.Payload[field]
+	return ok
 }
 
 // startedAtMicros reads task_started.started_at (unix seconds) from the raw

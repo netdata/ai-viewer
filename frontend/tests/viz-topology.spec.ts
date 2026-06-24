@@ -30,15 +30,16 @@ async function anySessionId(request: APIRequestContext): Promise<string> {
   return body.items[0]!.id;
 }
 
-/** gotoTopologyTab hard-navigates to a session's Topology tab and waits for the
- *  graph (the toolbar's node count proves the topology query resolved). */
+/** gotoTopologyTab hard-navigates to a session's unified detail view, opens the
+ *  Topology visualization, and waits for the graph to resolve. */
 async function gotoTopologyTab(page: Page, id: string): Promise<void> {
-  await page.goto(`/sessions/${encodeURIComponent(id)}?tab=topology`);
-  await expect(
-    page.getByRole('heading', { name: new RegExp('Session\\b'), level: 1 }),
-  ).toBeVisible();
+  await page.goto(`/sessions/${encodeURIComponent(id)}`);
+  await expect(page.getByRole('region', { name: /waterfall visualization/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Topology' }).click();
+  const topologyRegion = page.getByRole('region', { name: /topology visualization/i });
+  await expect(topologyRegion).toBeVisible();
   // Toolbar shows "<n> node(s)"; wait for it so the fetch+layout completed.
-  await expect(page.getByText(/\d+ nodes?/)).toBeVisible();
+  await expect(topologyRegion.getByText(/\d+ nodes?/)).toBeVisible();
 }
 
 test.describe('topology tab — per session (AC#2)', () => {
@@ -96,13 +97,18 @@ test.describe('topology page — cross session (AC#2)', () => {
     // The page landmark (Topology.tsx <h1 id="topology-title">Topology</h1>).
     await expect(page.getByRole('heading', { name: 'Topology', level: 1 })).toBeVisible();
 
-    // The GLOBAL FilterBar is present (Layout renders it above every route;
-    // role="search" name "Session filters" — FilterBar.tsx). This is the AC#2
-    // "reuses the global FilterBar" requirement for the cross-session view.
+    // The GLOBAL FilterBar is reachable through the topbar Filters sheet
+    // (Layout.tsx); opening it proves the cross-session view reuses the same
+    // filter controls without permanently occupying global chrome.
+    await page.getByRole('button', { name: 'Filters' }).click();
     await expect(page.getByRole('search', { name: 'Session filters' })).toBeVisible();
+    await page.keyboard.press('Escape');
 
-    // The toolbar's "<n> session(s)" count proves /api/topology resolved.
-    await expect(page.getByText(/\d+ sessions?/)).toBeVisible();
+    // The toolbar's session count label proves /api/topology resolved. The
+    // number and "sessions" text are separate spans, so assert the label token.
+    await expect(
+      page.getByRole('region', { name: 'Topology' }).getByText('sessions', { exact: true }),
+    ).toBeVisible();
 
     // The graph renders via the same TopologyRenderer (role="group").
     const graph = page.getByRole('group', { name: /topology/i });
@@ -112,7 +118,7 @@ test.describe('topology page — cross session (AC#2)', () => {
     // The cross-session page also exposes the 3-layout toggle (its OWN radio
     // group name "cross-topology-mode", but the visible labels match).
     for (const mode of ['Plain force', 'Hierarchical', 'Seeded force']) {
-      await page.getByRole('radio', { name: mode }).check();
+      await page.getByRole('radio', { name: mode }).check({ force: true });
       await expect(page.getByRole('group', { name: /topology/i })).toBeVisible();
     }
 

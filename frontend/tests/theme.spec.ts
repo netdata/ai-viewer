@@ -1,13 +1,21 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 // Theme coverage (frontend-architecture.md §Theming; state/theme.ts +
-// components/ThemeToggle). The 3-button segmented control sets a ThemePreference:
+// AppTopbar ThemeMenu). The dropdown sets a ThemePreference:
 //   - explicit Dark/Light => persisted to localStorage 'aiViewerTheme' and
 //     written to <html data-theme>; wins over the OS preference;
 //   - Auto => clears the override and follows prefers-color-scheme.
-// Button selectors use the STATIC aria-labels from ThemeToggle.tsx.
+// Menu item selectors use stable data-testid values from AppTopbar.tsx.
 
 const html = (theme: 'dark' | 'light') => `html[data-theme="${theme}"]`;
+
+async function chooseTheme(
+  page: Page,
+  testId: 'theme-auto' | 'theme-dark' | 'theme-light',
+): Promise<void> {
+  await page.getByRole('button', { name: /^Theme:/ }).click();
+  await page.getByTestId(testId).click();
+}
 
 test.describe('theme', () => {
   test('explicit Dark / Light update <html data-theme> and persist across reload', async ({
@@ -16,12 +24,12 @@ test.describe('theme', () => {
     await page.goto('/');
 
     // Click Dark -> data-theme="dark".
-    await page.getByRole('button', { name: 'Dark' }).click();
+    await chooseTheme(page, 'theme-dark');
     await expect(page.locator(html('dark'))).toHaveCount(1);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 
     // Click Light -> data-theme="light".
-    await page.getByRole('button', { name: 'Light' }).click();
+    await chooseTheme(page, 'theme-light');
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
     // The explicit choice is persisted under the documented key.
@@ -37,7 +45,7 @@ test.describe('theme', () => {
     await page.goto('/');
 
     // Select Auto: clears any override so the OS preference drives the theme.
-    await page.getByRole('button', { name: 'Auto (follow system)' }).click();
+    await chooseTheme(page, 'theme-auto');
     // Auto must NOT persist an override (state/theme.ts persistPreference).
     expect(
       await page.evaluate(() => window.localStorage.getItem('aiViewerTheme')),

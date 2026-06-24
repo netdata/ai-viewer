@@ -122,6 +122,67 @@ Cursors are stored as JSON in `sources.cursor`. The ingester treats them as opaq
 4. Unit tests for cursor resume: scan with `since=cursorAtMidpoint`, assert only the latter half of events are emitted.
 5. Property test: re-scanning with the final cursor produces zero events.
 
+## Ingestion Parity Requirements
+
+Every adapter MUST participate in the deterministic parity gate defined in
+`ingestion-parity.md`.
+
+Each adapter owns an independent source extractor that reads the native source
+format and emits source artifacts for the parity manifest. The extractor may
+reuse low-level parsers that decode native records, but it MUST NOT call mapper
+functions that emit `canonical.Event`, and it MUST NOT read the canonical
+SQLite database. This independence is what lets the gate catch mapper-side data
+loss.
+
+Each adapter spec MUST include an availability matrix for every parity artifact
+class:
+
+- `session_boundary`
+- `turn_boundary`
+- `op_boundary`
+- `user_prompt`
+- `assistant_message`
+- `reasoning_text`
+- `llm_request`
+- `llm_response`
+- `llm_sdk_request`
+- `llm_sdk_response`
+- `tool_request`
+- `tool_response`
+- `llm_error`
+- `tool_error`
+- `subagent_link`
+- `system_op`
+- `compaction_event`
+- `session_metadata`
+- `log_entry`
+- `attachment_metadata`
+
+For each class, the matrix states:
+
+- source availability (`available`, `source_empty`, `partial_source`,
+  `source_unavailable`, `redacted`, `compacted_away`, `source_corrupt`);
+- hash domain (`semantic_text`, `canonical_json`, `raw_bytes`,
+  `identity_json`);
+- native artifact id formula;
+- selector or structural identity fields;
+- expected canonical row/payload/log representation;
+- source-record accounting rule for records that do not emit artifacts;
+- source-format evidence for every non-`available` state.
+
+`source_unavailable` is allowed only with source-format evidence. "The mapper
+does not currently read it" is a bug, not an exception.
+
+Payload artifacts require exact selectors, lengths, and hashes. A payload ref
+that points only at a containing transcript file is not sufficient unless the
+canonical artifact also carries enough selector metadata to identify the exact
+logical source fragment.
+
+The parity gate consumes a machine-readable copy of the matrix from the parity
+source package. Tests MUST fail if the machine-readable matrix and the adapter
+spec disagree about classes, availability states, hash domains, or selector
+requirements.
+
 ## Adding a New Adapter
 
 Step-by-step (also lives in `docs/adding-an-adapter.md` for end-user contributors):

@@ -37,6 +37,7 @@ go test ./internal/adapters/... -bench=. -benchmem
 cd frontend && npm test                  # vitest watch mode
 cd frontend && npm test -- --run         # one-shot
 cd frontend && npm run e2e               # playwright headless
+AI_VIEWER_E2E_PORT=17710 npm run e2e     # use a different local E2E port
 cd frontend && npm run e2e -- --headed   # playwright debug
 cd frontend && npm run e2e -- --ui       # playwright UI mode
 

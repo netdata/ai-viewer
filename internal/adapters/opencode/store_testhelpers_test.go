@@ -53,6 +53,7 @@ var ocSchemaStmts = []string{
 		data TEXT NOT NULL)`,
 	`CREATE TABLE session_message (
 		id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+		seq INTEGER NOT NULL,
 		time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
 		data TEXT NOT NULL)`,
 }

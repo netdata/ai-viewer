@@ -98,12 +98,15 @@ test.describe('a11y — /stats dashboard (SOW-0007 Chunk 11)', () => {
     test(`/stats has no serious/critical axe violations (${theme})`, async ({ page }) => {
       await gotoStats(page, theme);
 
-      // Under the committed seed BOTH charts have data, so two role="img" SVGs
-      // paint. Assert that explicitly (in addition to the either/or ready gate)
-      // so the axe run below is exercising the real chart DOM, not a vacuous
-      // empty-state page — if the seed ever regresses to no rows this fails
-      // loudly rather than passing on a blank dashboard.
-      await expect(page.getByRole('img')).toHaveCount(2);
+      // Under the committed seed BOTH charts have data. Assert both sections
+      // paint real chart DOM (not empty states) without pinning the page-wide
+      // img-role count: BarChart exposes a clipped image summary plus focusable
+      // SVG controls, and browsers may expose the SVG container as an image too.
+      const trends = page.locator('section[aria-labelledby="stats-trends-title"]');
+      const top = page.locator('section[aria-labelledby="stats-top-title"]');
+      await expect(trends.getByRole('img')).toHaveCount(1);
+      await expect(top.getByRole('img').first()).toBeVisible();
+      await expect(top.locator('rect[data-bar]').first()).toBeVisible();
 
       const blocking = await analyzeBlocking(page);
       expect(

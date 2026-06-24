@@ -266,6 +266,42 @@ func TestScan_HappyPathEmitsSession(t *testing.T) {
 	}
 }
 
+func TestScan_SkipsUnchangedEOFFinalizedRolloutBeforeProbe(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := shardPath(root, uuid7(1))
+	writeFileBytes(t, path, []byte("not a codex record\n"))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat rollout: %v", err)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		t.Fatalf("relpath rollout: %v", err)
+	}
+	rel = filepath.ToSlash(rel)
+	since := newCursor().withFile(rel, FileCursor{
+		Offset:           info.Size(),
+		Size:             info.Size(),
+		MtimeUs:          info.ModTime().UnixMicro(),
+		EOFFinalizedSize: info.Size(),
+	})
+
+	events, errs, final := scanCollect(t, root, "codex:"+root, since)
+	if len(errs) > 0 {
+		t.Fatalf("scan errors = %v, want none; events=%+v", errs, events)
+	}
+	for _, ev := range events {
+		if _, ok := ev.(canonical.SessionStartedEvent); ok {
+			t.Fatalf("skipped rollout emitted a session event: %+v", ev)
+		}
+	}
+	got := final.fileCursor(rel)
+	if got.Offset != info.Size() || got.EOFFinalizedSize != info.Size() {
+		t.Fatalf("final cursor = %+v, want unchanged consumed cursor at size %d", got, info.Size())
+	}
+}
+
 // TestScan_ResumeNoDupNoGap is acceptance #6: scan a partial file, persist the
 // cursor, append the rest, resume, and assert the union of emitted catalog
 // events equals a single one-shot scan (zero duplicate SessionStarted, all
@@ -357,19 +393,87 @@ func TestScan_TruncationRescans(t *testing.T) {
 	_ = ev2
 }
 
-// TestScan_LegacyOneShotSourceError is R1: a legacy flat .json file emits
-// exactly one informational SourceError on first scan and is suppressed on the
-// next scan via the cursor's LegacyJSON map.
-func TestScan_LegacyOneShotSourceError(t *testing.T) {
+// TestScan_LegacyFlatJSONIngestedOnce asserts valid legacy flat .json files are
+// ingested on first full scan and suppressed on the next scan via LegacyJSON.
+func TestScan_LegacyFlatJSONIngestedOnce(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	legacy := "rollout-2025-06-26-5556f03d-348c-4463-987c-053ccd0b1df5.json"
-	writeFileBytes(t, filepath.Join(root, legacy), []byte(`{"session":{},"items":[]}`))
+	writeFileBytes(t, filepath.Join(root, legacy), []byte(`{
+		"session":{"timestamp":"2025-06-26T00:00:00Z","id":"legacy-session"},
+		"items":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},
+			{"type":"local_shell_call","call_id":"call-1","action":{"cmd":"ls"}},
+			{"type":"local_shell_call_output","call_id":"call-1","output":"done"}
+		]
+	}`))
+
+	events1, errs1, cur1 := scanCollect(t, root, "codex:"+root, newCursor())
+	if len(errs1) != 0 {
+		t.Fatalf("legacy scan errors = %v, want none", errs1)
+	}
+	if !hasKind(events1, canonical.EvSessionStarted) {
+		t.Fatalf("legacy scan did not emit session start; events=%v", events1)
+	}
+	if !hasKind(events1, canonical.EvPayloadRef) {
+		t.Fatalf("legacy scan did not emit payload refs; events=%v", events1)
+	}
+	if !cur1.legacyIngested(legacy) {
+		t.Fatal("legacy file not recorded as ingested in cursor")
+	}
+	events2, errs2, _ := scanCollect(t, root, "codex:"+root, cur1)
+	for _, ev := range events2 {
+		if ev.EventKind() != canonical.EvSourceProgress {
+			t.Fatalf("legacy scan re-emitted content event with carried cursor: %v", events2)
+		}
+	}
+	if len(errs2) != 0 {
+		t.Fatalf("legacy scan re-emitted errors with carried cursor: %v", errs2)
+	}
+}
+
+func TestScan_LegacyFlatJSONRecoversValidPrefixWithTrailingCorruption(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	legacy := "rollout-2025-07-01-0187df2e-dbd3-4fb3-a837-8e51233dd60a.json"
+	body := `{"session":{"timestamp":"2025-07-01T20:52:59.003Z","id":"legacy-session"},"items":[{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}` +
+		`{"type":"message","role":"user","content":[`
+	writeFileBytes(t, filepath.Join(root, legacy), []byte(body))
+
+	events, errs, cur := scanCollect(t, root, "codex:"+root, newCursor())
+	trailingErrs := 0
+	for _, e := range errs {
+		if strings.Contains(e, "trailing non-whitespace") {
+			trailingErrs++
+		}
+	}
+	if trailingErrs != 1 {
+		t.Fatalf("legacy trailing SourceError count = %d, want exactly 1; errs=%v", trailingErrs, errs)
+	}
+	if !hasKind(events, canonical.EvSessionStarted) {
+		t.Fatalf("legacy recoverable prefix did not emit session start; events=%v", events)
+	}
+	if !hasKind(events, canonical.EvPayloadRef) {
+		t.Fatalf("legacy recoverable prefix did not emit payload refs; events=%v", events)
+	}
+	if !cur.legacyIngested(legacy) {
+		t.Fatal("recoverable corrupt legacy file not recorded in cursor")
+	}
+}
+
+// TestScan_MalformedLegacyFlatJSONSourceError asserts corrupt legacy JSON fails
+// closed through OnError while still using LegacyJSON to avoid repeated noise.
+func TestScan_MalformedLegacyFlatJSONSourceError(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	legacy := "rollout-2025-06-26-5556f03d-348c-4463-987c-053ccd0b1df5.json"
+	writeFileBytes(t, filepath.Join(root, legacy), []byte(`{"session":{}, "items":[`))
 
 	_, errs1, cur1 := scanCollect(t, root, "codex:"+root, newCursor())
 	legacyErrs := 0
 	for _, e := range errs1 {
-		if strings.Contains(e, "legacy flat .json") {
+		if strings.Contains(e, "decode legacy flat JSON") {
 			legacyErrs++
 		}
 	}
@@ -377,12 +481,12 @@ func TestScan_LegacyOneShotSourceError(t *testing.T) {
 		t.Fatalf("legacy SourceError count = %d, want exactly 1; errs=%v", legacyErrs, errs1)
 	}
 	if !cur1.legacyIngested(legacy) {
-		t.Fatal("legacy file not recorded as seen in cursor")
+		t.Fatal("malformed legacy file not recorded in cursor")
 	}
-	// Second scan with the carried cursor must be quiet.
+
 	_, errs2, _ := scanCollect(t, root, "codex:"+root, cur1)
 	for _, e := range errs2 {
-		if strings.Contains(e, "legacy flat .json") {
+		if strings.Contains(e, "decode legacy flat JSON") {
 			t.Fatalf("legacy SourceError re-emitted after suppression: %v", errs2)
 		}
 	}

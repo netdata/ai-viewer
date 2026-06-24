@@ -116,7 +116,7 @@ export function AppSidebar({
         <Tooltip>
           <TooltipTrigger asChild>
             <a
-              href="http://127.0.0.1:7710/api/health"
+              href="/api/health"
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"

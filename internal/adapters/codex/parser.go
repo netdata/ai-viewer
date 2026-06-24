@@ -68,9 +68,11 @@ const (
 // in Rust (struct RolloutLine { timestamp, #[serde(flatten)] item }) lands the
 // tag at top level (`type`) and the content under `payload`.
 type envelope struct {
-	TS      string          `json:"timestamp"`
-	Type    recordType      `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	TS         string          `json:"timestamp"`
+	Type       recordType      `json:"type"`
+	RecordType string          `json:"record_type"`
+	ID         string          `json:"id"`
+	Payload    json.RawMessage `json:"payload"`
 }
 
 // record is the parsed codex line. Env is always populated; exactly one typed
@@ -78,13 +80,15 @@ type envelope struct {
 // consumes. Raw holds the verbatim line bytes so the mapper can build
 // file://...#L<line> PayloadRefs without re-typing every nested variant.
 type record struct {
-	Env          envelope
-	SessionMeta  *sessionMetaPayload
-	TurnContext  *turnContextPayload
-	ResponseItem *responseItemPayload
-	EventMsg     *eventMsgPayload
-	Compacted    *compactedPayload
-	Raw          []byte
+	Env                  envelope
+	SessionMeta          *sessionMetaPayload
+	TurnContext          *turnContextPayload
+	ResponseItem         *responseItemPayload
+	EventMsg             *eventMsgPayload
+	Compacted            *compactedPayload
+	Raw                  []byte
+	PayloadPointerPrefix string
+	LegacySessionHeader  bool
 }
 
 // Type returns the top-level RolloutItem discriminator.
@@ -93,6 +97,10 @@ func (r record) Type() recordType { return r.Env.Type }
 // Timestamp returns the envelope timestamp (RFC3339 UTC) — the canonical time
 // source for the line (spec adapter-codex.md:56-60).
 func (r record) Timestamp() string { return r.Env.TS }
+
+func (r record) payloadPath(path string) string {
+	return r.PayloadPointerPrefix + path
+}
 
 // parseLine decodes one JSONL line into a record. Whitespace-only / empty lines
 // return (record{}, true, nil) to signal "skip silently". Malformed JSON or a
@@ -110,21 +118,29 @@ func parseLine(line []byte) (record, bool, error) {
 	if err := json.Unmarshal(trimmed, &env); err != nil {
 		return record{}, false, fmt.Errorf("decode envelope: %w", err)
 	}
+	if env.RecordType == "state" && env.Type == "" {
+		return record{}, true, nil
+	}
+	legacySessionHeader := false
 	if env.Type == "" {
-		return record{}, false, errors.New("record.type is required")
+		if env.ID == "" || env.TS == "" {
+			return record{}, false, errors.New("record.type is required")
+		}
+		env.Type = recSessionMeta
+		legacySessionHeader = true
 	}
 
-	rec := record{Env: env, Raw: append([]byte(nil), trimmed...)}
+	rec := record{Env: env, Raw: append([]byte(nil), trimmed...), PayloadPointerPrefix: "/payload", LegacySessionHeader: legacySessionHeader}
 	switch env.Type {
 	case recSessionMeta:
 		var p sessionMetaPayload
-		if err := decodePayload(env.Payload, &p); err != nil {
+		if err := decodePayload(payloadOrLine(env.Payload, trimmed), &p); err != nil {
 			return record{}, false, fmt.Errorf("decode session_meta: %w", err)
 		}
 		rec.SessionMeta = &p
 	case recTurnContext:
 		var p turnContextPayload
-		if err := decodePayload(env.Payload, &p); err != nil {
+		if err := decodePayload(payloadOrLine(env.Payload, trimmed), &p); err != nil {
 			return record{}, false, fmt.Errorf("decode turn_context: %w", err)
 		}
 		rec.TurnContext = &p
@@ -134,14 +150,32 @@ func parseLine(line []byte) (record, bool, error) {
 		return decodeEventMsg(rec)
 	case recCompacted:
 		var p compactedPayload
-		if err := decodePayload(env.Payload, &p); err != nil {
+		if err := decodePayload(payloadOrLine(env.Payload, trimmed), &p); err != nil {
 			return record{}, false, fmt.Errorf("decode compacted: %w", err)
 		}
 		rec.Compacted = &p
 	default:
+		directType := string(env.Type)
+		if _, ok := responseItemNoOp[directType]; ok {
+			return rec, true, nil
+		}
+		if _, ok := responseItemTypes[directType]; ok {
+			rec.Env.Type = recResponseItem
+			rec.Env.Payload = append(json.RawMessage(nil), trimmed...)
+			rec.PayloadPointerPrefix = ""
+			return decodeResponseItem(rec)
+		}
 		return record{}, false, &unknownTypeError{Type: string(env.Type)}
 	}
 	return rec, false, nil
+}
+
+func payloadOrLine(payload json.RawMessage, line []byte) json.RawMessage {
+	body := bytes.TrimSpace(payload)
+	if len(body) == 0 || bytes.Equal(body, []byte("null")) {
+		return append(json.RawMessage(nil), line...)
+	}
+	return payload
 }
 
 // decodePayload unmarshals a payload body into dst, tolerating an absent body

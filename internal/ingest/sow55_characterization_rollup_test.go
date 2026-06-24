@@ -27,11 +27,11 @@ func TestRefreshRollups_CharacterizationCarriedSetAcrossMultipleRefreshes(t *tes
 
 	assertCarriedState1BothOpen(t, db, wr, hourH, format)
 
-	clk.now = nowHourClosed
+	clk.Set(nowHourClosed)
 	mustRefreshRollups(t, db, wr)
 	assertCarriedState2HourClosed(t, db, wr, hourH, format)
 
-	clk.now = nowDayClosed
+	clk.Set(nowDayClosed)
 	mustRefreshRollups(t, db, wr)
 	assertCarriedState3DayClosed(t, db, wr, hourH, format)
 }

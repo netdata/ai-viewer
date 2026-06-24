@@ -53,6 +53,7 @@ func seedSyntheticDB(t *testing.T, dir string) string {
 			data TEXT NOT NULL)`,
 		`CREATE TABLE session_message (
 			id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+			seq INTEGER NOT NULL,
 			time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
 			data TEXT NOT NULL)`,
 		`INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated)
@@ -61,8 +62,8 @@ func seedSyntheticDB(t *testing.T, dir string) string {
 			VALUES ('msg_aaa','ses_aaa',1700000000000,1700000000000,'{"role":"assistant"}')`,
 		`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
 			VALUES ('prt_aaa','msg_aaa','ses_aaa',1700000000000,1700000000000,'{"type":"text","text":"synthetic"}')`,
-		`INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
-			VALUES ('evt_aaa','ses_aaa','model-switched',1700000000000,1700000000000,'{}')`,
+		`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+			VALUES ('evt_aaa','ses_aaa','model-switched',1,1700000000000,1700000000000,'{}')`,
 	}
 	for _, s := range stmts {
 		if _, err := rw.Exec(s); err != nil {

@@ -166,10 +166,10 @@ func TestScanThenTail_SymlinkedRootNoHistoryReplay(t *testing.T) {
 		case ev := <-tailOut:
 			tailEvents = append(tailEvents, ev)
 			// The genuinely-new assistant record finalizes the second LLM op
-			// (turn 1 op 2 — after the historical op 1). Use it as the signal that
+			// (turn 1 op 3, after user_input op 1 and historical llm op 2). Use it as the signal that
 			// the append was processed.
 			if of, ok := ev.(canonical.OpFinalizedEvent); ok &&
-				of.SessionNativeID == sess && of.TurnSeq == 1 && of.Seq == 2 {
+				of.SessionNativeID == sess && of.TurnSeq == 1 && of.Seq == 3 {
 				sawNew = true
 			}
 		case <-deadline:
@@ -184,12 +184,12 @@ func TestScanThenTail_SymlinkedRootNoHistoryReplay(t *testing.T) {
 	cancel()
 	wg.Wait()
 
-	// The crux: Tail must NOT have re-emitted the HISTORICAL op (turn 1, op 1). A
-	// missed cursor key would re-read from offset 0 and re-emit it.
+	// The crux: Tail must NOT have re-emitted any HISTORICAL op. A missed cursor
+	// key would re-read from offset 0 and re-emit user_input op 1 or llm op 2.
 	for _, ev := range tailEvents {
 		if os, ok := ev.(canonical.OpStartedEvent); ok &&
-			os.SessionNativeID == sess && os.TurnSeq == 1 && os.Seq == 1 {
-			t.Fatalf("Tail re-emitted the historical LLM OpStarted (turn 1, op 1) under a symlinked root (P1.7d — cursor key mismatch caused a from-0 re-read → catalog double-count)")
+			os.SessionNativeID == sess && os.TurnSeq == 1 && os.Seq < 3 {
+			t.Fatalf("Tail re-emitted a historical OpStarted (turn 1, op %d) under a symlinked root (P1.7d — cursor key mismatch caused a from-0 re-read → catalog double-count)", os.Seq)
 		}
 		if ss, ok := ev.(canonical.SessionStartedEvent); ok && ss.NativeID == sess {
 			t.Fatalf("Tail re-emitted the historical SessionStarted for %q under a symlinked root (P1.7d — from-0 re-read)", sess)

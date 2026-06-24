@@ -172,8 +172,8 @@ func TestAffectedSessions_AllTables(t *testing.T) {
 	insertAssistantMessage(t, rw, "msg_a", "ses_a", 2, 2, 1, 1)
 	insertPart(t, rw, "prt_a", "msg_a", "ses_a", 3, 3, textBody("x")) // touches ses_a again (dedupe)
 	insertPart(t, rw, "prt_b", "msg_b", "ses_b", 4, 4, textBody("y"))
-	_, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
-		VALUES ('evt_b','ses_b','model-switched',5,5,'{}')`)
+	_, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+		VALUES ('evt_b','ses_b','model-switched',1,5,5,'{}')`)
 	if err != nil {
 		t.Fatalf("insert session_message: %v", err)
 	}
@@ -268,12 +268,12 @@ func TestSessionMessage_UnknownTypeWarns(t *testing.T) {
 	dir := t.TempDir()
 	path, rw := newEmptyDB(t, dir, "opencode.db")
 	// Two session_message rows: a KNOWN type (no warn) and an UNKNOWN one (warn).
-	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
-		VALUES ('evt_known','ses_a','model-switched',1,1,'{}')`); err != nil {
+	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+		VALUES ('evt_known','ses_a','model-switched',1,1,1,'{}')`); err != nil {
 		t.Fatalf("insert known: %v", err)
 	}
-	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
-		VALUES ('evt_unknown','ses_b','planned-future-thing',2,2,'{}')`); err != nil {
+	if _, err := rw.Exec(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+		VALUES ('evt_unknown','ses_b','planned-future-thing',2,2,2,'{}')`); err != nil {
 		t.Fatalf("insert unknown: %v", err)
 	}
 	if err := rw.Close(); err != nil {

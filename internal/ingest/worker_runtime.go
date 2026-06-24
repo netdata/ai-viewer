@@ -26,6 +26,7 @@ func (w *worker) run(ctx context.Context) {
 type workerRuntime struct {
 	worker              *worker
 	writer              *writer
+	flush               func(context.Context, *writer, []canonical.Event) error
 	batch               []canonical.Event
 	flushTimer          *time.Timer
 	timerArmed          bool
@@ -42,6 +43,7 @@ func newWorkerRuntime(w *worker) *workerRuntime {
 	rt := &workerRuntime{
 		worker:     w,
 		writer:     wr,
+		flush:      w.flush,
 		batch:      make([]canonical.Event, 0, w.batchSize),
 		flushTimer: time.NewTimer(w.batchEvery),
 	}
@@ -160,14 +162,18 @@ func (rt *workerRuntime) flushBatchWithWriteContext(writeCtx context.Context, re
 	}
 	batch := rt.batch
 	for attempt := 0; attempt <= flushMaxRetries; attempt++ {
-		err := rt.worker.flush(writeCtx, rt.writer, batch)
+		err := rt.flush(writeCtx, rt.writer, batch)
 		if err == nil {
 			break
 		}
 		if attempt < flushMaxRetries {
 			// Transient: retry with backoff (100ms, 200ms, 400ms). The events
 			// are NOT dropped — the batch stays in rt.batch for the next attempt.
-			rt.worker.report(fmt.Errorf("flush (%s) attempt %d/%d: %w — retrying", reason, attempt+1, flushMaxRetries+1, err))
+			rt.worker.reportRecoverable("worker: batch flush retry",
+				fmt.Errorf("flush (%s) attempt %d/%d: %w", reason, attempt+1, flushMaxRetries+1, err),
+				"reason", reason,
+				"attempt", attempt+1,
+				"max_attempts", flushMaxRetries+1)
 			backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
 			select {
 			case <-time.After(backoff):
@@ -205,7 +211,7 @@ func (rt *workerRuntime) idleRefreshWithWriteContext(writeCtx context.Context) {
 		return
 	}
 	if err := rt.worker.refreshRollupsOnly(writeCtx, rt.writer); err != nil {
-		rt.worker.report(err)
+		rt.worker.reportRecoverable("worker: idle read-model refresh failed", err)
 	}
 	rt.writer.resetBatch()
 }

@@ -3,43 +3,50 @@ import { test, expect } from '@playwright/test';
 // Deep-link / SPA-fallback coverage (SOW-0016). A HARD navigation to a
 // client-side route (/sessions/<id>) must work: the Go server's SPA fallback
 // serves the built shell for the unknown path, and the client router then
-// resolves the route and renders the detail Overview. The session id is derived
-// at runtime from /api/sessions — never hardcoded — so the test tracks the seed.
+// resolves the route and renders the unified detail view. The session id is
+// derived at runtime from /api/sessions — never hardcoded — so the test tracks
+// the seed.
 
 test.describe('deep link', () => {
-  test('hard navigation to /sessions/<id> renders the detail Overview', async ({
+  test('hard navigation to /sessions/<id> renders the unified detail view', async ({
     page,
     request,
   }) => {
     // Pull a real seeded session id from the REST API (items[0].id).
     const resp = await request.get('/api/sessions');
     expect(resp.ok()).toBeTruthy();
-    const body = (await resp.json()) as { items: Array<{ id: string }> };
+    const body = (await resp.json()) as { items: Array<{ id: string; agent_name: string }> };
     expect(body.items.length).toBeGreaterThanOrEqual(1);
-    const id = body.items[0]!.id;
+    const session = body.items[0]!;
+    const id = session.id;
     expect(id).toBeTruthy();
+    expect(session.agent_name).toBeTruthy();
 
     // Hard navigation (full page load), not an in-app Link click — this is what
     // proves the server fallback + client hydration path, the SOW-0016 contract.
     await page.goto(`/sessions/${encodeURIComponent(id)}`);
 
-    // The detail heading echoes the id in a <code> (src/pages/SessionDetail).
-    await expect(
-      page.getByRole('heading', { name: /Session\b/, level: 1 }),
-    ).toBeVisible();
+    // The unified detail heading is the agent name; the id is still echoed in a
+    // <code> below it (src/pages/SessionDetail).
+    await expect(page.getByRole('heading', { name: session.agent_name, level: 1 })).toBeVisible();
     await expect(page.getByText(id, { exact: false }).first()).toBeVisible();
 
-    // The Overview tab is the default; assert a StatCard from OverviewTab is
-    // present (label "Tokens in (fresh)") — proving the detail payload rendered,
-    // not a not-found / error state.
-    await expect(page.getByText('Tokens in (fresh)', { exact: true })).toBeVisible();
-    // The "Tools used" section header is always rendered on a loaded Overview.
-    await expect(page.getByRole('heading', { name: 'Tools used' })).toBeVisible();
+    // The unified page renders overview tiles, the left visualization/event
+    // region, and the right turn-view region. These landmarks prove the detail
+    // payload rendered, not a not-found / error state.
+    const overview = page.getByRole('group', { name: 'Session overview' });
+    await expect(overview).toBeVisible();
+    await expect(overview.getByText('Status', { exact: true })).toBeVisible();
+    await expect(overview.getByText('Tokens', { exact: true })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Visualization and event list' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Turn view' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Waterfall' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Event list' })).toBeVisible();
     // Negative: the not-found state must not be shown for a valid seeded id.
     await expect(page.getByText('Session not found.')).toHaveCount(0);
   });
 
-  test('parent session renders the SOW-0016 child-sessions drill-down', async ({
+  test('parent session renders the SOW-0016 child-session boundary in the unified waterfall', async ({
     page,
     request,
   }) => {
@@ -59,9 +66,8 @@ test.describe('deep link', () => {
     ).toBeDefined();
     const parentId = parent!.id;
 
-    // The Overview child table renders from the DETAIL response's child_sessions
-    // (OverviewTab.tsx). Pull the first child id from the same contract the UI
-    // consumes so the link assertion below is exact, not a guess.
+    // Pull the first child id from the same detail contract the UI consumes so
+    // the waterfall/drawer assertion below is exact, not a guess.
     const detailResp = await request.get(`/api/sessions/${encodeURIComponent(parentId)}`);
     expect(detailResp.ok()).toBeTruthy();
     const detail = (await detailResp.json()) as {
@@ -78,28 +84,19 @@ test.describe('deep link', () => {
     // Hard navigation to the parent — same SPA-fallback path as the test above.
     await page.goto(`/sessions/${encodeURIComponent(parentId)}`);
 
-    // The SOW-0016 child-sessions section must render: region + heading +
-    // a populated table (selectors mirror OverviewTab.tsx: a
-    // <section aria-labelledby="child-sessions-title"> with an
-    // <h2 id="child-sessions-title">Child sessions</h2>).
-    const childSection = page.getByRole('region', { name: 'Child sessions' });
-    await expect(childSection).toBeVisible();
-    await expect(
-      childSection.getByRole('heading', { name: 'Child sessions', level: 2 }),
-    ).toBeVisible();
-    const childRows = childSection.locator('table tbody tr');
-    await expect(childRows.first()).toBeVisible();
-    expect(await childRows.count()).toBeGreaterThanOrEqual(1);
+    // The unified view exposes child sessions as session-boundary spans in the
+    // default waterfall. Click a session-boundary span and assert the shared
+    // detail drawer reports the derived child id.
+    const waterfall = page.getByRole('group', { name: /waterfall/i });
+    await expect(waterfall).toBeVisible();
+    const childBoundary = waterfall.getByRole('button', { name: /— session —/ }).first();
+    await expect(childBoundary).toBeVisible();
+    await childBoundary.click();
 
-    // Each child row links to /sessions/<child id> — assert the drill-down link
-    // for the derived child exists INSIDE the section and points elsewhere than
-    // the parent itself (proves the parent→child navigation target end-to-end).
-    const childLink = childSection.locator(
-      `a[href="/sessions/${encodeURIComponent(childId)}"]`,
-    );
-    await expect(childLink.first()).toBeVisible();
-    await expect(
-      childSection.locator(`a[href="/sessions/${encodeURIComponent(parentId)}"]`),
-    ).toHaveCount(0);
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText('Child session', { exact: true })).toBeVisible();
+    await expect(dialog.getByText(childId, { exact: true })).toBeVisible();
+    await expect(dialog.getByText(parentId, { exact: true })).toHaveCount(0);
   });
 });

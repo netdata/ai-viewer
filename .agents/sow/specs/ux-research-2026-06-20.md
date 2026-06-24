@@ -265,7 +265,7 @@ Per the operator's "as many use cases as possible" framing, I should not optimiz
 Per the SOW lifecycle:
 1. Each P0 item gets a single focused commit.
 2. P1 items land as their own SOWs (A3 / A4 / A5 = the "Pages: Agents / Models / Tools come alive" SOW; A11 = "Ingest health" SOW; D1/D2 = "Breadcrumbs + back" SOW).
-3. The 5-reviewer loop runs on each P1 SOW (or its visual deliverable) — same as SOW-0073.
+3. The external reviewer gates run on each P1 SOW (or its visual deliverable) — same as SOW-0073.
 4. Specs (this one, the design-system one) update to reflect the new views.
 
 ## What I need from the operator

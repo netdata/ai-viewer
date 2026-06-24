@@ -5,6 +5,10 @@
 Status: open (proposed 2026-06-22)
 Sub-state: CTO-proposed. Reviewer 3 (glm) of SOW-0096 produced the findings this SOW fixes. Depends on SOW-0097 (the new `user_input`/`assistant` op kinds need UI surfaces) and on the per-adapter fix SOWs (the SOW-0096 framework's invariant #11 can only pass once the data is in the canonical model AND surfaced in the UI).
 
+## Correction - 2026-06-22
+
+SOW-0097 has been reframed from new op kinds into deterministic ingestion parity gates. Any references below to new `user_input`/`assistant` op kinds are provisional. This UX SOW should surface whatever canonical artifact representation the parity spec approves, whether that is new op kinds, existing `kind + name` combinations, or payload-derived artifact classes.
+
 ## Pre-Implementation Gate
 
 ### Problem / root-cause model

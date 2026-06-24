@@ -166,6 +166,7 @@ describe('UnifiedView — overall shell', () => {
     expect(viz).toBeInTheDocument();
     expect(within(viz).getByRole('button', { name: /^waterfall$/i })).toBeInTheDocument();
     expect(within(viz).getByRole('button', { name: /^topology$/i })).toBeInTheDocument();
+    expect(within(viz).queryByRole('table', { name: /event list/i })).not.toBeInTheDocument();
 
     // Bottom tab buttons.
     const bottom = screen.getByRole('region', { name: /events panel/i });

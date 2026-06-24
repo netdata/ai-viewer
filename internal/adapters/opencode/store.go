@@ -45,7 +45,10 @@ var wantedColumns = map[string][]string{
 		"id", "message_id", "session_id", "time_created", "time_updated", "data",
 	},
 	"session_message": {
-		"id", "session_id", "type", "time_created", "time_updated", "data",
+		"id", "session_id", "type", "seq", "time_created", "time_updated", "data",
+	},
+	"session_input": {
+		"id", "session_id", "prompt", "time_created",
 	},
 }
 
@@ -172,7 +175,7 @@ type schemaSet map[string]tableSchema
 // (e.g. an old session row missing cost/tokens_*) is recorded in each
 // tableSchema's Missing and tolerated.
 func introspectAll(ctx context.Context, db *sql.DB) (schemaSet, error) {
-	out := make(schemaSet, len(trackedTables))
+	out := make(schemaSet, len(trackedTables)+1)
 	for _, table := range trackedTables {
 		s, err := introspectTable(ctx, db, table)
 		if err != nil {
@@ -183,6 +186,11 @@ func introspectAll(ctx context.Context, db *sql.DB) (schemaSet, error) {
 		}
 		out[table] = s
 	}
+	sessionInput, err := introspectTable(ctx, db, "session_input")
+	if err != nil {
+		return nil, err
+	}
+	out["session_input"] = sessionInput
 	return out, nil
 }
 

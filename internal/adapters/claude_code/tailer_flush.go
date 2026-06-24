@@ -141,7 +141,7 @@ func (f *tailFlush) handleTranscriptError(err error) error {
 
 func (f *tailFlush) foldDeferral(mapper *fileMapper, t transcript) {
 	if f.def != nil {
-		collectAgentDeferral(mapper, t, f.def.pending, f.def.completed)
+		collectAgentDeferral(mapper, t, f.def.pending, f.def.completed, f.def.finalized)
 	}
 }
 

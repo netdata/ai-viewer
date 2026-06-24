@@ -10,6 +10,7 @@ This directory contains the **living specifications** of ai-viewer: what it does
 
 - [workflow.md](workflow.md) — the development workflow: spec→test→code→review→gates→commit. The durable record of the discipline contract.
 - [quality-gates.md](quality-gates.md) — every automated gate enforced in CI and locally; commands, thresholds, and rationale.
+- [ingestion-parity.md](ingestion-parity.md) — deterministic source-to-canonical parity: source manifests, canonical manifests, diff rules, and gates.
 
 ### Foundations
 

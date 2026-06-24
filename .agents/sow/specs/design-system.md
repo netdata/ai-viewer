@@ -42,7 +42,7 @@ Dark default; light override; both designed.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
-| `--status-completed` | `0.72 0.17 145` (green) | `0.55 0.17 145` | Session finished without error |
+| `--status-completed` | `0.72 0.17 145` (green) | `0.48 0.17 145` | Session finished without error |
 | `--status-running` | `0.78 0.16 75` (amber) | `0.65 0.16 75` | Session still active |
 | `--status-failed` | `0.65 0.22 25` (red) | `0.55 0.22 25` | Session ended with failures |
 | `--status-abandoned` | `0.55 0.01 250` (gray) | `0.55 0.01 250` | Session closed without clean finish |

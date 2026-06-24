@@ -220,7 +220,7 @@ export function Topology() {
               key={m.key}
               className={`inline-flex cursor-pointer items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs ${
                 mode === m.key
-                  ? 'bg-accent text-foreground'
+                  ? 'bg-primary text-primary-foreground'
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -242,7 +242,7 @@ export function Topology() {
           type="button"
           className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-sm transition-colors ${
             frozen
-              ? 'border-primary bg-accent text-foreground'
+              ? 'border-primary bg-primary text-primary-foreground'
               : 'border-border bg-card text-foreground hover:bg-accent'
           }`}
           aria-pressed={frozen}

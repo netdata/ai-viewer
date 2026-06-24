@@ -538,3 +538,108 @@ func TestLoadSourceCursor_DecodeRoundTripV3(t *testing.T) {
 		t.Fatal("loadSourceCursor(stored=\"{}\") = nil, want non-nil cursor")
 	}
 }
+
+type fakeReadModelBackfiller struct {
+	deferReadModels bool
+	calls           chan struct{}
+	ctxDone         chan struct{}
+	returnErr       error
+}
+
+func newFakeReadModelBackfiller(deferReadModels bool) *fakeReadModelBackfiller {
+	return &fakeReadModelBackfiller{
+		deferReadModels: deferReadModels,
+		calls:           make(chan struct{}, 1),
+		ctxDone:         make(chan struct{}, 1),
+	}
+}
+
+func (f *fakeReadModelBackfiller) DeferReadModels() bool { return f.deferReadModels }
+
+func (f *fakeReadModelBackfiller) BackfillReadModels(ctx context.Context) error {
+	f.calls <- struct{}{}
+	if f.returnErr != nil {
+		return f.returnErr
+	}
+	<-ctx.Done()
+	f.ctxDone <- struct{}{}
+	return ctx.Err()
+}
+
+func TestStartPostScanBackfillClosesGateOnTimeout(t *testing.T) {
+	t.Parallel()
+
+	scanDone := make(chan struct{})
+	close(scanDone)
+	backfiller := newFakeReadModelBackfiller(true)
+
+	backfillDone := startPostScanBackfill(scanDone, backfiller, silentLogger(), 10*time.Millisecond)
+
+	select {
+	case <-backfiller.calls:
+	case <-time.After(time.Second):
+		t.Fatal("BackfillReadModels was not called after scanDone closed")
+	}
+	select {
+	case <-backfiller.ctxDone:
+	case <-time.After(time.Second):
+		t.Fatal("BackfillReadModels did not observe timeout cancellation")
+	}
+	select {
+	case <-backfillDone:
+	case <-time.After(time.Second):
+		t.Fatal("backfill gate did not close after timeout")
+	}
+}
+
+func TestStartPostScanBackfillWaitsForScanDone(t *testing.T) {
+	t.Parallel()
+
+	scanDone := make(chan struct{})
+	backfiller := newFakeReadModelBackfiller(true)
+	backfillDone := startPostScanBackfill(scanDone, backfiller, silentLogger(), 10*time.Millisecond)
+
+	select {
+	case <-backfiller.calls:
+		t.Fatal("BackfillReadModels called before scanDone closed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-backfillDone:
+		t.Fatal("backfill gate closed before scanDone closed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(scanDone)
+	select {
+	case <-backfiller.calls:
+	case <-time.After(time.Second):
+		t.Fatal("BackfillReadModels was not called after scanDone closed")
+	}
+	select {
+	case <-backfillDone:
+	case <-time.After(time.Second):
+		t.Fatal("backfill gate did not close after scanDone closed")
+	}
+}
+
+func TestStartPostScanBackfillSkipsWhenReadModelsNotDeferred(t *testing.T) {
+	t.Parallel()
+
+	scanDone := make(chan struct{})
+	close(scanDone)
+	backfiller := newFakeReadModelBackfiller(false)
+
+	backfillDone := startPostScanBackfill(scanDone, backfiller, silentLogger(), time.Minute)
+
+	select {
+	case <-backfillDone:
+	case <-time.After(time.Second):
+		t.Fatal("backfill gate did not close when read models were not deferred")
+	}
+	select {
+	case <-backfiller.calls:
+		t.Fatal("BackfillReadModels called even though read models were not deferred")
+	default:
+	}
+}

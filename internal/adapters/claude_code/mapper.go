@@ -88,6 +88,11 @@ type fileMapper struct {
 	pendingBeforeStart []canonical.Event
 	// turnSeq is the current 1-based turn counter. 0 means no turn open yet.
 	turnSeq int
+	// turnFinalized records whether the current turn has already received a
+	// TurnFinalizedEvent. Claude Code often starts the next prompt without a
+	// turn_duration marker; the mapper closes the previous turn at that next
+	// prompt timestamp exactly once.
+	turnFinalized bool
 	// opSeqInTurn is the 1-based op counter within the current turn.
 	opSeqInTurn int
 	// toolOps maps an open tool_use id to the turn/op it was emitted under,
@@ -114,6 +119,10 @@ type fileMapper struct {
 	// the child sidechain's EOF (spec §8.1, P1b): the parent transcript has no
 	// tool_result for the Agent tool, so the op is otherwise stuck running.
 	agentOps map[string]agentOpRef
+	// agentOpsResolved records Agent children finalized by a parent-side
+	// tool_result. Cross-file child completion must not later overwrite that
+	// source-native parent result.
+	agentOpsResolved map[string]struct{}
 	// fullyRead reports whether this file was streamed to EOF with no parked
 	// partial trailing line. Set by readTranscript. A fully-read subagent
 	// sidechain whose terminal record is an assistant-text marker finalizes its
@@ -183,6 +192,7 @@ type openToolOp struct {
 	turnSeq int
 	opSeq   int
 	name    string
+	childID string
 }
 
 // mapperConfig bundles the per-file inputs newFileMapper needs. Grouping them
@@ -485,6 +495,24 @@ func (m *fileMapper) logEntry(base canonical.EventBase, severity, kind string, r
 	if rec.Env.Subtype != "" {
 		extras["subtype"] = rec.Env.Subtype
 	}
+	if rec.Env.Type == recSystem && rec.System != nil && rec.System.Content != "" {
+		extras["content"] = rec.System.Content
+	}
+	if rec.LineNo > 0 {
+		class := "log_entry"
+		nativeArtifactID := fmt.Sprintf("line:%d:/log", rec.LineNo)
+		if rec.Env.Type == recSystem && claudeCodeLoggedSystemLogSubtype(rec.Env.Subtype) {
+			class = "system_op"
+			nativeArtifactID = fmt.Sprintf("line:%d:/system", rec.LineNo)
+		}
+		extras["aiViewer"] = map[string]any{
+			"parity": map[string]any{
+				"class":            class,
+				"nativeArtifactId": nativeArtifactID,
+				"selectorURI":      m.payloadURI(rec.LineNo),
+			},
+		}
+	}
 	return canonical.LogEntryEvent{
 		EventBase:       base,
 		SessionNativeID: m.nativeID,
@@ -496,24 +524,40 @@ func (m *fileMapper) logEntry(base canonical.EventBase, severity, kind string, r
 	}
 }
 
-// attachmentLog builds the DBG LogEntry for an `attachment` record. For a
-// `file` attachment it enriches the extras with filename, displayPath, and the
-// attachment type so the reference is visible in the UI without a backing
-// payload row (spec §333, §338, P2.6). No PayloadRef is ever emitted for an
-// attachment — it has no owning op (P1.1b).
+func claudeCodeLoggedSystemLogSubtype(subtype string) bool {
+	switch subtype {
+	case "compact_boundary", "api_error", "turn_duration":
+		return false
+	default:
+		return true
+	}
+}
+
+// attachmentLog builds the DBG LogEntry for an `attachment` record. It enriches
+// the extras with attachment type plus any source filename/displayPath fields
+// so the reference is visible and parity-verifiable without a backing payload
+// row. No PayloadRef is emitted for an attachment because it has no owning op.
 func (m *fileMapper) attachmentLog(base canonical.EventBase, rec record) canonical.LogEntryEvent {
 	le := m.logEntry(base, "DBG", "attachment", rec)
 	att := decodeAttachment(rec.Raw)
+	if rec.LineNo > 0 {
+		le.Extras["aiViewer"] = map[string]any{
+			"parity": map[string]any{
+				"class":            "attachment_metadata",
+				"nativeArtifactId": fmt.Sprintf("line:%d:/attachment", rec.LineNo),
+				"selectorURI":      m.payloadURI(rec.LineNo),
+				"jsonPointer":      "/attachment",
+			},
+		}
+	}
 	if att.Type != "" {
 		le.Extras["attachmentType"] = att.Type
 	}
-	if att.Type == "file" {
-		if att.Filename != "" {
-			le.Extras["filename"] = att.Filename
-		}
-		if att.DisplayPath != "" {
-			le.Extras["displayPath"] = att.DisplayPath
-		}
+	if att.Filename != "" {
+		le.Extras["filename"] = att.Filename
+	}
+	if att.DisplayPath != "" {
+		le.Extras["displayPath"] = att.DisplayPath
 	}
 	return le
 }

@@ -1,6 +1,6 @@
 # SOW-0093 — Perf: Sources / Search / Topology
 
-**Status:** in-progress (chunks 1-3 shipped)
+**Status:** completed
 **Date:** 2026-06-21
 **Goal:** Make the highest-traffic operator endpoints fast enough to feel
 instant on the production DB (530k sessions, 7 sources, 8k-op biggest session).
@@ -74,3 +74,7 @@ date. The chunks are independent and shippable separately.
 - [x] Chunk 2: `/api/search` parallel + CTE ✅ `7b89ab4`
 - [x] Chunk 3: `/api/topology` indexes ✅ `accd3a0`
 - [x] Chunk 4: `/api/sessions/:id` recursive CTE fix ✅ `53ac117`
+
+## Outcome
+
+Completed. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene pass.

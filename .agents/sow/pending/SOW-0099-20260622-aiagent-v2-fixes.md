@@ -5,6 +5,10 @@
 Status: open (proposed 2026-06-22)
 Sub-state: CTO-proposed. Reviewer 4 (minimax) of SOW-0096 produced the findings this SOW fixes. Depends on SOW-0097 (canonical `user_input` op kind) for the invariant #2 work; the mapper-side fixes in this SOW stand alone.
 
+## Correction - 2026-06-22
+
+SOW-0097 has been reframed from a `user_input`/`assistant` op-kind change into a deterministic ingestion parity-gate SOW. Any references below to "after SOW-0097 lands, emit new op kinds" are provisional. The actual v2 mapper work must follow the SOW-0097 parity spec: prove source-visible user prompts and assistant text against canonical artifacts first, then add op kinds only if the parity contract requires them.
+
 ## Pre-Implementation Gate
 
 ### Problem / root-cause model

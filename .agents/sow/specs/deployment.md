@@ -121,16 +121,19 @@ a fixed set of committed fixtures (`testdata/aiagent_v3/{happy_single_turn,
 multi_turn,sub_agent}/INPUT`) into a `mktemp` temp DB, waits until all three
 sources log "adapter scan complete; tail starting" (so every fixture has emitted
 before shutdown), then SIGTERMs the ingester and waits for a clean exit (which
-flushes the final batch). It then enforces the EXACT deterministic seed via a
-read-only `sqlite3` open — exactly 4 sessions, 1 child session, 3 sources (a
-shortfall = partial seed; a surplus = fixture drift; both fail loudly) — then
-`exec`s
-`ai-viewer-serve --bind 127.0.0.1:7710` in the foreground so Playwright owns and
-tears down the process. Kills only the ingester PID it starts (never
-`pkill`/`killall`). The temp DB is built from already-sanitized fixtures, never
-the operator's real state dir. In CI the `frontend` job runs `scripts/build.sh`
-(which sets up Go) BEFORE `npm run e2e`, so the binaries exist when the
-`webServer` launches this script (SOW-0001 Chunk-18 D1/D2).
+flushes the final batch and runs the final resolver pass). It then enforces the
+EXACT deterministic seed via a read-only `sqlite3` open — exactly 4 sessions,
+1 child session, 1 linked parent session-op, and 3 sources (a shortfall =
+partial seed; a surplus = fixture drift; both fail loudly) — then `exec`s
+`ai-viewer-serve --bind 127.0.0.1:<port>` in the foreground so Playwright owns
+and tears down the process. The port defaults to `7710`; Playwright passes
+`AI_VIEWER_E2E_PORT` when set, and the aggregate local gate chooses a fallback
+port when the installed workstation service already owns `7710`. Kills only the
+ingester PID it starts (never `pkill`/`killall`). The temp DB is built from
+already-sanitized fixtures, never the operator's real state dir. In CI the
+`frontend` job runs `scripts/build.sh` (which sets up Go) BEFORE `npm run e2e`,
+so the binaries exist when the `webServer` launches this script (SOW-0001
+Chunk-18 D1/D2).
 
 ## Source Auto-Discovery
 

@@ -65,6 +65,16 @@ func opStarts(events []canonical.Event) []canonical.OpStartedEvent {
 	return out
 }
 
+func countReasoningOps(events []canonical.Event) int {
+	n := 0
+	for _, s := range opStarts(events) {
+		if s.Kind == canonical.OpReasoning {
+			n++
+		}
+	}
+	return n
+}
+
 // opFinals returns every OpFinalizedEvent in the stream.
 func opFinals(events []canonical.Event) []canonical.OpFinalizedEvent {
 	var out []canonical.OpFinalizedEvent

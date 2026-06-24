@@ -142,6 +142,11 @@ This boundary keeps D3 isolated and testable.
 - **Timeouts / retries:** `playwright.config.ts` sets `timeout: 15_000` and `retries: 0` (NO blanket retries — a flake elsewhere is a real defect). The SSE flows opt into `test.describe.configure({ retries: 1, timeout: 30_000 })` (the EventSource open is the slowest checkpoint and the one legitimate CI-timing risk). Add a retry ONLY to a genuine connection/timing checkpoint, never broadly.
 - **Quarantine, never `test.skip`:** a genuinely-flaky spec is MOVED to `frontend/tests/quarantine/` with the linked SOW filename in its file header. Two Playwright projects make this automatic: `chromium` is the gating project with `testIgnore: '**/quarantine/**'`; `quarantine` (its own `testDir`) runs only that dir. `npm run e2e` / `npm run e2e:a11y` name `--project=chromium` (gating); `npm run e2e:quarantine` runs `--project=quarantine --pass-with-no-tests` (non-gating, diagnostic). The directory is empty on delivery — policy in `frontend/tests/quarantine/README.md`.
 - **`npm run e2e:a11y`** runs the three axe specs (`a11y`, `viz-a11y`, `stats-a11y`) on the gating project; axe scans **every** route under both themes, including the `/sessions/:id` **logs** tab. Threshold: zero serious/critical.
+- **E2E bind port:** Playwright defaults the seeded embedded server to
+  `127.0.0.1:7710`, but honors `AI_VIEWER_E2E_PORT=<free-port>` for local runs
+  where the installed workstation service already owns the default. Do not set
+  `reuseExistingServer: true`; the suite must always own a fresh deterministic
+  temp DB.
 
 ### viz a11y waivers (SOW-0012)
 

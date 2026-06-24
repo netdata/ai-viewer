@@ -179,6 +179,7 @@ type lineStreamer struct {
 	onError  func(error)
 	emitted  int
 	off      int64
+	lineNo   int64
 }
 
 func (s *lineStreamer) run() (int, int64, error) {
@@ -228,6 +229,7 @@ func (s *lineStreamer) handleReadError(consumed int64, err error) (bool, error) 
 }
 
 func (s *lineStreamer) handleOversizedLine(consumed int64) {
+	s.lineNo++
 	emit := s.off >= s.emitFrom
 	if emit {
 		s.onError(fmt.Errorf("transcript %s @%d: line exceeds %d bytes; skipping", s.t.rel, s.off, scanBufferMax))
@@ -238,6 +240,7 @@ func (s *lineStreamer) handleOversizedLine(consumed int64) {
 }
 
 func (s *lineStreamer) processLine(line []byte) error {
+	s.lineNo++
 	recBytes, lineStart := s.consumeLine(line)
 	emit := lineStart >= s.emitFrom
 	rec, skip, err := parseLine(recBytes)
@@ -271,6 +274,7 @@ func (s *lineStreamer) markUnmappedPhysicalLine(emit bool) {
 }
 
 func (s *lineStreamer) mapAndMaybeEmit(lineStart int64, rec record, emit bool) error {
+	rec.LineNo = s.lineNo
 	events, err := s.mapper.mapRecord(rec)
 	if err != nil {
 		s.handleMapError(lineStart, err, emit)

@@ -23,6 +23,52 @@ For every adapter under `internal/adapters/<name>/`:
 - **Idempotency property**: re-scanning with the final cursor produces zero events.
 - **Error tests**: malformed records produce `SourceError` events, do not crash, do not block other records.
 
+### 1b. Ingestion parity tests (Go)
+
+`internal/parity/` verifies that source-native artifacts match canonical
+artifacts after ingestion. These tests are distinct from adapter golden tests:
+goldens prove a mapper emits a chosen event stream, while parity proves no
+source-visible artifact was lost, emptied, duplicated, truncated, misclassified,
+or left unverifiable.
+
+Required parity test surfaces:
+
+- Source extractor tests per adapter: native fixture → source manifest.
+- Source record accounting tests per record-based adapter: unknown top-level
+  native record types fail closed until the adapter spec explicitly documents an
+  ignored-record rule; known no-op records have explicit positive tests.
+- Canonical extractor tests: seeded SQLite/payload refs → canonical manifest.
+- Diff tests: missing, extra, duplicate, hash mismatch, length mismatch, empty,
+  partial, redacted/compacted marker mismatch, source-unavailable mismatch,
+  class mismatch, subagent-link direction mismatch, source-record accounting
+  gap, matrix mismatch, synthetic-id collision, and unverifiable canonical
+  artifacts all fail closed.
+- E2E fixture tests: sanitized source fixture → ingest into temp DB → source
+  manifest vs canonical manifest diff is empty.
+- CLI tests: `ai-viewer-ingest check-parity` exits non-zero on mismatch and
+  distinguishes `PASS full parity`, `FAIL parity`, `INCOMPLETE`, and
+  `SAMPLE ONLY`. The fixture-mode CLI path may scan into a temporary SQLite DB;
+  the existing-DB path must open the DB read-only and detect missing canonical
+  artifacts without mutating it.
+- Wrapper tests: `scripts/check-ingestion-parity.sh --fixtures` runs the named
+  parity test set, including matrix drift tests, plus the `internal/parity` fuzz
+  seed corpus, and fails closed on missing/failed underlying commands or invalid
+  arguments.
+- Matrix drift tests: every adapter spec's parity availability matrix matches the
+  machine-readable matrix consumed by the gate, and the machine-readable matrix
+  has no live `unknown` rows or default in-progress SOW placeholder text.
+- Snapshot determinism tests: unchanged source + unchanged temp DB produce
+  byte-identical sorted manifests and findings across repeated runs.
+- Live mutation tests: appending to a source file during extraction makes the run
+  `INCOMPLETE`, not `PASS`.
+- Source extractor fuzz tests: malformed/truncated native records never panic and
+  never become a clean pass. Diff-engine fuzz tests reject malformed manifests
+  fail-closed. The ingestion parity wrapper runs these deterministic seeds with
+  `go test -run='^Fuzz' ./internal/parity`.
+
+Committed parity fixtures must be sanitized and must not contain raw prompts,
+assistant messages, reasoning, tool output, secrets, or operator identity.
+
 ### 2. Canonical/ingest unit tests (Go)
 
 `internal/canonical/` and `internal/ingest/`:
@@ -193,7 +239,7 @@ Current CI testing surfaces on `master` and PRs to `master`:
 - `test`: Go build, `go test -race -count=1 -timeout=25m -coverprofile=coverage.out -covermode=atomic ./...`, deterministic adapter fuzz seed corpus, Go coverage artifact upload and threshold enforcement, coverage-gate self-test, benchmark compile smoke, and benchmark-gate self-test.
 - `frontend`: ESLint, TypeScript typecheck, Vitest unit/component run with coverage and native per-directory thresholds, coverage artifact upload, coverage-config verifier/self-tests, Playwright E2E/axe, bundle-size self-test, and enforced bundle-size gate.
 - `embed-smoke`: embedded frontend/server binary build, served UI smoke, and `/api/health` smoke.
-- `gates`: cross-cutting testing infrastructure checks including lint-test, secrets scanner self-test/scan, spec-drift self-test/scan, Codacy coverage-upload self-test, Codacy config self-test, AI-attribution scan, local aggregate syntax check, and optional systemd unit lint.
+- `gates`: cross-cutting testing infrastructure checks including lint-test, secrets scanner self-test/scan, spec-drift self-test/scan, ingestion parity self-test/fixtures, Codacy coverage-upload self-test, Codacy config self-test, AI-attribution scan, local aggregate syntax check, and optional systemd unit lint.
 - `codeql`: required CodeQL matrix jobs for `go`, `javascript-typescript`, and `actions`.
 - `codacy-coverage`: non-required reporting job that uploads coverage artifacts through `scripts/codacy-coverage-upload.sh` when a usable Codacy token is available.
 

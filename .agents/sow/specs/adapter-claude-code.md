@@ -90,6 +90,14 @@ Optionally, when workflow runs group related agents:
 ~/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/<subdir>/agent-<agentId>.jsonl
 ```
 
+Workflow grouping can also create control journals such as
+`<sessionId>/subagents/workflows/<workflow-id>/journal.jsonl`. These are not
+conversation transcripts: live corpus inspection on 2026-06-23 found top-level
+`started` / `result` workflow control records there, not Claude transcript
+records. The adapter and parity source extractor MUST ignore non-`agent-*.jsonl`
+files below any `subagents/` directory instead of treating them as root or
+subagent sessions.
+
 Additionally, oversized Bash/PowerShell tool OUTPUT may be spilled to per-session files under the session dir (`tool-results/<id>.txt`), referenced by `persistedOutputPath`. NOTE: this `tool-results/` spill is distinct from a `compact_file_reference` record, which points at the ORIGINAL project file the model read (outside the projects root), NOT at a `tool-results/` spill — see §3.4:
 
 ```text
@@ -140,6 +148,10 @@ The producer's `Entry` union additionally declares record types not observed in 
 - `attribution-snapshot` (`AttributionSnapshotMessage`, `logs.ts:208-219`) — per-file character contribution counts; used for git commit attribution.
 - `speculation-accept` (`SpeculationAcceptMessage`, `logs.ts:233-237`) — speculation/prediction accepted; carries `timeSavedMs`.
 - `marble-origami-commit`, `marble-origami-snapshot` (`logs.ts:255-295`) — internal context-collapse mechanism (the discriminator is obfuscated in source; same comment notes "the gate name [...] would leak into external builds via the appendEntry dispatch"). The adapter should ignore these record types.
+- `fork-context-ref` — live-observed in subagent `agent-*.jsonl` transcripts on
+  2026-06-23. It carries parent/fork context bookkeeping (`agentId`,
+  `parentSessionId`, `parentLastUuid`, `contextLength`) and does not map to a
+  canonical artifact; tolerate and ignore it.
 
 Records carry a shared envelope plus a per-type body. Common envelope fields (from `SerializedMessage` + `TranscriptMessage` in `logs.ts:8-17, 221-231`):
 
@@ -214,7 +226,12 @@ Records carry a shared envelope plus a per-type body. Common envelope fields (fr
 - `ToolSearch`: `{ matches, query, total_deferred_tools }`
 - raw string: a bare error message (when the tool stack returns a string instead of structured output)
 
-The adapter should treat `toolUseResult` as opaque structured payload for ops of `kind='tool'`; the `tool_use_id` from the corresponding block is the canonical join key back to the `assistant.tool_use`.
+The adapter should treat `toolUseResult` as opaque structured payload for ops of
+`kind='tool'` and `kind='session'`; the `tool_use_id` from the corresponding
+block is the canonical join key back to the `assistant.tool_use`. Some Claude
+Code versions return `Agent` tool results through the parent transcript, while
+others only expose the subagent's terminal assistant text in the child
+transcript. The adapter and source parity extractor must support both forms.
 
 ### 3.2 `assistant` records
 
@@ -294,7 +311,7 @@ The adapter should treat `toolUseResult` as opaque structured payload for ops of
 Observed `subtype` values:
 
 - `stop_hook_summary` — a session-stop hook fired. Body includes `hookCount`, `hookInfos[]`, `hookErrors[]`, `preventedContinuation`, `stopReason`, `level`, `toolUseID`. Useful for plugin/hook visibility.
-- `api_error` — an Anthropic API call failed. Body: `error{status, headers, requestID, type}`, `retryInMs` (**a float** — Claude Code emits fractional backoff ms, e.g. `38317.38269012852`; the adapter decodes it as `*float64`), `retryAttempt`, `maxRetries`. Maps to a failed LLM op (see §5).
+- `api_error` — an Anthropic API call failed. Body: `error{status, headers, requestID, type, message?}`, `retryInMs` (**a float** — Claude Code emits fractional backoff ms, e.g. `38317.38269012852`; the adapter decodes it as `*float64`), `retryAttempt`, `maxRetries`. Each record maps to one failed LLM-attempt op (see §5).
 - `compact_boundary` — **compaction marker** (see §9). Body: `compactMetadata{trigger, preTokens, postTokens, durationMs, preservedSegment{headUuid, anchorUuid, tailUuid}, preservedMessages{anchorUuid, uuids[]}}`. `trigger` observed values: `"manual"`.
 - `turn_duration` — emitted at the end of a turn. Body: `durationMs`, `messageCount`. The adapter uses this as a definitive **turn boundary signal** for the preceding turn.
 - `local_command` — a `/`-prefixed local CLI command ran. Body varies.
@@ -319,7 +336,7 @@ Observed `subtype` values:
 
 `attachment.type` values observed and their semantics:
 
-- `file` — operator attached a file: `{type, filename, displayPath, content:{type:"text", file:{filePath, content}}}`. A bare file attachment is turn-context the harness injected, NOT a tool op; the canonical model has no op to own it, and `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` (`migrations/0001_initial.sql:147`). The adapter therefore does NOT emit a `PayloadRefEvent` for a `file` attachment (an orphan ref would reference a non-existent op and roll back the ingest batch). Instead it records `filename`, `displayPath`, and the attachment `type` in the attachment `LogEntry`'s extras (§333, §338), so the attached file is still visible in the UI.
+- `file` — operator attached a file: `{type, filename, displayPath, content:{type:"text", file:{filePath, content}}}`. A bare file attachment is turn-context the harness injected, NOT a tool op; the canonical model has no op to own it, and `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` (`migrations/0001_initial.sql:147`). The adapter therefore does NOT emit a `PayloadRefEvent` for a `file` attachment (an orphan ref would reference a non-existent op and roll back the ingest batch). Instead it records the attachment `type` plus any source `filename` and `displayPath` fields in the attachment `LogEntry`'s extras (§333, §338), so the attached file is still visible in the UI.
 - `directory` — operator attached a directory listing.
 - `opened_file_in_ide` — IDE signal that operator opened a file: `{type, filename}`.
 - `edited_text_file` — IDE signal that operator edited a file outside the agent's edits.
@@ -331,12 +348,12 @@ Observed `subtype` values:
 - `mcp_instructions_delta` — diff to the MCP-server instructions context.
 - `diagnostics` — IDE diagnostics (linter errors, etc.).
 - `date_change` — the calendar day changed mid-session.
-- `compact_file_reference` — **reality (verified `jarmuine/claude-code @ 4b9d30f79532 :: src/utils/attachments.ts:307-312, 3136`)**: the record carries `{type, filename, displayPath}` where `filename` is the **original project file** the model read (a CWD-relative or absolute path under the operator's project, e.g. `/home/user/src/x.go`), NOT a spill file under `<sessionDir>/tool-results/`. `displayPath` is the CWD-relative form for display. The earlier draft of this spec assumed a `tool-results/<id>.txt` spill path; that is the layout for Bash/PowerShell oversized-output spills (`BashTool.tsx:292`, `toolResultStorage.ts:27`), referenced by `persistedOutputPath`, not by `compact_file_reference`. Because the referenced file lives **outside the configured projects root**, the adapter does NOT emit a servable `PayloadRefEvent` for it (a read-only viewer serves only files under its source root; pointing a payload at an arbitrary project path would fail the §6.1 containment guard). The adapter records the `displayPath` in the attachment `LogEntry`'s extras so the reference is still visible in the UI, and leaves payload-on-demand for these to a future SOW if the operator wants project-file serving.
+- `compact_file_reference` — **reality (verified `jarmuine/claude-code @ 4b9d30f79532 :: src/utils/attachments.ts:307-312, 3136`)**: the record carries `{type, filename, displayPath}` where `filename` is the **original project file** the model read (a CWD-relative or absolute path under the operator's project, e.g. `/home/user/src/x.go`), NOT a spill file under `<sessionDir>/tool-results/`. `displayPath` is the CWD-relative form for display. The earlier draft of this spec assumed a `tool-results/<id>.txt` spill path; that is the layout for Bash/PowerShell oversized-output spills (`BashTool.tsx:292`, `toolResultStorage.ts:27`), referenced by `persistedOutputPath`, not by `compact_file_reference`. Because the referenced file lives **outside the configured projects root**, the adapter does NOT emit a servable `PayloadRefEvent` for it (a read-only viewer serves only files under its source root; pointing a payload at an arbitrary project path would fail the §6.1 containment guard). The adapter records `filename` and `displayPath` in the attachment `LogEntry`'s extras so the reference is still visible in the UI, and leaves payload-on-demand for these to a future SOW if the operator wants project-file serving.
 - `nested_memory` — memory directive injected from a nested `CLAUDE.md`.
 - `command_permissions` — permission-prompt history.
 - `ultrathink_effort` — extended-thinking effort indicator.
 
-Most attachments are content the harness injects into the model's context, NOT operator-visible UI events. The adapter emits them as `LogEntry` rows with `severity=DBG` (so they don't dominate the timeline). For a `file` attachment it additionally records `filename`, `displayPath`, and the attachment `type` in the `LogEntry`'s extras so the reference is visible without a backing payload row. The adapter does NOT emit a `PayloadRefEvent` for any attachment subtype: a `file` attachment has no owning op (a payload row's `op_id` is `NOT NULL REFERENCES ops(id)`, so an orphan ref would roll back the ingest batch), and `compact_file_reference` targets a project file outside the served root (§3.4). Payload-on-demand for attached content is left to a future SOW.
+Most attachments are content the harness injects into the model's context, NOT operator-visible UI events. The adapter emits them as `LogEntry` rows with `severity=DBG` (so they don't dominate the timeline). For every attachment subtype it records `attachmentType`, and it also records `filename` and `displayPath` whenever those source fields are present. This keeps `file`, `opened_file_in_ide`, `edited_text_file`, `compact_file_reference`, and any future path-carrying attachment subtype visible and parity-verifiable without a backing payload row. The adapter does NOT emit a `PayloadRefEvent` for any attachment subtype: a `file` attachment has no owning op (a payload row's `op_id` is `NOT NULL REFERENCES ops(id)`, so an orphan ref would roll back the ingest batch), and `compact_file_reference` targets a project file outside the served root (§3.4). Payload-on-demand for attached content is left to a future SOW.
 
 ### 3.5 `queue-operation` records
 
@@ -425,7 +442,7 @@ No timestamp, no uuid. Records the link between the local Claude Code session an
 }
 ```
 
-No top-level `timestamp` (the inner `snapshot.timestamp` is the write time). Records the producer's tracked-file backup state for Edit/Write undo. The adapter stores the actual `snapshot.trackedFileBackups` map under `sessions.extras_json.fileHistory` when non-empty (last-non-empty wins, mirroring the other last-wins snapshots), so the UI can show which files the session backed up — not merely a boolean that a snapshot existed.
+No top-level `timestamp` (the inner `snapshot.timestamp` is the write time). Records the producer's tracked-file backup state for Edit/Write undo. The adapter emits the actual `snapshot.trackedFileBackups` map under `sessions.extras_json.fileHistory` when non-empty, so the UI can show which files the session backed up — not merely a boolean that a snapshot existed. Because `file-history-snapshot` is emitted through partial `SessionUpdatedEvent` rows, the ingester applies SQLite `json_patch` to `sessions.extras_json`; therefore the final canonical `fileHistory` object is merge-patch accumulated across source snapshots in source order (new values win, object children merge, JSON null deletes). Null deletion applies recursively, including inside newly introduced file entries; a patch object such as `{"backupFileName": null, "version": 1}` becomes an object with only `version` instead of preserving a literal null field. The parity source extractor MUST mirror that final merged object before hashing `session_metadata`.
 
 ### 3.12 Records observed only in source, not in real data
 
@@ -483,14 +500,37 @@ Subagent records share the same shape as main records. Distinguishing fields:
 
 ### 4.4 Result return path
 
-The subagent's "result" is never copied back into the parent's jsonl. The parent's `assistant.tool_use` for `Agent` has NO matching `tool_result` block in the parent's records (verified by tool-id grep across the ai-viewer's own session: 1 occurrence of the Agent's `toolu_id` instead of the typical 2). The result is implicit: it equals the LAST `assistant` record with `content[0].type == "text"` in `agent-<agentId>.jsonl`.
+The subagent's "result" has two observed return paths:
+
+- Some transcripts do not copy the result back into the parent's jsonl. In that
+  form, the parent's `assistant.tool_use` for `Agent` has no matching
+  `tool_result` block and the result is implicit: it equals the last
+  `assistant` record with `content[0].type == "text"` in
+  `agent-<agentId>.jsonl`.
+- Other transcripts do include a parent-side `tool_result` block whose
+  `tool_use_id` matches the parent `Agent` tool-use id, optionally with a
+  top-level `toolUseResult` structured echo. In that form, the `Agent` session
+  op is finalized from the parent record exactly like a normal tool op, and the
+  result payloads are persisted as `tool_response` refs scoped to the session
+  op.
+
+Both forms are source-visible and must be represented in parity.
 
 This is the most important structural difference from ai-agent v3 and must be encoded in the adapter:
 
 1. While streaming the parent's jsonl, on each `assistant.tool_use` with `name == "Agent"`, emit `OpStartedEvent` with `kind='session'`, capture the `toolu_id`.
-2. The corresponding `OpFinalizedEvent` is deferred until the subagent's jsonl reports completion (its last assistant record or end-of-file with no more activity).
-3. Read the sidecar `.meta.json` to recover `agentType` (the subagent's effective "agent name") and the `toolUseId` join key.
-4. Emit a separate canonical Session for the subagent: `SessionStartedEvent` with `Kind='sub_agent'`, `ParentNativeID=<parent sessionId>` and the synthetic `NativeID=<parent sessionId>:agent:<agentId>` (see §5.1, §5.2), `AgentName=<agentType>`.
+2. If a matching parent-side `tool_result` arrives, finalize the session op from
+   that record and emit the exact `tool_response` payload refs
+   (`/message/content/<i>/content` and `/toolUseResult` when present).
+3. Otherwise, defer the corresponding `OpFinalizedEvent` until the subagent's
+   jsonl reports completion (its last assistant record or end-of-file with no
+   more activity).
+4. Read the sidecar `.meta.json` to recover `agentType` (the subagent's
+   effective "agent name") and the `toolUseId` join key.
+5. Emit a separate canonical Session for the subagent: `SessionStartedEvent`
+   with `Kind='sub_agent'`, `ParentNativeID=<parent sessionId>` and the
+   synthetic `NativeID=<parent sessionId>:agent:<agentId>` (see §5.1, §5.2),
+   `AgentName=<agentType>`.
 
 ## 5. Mapping to Canonical Events
 
@@ -534,29 +574,29 @@ Claude Code does not write explicit turn records. The adapter infers turns from 
 | Source record | Canonical event(s) emitted |
 |---|---|
 | First record in file | `SessionStartedEvent` (once per file) |
-| `user` with string content (non-meta, non-compact) | `TurnStartedEvent(Seq=N+1)` |
-| `user` with array content (`tool_result` blocks) | one `OpFinalizedEvent` per `tool_result` block, matched by `tool_use_id`; plus one `PayloadRefEvent` (`PayloadKind='tool_response'`, `Format='text'`, `LocationURI=file://<transcript>`) for the `toolUseResult` body when present, matched to the finalized tool op's `Seq` |
+| `user` with string content (non-meta, non-compact) | `TurnStartedEvent(Seq=N+1)` plus an internal `OpStartedEvent`/`OpFinalizedEvent` with `Kind='internal'`, `Name='user_input'`, and one `PayloadRefEvent` (`PayloadKind='tool_request'`, `Format='text'`) whose `LocationURI` selects the exact string at `file://<transcript>?json_pointer=/message/content#L<line>`. This op owns the prompt payload because `payload_refs.op_id` is non-null. |
+| `user` with array content (`tool_result`, `text`, and `image` blocks) | one `OpFinalizedEvent` per `tool_result` block, matched by `tool_use_id`; `Status='failed', ErrorClass='tool_error'` when `tool_result.is_error==true`, otherwise `Status='completed'`; plus one `PayloadRefEvent` (`PayloadKind='tool_response'`) per matched `tool_result.content` selector (`/message/content/<i>/content`), scoped to the finalized tool op; plus one `PayloadRefEvent` (`PayloadKind='tool_response'`) for the top-level `toolUseResult` body when present (`/toolUseResult`), matched to the first finalized tool op in the record exactly as the existing op-finalization rule scopes the structured echo. A `text` block in the same array is operator-injected prompt text inside the current turn: it emits a completed internal `kind=internal,name=user_input` op at the record timestamp plus one `PayloadRefEvent` (`PayloadKind='tool_request'`, `Format='text'`) selecting `/message/content/<i>/text`. An `image` block emits a completed internal `kind=internal,name=user_input` op at the record timestamp plus one `PayloadRefEvent` (`PayloadKind='tool_request'`, `Format='json'`) selecting the whole image block at `/message/content/<i>`; this preserves the source-visible `{type:"image", source:{type:"base64", media_type, data}}` object exactly as canonical JSON without decoding the base64 bytes. Claude Code stores the error body as the same `tool_response` payload, so the op error artifact records `error_class=tool_error` and an empty `error_message_sha256` unless a future adapter version starts populating `ops.error_message`. |
 | `user` with `isMeta==true` (`<local-command-caveat>` etc.) | `LogEntry` `DBG`; no turn/op events |
-| `user` with `isCompactSummary==true` | `LogEntry` `INF` carrying the post-compaction summary, plus a `PayloadRefEvent` (`PayloadKind='log'`, `Format='text'`, `LocationURI=file://<transcript>`) pointing at the summary text so the UI can render it in a compaction lane. The payload is scoped to the **compaction op** that immediately precedes the summary (the same `(TurnSeq, OpSeq)` the `compact_boundary` synthetic op was emitted under), because `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` — a payload must reference an op that exists, and the compaction op is the natural owner of its own summary. The drop guard keys on `OpSeq == 0` only (the real "no owning op" sentinel): a compaction op legitimately exists at turn 0 (a `/compact` before any operator prompt), so a turn-0 compaction summary is still emitted, scoped to that turn-0 compaction op (§9.2). |
-| `assistant` (model != `<synthetic>`) | `OpStartedEvent(Kind='llm', Model, Provider='anthropic', Name=Model)` covering the LLM call; for each `tool_use` block in `content[]`, an additional `OpStartedEvent(Kind='tool', Name=name, ToolNamespace=mcp_server or '')`; `OpFinalizedEvent` for the LLM op with tokens from `message.usage` |
+| `user` with `isCompactSummary==true` | `LogEntry` `INF` carrying the post-compaction summary, plus a `PayloadRefEvent` (`PayloadKind='log'`, `Format='text'`, exact selector `/message/content`) pointing at the summary text so the UI can render it in a compaction lane. The payload is scoped to the **compaction op** that immediately precedes the summary (the same `(TurnSeq, OpSeq)` the `compact_boundary` synthetic op was emitted under), because `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)` — a payload must reference an op that exists, and the compaction op is the natural owner of its own summary. The drop guard keys on `OpSeq == 0` only (the real "no owning op" sentinel): a compaction op legitimately exists at turn 0 (a `/compact` before any operator prompt), so a turn-0 compaction summary is still emitted, scoped to that turn-0 compaction op (§9.2). |
+| `assistant` (model != `<synthetic>`) | `OpStartedEvent(Kind='llm', Model, Provider='anthropic', Name=Model)` covering the LLM call, one exact `PayloadRefEvent` (`PayloadKind='llm_response'`, `Format='text'`) for each `content[].text` selector (`/message/content/<i>/text`), one exact `PayloadRefEvent` (`PayloadKind='llm_reasoning'`, `Format='text'`) for each `content[].thinking` selector (`/message/content/<i>/thinking`) scoped to the nested reasoning op, and for each `tool_use` block an additional `OpStartedEvent(Kind='tool', Name=name, ToolNamespace=mcp_server or '')` plus one exact `PayloadRefEvent` (`PayloadKind='tool_request'`, `Format='json'`) for `/message/content/<i>/input`; `OpFinalizedEvent` for the LLM op with tokens from `message.usage`. |
 | `assistant` (model == `<synthetic>`) | `LogEntry` `INF`; no LLM op emitted |
 | `assistant.content[].type=="thinking"` | nested `OpStartedEvent`/`OpFinalizedEvent` with `Kind='reasoning'`, `ParentOpSeq=<the LLM op>`, `BytesOut=len(thinking)` |
-| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, Extras.aiViewer.toolUseId=<the Agent tool_use block id>)`, ALWAYS carrying the `toolUseId` stash (the meta-independent parent→child join key, §8.1); plus `ChildSessionNativeID=<parent sessionId>:agent:<agentId>` WHEN the sidecar `.meta.json` is already known at map time. The `OpFinalizedEvent` is deferred until the spawned subagent sidechain is fully read AND its terminal record is an assistant-text completion marker (see §8.1, §485). The parent transcript has NO `tool_result` for the Agent tool, so the op is finalized from the child's end state, not from a `tool_result` block. When the linking `.meta.json` lands after the parent's `Agent` block was already tailed, the op→child link is repaired by the resolver matching the op's stashed `toolUseId` to the child session's stashed `toolUseId` — NO transcript re-read, no catalog double-count (§8.1). |
+| `assistant.tool_use` with `name=="Agent"` | `OpStartedEvent(Kind='session', Name=description, Extras.aiViewer.toolUseId=<the Agent tool_use block id>)`, ALWAYS carrying the `toolUseId` stash (the meta-independent parent→child join key, §8.1); plus `ChildSessionNativeID=<parent sessionId>:agent:<agentId>` WHEN the sidecar `.meta.json` is already known at map time. If a matching parent-side `tool_result` arrives, the session op is finalized from that record and emits the same `tool_response` payload refs as a normal tool result. If no matching parent-side result exists, the `OpFinalizedEvent` is deferred until the spawned subagent sidechain is fully read AND its terminal record is an assistant-text completion marker (see §8.1, §485). When the linking `.meta.json` lands after the parent's `Agent` block was already tailed, the op→child link is repaired by the resolver matching the op's stashed `toolUseId` to the child session's stashed `toolUseId` — NO transcript re-read, no catalog double-count (§8.1). |
 | Each subagent jsonl file | a separate canonical Session (`Kind='sub_agent'`, parent linkage via `ParentNativeID`, `Extras.aiViewer.toolUseId=<the child's .meta.json.toolUseId>` when the sidecar is known — the join key the resolver matches against the parent op's stashed `toolUseId`, §8.1); turn/op inference identical to main session |
 | `system.subtype=="turn_duration"` | `TurnFinalizedEvent` for the just-completed turn |
-| `system.subtype=="api_error"` | `LogEntry` severity `ERR`; if the next record is a synthetic assistant or absence-of-assistant, mark the in-flight LLM op `status='failed', error_class=api_error_<status>` |
+| `system.subtype=="api_error"` | one synthetic-attempt `OpStartedEvent(Kind='llm', Provider='anthropic', Name='api_error')` plus matching `OpFinalizedEvent(Status='failed', ErrorClass='api_error_<status>')` at the API-error record timestamp; `ErrorMessage` is `error.message`, else `content`, else `error.type`, else `api_error`. The adapter also emits the existing `LogEntry` severity `ERR`. This is not a successful assistant response and does not emit `llm_response`; it is the source-visible failed provider attempt. |
 | `system.subtype=="compact_boundary"` | BOTH a `LogEntry` `INF` (Message `compact_boundary`, Extras carry the full `compactMetadata`) AND a synthetic op `OpKind='compaction'` carrying `Ts=record.timestamp`, `EndTs=Ts+durationMs*1000`, `BytesIn=preTokens`, `BytesOut=postTokens`, and `Extras=` the FULL `compactMetadata` (`trigger`, `preTokens`, `postTokens`, `durationMs`, AND `preservedSegment` + `preservedMessages`). Subsequent records' `parentUuid` may be `null` (post-compaction chain restart); the adapter must accept that without error. See §9. |
 | `system.subtype=="stop_hook_summary"` | `LogEntry` `DBG` (one per hook) plus aggregate `LogEntry` `INF`; no canonical op |
 | `system.subtype=="local_command"` | `LogEntry` `INF` |
 | `system.subtype=="informational"` | `LogEntry` `INF` |
-| `attachment` (any subtype) | `LogEntry` `DBG`. For a `file` subtype the LogEntry's extras additionally carry `filename`, `displayPath`, and the attachment `type` (§333, §338). NO `PayloadRefEvent` is emitted for any attachment subtype: a `file` attachment has no owning op (and `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)`, so an orphan ref rolls back the batch), and `compact_file_reference` targets a path outside the served root. See §3.4. |
+| `attachment` (any subtype) | `LogEntry` `DBG`. Extras carry `attachmentType` for every subtype, plus `filename` and `displayPath` whenever the source attachment object has those fields (§333, §338). NO `PayloadRefEvent` is emitted for any attachment subtype: a `file` attachment has no owning op (and `payload_refs.op_id` is `NOT NULL REFERENCES ops(id)`, so an orphan ref rolls back the batch), and `compact_file_reference` targets a path outside the served root. See §3.4. |
 | `queue-operation` | `LogEntry` `INF` |
 | `last-prompt` | UPDATE `sessions.extras_json.lastPrompt`; no event (no `Ts`) — implemented as last-wins in the adapter's in-memory state, flushed on `SourceProgress` |
 | `custom-title` / `ai-title` | UPDATE `sessions.extras_json.title` (custom wins) |
 | `permission-mode` | UPDATE `sessions.extras_json.permissionMode` |
 | `pr-link` | accumulate into `sessions.extras_json.prLinks[]` and emit a `SessionUpdatedEvent` carrying the FULL `prLinks` array seen so far on the file (NOT a singular `prLink` object); has `timestamp` so also a `LogEntry` `INF` at that ts. The ingester applies session extras via `json_patch` (whole-key overwrite), so emitting the complete array each time — combined with replay-from-0 on resume — makes the final array authoritative (last-wins on the whole array). A singular `prLink` key would be overwritten by each subsequent PR, losing all but the last. |
 | `bridge-session` | UPDATE `sessions.extras_json.bridge` |
-| `file-history-snapshot` | UPDATE `sessions.extras_json.fileHistory` (last non-empty wins) |
+| `file-history-snapshot` | UPDATE `sessions.extras_json.fileHistory` using SQLite `json_patch` merge-patch semantics across non-empty snapshots |
 | Unknown `type` | `SourceError` (informational); the bad line is logged but not blocking |
 
 ### 5.5 Op Seq within turn
@@ -567,7 +607,11 @@ assistant child ops by semantic type, not by raw `content[]` interleaving:
 1. The LLM op for an `assistant` record gets `Seq = next available`.
 2. Each `thinking` block gets a NESTED op under the LLM op (`ParentOpSeq = LLM op's Seq`), in `content[]` order among thinking blocks.
 3. Each `tool_use` block inside that assistant record gets `Seq = next available + 1, +2, ...` AFTER the LLM and all thinking blocks, in `content[]` order among tool-use blocks.
-4. Tool ops are `Finalized` not when emitted but when the matching `user.tool_result` arrives; the adapter holds a small in-memory map `tool_use_id -> op state`.
+4. Tool/session ops are `Finalized` not when emitted but when the matching
+   `user.tool_result` arrives. For `Agent` session ops that never receive a
+   parent-side tool result, finalization comes from the child sidechain
+   completion state. The adapter holds a small in-memory map
+   `tool_use_id -> op state`.
 
 ### 5.6 Token and provider fields
 
@@ -578,6 +622,135 @@ assistant child ops by semantic type, not by raw `content[]` interleaving:
 - `CtxUsed` = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens` — the TOTAL context occupancy (full input the model held, incl. cache, plus output), per the canonical `CtxUsed` definition (SOW-0029).
 - `CtxMax` = looked up via `catalog_models.ctx_max` (1M for `claude-opus-4-7[1m]`, 200K otherwise per Anthropic docs at time of writing).
 - `CostUSD` = computed from `pricing.go` per `(provider, model, cache tier)`; ai-viewer's pricing table tracks separate $/Mtok for input, output, cache-creation (ephemeral_1h, ephemeral_5m), cache-read.
+
+### 5.7 Source Manifest Parity
+
+The SOW-0097 parity gate has an independent claude-code source extractor under
+`internal/parity`. It reads transcript JSONL files directly and emits source
+artifacts without calling the claude-code canonical mapper.
+
+The extractor must account for every top-level transcript record. It may ignore
+only the documented metadata/no-op record types from §3.12 and the known
+snapshot records that have no parity artifact in the current matrix. Any other
+unknown `type` is a source-extractor error; `check-parity` reports that source
+as `INCOMPLETE`, not `PASS`, because a future unknown record may carry
+source-visible artifacts.
+
+Transcript line reads are bounded the same way as the adapter scanner:
+`scanBufferMax` is 8 MiB. A source line that exceeds the bound is a
+source-extractor error, so `check-parity` reports the source as `INCOMPLETE`.
+The extractor must not read an unbounded line into memory just because parity is
+read-only. This applies to the main source-record pass and to source-context
+pre-scans such as subagent child-completion inspection.
+
+The current claude-code parity slices cover exact inline artifacts present in
+the JSONL transcript plus source-visible subagent links derived from sidecar
+metadata:
+
+Malformed JSON inside one transcript line is recoverable source corruption. The
+extractor emits one `source_corruption` artifact for that line, with
+`availability=source_corrupt`, a file-line selector, raw byte length/hash over
+the rejected line, and an integrity failure describing the JSON decode failure,
+then continues with later lines. Unknown top-level `type` values are not treated
+as corruption; they remain source-extractor errors because they may represent a
+new source-visible record class.
+
+Structural boundary artifacts (`session_boundary`, `turn_boundary`, and
+`op_boundary`) are final-state rows keyed by native session/turn/op identity,
+not append-only evidence rows. The source extractor MUST coalesce repeated
+boundary artifacts by exact parity match key in the same deterministic transcript
+scan order as the adapter, keeping the last state. This mirrors the canonical
+SQLite upsert contract and prevents duplicate transcript copies or later
+finalization records from making the source manifest self-contradictory.
+
+Deferred tool finalization is pinned to the original `tool_use` identity. When a
+Claude Code tool or `Agent` op starts in turn N and its `tool_result` appears
+after later records, or no result appears before EOF, the source extractor MUST
+emit the delayed `tool_response` payloads, final/running `op_boundary`, and any
+`tool_error` under the stored turn/op from the original `tool_use`, not under
+the current turn at the point of finalization. This mirrors the adapter's
+open-tool table and the canonical `ops` row identity.
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule |
+|---|---|---|---|---|
+| `session_boundary` | `available` | `identity_json` | `sessions` row | `session:<native_session_id>`; claude-code sessions remain `status=running` because the source has no terminal session record. |
+| `turn_boundary` | `available` | `identity_json` | `turns` row | `turn:<seq>` from the same user-string turn synthesis described in §5.3. |
+| `op_boundary` | `available` | `identity_json` | `ops` row | `op:<turn_seq>:<op_seq>` using the same op ordering as §5.5, including the internal `user_input` prompt op. |
+| `compaction_event` | `available` | `identity_json` | `kind=compaction,name=compaction` op plus `ops.extras_json` compact metadata and `ops.bytes_in/out` token counts | `op:<turn_seq>:<op_seq>:compaction`; identity includes trigger, pre/post token counts, duration, started/ended timestamps, and canonical-JSON hashes for `preservedSegment` and `preservedMessages` when present. |
+| `user_prompt` | `available` / `source_empty` | `semantic_text` | internal `kind=internal,name=user_input` op plus `payload_refs.kind=tool_request` exact selector | `line:<line>:/message/content` for string prompts; `line:<line>:/message/content/<i>/text` for operator-injected text blocks inside array content. |
+| `user_image` | `available` | `canonical_json` | internal `kind=internal,name=user_input` op plus `payload_refs.kind=tool_request,format=json` exact selector | `line:<line>:/message/content/<i>` for the whole user-array image content block. The hash covers canonical JSON for the persisted block, not decoded image bytes. |
+| `assistant_message` | `available` / `source_empty` | `semantic_text` | LLM op plus `payload_refs.kind=llm_response` exact selector | `line:<line>:/message/content/<i>/text`. |
+| `reasoning_text` | `available` / `source_empty` | `semantic_text` | reasoning op plus `payload_refs.kind=llm_reasoning` exact selector | `line:<line>:/message/content/<i>/thinking`. |
+| `tool_request` | `available` / `source_empty` | `canonical_json` or `semantic_text` | tool/session op plus `payload_refs.kind=tool_request` exact selector | `line:<line>:/message/content/<i>/input`; objects/arrays/scalars use canonical JSON, strings use semantic text. |
+| `tool_response` | `available` / `source_empty` | `canonical_json` or `semantic_text` | finalized tool/session op plus `payload_refs.kind=tool_response` exact selector | `line:<line>:/message/content/<i>/content` for the Anthropic `tool_result` block and `line:<line>:/toolUseResult` for the top-level structured echo when present, including parent-side `Agent` tool results. |
+| `attachment_metadata` | `available` | `identity_json` | `DBG` `log_entries` row with `recordType=attachment`, persisted attachment extras, and `extras.aiViewer.parity` selector metadata | `line:<line>:/attachment`; identity includes `attachment_type`, `filename`, and `display_path` exactly as persisted. Attached file/image content is not claimed here because attachments have no owning op and no payload row. |
+| `llm_error` | `available` | `identity_json` | failed synthetic-attempt LLM op with `error_class` / `error_message` | `op:<turn_seq>:<op_seq>:error`; `error_class=api_error_<status>` when `error.status` is present, otherwise `api_error`; `error_message_sha256` hashes `error.message`, else `content`, else `error.type`, else `api_error`. |
+| `tool_error` | `available` | `identity_json` | failed tool/session op with `error_class='tool_error'` from `tool_result.is_error==true` | `op:<turn_seq>:<op_seq>:error`; `error_message_sha256` is the empty-string hash because the adapter records the error body as the `tool_response` payload and leaves `ops.error_message` empty. |
+| `subagent_link` | `available` when a sidecar maps the parent `Agent` tool id to an `agentId` | `identity_json` | parent `kind=session` Agent op with `child_session_id` resolved to the subagent session | `op:<turn_seq>:<op_seq>:child_session:<parentSessionId>:agent:<agentId>` from the parent `assistant.tool_use.id == agent-<agentId>.meta.json.toolUseId` join. |
+| `system_op` | `available` | `identity_json` | `log_entries` row whose extras identify `recordType=system`, logged subtype, source line selector, and the source `content` string when present | `line:<line>:/system`; identity includes native session id, turn seq when present, subtype, severity, message, timestamp, and `content_sha256` when the source record carried `content`. Excludes `compact_boundary`, `api_error`, and `turn_duration` because those are represented by `compaction_event`, `llm_error`, and `turn_boundary` respectively. Canonical parity emits the `system_op` artifact for these rows and does not also emit a generic `log_entry`. |
+| `log_entry` | `available` / `source_empty` | `semantic_text` | adapter-emitted generic `log_entries` rows and compaction-summary `payload_refs.kind=log` exact selector | `line:<line>:/log` for source-backed generic log rows (`queue-operation`, `pr-link`, meta user, synthetic assistant, API error, compact boundary, and compaction summary); `line:<line>:/message/content` for `isCompactSummary:true` summary payload text. Line-based ids are required because Claude Code can persist repeated log records with identical timestamp/message fields. |
+| `llm_request` | `source_unavailable` | n/a | none | Claude Code transcripts do not store the provider HTTP request envelope or full prompt sent to Anthropic. |
+| `llm_response` | `source_unavailable` for provider envelope | n/a | none for provider envelope; assistant text blocks are `assistant_message` | Claude Code stores assistant content blocks, not the raw Anthropic HTTP/SSE response envelope. |
+
+Machine-readable matrix rows:
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule | Evidence |
+|---|---|---|---|---|---|
+| `session_boundary` | `available` | `identity_json` | `sessions` row | `session:<native_session_id>` | Current parity table above. |
+| `turn_boundary` | `available` | `identity_json` | `turns` row | `turn:<seq>` | Current parity table above. |
+| `op_boundary` | `available` | `identity_json` | `ops` row | `op:<turn_seq>:<op_seq>` | Current parity table above. |
+| `user_prompt` | `available` / `source_empty` | `semantic_text` | internal user-input op plus `payload_refs.kind=tool_request` | `line:<line>:/message/content` or `/message/content/<i>/text` | Current parity table above. |
+| `user_image` | `available` | `canonical_json` | internal user-input op plus `payload_refs.kind=tool_request` | `line:<line>:/message/content/<i>` | Current parity table above. |
+| `assistant_message` | `available` / `source_empty` | `semantic_text` | LLM op plus `payload_refs.kind=llm_response` | `line:<line>:/message/content/<i>/text` | Current parity table above. |
+| `reasoning_text` | `available` / `source_empty` | `semantic_text` | reasoning op plus `payload_refs.kind=llm_reasoning` | `line:<line>:/message/content/<i>/thinking` | Current parity table above. |
+| `llm_request` | `source_unavailable` | n/a | none | provider request envelope is not persisted | Current parity table above. |
+| `llm_response` | `source_unavailable` | n/a | none for provider envelope; assistant text is `assistant_message` | provider response envelope is not persisted | Current parity table above. |
+| `llm_sdk_request` | `not_source_visible` | n/a | none | Claude Code transcripts do not persist a separate SDK request envelope | Transcript schema sections above. |
+| `llm_sdk_response` | `not_source_visible` | n/a | none | Claude Code transcripts do not persist a separate SDK response envelope | Transcript schema sections above. |
+| `tool_request` | `available` / `source_empty` | `canonical_json` / `semantic_text` | tool/session op plus `payload_refs.kind=tool_request` | `line:<line>:/message/content/<i>/input` | Current parity table above. |
+| `tool_response` | `available` / `source_empty` | `canonical_json` / `semantic_text` | finalized tool/session op plus `payload_refs.kind=tool_response` | `line:<line>:/message/content/<i>/content` or `/toolUseResult` | Current parity table above. |
+| `llm_error` | `available` | `identity_json` | failed synthetic-attempt LLM op | `op:<turn_seq>:<op_seq>:error` | Current parity table above. |
+| `tool_error` | `available` | `identity_json` | failed tool/session op | `op:<turn_seq>:<op_seq>:error` | Current parity table above. |
+| `subagent_link` | `available` | `identity_json` | parent Agent op with child session id | `op:<turn_seq>:<op_seq>:child_session:<parentSessionId>:agent:<agentId>` | Current parity table above. |
+| `system_op` | `available` | `identity_json` | logged system record row | `line:<line>:/system` | Current parity table above. |
+| `compaction_event` | `available` | `identity_json` | compaction op plus compact metadata | `op:<turn_seq>:<op_seq>:compaction` | Current parity table above. |
+| `session_metadata` | `available` | `identity_json` | sessions row plus `sessions.extras_json` | `session:<sessionId>:metadata` | Current parity table above. |
+| `log_entry` | `available` / `source_empty` | `semantic_text` | adapter log row or compaction/log payload ref | `line:<line>:/log` for generic logs or `line:<line>:/message/content` for compact summaries | Current parity table above. |
+| `attachment_metadata` | `available` | `identity_json` | attachment log row with parity extras | `line:<line>:/attachment` | Current parity table above. |
+| `patch_metadata` | `not_source_visible` | n/a | none | Claude Code transcripts do not persist a separate patch/file-change metadata record | Transcript schema sections above. |
+
+For `subagent_link`, the source extractor reads bounded, root-contained
+`agent-<agentId>.meta.json` sidecars independently of the adapter, using the
+same fixed cap semantics as adapter meta reads: reject by size precheck when the
+filesystem reports the sidecar is over the cap, then read through a `cap+1`
+limited reader so a file that grows between stat and read is still rejected
+without an unbounded allocation. A parent `assistant.tool_use` block with
+`name=="Agent"` emits a source link only when its `id` is found in the sidecar
+`toolUseId` map. Missing sidecars or sidecars without `toolUseId` prove no
+source-visible parent-op-to-child join yet, so the link artifact is not emitted
+until the sidecar appears; present-but-unreadable, malformed, or oversized
+sidecars are source-extractor errors, not silent absence.
+
+Every inline payload ref uses a `file://` URI with a 1-based line fragment and
+an RFC 6901 JSON pointer query, e.g.
+`file://<transcript>?json_pointer=/message/content/0/text#L12`. The logical
+payload length is the selected decoded value length: string UTF-8 bytes for
+text, canonical JSON bytes for object/array/scalar values including JSON null,
+and zero bytes for explicit empty strings. Whole-transcript refs are
+insufficient for these classes because they cannot prove which inline fragment
+was captured.
+
+For `session_metadata`, the source extractor reads metadata snapshots directly
+from the transcript and emits one final identity artifact per session only when
+source-visible metadata exists. The identity covers the fields the adapter
+persists into `sessions.extras_json`: `lastPrompt` as `last_prompt_sha256`,
+`customTitle`, `aiTitle`, `permissionMode`, `bridge.bridgeSessionId`,
+`bridge.lastSequenceNum`, accumulated `prLinks`, and `fileHistory` as
+`file_history_sha256`. Timestamp-less scalar snapshots are last-wins; `pr-link`
+records are accumulated in source order; `fileHistory` is merge-patch
+accumulated to match the final `sessions.extras_json.fileHistory` object,
+including recursive null-field deletion inside newly introduced entries. The
+canonical extractor builds the same identity from the final `sessions` row.
 
 ## 6. Watch Strategy
 
@@ -783,19 +956,18 @@ land independently:
    it cannot be lost by a re-emit that carries it. See `ingester.md` (the
    `graftAiViewerExtras` invariant).
 
-2. **Agent op finalize is inherently child-side, via the terminal
-   assistant-text completion marker (adapter).** The parent transcript has NO
-   `tool_result` block for the `Agent` tool (§4.4, verified against a real
-   transcript: the Agent's `tool_use` id appears once, not the typical twice),
-   so there is no parent-side completion record. The subagent's result is
-   implicit — the **last record** of `agent-<agentId>.jsonl` is an `assistant`
-   message whose `content[0].type == "text"` (§4.4, §485; verified on real
-   workstation transcripts: completed sidechains end with `{assistant, text}`,
-   while a child whose last record is a `user`/`tool` record was interrupted and
-   is NOT complete). The adapter therefore finalizes the parent's
-   `OpStartedEvent(Kind='session')` from the **child sidechain's end state**,
-   never from a parent record, and the link is the op's `ChildSessionNativeID`
-   (equal to the child file's synthetic `NativeID`).
+2. **Agent op finalize has two valid source paths.** When the parent transcript
+   includes a matching `tool_result` block for the `Agent` tool (§4.4), the
+   adapter finalizes the `OpStartedEvent(Kind='session')` from that parent
+   record and persists the exact `tool_response` payload refs. When no
+   parent-side result exists, the subagent's result is implicit: the **last
+   record** of `agent-<agentId>.jsonl` is an `assistant` message whose
+   `content[0].type == "text"` (§4.4, §485; verified on real workstation
+   transcripts: completed sidechains end with `{assistant, text}`, while a
+   child whose last record is a `user`/`tool` record was interrupted and is NOT
+   complete). In the implicit form, the adapter finalizes the parent's session
+   op from the **child sidechain's end state**, and the link is the op's
+   `ChildSessionNativeID` (equal to the child file's synthetic `NativeID`).
 
    The completion rule is exact:
 
@@ -1090,7 +1262,7 @@ All record fields are UTF-8 JSON. `sanitizePath` operates on the canonicalized (
 
 The canonical events model is span-shaped and assumes adapters can produce explicit turn/op boundaries. Claude Code's reality is messier; the following gaps require either canonical-model extension OR adapter-side synthesis:
 
-1. **No native turn or op boundaries.** Inferred from message-chain heuristics (§5.3, §5.5). Risk: an exotic flow (mid-turn user interrupt with a `text` block instead of a tool_result; multi-prompt operator runs without explicit completion) could break inference. Mitigation: extensive fixtures from real data; if inference is ambiguous, the adapter emits `SourceError` `INF` and continues with best-effort.
+1. **No native turn or op boundaries.** Inferred from message-chain heuristics (§5.3, §5.5). Risk: multi-prompt operator runs without explicit completion can break inference. Mitigation: extensive fixtures from real data; if inference is ambiguous, the adapter emits `SourceError` `INF` and continues with best-effort. Mid-turn user `text` blocks inside array content are preserved as internal `user_input` ops in the current turn, not as new turns.
 2. **No native cost.** Compute from `pricing.go`. Risk: pricing model changes silently. Mitigation: pricing is a versioned spec; tested against known totals where Anthropic's web console can be cross-checked.
 3. **Compaction is a first-class op.** Modeled as a synthetic `OpKind='compaction'` op (§9). The canonical model already defines `OpCompaction`, so no schema change is needed — but the UI must learn to render `compact_boundary` distinctively (a different lane / icon).
 4. **Subagents share `sessionId` with parent.** Resolved via synthetic NativeID (`<sessionId>:agent:<agentId>`). The canonical model needs no extension; the adapter owns the NativeID synthesis.
@@ -1101,7 +1273,7 @@ The canonical events model is span-shaped and assumes adapters can produce expli
 9. **`isMeta` and `isCompactSummary` synthetic users.** These are NOT operator-initiated turn starts. Handled by the turn-boundary rule in §5.3.
 10. **`isSidechain` and `agentId` are not part of the canonical envelope.** They live in adapter-internal state used to route a record to the right canonical session. No schema change needed.
 11. **No explicit session-end record.** The canonical model expects a `SessionFinalizedEvent`. Claude Code does not emit one — a session is "done" when the file stops being written to. The adapter never emits `SessionFinalizedEvent` for claude-code; sessions remain `status='running'` until an explicit policy (e.g. "no writes for 24h") closes them. This is a deliberate decision: the operator can resume any session at any time; there is no "completed" state. The UI should render `status='running'` as "active or resumable" rather than "still running".
-12. **Operator-pasted images.** 3 of ~40,000 user content blocks were images. Currently stored only as `PayloadRefEvent` (base64 data inline in the jsonl); the canonical model has no first-class image affordance. Phase 2 acceptable. The UI shows them as image-thumbnail attachments.
+12. **Operator-pasted images.** 3 of ~40,000 user content blocks were images. The adapter preserves each inline image block as a `user_image` parity artifact backed by a `PayloadRefEvent(kind=tool_request, format=json)` on an internal `user_input` op. This proves the source-visible block is not lost. The canonical model still has no first-class image viewer affordance; a future UI/payload SOW can decide whether to decode the base64 bytes as `Format='binary'` or render thumbnails.
 
 ## 12. References
 

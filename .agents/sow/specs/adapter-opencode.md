@@ -138,6 +138,51 @@ Authoritative TypeScript shapes at `anomalyco/opencode @ 2b3ddf9 :: packages/ope
 
 Observed: 127345 messages on the operator's DB (117440 assistant, 9907 user, `-2` reconciliation between table and union counts is normal). Token totals on the message are the **session-running total at completion of this turn**, not the per-step token usage (see step-finish parts).
 
+#### `session_input` — optional prompt body evidence
+
+Newer opencode schemas persist user prompt bodies separately from
+`message.data`. Per upstream `packages/core/src/session/sql.ts`,
+`session_input` has:
+
+| column + SQLite type | notes |
+|---|---|
+| `id` TEXT PK | input id; for promoted prompts this matches the created user `message.id` |
+| `session_id` TEXT NOT NULL | owning session |
+| `prompt` TEXT(JSON) NOT NULL | encoded prompt object |
+| `delivery` TEXT NULL | input delivery state |
+| `admitted_seq` INTEGER NOT NULL | prompt lifecycle sequence |
+| `promoted_seq` INTEGER NULL | set when the prompt becomes a user message |
+| `time_created` INTEGER NOT NULL | ms epoch |
+
+The prompt JSON shape is:
+
+```jsonc
+{
+  "text": "<user prompt text>",
+  "files?": [
+    {
+      "uri": "<file-or-data-uri>",
+      "mime": "<media type>",
+      "name?": "<display filename>",
+      "description?": "<operator-provided description>",
+      "source?": {"start": 0, "end": 0, "text": "<prompt span>"}
+    }
+  ],
+  "agents?": { ... }
+}
+```
+
+The adapter treats `session_input` as optional evidence. Older or migrated
+databases may have no table, or an empty table, while still carrying `message`
+rows with `role="user"` but no prompt body. Initial scans and full-session-tree
+reloads read `session_input.prompt.text` when the table exists. A prompt row is
+not a standalone cursor trigger: opencode promotion creates the user `message`
+row that triggers the affected-session reload, and the prompt text itself is
+written before promotion and is not mutated by promotion. If a paired user
+message has no matching `session_input.prompt.text`, the adapter emits an
+explicit metadata-only user prompt artifact with `availability=source_unavailable`
+instead of silently dropping the user prompt.
+
 #### `part` — fine-grained pieces of a message (text, tool calls, reasoning, etc.)
 
 Per `session.sql.ts:75-91`:
@@ -198,13 +243,19 @@ Per `session.sql.ts:112-129`:
 | `id` TEXT PK | `evt_<sonyflake>` |
 | `session_id` TEXT NOT NULL | FK → `session.id` CASCADE |
 | `type` TEXT NOT NULL | currently always `agent-switched` or `model-switched` |
+| `seq` INTEGER NOT NULL | durable per-session event sequence in current opencode schema; absent in older local fixtures |
 | `time_created` INTEGER NOT NULL | ms epoch |
 | `time_updated` INTEGER NOT NULL | ms epoch |
 | `data` TEXT(JSON) NOT NULL | per `anomalyco/opencode @ 2b3ddf9 :: packages/core/src/session-message.ts:20-30` |
 
-Indexes: `session_message_session_idx`, `session_message_session_type_idx`, `session_message_time_created_idx`.
+Indexes: current upstream (`anomalyco/opencode @ 23fd5907`) defines
+`session_message_session_seq_idx`,
+`session_message_session_type_seq_idx`,
+`session_message_session_time_created_id_idx`, and
+`session_message_time_created_idx`; older local fixtures may still use the
+pre-`seq` shape and must remain readable.
 
-Observed: 3985 rows (1992 agent-switched + 1993 model-switched). The TypeScript schema (`session-message.ts:165`) defines a wider union (`User`, `Synthetic`, `Shell`, `Assistant`, `Compaction`) under a planned next-gen pipeline, but only two variants ship today. Treat unknown types as forward-compatibility data and skip with a structured WARN log.
+Observed: 3985 rows (1992 agent-switched + 1993 model-switched). The TypeScript schema (`session-message.ts:165`) defines a wider union (`User`, `Synthetic`, `Shell`, `Assistant`, `Compaction`) under a planned next-gen pipeline, but only two variants ship today. The runtime adapter treats unknown types as forward-compatibility data and skips with a structured WARN log. The SOW-0097 parity source extractor is stricter: an unknown `session_message.type` is a source-record accounting failure until this spec classifies the new type as mapped or explicitly ignored with evidence.
 
 #### `project` — workspace/project a session belongs to
 
@@ -562,6 +613,26 @@ When a new `message` row appears (role=`assistant`):
 - Emit `TurnStartedEvent` with:
   - `SessionNativeID = message.session_id`
   - `Seq = (count of prior assistant messages in same session) + 1`
+- Pair the assistant with its user prompt by `message.data.parentID` when set,
+  otherwise by the immediately preceding user message in `(time_created,id)`
+  order. The paired user message emits:
+  - `OpStartedEvent` + `OpFinalizedEvent` with `Kind="internal"`,
+    `Name="user_input"`, `Seq=1`, `Status="completed"`, and `EndTs` equal to
+    the user message timestamp.
+  - one `PayloadRefEvent` with `PayloadKind="tool_request"` and `Format="text"`.
+    If `session_input.prompt.text` is available, `LocationURI` selects that
+    exact value. If the source only proves the user message existed but carries
+    no retrievable prompt body, `LocationURI=""`, `OriginalBytes=-1`, and the
+    parity extractor records the canonical artifact as `source_unavailable`.
+  - one additional `PayloadRefEvent` for each `session_input.prompt.files[]`
+    entry whose `mime` starts with `image/`. These refs keep
+    `PayloadKind="tool_request"` because the canonical payload-kind enum has no
+    user-attachment kind; parity classifies them as `user_image` from the
+    `prompt.files.<index>` selector. `Format="json"` and `LocationURI` selects
+    the exact file object at
+    `opencode-sqlite://?input_id=<id>&field=prompt.files.<index>`. Non-image
+    file entries remain attachment metadata only when opencode also writes them
+    as `part.type="file"` rows; they are not `user_image` artifacts.
 - Emit `TurnFinalizedEvent` ONLY when the turn is TERMINAL (`turnIsTerminal`): `data.time.completed` is set, OR `data.error` is present, OR the message has at least one `step-finish` part. Otherwise the turn is **RUNNING** — `TurnStartedEvent` with NO `TurnFinalizedEvent` (opencode writes the assistant `message` row LIVE while the turn is still in progress; finalizing every live row would wrongly mark an in-flight turn completed). A later poll re-emits the whole tree and finalizes the turn once it actually completes; the re-emit is idempotent. When terminal, `TurnFinalizedEvent` carries the message-level `cost`/per-turn token delta and `Status` derived from `data.finish` (`stop`→completed, anything else→completed unless `data.error` is set → failed).
 
 For each `part` row of the assistant message, walking in `id` order:
@@ -574,22 +645,26 @@ For each `part` row of the assistant message, walking in `id` order:
 | `text` | NOT an op; surface as the assistant's final text. The adapter does NOT emit an op for a `text` part, but DOES emit a `PayloadRef` (kind `llm_response`, field `text`) scoped to the turn's most-recent LLM op so the presenter can retrieve the assistant's text on demand without ai-viewer copying it. When no LLM op is open yet (a `text` part before any `step-start`), the ref is dropped (it has no op to attach to; `payload_refs.op_id` is NOT NULL). |
 | `tool` | emit `OpStartedEvent`+`OpFinalizedEvent` (kind=`tool`, ParentOpSeq=current LLM Op, name=`tool`, ToolNamespace=derived from `tool` (e.g. `github_get_file_contents` → namespace `github`, name `get_file_contents`)) using `state.time.start`/`state.time.end`; `Status` derived from `state.status` |
 | `tool` where `tool='task'` AND `state.metadata.sessionId` set | emit BOTH the tool Op AND an `OpStartedEvent` of kind=`session` with `ChildSessionNativeID = state.metadata.sessionId` (SOW-0005 decision: emit both; the `session` op is the topology parent so the sub-agent attaches in the topology view) |
-| `patch` | NOT an op; record in extras of the surrounding LLM op for the "Files changed" UI tab |
+| `patch` | NOT an op; record in extras of the surrounding LLM op for the "Files changed" UI tab and emit `patch_metadata` parity evidence with the source part id |
 | `compaction` | emit `LogEntry` severity=`INF`, source=`opencode`, message=`session compacted (auto=<bool>)` |
 | `retry` | emit `LogEntry` severity=`WRN`, message=`API retry attempt <attempt>: <error.name>` |
 | `file` | emit an INF `LogEntry` message=`file attachment`, source=`opencode`, with `Extras = {filename, url, mime}` (only the present fields), scoped to the turn and the open LLM op when one is open (`OpSeq` may be 0). **NOT** a `PayloadRef` (SOW-0005 round-4 P2-3): the canonical `PayloadRefEvent.PayloadKind` set is exactly `llm_request \| llm_response \| llm_sdk_request \| llm_sdk_response \| llm_reasoning \| tool_request \| tool_response \| log` (internal/canonical/events.go) — none of which is a user file attachment — so the earlier `kind="user_attachment"` ref was a canonical-contract violation. The attachment is surfaced as a `LogEntry` (mirroring compaction/retry) so the observability is preserved without inventing a non-canonical kind. A richer canonical attachment `PayloadKind` (and a resolver for it) is **deferred to a follow-up SOW**; the adapter must not emit a non-canonical kind in the interim. A `file` part with no `url`/`filename`/`mime` at all emits nothing. |
 | `subtask`, `agent`, `snapshot` | **No-op in v1** (SOW-0005 round-4 P2-4). The earlier spec said `subtask` → a `session` op; live counts for all three part types are **ZERO** on the reference DB (the `subtask` part type is planned upstream but not yet populated — cross-referenced in §"Sub-Agent Linkage": the 11 parent-set sessions without a matching task part come from `subtask`/manual fork mechanisms that do not emit a populated `subtask` part). The adapter therefore treats `subtask`/`agent`/`snapshot` as **known, intentionally-ignored** part types (no op, no payload, no WARN — they are recognized, just unused), rather than implementing against zero data. Implementing `subtask` → `session` op is **deferred to a follow-up SOW** if/when these part types appear in a real database. |
 
-**Op `seq` numbering within a turn**: increment a counter per part processed, regardless of part type that gets emitted. `ParentOpSeq` for parts that fall inside a step is the LLM Op's seq (the `step-start`'s seq).
+**Op `seq` numbering within a turn**: increment a counter per emitted op. When
+a paired user message exists, the internal `user_input` op consumes `seq=1`
+before assistant parts are walked, so the first LLM `step-start` is `seq=2`.
+`ParentOpSeq` for parts that fall inside a step is the LLM Op's seq (the
+`step-start`'s seq).
 
-**Malformed `message.data` / `part.data` JSON (SOW-0005 round-3 P2-2).** A `message` or `part` whose `data` blob cannot be JSON-decoded is skipped with a session-scoped `LogEntry` severity=`WRN` (for the per-session detail view) **AND** routed through the adapter's `onError` callback. `data` is NOT-NULL in opencode's schema, so an undecodable blob is a corruption signal, not benign forward-compat drift; routing it through `onError` turns it into a source-scoped `SourceErrorEvent` that increments `sources.parse_errors` so a corrupt opencode DB **degrades `/api/health`** (the session `LogEntry` alone never reaches the health source-status panel). The two surfaces are complementary: the `LogEntry` carries the per-session/turn/op context for the detail view; the `SourceErrorEvent` carries the source-level health signal. (An unknown but well-formed `$.type`/role is different — that is forward-compat data, a `WRN` `LogEntry` only, NOT an `onError` health signal.)
+**Malformed `message.data` / `part.data` JSON (SOW-0005 round-3 P2-2).** A `message` or `part` whose `data` blob cannot be JSON-decoded is skipped with a session-scoped `LogEntry` severity=`WRN` (for the per-session detail view) **AND** routed through the adapter's `onError` callback. `data` is NOT-NULL in opencode's schema, so an undecodable blob is a corruption signal, not benign forward-compat drift; routing it through `onError` turns it into a source-scoped `SourceErrorEvent` that increments `sources.parse_errors` so a corrupt opencode DB **degrades `/api/health`** (the session `LogEntry` alone never reaches the health source-status panel). The two surfaces are complementary: the `LogEntry` carries the per-session/turn/op context for the detail view; the `SourceErrorEvent` carries the source-level health signal. In the runtime adapter, an unknown but well-formed `message.data.role` or `part.data.type` is forward-compat data and produces a `WRN` `LogEntry` only, not an `onError` health signal. In the parity source extractor, unknown roles and part types fail closed because skipping them would make a 100% source-manifest proof impossible.
 
 ### Payload references
 
 Opencode keeps payloads in the SQLite database itself (`part.data.state.output`, `part.data.text`, etc.). It does not write payload files to disk. The adapter emits `PayloadRefEvent` with a custom URI scheme:
 
 ```
-LocationURI = "opencode-sqlite://opencode.db?part_id=<prt_...>&field=state.output"
+LocationURI = "opencode-sqlite://?part_id=<prt_...>&field=state.output"
 ```
 
 The presenter resolves this scheme by re-querying SQLite for the named field. This keeps payloads out of ai-viewer's own database (they may be hundreds of MB total) and respects the read-only contract.
@@ -606,11 +681,211 @@ The mapper's built-in default (`defaultPayloadURI`, used in mapper-only unit tes
 |---|---|---|
 | `text` | `llm_response` | `text` |
 | `reasoning` | `llm_reasoning` | `text` |
+| `tool` with non-empty `state.input` | `tool_request` | `state.input` |
 | `tool` with non-empty `state.output` | `tool_response` | `state.output` |
+
+The paired user-prompt field map:
+
+| source | PayloadKind | field |
+|---|---|---|
+| `session_input.prompt.text` | `tool_request` | `prompt.text` |
+| `session_input.prompt.files[<i>]` where `mime` starts with `image/` | `tool_request` | `prompt.files.<i>` |
+
+The prompt URI grammar is hostless/pathless like part payloads:
+`opencode-sqlite://?input_id=<id>&field=prompt.text` or
+`opencode-sqlite://?input_id=<id>&field=prompt.files.<i>`. The resolver SELECTs
+`session_input.prompt` for `input_id`, projects the requested prompt field, and
+hashes logical text as `semantic_text`; image file objects are canonicalized and
+hashed as `canonical_json`.
 
 **`tool_response` is emitted ONLY when `state.output` is non-empty (SOW-0005 round-6 P2-1).** A failed tool (`state.status == "error"`) typically carries only `state.error` and no `state.output`; emitting a `tool_response` PayloadRef pointing at `field=state.output` for such a tool would reference a body that does not exist (the future `/api/payloads` resolver would `SELECT part.state.output` and find nothing). The op's failure detail is carried by `OpFinalizedEvent.ErrorMessage` (= `state.error`) instead, so dropping the empty-output ref loses nothing. A failed tool that *does* produce partial output before failing still emits the ref (the gate is on `state.output != ""`, not on the status).
 
+**`tool_request` is emitted when `state.input` carries a non-null JSON value.**
+Tool input is source-visible operator intent. Dropping it would make the parity
+gate miss a load-bearing artifact and would make the eventual payload resolver
+unable to show tool arguments from opencode sessions. `state.input=null` or an
+absent input emits no payload ref; `{}` and `[]` are real empty JSON values and
+are preserved.
+
 (A `file` part is **NOT** a `PayloadRef` — SOW-0005 round-4 P2-3 removed the non-canonical `user_attachment` kind; a file part emits an INF `LogEntry` carrying `filename`/`url`/`mime` in extras, see the part-type table above. A canonical attachment `PayloadKind` is deferred to a follow-up SOW.)
+
+### Source Manifest Parity
+
+The SOW-0097 parity gate has an independent opencode source extractor under
+`internal/parity`. It opens the configured opencode SQLite database read-only
+(`mode=ro`, `query_only(true)`), reads source tables directly, and emits source
+artifacts without calling the opencode adapter mapper.
+
+One parity source result is built from one pinned read-only SQLite transaction:
+schema introspection, ordered session enumeration, per-session relationship row
+loads, parent/root lookup, and source-side payload field projection all use that
+same snapshot. A concurrent opencode write may proceed, but it must be invisible
+to the in-flight parity source result rather than appearing halfway through the
+session stream.
+
+Malformed JSON inside a known `message.data`, `part.data`, or
+`session_message.data` row is recoverable source corruption. The extractor emits
+one `source_corruption` artifact for that table row, with
+`availability=source_corrupt`, an `opencode-sqlite://` row selector, raw byte
+length/hash over the rejected JSON blob, and an integrity failure describing the
+decode failure, then continues with other rows from the same read snapshot.
+Unknown `message.data.role`, `part.data.type`, or `session_message.type` values
+remain hard source-extractor errors because they are source schema drift, not
+corrupt bytes.
+
+For no-DB `check-parity --sample`, the temporary canonical side does not run a
+full opencode historical backfill when sampled source artifacts identify one or
+more native session ids. The parity runner asks the opencode adapter to map only
+those session ids through its production full-session-tree load and mapper, then
+ingests that bounded event stream into the temp canonical DB. This helper is
+diagnostic-only: it is not part of the public adapter interface, does not persist
+or advance a cursor, does not run in full-parity mode, and must not hide real
+errors from the sampled sessions. It exists because opencode's table watermark
+cursor cannot skip arbitrary old unsampled rows while retaining one sampled
+session tree.
+
+The first opencode source-manifest slice emits:
+
+- `session_boundary` from every `session` row. `parent_id` controls
+  `kind=sub_agent`; root ids are resolved from the parent chain. `time_archived`
+  finalizes a session as `completed`; otherwise a session remains `running`
+  unless the terminal assistant-message error path is covered by a later slice.
+- `session_metadata` from every `session` row that carries descriptive
+  metadata beyond the boundary identity. The identity covers `agent`,
+  `model.id`, `model.providerID`, `model.variant`, `version`, `slug`, `title`,
+  `project_id`, and SHA-256 of `directory`. Parent/root/status/timestamps stay
+  in `session_boundary`. The source extractor reads optional modern columns
+  (`agent`, `model`, `time_archived`) only when SQLite schema introspection says
+  they exist, so older opencode databases remain verifiable instead of failing
+  on absent optional columns.
+- `turn_boundary` from assistant `message` rows ordered by
+  `(time_created, id)` per session. The turn sequence is the assistant-message
+  ordinal, matching the adapter. A turn is terminal when `message.data.time`
+  has `completed`, when `message.data.error` is present, or when at least one
+  `step-finish` part exists.
+- `user_prompt` from the user message paired to each assistant turn. When
+  `session_input.prompt.text` is available, the artifact is `available` with
+  native id `input:<id>:prompt.text` and selector
+  `opencode-sqlite://?input_id=<id>&field=prompt.text`. When the paired user
+  message exists but the source database carries no prompt text, the artifact
+  is `source_unavailable` with native id
+  `op:<turnSeq>:1:payload:tool_request:1`, matching the canonical empty-location
+  payload ref emitted for the internal `user_input` op.
+- `user_image` from the same paired `session_input.prompt.files[]` array. Every
+  entry whose `mime` starts with `image/` is `available`, uses native id
+  `input:<id>:prompt.files.<index>`, selector
+  `opencode-sqlite://?input_id=<id>&field=prompt.files.<index>`, and hashes the
+  canonical JSON of the exact file object. This proves the media input opencode
+  lowers into LLM `media` content without inventing a non-canonical payload kind.
+- `op_boundary` from assistant-message `part` rows ordered by `id`:
+  `step-start`/`step-finish` form LLM ops, `reasoning` forms reasoning ops, and
+  `tool` forms tool ops. The extractor uses the same canonical status
+  translation as the adapter: tool `completed -> completed`, `error -> failed`,
+  running/pending without an end timestamp remains running.
+- `subagent_link` from `tool='task'` parts whose `state.metadata.sessionId`
+  names a child session. The link is attached to the synthetic session op that
+  the adapter emits before the task tool op.
+- `tool_error` from failed tool ops, hashing `state.error` as the error message.
+- payload artifacts from exact `part.data` fields:
+  `text -> assistant_message`, `reasoning.text -> reasoning_text`,
+  `tool.state.input -> tool_request`, and
+  `tool.state.output -> tool_response`.
+- non-op part metadata/logs from exact `part.data` rows:
+  `compaction -> compaction_event` plus its `log_entry`, `retry -> log_entry`,
+  `file -> attachment_metadata` plus its `log_entry`, and
+  `patch -> patch_metadata`. The adapter stores `part_id` in the canonical log
+  extras for log-backed rows so the canonical manifest can prove the exact
+  SQLite `part` row, not only the rendered log message. Patch metadata is stored
+  on the surrounding LLM op's extras because `patch` is not an op and has no
+  log row of its own. A `file` part with no `url`, `filename`, or `mime`
+  remains source-empty and emits no canonical artifact.
+- `llm_error` from assistant messages whose `message.data.error` object is
+  present. Opencode stores this error on the assistant message / turn, not as a
+  failed `step-start`/`step-finish` op: step parts may still finalize the LLM op
+  as `completed` while the assistant turn and terminal session are `failed`.
+  The parity artifact therefore uses native id `turn:<turnSeq>:assistant_error`
+  and identity-hashes `native_session_id`, `turn_seq`, `error_class`,
+  `error_message_sha256`, and the failed-turn timestamp. The canonical extractor
+  matches it from the failed opencode `turns` row plus the terminal
+  `sessions.error_message` when the failed turn is the session-terminal error.
+  A source error message that has no canonical error-message counterpart remains
+  a blocking parity mismatch rather than being silently ignored.
+- `system_op` from known `session_message` rows. Current opencode projects
+  `session.next.agent.switched` into `type='agent-switched'` rows with
+  `data.agent`, and `session.next.model.switched` into `type='model-switched'`
+  rows with `data.model.{id,providerID,variant}`. The adapter must load these
+  sidecar rows with the session tree and emit one session-scoped canonical
+  `LogEntryEvent` per row. The log extras must carry `session_message_id`,
+  `session_message_type`, optional `seq`, decoded agent/model fields, and a
+  SHA-256 over canonical JSON of the exact `data` body. The generic log-entry
+  parity block must point at `opencode-sqlite://?table=session_message&id=<id>`
+  so the log row proves the exact sidecar row, not only a rendered message.
+  The parity extractor emits a sibling `system_op` artifact with native id
+  `session_message:<id>:system_op`; its identity hashes `native_session_id`,
+  `session_message_id`, `event_type`, `seq` when present, timestamp, severity,
+  message, decoded fields, and `data_sha256`. Unknown `session_message.type`
+  values are parity source-record accounting failures until this spec defines
+  their artifact mapping or explicitly documents why they are ignored.
+
+The source selector for opencode payload artifacts is the same grammar the
+adapter stores in canonical payload refs:
+`opencode-sqlite://?part_id=<id>&field=<field>` or
+`opencode-sqlite://?input_id=<id>&field=prompt.<field>`, with
+`selector.field_path` equal to the field. The canonical extractor MUST resolve
+that selector by opening the source SQLite database read-only, reading the owning
+`part.data` or `session_input.prompt`, projecting the field, and hashing the
+logical value. String fields use `semantic_text`; object/array/scalar JSON values
+use `canonical_json`.
+
+The source selector for opencode non-op part metadata is
+`opencode-sqlite://?table=part&id=<id>`. Compaction metadata uses
+`part:<id>:compaction` and identity-hashes `native_session_id`, `turn_seq`,
+the current LLM `op_seq` when one is open, `auto`, timestamp, severity, and log
+message. Retry logs use the generic `log_entry` identity for
+`API retry attempt <attempt>[: <error.name>]` and preserve `attempt` plus
+optional `error.name` in canonical extras. File attachment metadata uses
+`part:<id>:file` and identity-hashes `native_session_id`, `turn_seq`, the
+current LLM `op_seq` when one is open, `filename`, `url`, and `mime`; its log
+entry remains the canonical `INF file attachment` row. Patch metadata uses
+`part:<id>:patch` and identity-hashes `native_session_id`, `turn_seq`, the
+current LLM `op_seq`, `part_id`, `hash` when present, `files_count`, and
+`files_sha256`, where `files_sha256` is SHA-256 over canonical JSON of the
+ordered `patch.files` list. Raw changed-file paths are not part of the parity
+identity JSON. Runtime op extras keep the existing `patch_hash` / `patch_files`
+fields for the UI and also carry `patches[]` entries with `part_id`, `hash`,
+`files_count`, and `files_sha256` so the canonical parity extractor can prove
+each source patch part independently, including multiple patch parts in one
+LLM op.
+
+Later SOW-0097 chunks still need full coverage for corrupt row accounting,
+schema-drift parity, and live corpus performance.
+
+Machine-readable matrix rows:
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule | Evidence |
+|---|---|---|---|---|---|
+| `session_boundary` | `available` | `identity_json` | `sessions` row | `session:<session.id>` | Source Manifest Parity bullets above. |
+| `turn_boundary` | `available` | `identity_json` | `turns` row from assistant message ordinal | `turn:<seq>` | Source Manifest Parity bullets above. |
+| `op_boundary` | `available` | `identity_json` | `ops` row from `part` rows | `op:<turn_seq>:<op_seq>` | Source Manifest Parity bullets above. |
+| `user_prompt` | `available` / `source_unavailable` | `semantic_text` | internal user-input op plus `payload_refs.kind=tool_request` | `input:<id>:prompt.text` or metadata-only canonical payload ordinal | Source Manifest Parity bullets above. |
+| `user_image` | `available` | `canonical_json` | internal user-input op plus `payload_refs.kind=tool_request` over image file objects | `input:<id>:prompt.files.<index>` | Source Manifest Parity `user_image` bullet above. |
+| `assistant_message` | `available` / `source_empty` | `semantic_text` | LLM op plus `payload_refs.kind=llm_response` | `part:<id>:text` | Source Manifest Parity bullets above. |
+| `reasoning_text` | `available` / `source_empty` | `semantic_text` | reasoning op plus `payload_refs.kind=llm_reasoning` | `part:<id>:text` | Source Manifest Parity bullets above. |
+| `llm_request` | `not_source_visible` | n/a | none | opencode DB does not persist raw provider request envelopes separately | PayloadRef field map above. |
+| `llm_response` | `not_source_visible` | n/a | none for provider envelope; assistant text is `assistant_message` | opencode DB persists assistant text parts, not raw provider response envelopes | PayloadRef field map above. |
+| `llm_sdk_request` | `not_source_visible` | n/a | none | opencode DB does not persist separate SDK request envelopes | PayloadRef field map above. |
+| `llm_sdk_response` | `not_source_visible` | n/a | none | opencode DB does not persist separate SDK response envelopes | PayloadRef field map above. |
+| `tool_request` | `available` / `source_empty` | `canonical_json` / `semantic_text` | tool op plus `payload_refs.kind=tool_request` | `part:<id>:state.input` | Source Manifest Parity bullets above. |
+| `tool_response` | `available` / `source_empty` | `canonical_json` / `semantic_text` | finalized tool op plus `payload_refs.kind=tool_response` | `part:<id>:state.output` | Source Manifest Parity bullets above. |
+| `llm_error` | `available` | `identity_json` | failed opencode turn plus terminal session error detail when present | `turn:<turnSeq>:assistant_error` | Source Manifest Parity assistant-error bullet above. |
+| `tool_error` | `available` | `identity_json` | failed tool op | `op:<turn_seq>:<op_seq>:error` | Source Manifest Parity bullets above. |
+| `subagent_link` | `available` | `identity_json` | task session op with child session id | `op:<turn_seq>:<op_seq>:child_session:<child_session_id>` | Source Manifest Parity bullets above. |
+| `system_op` | `available` | `identity_json` | session-scoped log row with `session_message_id` parity extras | `session_message:<id>:system_op` over decoded sidecar fields plus `data_sha256` | Source Manifest Parity `session_message` bullet above. |
+| `compaction_event` | `available` | `identity_json` | compaction part log row plus `part_id` extras | `part:<id>:compaction` | Source Manifest Parity non-op part bullets above. |
+| `session_metadata` | `available` | `identity_json` | `sessions` row plus first-class session columns and `sessions.extras_json` | `session:<session.id>:metadata` over selected descriptive fields only | Source Manifest Parity session-metadata bullet above. |
+| `log_entry` | `available` / `source_empty` | `semantic_text` | log row for compaction/retry/file parts and known `session_message` rows | part log id or `session_message:<id>:log` via parity extras | Source Manifest Parity non-op part and `session_message` bullets above. |
+| `attachment_metadata` | `available` | `identity_json` | file part log row plus `part_id` extras | `part:<id>:file` | Source Manifest Parity non-op part bullets above. |
+| `patch_metadata` | `available` | `identity_json` | Source `patch` part matched to the surrounding LLM op `extras_json.patches[]` metadata | `part:<id>:patch` | Source Manifest Parity non-op part bullets above. |
 
 ### Sub-Agent Linkage
 

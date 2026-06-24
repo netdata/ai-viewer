@@ -12,7 +12,7 @@ JSONL files (~/.claude/projects/) into a canonical SQLite store
 via the claude-code adapter. Your job: figure out what Claude Code
 actually emits, what we capture, and what we miss.
 
-FILE PATHS (relative to repo root /home/costa/src/ai-viewer.git):
+FILE PATHS (relative to repo root /home/user/src/ai-viewer.git):
 
 Our claude-code adapter:
   internal/adapters/claude_code/adapter.go

@@ -336,14 +336,12 @@ func ingestV3Dir(t *testing.T, src, scanRoot string, wantSessions int64) *sql.DB
 	if err := ing.Submit(src, events); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	<-scanDone
-	if !waitFor(3*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == wantSessions
-	}) {
-		t.Fatalf("expected %d sessions; got %d", wantSessions, scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
-	}
+	waitForScan(t, scanDone, "aiagent_v3 lineage")
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions`); got != wantSessions {
+		t.Fatalf("session count after Stop = %d, want %d", got, wantSessions)
 	}
 	// Backfill any out-of-order parent/root/op-child linkage now that all
 	// rows are present.

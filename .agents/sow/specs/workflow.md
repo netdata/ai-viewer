@@ -9,16 +9,16 @@ The contract counterpart is `AGENTS.md` (top-level invariants). The runtime chec
 ## Roles
 
 - **Operator** — owns product direction, UX feedback, sign-off on SOWs, risk acceptance, and destructive-operation approval. Does not see technical detail (see "What the operator sees" in `AGENTS.md`).
-- **CTO (master assistant)** — owns technical decisions, orchestration, integration, QA, claim verification, and long-term-memory hygiene. Does not write production code directly. Runs the 5-reviewer Production-Grade Loop on every non-trivial PR.
-- **Implementer** — a fresh-context `minimax` subagent (default `llm-netdata-cloud/minimax-m3-coder`) that writes production code under spec + failing-test constraints supplied by the CTO. The single producer of code.
-- **Reviewers** — exactly five independent LLMs, run in parallel: `glm`, `mimo`, `minimax` (fresh-context, never the implementer instance), `qwen`, `deepseek`. Each votes `PRODUCTION GRADE` or `NEEDS WORK` (with P0–P3 findings). The CTO verifies every claim. See `AGENTS.md` "Production-Grade Loop" and `.agents/sow/specs/second-opinions.md`.
+- **CTO (master assistant)** — owns technical decisions, orchestration, implementation, tests, integration, QA, claim verification, and long-term-memory hygiene.
+- **Helper subagents** — optional bounded read-only investigators or summarizers. They do not own implementation, tests, commits, or review gates.
+- **External reviewers** — six independent reviewers, run in parallel for meaningful gates: `glm`, `minimax`, `kimi`, `mimo`, `deepseek`, and `qwen`. They vote on gap analysis, implementation plan, or implementation review. The CTO verifies every claim. See `AGENTS.md` "Three Reviewer Gates" and `.agents/sow/specs/second-opinions.md`.
 
 ## The Invariant Cycle
 
 Every non-trivial change follows this order. Steps are mandatory unless the SOW explicitly justifies skipping one in writing.
 
 ```
-Re-orient → Spec → Test → Code → Gates → Review → Discipline → Commit
+Re-orient → Gap → Gap Review → Plan → Plan Review → Spec → Test → Code → Gates → Implementation Review → Discipline → Commit
 ```
 
 ### Re-orient
@@ -28,7 +28,25 @@ The assistant assumes nothing is in working memory. Before any work:
 - Read `AGENTS.md`.
 - Read `.agents/sow/current/` and `.agents/sow/pending/`.
 - Read `.agents/sow/specs/index.md` and every spec the task touches.
-- Load `project-workflow`, `project-coding`, `project-quality-gates`, `project-delegation`, plus any domain skill (`project-go-backend`, `project-frontend`, `project-adapters`, etc.).
+- Load `project-workflow`, `project-coding`, `project-quality-gates`, plus any domain skill (`project-go-backend`, `project-frontend`, `project-adapters`, etc.). Load `project-delegation` only when using helper subagents.
+
+### Gap Analysis
+
+For meaningful goals/SOWs, the CTO first derives what must be true for the goal
+to be satisfied: required behavior, known gaps, risks, edge cases, tests, gates,
+spec/doc changes, migration or repair paths, and evidence still needed.
+
+The gap analysis is reviewed through the external reviewer gate when the chunk
+is meaningful. The positive vote is `NOTHING MORE CAN BE DONE`.
+
+### Implementation Plan
+
+After the gap analysis is accepted, the CTO writes a concrete implementation
+plan: files, specs, tests, code slices, gates, rollout/installation steps, risk
+controls, and sequencing.
+
+The plan is reviewed through the external reviewer gate when the chunk is
+meaningful. The positive vote is `READY FOR IMPLEMENTATION`.
 
 ### Spec First
 
@@ -59,15 +77,15 @@ Mandatory test kinds the project enforces:
 
 ### Code Last
 
-Implementation is produced by subagents per the Delegation Protocol in `AGENTS.md`. The master assistant:
+Implementation is written directly by the CTO after specs and failing tests. The CTO:
 
-- Composes a self-contained subagent prompt with spec excerpt, failing-test references, gate requirements, and forbidden patterns.
-- Spawns the subagent (parallel where independent).
-- Reads the diff (never trusts the summary).
+- Keeps changes scoped to the accepted goal/gap/plan.
+- Makes the failing tests pass without weakening them.
+- Reads the full diff.
 - Runs the failing tests to confirm they now pass.
 - Runs all quality gates to confirm nothing else broke.
 
-The master assistant does **not** Edit/Write production source files itself. Permitted master-context writes are limited to contract documents, specs, skills, SOWs, README, LICENSE, and trivial verified typo fixes.
+Helper subagents may support investigation, but they do not own implementation.
 
 ### Gates
 
@@ -75,32 +93,56 @@ All gates listed in `quality-gates.md` run locally before reporting any work don
 
 Weakening a gate to make it pass is a contract breach. Fix the root cause.
 
-### External Review (the 5-Reviewer Production-Grade Loop)
+### External Review Gates
 
-For non-trivial SOWs: the CTO runs the 5-reviewer Production-Grade Loop per `AGENTS.md` and `.agents/sow/specs/second-opinions.md`. The five reviewers (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) run in parallel. Each votes `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. The CTO verifies every claim.
+External reviewers run on meaningful chunks, at least per SOW and per
+substantial milestone for complex SOWs. The reviewers (`glm`, `minimax`, `kimi`,
+`mimo`, `deepseek`, `qwen`) run in parallel. The three gate votes are:
+
+- Gap analysis: `NOTHING MORE CAN BE DONE` or `NEEDS WORK`.
+- Implementation plan: `READY FOR IMPLEMENTATION` or `NEEDS WORK`.
+- Implementation review: `PRODUCTION GRADE` or `NEEDS WORK`.
 
 Stop conditions:
 
-- 5/5 PRODUCTION GRADE → merge.
-- Any P0/P1 → fix, push, re-trigger full cycle.
-- P2 → fix in the same PR, re-trigger the full cycle; merge only when 5/5 PG or only P3 noise remains.
-- P3 → fix in this PR, document in SOW `## Reviews`, merge with note.
-- Hard stall (5+ cycles with new P0/P1 each round) → write a `## Regression` section, open a follow-up SOW, surface to the operator.
+- P0/P1/P2 findings → fix or reject with evidence, then re-run the same gate.
+- P3 findings → fix or document.
+- Positive votes from all available reviewers, or every non-positive vote verified as false-positive/noise → advance to the next stage.
+- Repeated hard stall → record in the SOW and surface a business-level recommendation.
 
-Findings addressed in code; reviewers re-run with the same scope plus a fix note; iterate until convergence. History recorded in the SOW under `## Reviews`.
+Technical reviewer failures are handled pragmatically:
 
-The CTO does not claim work "done" before review convergence. The honest mid-flight phrasing is "code written, gates green, review pending (X/5 PRODUCTION GRADE)".
+- If successful reviewers already found accepted or not-yet-disproven P0/P1/P2
+  findings, do not retry failed reviewers in that round. Fix or reject the
+  blocking findings first, then rerun the whole reviewer batch, including the
+  reviewers that failed.
+- If successful reviewers found nothing or only P3 findings, retry each failed
+  reviewer once when the missing vote matters.
+- If the retry also fails, record the technical failure, ignore that reviewer for
+  the current gate, and try it again on a later task or later gate.
 
-### Merge Protection
+Findings are addressed in the relevant artifact for that gate: gap analysis,
+plan, specs, tests, code, docs, or gates. Reviewers re-run with the same scope
+plus a fix note; iterate until convergence. History is recorded in the SOW under
+`## Reviews`.
 
-The PR merge gate is automated CI/CodeQL plus external reviewer convergence,
-not manual approval. Classic branch protection on `master` has
-`required_pull_request_reviews: null`, and GitHub repository rulesets targeting
-`master` or `~DEFAULT_BRANCH` must not add `pull_request` rules that require an
-approving review or code-owner review. If a ruleset reintroduces that gate,
-disable or update the ruleset and merge through the normal
-`gh pr merge --merge --delete-branch` path; do not bypass protections with
-administrator merge.
+The CTO does not claim work "done" before the applicable gate converges.
+
+### Commit / Merge Protection
+
+During the active Development phase, work goes directly to `master`. The CTO
+runs the applicable reviewer gates before closing meaningful work, commits only
+specific in-scope files, pushes `master`, then reads CI/Codacy/CodeQL/cubic
+output and addresses real findings.
+
+When GA or explicit-PR flow is active, the PR merge gate is automated CI/CodeQL
+plus external reviewer convergence, not manual approval. Classic branch
+protection on `master` has `required_pull_request_reviews: null`, and GitHub
+repository rulesets targeting `master` or `~DEFAULT_BRANCH` must not add
+`pull_request` rules that require an approving review or code-owner review. If a
+ruleset reintroduces that gate, disable or update the ruleset and merge through
+the normal `gh pr merge --merge --delete-branch` path; do not bypass protections
+with administrator merge.
 
 ### Discipline Checklist
 
@@ -109,7 +151,7 @@ Before reporting to the operator:
 - Specs reflect new behavior — same commit as code.
 - Tests exist, pass, race-clean, coverage thresholds met.
 - All quality gates green locally.
-- External review converged for non-trivial work (5/5 PRODUCTION GRADE, or only P3 noise with documented disposition).
+- Applicable external reviewer gate converged; P0/P1/P2 findings fixed or rejected with evidence; only documented P3 findings remain.
 - No new TODO/FIXME without a tracked SOW in `pending/`.
 - `AGENTS.md`, skills, specs updated if a new pattern or gotcha emerged.
 - No half-built features.
@@ -154,7 +196,8 @@ When a SOW is later found to have shipped a regression:
 The assistant must never:
 
 - Ask the operator for a technical decision.
-- Write production code in master context.
+- Delegate implementation by default, or write code before the accepted specs,
+  tests, and applicable reviewer gates are ready.
 - Claim work done before tests, gates, and review converge.
 - Skip the spec update and "add it later".
 - Add `t.Skip`, `// nolint`, `test.skip` to land a PR.

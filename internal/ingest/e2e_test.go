@@ -48,24 +48,19 @@ func TestE2E_SubAgentFixture(t *testing.T) {
 
 	events := make(chan canonical.Event, 256)
 	scanDone := make(chan struct{})
+	var scanErr error
 	go func() {
 		defer close(events)
-		if err := a.Scan(ctx, nil, events); err != nil {
-			t.Errorf("Scan: %v", err)
-		}
+		scanErr = a.Scan(ctx, nil, events)
 		close(scanDone)
 	}()
 	if err := ing.Submit("aiagent_v3:"+fixtureDir, events); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	// Wait for Scan to finish.
-	<-scanDone
-	// Give the worker a moment to drain the buffered tail.
-	if !waitFor(3*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 2
-	}) {
-		t.Fatalf("expected 2 sessions; got %d", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
+	waitForScan(t, scanDone, "aiagent_v3 sub_agent")
+	if scanErr != nil {
+		t.Fatalf("Scan: %v", scanErr)
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -152,21 +147,19 @@ func TestE2E_SessionErrorFixture(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	events := make(chan canonical.Event, 256)
+	scanDone := make(chan struct{})
+	var scanErr error
 	go func() {
 		defer close(events)
-		if err := a.Scan(ctx, nil, events); err != nil {
-			t.Errorf("Scan: %v", err)
-		}
+		defer close(scanDone)
+		scanErr = a.Scan(ctx, nil, events)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	// Wait until the channel drains. Polling for at least one session
-	// then stopping is a simpler signal than tracking goroutines.
-	if !waitFor(3*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) > 0
-	}) {
-		t.Fatalf("session not ingested")
+	waitForScan(t, scanDone, "aiagent_v3 session_error")
+	if scanErr != nil {
+		t.Fatalf("Scan: %v", scanErr)
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -210,17 +203,19 @@ func TestE2E_HappyPathFixture(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	events := make(chan canonical.Event, 256)
+	scanDone := make(chan struct{})
+	var scanErr error
 	go func() {
 		defer close(events)
-		_ = a.Scan(ctx, nil, events)
+		defer close(scanDone)
+		scanErr = a.Scan(ctx, nil, events)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if !waitFor(3*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) > 0
-	}) {
-		t.Fatalf("no session ingested")
+	waitForScan(t, scanDone, "aiagent_v3 happy_single_turn")
+	if scanErr != nil {
+		t.Fatalf("Scan: %v", scanErr)
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)

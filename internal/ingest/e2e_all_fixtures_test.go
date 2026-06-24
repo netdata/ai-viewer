@@ -58,17 +58,19 @@ func TestE2E_AllFixtures(t *testing.T) {
 				t.Fatalf("Start: %v", err)
 			}
 			events := make(chan canonical.Event, 256)
+			scanDone := make(chan struct{})
+			var scanErr error
 			go func() {
 				defer close(events)
-				_ = a.Scan(ctx, nil, events)
+				defer close(scanDone)
+				scanErr = a.Scan(ctx, nil, events)
 			}()
 			if err := ing.Submit(sourceID, events); err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
-			if !waitFor(3*time.Second, func() bool {
-				return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) > 0
-			}) {
-				t.Fatalf("no session ingested for %s", name)
+			waitForScan(t, scanDone, "aiagent_v3 "+name)
+			if scanErr != nil {
+				t.Fatalf("Scan: %v", scanErr)
 			}
 			if err := ing.Stop(); err != nil {
 				t.Fatalf("Stop: %v", err)

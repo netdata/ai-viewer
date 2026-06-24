@@ -14,7 +14,7 @@
 # reviewers are LLM CLI tools, not agents that can run this script.
 set -euo pipefail
 
-cd /home/costa/src/ai-viewer.git
+cd "${AI_VIEWER_REPO_ROOT:-$(git rev-parse --show-toplevel)}"
 COMMON=prompts/reviewers/common-brief.md
 
 run_codex() {

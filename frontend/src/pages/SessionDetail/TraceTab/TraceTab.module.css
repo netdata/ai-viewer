@@ -269,7 +269,7 @@
   background: none;
   border: none;
   padding: 0;
-  color: var(--accent);
+  color: var(--primary);
   cursor: pointer;
   font: inherit;
   text-align: left;

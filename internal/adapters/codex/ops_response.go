@@ -26,13 +26,13 @@ func (m *fileMapper) mapResponseItem(rec record, advance func(int64) canonical.E
 	case "message":
 		return m.mapMessage(rec, advance, tsUs, bodyBytes), nil
 	case "reasoning":
-		return m.mapReasoning(p, advance, tsUs, bodyBytes), nil
+		return m.mapReasoning(rec, p, advance, tsUs, bodyBytes), nil
 	case "function_call", "custom_tool_call", "local_shell_call",
 		"tool_search_call":
-		return m.mapToolCall(p, advance, tsUs, bodyBytes), nil
+		return m.mapToolCall(rec, p, advance, tsUs, bodyBytes), nil
 	case "function_call_output", "custom_tool_call_output", "local_shell_call_output",
 		"tool_search_output":
-		return m.mapToolOutput(p, advance, tsUs, bodyBytes), nil
+		return m.mapToolOutput(rec, p, advance, tsUs, bodyBytes), nil
 	case "web_search_call":
 		return m.mapWebSearchCall(p, advance, tsUs, bodyBytes), nil
 	case "image_generation_call":
@@ -56,7 +56,8 @@ func (m *fileMapper) mapResponseItem(rec record, advance func(int64) canonical.E
 func (m *fileMapper) mapMessage(rec record, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	p := rec.ResponseItem
 	if p.Role == "user" {
-		return m.emitUserInput(advance, tsUs, messageText(p.Content), "json", bodyBytes)
+		refs := append(textPayloadPointers(rec, p.Content, "content"), imagePayloadPointers(rec, p.Content, "content")...)
+		return m.emitUserInput(advance, tsUs, messageText(p.Content), "json", bodyBytes, refs)
 	}
 	// assistant / system / developer → llm op (the assistant is the LLM output;
 	// system/developer messages are rare inline instructions, still llm-kind so
@@ -89,8 +90,8 @@ func (m *fileMapper) mapMessage(rec record, advance func(int64) canonical.EventB
 			Status:          "completed",
 			EndTs:           tsUs,
 		},
-		m.payloadRef(advance(tsUs), turnSeq, opSeq, "llm_response", "json", bodyBytes),
 	)
+	out = appendPayloadRefs(out, m, advance, tsUs, turnSeq, opSeq, "llm_response", "json", bodyBytes, textPayloadPointers(rec, p.Content, "content"))
 	if phaseFromRaw(rec.Raw) == "final_answer" {
 		out = append(out, m.logEntry(advance(tsUs), "INF", "final_answer", nil))
 	}
@@ -116,7 +117,7 @@ func (m *fileMapper) mapMessage(rec record, advance func(int64) canonical.EventB
 // with the tool call in the prior turn and its output in the new turn,
 // which the in-flight tracker (m.openOps) can't represent. The split
 // happens on the NEXT user_input after the tool resolves.
-func (m *fileMapper) emitUserInput(advance func(int64) canonical.EventBase, tsUs int64, text, format string, bodyBytes int64) []canonical.Event {
+func (m *fileMapper) emitUserInput(advance func(int64) canonical.EventBase, tsUs int64, text, format string, bodyBytes int64, refs []payloadPointer) []canonical.Event {
 	if !m.firstSeenUser(userFingerprint(text)) {
 		return nil
 	}
@@ -168,8 +169,8 @@ func (m *fileMapper) emitUserInput(advance func(int64) canonical.EventBase, tsUs
 			Status:          "completed",
 			EndTs:           tsUs,
 		},
-		m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", format, bodyBytes),
 	)
+	out = appendPayloadRefs(out, m, advance, tsUs, turnSeq, opSeq, "tool_request", format, bodyBytes, refs)
 	return out
 }
 
@@ -179,7 +180,7 @@ func (m *fileMapper) emitUserInput(advance func(int64) canonical.EventBase, tsUs
 // The body goes to a PayloadRef (Format=text for a summary, json for the full
 // item). event_msg.agent_reasoning* is a LogEntry only (ops_event.go) so the UI
 // never sees a duplicate reasoning op.
-func (m *fileMapper) mapReasoning(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
+func (m *fileMapper) mapReasoning(rec record, p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	kind, format := reasoningKind(p)
 	ts := m.ensureTurn(tsUs)
 	out := make([]canonical.Event, 0, 4)
@@ -206,9 +207,142 @@ func (m *fileMapper) mapReasoning(p *responseItemPayload, advance func(int64) ca
 			Status:          "completed",
 			EndTs:           tsUs,
 		},
-		m.payloadRef(advance(tsUs), turnSeq, opSeq, "llm_reasoning", format, bodyBytes),
 	)
+	refs := append(textPayloadPointers(rec, p.Summary, "summary"), textPayloadPointers(rec, p.Content, "content")...)
+	if len(refs) > 0 || len(jsonTrim(p.EncryptedContent)) > 0 {
+		out = appendPayloadRefs(out, m, advance, tsUs, turnSeq, opSeq, "llm_reasoning", format, bodyBytes, refs)
+	}
 	return out
+}
+
+type payloadPointer struct {
+	path  string
+	bytes int64
+}
+
+func appendPayloadRefs(out []canonical.Event, m *fileMapper, advance func(int64) canonical.EventBase, tsUs int64, turnSeq int, opSeq int, kind string, format string, fallbackBytes int64, refs []payloadPointer) []canonical.Event {
+	if len(refs) == 0 {
+		return append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, kind, format, fallbackBytes))
+	}
+	for _, ref := range refs {
+		out = append(out, m.payloadRefAtPointer(advance(tsUs), turnSeq, opSeq, kind, format, ref.bytes, ref.path))
+	}
+	return out
+}
+
+func textPayloadPointers(rec record, raw json.RawMessage, field string) []payloadPointer {
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
+	}
+	refs := make([]payloadPointer, 0, len(items))
+	for i, item := range items {
+		textRaw, ok := item["text"]
+		if !ok {
+			continue
+		}
+		var text string
+		if json.Unmarshal(textRaw, &text) != nil {
+			continue
+		}
+		refs = append(refs, payloadPointer{
+			path:  rec.payloadPath(fmt.Sprintf("/%s/%d/text", field, i)),
+			bytes: int64(len(text)),
+		})
+	}
+	return refs
+}
+
+func imagePayloadPointers(rec record, raw json.RawMessage, field string) []payloadPointer {
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
+	}
+	refs := make([]payloadPointer, 0, len(items))
+	for i, item := range items {
+		if !imageContentItem(item) {
+			continue
+		}
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			continue
+		}
+		refs = append(refs, payloadPointer{
+			path:  rec.payloadPath(fmt.Sprintf("/%s/%d", field, i)),
+			bytes: int64(len(encoded)),
+		})
+	}
+	return refs
+}
+
+func imageContentItem(item map[string]json.RawMessage) bool {
+	if rawType, ok := item["type"]; ok {
+		var typ string
+		if json.Unmarshal(rawType, &typ) == nil && strings.Contains(strings.ToLower(typ), "image") {
+			return true
+		}
+	}
+	for _, field := range []string{"image", "image_url", "image_urls", "local_image", "local_images", "image_details"} {
+		if _, ok := item[field]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func userMessageImagePayloadPointers(rec record) []payloadPointer {
+	var env struct {
+		Payload map[string]json.RawMessage `json:"payload"`
+	}
+	if json.Unmarshal(rec.Raw, &env) != nil {
+		return nil
+	}
+	var refs []payloadPointer
+	for _, field := range []string{"images", "local_images", "image_details"} {
+		refs = append(refs, fieldPayloadPointers(rec, env.Payload, field)...)
+	}
+	return refs
+}
+
+func fieldPayloadPointers(rec record, payload map[string]json.RawMessage, field string) []payloadPointer {
+	raw, ok := payload[field]
+	if !ok {
+		return nil
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return []payloadPointer{{
+			path:  rec.payloadPath("/" + field),
+			bytes: int64(len(raw)),
+		}}
+	}
+	refs := make([]payloadPointer, 0, len(items))
+	for i, item := range items {
+		refs = append(refs, payloadPointer{
+			path:  rec.payloadPath(fmt.Sprintf("/%s/%d", field, i)),
+			bytes: int64(len(item)),
+		})
+	}
+	return refs
+}
+
+func rawPayloadPointer(path string, raw json.RawMessage) []payloadPointer {
+	var value interface{}
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case string:
+		return []payloadPointer{{path: path, bytes: int64(len(typed))}}
+	case nil:
+		return []payloadPointer{{path: path, bytes: 0}}
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return nil
+		}
+		return []payloadPointer{{path: path, bytes: int64(len(encoded))}}
+	}
 }
 
 // reasoningKind classifies a reasoning item (spec rule #8, acceptance #4):

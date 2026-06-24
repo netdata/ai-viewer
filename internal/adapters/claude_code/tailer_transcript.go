@@ -19,12 +19,18 @@ func transcriptForRel(root, rel string) (transcript, bool) {
 	if tr, ok := subagentTranscriptForRel(root, rel, parts, base); ok {
 		return tr, true
 	}
+	if relUnderSubagents(parts) {
+		return transcript{}, false
+	}
 	return rootTranscriptForRel(root, rel, parts, base), true
 }
 
 func subagentTranscriptForRel(root, rel string, parts []string, base string) (transcript, bool) {
 	for i, p := range parts {
 		if p == subagentsDir && i >= 2 {
+			if !strings.HasPrefix(base, "agent-") {
+				return transcript{}, false
+			}
 			sessionID := parts[i-1]
 			agentID := strings.TrimSuffix(strings.TrimPrefix(base, "agent-"), transcriptExt)
 			return transcript{
@@ -38,6 +44,15 @@ func subagentTranscriptForRel(root, rel string, parts []string, base string) (tr
 		}
 	}
 	return transcript{}, false
+}
+
+func relUnderSubagents(parts []string) bool {
+	for i, p := range parts {
+		if p == subagentsDir && i >= 2 {
+			return true
+		}
+	}
+	return false
 }
 
 func rootTranscriptForRel(root, rel string, parts []string, base string) transcript {

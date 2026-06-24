@@ -249,14 +249,18 @@ func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, source
 	if err := commitSessionSnapshot(tx, sink, sessionID, onError); err != nil {
 		return nil, false, err
 	}
-	evs, err = mapSession(sourceID, snap.session, snap.tree, WithRootNativeID(snap.rootID), WithOnWarn(onError))
+	evs, err = mapSession(sourceID, snap.session, snap.tree,
+		WithRootNativeID(snap.rootID),
+		WithSessionMessages(snap.sessionMessages),
+		WithOnWarn(onError))
 	return evs, false, err
 }
 
 type sessionSnapshot struct {
-	session sessionRow
-	tree    []messageWithParts
-	rootID  string
+	session         sessionRow
+	tree            []messageWithParts
+	sessionMessages []sessionMessageRow
+	rootID          string
 }
 
 func readSessionSnapshot(ctx context.Context, tx *sql.Tx, schema schemaSet, sessionID string, logger *slog.Logger, sink *warnSink) (sessionSnapshot, bool, bool, error) {
@@ -276,8 +280,12 @@ func readSessionSnapshot(ctx context.Context, tx *sql.Tx, schema schemaSet, sess
 	if err != nil {
 		return sessionSnapshot{}, false, false, err
 	}
+	sessionMessages, err := loadSessionMessages(ctx, tx, schema["session_message"], sessionID, sink.collect)
+	if err != nil {
+		return sessionSnapshot{}, false, false, err
+	}
 	root := resolveRootID(ctx, tx, s.ID, s.ParentID, sink.collect)
-	return sessionSnapshot{session: s, tree: tree, rootID: root}, true, false, nil
+	return sessionSnapshot{session: s, tree: tree, sessionMessages: sessionMessages, rootID: root}, true, false, nil
 }
 
 func commitSessionSnapshot(tx *sql.Tx, sink *warnSink, sessionID string, onError func(error)) error {

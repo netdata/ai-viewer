@@ -193,6 +193,8 @@ type Ingester struct {
 	wg       sync.WaitGroup
 	workers  map[string]*worker
 	ctx      context.Context
+	errMu    sync.Mutex
+	errs     []error
 
 	formatOverrides   map[string]string
 	locationOverrides map[string]string
@@ -314,6 +316,9 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 		now:             i.now,
 		deferReadModels: &i.deferReadModels,
 	}
+	w.onErr = func(err error) {
+		i.recordWorkerError(sourceID, err)
+	}
 	i.workers[sourceID] = w
 	ctx := i.ctx
 	i.mu.Unlock()
@@ -325,9 +330,9 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 	return nil
 }
 
-// Stop cancels the workers' context, waits for every worker to drain
-// its pending batch, stops the resolver, and returns. Safe to call
-// multiple times.
+// Stop cancels the workers' context, waits for every worker to drain its
+// pending batch, runs one final resolver pass over the committed rows, stops the
+// resolver, and returns. Safe to call multiple times.
 func (i *Ingester) Stop() error {
 	i.mu.Lock()
 	if !i.started {
@@ -342,14 +347,49 @@ func (i *Ingester) Stop() error {
 	cancel := i.cancelFn
 	resolver := i.resolver
 	i.mu.Unlock()
-	if resolver != nil {
-		resolver.Stop()
-	}
 	if cancel != nil {
 		cancel()
 	}
 	i.wg.Wait()
+	var resolverErr error
+	if resolver != nil {
+		resolverErr = resolver.linkOrphans(context.Background())
+		resolver.Stop()
+	}
+	workerErr := i.workerError()
+	if workerErr != nil && resolverErr != nil {
+		return errors.Join(workerErr, fmt.Errorf("final resolver: %w", resolverErr))
+	}
+	if workerErr != nil {
+		return workerErr
+	}
+	if resolverErr != nil {
+		return resolverErr
+	}
 	return nil
+}
+
+func (i *Ingester) recordWorkerError(sourceID string, err error) {
+	if err == nil {
+		return
+	}
+	i.errMu.Lock()
+	i.errs = append(i.errs, err)
+	i.errMu.Unlock()
+	if i.logger != nil {
+		i.logger.Error("worker: batch failed",
+			"source_id", sourceID,
+			"err", err)
+	}
+}
+
+func (i *Ingester) workerError() error {
+	i.errMu.Lock()
+	defer i.errMu.Unlock()
+	if len(i.errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("ingest worker errors: %w", errors.Join(i.errs...))
 }
 
 // HWM returns the current per-source observability counter (max

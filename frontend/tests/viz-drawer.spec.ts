@@ -42,8 +42,9 @@ async function richestSessionId(request: APIRequestContext): Promise<string> {
 /** openDrawerFromTrace navigates to the Trace tab and clicks the first span bar,
  *  returning once the drawer dialog is open. */
 async function openDrawerFromTrace(page: Page, id: string): Promise<void> {
-  await page.goto(`/sessions/${encodeURIComponent(id)}?tab=trace`);
-  await expect(page.getByText(/\d+ ops/)).toBeVisible();
+  await page.goto(`/sessions/${encodeURIComponent(id)}`);
+  const vizRegion = page.getByRole('region', { name: /waterfall visualization/i });
+  await expect(vizRegion.getByText(/\d+ ops/)).toBeVisible();
   const waterfall = page.getByRole('group', { name: /waterfall/i });
   await expect(waterfall.getByRole('button').first()).toBeVisible();
   await waterfall.getByRole('button').first().click();
@@ -62,8 +63,9 @@ test.describe('span detail drawer (AC#4)', () => {
     // The op field list: assert the always-present labels render (the <dt>s).
     await expect(dialog.getByText('Status', { exact: true })).toBeVisible();
     await expect(dialog.getByText('Duration', { exact: true })).toBeVisible();
-    await expect(dialog.getByText('Tokens in', { exact: true })).toBeVisible();
-    await expect(dialog.getByText('Tokens out', { exact: true })).toBeVisible();
+    // Waterfall clicks use the slim whole-tree trace shape, so heavy metrics
+    // (model/tokens/cost/context) are intentionally omitted from this drawer.
+    await expect(dialog.getByText(/trace endpoint returns the slim shape/i)).toBeVisible();
 
     // The Payloads section header is always rendered.
     await expect(dialog.getByRole('heading', { name: 'Payloads' })).toBeVisible();

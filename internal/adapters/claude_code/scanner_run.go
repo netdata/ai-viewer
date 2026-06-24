@@ -113,7 +113,7 @@ func (s *scanRunner) processTranscript(tr transcript) error {
 		return s.handleTranscriptError(err)
 	}
 	s.cur = s.cur.withFile(tr.rel, updated)
-	collectAgentDeferral(mapper, tr, s.def.pending, s.def.completed)
+	collectAgentDeferral(mapper, tr, s.def.pending, s.def.completed, s.def.finalized)
 	s.emittedSinceProgress += n
 	return s.maybeEmitProgress()
 }
@@ -182,11 +182,21 @@ type agentOpFinalize struct {
 
 // collectAgentDeferral folds one transcript's mapper state into the cross-file
 // Agent-op deferral maps (spec §8.1).
-func collectAgentDeferral(mapper *fileMapper, tr transcript, pending map[string]agentOpFinalize, completed map[string]completionState) {
+func collectAgentDeferral(mapper *fileMapper, tr transcript, pending map[string]agentOpFinalize, completed map[string]completionState, finalized map[string]struct{}) {
 	if mapper == nil {
 		return
 	}
+	for childID := range mapper.agentOpsResolved {
+		delete(pending, childID)
+		delete(completed, childID)
+		if finalized != nil {
+			finalized[childID] = struct{}{}
+		}
+	}
 	for childID, ref := range mapper.agentOps {
+		if _, done := finalized[childID]; done {
+			continue
+		}
 		pending[childID] = agentOpFinalize{parentNativeID: mapper.nativeID, ref: ref}
 	}
 	if tr.kind != canonical.KindSubAgent {

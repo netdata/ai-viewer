@@ -1,12 +1,15 @@
 # ai-viewer benchmark baseline
 # Benchmark-code provenance:
 #   - Refreshed under SOW-0058 for the serial-hot-path benchmark contract.
+#   - Refreshed under SOW-0097 after deterministic parity coverage added
+#     source-verifiable payload/log artifacts to adapter event streams. Avoidable
+#     regressions were fixed before this refresh.
 #   - Benchmark implementations predate this baseline unless changed by the same
 #     integration commit; use git blame on the benchmark files in that commit.
 #   - Pre-refresh repository HEAD: e783894bfe3e.
-# Regenerated: 2026-06-07 (SOW-0058) - refreshes the workstation baseline for
-#   the -cpu=1 serial-hot-path contract after stabilizing HubFanout with a
-#   deterministic 256-delivery serial batch per benchmark operation.
+# Regenerated: 2026-06-24 (SOW-0097) - refreshes the workstation baseline for
+#   the -cpu=1 serial-hot-path contract after parity-visible payload and log
+#   artifacts changed the measured adapter event streams.
 # Benchmark command:
 #   go test -run='^$' -bench=. -benchmem -count=6 -cpu=1 \
 #     ./internal/adapters/aiagent_v2/ \
@@ -38,107 +41,107 @@ goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/adapters/aiagent_v2
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkScan_SyntheticCorpus 	       8	 138582628 ns/op	  57.24 MB/s	         4.884 corpus_compressed_mb	    106810 events/sec	      7216 files/sec	         4.531 peak_heap_mb	134531220 B/op	  225614 allocs/op
-BenchmarkScan_SyntheticCorpus 	       8	 139449624 ns/op	  56.88 MB/s	         4.884 corpus_compressed_mb	    106146 events/sec	      7171 files/sec	         4.414 peak_heap_mb	134530971 B/op	  225611 allocs/op
-BenchmarkScan_SyntheticCorpus 	       8	 135629522 ns/op	  58.49 MB/s	         4.884 corpus_compressed_mb	    109136 events/sec	      7373 files/sec	         8.383 peak_heap_mb	134530804 B/op	  225609 allocs/op
-BenchmarkScan_SyntheticCorpus 	       8	 138431105 ns/op	  57.30 MB/s	         4.884 corpus_compressed_mb	    106927 events/sec	      7224 files/sec	         4.375 peak_heap_mb	134530838 B/op	  225610 allocs/op
-BenchmarkScan_SyntheticCorpus 	       8	 143740577 ns/op	  55.19 MB/s	         4.884 corpus_compressed_mb	    102977 events/sec	      6957 files/sec	         4.938 peak_heap_mb	134530958 B/op	  225611 allocs/op
-BenchmarkScan_SyntheticCorpus 	       8	 134190786 ns/op	  59.11 MB/s	         4.884 corpus_compressed_mb	    110306 events/sec	      7452 files/sec	         4.625 peak_heap_mb	134531085 B/op	  225612 allocs/op
-BenchmarkTail_SyntheticAppend 	   10000	    104151 ns/op	  56.01 MB/s	    288042 events/sec	         4.109 peak_heap_mb	   93729 B/op	     418 allocs/op
-BenchmarkTail_SyntheticAppend 	   10000	    105132 ns/op	  55.49 MB/s	    285355 events/sec	         4.086 peak_heap_mb	   93729 B/op	     418 allocs/op
-BenchmarkTail_SyntheticAppend 	   10000	    100911 ns/op	  57.81 MB/s	    297291 events/sec	         4.117 peak_heap_mb	   93729 B/op	     418 allocs/op
-BenchmarkTail_SyntheticAppend 	   12091	    102226 ns/op	  57.07 MB/s	    293466 events/sec	         4.164 peak_heap_mb	   93729 B/op	     418 allocs/op
-BenchmarkTail_SyntheticAppend 	   10000	    100526 ns/op	  58.03 MB/s	    298429 events/sec	         4.086 peak_heap_mb	   93729 B/op	     418 allocs/op
-BenchmarkTail_SyntheticAppend 	   10000	    101865 ns/op	  57.27 MB/s	    294508 events/sec	         4.109 peak_heap_mb	   93729 B/op	     418 allocs/op
+BenchmarkScan_SyntheticCorpus 	       8	 138907059 ns/op	  57.11 MB/s	         4.884 corpus_compressed_mb	    106553 events/sec	      7199 files/sec	         5.398 peak_heap_mb	134377503 B/op	  236411 allocs/op
+BenchmarkScan_SyntheticCorpus 	       7	 145776235 ns/op	  54.41 MB/s	         4.884 corpus_compressed_mb	    101532 events/sec	      6860 files/sec	         5.656 peak_heap_mb	134377465 B/op	  236410 allocs/op
+BenchmarkScan_SyntheticCorpus 	       8	 137254788 ns/op	  57.79 MB/s	         4.884 corpus_compressed_mb	    107836 events/sec	      7286 files/sec	         4.938 peak_heap_mb	134377753 B/op	  236414 allocs/op
+BenchmarkScan_SyntheticCorpus 	       8	 144573640 ns/op	  54.87 MB/s	         4.884 corpus_compressed_mb	    102377 events/sec	      6917 files/sec	         4.703 peak_heap_mb	134377634 B/op	  236413 allocs/op
+BenchmarkScan_SyntheticCorpus 	       8	 149902685 ns/op	  52.92 MB/s	         4.884 corpus_compressed_mb	     98737 events/sec	      6671 files/sec	         6.492 peak_heap_mb	134377467 B/op	  236410 allocs/op
+BenchmarkScan_SyntheticCorpus 	       8	 140973910 ns/op	  56.27 MB/s	         4.884 corpus_compressed_mb	    104991 events/sec	      7094 files/sec	         5.586 peak_heap_mb	134377389 B/op	  236408 allocs/op
+BenchmarkTail_SyntheticAppend 	   10000	    111658 ns/op	  52.25 MB/s	    268678 events/sec	         4.102 peak_heap_mb	   94305 B/op	     446 allocs/op
+BenchmarkTail_SyntheticAppend 	   10000	    107350 ns/op	  54.35 MB/s	    279460 events/sec	         4.164 peak_heap_mb	   94305 B/op	     446 allocs/op
+BenchmarkTail_SyntheticAppend 	   10000	    108024 ns/op	  54.01 MB/s	    277716 events/sec	         4.219 peak_heap_mb	   94305 B/op	     446 allocs/op
+BenchmarkTail_SyntheticAppend 	   10000	    111524 ns/op	  52.31 MB/s	    269000 events/sec	         4.086 peak_heap_mb	   94305 B/op	     446 allocs/op
+BenchmarkTail_SyntheticAppend 	   10000	    106999 ns/op	  54.52 MB/s	    280377 events/sec	         4.086 peak_heap_mb	   94305 B/op	     446 allocs/op
+BenchmarkTail_SyntheticAppend 	   10000	    104270 ns/op	  55.95 MB/s	    287716 events/sec	         4.102 peak_heap_mb	   94305 B/op	     446 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/adapters/aiagent_v2	26.509s
+ok  	github.com/netdata/ai-viewer/internal/adapters/aiagent_v2	19.412s
 goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/adapters/claude_code
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkClaudeScan_SyntheticCorpus 	      90	  13251102 ns/op	  34.44 MB/s	    155308 events/sec	      6037 transcripts/sec	10979245 B/op	   49027 allocs/op
-BenchmarkClaudeScan_SyntheticCorpus 	      92	  13994251 ns/op	  32.61 MB/s	    147060 events/sec	      5717 transcripts/sec	10982697 B/op	   49027 allocs/op
-BenchmarkClaudeScan_SyntheticCorpus 	      87	  13509904 ns/op	  33.78 MB/s	    152333 events/sec	      5922 transcripts/sec	10982701 B/op	   49027 allocs/op
-BenchmarkClaudeScan_SyntheticCorpus 	      79	  13765345 ns/op	  33.16 MB/s	    149506 events/sec	      5812 transcripts/sec	10982709 B/op	   49027 allocs/op
-BenchmarkClaudeScan_SyntheticCorpus 	      88	  13691533 ns/op	  33.34 MB/s	    150312 events/sec	      5843 transcripts/sec	10982699 B/op	   49027 allocs/op
-BenchmarkClaudeScan_SyntheticCorpus 	      80	  13372475 ns/op	  34.13 MB/s	    153898 events/sec	      5982 transcripts/sec	10982710 B/op	   49027 allocs/op
-BenchmarkClaudeTail_SyntheticAppend 	   20643	     57073 ns/op	  23.25 MB/s	    105129 events/sec	   83404 B/op	     173 allocs/op
-BenchmarkClaudeTail_SyntheticAppend 	   21720	     57141 ns/op	  23.22 MB/s	    105004 events/sec	   83404 B/op	     173 allocs/op
-BenchmarkClaudeTail_SyntheticAppend 	   17512	     73300 ns/op	  18.10 MB/s	     81855 events/sec	   83404 B/op	     173 allocs/op
-BenchmarkClaudeTail_SyntheticAppend 	   20806	     64053 ns/op	  20.72 MB/s	     93673 events/sec	   83404 B/op	     173 allocs/op
-BenchmarkClaudeTail_SyntheticAppend 	   17856	     62253 ns/op	  21.32 MB/s	     96380 events/sec	   83404 B/op	     173 allocs/op
-BenchmarkClaudeTail_SyntheticAppend 	   20041	     63115 ns/op	  21.03 MB/s	     95064 events/sec	   83404 B/op	     173 allocs/op
+BenchmarkClaudeScan_SyntheticCorpus 	      46	  26999278 ns/op	  16.90 MB/s	    152930 events/sec	      2963 transcripts/sec	18322452 B/op	  120556 allocs/op
+BenchmarkClaudeScan_SyntheticCorpus 	      50	  25008156 ns/op	  18.25 MB/s	    165106 events/sec	      3199 transcripts/sec	18322442 B/op	  120556 allocs/op
+BenchmarkClaudeScan_SyntheticCorpus 	      49	  24911262 ns/op	  18.32 MB/s	    165748 events/sec	      3211 transcripts/sec	18347123 B/op	  120556 allocs/op
+BenchmarkClaudeScan_SyntheticCorpus 	      50	  26092889 ns/op	  17.49 MB/s	    158242 events/sec	      3066 transcripts/sec	18347164 B/op	  120557 allocs/op
+BenchmarkClaudeScan_SyntheticCorpus 	      45	  24594329 ns/op	  18.56 MB/s	    167884 events/sec	      3253 transcripts/sec	18322467 B/op	  120556 allocs/op
+BenchmarkClaudeScan_SyntheticCorpus 	      44	  29311676 ns/op	  15.57 MB/s	    140865 events/sec	      2729 transcripts/sec	18347162 B/op	  120556 allocs/op
+BenchmarkClaudeTail_SyntheticAppend 	   13666	     85261 ns/op	  15.56 MB/s	     93829 events/sec	   96963 B/op	     310 allocs/op
+BenchmarkClaudeTail_SyntheticAppend 	   14914	     87319 ns/op	  15.20 MB/s	     91618 events/sec	   96963 B/op	     310 allocs/op
+BenchmarkClaudeTail_SyntheticAppend 	   12715	     93946 ns/op	  14.13 MB/s	     85155 events/sec	   96962 B/op	     310 allocs/op
+BenchmarkClaudeTail_SyntheticAppend 	    9681	    115607 ns/op	  11.48 MB/s	     69200 events/sec	   96961 B/op	     310 allocs/op
+BenchmarkClaudeTail_SyntheticAppend 	   10000	    110199 ns/op	  12.04 MB/s	     72596 events/sec	   96962 B/op	     310 allocs/op
+BenchmarkClaudeTail_SyntheticAppend 	   10000	    104890 ns/op	  12.65 MB/s	     76270 events/sec	   96963 B/op	     310 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/adapters/claude_code	37.860s
+ok  	github.com/netdata/ai-viewer/internal/adapters/claude_code	33.911s
 goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/adapters/codex
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkCodexScan_SyntheticCorpus 	     226	   5283258 ns/op	  13.31 MB/s	    127951 events/sec	      6057 files/sec	         4.352 peak_heap_mb	 6391482 B/op	   25837 allocs/op
-BenchmarkCodexScan_SyntheticCorpus 	     237	   5542173 ns/op	  12.69 MB/s	    121974 events/sec	      5774 files/sec	         4.250 peak_heap_mb	 6391479 B/op	   25837 allocs/op
-BenchmarkCodexScan_SyntheticCorpus 	     229	   5190274 ns/op	  13.55 MB/s	    130244 events/sec	      6165 files/sec	         4.312 peak_heap_mb	 6391478 B/op	   25837 allocs/op
-BenchmarkCodexScan_SyntheticCorpus 	     220	   5670825 ns/op	  12.40 MB/s	    119207 events/sec	      5643 files/sec	         4.242 peak_heap_mb	 6391475 B/op	   25837 allocs/op
-BenchmarkCodexScan_SyntheticCorpus 	     182	   6426092 ns/op	  10.95 MB/s	    105196 events/sec	      4980 files/sec	         4.242 peak_heap_mb	 6391468 B/op	   25837 allocs/op
-BenchmarkCodexScan_SyntheticCorpus 	     188	   6670461 ns/op	  10.54 MB/s	    101342 events/sec	      4797 files/sec	         4.156 peak_heap_mb	 6391464 B/op	   25836 allocs/op
-BenchmarkCodexTail_SyntheticAppend 	    6578	    159779 ns/op	  13.78 MB/s	    131432 events/sec	         4.188 peak_heap_mb	  191128 B/op	     779 allocs/op
-BenchmarkCodexTail_SyntheticAppend 	    6170	    171074 ns/op	  12.87 MB/s	    122754 events/sec	         4.164 peak_heap_mb	  191128 B/op	     779 allocs/op
-BenchmarkCodexTail_SyntheticAppend 	    7441	    157206 ns/op	  14.01 MB/s	    133583 events/sec	         4.211 peak_heap_mb	  190680 B/op	     779 allocs/op
-BenchmarkCodexTail_SyntheticAppend 	    7270	    152338 ns/op	  14.45 MB/s	    137851 events/sec	        26.41 peak_heap_mb	  191127 B/op	     779 allocs/op
-BenchmarkCodexTail_SyntheticAppend 	    8330	    167444 ns/op	  13.15 MB/s	    125415 events/sec	         4.203 peak_heap_mb	  191128 B/op	     779 allocs/op
-BenchmarkCodexTail_SyntheticAppend 	    8114	    164308 ns/op	  13.40 MB/s	    127809 events/sec	         4.211 peak_heap_mb	  191127 B/op	     779 allocs/op
+BenchmarkCodexScan_SyntheticCorpus 	     159	   7711630 ns/op	   9.12 MB/s	     83510 events/sec	      4150 files/sec	         4.242 peak_heap_mb	 6700177 B/op	   30293 allocs/op
+BenchmarkCodexScan_SyntheticCorpus 	     187	   6360511 ns/op	  11.06 MB/s	    101250 events/sec	      5031 files/sec	         4.227 peak_heap_mb	 6700169 B/op	   30293 allocs/op
+BenchmarkCodexScan_SyntheticCorpus 	     193	   5953831 ns/op	  11.81 MB/s	    108166 events/sec	      5375 files/sec	         4.328 peak_heap_mb	 6684206 B/op	   30293 allocs/op
+BenchmarkCodexScan_SyntheticCorpus 	     195	   5532967 ns/op	  12.71 MB/s	    116393 events/sec	      5784 files/sec	         4.273 peak_heap_mb	 6684206 B/op	   30293 allocs/op
+BenchmarkCodexScan_SyntheticCorpus 	     214	   5486194 ns/op	  12.82 MB/s	    117386 events/sec	      5833 files/sec	         4.273 peak_heap_mb	 6684211 B/op	   30293 allocs/op
+BenchmarkCodexScan_SyntheticCorpus 	     216	   6819793 ns/op	  10.31 MB/s	     94431 events/sec	      4692 files/sec	         4.273 peak_heap_mb	 6700158 B/op	   30293 allocs/op
+BenchmarkCodexTail_SyntheticAppend 	    6746	    188567 ns/op	  11.68 MB/s	    106063 events/sec	         4.203 peak_heap_mb	  200668 B/op	     918 allocs/op
+BenchmarkCodexTail_SyntheticAppend 	    6574	    197248 ns/op	  11.16 MB/s	    101395 events/sec	        11.28 peak_heap_mb	  200667 B/op	     918 allocs/op
+BenchmarkCodexTail_SyntheticAppend 	    7396	    185758 ns/op	  11.85 MB/s	    107667 events/sec	         4.109 peak_heap_mb	  200668 B/op	     918 allocs/op
+BenchmarkCodexTail_SyntheticAppend 	    7276	    200327 ns/op	  10.99 MB/s	     99837 events/sec	         4.250 peak_heap_mb	  200668 B/op	     918 allocs/op
+BenchmarkCodexTail_SyntheticAppend 	    5660	    178378 ns/op	  12.34 MB/s	    112122 events/sec	         4.109 peak_heap_mb	  200220 B/op	     918 allocs/op
+BenchmarkCodexTail_SyntheticAppend 	    6811	    182152 ns/op	  12.09 MB/s	    109799 events/sec	         4.125 peak_heap_mb	  200668 B/op	     918 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/adapters/codex	20.053s
+ok  	github.com/netdata/ai-viewer/internal/adapters/codex	19.754s
 goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/adapters/opencode
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkOpencodeScan_SyntheticDB     	      25	  46151824 ns/op	   8.79 MB/s	     56812 events/sec	         4.164 peak_heap_mb	      5547 sessions/sec	 8030379 B/op	  153042 allocs/op
-BenchmarkOpencodeScan_SyntheticDB     	      25	  46848346 ns/op	   8.66 MB/s	     55968 events/sec	         4.055 peak_heap_mb	      5464 sessions/sec	 8030305 B/op	  153039 allocs/op
-BenchmarkOpencodeScan_SyntheticDB     	      25	  50136606 ns/op	   8.09 MB/s	     52297 events/sec	         3.867 peak_heap_mb	      5106 sessions/sec	 8030385 B/op	  153044 allocs/op
-BenchmarkOpencodeScan_SyntheticDB     	      25	  47828187 ns/op	   8.48 MB/s	     54821 events/sec	         3.867 peak_heap_mb	      5352 sessions/sec	 8030422 B/op	  153046 allocs/op
-BenchmarkOpencodeScan_SyntheticDB     	      25	  47361789 ns/op	   8.56 MB/s	     55361 events/sec	         4.062 peak_heap_mb	      5405 sessions/sec	 8030377 B/op	  153043 allocs/op
-BenchmarkOpencodeScan_SyntheticDB     	      26	  46934365 ns/op	   8.64 MB/s	     55865 events/sec	         4.070 peak_heap_mb	      5454 sessions/sec	 8030381 B/op	  153043 allocs/op
-BenchmarkOpencodeTail_SyntheticAppend 	    3404	    318987 ns/op	     65833 events/sec	         3.953 peak_heap_mb	   85115 B/op	    1509 allocs/op
-BenchmarkOpencodeTail_SyntheticAppend 	    3600	    333201 ns/op	     63025 events/sec	         4.000 peak_heap_mb	   85115 B/op	    1509 allocs/op
-BenchmarkOpencodeTail_SyntheticAppend 	    3644	    328035 ns/op	     64018 events/sec	         4.047 peak_heap_mb	   85115 B/op	    1509 allocs/op
-BenchmarkOpencodeTail_SyntheticAppend 	    3684	    351674 ns/op	     59714 events/sec	         3.938 peak_heap_mb	   85115 B/op	    1509 allocs/op
-BenchmarkOpencodeTail_SyntheticAppend 	    3283	    329142 ns/op	     63802 events/sec	         4.094 peak_heap_mb	   85114 B/op	    1509 allocs/op
-BenchmarkOpencodeTail_SyntheticAppend 	    3704	    323660 ns/op	     64883 events/sec	         4.016 peak_heap_mb	   85115 B/op	    1509 allocs/op
+BenchmarkOpencodeScan_SyntheticDB     	      25	  47872050 ns/op	   8.47 MB/s	     60244 events/sec	         4.008 peak_heap_mb	      5348 sessions/sec	 8405894 B/op	  160031 allocs/op
+BenchmarkOpencodeScan_SyntheticDB     	      21	  50094300 ns/op	   8.09 MB/s	     57571 events/sec	         4.023 peak_heap_mb	      5110 sessions/sec	 8405801 B/op	  160028 allocs/op
+BenchmarkOpencodeScan_SyntheticDB     	      25	  48490072 ns/op	   8.36 MB/s	     59476 events/sec	         4.016 peak_heap_mb	      5279 sessions/sec	 8405868 B/op	  160032 allocs/op
+BenchmarkOpencodeScan_SyntheticDB     	      24	  48355810 ns/op	   8.39 MB/s	     59641 events/sec	         3.984 peak_heap_mb	      5294 sessions/sec	 8405768 B/op	  160026 allocs/op
+BenchmarkOpencodeScan_SyntheticDB     	      25	  49785108 ns/op	   8.15 MB/s	     57929 events/sec	         4.039 peak_heap_mb	      5142 sessions/sec	 8405731 B/op	  160023 allocs/op
+BenchmarkOpencodeScan_SyntheticDB     	      22	  49727023 ns/op	   8.15 MB/s	     57997 events/sec	         3.930 peak_heap_mb	      5148 sessions/sec	 8405888 B/op	  160033 allocs/op
+BenchmarkOpencodeTail_SyntheticAppend 	    2878	    401806 ns/op	     57242 events/sec	         4.016 peak_heap_mb	   89692 B/op	    1650 allocs/op
+BenchmarkOpencodeTail_SyntheticAppend 	    2914	    406447 ns/op	     56588 events/sec	         4.047 peak_heap_mb	   89691 B/op	    1650 allocs/op
+BenchmarkOpencodeTail_SyntheticAppend 	    2904	    419780 ns/op	     54791 events/sec	         4.023 peak_heap_mb	   89691 B/op	    1650 allocs/op
+BenchmarkOpencodeTail_SyntheticAppend 	    2874	    402921 ns/op	     57083 events/sec	         4.023 peak_heap_mb	   89691 B/op	    1650 allocs/op
+BenchmarkOpencodeTail_SyntheticAppend 	    2762	    412495 ns/op	     55758 events/sec	         4.117 peak_heap_mb	   89691 B/op	    1650 allocs/op
+BenchmarkOpencodeTail_SyntheticAppend 	    2745	    409759 ns/op	     56131 events/sec	         4.039 peak_heap_mb	   89692 B/op	    1650 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/adapters/opencode	235.616s
+ok  	github.com/netdata/ai-viewer/internal/adapters/opencode	79.377s
 goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/ingest
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkBatchInsert 	      10	 112024748 ns/op	       530.0 batch_events	      4731 events/sec	         4.461 peak_heap_mb	 6519664 B/op	  110421 allocs/op
-BenchmarkBatchInsert 	      10	 114532286 ns/op	       530.0 batch_events	      4628 events/sec	         4.117 peak_heap_mb	 6513963 B/op	  110407 allocs/op
-BenchmarkBatchInsert 	      10	 108707761 ns/op	       530.0 batch_events	      4875 events/sec	         4.344 peak_heap_mb	 6513696 B/op	  110387 allocs/op
-BenchmarkBatchInsert 	      10	 123961680 ns/op	       530.0 batch_events	      4276 events/sec	         4.375 peak_heap_mb	 6513716 B/op	  110362 allocs/op
-BenchmarkBatchInsert 	       9	 120096803 ns/op	       530.0 batch_events	      4413 events/sec	         4.117 peak_heap_mb	 6514333 B/op	  110425 allocs/op
-BenchmarkBatchInsert 	       9	 111621253 ns/op	       530.0 batch_events	      4748 events/sec	         4.062 peak_heap_mb	 6514240 B/op	  110422 allocs/op
+BenchmarkBatchInsert 	      10	 110872382 ns/op	       530.0 batch_events	      4780 events/sec	         4.266 peak_heap_mb	 6784580 B/op	  117489 allocs/op
+BenchmarkBatchInsert 	      10	 110677066 ns/op	       530.0 batch_events	      4789 events/sec	         4.453 peak_heap_mb	 6779693 B/op	  117488 allocs/op
+BenchmarkBatchInsert 	      10	 112632897 ns/op	       530.0 batch_events	      4706 events/sec	         4.148 peak_heap_mb	 6777830 B/op	  117469 allocs/op
+BenchmarkBatchInsert 	      10	 113956285 ns/op	       530.0 batch_events	      4651 events/sec	         4.203 peak_heap_mb	 6779283 B/op	  117388 allocs/op
+BenchmarkBatchInsert 	       9	 116782219 ns/op	       530.0 batch_events	      4538 events/sec	         4.195 peak_heap_mb	 6779136 B/op	  117549 allocs/op
+BenchmarkBatchInsert 	      10	 112726391 ns/op	       530.0 batch_events	      4702 events/sec	         4.352 peak_heap_mb	 6778277 B/op	  117497 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/ingest	9.431s
+ok  	github.com/netdata/ai-viewer/internal/ingest	8.683s
 goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/presenter
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkSessionsListQuery 	    2086	    536461 ns/op	      1864 requests/sec	       100.0 rows	  123511 B/op	    3177 allocs/op
-BenchmarkSessionsListQuery 	    2334	    542141 ns/op	      1845 requests/sec	       100.0 rows	  123498 B/op	    3177 allocs/op
-BenchmarkSessionsListQuery 	    1852	    575475 ns/op	      1738 requests/sec	       100.0 rows	  123502 B/op	    3177 allocs/op
-BenchmarkSessionsListQuery 	    2325	    535491 ns/op	      1867 requests/sec	       100.0 rows	  123495 B/op	    3177 allocs/op
-BenchmarkSessionsListQuery 	    2277	    539722 ns/op	      1853 requests/sec	       100.0 rows	  123497 B/op	    3177 allocs/op
-BenchmarkSessionsListQuery 	    2323	    535461 ns/op	      1868 requests/sec	       100.0 rows	  123496 B/op	    3177 allocs/op
+BenchmarkSessionsListQuery 	    2233	    552961 ns/op	      1808 requests/sec	       100.0 rows	  143487 B/op	    2898 allocs/op
+BenchmarkSessionsListQuery 	    2200	    552230 ns/op	      1811 requests/sec	       100.0 rows	  143489 B/op	    2898 allocs/op
+BenchmarkSessionsListQuery 	    2236	    585451 ns/op	      1708 requests/sec	       100.0 rows	  143478 B/op	    2898 allocs/op
+BenchmarkSessionsListQuery 	    2235	    554015 ns/op	      1805 requests/sec	       100.0 rows	  143477 B/op	    2898 allocs/op
+BenchmarkSessionsListQuery 	    2170	    544178 ns/op	      1838 requests/sec	       100.0 rows	  143482 B/op	    2898 allocs/op
+BenchmarkSessionsListQuery 	    2187	    556818 ns/op	      1796 requests/sec	       100.0 rows	  143478 B/op	    2898 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/presenter	7.629s
+ok  	github.com/netdata/ai-viewer/internal/presenter	7.890s
 goos: linux
 goarch: amd64
 pkg: github.com/netdata/ai-viewer/internal/notify
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkHubFanout 	   10000	    272330 ns/op	    940034 deliveries/sec	      1000 subscriptions	    2019 B/op	     255 allocs/op
-BenchmarkHubFanout 	   10000	    276700 ns/op	    925189 deliveries/sec	      1000 subscriptions	    2019 B/op	     255 allocs/op
-BenchmarkHubFanout 	   10000	    259372 ns/op	    986999 deliveries/sec	      1000 subscriptions	    2019 B/op	     255 allocs/op
-BenchmarkHubFanout 	   10000	    253986 ns/op	   1007930 deliveries/sec	      1000 subscriptions	    2019 B/op	     255 allocs/op
-BenchmarkHubFanout 	   10000	    294392 ns/op	    869590 deliveries/sec	      1000 subscriptions	    2019 B/op	     255 allocs/op
-BenchmarkHubFanout 	   10000	    289661 ns/op	    883793 deliveries/sec	      1000 subscriptions	    2019 B/op	     255 allocs/op
+BenchmarkHubFanout 	   48128	     24992 ns/op	  10243234 deliveries/sec	      1000 subscriptions	    2042 B/op	     255 allocs/op
+BenchmarkHubFanout 	   65120	     28909 ns/op	   8855249 deliveries/sec	      1000 subscriptions	    2043 B/op	     255 allocs/op
+BenchmarkHubFanout 	   57824	     23653 ns/op	  10823142 deliveries/sec	      1000 subscriptions	    2043 B/op	     255 allocs/op
+BenchmarkHubFanout 	   64957	     47748 ns/op	   5361483 deliveries/sec	      1000 subscriptions	    2043 B/op	     255 allocs/op
+BenchmarkHubFanout 	   63703	     22783 ns/op	  11236228 deliveries/sec	      1000 subscriptions	    2043 B/op	     255 allocs/op
+BenchmarkHubFanout 	   62877	     21105 ns/op	  12129769 deliveries/sec	      1000 subscriptions	    2043 B/op	     255 allocs/op
 PASS
-ok  	github.com/netdata/ai-viewer/internal/notify	16.695s
+ok  	github.com/netdata/ai-viewer/internal/notify	12.858s

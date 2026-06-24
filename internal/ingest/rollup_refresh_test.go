@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -59,9 +60,22 @@ func flushBatchWithMaxRollupRows(t *testing.T, db *sql.DB, sourceID, format stri
 // transition the carry-forward dirty set must survive. flushBatchReuse drives a
 // SINGLE writer across batches (production reuses wr in worker.run), so the
 // carry-forward state on the writer persists exactly as it does in production.
-type mutableClock struct{ now int64 }
+type mutableClock struct {
+	mu  sync.RWMutex
+	now int64
+}
 
-func (c *mutableClock) Now() int64 { return c.now }
+func (c *mutableClock) Now() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.now
+}
+
+func (c *mutableClock) Set(now int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
+}
 
 type notifyRollbackFixture struct {
 	db                *sql.DB
@@ -153,7 +167,7 @@ func TestRefreshRollups_OpenHourMaterializedAfterClose(t *testing.T) {
 	wr.now = clk.Now
 
 	// Batch 1: session + op entirely within the OPEN hour H.
-	clk.now = nowAtBatch1
+	clk.Set(nowAtBatch1)
 	batch1 := []canonical.Event{
 		sessionStartEvent(src, "sess-1", "claude", "/work/proj", hourH, 1),
 		canonical.TurnStartedEvent{
@@ -171,7 +185,7 @@ func TestRefreshRollups_OpenHourMaterializedAfterClose(t *testing.T) {
 
 	// Batch 2: a NEW op in hour H+1 at a now where H has closed. The carried H must
 	// now materialize; H+1 (the new open hour) must be skipped+retained.
-	clk.now = nowAtBatch2
+	clk.Set(nowAtBatch2)
 	batch2 := []canonical.Event{
 		sessionStartEvent(src, "sess-2", "claude", "/work/proj", hourH1, 100),
 		canonical.TurnStartedEvent{
@@ -267,7 +281,7 @@ func TestRefreshRollups_RefreshOnlyMaterializesClosedCarried(t *testing.T) {
 	// failed idle pass (whose bucket's ops are committed by a prior batch) is
 	// retried rather than silently dropped. Advance the clock past midnight so H AND
 	// its day are closed (both carried sets materialize and stage removal together).
-	clk.now = nowClosed
+	clk.Set(nowClosed)
 	ctx := context.Background()
 	txRB, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -377,7 +391,7 @@ func newNotifyRollbackFixture(t *testing.T, src, format string) notifyRollbackFi
 	if !wr.hasPendingRollupBuckets() {
 		t.Fatal("premise broken: open hour/day must be carried after the first flush")
 	}
-	clk.now = ts(1, 0, 1)
+	clk.Set(ts(1, 0, 1))
 
 	return notifyRollbackFixture{
 		db: db, wr: wr, w: newRefreshOnlyTestWorker(db, src, format),
@@ -1522,7 +1536,7 @@ func TestRefreshRollups_OpenDayMaterializedAfterMidnight(t *testing.T) {
 	// Idle pass 1 at now=day0 11:01: H closes (materialize+promote out of the HOUR
 	// set) while day0 stays OPEN. This is the step that, under the old code, dropped
 	// day0's only handle.
-	clk.now = nowHourClosed
+	clk.Set(nowHourClosed)
 	refreshOnlyReuse(t, dbA, wr)
 
 	if _, ok := readRollups(t, dbA, "rollup_hourly")[rollupKey{hourH, format, "total", ""}]; !ok {
@@ -1539,7 +1553,7 @@ func TestRefreshRollups_OpenDayMaterializedAfterMidnight(t *testing.T) {
 
 	// Idle pass 2 at now=day1 00:01: day0 is now closed, NO new events. The carried
 	// day must materialize.
-	clk.now = nowAfterMidnight
+	clk.Set(nowAfterMidnight)
 	refreshOnlyReuse(t, dbA, wr)
 
 	if _, ok := readRollups(t, dbA, "rollup_daily")[rollupKey{day0, format, "total", ""}]; !ok {

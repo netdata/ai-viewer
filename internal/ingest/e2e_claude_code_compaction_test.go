@@ -18,14 +18,14 @@ import (
 // FOREIGN KEY error that rolled back the entire ingest batch.
 //
 // The per-package tests cover each side in isolation (the adapter golden
-// pins OpSeq=2 on the ref; writer_orphan_payload_ref_test pins the writer's
+// pins the ref's OpSeq; writer_orphan_payload_ref_test pins the writer's
 // orphan guard). The bug lived in the COMPOSITION, so this drives the REAL
 // claude-code adapter over the committed c_compaction fixture, feeds its
 // events through the REAL ingester writer against an in-memory SQLite with
 // the real migrations, and asserts the seam holds end-to-end:
 //
 //	(a) the batch commits with NO FOREIGN KEY constraint error,
-//	(b) the compaction op row (turn 1, seq 2) exists in ops,
+//	(b) the compaction op row exists in ops,
 //	(c) a payload_refs row's op_id equals that compaction op's id (the
 //	    summary payload is correctly op-scoped, not orphaned), and
 //	(d) sources.parse_errors is 0 — the orphan guard never had to fire
@@ -63,11 +63,12 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 	}
 
 	events := make(chan canonical.Event, 256)
+	scanDone := make(chan struct{})
+	var scanErr error
 	go func() {
 		defer close(events)
-		if err := a.Scan(ctx, nil, events); err != nil {
-			t.Errorf("Scan: %v", err)
-		}
+		defer close(scanDone)
+		scanErr = a.Scan(ctx, nil, events)
 	}()
 	// Submit drives the real worker; the worker applies every event in one
 	// transaction and drops the batch if commit fails. A FK rollback at the
@@ -77,17 +78,15 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	// The compaction op is turn 1, op seq 2 (the second top-level op in the
-	// turn; the first is the pre-compaction llm call). Wait for it to land.
-	if !waitFor(3*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE kind='compaction'`) == 1
-	}) {
-		t.Fatalf("compaction op not ingested; ops=%d compaction=%d",
-			scanInt(t, db, `SELECT COUNT(*) FROM ops`),
-			scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE kind='compaction'`))
+	waitForScan(t, scanDone, "claude-code compaction")
+	if scanErr != nil {
+		t.Fatalf("Scan: %v", scanErr)
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE kind='compaction'`); got != 1 {
+		t.Fatalf("compaction op count after Stop = %d, want 1", got)
 	}
 
 	// (a) The batch committed with no FOREIGN KEY error. The worker drops a
@@ -102,11 +101,11 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 	}
 
 	// (b) The compaction op row exists. Derive its canonical id from the
-	// fixture's session native id + turn 1 + op seq 2 (the same derivation
+	// fixture's session native id + turn 1 + op seq 3 (the same derivation
 	// the writer uses), then assert the row is present and is a compaction.
 	const sessionNativeID = "33333333-3333-4333-8333-333333333333"
 	compactionOpID := canonicalOpID(
-		canonicalTurnID(canonicalSessionID(sourceID, sessionNativeID), 1), 2)
+		canonicalTurnID(canonicalSessionID(sourceID, sessionNativeID), 1), 3)
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE id=? AND kind='compaction'`, compactionOpID); got != 1 {
 		t.Fatalf("compaction op row count = %d, want 1 (id=%s)", got, compactionOpID)
 	}

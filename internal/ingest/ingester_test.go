@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,6 +134,155 @@ func TestStop_DrainsPendingBatch(t *testing.T) {
 
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='sess-1'`); got != 1 {
 		t.Errorf("session row count = %d, want 1", got)
+	}
+}
+
+func TestStop_RunsFinalResolverPassAfterWorkerDrain(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+	const childNative = "child-session"
+
+	_, db := openTestStore(t)
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(100),
+		WithBatchInterval(time.Hour),
+		WithResolverInterval(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ch := make(chan canonical.Event, 8)
+	ch <- canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "parent",
+		RootNativeID: "parent",
+		Kind:         canonical.KindRoot,
+		AgentName:    "parent-agent",
+	}
+	ch <- canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1000},
+		SessionNativeID: "parent",
+		Seq:             1,
+	}
+	ch <- canonical.OpStartedEvent{
+		EventBase:            canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		SessionNativeID:      "parent",
+		TurnSeq:              1,
+		Seq:                  1,
+		ParentOpSeq:          -1,
+		Kind:                 canonical.OpSession,
+		Name:                 "child-agent",
+		ChildSessionNativeID: childNative,
+	}
+	ch <- canonical.SessionStartedEvent{
+		EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1200},
+		NativeID:       childNative,
+		RootNativeID:   "parent",
+		ParentNativeID: "parent",
+		Kind:           canonical.KindSubAgent,
+		AgentName:      "child-agent",
+	}
+	close(ch)
+
+	if err := i.Submit(src, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := i.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	parentID := canonicalSessionID(src, "parent")
+	childID := canonicalSessionID(src, childNative)
+	opID := canonicalOpID(canonicalTurnID(parentID, 1), 1)
+	if got := scanString(t, db, `SELECT IFNULL(child_session_id,'') FROM ops WHERE id=?`, opID); got != childID {
+		t.Fatalf("op child_session_id after Stop = %q, want %q", got, childID)
+	}
+}
+
+func TestStop_RunsFinalResolverPassBeforeReturningWorkerErrors(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+	const childNative = "child-session"
+
+	_, db := openTestStore(t)
+	i, err := New(db,
+		WithLogger(silentLogger()),
+		WithBatchSize(4),
+		WithBatchInterval(time.Hour),
+		WithResolverInterval(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := i.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ch := make(chan canonical.Event, 8)
+	ch <- canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "parent",
+		RootNativeID: "parent",
+		Kind:         canonical.KindRoot,
+		AgentName:    "parent-agent",
+	}
+	ch <- canonical.TurnStartedEvent{
+		EventBase:       canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 1000},
+		SessionNativeID: "parent",
+		Seq:             1,
+	}
+	ch <- canonical.OpStartedEvent{
+		EventBase:            canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 1100},
+		SessionNativeID:      "parent",
+		TurnSeq:              1,
+		Seq:                  1,
+		ParentOpSeq:          -1,
+		Kind:                 canonical.OpSession,
+		Name:                 "child-agent",
+		ChildSessionNativeID: childNative,
+	}
+	ch <- canonical.SessionStartedEvent{
+		EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 4, Ts: 1200},
+		NativeID:       childNative,
+		RootNativeID:   "parent",
+		ParentNativeID: "parent",
+		Kind:           canonical.KindSubAgent,
+		AgentName:      "child-agent",
+	}
+	if err := i.Submit(src, ch); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if !waitFor(time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id IN ('parent', ?)`, childNative) == 2
+	}) {
+		t.Fatalf("valid batch did not commit before terminal batch; sessions=%d", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
+	}
+
+	ch <- canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 5, Ts: 1300},
+	}
+	close(ch)
+
+	err = i.Stop()
+	if err == nil {
+		t.Fatal("Stop returned nil, want worker batch error")
+	}
+	if !strings.Contains(err.Error(), "DROPPING") || !strings.Contains(err.Error(), "missing NativeID") {
+		t.Fatalf("Stop error = %v, want dropped empty-native-id batch context", err)
+	}
+
+	parentID := canonicalSessionID(src, "parent")
+	childID := canonicalSessionID(src, childNative)
+	opID := canonicalOpID(canonicalTurnID(parentID, 1), 1)
+	if got := scanString(t, db, `SELECT IFNULL(child_session_id,'') FROM ops WHERE id=?`, opID); got != childID {
+		t.Fatalf("op child_session_id after Stop worker error = %q, want %q", got, childID)
 	}
 }
 

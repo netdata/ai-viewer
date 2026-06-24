@@ -25,6 +25,17 @@ function lagFor(lagBySource: Map<string, number>, source: SourceItem): string {
   return lag === undefined ? '—' : formatDuration(lag);
 }
 
+function sourceColorVar(format: string): string {
+  switch (format) {
+    case 'aiagent_v3': return '--source-aiagent-v3';
+    case 'aiagent_v2': return '--source-aiagent-v2';
+    case 'claude-code': return '--source-claude-code';
+    case 'codex': return '--source-codex';
+    case 'opencode': return '--source-opencode';
+    default: return '--border';
+  }
+}
+
 export function Sources() {
   const sources = useSources();
   const health = useHealth();
@@ -122,7 +133,7 @@ export function Sources() {
             </thead>
             <tbody>
               {items.map((src, i) => {
-                const sourceColor = `var(--source-${src.format.replace(/[^a-z0-9]/gi, '').toLowerCase()}, var(--border))`;
+                const sourceColor = `var(${sourceColorVar(src.format)})`;
                 return (
                   <tr
                     key={src.id}

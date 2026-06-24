@@ -1,9 +1,13 @@
 package claude_code
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -100,14 +104,38 @@ func evalSymlinksAllowingTail(abs string) (string, error) {
 	return filepath.Join(resolvedParent, filepath.Base(abs)), nil
 }
 
-// emitToolResultPayload returns a PayloadRefEvent for a user record's
-// top-level toolUseResult body (spec §5.4): the structured tool-result echo
-// lives inline in the transcript, so the ref points at the transcript file.
-// Attached to the just-finalized tool op (turn/op from the matched
-// tool_result). Returns an error when the URI cannot be resolved (containment
-// failure) so the caller can surface it.
-func (m *fileMapper) emitToolResultPayload(base canonical.EventBase, turnSeq, opSeq int) (canonical.PayloadRefEvent, error) {
+func (m *fileMapper) payloadURI(lineNo int64) string {
+	anchor := ""
+	if lineNo > 0 {
+		anchor = fmt.Sprintf("#L%d", lineNo)
+	}
+	if m.absPath == "" {
+		return anchor
+	}
 	uri, err := payloadLocationURI(m.root, m.absPath)
+	if err != nil {
+		uri = "file://" + filepath.ToSlash(filepath.Clean(m.absPath))
+	}
+	return uri + anchor
+}
+
+func (m *fileMapper) payloadURIWithPointer(lineNo int64, pointer string) string {
+	uri := m.payloadURI(lineNo)
+	if pointer == "" {
+		return uri
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return uri
+	}
+	values := parsed.Query()
+	values.Set("json_pointer", pointer)
+	parsed.RawQuery = values.Encode()
+	return parsed.String()
+}
+
+func (m *fileMapper) emitInlinePayload(base canonical.EventBase, turnSeq, opSeq int, kind, format string, rec record, pointer string) (canonical.PayloadRefEvent, error) {
+	originalBytes, err := inlinePayloadOriginalBytes(rec, pointer)
 	if err != nil {
 		return canonical.PayloadRefEvent{}, err
 	}
@@ -116,10 +144,10 @@ func (m *fileMapper) emitToolResultPayload(base canonical.EventBase, turnSeq, op
 		SessionNativeID: m.nativeID,
 		TurnSeq:         turnSeq,
 		OpSeq:           opSeq,
-		PayloadKind:     "tool_response",
-		Format:          "text",
-		LocationURI:     uri,
-		OriginalBytes:   -1,
+		PayloadKind:     kind,
+		Format:          format,
+		LocationURI:     m.payloadURIWithPointer(rec.LineNo, pointer),
+		OriginalBytes:   originalBytes,
 	}, nil
 }
 
@@ -135,22 +163,217 @@ func (m *fileMapper) emitToolResultPayload(base canonical.EventBase, turnSeq, op
 // turn-0 summary. Returns (zero, false, nil) only when no compaction op has
 // been seen on the file (opSeq==0) — without an owning op the ref would
 // FK-roll-back the batch.
-func (m *fileMapper) emitSummaryPayload(base canonical.EventBase, turnSeq, opSeq int) (canonical.PayloadRefEvent, bool, error) {
+func (m *fileMapper) emitSummaryPayload(base canonical.EventBase, turnSeq, opSeq int, rec record) (canonical.PayloadRefEvent, bool, error) {
 	if opSeq == 0 {
 		return canonical.PayloadRefEvent{}, false, nil
 	}
-	uri, err := payloadLocationURI(m.root, m.absPath)
+	ref, err := m.emitInlinePayload(base, turnSeq, opSeq, "log", "text", rec, "/message/content")
 	if err != nil {
 		return canonical.PayloadRefEvent{}, false, err
 	}
-	return canonical.PayloadRefEvent{
-		EventBase:       base,
-		SessionNativeID: m.nativeID,
-		TurnSeq:         turnSeq,
-		OpSeq:           opSeq,
-		PayloadKind:     "log",
-		Format:          "text",
-		LocationURI:     uri,
-		OriginalBytes:   -1,
-	}, true, nil
+	return ref, true, nil
+}
+
+func jsonPointerLogicalBytes(raw []byte, pointer string) ([]byte, error) {
+	var doc interface{}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("decode inline payload JSON for pointer %q: %w", pointer, err)
+	}
+	value, err := jsonPointerValue(doc, pointer)
+	if err != nil {
+		return nil, err
+	}
+	if text, ok := value.(string); ok {
+		return []byte(text), nil
+	}
+	return canonicalJSONBytes(value)
+}
+
+func inlinePayloadOriginalBytes(rec record, pointer string) (int64, error) {
+	if n, ok, err := inlinePayloadOriginalBytesFast(rec, pointer); ok || err != nil {
+		return n, err
+	}
+	logicalBytes, err := jsonPointerLogicalBytes(rec.Raw, pointer)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(logicalBytes)), nil
+}
+
+func inlinePayloadOriginalBytesFast(rec record, pointer string) (int64, bool, error) {
+	if pointer == "/message/content" {
+		if rec.User == nil {
+			return 0, false, nil
+		}
+		text, _, isString := classifyUserContent(rec.User)
+		if !isString {
+			return 0, false, nil
+		}
+		return int64(len(text)), true, nil
+	}
+	index, field, ok, err := parseMessageContentPointer(pointer)
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+	if rec.Assistant != nil && index < len(rec.Assistant.Content) {
+		return contentBlockFieldOriginalBytes(rec.Assistant.Content[index], field)
+	}
+	if rec.User != nil {
+		_, blocks, isString := classifyUserContent(rec.User)
+		if !isString && index < len(blocks) {
+			return contentBlockFieldOriginalBytes(blocks[index], field)
+		}
+	}
+	return 0, false, nil
+}
+
+func parseMessageContentPointer(pointer string) (index int, field string, ok bool, err error) {
+	rest, ok := strings.CutPrefix(pointer, "/message/content/")
+	if !ok {
+		return 0, "", false, nil
+	}
+	indexToken, field, hasField := strings.Cut(rest, "/")
+	index, err = parseJSONPointerIndex(indexToken)
+	if err != nil {
+		return 0, "", true, err
+	}
+	if !hasField {
+		field = ""
+	}
+	return index, field, true, nil
+}
+
+func contentBlockFieldOriginalBytes(block contentBlock, field string) (int64, bool, error) {
+	switch field {
+	case "text":
+		return int64(len(block.Text)), true, nil
+	case "thinking":
+		return int64(len(block.Thinking)), true, nil
+	case "input":
+		n, err := rawMessageOriginalBytes(block.Input)
+		return n, true, err
+	case "content":
+		n, err := rawMessageOriginalBytes(block.Content)
+		return n, true, err
+	default:
+		return 0, false, nil
+	}
+}
+
+func rawMessageOriginalBytes(raw json.RawMessage) (int64, error) {
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	var value interface{}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return 0, err
+	}
+	if text, ok := value.(string); ok {
+		return int64(len(text)), nil
+	}
+	logicalBytes, err := canonicalJSONBytes(value)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(logicalBytes)), nil
+}
+
+func jsonPointerValue(doc interface{}, pointer string) (interface{}, error) {
+	if pointer == "" {
+		return doc, nil
+	}
+	if !strings.HasPrefix(pointer, "/") {
+		return nil, fmt.Errorf("json_pointer %q must start with /", pointer)
+	}
+	current := doc
+	for _, rawToken := range strings.Split(pointer[1:], "/") {
+		token, err := unescapeJSONPointerToken(rawToken)
+		if err != nil {
+			return nil, err
+		}
+		next, err := jsonPointerStep(current, token)
+		if err != nil {
+			return nil, fmt.Errorf("resolve json_pointer %q token %q: %w", pointer, token, err)
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func jsonPointerStep(current interface{}, token string) (interface{}, error) {
+	switch typed := current.(type) {
+	case map[string]interface{}:
+		value, ok := typed[token]
+		if !ok {
+			return nil, fmt.Errorf("object key not found")
+		}
+		return value, nil
+	case []interface{}:
+		index, err := parseJSONPointerIndex(token)
+		if err != nil {
+			return nil, err
+		}
+		if index >= len(typed) {
+			return nil, fmt.Errorf("array index out of range")
+		}
+		return typed[index], nil
+	default:
+		return nil, fmt.Errorf("cannot descend into %T", current)
+	}
+}
+
+func parseJSONPointerIndex(token string) (int, error) {
+	if token == "" {
+		return 0, fmt.Errorf("array index is empty")
+	}
+	if len(token) > 1 && token[0] == '0' {
+		return 0, fmt.Errorf("array index has leading zero")
+	}
+	for _, r := range token {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("array index is not decimal")
+		}
+	}
+	index, err := strconv.Atoi(token)
+	if err != nil {
+		return 0, fmt.Errorf("parse array index: %w", err)
+	}
+	return index, nil
+}
+
+func unescapeJSONPointerToken(token string) (string, error) {
+	var out strings.Builder
+	for i := 0; i < len(token); i++ {
+		if token[i] != '~' {
+			out.WriteByte(token[i])
+			continue
+		}
+		if i+1 >= len(token) {
+			return "", fmt.Errorf("json_pointer token %q has trailing escape", token)
+		}
+		switch token[i+1] {
+		case '0':
+			out.WriteByte('~')
+		case '1':
+			out.WriteByte('/')
+		default:
+			return "", fmt.Errorf("json_pointer token %q has invalid escape", token)
+		}
+		i++
+	}
+	return out.String(), nil
+}
+
+func canonicalJSONBytes(value interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, fmt.Errorf("encode canonical JSON: %w", err)
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

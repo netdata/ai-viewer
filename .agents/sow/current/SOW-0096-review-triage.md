@@ -6,6 +6,14 @@ baseline and the open SOW questions.
 
 ## Status
 
+Status: in-progress
+
+Sub-state: Verification artifact for active SOW-0096. This file records corrected baseline evidence and reviewer-claim triage; it does not authorize implementation by itself. The parent SOW owns implementation scope and gates.
+
+## Correction - 2026-06-22
+
+The operator corrected SOW-0097 after this triage was written. The canonical op-kind findings below remain factual evidence: `user_input` and `assistant` are not canonical `OpKind` values today. The implementation conclusion is superseded: SOW-0097 no longer starts by adding those kinds. It starts by defining deterministic source-to-canonical parity gates. Op-kind and status enum changes are now downstream decisions made only if the parity spec proves they are required.
+
 - [x] Reviewer 1 (codex via codex2) — verified, baseline corrections logged
 - [x] Reviewer 2 (claude-code via claude) — verified, baseline corrections logged
 - [x] Reviewer 3 (canonical via glm) — verified, canonical contract changes logged
@@ -15,6 +23,14 @@ baseline and the open SOW questions.
 - [ ] Reviewer 7 (framework via deepseek) — pending
 - [ ] Reviewer 8 (SQL via qwen) — pending
 - [ ] Reviewer 9 (UX) — CTO does directly
+
+## Pre-Implementation Gate
+
+Status: ready
+
+- **Scope**: evidence triage only. Runtime implementation remains governed by the parent SOW-0096 and follow-up SOWs SOW-0097..SOW-0103.
+- **Sensitive data handling plan**: keep only structural counts, adapter names, file paths, and reviewer finding IDs. Do not record payload contents, prompts, responses, secrets, or personal data in this artifact.
+- **Validation gate**: every correction below is treated as untrusted until verified by code/source inspection or live-DB SQL. Corrections marked authoritative here are the verified baseline for later SOW-0096 work.
 
 ## CORRECTIONS TO THE CTO'S BASELINE NARRATIVE
 

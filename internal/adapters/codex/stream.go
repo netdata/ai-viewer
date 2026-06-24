@@ -14,9 +14,10 @@ import (
 )
 
 // scanBufferMax bounds a single rollout line. Real codex lines can be large
-// (base64 encrypted_content reasoning blocks, big tool I/O); 8 MB is ample
-// while bounding pathological allocations. Mirrors claude_code/scanner.go.
-const scanBufferMax = 8 * 1024 * 1024
+// (base64 encrypted_content reasoning blocks, big tool I/O); live SOW-0097
+// evidence found valid lines up to about 14 MiB, so the cap leaves headroom
+// while bounding pathological allocations.
+const scanBufferMax = 16 * 1024 * 1024
 
 // streamReader is the per-line reader buffer size; matches claude_code.
 const streamReaderSize = 64 * 1024

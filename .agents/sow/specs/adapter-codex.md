@@ -23,7 +23,13 @@ The Codex CLI stores one rollout file per conversation under the user's `codex_h
 └── history.json, history.jsonl                              # raw shell history (out of scope, sensitive)
 ```
 
-The adapter's only input is `sessions/YYYY/MM/DD/rollout-*.jsonl`. The other artifacts are explicitly out of scope for the codex adapter.
+The adapter's inputs are:
+
+- current-format `sessions/YYYY/MM/DD/rollout-*.jsonl`;
+- legacy flat `sessions/rollout-YYYY-MM-DD-<uuid>.json` files that contain
+  source-visible conversation artifacts.
+
+The other Codex artifacts are explicitly out of scope for the codex adapter.
 
 References (`openai/codex @ 8a94430b`):
 
@@ -45,9 +51,29 @@ Real workstation observation: 19 files exist directly under `~/.codex/sessions/`
 }
 ```
 
-Upstream Codex no longer produces or reads this format: `list.rs:898` rejects any file whose name does not end in `.jsonl`. The adapter MAY support legacy `.json` files behind a `legacy_json_format=true` flag (off by default for v1). Phase 2 v1 scope: ignore them and log one informational `SourceError` per file the first time they are seen, then suppress.
+Upstream Codex no longer produces or reads this format: `list.rs:898` rejects
+any file whose name does not end in `.jsonl`. ai-viewer still ingests valid
+legacy files because they are source-visible historical data. A malformed
+legacy JSON file is a source corruption error: the adapter reports `SourceError`
+and the SOW-0097 parity gate reports `INCOMPLETE`; it must not be silently
+ignored. If a legacy file begins with one complete valid flat rollout object and
+then contains extra non-whitespace bytes, the adapter and source extractor MUST
+ingest the complete valid prefix and also report the trailing bytes as source
+corruption. Recoverable prefix artifacts are not dropped just because the file
+tail is corrupt.
 
-Rationale for deferring legacy: (a) upstream considers them obsolete; (b) their schema is a strict subset of the modern `ResponseItem` enum minus the wrapping `RolloutLine` envelope; (c) operators with old codex installs are rare and a follow-up SOW can add support if asked.
+Legacy file mapping:
+
+- The top-level `session` object maps to the same canonical `SessionStarted`
+  contract as a modern `session_meta` record.
+- Each `items[]` object maps as a direct response item. The canonical payload
+  ref points at the original legacy JSON file with an exact JSON pointer, for
+  example `file://.../rollout.json?json_pointer=/items/3/content/0/text`.
+- Native payload artifact IDs are `file:<basename>:<json-pointer>` because
+  legacy payloads are selected from a whole JSON document rather than a JSONL
+  line.
+- `local_shell_call.action` is the tool request payload for legacy shell calls;
+  `local_shell_call_output.output` is the matching tool response payload.
 
 ### Authoritative Wire Format (current)
 
@@ -78,6 +104,51 @@ On disk:
 {"timestamp": "...", "type": "turn_context",  "payload": {...}}
 {"timestamp": "...", "type": "compacted",     "payload": {...}}
 ```
+
+Newer rollout files also persist the serde-flattened body directly at the top
+level for known `RolloutItem` and `ResponseItem` variants:
+
+```json
+{"timestamp": "...", "type": "session_meta", "id": "...", "cwd": "..."}
+{"timestamp": "...", "type": "turn_context", "turn_id": "...", "model": "..."}
+{"timestamp": "...", "type": "message", "role": "assistant", "content": [...]}
+{"timestamp": "...", "type": "reasoning", "summary": [...]}
+{"timestamp": "...", "type": "function_call", "call_id": "...", "arguments": "..."}
+{"timestamp": "...", "type": "function_call_output", "call_id": "...", "output": "..."}
+```
+
+Both shapes are the same logical records. Wrapped records keep JSON-pointer
+selectors under `/payload/...`; direct records use root-field selectors
+(`/content/<i>/text`, `/summary/<i>/text`, `/arguments`, `/output`). Direct
+`ghost_snapshot` records are no-ops, matching wrapped
+`response_item.payload.type="ghost_snapshot"`.
+
+Older sharded JSONL rollout files from the 2025-08 to 2025-09 transition period
+can use a no-`type` first-line session header:
+
+```json
+{"timestamp": "...", "id": "...", "instructions": null, "git": {...}}
+```
+
+The observed key sets are `id,instructions,timestamp` and
+`git,id,instructions,timestamp`; `instructions` is either a string or null.
+This is a logical legacy `session_meta` header, not a source error. The adapter
+and source extractor MUST treat it as the first session record:
+`NativeID=id`, `StartedAt=timestamp`, optional `git` preserved in session
+extras, and missing modern metadata (`cwd`, `originator`, `cli_version`,
+`source`) left empty/defaulted. The `instructions` field is sensitive session
+metadata and is not emitted as a parity payload artifact.
+
+Some modern files also contain root-level state sentinels:
+
+```json
+{"record_type":"state"}
+```
+
+These lines have no `timestamp`, no `type`, and no source-visible payload. They
+are Codex bookkeeping and are ignored as parser-level no-ops. They must not
+surface as source errors and must not advance old-format EOF turn finalization
+time.
 
 Observed line-type distribution across sampled real files (10 random rollouts):
 
@@ -156,7 +227,7 @@ References: `codex-rs/protocol/src/models.rs:750-903`. Tagged union; the variant
 | `function_call_output` | `FunctionCallOutput` | `call_id`, `output` (string OR `{content: string\|content_items}`) |
 | `custom_tool_call` | `CustomToolCall` | `call_id`, `name`, `input` (string), `status` |
 | `custom_tool_call_output` | `CustomToolCallOutput` | `call_id`, `output` (same shape as function_call_output) |
-| `tool_search_call`, `tool_search_output` | tool-search subsystem | |
+| `tool_search_call`, `tool_search_output` | tool-search subsystem | `tool_search_call.arguments` is a JSON value, not a Responses-API string; the adapter must accept object/array/scalar values and preserve the exact `/arguments` selector. |
 | `web_search_call` | `WebSearchCall` | `call_id`, `status`, `action` (e.g. `{type:"search", query}`) |
 | `image_generation_call` | `ImageGenerationCall` | `id`, `status`, `revised_prompt`, `result` — **0 real files** (forward-compat only) |
 | `compaction` | `Compaction` | `encrypted_content` (opaque) — **0 real files** (forward-compat only) |
@@ -197,12 +268,19 @@ Two persistence modes exist upstream (`Limited` default, `Extended` opt-in). The
 
 | `payload.type` | Struct | Notes |
 |---|---|---|
-| `error` | `ErrorEvent` | |
+| `error` | `ErrorEvent` | Persist as an `ERR` `LogEntryEvent`. When `payload.message` exists, `LogEntryEvent.Message` is the exact source message and `Extras.aiViewer.parity` carries `nativeArtifactId=line:<line>:/payload/message`, `selectorURI=file://...#L<line>`, and `jsonPointer=/payload/message` so the ingestion parity gate can match the source log artifact exactly. |
 | `guardian_assessment` | | |
 | `exec_command_end` | `ExecCommandEndEvent` | `call_id`, `turn_id`, `command[]`, `cwd`, `parsed_cmd`, `source`, `stdout`/`stderr`/`aggregated_output` (truncated to 10000 bytes), `exit_code`, `duration`, `formatted_output`, `status`. **The stdout/stderr/formatted_output fields are cleared on persistence** (`policy.rs:51-59`); only `aggregated_output` (truncated middle) survives. |
 | `view_image_tool_call` | | |
 | `collab_*_end` | | sub-agent collab lifecycle ends |
 | `dynamic_tool_call_request`, `dynamic_tool_call_response` | | |
+
+Default-visible metadata events that do not map to turns, ops, payload refs, or
+errors, including observed `thread_goal_updated` and `view_image_tool_call`,
+are retained as `DBG` `LogEntryEvent` rows with message `event_msg:<type>`.
+The source manifest emits matching `log_entry` artifacts using the generic log
+identity (`scope`, `timestamp`, `severity=DBG`, `source=codex`, and message),
+not raw-line hashes.
 
 All other `EventMsg` variants (deltas, begins, approval requests, MCP startup, etc.) are NOT persisted (`policy.rs:175-219`).
 
@@ -246,7 +324,22 @@ Implications for ai-viewer:
 - React to `fsnotify.Create`, `fsnotify.Write` on `*.jsonl` files inside `YYYY/MM/DD/`:
   - On `Create`: register the new file in the cursor at offset=0; immediate tail read.
   - On `Write`: tail-read from cursor offset to current file size; parse complete lines; advance cursor.
-- Ignore: any file NOT matching `^rollout-.*\.jsonl$` under `sessions/YYYY/MM/DD/` (this excludes the legacy flat `.json` files in `sessions/` root, unless legacy mode is enabled).
+- On full scan, ingest each root-level legacy `rollout-*.json` once and record it
+  under `legacy_json`. Legacy files are static historical snapshots; tail
+  events on them may be ignored after scan coverage.
+- A recoverable legacy `.json` file with one valid flat rollout object followed
+  by trailing non-whitespace corruption emits artifacts from the valid prefix
+  and records a `SourceError` for the tail. The SOW-0097 source manifest also
+  emits one parity-only `source_corruption` artifact for the trailing byte range
+  with `availability=source_corrupt`, `hash_domain=raw_bytes`, and
+  `native_artifact_id=source_corruption:file:<basename>:trailing`; its
+  `integrity_failures[]` includes `field=trailing_bytes`, `expected=0`, and
+  `actual=<trailing-byte-count>`. The diff reports this as a `source_corrupt`
+  finding and leaves the run `INCOMPLETE`.
+  A file whose first JSON value is not a valid flat rollout remains a source
+  error with no recovered artifacts.
+- Ignore: any file NOT matching `^rollout-.*\.jsonl$` under `sessions/YYYY/MM/DD/`
+  or root-level `^rollout-.*\.json$`.
 - Ignore: `archived_sessions/`, `session_index.jsonl`, `state_*.sqlite*`, `logs_*.sqlite*`, `history*`.
 - A periodic full sweep (every 5 seconds, matching the other tailing adapters)
   covers missed inotify events on slow filesystems and adds new date directories
@@ -287,6 +380,13 @@ Per-file fields:
 
 Restart logic:
 
+- If `offset == size == current_size`, `eof_finalized_size == current_size`,
+  and `mtime_us` matches the current file mtime, the scanner skips opening the
+  rollout. The cursor already proves that every complete line was consumed and
+  the EOF finalization decision for that exact file state already fired. This
+  fast path is required for large live backfills and diagnostic sampled parity
+  scans; it must not apply when `mtime_us` is missing/mismatched, when the file
+  grew or shrank, or when `eof_finalized_size` is absent.
 - For each tracked file: if `current_size >= cursor.offset`, resume from `cursor.offset`.
 - If `current_size < cursor.offset`: file was truncated (codex never truncates, so this means manual operator deletion + recreation) — emit `SourceError`, reset to 0, full re-scan (also clears `eof_finalized_size`).
 - For new files (not in cursor): start at 0, full scan.
@@ -298,7 +398,8 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 
 ### Per-file state machine
 
-1. **`session_meta` (always first line):**
+1. **`session_meta` (always first line, either typed modern
+   `type=session_meta` or the no-`type` legacy JSONL header):**
    - Emit `SessionStartedEvent` with:
      - `NativeID = payload.id`
      - `ParentNativeID = payload.forked_from_id` (when present), OR `source.subagent.thread_spawn.parent_thread_id` (when present), else empty
@@ -322,27 +423,45 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 4. **`event_msg` payload `task_complete`:**
    - Emit `TurnFinalizedEvent(turn_seq, Status="completed", EndTs=completed_at_us)` with `TokensIn`/`TokensOut` set from the turn's token rollup (see rule #17 and "Token accounting nuance" below): the **sum of the per-call `last_token_usage`** over the `token_count` events attributed to this turn — **not** a delta of the cumulative `total_token_usage`. (`last_token_usage` is the per-call field; the cumulative `total_token_usage` feeds `OpFinalized.CtxUsed` only, never per-turn `TokensIn/Out`.)
    - Emit `OpFinalizedEvent` for each held-open op tied to this turn (function_call without matching output, etc.) with Status="completed" inferred or "unknown" if no output ever arrived.
+   - Source-manifest parity must emit matching `op_boundary` artifacts for those dangling ops at the same `completed_at`/line timestamp used for the turn close. They are finalized at `task_complete`, not later at EOF, so a parity gate can detect timestamp drift and missing held-open operations.
 
 5. **`event_msg` payload `turn_aborted`:**
    - Emit `TurnFinalizedEvent(turn_seq, Status="failed", ErrorClass=reason, EndTs)`.
    - For `reason="interrupted"` set ErrorClass="user_interrupt"; `"replaced"` → `"replaced"`; `"review_ended"` → `"review_ended"`; `"budget_limited"` → `"rate_limit"`.
+   - Emit `OpFinalizedEvent` for each held-open op tied to this turn with Status="cancelled" at the same close timestamp. Source-manifest parity must emit matching cancelled `op_boundary` artifacts before the failed `turn_boundary`; a later EOF cleanup with Status="completed" is wrong because the source explicitly says the turn was aborted.
 
 6. **`response_item` payload `message` role=user:**
-   - User input within a turn. Emit `OpStartedEvent` + `OpFinalizedEvent` with Kind=`internal`, Name=`user_input`. Bodies stored as `PayloadRefEvent` (PayloadKind=`user_input`, Format=`json`, LocationURI=`file://...#L<line>`).
+   - User input within a turn. Emit `OpStartedEvent` + `OpFinalizedEvent` with Kind=`internal`, Name=`user_input`. Bodies are stored as `PayloadRefEvent` with PayloadKind=`tool_request` (the canonical artifact class is `user_prompt` by `kind=internal,name=user_input` plus selector metadata). For text content arrays, LocationURI uses an exact JSON-pointer selector such as `file://.../rollout.jsonl?json_pointer=%2Fpayload%2Fcontent%2F0%2Ftext#L<line>`. For `event_msg.user_message`, the selector is `/payload/message`. `OriginalBytes` is the decoded logical text byte length, not the containing line length.
    - Some sessions duplicate user input as both `response_item.message(role=user)` and `event_msg.user_message`. Deduplicate by emitting only on the first occurrence (preferring `event_msg.user_message` if both arrive — it's the canonical UI event).
 
 7. **`response_item` payload `message` role=assistant:**
-   - Emit OpStarted+OpFinalized Kind=`llm`, Name=`message`, Model=current turn model, Provider=`openai`. Body in PayloadRefEvent.
+   - Emit OpStarted+OpFinalized Kind=`llm`, Name=`message`, Model=current turn model, Provider=`openai`. Text content bodies are stored as PayloadKind=`llm_response` refs with exact JSON-pointer selectors such as `/payload/content/<index>/text`; the canonical artifact class is `assistant_message` by `kind=llm,name=message` plus selector metadata.
    - When `phase=final_answer`, also emit a `LogEntry` so the UI can flag "this is the final response".
 
-8. **`response_item` payload `reasoning` OR `event_msg` payload `agent_reasoning`/`agent_reasoning_raw_content`:**
-   - Emit OpStarted+OpFinalized Kind=`reasoning`, Name=`reasoning`. Body in PayloadRefEvent (Format=`text` for summary lines, Format=`json` for full ResponseItem).
-   - **Both forms exist in the same file** (the `response_item` form is the durable model state; the `event_msg` form is the UI-displayed summary; they may carry different text). Adapter emits only the `response_item` form to canonical; uses `event_msg` only to surface in `LogEntry` for the UI "reasoning panel". Otherwise the UI sees duplicate reasoning ops.
+8. **`response_item` payload `reasoning` and `event_msg` payload `agent_reasoning`/`agent_reasoning_raw_content`:**
+   - `response_item.reasoning` emits OpStarted+OpFinalized Kind=`reasoning`,
+     Name=`reasoning`. Text-bearing summary/content bodies are stored as
+     PayloadKind=`llm_reasoning` refs with exact JSON-pointer selectors such as
+     `/payload/summary/<index>/text` or `/payload/content/<index>/text`.
+     Format=`text` for summary-only reasoning and Format=`json` for raw/full
+     response items. Opaque encrypted content can fall back to the containing
+     record until the parity matrix classifies that source artifact explicitly.
+     A reasoning record with no text-bearing summary/content and no encrypted
+     content emits the reasoning op boundary only; it MUST NOT emit a whole-file
+     fallback payload ref, because there is no source-visible reasoning text to
+     prove and such refs collapse multiple empty reasoning records onto the same
+     artifact key.
+   - `event_msg.agent_reasoning` and `event_msg.agent_reasoning_raw_content`
+     are UI-visible companion summaries. They produce only derived DBG logs and
+     MUST NOT emit second `reasoning_text` source artifacts or source-backed
+     `log_entry` artifacts for `payload.text`. The exact reasoning proof comes
+     from `response_item.reasoning`; claiming both forms as reasoning artifacts
+     duplicates source content and makes source-vs-canonical parity noisy.
 
 9. **`response_item` payload `function_call` (+ matching `function_call_output`):**
    - Emit OpStarted at `function_call` line: Kind=`tool`, Name=`payload.name`, ToolNamespace=`payload.namespace` (or inferred — see below), Extras={call_id, arguments_raw}.
    - Match `function_call_output` by `call_id` to emit OpFinalized with EndTs=output's line timestamp, Status derived (success if output not an error, else failed).
-   - PayloadRefs: `tool_request` (Format=`json`, the arguments string) and `tool_response` (Format=`json`).
+   - PayloadRefs: `tool_request` (Format=`json`, selector `/payload/arguments`) and `tool_response` (Format=`json`, selector `/payload/output`). `OriginalBytes` is the selected logical value length: decoded string bytes for string values, zero for JSON null, and canonical JSON bytes for object/array/scalar values.
    - **Tool namespace heuristic** (codex tools are not pre-namespaced on disk):
      - `name == "shell" || name == "shell_command" || name starts with "exec"` → `tool_namespace = "shell"`
      - `name == "apply_patch"` → `tool_namespace = "fs"`
@@ -356,9 +475,11 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 
 11. **`response_item` payload `web_search_call` / `event_msg.web_search_end`:**
     - Single op: Kind=`tool`, Name=`web_search`, ToolNamespace=`web`. **`web_search_call` carries NEITHER `id` NOR `call_id`** (real corpus: 483 files, no call-side correlation key), so it CANNOT pair by key. Pair the `response_item` (start) POSITIONALLY with the next `event_msg.web_search_end` in the same turn — track the most-recent open web_search op per turn and finalize it on the next `web_search_end` (which DOES carry a `call_id`, but in a different correlation space). The end carries `query` and `action`, merged onto the op's Extras via an OpStarted re-emit (F7).
+    - Source-manifest parity must mirror that FIFO rule: each `web_search_call` opens a `web_search` `op_boundary`, the next still-open `web_search_end` closes the oldest one as `completed`, and a turn close finalizes an unpaired web search using the normal dangling-op rule. The `tool_request` proof for the current canonical mapping is the whole `web_search_call` JSONL record (`line:<n>`, `hash_domain=raw_bytes`) because the mapper emits a whole-record payload ref for this forward-compatible call shape rather than a nested `json_pointer`.
 
 12. **`response_item` payload `image_generation_call` / `event_msg.image_generation_end`:**
-    - Op: Kind=`tool`, Name=`image_generation`, ToolNamespace=`media`. **UNOBSERVED: 0 real files for both `image_generation_call` and `image_generation_end`** — this mapping is forward-compat only and has no fixture coverage (no real data exists to sanitize). `image_generation_call` would use `id` (not `call_id`); the code keeps the path but does not pair beyond the active-turn fallback (F7).
+    - Op: Kind=`tool`, Name=`image_generation`, ToolNamespace=`media`. **UNOBSERVED: 0 real files for both `image_generation_call` and `image_generation_end`** — this mapping is forward-compat only and synthetic fixture coverage is acceptable until real data exists to sanitize. `image_generation_end.call_id` closes the matching open image-generation op at the end-event timestamp; if the end event cannot be matched, the active-turn fallback still closes the dangling op at turn close.
+    - Source-manifest parity mirrors the same forward-compatible lifecycle rule: `image_generation_call` opens the media tool op, and `image_generation_end.call_id` finalizes the matching open op as `completed` at the end-event timestamp so a parity diff catches accidental fallback to `task_complete` / EOF.
 
 13. **`response_item` payload `local_shell_call` / `local_shell_call_output`:**
     - LEGACY ONLY (does not occur in modern `.jsonl`). When ingesting legacy `.json` files: Kind=`tool`, Name=`shell`, ToolNamespace=`shell`.
@@ -366,13 +487,35 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 14. **`event_msg` payload `exec_command_end`:**
     - Used for telemetry enrichment — the matching `function_call`/`function_call_output` pair carries the same `call_id` and produces the op. The `exec_command_end` adds: parsed_cmd, exit_code, duration, source. Adapter merges these into the op's Extras: `{exec_exit_code, exec_duration_ms, exec_cwd, exec_source}`. The `duration` is a Rust `Duration` object `{secs, nanos}` (real corpus: always this shape) normalized to integer `exec_duration_ms = secs*1000 + nanos/1e6`. **Do not** emit a second op.
     - The `exit_code` is AUTHORITATIVE for the op's terminal status, ORDER-INDEPENDENTLY (G1, rule #5): non-zero `exit_code` → op `failed` / ErrorClass `command_failed`; `exit_code` 0 → `completed`. When `exec_command_end` arrives BEFORE the `function_call_output` (~68-85%), the exec status is stashed and WINS over the output-string heuristic at finalize. When it arrives AFTER (output-first, ~15-32%), the adapter emits a CORRECTING `OpFinalized` on the op's `(turn,seq)` so a non-zero exit overrides a provisionally-`completed` op. A blanked `aggregated_output` is NOT an error.
+    - Source-manifest parity mirrors the exec-first rule: an
+      `exec_command_end` with matching open `call_id` does not emit a second
+      source op, but stashes the exit-code-derived terminal status on that open
+      op. The later `function_call_output` or dangling turn close emits the
+      `op_boundary`; non-zero `exit_code` emits a matching `tool_error` identity
+      with `ErrorClass="command_failed"` and the canonical empty-message hash
+      when the source event carries no separate error message.
     - Note: `aggregated_output` is truncated to 10 KB at the source; `stdout`/`stderr`/`formatted_output` are blanked (`policy.rs:51-59`). Adapter cannot recover full output.
 
 15. **`event_msg` payload `mcp_tool_call_end`:**
     - For MCP-routed function calls (which appear ALSO as `function_call`/`function_call_output` with `name = "<server>.<tool>"` or via the `namespace` field). The `invocation` field gives canonical (server, tool). Use it to set `tool_namespace = "mcp:" + server` and `name = tool` on the matching op.
+    - Source-manifest parity treats `mcp_tool_call_end.call_id` as the
+      source-visible finalizer for the matching open tool op. The manifest must
+      restamp the op identity to `Name=invocation.tool` and
+      `ToolNamespace="mcp:"+invocation.server`, close the op at the
+      `mcp_tool_call_end` timestamp, and emit a `tool_error` identity with
+      `ErrorClass="tool_error"` when `result.Err` is present or
+      `result.Ok.is_error=true`. The `op_boundary` identity records the MCP
+      namespace for MCP-restamped tools so the parity diff proves namespace
+      migration, not just op existence.
 
 16. **`event_msg` payload `patch_apply_end`:**
     - Telemetry for an `apply_patch` `function_call`. Merge `success`, `status` into the op's Extras as `{patch_success, patch_status}`. Set Op Status accordingly (success=false → `failed` / ErrorClass `patch_failed`). ORDER-INDEPENDENT, mirroring exec (G2): an `apply_patch` op still open is finalized here with the extras merged; an already-finalized op (output-first) gets the extras re-emitted plus a correcting `OpFinalized` on its `(turn,seq)`.
+    - Source-manifest parity treats `patch_apply_end.call_id` as a source-visible
+      op finalizer for the matching open `apply_patch` tool op. `success=false`,
+      `status="failed"`, or `status="error"` produces an `op_boundary`
+      status=`failed` and a `tool_error` identity artifact with
+      `ErrorClass="patch_failed"` and the canonical empty-message hash when the
+      source event carries no separate error message.
 
 17. **`event_msg` payload `token_count`:**
     - Stream of token accounting snapshots. Each carries cumulative `total_token_usage` and the per-call `last_token_usage`, plus optional `model_context_window`.
@@ -385,6 +528,12 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 
 19. **`event_msg` payload `agent_message`:**
     - Companion to the assistant `response_item.message`. Adapter emits only the `response_item` (see #7); uses `event_msg.agent_message` only to populate `TurnFinalized.LastAgentMessage` Extras (for the UI "latest answer" preview).
+    - Source-manifest parity mirrors that deduplication rule: `agent_message`
+      MUST NOT emit a second `assistant_message` artifact and MUST NOT claim a
+      source-backed `log_entry` for `payload.message`. The exact assistant body
+      proof comes from the paired `response_item.message(role=assistant)`
+      payload; the adapter's DBG `agent_message` log is a derived UI marker, not
+      the parity artifact for the answer text.
 
 20. **Top-level `compacted` line AND its companion `event_msg.context_compacted`:**
     - These are TWO representations of ONE compaction, written as ADJACENT lines with IDENTICAL timestamps (real workstation corpus: 293 `compacted` + 258 `event_msg.context_compacted`). The top-level `compacted` is data-bearing (`{message, replacement_history}`); the `event_msg.context_compacted` is a bare `{type}` marker. Emit exactly ONE Op Kind=`compaction`, Name=`compaction`, Extras={`replacement_history_size`, `message_preview`} from the data-bearing `compacted` line; SUPPRESS the adjacent `event_msg.context_compacted` so it does NOT produce a second op. A lone `event_msg.context_compacted` with no preceding `compacted` (defensive) emits the op itself. The body goes to PayloadRef Format=`json`. (Note: `response_item.compaction` / `response_item.context_compaction` have ZERO real files — they are forward-compat only; if a future CLI emits one it converges on the same OpCompaction.)
@@ -420,7 +569,8 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
       session.)
     - **No open turn (clean end, or none opened):** nothing — stays `running`.
 
-24. **No `session_meta` line ever seen (corrupt file or pre-write crash):**
+24. **No `session_meta` or legacy no-`type` session header ever seen (corrupt
+    file or pre-write crash):**
     - Emit `SourceError` and skip the file. Cursor.offset stays 0 so it is retried on next CREATE-style event.
 
 ### Tabular summary
@@ -432,13 +582,13 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 | `event_msg.task_started` | `TurnStartedEvent` (idempotent) |
 | `event_msg.task_complete` | `TurnFinalizedEvent(completed)` |
 | `event_msg.turn_aborted` | `TurnFinalizedEvent(failed)` |
-| `response_item.message` role=user | `OpStarted/Finalized` Kind=internal Name=user_input + PayloadRef |
-| `response_item.message` role=assistant | `OpStarted/Finalized` Kind=llm + PayloadRef |
-| `response_item.reasoning` | `OpStarted/Finalized` Kind=reasoning + PayloadRef |
-| `response_item.function_call` / `_output` (paired) | `OpStarted` + `OpFinalized` Kind=tool + 2× PayloadRef |
-| `response_item.custom_tool_call` / `_output` | same |
-| `response_item.web_search_call` + `event_msg.web_search_end` | one Op Kind=tool Name=web_search |
-| `response_item.image_generation_call` + `event_msg.image_generation_end` | one Op Kind=tool Name=image_generation |
+| `response_item.message` role=user, or direct `type=message` role=user | `OpStarted/Finalized` Kind=internal Name=user_input + PayloadRef |
+| `response_item.message` role=assistant, or direct `type=message` role=assistant | `OpStarted/Finalized` Kind=llm + PayloadRef |
+| `response_item.reasoning`, or direct `type=reasoning` | `OpStarted/Finalized` Kind=reasoning + PayloadRef |
+| `response_item.function_call` / `_output` (paired), or direct `type=function_call` / `type=function_call_output` | `OpStarted` + `OpFinalized` Kind=tool + 2× PayloadRef |
+| `response_item.custom_tool_call` / `_output`, or direct equivalents | same |
+| `response_item.web_search_call`, or direct `type=web_search_call`, + `event_msg.web_search_end` | one Op Kind=tool Name=web_search |
+| `response_item.image_generation_call`, or direct equivalent, + `event_msg.image_generation_end` | one Op Kind=tool Name=image_generation |
 | `event_msg.exec_command_end` | merge into existing tool op (Extras) |
 | `event_msg.mcp_tool_call_end` | merge into existing tool op + ToolNamespace=mcp:server |
 | `event_msg.patch_apply_end` | merge into existing apply_patch op |
@@ -453,6 +603,180 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
 | EOF, NEW-format open turn, file FRESH (< 1 h) | turn stays open (still in-flight); no finalize (F1) |
 | EOF clean (most recent event is task_complete / no open turn) | **no `SessionFinalizedEvent`** — session stays `running` (codex has no per-session terminal signal; rollouts are resumable and metadata-appendable per `recorder.rs:1610`). UI uses `last_activity_ts` for staleness, identical to claude-code. |
 | unknown `type` or unknown `payload.type` | `SourceError` (once per variant) + `LogEntry` |
+
+### Ingestion parity matrix
+
+SOW-0097 adds a source-manifest extractor for Codex current JSONL rollouts and
+legacy flat JSON rollouts. The extractor reads the rollout files directly and
+must not call the canonical mapper. Its artifact IDs and identity JSON must
+match the canonical extractor's boundary formulas so the diff proves
+source-to-canonical parity instead of just checking that rows exist. Source
+file scope mirrors production discovery: only
+`sessions/YYYY/MM/DD/rollout-*.jsonl` and root-level
+`sessions/rollout-*.json` legacy files are source-visible for this adapter.
+The parity extractor MUST prune `archived_sessions/` and MUST ignore
+root-level, wrong-depth, non-numeric-shard, or non-`rollout-` JSONL files, just
+as the production scanner does. An ignored JSONL file is outside the Codex
+adapter contract and must not create source artifacts or source parse errors.
+The extractor walks the symlink-resolved sessions root and MUST refuse any
+candidate rollout or legacy flat JSON file whose resolved target escapes that
+root; such a source is incomplete until the unsafe path is removed, and the
+extractor must not read the escaped target.
+Source
+rollout line reads are bounded to the adapter streamer's 16 MiB line cap. The
+cap was raised from 8 MiB after live SOW-0097 evidence found valid Codex rollout
+lines up to about 14 MiB. If a source rollout line exceeds that cap, source
+extraction returns an error and `check-parity` reports the run as incomplete
+instead of allocating an unbounded buffer or trying to decode a pathological
+line. A malformed legacy flat JSON document likewise returns a source-extractor
+error and makes `check-parity` `INCOMPLETE`. If the legacy document has a
+complete valid first rollout object followed by trailing non-whitespace bytes,
+the extractor emits source artifacts from the valid prefix and returns an error
+for the trailing corruption. It also emits one parity-only `source_corruption`
+artifact for the corrupt trailing byte range, so the diff can prove everything
+recoverable while the run still fails closed on identified source-corrupt bytes.
+The artifact records `integrity_failures[]` with `field=trailing_bytes`,
+`expected=0`, and `actual=<trailing-byte-count>`.
+
+For JSONL payload artifacts, the source extractor decodes the payload document
+once per record and reuses that decoded document for selector discovery and
+proof resolution. It must not re-decode the containing JSONL line once per
+emitted nested artifact. Wrapped selectors keep their canonical `/payload/...`
+form and direct response-item selectors keep their direct form, but the selected
+bytes/hash/chars are resolved from the decoded payload document. Whole-record
+classes such as `web_search_call` and source-backed top-level `compacted` bodies
+still hash the trimmed JSONL record directly.
+
+The high-volume `response_item` and `event_msg` source paths also route on
+fields read from that decoded payload document (`type`, `role`, `name`, and
+`call_id` where present). They must not perform a separate typed payload
+unmarshal before proving nested payload artifacts.
+
+Initial covered classes:
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule |
+|---|---|---|---|---|
+| `session_boundary` | `available` | `identity_json` | `sessions` row from `SessionStartedEvent` and optional stale-crash `SessionFinalizedEvent` | `native_artifact_id=session:<session_meta.payload.id>` or `session:<legacy-header.id>`. Clean Codex sessions stay `status=running` because Codex has no clean session-finalized record. Stale new-format crashes may become `failed/incomplete` per EOF rule #23. |
+| `turn_boundary` | `available` | `identity_json` | `turns` rows from `turn_context`, `task_started`, `task_complete`, `turn_aborted`, supersede, or EOF-finalize rules | `native_artifact_id=turn:<seq>`. Old-format turns opened by `turn_context` close `completed` at EOF with `EndTs` equal to the last content timestamp, not file mtime. New-format fresh hanging turns stay running; stale hanging turns fail incomplete. |
+| `op_boundary` | `available` | `identity_json` | `ops` rows from source-visible response/tool/compaction/collab records | `native_artifact_id=op:<turn_seq>:<op_seq>`. Sequences are the adapter's source-derived monotone op order inside each synthesized turn. MCP-restamped tool ops include `tool_namespace="mcp:<server>"` in the identity so source-vs-canonical diffs catch missed MCP namespace migration. |
+| `user_prompt` | `available` / `source_empty` | `semantic_text` | `kind=internal,name=user_input` op plus `payload_refs.kind=tool_request` exact selector | `line:<line>:/payload/content/<i>/text` for wrapped response items, `line:<line>:/content/<i>/text` for direct JSONL response items, `file:<basename>:/items/<i>/content/<j>/text` for legacy flat JSON items, or `line:<line>:/payload/message` for event messages. |
+| `user_image` | `available` | `canonical_json` | `kind=internal,name=user_input` op plus `payload_refs.kind=tool_request,format=json` exact selector | `line:<line>:/payload/content/<i>` or `line:<line>:/content/<i>` for `response_item.message(role=user)` image blocks, and `line:<line>:/payload/images/<i>`, `/payload/local_images/<i>`, or `/payload/image_details/<i>` for `event_msg.user_message` image references/details. Hashes cover canonical JSON for the selected source-visible block or scalar, not decoded image bytes. |
+| `assistant_message` | `available` / `source_empty` | `semantic_text` | `kind=llm,name=message` op plus `payload_refs.kind=llm_response` exact selector | `line:<line>:/payload/content/<i>/text` for wrapped response items, `line:<line>:/content/<i>/text` for direct JSONL response items, or `file:<basename>:/items/<i>/content/<j>/text` for legacy flat JSON items. |
+| `reasoning_text` | `available` / `source_empty` | `semantic_text` | `kind=reasoning,name=reasoning` op plus `payload_refs.kind=llm_reasoning` exact selector | `line:<line>:/payload/summary/<i>/text` / `/payload/content/<i>/text` for wrapped response items, `line:<line>:/summary/<i>/text` / `/content/<i>/text` for direct JSONL response items, or `file:<basename>:/items/<i>/summary/<j>/text` for legacy flat JSON items. |
+| `llm_error` | `not_source_visible` | n/a | none as an LLM op error | Codex rollout files persist generic `event_msg.error` diagnostics, not provider/model error envelopes tied to a specific LLM op. The adapter maps those diagnostics to `log_entry`, where exact source-message parity is available. The canonical parity extractor must not synthesize `llm_error` artifacts for codex failed LLM ops, because there is no source-visible Codex artifact that could prove them. |
+| `tool_request` | `available` / `source_empty` | `semantic_text`, `canonical_json`, or `raw_bytes` | `kind=tool` op plus `payload_refs.kind=tool_request` exact selector | `line:<line>:/payload/arguments` for wrapped tool calls, `line:<line>:/arguments` for direct JSONL tool calls, or `file:<basename>:/items/<i>/action` for legacy `local_shell_call` items. `web_search_call` currently uses whole-record `line:<line>` raw-bytes proof because canonical stores a whole-line payload ref. |
+| `tool_response` | `available` / `source_empty` | `semantic_text` or `canonical_json` | same tool op finalized by output record plus `payload_refs.kind=tool_response` exact selector | `line:<line>:/payload/output` for wrapped tool outputs, `line:<line>:/output` for direct JSONL tool outputs, or `file:<basename>:/items/<i>/output` for legacy flat JSON outputs. |
+| `tool_error` | `available` when a tool end event carries failed status/error semantics | `identity_json` | failed `ops` row with `error_class` / `error_message`; currently covered for non-zero `exec_command_end` and failed `patch_apply_end` finalization | `op:<turn_seq>:<op_seq>:error`. Identity records owning op kind, turn/op sequence, error class, and error-message hash. |
+| `log_entry` | `available` / `source_empty` for source diagnostics intentionally surfaced to the operator and source-backed compaction bodies | `semantic_text` | `log_entries` row when the source diagnostic is represented as a log row; `payload_refs.kind=log` when the source diagnostic/body is op-scoped payload content | `line:<line>:/payload/message` for `event_msg.error` and other exact-message diagnostics that claim source parity. For data-bearing top-level `compacted` records, the compaction op owns one `payload_refs.kind=log` artifact keyed as `line:<line>` over the whole trimmed JSONL record because the adapter intentionally stores a whole-line payload ref for the compaction body. Derived logs use deterministic `log://` IDs and do not satisfy source-field parity. |
+| `subagent_link` | `available` when `event_msg.collab_agent_spawn_end.new_thread_id` is present | `identity_json` | `kind=session,name=spawn` op with `child_session_id` resolved to the spawned session | `op:<turn_seq>:<op_seq>:child_session:<new_thread_id>`. Identity records parent native session id, parent turn/op sequence, child native session id, link kind `child_session`, and direction `parent_to_child`. |
+| `system_op` | `available` for persisted Codex lifecycle/review/default metadata events that the adapter surfaces as log rows | `identity_json` | `log_entries` rows with `source=codex` and messages from the Codex event type | `log:<scope>:<timestamp>:<severity>:<source-hash>:<message-hash>`. Identity records native session id, optional turn seq, severity, canonical log message, timestamp, and original `event_msg` type. This is an additional system-operation view over the existing log row; it does not remove the `log_entry` artifact. |
+| `session_metadata` | `available` when `session_meta` carries persisted descriptive fields beyond the native id | `identity_json` | `sessions` row plus `sessions.extras_json` from `SessionStartedEvent` | `session:<session_meta.payload.id>:metadata` or `session:<legacy-header.id>:metadata`. Identity verifies the derived `agent_name` plus selected persisted `session_meta` fields: `cli_version`, `originator`, compact `source`, `model_provider`, `relationship`, `subagent_depth`, SHA-256 of `cwd`, and SHA-256 of the non-empty canonical `git` object. Sensitive raw fields such as `base_instructions`, `dynamic_tools`, `memory_mode`, and legacy `instructions` are intentionally excluded. `session_boundary` remains the proof for kind, parent, root, status, and timestamps. |
+
+Machine-readable matrix rows:
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule | Evidence |
+|---|---|---|---|---|---|
+| `session_boundary` | `available` | `identity_json` | `sessions` row | `session:<session_meta.payload.id>` or `session:<legacy-header.id>` | Initial covered classes table above. |
+| `turn_boundary` | `available` | `identity_json` | `turns` rows from turn pivots and EOF rules | `turn:<seq>` | Initial covered classes table above. |
+| `op_boundary` | `available` | `identity_json` | `ops` rows from response/tool/compaction/collab records | `op:<turn_seq>:<op_seq>` | Initial covered classes table above. |
+| `user_prompt` | `available` / `source_empty` | `semantic_text` / `canonical_json` | internal user-input op plus `payload_refs.kind=tool_request` | source line/file selector plus JSON pointer to user content | Initial covered classes table above. |
+| `user_image` | `available` | `canonical_json` | internal user-input op plus `payload_refs.kind=tool_request` | source line selector plus JSON pointer to image block/reference/detail | Initial covered classes table above. |
+| `assistant_message` | `available` / `source_empty` | `semantic_text` | LLM message op plus `payload_refs.kind=llm_response` | source line/file selector plus JSON pointer to assistant text | Initial covered classes table above. |
+| `reasoning_text` | `available` / `source_empty` | `semantic_text` | reasoning op plus `payload_refs.kind=llm_reasoning` | source line/file selector plus JSON pointer to reasoning text | Initial covered classes table above. |
+| `llm_request` | `not_source_visible` | n/a | none | Codex rollout does not persist raw provider request envelopes | Rollout item schema above. |
+| `llm_response` | `not_source_visible` | n/a | none for provider envelope; assistant text is `assistant_message` | Codex rollout persists response items, not raw provider HTTP/SSE responses | Rollout item schema above. |
+| `llm_sdk_request` | `not_source_visible` | n/a | none | Codex rollout does not persist a separate SDK request envelope | Rollout item schema above. |
+| `llm_sdk_response` | `not_source_visible` | n/a | none | Codex rollout does not persist a separate SDK response envelope | Rollout item schema above. |
+| `tool_request` | `available` / `source_unavailable` / `source_empty` | `semantic_text` / `canonical_json` / `raw_bytes` | tool op plus `payload_refs.kind=tool_request` | source line/file selector plus JSON pointer or whole-record selector | Initial covered classes table above. |
+| `tool_response` | `available` / `source_unavailable` / `source_empty` | `semantic_text` / `canonical_json` | finalized tool op plus `payload_refs.kind=tool_response` | source line/file selector plus JSON pointer to output | Initial covered classes table above. |
+| `llm_error` | `not_source_visible` | n/a | none as an LLM op error; generic errors are `log_entry` | no provider/model error envelope tied to an LLM op exists in Codex rollout files | Event message schema above. |
+| `tool_error` | `available` | `identity_json` | failed `ops` row | `op:<turn_seq>:<op_seq>:error` | Initial covered classes table above. |
+| `subagent_link` | `available` | `identity_json` | session spawn op with `child_session_id` | `op:<turn_seq>:<op_seq>:child_session:<new_thread_id>` | Initial covered classes table above. |
+| `system_op` | `available` | `identity_json` | `log_entries` rows for lifecycle/review/default metadata events | `log:<scope>:<timestamp>:<severity>:<source-hash>:<message-hash>` over the Codex event type and log identity | Initial covered classes table above. |
+| `compaction_event` | `available` | `identity_json` | compaction op metadata | `op:<turn_seq>:<op_seq>:compaction`, including `trigger`, optional `replacement_history_size`, optional `message_preview` hash, and op timestamp/sequence | Compaction rules above. |
+| `session_metadata` | `available` | `identity_json` | `sessions` row plus `sessions.extras_json` | `session:<session_meta.payload.id>:metadata` or `session:<legacy-header.id>:metadata` over persisted descriptive fields only | Initial covered classes table above. |
+| `log_entry` | `available` / `source_empty` | `semantic_text` / `raw_bytes` | log row or `payload_refs.kind=log` | `line:<line>:/payload/message` or whole-line compaction body | Initial covered classes table above. |
+| `attachment_metadata` | `not_source_visible` | n/a | none as a separate attachment record | Codex rollout files do not persist a Claude-style `attachment` record. Image/file-like user inputs live inside `response_item.message(role=user)` content blocks or `event_msg.user_message` image fields and are covered by `user_image` artifacts. | Response item and event schema above. |
+| `patch_metadata` | `not_source_visible` | n/a | none as a separate patch/file-change metadata record | Codex rollout files do not persist Opencode-style patch part records. Patch application telemetry is represented by `apply_patch` tool ops and `tool_error` when the patch fails. | Event message schema above. |
+
+`event_msg.context_compacted` follows the adapter suppression rule in source
+manifests: when it is the immediate next line after a top-level `compacted`
+record with the same timestamp, it is the bare companion marker and emits no
+second artifact. When it is not that adjacent companion, it emits the compaction
+`op_boundary` plus a `payload_refs.kind=log`-equivalent `log_entry` keyed as
+`line:<line>` over the whole trimmed JSONL record. Every emitted compaction op
+also emits a `compaction_event` parity artifact keyed as
+`op:<turn_seq>:<op_seq>:compaction`. For data-bearing top-level `compacted`
+records, the identity includes `replacement_history_size` and a SHA-256 hash of
+the stored `message_preview`; for lone `event_msg.context_compacted` and forward-
+compatible response-item compaction records, the identity records `trigger=auto`
+and the op timestamp/sequence fields.
+
+`tool_output_unmatched` is not a persisted Codex `event_msg` payload type in the
+adapter allowlist. It is a mapper-derived warning emitted when a
+`function_call_output` has no matching open or finalized op. Source-manifest
+extraction must not claim source-backed `log_entry` parity for
+`event_msg.tool_output_unmatched`; such a source record is unsupported and must
+fail as an unknown event variant, matching the canonical parser contract.
+
+For the first structural parity fixture, an old-format single-turn rollout with
+one `turn_context`, user prompt, assistant message, reasoning record, two tool
+calls, and no `task_started`/`task_complete` must produce:
+
+- one `session_boundary` artifact with `kind=root`, `status=running`, and no
+  `ended_at`;
+- one `turn_boundary` artifact with `seq=1`, `status=completed`,
+  `started_at=<turn_context timestamp>`, and `ended_at=<last content timestamp>`;
+- one `op_boundary` artifact for every source-visible op emitted by the mapper:
+  user input, assistant message, reasoning, and each tool call.
+
+For old-format multi-turn rollouts with no `task_started`/`task_complete`, each
+new `turn_context.turn_id` that differs from the active turn closes the prior
+turn as `completed` at the new `turn_context` timestamp, then opens the next
+turn with the next monotone source-derived turn sequence. The final old-format
+turn still closes at EOF using the last source-visible content timestamp. The
+source manifest must emit one `turn_boundary` per source-derived turn and must
+reset op sequencing per turn so canonical `op:<turn_seq>:<op_seq>` artifacts
+prove no old-format turn was merged into its neighbor.
+
+For task-started-only new-format rollouts, `event_msg.task_started.turn_id` is
+also a source turn boundary. A new `task_started.turn_id` that differs from the
+active new-format turn closes the prior turn as `failed` at the new
+`task_started` timestamp, marks any dangling ops as `cancelled`, and opens the
+next source-derived turn. The matching `task_complete` / `turn_aborted` record
+then finalizes the active replacement turn. The source manifest must not merge
+the replaced turn's user/assistant/tool artifacts into the replacement turn.
+
+For Codex sub-turn splitting, the source manifest mirrors the adapter's
+user-input visualization boundary. Once an active source-derived turn has
+already emitted one `user_input` op, a later deduped user prompt in the same
+Codex task closes that active turn as `completed` at the later user prompt
+timestamp and opens a synthetic source-derived sub-turn with the next monotone
+turn sequence. The later user prompt and following assistant/tool artifacts land
+in the synthetic sub-turn. If a tool call is still open, the split is deferred so
+the tool request and response stay in the same turn; the next user prompt after
+the tool resolves performs the split. The source manifest must therefore prove
+both that repeated user prompts are not merged into one turn and that
+mid-tool-call splits do not orphan a tool response.
+
+For unfinished new-format rollouts at EOF, the source manifest mirrors rule #23
+instead of pretending the missing completion marker is harmless:
+
+- If the rollout file mtime is fresh (`now - mtime < 1h`), the active
+  `task_started` turn remains a `running` `turn_boundary` with no `ended_at`,
+  and the session boundary remains `running`.
+- If the rollout file mtime is stale (`now - mtime >= 1h`), the active
+  `task_started` turn becomes a `failed` `turn_boundary` with `ended_at` equal
+  to the file mtime, dangling tool ops become `cancelled`, and the
+  `session_boundary` becomes `failed` with the same `ended_at`. If filesystem
+  mtime predates the source turn start because of clock skew or a synthetic test
+  fixture, the parity timestamp is floored at the active turn start, matching
+  the adapter's EOF finalization rule.
+
+The source extractor must use the same file mtime that the adapter scanner uses
+for the stale EOF decision. The parity gate must therefore catch both failure
+modes: a fresh in-flight turn incorrectly closed as failed, and a stale crashed
+turn incorrectly left running.
 
 ### Cost calculation
 
@@ -469,13 +793,14 @@ Codex supports sub-agents (`SubAgentSource::ThreadSpawn`) and forks (`forked_fro
 - **Sub-agent**: `session_meta.payload.source = {"subagent": {"thread_spawn": {"parent_thread_id": "<uuid>", "depth": N, "agent_nickname": "...", "agent_role": "..."}}}` and `thread_source = "subagent"`. The parent session's rollout file does NOT inline the child; it appears separately and the parent is identified via `parent_thread_id`.
 - **Fork**: `session_meta.payload.forked_from_id = "<uuid>"` — branched/resumed from another session.
 - **`event_msg.collab_agent_spawn_begin`/`_end`** in the PARENT rollout name the spawn but the `_begin` event is NOT persisted (`policy.rs:215`). Only `_end` is. The `_end` event carries the parent→child link as `sender_thread_id` (parent) → `new_thread_id` (child), alongside `new_agent_nickname`, `new_agent_role`, `model`, `reasoning_effort`, and `status`. (Real workstation corpus: 5 `collab_agent_spawn_end` files; the field is `new_thread_id`, NOT `agent_ref.thread_id` as an earlier draft of this spec wrongly stated.)
-- **`event_msg.collab_close_end`** (72 files) and **`event_msg.collab_waiting_end`** (74 files) also appear in collab sessions. They carry no parent→child edge the topology view needs, so the adapter recognizes them (no `SourceError`) and surfaces each as a `LogEntry` only — no canonical op.
+- **`event_msg.collab_close_end`** (72 files) and **`event_msg.collab_waiting_end`** (74 files) also appear in collab sessions. They carry no parent→child edge the topology view needs, so the adapter recognizes them (no `SourceError`) and surfaces each as a `LogEntry` only — no canonical op. When either event carries `payload.message`, the `LogEntry` message is the exact source message and `Extras.aiViewer.parity` carries `nativeArtifactId=line:<line>:/payload/message`, `selectorURI=file://...#L<line>`, and `jsonPointer=/payload/message`, matching the `event_msg.error` source-backed log parity contract.
 
 Adapter behavior:
 
 - Emit `SessionStartedEvent.ParentNativeID = parent_thread_id` when the child's `session_meta.source` is `subagent`.
 - Emit `SessionStartedEvent.ParentNativeID = forked_from_id` otherwise when `forked_from_id` is present.
 - In the parent, when an `event_msg.collab_agent_spawn_end` line appears, emit an Op Kind=`session`, Name=`spawn`, ChildSessionNativeID=`new_thread_id`. (If the child rollout file doesn't yet exist at that moment, the ingester's foreign-key constraint must be relaxed temporarily — the canonical-events spec allows out-of-order child arrival.)
+- Source-manifest parity mirrors the parent-side spawn event. The source extractor emits both an `op_boundary` for the `session/spawn` op and a `subagent_link` artifact keyed as `op:<turn_seq>:<op_seq>:child_session:<new_thread_id>`. If the child rollout has not landed yet, the canonical side is incomplete until the resolver can link `ops.child_session_id`; silently dropping the link is a P0 parity failure.
 - A sub-agent rollout file with `parent_thread_id` referring to an unknown session is recorded with `parent_session_id` set to NULL and a `LogEntry` warning; reconciled when the parent appears.
 
 Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1`, with named nicknames (Raman, Tesla, Nash, Boyle, etc.) and role `"explorer"`.
@@ -494,7 +819,7 @@ Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1
 
 6. **Sandbox mode `danger-full-access`**: no parsing difference; surface in Extras only.
 
-7. **Very large reasoning content** (`encrypted_content` can be 50+ KB of base64): keep as PayloadRefEvent pointing to a byte range within the file (`file://<path>#L<line>` URI scheme is reasonable; presenter reads on demand). DO NOT inline raw content into SQLite.
+7. **Very large reasoning content** (`encrypted_content` can be 50+ KB of base64): keep as PayloadRefEvent pointing at source bytes; never inline raw content into SQLite. Text-bearing nested fields use exact `json_pointer` selectors. Opaque encrypted content may use a whole-record fallback only when the parity availability matrix documents how that opaque artifact is classified.
 
 8. **Token streaming truncated mid-response**: not directly visible in rollout (deltas not persisted, `policy.rs:184,210`). The terminal `agent_message` event arrives only on completion, so a truncated assistant response means no terminal event → handled by edge case #1.
 
@@ -504,7 +829,13 @@ Real observation: 8 distinct sub-agent sessions in the sampled set, all `depth=1
 
 11. **Embedded control characters / ANSI escapes in tool output strings**: codex serializes these as `\uXXXX` JSON escapes. Go's `encoding/json` accepts them. jq's strict mode rejects them — do not test parsing with jq alone.
 
-12. **Legacy `.json` files (pre-mid-2025)**: 19 such files exist on this workstation. Out of scope for v1 (emit one informational log entry per file).
+12. **Legacy `.json` files (pre-mid-2025)**: 19 such files exist on this
+workstation. Valid legacy flat files are ingested once during full scan. A file
+whose first JSON value is malformed is source corruption with no recovered
+artifacts. A file whose first JSON value is a valid flat rollout but has
+trailing non-whitespace bytes ingests the valid prefix, emits one `SourceError`
+for the trailing corruption, emits one parity `source_corruption` artifact for
+the trailing byte range, and makes parity incomplete.
 
 13. **File renamed/moved**: codex does not rename files. If an operator manually renames or moves a rollout file, the adapter sees a Delete event on the old path and Create on the new path; cursor entry for the old path is left stale. Optional cleanup after N days.
 
@@ -531,7 +862,7 @@ Items in codex that don't map cleanly to canonical-events.md:
 > values live in `turns.extras_json.{codex_turn_id,sandbox,effort,approval_policy,ttft_ms,last_agent_message}`
 > as documented).
 
-1. **Reasoning op as first-class**: covered (`OpKind = 'reasoning'` exists). However, codex distinguishes `agent_reasoning` (visible summary) from `agent_reasoning_raw_content` (full CoT) — canonical model has no field for that distinction. Stash in Extras: `{reasoning_kind: "summary"|"raw"}`.
+1. **Reasoning op as first-class**: covered (`OpKind = 'reasoning'` exists) for `response_item.reasoning`. Codex also persists `event_msg.agent_reasoning` and `event_msg.agent_reasoning_raw_content` as UI companion summaries; those are derived DBG logs only and are not parity `reasoning_text` artifacts.
 
 2. **No "turn" concept in codex pre-0.93**: older sessions infer turns from `turn_context` boundaries. Canonical `turn.seq` becomes a synthesized 1-based counter that may not match any codex-internal id. Store the codex `turn_id` (UUID) in `turns.extras_json.codex_turn_id` for cross-reference.
 

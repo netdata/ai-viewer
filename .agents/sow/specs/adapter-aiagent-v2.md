@@ -207,7 +207,9 @@ Legacy snapshots may have non-empty `chunks: [{ text, ts }, ...]`. The adapter p
 "response": { "payload": <any>, "size": <int>, "truncated": <bool?> }
 ```
 
-Payload may be raw object, base64-encoded blob, or — in newer v2-era snapshots — a nested `EvidencePayloadRef` pointing into `payloads/<sessionId>/...`. Producer-shaped references appear as `payload.ref` for LLM/tool request and response payloads and as `payload.sdk.ref` for SDK request and response captures. A ref descriptor carries the v3 evidence fields (`path`, `format`, `compression`, `originalBytes`, `compressedBytes`, `sha256`, `captured`, `truncated`, `redacted`); `PayloadRefEvent.StoredBytes` maps from `compressedBytes`. The adapter inspects these known ref wrappers and emits a `PayloadRefEvent`. Plain `payload.ref` uses the op kind + side (`llm_request`, `llm_response`, `tool_request`, `tool_response`); `payload.sdk.ref` uses the canonical SDK kinds (`llm_sdk_request`, `llm_sdk_response`). When `captured=true` and `path` is present, `LocationURI` resolves the relative `path` against `<sessions-dir>` and `Compression` is copied from the ref. When `captured=false` or `path` is absent, the event still carries available metadata (`PayloadKind`, `Format`, `OriginalBytes`, `SHA256`) but leaves `LocationURI` and `Compression` empty, mirroring the v3 adapter. Otherwise the adapter records `op.bytes_in = request.size`, `op.bytes_out = response.size` and does NOT inline the raw bytes (the canonical model never inlines payloads — see `canonical-events.md`).
+Payload may be raw object, raw JSON string/blob, or — in newer v2-era snapshots — a nested `EvidencePayloadRef` pointing into `payloads/<sessionId>/...`. Producer-shaped references appear as `payload.ref` for LLM/tool request and response payloads and as `payload.sdk.ref` for SDK request and response captures. A ref descriptor carries the v3 evidence fields (`path`, `format`, `compression`, `originalBytes`, `compressedBytes`, `sha256`, `captured`, `truncated`, `redacted`); `PayloadRefEvent.StoredBytes` maps from `compressedBytes`. The adapter inspects these known ref wrappers and emits a `PayloadRefEvent`. Plain `payload.ref` uses the op kind + side (`llm_request`, `llm_response`, `tool_request`, `tool_response`); `payload.sdk.ref` uses the canonical SDK kinds (`llm_sdk_request`, `llm_sdk_response`). When `captured=true` and `path` is present, `LocationURI` resolves the relative `path` against `<sessions-dir>` and `Compression` is copied from the ref. When `captured=false` or `path` is absent, the event still carries available metadata (`PayloadKind`, `Format`, `OriginalBytes`, `SHA256`) but leaves `LocationURI` and `Compression` empty, mirroring the v3 adapter.
+
+If a request/response side has no producer ref descriptor and carries an inline `payload`, the adapter emits a `PayloadRefEvent` that points back to the exact source fragment inside the original snapshot: `LocationURI=file://<absolute-snapshot>.json.gz?json_pointer=<RFC6901 pointer>`, `Compression=gzip`, and `PayloadKind` from op kind + side (`llm_request`, `llm_response`, `tool_request`, `tool_response`). The selector points at `/opTree/turns/<array-index>/ops/<array-index>/<side>/payload` or the equivalent `steps[]` / nested `childSession` path. JSON strings are `format=text` and hash as `semantic_text`; all other inline JSON values are `format=json` and hash as `canonical_json`. Inline sides with producer refs do not emit an extra inline row for the ref wrapper itself. `truncated=true` remains source-visible partial data and the parity gate must report it as `partial_source`; a canonical row that presents the partial body as complete is wrong.
 
 #### childSession shape (the embedded sub-agent pattern)
 
@@ -271,10 +273,161 @@ The translation is harder than v3 because the v2 file is a **snapshot of full st
 | `op` with `kind="system"` | `OpStartedEvent(Kind="system", Name=attributes.name, Extras.original_kind="system")` + `OpFinalizedEvent` | System ops contain logs only; ingested for log surfacing and filterable through the first-class canonical system kind |
 | `op.logs[k]` | `LogEntryEvent(Severity, Source="aiagent_v2", Message, Ts=log.timestamp*1000, op_id_linkage)` | One event per log line |
 | `op.request.payload.ref`, `op.response.payload.ref`, `op.request.payload.sdk.ref`, or `op.response.payload.sdk.ref` (when present) | One `PayloadRefEvent(PayloadKind, Format, Compression, LocationURI=file://<sessions-dir>/<ref.path> when captured/pathful, OriginalBytes, StoredBytes=ref.compressedBytes)` per present ref descriptor | A single side may carry both the regular ref and the SDK ref because the producer deep-merges payload updates. Emit both independently. A malformed/path-escaping ref emits `SourceErrorEvent` and skips only that ref; any sibling ref on the same side is still emitted. Regular request/response payload refs keep the historical event path `::payload:<side>`; SDK refs use `::payload:<side>:sdk` so `SourceSeq` stays unique when both are present. |
+| `op.request.payload`, `op.response.payload` inline value with no ref descriptor | One `PayloadRefEvent(PayloadKind, Format, Compression=gzip, LocationURI=file://<snapshot>.json.gz?json_pointer=<pointer>)` per inline side | The event never copies raw payload bytes into SQLite. The snapshot selector is exact enough for canonical parity to resolve and hash only the logical payload fragment. JSON strings hash as semantic text; objects/arrays/numbers/bools/null hash as canonical JSON. |
 | `op.childSessionRef` (no `childSession`) | `OpStartedEvent(Kind="session", ChildSessionNativeID=ref.sessionId, Extras.childSessionSummary=<opaque summary>)` + `OpFinalizedEvent(from the session op's timing/status)` | No recursion; child is found via another file/ledger |
 | `op.status == "failed"` | `OpFinalizedEvent(Status="failed", ErrorClass=attributes.error)` | Plus `LogEntryEvent(severity="ERR")` with attributes.error message when present; no synthetic error fallback is injected |
 | Periodic checkpoint after batch | `SourceProgressEvent(Cursor=...)` | See Cursor below |
 | Parse error on a file | `SourceErrorEvent(Path, Message)` | Increments `sources.parse_errors`, does not block other files |
+
+## Source Manifest Parity
+
+The SOW-0097 parity gate has an independent aiagent_v2 source extractor under
+`internal/parity`. It reads root-level `<sessions-dir>/*.json.gz` snapshots
+directly and emits source artifacts without calling the aiagent_v2 canonical
+mapper. It ignores producer temp files matching `*.json.gz.tmp-*` and all
+subdirectories; v3 owns `session/` and `payloads/` traversal.
+
+Snapshot reads are bounded with the parity resolver's default 1 GiB
+per-artifact safety cap. The source extractor rejects a snapshot whose
+compressed file size is over the cap before opening gzip, and rejects a snapshot
+whose decompressed JSON stream exceeds the cap before JSON decode. Either case
+is a source-extractor error, so `check-parity` reports the source as
+`INCOMPLETE`; it is never a passing manifest built from partial or unbounded
+snapshot bytes.
+
+Recoverable per-file snapshot corruption does not stop the source extractor
+from checking later snapshots. A zero-byte `.json.gz`, invalid gzip stream, or
+malformed/decode-invalid snapshot JSON emits a `source_corruption` artifact with
+`availability=source_corrupt`, a file selector, raw byte length/hash over the
+rejected compressed snapshot bytes, and a typed integrity failure. The source is
+still `INCOMPLETE`, never `PASS`, but the diagnostic is machine-countable and
+one corrupt snapshot cannot hide parity evidence from subsequent snapshots.
+
+The extractor emits:
+
+- `session_boundary` from every `opTree` node, including embedded
+  `childSession` subtrees. Session native id is `traceId`; root id is the root
+  file's `opTree.traceId`; embedded children use `kind=sub_agent` and
+  `parent_native_session_id` equal to the containing session.
+- `turn_boundary` from every `turns[]` item using the source `index` as
+  canonical turn seq, and from every `steps[]` item using
+  `10000 + step.index`, matching the adapter's projection.
+- `op_boundary` from every operation in traversal order. Op seq is the
+  operation's index within its containing turn/step, with synthetic reasoning
+  op seqs allocated after the source-op range exactly like the adapter.
+  Status maps `ok -> completed`, `failed -> failed`, and missing status to
+  `running`.
+- `reasoning_text` from every LLM op whose `reasoning.final` string is
+  non-empty. The source artifact uses the synthetic reasoning op's native id
+  plus `:reasoning.final`, `hash_domain=semantic_text`, and
+  `field_path=reasoning.final`. Canonical proves the same text from the
+  reasoning op's `ops.extras_json["reasoning.final"]`; dropping the text while
+  keeping only the reasoning op boundary is a parity failure.
+- `assistant_message` from every `opTree.finalReport` object when present. The
+  artifact is session-scoped, uses `hash_domain=canonical_json`, and uses
+  `field_path=finalReport`. Canonical proves the same JSON from
+  `sessions.extras_json["final_report"]`; a session that keeps the boundary but
+  drops the final user-facing report is a parity failure.
+- `session_metadata` from every `opTree` node whose session-level metadata is
+  source-visible beyond the boundary itself. The identity covers `traceId`,
+  filename-derived `originId`, `version`, `id`, `agentId`, `callPath`,
+  `sessionTitle`, `latestStatus`, and canonical JSON hashes for optional
+  `attributes`, `totals`, and `pluginMetas`. Canonical proves the same identity
+  from first-class `sessions` columns plus `sessions.extras_json` keys
+  `originId`, `version`, `nodeId`, `sessionTitle`, `latestStatus`,
+  `attributes`, `totals`, and `plugin_metas`; dropping any source-visible
+  session metadata is a parity failure.
+- `subagent_link` for every `kind=session` op with embedded `childSession` or
+  pathless `childSessionRef`, keyed by parent turn/op seq and child native id.
+- `llm_error` / `tool_error` for failed ops whose `attributes.error` string is
+  present. The parity identity stores the error-message hash, not the raw text.
+- `system_op` for every source op with `kind="system"`. The artifact is an
+  `identity_json` proof of the canonical `ops.kind=system` row, with source
+  kind, canonical name, status, and timestamps derived from the same fields as
+  `op_boundary`. The native id is `op:<turn_seq>:<op_seq>:system`; the ordinary
+  `op_boundary` artifact for the same op remains present.
+- `compaction_event` for every `steps[]` item with `kind="internal"` that
+  contains a `kind="session"` operation whose provider attribute is
+  `history-compaction`. The identity covers native session id, step-projected
+  turn seq, op seq, trigger, step kind, op name/provider, child native session
+  id when present, archived/current turn, status, and timestamps.
+  `archivedTurn` and `currentTurn` are read from op attributes first and fall
+  back to step attributes. Canonical proves the same identity from the session
+  op row plus `ops.extras_json`: compaction proof attributes are stored as
+  `attr.<key>`, and step metadata for step-projected ops is stored as
+  `step.kind` plus `step.attr.<key>`.
+- `log_entry` for source-backed log text:
+  - every `op.logs[k].message`, keyed by
+    `file:<snapshot-basename>:/opTree/.../ops/<i>/logs/<k>/message`;
+  - every failed op `attributes.error`, keyed by
+    `file:<snapshot-basename>:/opTree/.../ops/<i>/attributes/error`;
+  - every failed session `opTree.error`, including embedded child sessions,
+    keyed by `file:<snapshot-basename>:/opTree/.../error`.
+  Each artifact uses the source snapshot file URI plus the exact JSON pointer,
+  `hash_domain=semantic_text`, and `availability=source_empty` when the source
+  field is present but empty. Canonical proves the same artifact from
+  `log_entries` rows carrying `extras_json.aiViewer.parity` with the same
+  native artifact id, selector URI, and JSON pointer.
+- payload artifacts from producer ref descriptors under
+  `request.payload.ref`, `response.payload.ref`, `request.payload.sdk.ref`, and
+  `response.payload.sdk.ref`. Captured refs resolve under the configured
+  sessions root, enforce the parity payload-file safety cap before materializing
+  compressed bytes and again after decompression, decompress gzip before hashing,
+  compare producer `originalBytes`, `compressedBytes`, and `sha256` when
+  present, mark mismatches as `availability=source_corrupt` with typed
+  `integrity_failures[]` entries for every failed proof field, and map to parity
+  classes `llm_request`, `llm_response`, `llm_sdk_request`,
+  `llm_sdk_response`, `tool_request`, and `tool_response`.
+- uncaptured or pathless producer refs as `availability=source_unavailable`
+  with the same stable ordinal native artifact id used by the canonical
+  extractor, so metadata-only canonical `PayloadRefEvent` rows are still
+  matched explicitly.
+- legacy inline request/response payload bodies when no producer ref descriptor
+  exists on that side. The source artifact uses the source snapshot file selector
+  plus RFC 6901 JSON pointer into `opTree`, and maps the side to `llm_request`,
+  `llm_response`, `tool_request`, or `tool_response`. JSON strings use
+  `hash_domain=semantic_text`; all other JSON values use
+  `hash_domain=canonical_json`. Truncated inline payloads are
+  `availability=partial_source`, not `source_unavailable`.
+- No `user_prompt` or `user_image` artifacts. The v2 snapshot format does not
+  persist a separate user-message stream; user-authored text or image-bearing
+  JSON can only be present inside request payload bodies. The parity gate proves
+  those bytes through `llm_request` / `tool_request` artifacts. Emitting an
+  additional `user_prompt` or `user_image` artifact from the same request body
+  would double-count one source artifact as two logical classes.
+
+There is no separate aiagent_v2 attachment artifact. Upstream `SessionNode`,
+`TurnNode`, `StepNode`, and `OperationNode` have no attachment field; file
+paths, images, or other attachment-like values can only appear inside
+request/response payload JSON. Those bytes are covered by payload artifact
+classes, so `attachment_metadata` is `not_source_visible`.
+
+Machine-readable matrix rows:
+
+| Class | Source availability | Hash domain | Canonical representation | Selector / identity rule | Evidence |
+|---|---|---|---|---|---|
+| `session_boundary` | `available` | `identity_json` | `sessions` row | `session:<traceId>` | Source Manifest Parity bullets above. |
+| `turn_boundary` | `available` | `identity_json` | `turns` row | `turn:<turn.index>` or `turn:<10000+step.index>` | Source Manifest Parity bullets above. |
+| `op_boundary` | `available` | `identity_json` | `ops` row | `op:<turn_seq>:<op_seq>` | Source Manifest Parity bullets above. |
+| `user_prompt` | `not_source_visible` | n/a | none | source format has no separate user-message artifact; prompt text is inside request payload artifacts | Source Manifest Parity bullets above. |
+| `user_image` | `not_source_visible` | n/a | none | source format has no separate user-image artifact; image-bearing JSON is inside request payload artifacts | Source Manifest Parity bullets above. |
+| `assistant_message` | `available` | `canonical_json` | `sessions.extras_json.final_report` | `session:<traceId>:final_report` with `field_path=finalReport` | Source Manifest Parity bullets above. |
+| `reasoning_text` | `available` | `semantic_text` | reasoning op `ops.extras_json.reasoning.final` | `op:<turn_seq>:<op_seq>:reasoning.final` | Source Manifest Parity bullets above. |
+| `llm_request` | `available` / `source_unavailable` / `partial_source` | `raw_bytes` / `canonical_json` / `semantic_text` | `payload_refs.kind=llm_request` | producer ref path, metadata-only payload ordinal, or inline snapshot JSON pointer | Source Manifest Parity bullets above. |
+| `llm_response` | `available` / `source_unavailable` / `partial_source` | `raw_bytes` / `canonical_json` / `semantic_text` | `payload_refs.kind=llm_response` | producer ref path, metadata-only payload ordinal, or inline snapshot JSON pointer | Source Manifest Parity bullets above. |
+| `llm_sdk_request` | `available` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=llm_sdk_request` | producer SDK ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `llm_sdk_response` | `available` / `source_unavailable` | `raw_bytes` | `payload_refs.kind=llm_sdk_response` | producer SDK ref path or metadata-only payload ordinal | Source Manifest Parity bullets above. |
+| `tool_request` | `available` / `source_unavailable` / `partial_source` | `raw_bytes` / `canonical_json` / `semantic_text` | `payload_refs.kind=tool_request` | producer ref path, metadata-only payload ordinal, or inline snapshot JSON pointer | Source Manifest Parity bullets above. |
+| `tool_response` | `available` / `source_unavailable` / `partial_source` | `raw_bytes` / `canonical_json` / `semantic_text` | `payload_refs.kind=tool_response` | producer ref path, metadata-only payload ordinal, or inline snapshot JSON pointer | Source Manifest Parity bullets above. |
+| `llm_error` | `available` | `identity_json` | failed LLM `ops` row | `op:<turn_seq>:<op_seq>:error` | Source Manifest Parity bullets above. |
+| `tool_error` | `available` | `identity_json` | failed tool/session `ops` row | `op:<turn_seq>:<op_seq>:error` | Source Manifest Parity bullets above. |
+| `subagent_link` | `available` | `identity_json` | parent session op with child link | `op:<turn_seq>:<op_seq>:child_session:<child_traceId>` | Source Manifest Parity bullets above. |
+| `system_op` | `available` | `identity_json` | `ops.kind=system` row | `op:<turn_seq>:<op_seq>:system` | Source Manifest Parity bullets above. |
+| `compaction_event` | `available` | `identity_json` | history-compaction step session op row plus `ops.extras_json` | `op:<turn_seq>:<op_seq>:compaction`; identity includes trigger, step kind, name/provider, child session id, archived/current turn, status, and timestamps | Source Manifest Parity bullets above; upstream `session-orchestration-steps.ts` creates `internal` history-compaction steps. |
+| `session_metadata` | `available` | `identity_json` | `sessions` row plus `sessions.extras_json` | `session:<traceId>:metadata`; includes canonical JSON hashes for `attributes`, `totals`, and `pluginMetas` / `plugin_metas` | Source Manifest Parity bullets above. |
+| `log_entry` | `available` / `source_empty` | `semantic_text` | `log_entries` rows with `extras_json.aiViewer.parity` | source snapshot file URI plus JSON pointer; native id `file:<snapshot-basename>:<json_pointer>` | Source Manifest Parity bullets above. |
+| `attachment_metadata` | `not_source_visible` | n/a | none | v2 `opTree` has no separate attachment artifact; attachment-like values are payload JSON covered by request/response payload artifacts | Source Manifest Parity bullets above; upstream `SessionNode`, `TurnNode`, `StepNode`, and `OperationNode` have no attachment field. |
+| `patch_metadata` | `not_source_visible` | n/a | none | v2 `opTree` has no separate patch/file-change metadata artifact | Source Manifest Parity bullets above; upstream operation records have payload refs, logs, and attributes, not Opencode-style patch part records. |
 
 ### Ordering
 
@@ -338,7 +491,7 @@ If the same child traceId appears BOTH embedded in a parent AND as its own file 
 
 ## Edge Cases
 
-1. **Empty (zero-byte) `.json.gz` files.** Verified count: **29 of 294,316** files are 0 bytes. Cause: producer crashed between `writeFileSync` (which created the temp file) and the gzip data being flushed, then the temp was renamed by another producer's later attempt. The adapter MUST detect zero-byte files via stat (no gzip decompression attempted) and emit `SourceError` with explanatory message; record file in cursor as "skipped, zero bytes" so it is not retried until the file is modified.
+1. **Empty (zero-byte) `.json.gz` files.** Verified count: **29 of 294,316** files are 0 bytes. Cause: producer crashed between `writeFileSync` (which created the temp file) and the gzip data being flushed, then the temp was renamed by another producer's later attempt. The adapter MUST detect zero-byte files via stat (no gzip decompression attempted) and emit `SourceError` with explanatory message; record file in cursor as "skipped, zero bytes" so it is not retried until the file is modified. The parity source extractor MUST emit a typed `source_corruption` artifact for the file and continue scanning later snapshots, so one corrupt snapshot cannot suppress live parity evidence for the rest of the source tree.
 
 2. **Orphaned `.tmp-<pid>-<ts>` files.** Verified count on operator's disk: 2 files (`143f3e6c-...json.gz.tmp-702094-1768162665628`, 13 KB; `e48f9399-...json.gz.tmp-702094-1768162665636`, 0 bytes). Producer never cleans these. The adapter MUST ignore them by suffix match (`*.json.gz.tmp-*`); never include them in scans.
 
@@ -412,15 +565,15 @@ Post-backfill, fsnotify drives only changed files. Steady-state load is ≤ tens
 These are v2 concepts that do not fit cleanly into `canonical-events.md` and `data-model.md`. The adapter records each one through the settled projection below.
 
 1. **0-based init turn (turn 0).** v2 has a turn 0 with `attributes.system: true`. The adapter preserves the source turn index, so init turn events use canonical `turns.seq = 0` for fidelity.
-2. **Steps as a sibling of turns.** v2 has `opTree.steps[]` for orchestration (advisors/router/handoff) and history-compaction (internal). Canonical has only `turns`. The adapter projects steps onto turn seqs with a reserved offset (`step_seq = 10000 + step.index`) and records step kind in session extras as `step.<index>.kind`; adding a dedicated `steps` table would be a larger future surface change.
+2. **Steps as a sibling of turns.** v2 has `opTree.steps[]` for orchestration (advisors/router/handoff) and history-compaction (internal). Canonical has only `turns`. The adapter projects steps onto turn seqs with a reserved offset (`step_seq = 10000 + step.index`), records step kind in session extras as `step.<index>.kind`, and copies the compaction proof step metadata onto every history-compaction step session op as `ops.extras_json.step.kind` plus `ops.extras_json.step.attr.<key>`; adding a dedicated `steps` table would be a larger future surface change.
 3. **`system` op kind.** Canonical `OpKind` has a first-class `system` value. v2 uses `system` for the init/fin housekeeping ops. The adapter maps `system → system` and stores the original kind in `extras_json.original_kind = "system"` for source fidelity.
 4. **Accounting type `tool` carrying `charactersIn`/`charactersOut`.** Canonical `OpFinalized` has dedicated `CharsIn`/`CharsOut` fields for sources that report UTF-8 character counts instead of bytes. The adapter maps tool accounting `charactersIn → chars_in` and `charactersOut → chars_out`; request/response `size` still maps to `BytesIn`/`BytesOut` when present.
 5. **`opTree.totals` denormalization.** v2 carries pre-computed totals on the session node. Canonical computes totals server-side from ops. The adapter does NOT emit a canonical event from totals (avoids double-counting) and keeps the original totals in `sessions.extras_json.totals` for QA cross-check.
-6. **`finalReport` payload.** A potentially-large structured object containing the agent's final user-facing report. The adapter stores it in `sessions.extras_json.final_report`; there is no separate `final_reports` table in v1.
+6. **`finalReport` payload.** A potentially-large structured object containing the agent's final user-facing report. The adapter stores it in `sessions.extras_json.final_report`; there is no separate `final_reports` table in v1. SOW-0097 parity treats this as a session-scoped `assistant_message` artifact and proves its canonical JSON hash/length with selector `field_path=finalReport`.
 7. **`pluginMetas`.** Per-plugin final metadata. Same situation as `finalReport`; stored in `sessions.extras_json.plugin_metas`.
 8. **`latestStatus`.** Optional free-text progress string set by `agent__task_status`. Useful for showing "what was the agent's last self-reported status" in the UI. The adapter stores it as `sessions.extras_json.latestStatus`. Canonical does not have a dedicated field.
-9. **Per-op `reasoning` block.** Canonical has `reasoning` as a separate `OpKind`. The adapter spawns a nested `OpStartedEvent(Kind="reasoning", ParentOpSeq=<llm>)` plus `OpFinalizedEvent` per llm op that has `reasoning.final`. The reasoning text content is stored in the reasoning op's extras as `reasoning.final`; no raw reasoning payload is inlined.
-10. **Embedded request/response payloads (legacy, no ref descriptor).** Older v2 snapshots may inline payloads directly. Canonical never inlines, and the v2 adapter is read-only on source files, so inline payloads are deliberately skipped: no `PayloadRefEvent` and no parse error. Producer-shaped `payload.ref` and `payload.sdk.ref` descriptors produce `PayloadRefEvent` rows. The adapter also keeps constrained legacy flat descriptor compatibility for older helper-shaped snapshots and tests: a flat descriptor must have a non-empty string `ref`, or a top-level `path` accompanied by evidence metadata such as `format`, byte counts, hash, compression, or `captured`. A bare inline object like `{"path":"src/file"}` is not a payload ref. If both producer descriptors are present on the same request/response side, both rows are emitted with independent path validation. A future side-cache design would require its own SOW because it would introduce generated artifacts.
+9. **Per-op `reasoning` block.** Canonical has `reasoning` as a separate `OpKind`. The adapter spawns a nested `OpStartedEvent(Kind="reasoning", ParentOpSeq=<llm>)` plus `OpFinalizedEvent` per llm op that has `reasoning.final`. The reasoning text content is stored in the reasoning op's extras as `reasoning.final`; no raw reasoning payload is inlined. SOW-0097 parity treats that extras field as the exact `reasoning_text` artifact for this adapter and proves its semantic-text hash/length with selector `field_path=reasoning.final`.
+10. **Embedded request/response payloads (legacy, no ref descriptor).** Older v2 snapshots may inline payloads directly. Canonical still never inlines raw bytes, and the v2 adapter stays read-only on source files, but inline payloads are represented by exact snapshot selectors: `PayloadRefEvent.LocationURI=file://<snapshot>.json.gz?json_pointer=<pointer>` with `Compression=gzip`. Producer-shaped `payload.ref` and `payload.sdk.ref` descriptors produce `PayloadRefEvent` rows and suppress inline emission for that side. The adapter also keeps constrained legacy flat descriptor compatibility for older helper-shaped snapshots and tests: a flat descriptor must have a non-empty string `ref`, or a top-level `path` accompanied by evidence metadata such as `format`, byte counts, hash, compression, or `captured`. A bare inline object like `{"path":"src/file"}` is not a payload ref; it is an inline JSON payload and receives a snapshot JSON-pointer selector. If both producer descriptors are present on the same request/response side, both rows are emitted with independent path validation. No side-cache or generated artifact is introduced.
 
 ## References
 

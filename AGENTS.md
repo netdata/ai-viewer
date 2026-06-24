@@ -4,11 +4,11 @@ A read-only, real-time explorer for AI coding-agent session snapshots. Multi-for
 
 > **⚠️ CURRENT PHASE: DEVELOPMENT (started 2026-06-14).**
 > The app is unreleased, not installed anywhere, zero users, zero production risk.
-> The **PR-per-SOW rule, master branch protection, and the mandatory 5-reviewer Production-Grade Loop are SUSPENDED** for this phase. Work goes directly to `master`.
+> The **PR-per-SOW rule and master branch protection are SUSPENDED** for this phase. Work goes directly to `master`.
 > CI / Codacy / cubic / CodeQL still run on every push to `master` as defense-in-depth; the CTO reads their findings and addresses the real ones.
-> The 5-reviewer cycle is **CTO-discretion** during this phase (use it for genuinely risky changes; skip for trivial).
+> External reviewers are used as **three milestone quality gates** on meaningful chunks of work: gap analysis, implementation plan, and implementation review.
 > See the **"Phase: Development"** section below for the full override list.
-> This phase ends when the operator declares GA; at that point the Production-Grade Loop (Hard Rule #11 + the dedicated section) takes over and this banner is removed.
+> This phase ends when the operator declares GA; at that point the operator decides which branch/PR protections return.
 
 ## Goals
 
@@ -21,7 +21,7 @@ A read-only, real-time explorer for AI coding-agent session snapshots. Multi-for
 
 ## Phase: Development (active — started 2026-06-14)
 
-The project is in active development: unreleased, not installed anywhere, zero users, zero production risk. Process weight matches risk weight. The rules in this section **override** the PR-per-SOW, master branch protection, and mandatory 5-reviewer rules during this phase. When the operator declares GA, this section is deleted and the Production-Grade Loop (Hard Rule #11 + the "Production-Grade Loop" section) takes over.
+The project is in active development: unreleased, not installed anywhere, zero users, zero production risk. Process weight matches risk weight. The rules in this section **override** the PR-per-SOW and master branch protection rules during this phase. When the operator declares GA, this section is deleted or revised.
 
 ### What's overridden during Development
 
@@ -29,22 +29,22 @@ The project is in active development: unreleased, not installed anywhere, zero u
 |---|---|
 | **PR per SOW** (Hard Rule #11 + workflow spec + Branch Protection section) | **Work directly on `master`.** No PRs, no per-SOW branches. Commit to `master` with clear SOW-referencing messages. SOWs still move `pending/` → `current/` → `done/` for tracking. |
 | **Master branch protection** (Branch Protection section) | **Not enforced as a gate.** The two repository rulesets (17315422 `protect-default-branch`, 17315423 `protect-master-branch`) have Team-admin bypass; the CTO pushes directly. The rulesets stay configured for GA re-enable. |
-| **5-reviewer Production-Grade Loop mandatory** (Hard Rule #11) | **CTO-discretion.** Run it on genuinely risky changes (schema, security, new adapter, cross-cutting refactor). Skip it for trivial changes. When in doubt, run it — but it's no longer a hard gate. |
-| **Hard Rule #4 "5/5 PRODUCTION GRADE before done"** | **Softened.** The honest phrasing during dev is "code written, gates green, CI green". Reviewer convergence is desired but not blocking. |
+| **Old single end-of-work review model** | **Replaced by three milestone review gates.** Reviewers validate the CTO's gap analysis, implementation plan, and implementation before a meaningful feature/batch/SOW is closed. |
+| **Old implementation-only vote wording** | **Replaced.** Reviewer votes now match the stage: `NOTHING MORE CAN BE DONE`, `READY FOR IMPLEMENTATION`, and `PRODUCTION GRADE`. |
 
 ### What stays in force during Development
 
 - **Specs first, tests second, code last** (Hard Rule #2) — invariant.
-- **The assistant never writes code in master context** (Hard Rule #3) — **SUSPENDED by operator directive 2026-06-14** (see Hard Rule #3 above). The CTO writes production code directly; `minimax` is reviewer-only.
+- **The CTO writes implementation directly** — helper subagents may be used for bounded investigation, but not as the normal implementation path.
 - **All automated quality gates** — CI runs on every push to `master` (lint, test, frontend, embed-smoke, gates, CodeQL). Codacy, cubic, Dependabot run too. The CTO reads their findings and addresses the real ones; they don't block.
 - **SOWs for tracking** — still write SOWs in `pending/` → `current/` → `done/`. They're the durable record of what was done and why. Just no PR-per-SOW.
-- **Delegation** — `minimax` still implements; the CTO still verifies subagent output (read the diff, re-run tests, re-run gates).
+- **External reviewer discipline** — reviewers are a gate on meaningful chunks, not a substitute for CTO analysis, planning, coding, self-review, or tests.
 - **Sensitive data hygiene** — invariant.
 - **Git discipline** — invariant (no `git add -A`, specific files only, never mention AI tools in commits, etc.).
 
 ### Phase transition
 
-- **Development → GA**: declared by the operator. At that point: delete this section + the top banner, re-enable the Production-Grade Loop as mandatory, switch back to PR-per-SOW, confirm branch protection is active. Record the transition in a SOW.
+- **Development → GA**: declared by the operator. At that point: delete or revise this section + the top banner, decide whether PR-per-SOW and branch protection return, and record the transition in a SOW.
 - **GA → Development**: not expected. If we need to roll back, the operator declares it and this section is re-added.
 
 ## Operating Contract — Hard Rules (Non-Negotiable)
@@ -55,9 +55,9 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 2. **Specs first, tests second, code last.** The order is invariant. The assistant updates the relevant spec before writing tests; writes tests before writing implementation; writes implementation only after both. See `.agents/sow/specs/workflow.md`.
 
-3. **The assistant never writes code in master context** *(GA-phase rule — **SUSPENDED by operator directive 2026-06-14**)*. Per direct operator instruction ("stop using minimax as a coder and do the coding yourself. Use minimax as a reviewer from now on"), the **CTO now writes production code directly**; `minimax` is **reviewer-only** (it remains one of the 5 reviewers, but no longer the implementer). Hard Rule #3's master-context Edit/Write prohibition is lifted for production source; the CTO still owns specs/tests/SOWs/AGENTS.md as before. This override is in force until the operator rescinds it. The full Production-Grade Loop below is updated to reflect it (implementer = CTO; `minimax` stays in the reviewer set). The spec→test→code ordering, the automated gates, the no-silent-failures invariant, and the 5-reviewer second-opinion practice are all unchanged. Master-context edits permitted as before for: `AGENTS.md`, `.agents/sow/specs/*`, `.agents/skills/*`, SOW files, `README.md`, `LICENSE`, top-level config the assistant owns end-to-end, and trivial typo/format fixes the assistant has verified by reading — PLUS now all production source (`cmd/**`, `internal/**`, `frontend/src/**`, etc.) under the same discipline (tests + gates + reviewer cycle).
+3. **The CTO writes implementation directly.** The CTO owns planning, coding, tests, self-review, gates, commits, and reporting. Helper subagents may be used for bounded investigation or summarization, but they are not the normal implementation path and they do not replace CTO ownership.
 
-4. **The assistant does not trust itself.** Any code the assistant or its subagents have just produced is buggy by default. Before claiming any work "done", "working", or "ready for the operator": (a) automated tests covering the change must exist and pass, (b) all configured quality gates must pass, (c) the 5-reviewer Production-Grade Loop must have converged with 5/5 PRODUCTION GRADE (or only P3 noise with documented disposition) and the CTO must have verified every claim. Without all three, the assistant must report the work as "code written, not yet verified" — never as working. See `.agents/skills/project-quality-gates/SKILL.md` and `.agents/skills/project-second-opinions/SKILL.md`.
+4. **The assistant does not trust itself.** Work is treated as incomplete until it has the right evidence. Before claiming meaningful work complete: (a) automated tests covering the change must exist and pass, (b) configured quality gates must pass, (c) the applicable external reviewer gate has converged, and (d) the CTO has verified every reviewer claim. P0/P1/P2 findings are fixed or rejected with evidence; only P3 cosmetic findings may be documented and left. Without that evidence, the honest status is "not yet verified".
 
 5. **Untested ≡ broken.** The operator will not manually test code for the assistant. Manual UI walkthroughs by the assistant are diagnostics, not proof. Every behavior the project ships has at least one automated test exercising it. Coverage thresholds are enforced in CI.
 
@@ -71,7 +71,7 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
 
-11. **The Production-Grade Loop is the operating model.** *(GA-phase rule — **partially SUSPENDED by operator directive 2026-06-14**)*. The CTO writes production code directly (Hard Rule #3 suspended). The 5-reviewer cycle (`glm`, `mimo`, `minimax`-fresh, `qwen`, `deepseek`) remains the quality model but is **CTO-discretion** during the Development phase: run it on genuinely risky changes (schema, security, new adapter, cross-cutting refactor); skip for trivial. **This rule must survive restarts and compactions** — the full protocol lives in the "Production-Grade Loop" section below and in the `project-second-opinions`, `project-delegation`, and `project-workflow` skills. The CTO does not skip the reviewer cycle on CTO-written code — it is treated as buggy-by-default until tests + gates + the 5-reviewer cycle converge. The operator does not see technical detail.
+11. **Three external reviewer gates protect meaningful work.** The reviewer set is `glm`, `minimax`, `kimi`, `mimo`, `deepseek`, and `qwen`. Reviewers are intentionally diverse and are used to ensure nothing is missed, lost, forgotten, or overlooked. They run on good chunks of work: at least per SOW, and per milestone for complex SOWs. They do not run for every line or trivial edit. The gates are: (1) gap analysis review, vote `NOTHING MORE CAN BE DONE`; (2) implementation-plan review, vote `READY FOR IMPLEMENTATION`; (3) implementation review, vote `PRODUCTION GRADE`.
 
 ## Ownership Model
 
@@ -92,7 +92,7 @@ This repository operates under a delegated-ownership contract.
 - All code, tests, CI, releases, documentation.
 - Bug triage, fixes, performance tuning, profiling.
 - Build, install, run scripts.
-- **Quality enforcement**: zero lint warnings, zero test failures, coverage thresholds met, automated gates green, second-opinion review converged — before any merge.
+- **Quality enforcement**: zero lint warnings, zero test failures, coverage thresholds met, automated gates green, and applicable external reviewer gates converged before closing meaningful work.
 - **Tooling**: every quality gate that can be automated, is automated.
 - **Long-term memory hygiene**: keeping `AGENTS.md`, specs, and skills up to date with reality.
 
@@ -106,7 +106,7 @@ Every non-trivial change of architecture or design must be visible to the operat
 
 After SOW sign-off, the assistant does not ask permission for technical choices within the agreed scope. If a finding materially changes the SOW, the assistant pauses, writes an addendum, and asks. Otherwise: work proceeds; the operator receives a verified, tested, reviewed system.
 
-**SOW sign-off is the ONLY approval gate.** The operator does NOT approve pull requests, code reviews, branch protection settings, dependency upgrades, or any other in-implementation step. PR review is performed by the 5-reviewer Production-Grade Loop (see the dedicated section below + `project-second-opinions` skill). The assistant **opens AND merges its own PRs** via `gh pr merge --merge --delete-branch` after the 5-reviewer cycle converges. Asking the operator to "approve" a PR is a contract breach.
+**SOW sign-off is the ONLY operator approval gate.** The operator does NOT approve pull requests, code reviews, branch protection settings, dependency upgrades, or any other in-implementation step. External reviewers are quality gates for the CTO, not an operator approval substitute. Asking the operator to "approve" a PR is a contract breach.
 
 ## Spec → Test → Code Protocol
 
@@ -114,25 +114,24 @@ Mandatory ordering for any change with runtime behavior:
 
 1. **Update the spec.** Identify which specs under `.agents/sow/specs/` describe the affected behavior. Update them to describe the target behavior. If no spec covers it, create one.
 2. **Write tests against the new spec.** Tests fail because the implementation does not yet exist or does not yet match the spec. Failing tests are the executable contract.
-3. **Write the implementation.** Implementation makes the tests pass without weakening them. Subagent-produced (see Delegation Protocol).
+3. **Write the implementation.** Implementation makes the tests pass without weakening them. The CTO writes the implementation directly.
 4. **Run all automated gates.** See `.agents/skills/project-quality-gates/SKILL.md`. Any failure blocks completion.
-5. **Run the 5-reviewer Production-Grade Loop.** See `AGENTS.md` "Production-Grade Loop" and `.agents/skills/project-second-opinions/SKILL.md`. The CTO runs `glm`, `mimo`, `minimax` (fresh-context), `qwen`, `deepseek` in parallel. Each votes `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. The CTO verifies every claim. Re-trigger on P0/P1; fix P2 in the same PR; document P3.
+5. **Run the applicable external reviewer gate.** See `AGENTS.md` "Three Reviewer Gates" and `.agents/skills/project-second-opinions/SKILL.md`. Reviewers vote on the stage-specific outcome. The CTO verifies every claim. P0/P1/P2 findings are fixed or rejected with evidence; P3 may be documented.
 6. **Commit spec + tests + code + doc updates together.** Drift between artifacts is impossible if they ship in one commit.
 
 Skipping a step is forbidden. If a step is genuinely not applicable (e.g. doc-only change), the SOW must justify the skip in writing.
 
 Detailed workflow lives at `.agents/sow/specs/workflow.md`. The runtime checklist lives at `.agents/skills/project-workflow/SKILL.md`.
 
-## Delegation Protocol
+## Helper Subagent Protocol
 
-The assistant orchestrates and writes production code (per the 2026-06-14 operator directive); the 5 reviewers verify. Rules:
+The CTO owns the work and writes implementation directly. Helper subagents are optional tools for bounded investigation or summarization. Rules:
 
-- **Production code is written by the CTO directly.** The `minimax` implementer role is **suspended** (reviewer-only). The CTO may still delegate heavy drafting to it ad-hoc, but the default is CTO-coded.
-- **Heavy investigation is always delegated.** Multi-file reads, exploratory searches, and cross-cutting audits go to `Explore` or `general-purpose` subagents.
-- **The 5-reviewer cycle is also delegated — but only the CTO runs it.** The implementer never runs reviewers; the master runs the 5-reviewer Production-Grade Loop on the final integrated state.
-- **Parallelize aggressively.** When subtasks are independent (e.g. running 5 reviewers, or scaffolding 2 unrelated packages), launch them in a single message with parallel Agent invocations.
-- **Subagent prompts are self-contained.** They include file paths, the spec excerpts they must honor, the tests they must make pass, and the quality gates they must satisfy. They do not assume conversation context. Implementation prompts include the `[FORBIDDEN]` block stating the implementer MUST NOT run external reviewers.
-- **Verify subagent output before trusting it.** Read the actual changes; do not rely on the subagent's summary. Run the quality gates yourself before reporting progress to the operator. Verify every reviewer claim before acting on it.
+- **Do not delegate implementation by default.** The normal path is CTO-coded.
+- **Use helper subagents for bounded investigation** when reading many files or comparing independent areas would otherwise flood context.
+- **Parallelize independent helper work** when it reduces wall time without causing conflicting edits.
+- **Subagent prompts are self-contained.** They include file paths, the question, scope, and expected evidence.
+- **Verify subagent output before trusting it.** Summaries are claims, not proof. Read the relevant files and rerun the checks yourself.
 
 Detailed patterns and prompt templates: `.agents/skills/project-delegation/SKILL.md`.
 
@@ -170,7 +169,7 @@ The assistant performs these every time, regardless of how confident it feels. T
 
 1. Read `.agents/sow/pending/` and `.agents/sow/current/` for overlap, contradictions, existing decisions.
 2. Read `.agents/sow/specs/index.md` and the specs it points to that touch the affected areas.
-3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum: `project-workflow`, `project-coding`, `project-quality-gates`, `project-delegation`, `project-second-opinions` (the runtime enforcement of the Production-Grade Loop).
+3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum for implementation work: `project-workflow`, `project-coding`, `project-quality-gates`, `project-testing`, and `project-second-opinions` when a review gate is due. Read `project-delegation` only when using helper subagents.
 4. Read source code, tests, fixtures as ground truth.
 5. Ask the operator only for irreducible product/design/risk decisions. Never technical ones.
 
@@ -182,7 +181,7 @@ The assistant runs this checklist before reporting a task complete to the operat
 - [ ] Tests exist covering the new/changed behavior; tests pass; race detector clean.
 - [ ] Coverage thresholds met for affected packages.
 - [ ] All quality gates green locally.
-- [ ] 5-reviewer Production-Grade Loop run for non-trivial work; CTO verified every claim; 5/5 PRODUCTION GRADE (or only P3 noise with documented disposition).
+- [ ] Applicable external reviewer gate run for the current stage; CTO verified every claim; P0/P1/P2 findings fixed or rejected with evidence; only P3 cosmetic findings remain documented.
 - [ ] No new TODO/FIXME left without a SOW in `.agents/sow/pending/`.
 - [ ] `AGENTS.md`, relevant skills, and relevant specs updated if a new pattern, gotcha, or convention emerged.
 - [ ] No half-built features in the diff.
@@ -259,7 +258,7 @@ ai-viewer.git/
 │   ├── skills/                  project skills (runtime guidance for assistants)
 │   │   ├── project-workflow/SKILL.md         master spec→test→code cycle
 │   │   ├── project-quality-gates/SKILL.md    automated gates catalog
-│   │   ├── project-delegation/SKILL.md       subagent orchestration patterns
+│   │   ├── project-delegation/SKILL.md       helper-subagent patterns
 │   │   ├── project-coding/SKILL.md           coding standards
 │   │   ├── project-go-backend/SKILL.md       Go patterns
 │   │   ├── project-frontend/SKILL.md         React/TS patterns
@@ -305,121 +304,144 @@ ai-viewer.git/
     └── workflows/               CI: every gate above on every push
 ```
 
-## Production-Grade Loop — Implementer + 5-Reviewer Cycle
+## Three Reviewer Gates
 
-This is the **single source of truth for how code is produced**. It is the assistant's standing operating model. It must survive restarts, compactions, and the next instance of the assistant. Treat the rules below as non-negotiable, like the Hard Rules above. The runtime enforcement lives in `.agents/skills/project-second-opinions/SKILL.md`, `.agents/skills/project-delegation/SKILL.md`, and `.agents/skills/project-workflow/SKILL.md`; this section is the contract; the skills are the implementation.
+External reviewers are how the project gets the collective expertise of several
+different strong models, each with different training and biases. They are not
+implementers and they are not a replacement for CTO analysis. They are quality
+gates that ensure nothing important was missed.
 
-### The model split
+Reviewer set:
 
-| Role | Model | Job |
-|---|---|---|
-| **CTO (master assistant)** | me | orchestrate, decide, verify reviewer claims, integrate, merge, report. **Writes production code directly** (operator directive 2026-06-14; Hard Rule #3 suspended). |
-| ~~Implementer~~ (`minimax`) | `llm-netdata-cloud/minimax-m3-coder` | **reviewer-only** per the 2026-06-14 operator directive — no longer the implementer. The CTO may still delegate to it ad-hoc for heavy drafting, but the default is CTO-coded. |
-| **Reviewers** | `glm`, `mimo`, `minimax`, `qwen`, `deepseek` (5 in parallel, fresh-context) | independent second opinions, each voting `PRODUCTION GRADE` or `NEEDS WORK` with P0–P3 findings. |
-| **CTO (verification)** | me | verify every reviewer claim, drive iteration, decide when to stop. |
+- `glm`
+- `minimax`
+- `kimi`
+- `mimo`
+- `deepseek`
+- `qwen`
 
-**Operator directive 2026-06-14 (in force until rescinded):** the CTO writes production code directly; `minimax` is reviewer-only. The 5-reviewer set is unchanged (glm/mimo/minimax/qwen/deepseek). This trades the implementer≠reviewer separation (a GA-phase strength) for faster dev-phase iteration — the 5 external reviewers still provide independent review of CTO-written code, so the code is never self-graded. If the operator rescinds this directive, revert this section + Hard Rule #3 and return to `minimax`-implements.
+The CTO runs reviewers on meaningful chunks of work: at least per SOW, and per
+milestone for complex SOWs. Do not run reviewers for every line or tiny edit. Do
+not batch many unrelated SOWs into one review. A good default is three gates per
+SOW: gap analysis, implementation plan, and implementation.
 
-**I do not trust my own code.** CTO-written code is treated exactly like subagent-produced code: it is buggy by default until tests + gates + the 5-reviewer cycle converge. The CTO does not skip the reviewer cycle for CTO-written code any more than for subagent-written code.
+### Gate 1 — Gap Analysis
 
-**Implementer ≠ Reviewer.** The `minimax` instance that implements a SOW is **not** the same instance that reviews it. The reviewer `minimax` is a fresh-context review pass that has not seen the implementation. This kills the self-review blind spot while still collecting minimax's expertise in the review set. The recursion-safety rule in `project-second-opinions` SKILL still applies: any assistant instance that detects "I am being run for review" must not invoke external reviewers.
+Input to reviewers:
 
-**I do not trust the implementer.** External reviewers are how the project gets the collective output of all five models. The CTO's job is to fuse those reviews with the implementer's work into a verified, tested, gate-green change. The implementer is fast; the reviewers are correct; the CTO is accountable.
+- the original goal;
+- the CTO's gap analysis;
+- relevant SOW/spec/code evidence;
+- known constraints and risks.
 
-### The loop
+Reviewer vote:
 
-```
-1. CTO decides SOW scope, writes/updates specs, drafts failing tests
-2. CTO delegates implementation to minimax (per project-delegation skill)
-3. minimax writes code + makes tests pass + runs local gates
-4. CTO verifies minimax's work: diff read, tests re-run, gates re-run, no collateral damage
-5. CTO selects the 5 reviewers (glm, mimo, minimax, qwen, deepseek) and runs them in parallel on the final diff
-6. Each reviewer votes PRODUCTION GRADE or NEEDS WORK with findings
-7. CTO verifies every finding (read the code, run the repro, check the spec). Reject false positives.
-8. P0/P1 findings → fix and re-trigger full 5-reviewer cycle
-   P2 findings → fix in the same PR, re-trigger the cycle; merge only when 5/5 PG or only P3 noise remains
-   P3 findings → fix in the same PR, document in SOW `## Reviews`, merge when gate green
-9. CI green on all required status checks + 5 reviewers converge → CTO merges, checks out master, pulls, continues
-```
+- `NOTHING MORE CAN BE DONE` — the gap analysis is complete enough to plan from.
+- `NEEDS WORK` — one or more gaps, risks, edge cases, tests, specs, or checks are missing.
 
-### When the loop runs
+Purpose: discover what else could reasonably be done to achieve the goal before
+the implementation plan narrows the solution.
 
-The loop runs **once per PR**, not on every little change. Specific triggers (any of these is enough):
+### Gate 2 — Implementation Plan
 
-- **End of SOW** — before opening the PR. Always.
-- **Before risky changes** — schema changes, cross-cutting refactors, security-sensitive work, new adapter implementation. Earlier is better than later.
-- **After critical changes** — once a non-trivial chunk is green locally (tests + gates), CTO triggers the cycle.
-- **When uncertain** — if the CTO is not sure about an architectural call, trigger early on a design/spec, not on the full diff.
-- **Contract / process changes** — any PR that touches the production process (AGENTS.md, project skills, specs, workflows, CI config) goes through the 5-reviewer cycle. Only mechanical typo/format fixes and purely informational README-only docs are exempt.
+Input to reviewers:
 
-The CTO judges "good chunk" per the spirit of this rule. The bar is: **a PR is the unit**. One SOW = one PR = one loop = one merge.
+- the original goal;
+- accepted gap analysis;
+- CTO implementation plan;
+- planned specs, tests, files, gates, rollout/installation steps, and risk controls.
 
-### PRODUCTION GRADE vote
+Reviewer vote:
 
-Each reviewer responds with one of two outcomes:
+- `READY FOR IMPLEMENTATION` — the plan is coherent, complete, and unlikely to create avoidable side effects.
+- `NEEDS WORK` — the plan misses work, has bad sequencing, weak tests, unclear contracts, or likely breakage.
 
-- `PRODUCTION GRADE` — ship it, no actionable findings.
-- `NEEDS WORK` — one or more findings, each with file:line, severity, and concrete fix.
+Purpose: ensure the plan covers the goal and gap analysis before code is written.
 
-Findings carry severity:
+### Gate 3 — Implementation
 
-- **P0** — correctness bug, data loss, security hole, race. Blocks merge.
-- **P1** — design defect, missing error path, test gap on a contract. Blocks merge.
-- **P2** — quality, readability, simplification, non-blocking test gap. Fix in this PR; re-trigger the cycle; merge only when 5/5 PG or only P3 noise remains. CTO may explicitly waive with a documented reason (rare).
-- **P3** — nit, taste, alternative. Fix in this PR, document in SOW `## Reviews`, merge with note.
+Input to reviewers:
 
-### Stop conditions
+- the original goal;
+- accepted gap analysis;
+- accepted implementation plan;
+- final diff/code/tests/spec changes;
+- local test/gate results.
 
-- **5/5 PRODUCTION GRADE, gates green, CI green** → CTO merges.
-- **Any P0/P1 NEEDS WORK** → fix, push, re-trigger full 5-reviewer cycle. Iterate.
-- **P2 NEEDS WORK** → fix in the same PR, re-trigger the full 5-reviewer cycle; merge only when 5/5 PG or only P3 noise remains.
-- **P3 NEEDS WORK** → fix in the same PR, document in SOW `## Reviews`, merge with note when gates green and CI green.
-- **Hard stall: 5+ cycles with new P0/P1 each round** → CTO writes a `## Regression` section in the SOW, opens a follow-up SOW in `.agents/sow/pending/`, and surfaces to the operator with a business-level recommendation (e.g. "SOW X is blocked on recurring P0 findings; recommend re-scoping or accepting reduced scope"). Do not loop forever; do not over-share reviewer detail in the operator report.
+Reviewer vote:
 
-### Claim verification (CRITICAL)
+- `PRODUCTION GRADE` — implementation and tests satisfy the goal and plan with no actionable findings.
+- `NEEDS WORK` — correctness, completeness, side-effect, security, performance, maintainability, or test issues remain.
 
-Reviewer findings are **claims, not findings**. The CTO verifies every claim before acting on it. Verification steps:
+Purpose: ensure the implementation is correct before moving to the next item,
+committing, pushing, installing, or closing the SOW.
 
-1. **Read the file:line the reviewer cited.** Does the code actually do what the reviewer said?
-2. **Run the repro.** If the reviewer says "this race fires under X", construct X and run it.
-3. **Cross-check with the spec.** If the reviewer says "violates SPEC Y §3.2", open the spec and confirm.
-4. **Decide**: real bug (fix), false positive (reject with evidence), disputed (escalate).
+### Severity And Stop Conditions
 
-Acting on unverified claims causes two failure modes: (a) implementing phantom bugs that don't exist, (b) ignoring real bugs because the reviewer "sounded uncertain". Verify, then act. The CTO is the only one who decides.
+Reviewer findings carry severity:
 
-### Backup implementer
+- **P0** — correctness bug, data loss, security issue, race, or direct goal failure. Blocks progress.
+- **P1** — design defect, missing contract, missing error path, or missing test on required behavior. Blocks progress.
+- **P2** — maintainability, completeness, performance, or important quality issue. Blocks progress; fix or reject with evidence.
+- **P3** — cosmetic, wording, minor preference, or non-blocking alternative. May be documented and left.
 
-If `minimax` is down/degraded for an extended period, the CTO rotates the implementer role to the next-most-capable member of the reviewer set. Default order: `qwen` → `mimo` → `deepseek` → `glm`. The backup operates under the same protocol — but with **one twist**: the rotated reviewer is **removed from the 5-reviewer cycle** for that PR (so the implementer is not also reviewing their own work), and the 5-reviewer set is filled by substituting a reviewer from the ad-hoc set (`codex`, `gemini`, `claude`, `kimi`) chosen by the CTO. The CTO logs the rotation AND the substitution in the SOW under `## Implementer Rotation`.
+For every gate:
 
-### Implementer model spec
+- P0/P1/P2 findings are fixed, or rejected as false positive/hallucination with evidence.
+- P3 findings may be fixed or documented.
+- Re-run the same gate with the same broad scope after fixes. Add only short notes about what changed; do not narrow the scope to "review the fixes".
+- Stop only when every real reviewer response is positive for that gate, or when every non-positive response is verified as false-positive/noise with evidence. Reviewers that fail technically after the allowed single retry are recorded and skipped for the current gate only.
 
-`minimax` is the implementation model. The CTO pins to the **current stable minimax variant on litellm** at the time of work (per the project's "always pin to latest stable" policy). The default and current variant is `llm-netdata-cloud/minimax-m3-coder` (the latest stable coder variant, released 2026-06-01). The implementer and the reviewer-minimax use the same model so the split is unambiguous and so a version bump to one is a version bump to both. Major-version upgrades require a brief SOW; minor/patch upgrades are autonomous and committed together with passing gates. If the implementer is changed (e.g. backup rotation), the CTO updates the `### The model split` table above in the same commit.
+### Claim Verification
 
-### Automated reviewers (cubic, codacy, dependabot, Snyk, etc.)
+Reviewer findings are claims, not facts. The CTO verifies every claim before
+acting:
 
-These run automatically on every PR. They are **supplementary signals, not part of the 5-reviewer vote**:
+1. Read the cited file/spec/SOW lines.
+2. Run or construct the repro when applicable.
+3. Cross-check the goal and accepted gate artifacts.
+4. Decide: real finding, false positive, hallucination, or disputed.
+5. Record the disposition in the SOW or working notes for the gate.
 
-- The implementer (`minimax`) addresses their findings as part of the work, before opening the PR.
-- If an automated finding touches an area the 5 reviewers flagged, the CTO re-triggers the 5-reviewer cycle on the new diff.
-- Cubic, Codacy, and Dependabot backlogs (e.g. SOW-0046, SOW-0047) are tracked separately in the SOW system.
+### Reviewer Unavailability
 
-### Reviewer unavailability (single reviewer down)
+Reviewer failures are usually technical and transient: timeout, truncated output,
+empty output, command failure, or malformed response.
 
-If a reviewer in the 5-reviewer set is unavailable for a cycle (litellm error, model deprecated, timeout, rate limit), the CTO retries once. If still unavailable, the CTO substitutes from the ad-hoc set (`codex`, `gemini`, `claude`, `kimi`) and logs the substitution in the SOW `## Reviews` with the reason. The 5-reviewer count remains 5; the substitution is transparent to the operator report (operator still sees `5/5 PG` or `4/5 PG` etc., not the substitution details).
+When a reviewer batch returns:
 
-If two or more reviewers in the 5-reviewer set are unavailable simultaneously, the CTO surfaces to the operator as a hard stall with a business-level recommendation.
+- If any successful reviewer found P0/P1/P2 findings that the CTO accepts as real
+  or not yet disproven, do not spend time retrying failed reviewers in that
+  round. Fix or reject the blocking findings first, then rerun the whole reviewer
+  batch, including the reviewers that failed.
+- Retry failed reviewers immediately only when all successful reviewers voted
+  positively, or found only P3 findings, and the missing votes matter for closing
+  the gate.
+- Retry a failed reviewer once. If the retry also fails technically, record it,
+  temporarily remove that reviewer from the required votes for the current gate
+  only, and move on.
+- The skip is local to the current gate after the initial technical failure plus
+  one retry. Try the reviewer again on a later task or later gate; do not assume
+  the model is permanently unavailable.
 
-### What the operator sees
+### Automated Reviewers
 
-The operator sees **business outcomes, not technical detail**. In every report:
+Cubic, Codacy, Dependabot, CodeQL, and similar systems are supplementary
+signals. They do not replace the three reviewer gates. Their real findings are
+handled like any other gate finding; false positives require evidence.
 
-- SOW id and one-line description.
-- PR link + state (open / merged / blocked).
-- Reviewer verdicts (PRODUCTION GRADE counts: `4/5`, `5/5`).
-- Gate status (green / red).
-- Blocker (if any), with the question or decision needed.
+### What The Operator Sees
 
-The operator does **not** see code, design rationale, file paths, test names, or gate command output. The CTO decides and reports; the operator approves SOWs and accepts or rejects the outcome. **SOW sign-off is the only operator gate.**
+Reports to the operator stay compact:
+
+- SOW/goal and one-line state.
+- Gate status: gap / plan / implementation.
+- Reviewer vote summary.
+- Gate status: green / red.
+- Blocker or next action.
+
+Technical detail, reviewer transcripts, file paths, and gate output live in the
+SOW or working artifacts, not in long operator reports unless the operator asks.
 
 ## Sensitive Data In Durable Artifacts
 
@@ -464,6 +486,21 @@ The assistant must not create git worktrees on their own. Create a worktree only
 
 ## Branch Protection and Merge Workflow
 
+During the active Development phase, the project works directly on `master`.
+This section records both the current Development flow and the GA/explicit-PR
+flow so the ruleset can be re-enabled later without losing the contract.
+
+Current Development flow:
+
+1. Assistant works directly on `master`.
+2. Assistant runs applicable reviewer gates before closing meaningful work. For implementation review, the vote is `PRODUCTION GRADE`.
+3. Assistant verifies every reviewer claim, addresses P0/P1/P2 findings or rejects them with evidence, and documents or fixes P3 findings.
+4. Assistant commits only specific in-scope files, with clear SOW-referencing messages.
+5. Assistant pushes `master`, reads CI/Codacy/CodeQL/cubic output, and addresses real findings.
+6. Assistant continues work — no operator step.
+
+GA/explicit-PR branch protection:
+
 The canonical branch protection on `master` for this repo (and any new operator repo created at the operator's direction) is:
 
 - `enforce_admins: true` — destructive-action protection applies to admins.
@@ -473,13 +510,13 @@ The canonical branch protection on `master` for this repo (and any new operator 
 - `required_status_checks` populated with the CI job names recorded in `.github/workflows-checks.yaml` once the SOW-0013 post-merge setup runs.
 - GitHub repository rulesets must not reintroduce a manual PR-review gate on `master`. Any active branch ruleset targeting `master` or `~DEFAULT_BRANCH` must omit `pull_request` rules that require approving reviews or code-owner review; if such a ruleset exists, disable or update it before merging.
 
-The merge workflow:
+GA/explicit-PR merge workflow:
 
 1. Assistant creates a feature branch and pushes work.
 2. Assistant opens a PR (`gh pr create`) — for clean history + SOC2 audit trail.
-3. Assistant runs the **5-reviewer Production-Grade Loop** (glm, mimo, minimax, qwen, deepseek) per the section above on every non-trivial code-producing PR.
-4. Assistant verifies every reviewer claim, addresses findings, and iterates per the P0/P1/P2/P3 stop conditions.
-5. Assistant merges itself: `gh pr merge <num> --merge --delete-branch` — only when 5/5 PRODUCTION GRADE, gates green, and CI green.
+3. Assistant runs the applicable external reviewer gate before closing meaningful work. For implementation review, the vote is `PRODUCTION GRADE`.
+4. Assistant verifies every reviewer claim, addresses P0/P1/P2 findings or rejects them with evidence, and documents or fixes P3 findings.
+5. Assistant merges itself: `gh pr merge <num> --merge --delete-branch` — only when the applicable gate has converged, local gates are green, and CI is green.
 6. Assistant continues work — no operator step.
 
 Asking the operator to approve a PR is forbidden. The operator's approval gate is the SOW, not the PR.

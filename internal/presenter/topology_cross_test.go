@@ -348,6 +348,35 @@ func TestCrossTopology_DefaultMetricIsDuration(t *testing.T) {
 	}
 }
 
+// TestCrossTopology_RunningSessionDurationMetricIsZero pins rest-api.md's
+// contract that cross-session duration is 0 when end/duration is unknown. The
+// sort still uses the raw duration_us column for the default-index path, but
+// the projected size_metric must never scan NULL into the JSON response.
+func TestCrossTopology_RunningSessionDurationMetricIsZero(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "src1", "aiagent_v3", "/tmp/a", base)
+	seedSession(t, db, sessionRow{
+		id: "running", sourceID: "src1", nativeID: "n-run", rootID: "running",
+		kind: "root", agent: "nedi", status: "running",
+		startTS: base + 1_000, opCount: 1,
+	})
+
+	code, body, env := getCrossTopology(t, p, "metric=duration")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, env=%+v", code, env)
+	}
+	node := crossNode(t, body, "agent:running")
+	if node.SizeMetric != 0 {
+		t.Fatalf("running size_metric = %v, want 0", node.SizeMetric)
+	}
+	if body.MaxSizeMetric != 0 {
+		t.Fatalf("max_size_metric = %v, want 0", body.MaxSizeMetric)
+	}
+}
+
 // TestCrossTopology_UnknownMetricRejected asserts an unknown ?metric= is a 400.
 func TestCrossTopology_UnknownMetricRejected(t *testing.T) {
 	t.Parallel()

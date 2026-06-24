@@ -47,16 +47,15 @@ type worker struct {
 	// cheap session-count update). The binary clears this after the initial
 	// Scan completes and runs BackfillReadModels to build the deferred models.
 	deferReadModels *atomic.Bool
-	// onErr is invoked for batch-level failures (commit errors, etc.).
+	// onErr is invoked for terminal batch failures that lost primary rows.
 	// Defaults to logger.Error if not set.
 	onErr func(error)
 }
 
 // flush opens a transaction, applies every event in batch via the
 // writer, refreshes aggregates, persists source_progress, and commits.
-// On any error the transaction rolls back and the error is returned to
-// the caller; the batch is dropped (we do not retry — see
-// ingester.md §Failure Recovery).
+// On any error the transaction rolls back and the error is returned to the
+// caller; workerRuntime owns bounded retry and terminal-drop reporting.
 func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event) error {
 	wr.fts5IndexLogs = w.fts5IndexLogs
 	tx, err := w.db.BeginTx(ctx, nil)
@@ -225,6 +224,16 @@ func (w *worker) report(err error) {
 			"source_id", w.sourceID,
 			"err", err)
 	}
+}
+
+func (w *worker) reportRecoverable(msg string, err error, attrs ...any) {
+	if err == nil || w.logger == nil {
+		return
+	}
+	args := make([]any, 0, 4+len(attrs))
+	args = append(args, "source_id", w.sourceID, "err", err)
+	args = append(args, attrs...)
+	w.logger.Warn(msg, args...)
 }
 
 // ensureSourceRow inserts the source row if it does not yet exist. The

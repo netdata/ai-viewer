@@ -202,6 +202,20 @@ func crossSizeExpr(metric topologyMetric, alias string) string {
 	}
 }
 
+func crossProjectedSizeExpr(metric topologyMetric, alias string) string {
+	if metric == metricDuration {
+		return "COALESCE(" + crossSizeExpr(metric, alias) + ", 0)"
+	}
+	return crossSizeExpr(metric, alias)
+}
+
+func crossOrderSizeExpr(metric topologyMetric, alias string) string {
+	if metric == metricDuration {
+		return crossSizeExpr(metric, alias)
+	}
+	return "size_metric"
+}
+
 // loadCrossAgents selects the matching sessions as agent accumulators, ordered
 // by the selected size_metric DESC (then id ASC for a stable tie-break),
 // limited to effectiveMaxTopologyNodes()+1 so the caller can both keep the top-N and learn
@@ -226,7 +240,8 @@ func (p *Presenter) loadCrossAgents(ctx context.Context, f sessionFilter, metric
 
 func crossAgentsSelect(f sessionFilter, metric topologyMetric, limit int) (string, []any) {
 	where, args := f.whereClause("s")
-	sizeExpr := crossSizeExpr(metric, "s")
+	sizeExpr := crossProjectedSizeExpr(metric, "s")
+	orderSizeExpr := crossOrderSizeExpr(metric, "s")
 	// failure_ratio = failure_count / op_count (0 when op_count is 0). Computed
 	// as a REAL so the division is not integer-truncated.
 	query := `
@@ -234,7 +249,7 @@ SELECT s.id, IFNULL(s.parent_session_id, ''), IFNULL(s.agent_name, ''), s.kind, 
        ` + sizeExpr + ` AS size_metric,
        CASE WHEN s.op_count > 0 THEN CAST(s.failure_count AS REAL) / s.op_count ELSE 0 END AS failure_ratio
 FROM sessions s WHERE ` + where + `
-ORDER BY size_metric DESC, s.id ASC
+ORDER BY ` + orderSizeExpr + ` DESC, s.id ASC
 LIMIT ?` // #nosec G202 -- sizeExpr is a fixed crossSizeExpr enum switch (not user input); whereClause is static SQL + ?-placeholders; values bound via args
 	args = append(args, limit+1)
 	return query, args

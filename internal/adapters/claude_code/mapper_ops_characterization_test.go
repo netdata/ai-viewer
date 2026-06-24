@@ -1,12 +1,13 @@
 package claude_code
 
 import (
+	"net/url"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
-func TestMapper_UserMultipleToolResultsEmitsOnePayloadForFirstMatch(t *testing.T) {
+func TestMapper_UserMultipleToolResultsEmitsExactPayloadsAndOneEcho(t *testing.T) {
 	t.Parallel()
 
 	events := mapAll(t, "s", "", canonical.KindRoot, "", nil,
@@ -20,7 +21,7 @@ func TestMapper_UserMultipleToolResultsEmitsOnePayloadForFirstMatch(t *testing.T
 	for _, ev := range events {
 		switch e := ev.(type) {
 		case canonical.OpFinalizedEvent:
-			if e.TurnSeq == 1 && (e.Seq == 2 || e.Seq == 3) {
+			if e.TurnSeq == 1 && (e.Seq == 3 || e.Seq == 4) {
 				finalized[e.Seq] = e
 			}
 		case canonical.PayloadRefEvent:
@@ -30,7 +31,7 @@ func TestMapper_UserMultipleToolResultsEmitsOnePayloadForFirstMatch(t *testing.T
 		}
 	}
 
-	for _, seq := range []int{2, 3} {
+	for _, seq := range []int{3, 4} {
 		ev, ok := finalized[seq]
 		if !ok {
 			t.Fatalf("tool op seq %d was not finalized", seq)
@@ -39,13 +40,39 @@ func TestMapper_UserMultipleToolResultsEmitsOnePayloadForFirstMatch(t *testing.T
 			t.Fatalf("tool op seq %d status = %q, want completed", seq, ev.Status)
 		}
 	}
-	if len(payloads) != 1 {
-		t.Fatalf("tool_response payload refs = %d, want 1 for the record-level toolUseResult", len(payloads))
+	if len(payloads) != 3 {
+		t.Fatalf("tool_response payload refs = %d, want 3: two block payloads plus one record-level toolUseResult", len(payloads))
 	}
-	if payloads[0].TurnSeq != 1 || payloads[0].OpSeq != 3 {
-		t.Fatalf("toolUseResult payload scoped to turn=%d op=%d, want first matched tool_result op turn=1 op=3",
-			payloads[0].TurnSeq, payloads[0].OpSeq)
+	wantPointers := map[string]int{
+		"/message/content/0/content": 4,
+		"/message/content/1/content": 3,
+		"/toolUseResult":             4,
 	}
+	for _, payload := range payloads {
+		pointer := payloadRefJSONPointer(t, payload.LocationURI)
+		opSeq, ok := wantPointers[pointer]
+		if !ok {
+			t.Fatalf("unexpected tool_response payload pointer %q in URI %q", pointer, payload.LocationURI)
+		}
+		if payload.TurnSeq != 1 || payload.OpSeq != opSeq {
+			t.Fatalf("payload %s scoped to turn=%d op=%d, want turn=1 op=%d",
+				pointer, payload.TurnSeq, payload.OpSeq, opSeq)
+		}
+		delete(wantPointers, pointer)
+	}
+	if len(wantPointers) != 0 {
+		t.Fatalf("missing payload pointers: %v", wantPointers)
+	}
+}
+
+func payloadRefJSONPointer(t *testing.T, locationURI string) string {
+	t.Helper()
+
+	parsed, err := url.Parse(locationURI)
+	if err != nil {
+		t.Fatalf("parse LocationURI %q: %v", locationURI, err)
+	}
+	return parsed.Query().Get("json_pointer")
 }
 
 func TestMapper_AssistantMixedThinkingAndToolsPreservesOpOrder(t *testing.T) {
@@ -152,14 +179,16 @@ type opTrace struct {
 
 func mixedAssistantOpTrace() []opTrace {
 	return []opTrace{
-		{event: "start", kind: canonical.OpLLM, seq: 1, parent: -1, name: "claude-opus-4-7"},
+		{event: "start", kind: canonical.OpInternal, seq: 1, parent: -1, name: "user_input"},
 		{event: "final", seq: 1},
-		{event: "start", kind: canonical.OpReasoning, seq: 2, parent: 1},
+		{event: "start", kind: canonical.OpLLM, seq: 2, parent: -1, name: "claude-opus-4-7"},
 		{event: "final", seq: 2},
-		{event: "start", kind: canonical.OpReasoning, seq: 3, parent: 1},
+		{event: "start", kind: canonical.OpReasoning, seq: 3, parent: 2},
 		{event: "final", seq: 3},
-		{event: "start", kind: canonical.OpTool, seq: 4, parent: -1, name: "Read"},
-		{event: "start", kind: canonical.OpSession, seq: 5, parent: -1, name: "Investigate helper boundary"},
+		{event: "start", kind: canonical.OpReasoning, seq: 4, parent: 2},
+		{event: "final", seq: 4},
+		{event: "start", kind: canonical.OpTool, seq: 5, parent: -1, name: "Read"},
+		{event: "start", kind: canonical.OpSession, seq: 6, parent: -1, name: "Investigate helper boundary"},
 	}
 }
 

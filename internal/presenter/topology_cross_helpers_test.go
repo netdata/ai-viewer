@@ -47,6 +47,26 @@ func TestCrossAgentsSelectBindsFiltersAndLimit(t *testing.T) {
 	}
 }
 
+func TestCrossAgentsSelectDurationProjectsZeroButOrdersByIndexedColumn(t *testing.T) {
+	t.Parallel()
+
+	query, args := crossAgentsSelect(sessionFilter{group: groupAll}, metricDuration, 10)
+
+	for _, fragment := range []string{
+		"COALESCE(s.duration_us, 0) AS size_metric",
+		"ORDER BY s.duration_us DESC, s.id ASC",
+		"LIMIT ?",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("duration query missing %q:\n%s", fragment, query)
+		}
+	}
+	wantArgs := []any{11}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
 func TestCrossAgentRowAgentMapsLabelAndMetrics(t *testing.T) {
 	t.Parallel()
 

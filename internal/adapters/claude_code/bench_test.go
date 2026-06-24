@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	claudeBenchScanExpectedEvents int64 = 2058
-	claudeBenchTailExpectedEvents int64 = 6
+	claudeBenchScanExpectedEvents int64 = 4129
+	claudeBenchTailExpectedEvents int64 = 8
 )
 
 // BenchmarkClaudeScan_SyntheticCorpus exercises first backfill over a

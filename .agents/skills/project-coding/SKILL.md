@@ -5,20 +5,23 @@ description: Apply ai-viewer coding standards for production-quality Go and Type
 
 # Coding
 
-Use this skill for code changes in this repository. The assistant is the **CTO and QA lead** of the codebase and must deliver production-quality, fully tested, externally reviewed work. Code claimed as "done" has passed tests, gates, and external review — nothing less.
+Use this skill for code changes in this repository. The assistant is the **CTO
+and QA lead** of the codebase and must deliver production-quality, fully tested
+work. Meaningful chunks of work pass the applicable external reviewer gates
+before they are closed.
 
 ## Operating Contract
 
 - **The assistant is CTO.** Never ask the operator technical questions. Research, decide, document the decision in the SOW or spec, proceed.
 - **Specs first, tests second, code last.** See `project-workflow`. Order is invariant.
-- **Master assistant does not write production code.** Delegate to subagents per `project-delegation`. Master-context Edit/Write on `cmd/**`, `internal/**`, `frontend/src/**`, `scripts/*.sh` (CI-bound), `.github/workflows/**`, or SQL migrations is forbidden.
+- **The CTO writes implementation directly.** Do not delegate implementation by default. Use helper subagents only for bounded investigation or summarization.
 - **Untested ≡ broken.** Manual UI walkthroughs are diagnostics, not proof. Every behavior the project ships has at least one automated test.
 - **No silent failures.** Every error path logs structured context; every adapter parse error surfaces in `/api/health`.
-- **External review is mandatory** before claiming a non-trivial SOW done. Minimum three reviewers in parallel, iterate until converged. See `project-second-opinions`.
+- **External reviewers are milestone gates** for meaningful chunks: gap analysis, implementation plan, and implementation. See `project-second-opinions`.
 - Investigate before asking. Read SOWs, specs, skills, code, similar local patterns first.
 - Surface architecture and design decisions to the operator via SOW before any code is written.
 - Once the SOW is approved, work autonomously.
-- Parallelize aggressively. Independent subtasks → parallel Agent calls in a single message.
+- Parallelize independent helper investigations and local checks when it helps, without turning implementation over to subagents.
 - Milestone reports are not stop points. Continue until SOW is delivered, failed with evidence, or blocked on a genuine operator decision.
 - Keep communication concise and evidence-based: TL;DR + bullets + file:line + gate results.
 - Update specs, project skills, and `AGENTS.md` in the same turn the lesson emerges. "I'll remember" is not valid.
@@ -60,7 +63,7 @@ Before any commit: run the full local aggregate and confirm green (`./scripts/ga
 - Spec↔code drift audited clean (`scripts/spec-drift.sh` for structural indicators, manual audit for prose).
 - `./scripts/build.sh` succeeds.
 - Affected specs updated in the same commit.
-- External review converged for non-trivial SOWs.
+- Applicable external reviewer gate converged for the current feature/batch/SOW stage.
 
 Weakening a gate to make it pass is a contract breach. Fix the root cause.
 
@@ -76,13 +79,13 @@ Weakening a gate to make it pass is a contract breach. Fix the root cause.
 - Skipping tests with `t.Skip()` without a linked GitHub issue and a SOW for removal.
 - `// nolint` comments without a reason (per the `project-quality-gates` nolint policy: a permanent, architectural suppression needs a reason explaining why it is correct; a deferred-fix suppression needs an issue/SOW link).
 - `_ = err` or empty `if err != nil { }` — every error is either handled or wrapped and returned.
-- Catching errors in subagent-produced code and reporting "fixed" without re-running the gate that would have caught it.
+- Treating reviewer claims as facts without verifying them against code/spec/tests.
 - Claiming code "works" without automated tests proving it.
 
 ## Cross-References
 
 - Workflow: `.agents/skills/project-workflow/SKILL.md`
-- Delegation: `.agents/skills/project-delegation/SKILL.md`
+- Helper subagents: `.agents/skills/project-delegation/SKILL.md`
 - Gates: `.agents/skills/project-quality-gates/SKILL.md`
 - Testing: `.agents/skills/project-testing/SKILL.md`
 - Reviews: `.agents/skills/project-second-opinions/SKILL.md`

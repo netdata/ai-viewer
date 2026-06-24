@@ -69,6 +69,11 @@ const adapterEventChanSize = 1024
 // stuck Tail cannot hold up shutdown forever.
 const adapterContextGracePeriod = 5 * time.Second
 
+// readModelBackfillStartupTimeout bounds the derived-data repair that runs
+// between historical Scan and live Tail. Primary canonical ingestion must not
+// stay offline indefinitely because FTS/rollup rebuilds are expensive or stuck.
+const readModelBackfillStartupTimeout = 5 * time.Minute
+
 // stateDirPerm is the permission bits applied when the binary creates
 // its state directory + DB parent directory. 0o750 keeps the operator
 // owning read/write/execute, the operator's group read/execute, and
@@ -244,11 +249,6 @@ func run(args []string, stdout, stderr *os.File) int {
 	// so it doesn't contend with concurrent tail-mode flushes on the single
 	// SQLite connection (the prior per-source approach deadlocked the FTS
 	// backfill's truncate tx against ongoing flushes — SOW-0063).
-	// scanWG waits for all sources' Scan() to complete. The post-scan
-	// read-model backfill runs ONCE after ALL scans finish (not per-source),
-	// so it doesn't contend with concurrent tail-mode flushes on the single
-	// SQLite connection (the prior per-source approach deadlocked the FTS
-	// backfill's truncate tx against ongoing flushes — SOW-0063).
 	//
 	// CRITICAL: scanWG.Add must happen BEFORE scanWG.Wait. The Wait goroutine
 	// below starts immediately; if Add runs later (in the for loop below),
@@ -263,26 +263,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		close(scanDone)
 	}()
 
-	// Post-scan backfill: wait for ALL scans to complete, then rebuild the
-	// FTS + rollup read models once (no per-source contention). The
-	// backfillDone channel gates the tailers: each source's runAdapter
-	// BLOCKS on <-backfillDone before starting Tail, so the backfill
-	// (which truncates fts_ops/fts_logs in a single tx) never contends
-	// with concurrent tail-mode flushes on the single SQLite connection
-	// (SOW-0063 — the root cause of the FTS stall on every fresh install).
-	backfillDone := make(chan struct{})
-	go func() {
-		<-scanDone
-		if ing.DeferReadModels() {
-			backfillCtx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			logger.Info("ai-viewer-ingest: all scans complete; backfilling read models")
-			if err := ing.BackfillReadModels(backfillCtx); err != nil {
-				logger.Error("ai-viewer-ingest: read-model backfill failed", "err", err)
-			}
-		}
-		close(backfillDone)
-	}()
+	backfillDone := startPostScanBackfill(scanDone, ing, logger, readModelBackfillStartupTimeout)
 
 	var adapterWG sync.WaitGroup
 	for _, src := range sources {
@@ -470,6 +451,43 @@ func waitWithTimeout(wg *sync.WaitGroup, d time.Duration, logger *slog.Logger) {
 	}
 }
 
+type readModelBackfiller interface {
+	DeferReadModels() bool
+	BackfillReadModels(context.Context) error
+}
+
+func startPostScanBackfill(scanDone <-chan struct{}, backfiller readModelBackfiller, logger *slog.Logger, timeout time.Duration) <-chan struct{} {
+	backfillDone := make(chan struct{})
+	go func() {
+		defer close(backfillDone)
+		<-scanDone
+		if !backfiller.DeferReadModels() {
+			return
+		}
+		backfillCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		if logger != nil {
+			logger.Info("ai-viewer-ingest: all scans complete; backfilling read models",
+				"timeout", timeout.String())
+		}
+		if err := backfiller.BackfillReadModels(backfillCtx); err != nil {
+			if logger == nil {
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(backfillCtx.Err(), context.DeadlineExceeded) {
+				logger.Error("ai-viewer-ingest: read-model backfill timed out; tailing will continue without completed read-model backfill",
+					"timeout", timeout.String(),
+					"err", err)
+				return
+			}
+			logger.Error("ai-viewer-ingest: read-model backfill failed; tailing will continue without completed read-model backfill",
+				"err", err)
+		}
+	}()
+	return backfillDone
+}
+
 // versionString returns the binary's build-time version. When the
 // `-ldflags=-X` mechanism is added in a later chunk this is the only
 // function that needs to change.
@@ -498,6 +516,8 @@ func dispatchSubcommand(args []string, stdout, stderr *os.File) (int, bool) {
 		return 0, false
 	}
 	switch args[0] {
+	case "check-parity":
+		return runCheckParity(args[1:], stdout, stderr), true
 	case "rollups-backfill":
 		return runBackfill(args[1:], stdout, stderr), true
 	case "fts-content-backfill":

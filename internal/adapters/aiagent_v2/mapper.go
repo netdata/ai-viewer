@@ -59,13 +59,17 @@ type sessionVisit struct {
 	kind           canonical.SessionKind
 	version        int
 	depth          int
+	jsonPointer    string
 }
 
 type opScope struct {
-	sessionTrace string
-	turnSeq      int
-	depth        int
-	path         string
+	sessionTrace   string
+	turnSeq        int
+	depth          int
+	path           string
+	jsonPointer    string
+	stepKind       string
+	stepAttributes map[string]json.RawMessage
 }
 
 type opVisit struct {
@@ -74,6 +78,7 @@ type opVisit struct {
 	seq          int
 	reasoningSeq int
 	path         string
+	jsonPointer  string
 }
 
 type opTimes struct {
@@ -101,9 +106,10 @@ func mapSnapshot(snap snapshot, sourceID, originID, sessionsRoot, filename strin
 	out := make([]canonical.Event, 0, 64)
 	emitter := mapEmitter{ctx: &ctx, out: &out, onError: onError}
 	emitter.mapSession(sessionVisit{
-		node:    snap.OpTree,
-		kind:    canonical.KindRoot,
-		version: snap.Version,
+		node:        snap.OpTree,
+		kind:        canonical.KindRoot,
+		version:     snap.Version,
+		jsonPointer: "/opTree",
 	})
 	return out
 }

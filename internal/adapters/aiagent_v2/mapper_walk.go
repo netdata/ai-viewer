@@ -34,13 +34,13 @@ func rollupFromFinalized(ev canonical.OpFinalizedEvent) rollupTotals {
 
 // mapTurns walks node.Turns in stored order and emits canonical events
 // for each turn.
-func (m *mapEmitter) mapTurns(node opTree, depth int, sessionPath string) {
+func (m *mapEmitter) mapTurns(node opTree, depth int, sessionPath string, sessionPointer string) {
 	for i := range node.Turns {
-		m.mapTurn(node, node.Turns[i], depth, sessionPath)
+		m.mapTurn(node, node.Turns[i], depth, sessionPath, fmt.Sprintf("%s/turns/%d", sessionPointer, i))
 	}
 }
 
-func (m *mapEmitter) mapTurn(node opTree, turn turnNode, depth int, sessionPath string) {
+func (m *mapEmitter) mapTurn(node opTree, turn turnNode, depth int, sessionPath string, turnPointer string) {
 	turnPath := fmt.Sprintf("%s::T:%d", sessionPath, turn.Index)
 	turnStart := timestampOrRoot(m.ctx, turn.StartedAt)
 	m.append(canonical.TurnStartedEvent{
@@ -49,7 +49,7 @@ func (m *mapEmitter) mapTurn(node opTree, turn turnNode, depth int, sessionPath 
 		Seq:             turn.Index,
 	})
 
-	scope := opScope{sessionTrace: node.TraceID, turnSeq: turn.Index, depth: depth, path: turnPath}
+	scope := opScope{sessionTrace: node.TraceID, turnSeq: turn.Index, depth: depth, path: turnPath, jsonPointer: turnPointer}
 	totals := m.mapOps(turn.Ops, scope)
 	if turn.EndedAt != nil {
 		m.append(buildTurnFinalized(m.ctx, turnFinalizedInput{
@@ -65,13 +65,13 @@ func (m *mapEmitter) mapTurn(node opTree, turn turnNode, depth int, sessionPath 
 
 // mapSteps walks node.Steps and emits a canonical turn per step using
 // a reserved offset so step seqs do not collide with turn seqs.
-func (m *mapEmitter) mapSteps(node opTree, depth int, sessionPath string) {
+func (m *mapEmitter) mapSteps(node opTree, depth int, sessionPath string, sessionPointer string) {
 	for i := range node.Steps {
-		m.mapStep(node, node.Steps[i], depth, sessionPath)
+		m.mapStep(node, node.Steps[i], depth, sessionPath, fmt.Sprintf("%s/steps/%d", sessionPointer, i))
 	}
 }
 
-func (m *mapEmitter) mapStep(node opTree, step stepNode, depth int, sessionPath string) {
+func (m *mapEmitter) mapStep(node opTree, step stepNode, depth int, sessionPath string, stepPointer string) {
 	stepSeq := stepIndexOffset + step.Index
 	stepPath := fmt.Sprintf("%s::S:%d", sessionPath, step.Index)
 	stepStart := timestampOrRoot(m.ctx, step.StartedAt)
@@ -82,7 +82,15 @@ func (m *mapEmitter) mapStep(node opTree, step stepNode, depth int, sessionPath 
 	})
 
 	m.emitStepKind(node.TraceID, step, stepPath, stepStart)
-	scope := opScope{sessionTrace: node.TraceID, turnSeq: stepSeq, depth: depth, path: stepPath}
+	scope := opScope{
+		sessionTrace:   node.TraceID,
+		turnSeq:        stepSeq,
+		depth:          depth,
+		path:           stepPath,
+		jsonPointer:    stepPointer,
+		stepKind:       step.Kind,
+		stepAttributes: step.Attributes,
+	}
 	totals := m.mapOps(step.Ops, scope)
 	if step.EndedAt != nil {
 		m.append(buildTurnFinalized(m.ctx, turnFinalizedInput{
@@ -115,7 +123,7 @@ func (m *mapEmitter) mapOps(ops []operationNode, scope opScope) rollupTotals {
 	for j := range ops {
 		op := ops[j]
 		opPath := fmt.Sprintf("%s::O:%d:%s", scope.path, j, op.OpID)
-		visit := opVisit{op: op, scope: scope, seq: j, reasoningSeq: -1, path: opPath}
+		visit := opVisit{op: op, scope: scope, seq: j, reasoningSeq: -1, path: opPath, jsonPointer: fmt.Sprintf("%s/ops/%d", scope.jsonPointer, j)}
 		if needsReasoningSeq(op) {
 			visit.reasoningSeq = nextReasoningSeq
 			nextReasoningSeq++

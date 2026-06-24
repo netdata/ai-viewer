@@ -1,8 +1,10 @@
 # SOW-0089 — Data quality fixes (codex parser, deterministic related sessions, running-status hygiene)
 
+Status: completed
+
 **Date**: 2026-06-21
 **Author**: CTO
-**Status**: Current — chunks 5+6 of SOW-0088
+**Sub-state**: Completed — chunks 5+6 of SOW-0088
 **Operator feedback addressed**: items (3), (4), (5) of the operator's verbatim list (see `current/SOW-0088-20260621-session-view-refactor.md`).
 
 ## Why this SOW exists
@@ -173,3 +175,7 @@ while populating the new sub-turn boundaries.
 
 Estimated re-ingest time: ~5–10 minutes on the production workstation
 (matches the SOW-0010 baseline; no optimization needed for this scope).
+
+## Outcome
+
+Completed. Running-status hygiene shipped in commit `b557971`, deterministic related sessions shipped in commit `97bd23f`, and codex sub-turn splitting shipped in commit `045d54f`. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene pass.

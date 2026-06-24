@@ -15,7 +15,7 @@ Sub-state: CTO decision — defer until the serving route (`/api/payloads`, Phas
   - **Schema-A** (separate `attachment_refs` table, session/turn-scoped, dedicated `/api/sessions/:id/attachments` endpoint): cleaner contract (keeps `payload_refs` op-scoped, NOT NULL); but a separate table means showing attachments inline with op payloads later needs a union.
   - **Schema-B** (make `payload_refs.op_id` nullable + `attachment` kind, serve via `/api/payloads`): more UX-flexible (a gallery is just a filtered query on `payload_refs`); but weakens the op-scoped `payload_refs` contract.
   - Note (corrected during review): on UX-flexibility B is the superset (B→gallery is cheap; A→inline is awkward); on schema-cleanliness A wins. The tension is real and resolving it needs the serving-route design.
-- **Default when revisited:** Schema-A (clean contracts) served via a dedicated endpoint, unless the then-current `/api/payloads` design makes Schema-B materially simpler.
+- **Original default when revisited:** Schema-A (clean contracts) served via a dedicated endpoint, unless the then-current `/api/payloads` design makes Schema-B materially simpler. This was superseded by the operator guidance recorded below: default to Schema-B unless current `/api/payloads` design evidence makes Schema-A materially better.
 
 Reopen when: `/api/payloads` lands, OR the operator requests an attachments gallery, OR a cross-adapter consistency need appears (codex/claude-code/ai-agent attachment analogues).
 

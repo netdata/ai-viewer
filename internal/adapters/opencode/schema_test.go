@@ -309,7 +309,7 @@ func TestBuildSelect_ScansIntoRowStructs(t *testing.T) {
 	smSel := set["session_message"].buildSelect()
 	var sm sessionMessageRow
 	smr := db.QueryRowContext(context.Background(), smSel, int64(-1), int64(-1), "")
-	if err := smr.Scan(&sm.ID, &sm.SessionID, &sm.Type, &sm.TimeCreatedMs, &sm.TimeUpdatedMs, &sm.Data); err != nil {
+	if err := smr.Scan(&sm.ID, &sm.SessionID, &sm.Type, &sm.Seq, &sm.TimeCreatedMs, &sm.TimeUpdatedMs, &sm.Data); err != nil {
 		t.Fatalf("scan sessionMessageRow via buildSelect: %v", err)
 	}
 	if sm.ID != "evt_aaa" || sm.Type != "model-switched" {

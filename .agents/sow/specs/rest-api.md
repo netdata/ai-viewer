@@ -156,6 +156,38 @@ Each op row carries `parent_op_id` — the canonical id of the op it nests under
 Trace view rebuilds the authoritative span tree from this parentage; the key is
 always present (nullable), never omitted.
 
+### GET /api/sessions/:id/payload_refs
+
+Lazy payload-ref metadata endpoint for a single session. This is shape-compatible
+with the `payload_refs` array embedded in `/api/sessions/:id?include=payload_refs`
+and is used when the client wants payload metadata without loading the full
+session detail response.
+
+Query:
+
+```text
+?op=<op_id>      optional; return refs for one op in the session
+?turn=<turn_id>  optional; return refs for one turn in the session
+```
+
+`op` and `turn` are mutually exclusive; specifying both returns `400
+BAD_REQUEST`. Unknown session/op/turn ids return an empty `refs` array because
+the endpoint is a metadata list scoped by existing rows, not a session existence
+probe.
+
+```json
+{
+  "refs": [
+    { "id":1,"op_id":"...","kind":"llm_request","format":"http",
+      "compression":"gzip","original_bytes":1234,"stored_bytes":456 }
+  ]
+}
+```
+
+Ordering is deterministic: full-session and turn-scoped responses sort by
+`op_id ASC, payload_refs.id ASC`; op-scoped responses sort by
+`payload_refs.id ASC`.
+
 ### GET /api/sessions/:id/logs
 
 ```

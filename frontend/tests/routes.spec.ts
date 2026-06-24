@@ -17,7 +17,7 @@ test.describe('routes', () => {
     await expect(rows.first()).toBeVisible();
     expect(await rows.count()).toBeGreaterThanOrEqual(1);
     // The empty-state copy must NOT be on the page when data exists.
-    await expect(page.getByText('No sessions match the current filters.')).toHaveCount(0);
+    await expect(page.getByText('No sessions match these filters')).toHaveCount(0);
   });
 
   // /tools, /models, /agents were removed in commit 861b45b (the routes no
@@ -56,14 +56,9 @@ test.describe('routes', () => {
     const rows = page.locator('table tbody tr');
     await expect(rows.first()).toBeVisible();
     expect(await rows.count()).toBeGreaterThanOrEqual(1);
-    // The Sources health badge (pages/Sources/Sources.tsx:49) is a role=status
-    // span whose text is the literal status word (ok|degraded|down). Scope to the
-    // Sources region (the <section aria-labelledby="sources-title">, named
-    // "Sources") AND match the exact status text so this can ONLY hit the health
-    // badge — never the header ThemeToggle's role=status live region, whose text
-    // is "Theme: <theme>" (components/ThemeToggle/ThemeToggle.tsx:40) and which
-    // lives outside this region.
+    // The Sources health badge renders the operator-facing status label.
+    // Scope to the Sources region so this can only hit the summary badge.
     const sourcesRegion = page.getByRole('region', { name: /sources/i });
-    await expect(sourcesRegion.getByText(/^(ok|degraded|down)$/)).toBeVisible();
+    await expect(sourcesRegion.getByText(/^(Healthy|Degraded|Down)$/)).toBeVisible();
   });
 });

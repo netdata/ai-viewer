@@ -19,10 +19,18 @@ import (
 // fallthrough.
 func TestLogExtras(t *testing.T) {
 	t.Parallel()
-	if e := logExtras(logEntry{Path: "1-2"}); e["path"] != "1-2" {
+	e, err := logExtras(nil, logEntry{Path: "1-2"}, "/logs/0/message")
+	if err != nil {
+		t.Fatalf("logExtras path: %v", err)
+	}
+	if e["path"] != "1-2" {
 		t.Fatalf("expected path extra, got %v", e)
 	}
-	if e := logExtras(logEntry{}); e != nil {
+	e, err = logExtras(nil, logEntry{}, "/logs/0/message")
+	if err != nil {
+		t.Fatalf("logExtras empty: %v", err)
+	}
+	if e != nil {
 		t.Fatalf("expected nil when no path, got %v", e)
 	}
 }
@@ -93,6 +101,112 @@ func TestMapSteps_FullCoverage(t *testing.T) {
 	}
 	if !sawRunningStep {
 		t.Fatalf("missing TurnStarted for in-flight step")
+	}
+}
+
+func TestMapStepOpExtrasCarryCompactionProof(t *testing.T) {
+	t.Parallel()
+
+	snap := simpleSnapshot(2, "step-compaction")
+	snap.OpTree.Turns = nil
+	snap.OpTree.Steps = []stepNode{
+		{
+			ID:        "compact-step",
+			Index:     0,
+			Kind:      "internal",
+			StartedAt: 1700000010000,
+			EndedAt:   int64Ptr(1700000013000),
+			Attributes: rawAttrs(map[string]any{
+				"archivedTurn": 1,
+				"currentTurn":  2,
+			}),
+			Ops: []operationNode{
+				{
+					OpID:      "compact-op",
+					Kind:      "session",
+					StartedAt: 1700000010500,
+					EndedAt:   int64Ptr(1700000012500),
+					Status:    "ok",
+					Attributes: rawAttrs(map[string]any{
+						"name":     "history_compaction.turn_summarizer",
+						"provider": "history-compaction",
+					}),
+					ChildSessionRef: &childSessionRef{SessionID: "compact-child"},
+				},
+			},
+		},
+	}
+
+	events := mapSimple(t, snap)
+	for _, ev := range events {
+		started, ok := ev.(canonical.OpStartedEvent)
+		if !ok || started.TurnSeq != stepIndexOffset || started.Seq != 0 {
+			continue
+		}
+		if got := extraStringForTest(t, started.Extras, "attr.provider"); got != "history-compaction" {
+			t.Fatalf("attr.provider = %q, want history-compaction; extras=%v", got, started.Extras)
+		}
+		if got := extraStringForTest(t, started.Extras, "step.kind"); got != "internal" {
+			t.Fatalf("step.kind = %q, want internal; extras=%v", got, started.Extras)
+		}
+		if got := extraInt64ForTest(t, started.Extras, "step.attr.archivedTurn"); got != 1 {
+			t.Fatalf("step.attr.archivedTurn = %d, want 1; extras=%v", got, started.Extras)
+		}
+		if got := extraInt64ForTest(t, started.Extras, "step.attr.currentTurn"); got != 2 {
+			t.Fatalf("step.attr.currentTurn = %d, want 2; extras=%v", got, started.Extras)
+		}
+		return
+	}
+	t.Fatalf("missing step-projected compaction OpStarted event")
+}
+
+func extraStringForTest(t *testing.T, extras map[string]any, key string) string {
+	t.Helper()
+	switch value := extras[key].(type) {
+	case string:
+		return value
+	case json.RawMessage:
+		var out string
+		if err := json.Unmarshal(value, &out); err != nil {
+			t.Fatalf("decode %s string extra: %v", key, err)
+		}
+		return out
+	case []byte:
+		var out string
+		if err := json.Unmarshal(value, &out); err != nil {
+			t.Fatalf("decode %s string extra: %v", key, err)
+		}
+		return out
+	default:
+		t.Fatalf("%s extra = %T(%v), want string-compatible", key, value, value)
+		return ""
+	}
+}
+
+func extraInt64ForTest(t *testing.T, extras map[string]any, key string) int64 {
+	t.Helper()
+	switch value := extras[key].(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case float64:
+		return int64(value)
+	case json.RawMessage:
+		var out int64
+		if err := json.Unmarshal(value, &out); err != nil {
+			t.Fatalf("decode %s int extra: %v", key, err)
+		}
+		return out
+	case []byte:
+		var out int64
+		if err := json.Unmarshal(value, &out); err != nil {
+			t.Fatalf("decode %s int extra: %v", key, err)
+		}
+		return out
+	default:
+		t.Fatalf("%s extra = %T(%v), want int-compatible", key, value, value)
+		return 0
 	}
 }
 

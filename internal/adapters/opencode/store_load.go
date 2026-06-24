@@ -155,10 +155,114 @@ func loadSessionTree(ctx context.Context, q roQuerier, schema schemaSet, session
 	if err != nil {
 		return nil, err
 	}
+	inputsByMessage, err := loadSessionInputs(ctx, q, schema["session_input"], sessionID, onWarn)
+	if err != nil {
+		return nil, err
+	}
 	warnIfSessionTooLarge(sessionID, msgs, partsByMessage, onWarn)
 	out := make([]messageWithParts, 0, len(msgs))
 	for i := range msgs {
-		out = append(out, messageWithParts{Message: msgs[i], Parts: partsByMessage[msgs[i].ID]})
+		out = append(out, messageWithParts{
+			Message: msgs[i],
+			Parts:   partsByMessage[msgs[i].ID],
+			Input:   inputsByMessage[msgs[i].ID],
+		})
+	}
+	return out, nil
+}
+
+func loadSessionInputs(ctx context.Context, qr roQuerier, s tableSchema, sessionID string, onWarn func(error)) (map[string]*sessionInputRow, error) {
+	if !readableSessionInputSchema(s) {
+		return map[string]*sessionInputRow{}, nil
+	}
+
+	orderBy := quoteIdent("id")
+	if s.has("time_created") {
+		orderBy = quoteIdent("time_created") + ", " + quoteIdent("id")
+	}
+	rows, err := qr.QueryContext(ctx, selectBySessionID(s, orderBy), sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: load session_input for %s: %w", sessionID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	idx := newColumnIndex(s)
+	out := map[string]*sessionInputRow{}
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		d := newScanDest(len(s.Present)).withWarn("session_input", onWarn)
+		if err := rows.Scan(d.ptrs...); err != nil {
+			return nil, fmt.Errorf("opencode: scan session_input: %w", err)
+		}
+		row := sessionInputRow{
+			ID:            d.str(idx, "id"),
+			SessionID:     d.str(idx, "session_id"),
+			Prompt:        d.bytes(idx, "prompt"),
+			TimeCreatedMs: d.i64(idx, "time_created"),
+		}
+		if row.ID == "" || row.SessionID == "" {
+			if onWarn != nil {
+				onWarn(fmt.Errorf("opencode: session_input row has empty id/session_id; row skipped"))
+			}
+			continue
+		}
+		rowCopy := row
+		out[row.ID] = &rowCopy
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("opencode: iterate session_input for %s: %w", sessionID, err)
+	}
+	return out, nil
+}
+
+func readableSessionInputSchema(s tableSchema) bool {
+	return s.has("id") && s.has("session_id") && s.has("prompt")
+}
+
+func loadSessionMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID string, onWarn func(error)) ([]sessionMessageRow, error) {
+	orderBy := quoteIdent("time_created") + ", " + quoteIdent("id")
+	if s.has("seq") {
+		orderBy = quoteIdent("seq") + ", " + quoteIdent("id")
+	}
+	q := selectBySessionID(s, orderBy)
+	rows, err := qr.QueryContext(ctx, q, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: load session_message for %s: %w", sessionID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	idx := newColumnIndex(s)
+	var out []sessionMessageRow
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		d := newScanDest(len(s.Present)).withWarn("session_message", onWarn)
+		if err := rows.Scan(d.ptrs...); err != nil {
+			return nil, fmt.Errorf("opencode: scan session_message: %w", err)
+		}
+		id, ok := d.ownerOrWarn(idx, "id")
+		if !ok {
+			continue
+		}
+		sid, ok := d.ownerOrWarn(idx, "session_id")
+		if !ok {
+			continue
+		}
+		out = append(out, sessionMessageRow{
+			ID:            id,
+			SessionID:     sid,
+			Type:          d.str(idx, "type"),
+			Seq:           d.i64(idx, "seq"),
+			TimeCreatedMs: d.i64(idx, "time_created"),
+			TimeUpdatedMs: d.i64(idx, "time_updated"),
+			Data:          d.bytes(idx, "data"),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("opencode: iterate session_message for %s: %w", sessionID, err)
 	}
 	return out, nil
 }
@@ -170,7 +274,7 @@ func loadSessionTree(ctx context.Context, q roQuerier, schema schemaSet, session
 // roQuerier (the shared snapshot tx in production).
 func loadMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID string, onWarn func(error)) ([]messageRow, error) {
 	idx := newColumnIndex(s)
-	q := selectByColumn(s, "session_id", messageOrderBy(s))
+	q := selectBySessionID(s, messageOrderBy(s))
 	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: load messages for %s: %w", sessionID, err)
@@ -222,7 +326,7 @@ func loadMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID st
 // Returns a map keyed by message_id; a message with no parts is simply absent
 // (nil slice on lookup). q is any roQuerier (the shared snapshot tx in production).
 func loadSessionParts(ctx context.Context, qr roQuerier, s tableSchema, sessionID string, onWarn func(error)) (map[string][]partRow, error) {
-	q := selectByColumn(s, "session_id", quoteIdent("message_id")+", "+quoteIdent("id"))
+	q := selectBySessionID(s, quoteIdent("message_id")+", "+quoteIdent("id"))
 	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: load parts for session %s: %w", sessionID, err)

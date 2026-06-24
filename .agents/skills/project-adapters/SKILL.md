@@ -1,6 +1,6 @@
 ---
 name: project-adapters
-description: Step-by-step workflow for adding, modifying, or debugging a source-format adapter. Use whenever editing internal/adapters/<name>/, internal/canonical/, or related fixture files.
+description: Step-by-step workflow for adding, modifying, or debugging a source-format adapter. Use whenever editing an adapter under internal/adapters, internal/canonical, or related fixture files.
 ---
 
 # Adapters
@@ -30,7 +30,7 @@ An adapter is a sealed unit that converts one source format into the canonical e
 
 8. **Update docs.** `README.md` Source Formats table; `docs/adding-an-adapter.md` if any new patterns emerged.
 
-9. **Open or update a SOW.** Run external reviewers (`project-second-opinions` skill).
+9. **Open or update a SOW.** Use the external reviewer gates from `project-second-opinions` on the adapter SOW's gap analysis, implementation plan, and implementation before closing the work.
 
 ## Modifying an Existing Adapter
 
@@ -72,4 +72,4 @@ Before marking adapter work complete:
 - [ ] `golangci-lint run ./internal/adapters/<name>/...` clean.
 - [ ] Auto-discovery probe added.
 - [ ] README Source Formats table updated.
-- [ ] At least one external reviewer (`project-second-opinions`) approved.
+- [ ] Applicable external reviewer gates from `project-second-opinions` converged for the adapter SOW or substantial milestone.

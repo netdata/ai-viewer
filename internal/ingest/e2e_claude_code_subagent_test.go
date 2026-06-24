@@ -87,29 +87,29 @@ func TestClaudeCodeSubAgent_OpChildLinkedViaToolUseId(t *testing.T) {
 
 	events := make(chan canonical.Event, 256)
 	scanDone := make(chan struct{})
+	var scanErr error
 	go func() {
 		defer close(events)
-		if err := a.Scan(ctx, nil, events); err != nil {
-			t.Errorf("Scan: %v", err)
-		}
+		scanErr = a.Scan(ctx, nil, events)
 		close(scanDone)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	<-scanDone
-	if !waitFor(3*time.Second, func() bool {
-		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 2
-	}) {
-		t.Fatalf("expected 2 sessions; got %d", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
+	waitForScan(t, scanDone, "claude-code sub-agent")
+	if scanErr != nil {
+		t.Fatalf("Scan: %v", scanErr)
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions`); got != 2 {
+		t.Fatalf("session count after Stop = %d, want 2", got)
+	}
 
 	parentID := canonicalSessionID(sourceID, parentSession)
 	childID := canonicalSessionID(sourceID, parentSession+":agent:"+agentID)
-	opID := canonicalOpID(canonicalTurnID(parentID, 1), 2)
+	opID := canonicalOpID(canonicalTurnID(parentID, 1), 3)
 
 	// (a) both rows carry the toolUseId stash.
 	if got := scanString(t, db,

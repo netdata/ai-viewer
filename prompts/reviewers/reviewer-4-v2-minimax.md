@@ -16,7 +16,7 @@ to consult. The source of truth is the JSONL files on disk; the
 mapper at internal/adapters/aiagent_v2/mapper_*.go is the
 ONLY documentation of what we capture.
 
-FILE PATHS (relative to repo root /home/costa/src/ai-viewer.git):
+FILE PATHS (relative to repo root /home/user/src/ai-viewer.git):
 
   internal/adapters/aiagent_v2/adapter.go
   internal/adapters/aiagent_v2/mapper_*.go  (all mapper files)

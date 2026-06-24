@@ -1,43 +1,43 @@
 [0m
 > code-reviewer · minimax-m3-coder
 [0m
-[0m$ [0mls -la /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/
+[0m$ [0mls -la /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/
 total 312
-drwxr-xr-x 3 costa costa  4096 Jun 22 01:01 .
-drwxr-xr-x 7 costa costa  4096 Jun  2 16:05 ..
--rw-r--r-- 1 costa costa  5559 Jun  7 02:01 adapter.go
--rw-r--r-- 1 costa costa  5639 Jun  7 02:01 adapter_test.go
--rw-r--r-- 1 costa costa  2908 May 27 08:59 bench_helpers.go
--rw-r--r-- 1 costa costa 19611 Jun  3 04:07 bench_test.go
-drwxr-xr-x 4 costa costa  4096 May 27 08:59 cmd
--rw-r--r-- 1 costa costa 11145 May 27 00:48 coverage2_test.go
--rw-r--r-- 1 costa costa  9099 May 27 00:48 coverage3_test.go
--rw-r--r-- 1 costa costa 13275 Jun  2 16:05 coverage_test.go
--rw-r--r-- 1 costa costa  4889 May 27 00:48 cursor.go
--rw-r--r-- 1 costa costa  4070 Jun  2 16:05 cursor_test.go
--rw-r--r-- 1 costa costa  1845 May 28 11:06 doc.go
--rw-r--r-- 1 costa costa  2073 May 27 00:48 fuzz_test.go
--rw-r--r-- 1 costa costa  3997 May 27 00:48 golden_test.go
--rw-r--r-- 1 costa costa  4015 May 27 00:48 helpers_test.go
--rw-r--r-- 1 costa costa 13132 Jun  5 22:31 mapper_characterization_test.go
--rw-r--r-- 1 costa costa 10349 Jun  5 22:31 mapper_fixes_test.go
--rw-r--r-- 1 costa costa  7955 Jun  5 22:31 mapper.go
--rw-r--r-- 1 costa costa  1419 Jun  5 22:31 mapper_model.go
--rw-r--r-- 1 costa costa  8532 Jun 16 13:44 mapper_ops.go
--rw-r--r-- 1 costa costa 10862 Jun  5 22:31 mapper_payload.go
--rw-r--r-- 1 costa costa  3305 Jun  5 22:31 mapper_payload_multi_test.go
--rw-r--r-- 1 costa costa 12629 Jun  5 22:31 mapper_payload_test.go
--rw-r--r-- 1 costa costa  4915 Jun  5 22:31 mapper_session.go
--rw-r--r-- 1 costa costa 12841 Jun  5 18:22 mapper_test.go
--rw-r--r-- 1 costa costa  4787 Jun  5 22:31 mapper_walk.go
--rw-r--r-- 1 costa costa  9281 May 27 00:48 parser.go
--rw-r--r-- 1 costa costa  3421 May 27 00:48 parser_test.go
--rw-r--r-- 1 costa costa  9659 Jun 22 01:25 scanner.go
--rw-r--r-- 1 costa costa  9779 May 27 00:48 scanner_test.go
--rw-r--r-- 1 costa costa  3255 May 27 00:48 streamer.go
--rw-r--r-- 1 costa costa  8312 May 27 00:48 streamer_test.go
--rw-r--r-- 1 costa costa  7990 Jun 22 01:17 tailer.go
--rw-r--r-- 1 costa costa  8243 Jun 22 01:19 tailer_test.go
+drwxr-xr-x 3 user user  4096 Jun 22 01:01 .
+drwxr-xr-x 7 user user  4096 Jun  2 16:05 ..
+-rw-r--r-- 1 user user  5559 Jun  7 02:01 adapter.go
+-rw-r--r-- 1 user user  5639 Jun  7 02:01 adapter_test.go
+-rw-r--r-- 1 user user  2908 May 27 08:59 bench_helpers.go
+-rw-r--r-- 1 user user 19611 Jun  3 04:07 bench_test.go
+drwxr-xr-x 4 user user  4096 May 27 08:59 cmd
+-rw-r--r-- 1 user user 11145 May 27 00:48 coverage2_test.go
+-rw-r--r-- 1 user user  9099 May 27 00:48 coverage3_test.go
+-rw-r--r-- 1 user user 13275 Jun  2 16:05 coverage_test.go
+-rw-r--r-- 1 user user  4889 May 27 00:48 cursor.go
+-rw-r--r-- 1 user user  4070 Jun  2 16:05 cursor_test.go
+-rw-r--r-- 1 user user  1845 May 28 11:06 doc.go
+-rw-r--r-- 1 user user  2073 May 27 00:48 fuzz_test.go
+-rw-r--r-- 1 user user  3997 May 27 00:48 golden_test.go
+-rw-r--r-- 1 user user  4015 May 27 00:48 helpers_test.go
+-rw-r--r-- 1 user user 13132 Jun  5 22:31 mapper_characterization_test.go
+-rw-r--r-- 1 user user 10349 Jun  5 22:31 mapper_fixes_test.go
+-rw-r--r-- 1 user user  7955 Jun  5 22:31 mapper.go
+-rw-r--r-- 1 user user  1419 Jun  5 22:31 mapper_model.go
+-rw-r--r-- 1 user user  8532 Jun 16 13:44 mapper_ops.go
+-rw-r--r-- 1 user user 10862 Jun  5 22:31 mapper_payload.go
+-rw-r--r-- 1 user user  3305 Jun  5 22:31 mapper_payload_multi_test.go
+-rw-r--r-- 1 user user 12629 Jun  5 22:31 mapper_payload_test.go
+-rw-r--r-- 1 user user  4915 Jun  5 22:31 mapper_session.go
+-rw-r--r-- 1 user user 12841 Jun  5 18:22 mapper_test.go
+-rw-r--r-- 1 user user  4787 Jun  5 22:31 mapper_walk.go
+-rw-r--r-- 1 user user  9281 May 27 00:48 parser.go
+-rw-r--r-- 1 user user  3421 May 27 00:48 parser_test.go
+-rw-r--r-- 1 user user  9659 Jun 22 01:25 scanner.go
+-rw-r--r-- 1 user user  9779 May 27 00:48 scanner_test.go
+-rw-r--r-- 1 user user  3255 May 27 00:48 streamer.go
+-rw-r--r-- 1 user user  8312 May 27 00:48 streamer_test.go
+-rw-r--r-- 1 user user  7990 Jun 22 01:17 tailer.go
+-rw-r--r-- 1 user user  8243 Jun 22 01:19 tailer_test.go
 [0m
 [0m→ [0mRead .agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md
 <think>
@@ -83,25 +83,25 @@ echo "---"
 ls -la ~/.ai-agent/sessions/ 2>/dev/null | head -20
 ---
 total 27665072
-drwxr-xr-x     4 costa costa  24285184 Jun 22 08:05 .
-drwx------     3 costa costa      4096 Jun 22 01:59 ..
--rw-r--r--     1 costa costa     14307 Jan 25 16:20 0000174a-5d17-480f-bd27-1b97ddc47410.json.gz
--rw-r--r--     1 costa costa     24853 Jan 11 23:22 00001c25-bcaf-4221-a72e-a26382ef1a85.json.gz
--rw-r--r--     1 costa costa    612714 Dec  2  2025 0000506a-b7ed-4060-8409-c53663ee9274.json.gz
--rw-r--r--     1 costa costa      3236 Oct 29  2025 0000e5c4-e9dc-426e-b6d8-7be5926d3d98.json.gz
--rw-r--r--     1 costa costa     19102 Jun  8 07:47 0000f380-bae1-4f5e-a243-f2fc11e11788.json.gz
--rw-r--r--     1 costa costa     16125 Apr 19 10:38 0001043c-e5a2-4365-a5d2-20e7ab0201af.json.gz
--rw-r--r--     1 costa costa      2256 Oct 25  2025 0001188c-b216-461f-889b-1e3db6e7aaad.json.gz
--rw-r--r--     1 costa costa       546 Nov 12  2025 00016954-6c57-42fb-8481-6d33570c8cfd.json.gz
--rw-r--r--     1 costa costa      4259 Dec  5  2025 00019014-291a-4fad-be52-f9f00be1387f.json.gz
--rw-r--r--     1 costa costa      2972 Oct 26  2025 0001e6bc-65fa-44ed-95da-0362854c5070.json.gz
--rw-r--r--     1 costa costa     13411 Jan 25 04:08 0002004c-1b8a-46d8-a983-500019a56f20.json.gz
--rw-r--r--     1 costa costa      4424 Dec  6  2025 00022652-71fc-41ce-bb9f-e23529de8777.json.gz
--rw-r--r--     1 costa costa      4423 Dec 21  2025 000246d2-4db5-4ffa-a819-45b23011dc0e.json.gz
--rw-r--r--     1 costa costa     20085 Jan 31 22:07 00032277-ae25-4455-9784-2d93d262b548.json.gz
--rw-r--r--     1 costa costa     13715 Apr  4 10:28 00032f56-2e85-47b5-9f62-dc8551b5b16a.json.gz
--rw-r--r--     1 costa costa     11495 Dec 23 20:51 000332b9-5405-4ea3-82b3-669084267189.json.gz
--rw-r--r--     1 costa costa     15987 Jan 31 22:08 00033f87-0471-4b9f-9ac2-ca1b06b7c65b.json.gz
+drwxr-xr-x     4 user user  24285184 Jun 22 08:05 .
+drwx------     3 user user      4096 Jun 22 01:59 ..
+-rw-r--r--     1 user user     14307 Jan 25 16:20 0000174a-5d17-480f-bd27-1b97ddc47410.json.gz
+-rw-r--r--     1 user user     24853 Jan 11 23:22 00001c25-bcaf-4221-a72e-a26382ef1a85.json.gz
+-rw-r--r--     1 user user    612714 Dec  2  2025 0000506a-b7ed-4060-8409-c53663ee9274.json.gz
+-rw-r--r--     1 user user      3236 Oct 29  2025 0000e5c4-e9dc-426e-b6d8-7be5926d3d98.json.gz
+-rw-r--r--     1 user user     19102 Jun  8 07:47 0000f380-bae1-4f5e-a243-f2fc11e11788.json.gz
+-rw-r--r--     1 user user     16125 Apr 19 10:38 0001043c-e5a2-4365-a5d2-20e7ab0201af.json.gz
+-rw-r--r--     1 user user      2256 Oct 25  2025 0001188c-b216-461f-889b-1e3db6e7aaad.json.gz
+-rw-r--r--     1 user user       546 Nov 12  2025 00016954-6c57-42fb-8481-6d33570c8cfd.json.gz
+-rw-r--r--     1 user user      4259 Dec  5  2025 00019014-291a-4fad-be52-f9f00be1387f.json.gz
+-rw-r--r--     1 user user      2972 Oct 26  2025 0001e6bc-65fa-44ed-95da-0362854c5070.json.gz
+-rw-r--r--     1 user user     13411 Jan 25 04:08 0002004c-1b8a-46d8-a983-500019a56f20.json.gz
+-rw-r--r--     1 user user      4424 Dec  6  2025 00022652-71fc-41ce-bb9f-e23529de8777.json.gz
+-rw-r--r--     1 user user      4423 Dec 21  2025 000246d2-4db5-4ffa-a819-45b23011dc0e.json.gz
+-rw-r--r--     1 user user     20085 Jan 31 22:07 00032277-ae25-4455-9784-2d93d262b548.json.gz
+-rw-r--r--     1 user user     13715 Apr  4 10:28 00032f56-2e85-47b5-9f62-dc8551b5b16a.json.gz
+-rw-r--r--     1 user user     11495 Dec 23 20:51 000332b9-5405-4ea3-82b3-669084267189.json.gz
+-rw-r--r--     1 user user     15987 Jan 31 22:08 00033f87-0471-4b9f-9ac2-ca1b06b7c65b.json.gz
 [0m
 [0m$ [0mls ~/.ai-agent/sessions/ | wc -l
 echo "---"
@@ -116,11 +116,11 @@ zcat ~/.ai-agent/sessions/0000f380-bae1-4f5e-a243-f2fc11e11788.json.gz > /tmp/ai
 zcat ~/.ai-agent/sessions/0001043c-e5a2-4365-a5d2-20e7ab0201af.json.gz > /tmp/ai-viewer-review/sample3.json 2>&1
 ls -la /tmp/ai-viewer-review/
 total 2200
-drwxr-xr-x    2 costa costa    4096 Jun 22 11:21 .
+drwxr-xr-x    2 user user    4096 Jun 22 11:21 .
 drwxrwxrwt 9196 root  root  2007040 Jun 22 11:21 ..
--rw-r--r--    1 costa costa   62900 Jun 22 11:21 sample1.json
--rw-r--r--    1 costa costa   67649 Jun 22 11:21 sample2.json
--rw-r--r--    1 costa costa  101917 Jun 22 11:21 sample3.json
+-rw-r--r--    1 user user   62900 Jun 22 11:21 sample1.json
+-rw-r--r--    1 user user   67649 Jun 22 11:21 sample2.json
+-rw-r--r--    1 user user  101917 Jun 22 11:21 sample3.json
 [0m
 [0m$ [0mjq '. | {version, reason, opTree: .opTree | {id, traceId, startedAt, endedAt, turns_count: (.turns | length), steps_count: (.steps | length)}}' /tmp/ai-viewer-review/sample1.json 2>/dev/null | head -50
 {
@@ -377,10 +377,10 @@ chmod +x /tmp/ai-viewer-review/analyze.sh
 [0m
 <think>Now let me look at multiple sample files to confirm the pattern is universal.</think>
 [0m$ [0m/tmp/ai-viewer-review/analyze.sh ~/.ai-agent/sessions/ 50 2>&1 | head -120
-Analyzing 50 files from /home/costa/.ai-agent/sessions/
+Analyzing 50 files from /home/user/.ai-agent/sessions/
 [0m
 [0m$ [0m/tmp/ai-viewer-review/analyze.sh ~/.ai-agent/sessions/ 5 2>&1 | head -100
-Analyzing 5 files from /home/costa/.ai-agent/sessions/
+Analyzing 5 files from /home/user/.ai-agent/sessions/
 [0m
 [0m$ [0mzcat ~/.ai-agent/sessions/0000174a-5d17-480f-bd27-1b97ddc47410.json.gz | jq -r '
     ([.opTree.turns[]?.ops[]?, .opTree.steps[]?.ops[]?] | 
@@ -424,7 +424,7 @@ done
 EOF
 chmod +x /tmp/ai-viewer-review/analyze.sh
 /tmp/ai-viewer-review/analyze.sh ~/.ai-agent/sessions/ 5
-Analyzing up to 5 files from /home/costa/.ai-agent/sessions/
+Analyzing up to 5 files from /home/user/.ai-agent/sessions/
 0000174a-5d17-480f-bd27-1b97ddc47410.json.gz: llm req_ref req_sdk res_ref res_sdk reason | tool req_ref req_sdk res_ref res_sdk | child_sess
 0000174a-5d17-480f-bd27-1b97ddc47410.json.gz: 2 0 2 0 2 0 0 0 0 0 0 0
 00001c25-bcaf-4221-a72e-a26382ef1a85.json.gz: llm req_ref req_sdk res_ref res_sdk reason | tool req_ref req_sdk res_ref res_sdk | child_sess
@@ -642,11 +642,11 @@ file /tmp/ai-viewer-review/full.json
 ls -la /tmp/ai-viewer-review/full.json
 ...output truncated...
 
-Full output saved to: /home/costa/.local/share/opencode/tool-output/tool_eee6ddee4001gNZlzt2ujBjcTM
+Full output saved to: /home/user/.local/share/opencode/tool-output/tool_eee6ddee4001gNZlzt2ujBjcTM
 
 ---
 /tmp/ai-viewer-review/full.json: JSON text data
--rw-r--r-- 1 costa costa 570479 Jun 22 11:23 /tmp/ai-viewer-review/full.json
+-rw-r--r-- 1 user user 570479 Jun 22 11:23 /tmp/ai-viewer-review/full.json
 [0m
 [0m$ [0m# File is huge, jq was having trouble. Let me query specific turn.
 jq '.opTree.turns | length' /tmp/ai-viewer-review/full.json
@@ -861,24 +861,24 @@ session-run-live-bootstrap.ts
 (no output)
 [0m
 [0m$ [0mgrep -rn -E "reasoning.*final|reasoning\.final" ~/src/ai-agent.git/src/ 2>/dev/null | head -20
-/home/costa/src/ai-agent.git/src/tests/fixtures/test-llm-scenarios.ts:3434:    description: 'LLM emits reasoning-only turn that must not trigger retry before final report.',
-/home/costa/src/ai-agent.git/src/tests/fixtures/test-llm-scenarios.ts:3497:          reasoningContent: 'Evaluating instructions and preparing the final report tool invocation.',
-/home/costa/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-text-paths.test.ts:25:    id: 'run-test-reasoning-without-final-report',
-/home/costa/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-text-paths.test.ts:44:      invariant(!result.success, 'Scenario run-test-reasoning-without-final-report: no final report should end in synthetic failure.');
-/home/costa/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-text-paths.test.ts:45:      expectTurnFailureContains(result.logs, 'run-test-reasoning-without-final-report', ['no_tools', 'final_report_missing', 'retries_exhausted']);
-/home/costa/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/reasoning-advanced.test.ts:86:        text: 'Confirming reasoning replay prior to final report.',
-/home/costa/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/reasoning.test.ts:89:  description: 'Suite: Session processes reasoning content alongside final report',
-/home/costa/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-response-variants.test.ts:3: * Keeps mixed-tool, direct-text, and reasoning-only final-report paths out of phase2-runner.ts.
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:259:  it('extracts legacy reasoning chunks when older snapshots do not have final text', () => {
-/home/costa/src/ai-agent.git/src/tests/unit/session-tree.spec.ts:97:    expect(reasoning?.final).toBeUndefined();
-/home/costa/src/ai-agent.git/src/tests/unit/session-tree.spec.ts:100:    expect(tree.getSession().turns[0]?.ops[0]?.reasoning?.final).toBe('Compacted final reasoning.');
-/home/costa/src/ai-agent.git/src/llm-messages-turn-failed.ts:24:  reasoning_only_final: { priority: 'normal' },
-/home/costa/src/ai-agent.git/src/prompts/turn-failed.md:29:{% when 'reasoning_only' %}Reasoning-only output detected with no visible answer, tool calls, or final report. Call tools or provide your final report/answer in the required XML wrapper.
-/home/costa/src/ai-agent.git/src/prompts/turn-failed.md:30:{% when 'reasoning_only_final' %}Reasoning-only output detected with no visible final report/answer. Relax. This is easy. You must now summarize and provide your final report/answer. Output now the XML wrapper exactly as instructed, and then summarize your work in the requested format.
-/home/costa/src/ai-agent.git/src/prompts/turn-failed.md:31:{% when 'reasoning_only_persistent' %}Reasoning-only output repeated after the previous correction. Stop hidden reasoning and provide the visible final report/answer in the required XML wrapper now.
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:15:  const finalReasoning = op.reasoning?.final;
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:30:      const final = op.reasoning?.final;
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:1881:            this.addTurnFailure(isFinalTurn ? 'reasoning_only_final' : 'reasoning_only');
+/home/user/src/ai-agent.git/src/tests/fixtures/test-llm-scenarios.ts:3434:    description: 'LLM emits reasoning-only turn that must not trigger retry before final report.',
+/home/user/src/ai-agent.git/src/tests/fixtures/test-llm-scenarios.ts:3497:          reasoningContent: 'Evaluating instructions and preparing the final report tool invocation.',
+/home/user/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-text-paths.test.ts:25:    id: 'run-test-reasoning-without-final-report',
+/home/user/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-text-paths.test.ts:44:      invariant(!result.success, 'Scenario run-test-reasoning-without-final-report: no final report should end in synthetic failure.');
+/home/user/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-text-paths.test.ts:45:      expectTurnFailureContains(result.logs, 'run-test-reasoning-without-final-report', ['no_tools', 'final_report_missing', 'retries_exhausted']);
+/home/user/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/reasoning-advanced.test.ts:86:        text: 'Confirming reasoning replay prior to final report.',
+/home/user/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/reasoning.test.ts:89:  description: 'Suite: Session processes reasoning content alongside final report',
+/home/user/src/ai-agent.git/src/tests/phase2-harness-scenarios/suites/final-report-response-variants.test.ts:3: * Keeps mixed-tool, direct-text, and reasoning-only final-report paths out of phase2-runner.ts.
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:259:  it('extracts legacy reasoning chunks when older snapshots do not have final text', () => {
+/home/user/src/ai-agent.git/src/tests/unit/session-tree.spec.ts:97:    expect(reasoning?.final).toBeUndefined();
+/home/user/src/ai-agent.git/src/tests/unit/session-tree.spec.ts:100:    expect(tree.getSession().turns[0]?.ops[0]?.reasoning?.final).toBe('Compacted final reasoning.');
+/home/user/src/ai-agent.git/src/llm-messages-turn-failed.ts:24:  reasoning_only_final: { priority: 'normal' },
+/home/user/src/ai-agent.git/src/prompts/turn-failed.md:29:{% when 'reasoning_only' %}Reasoning-only output detected with no visible answer, tool calls, or final report. Call tools or provide your final report/answer in the required XML wrapper.
+/home/user/src/ai-agent.git/src/prompts/turn-failed.md:30:{% when 'reasoning_only_final' %}Reasoning-only output detected with no visible final report/answer. Relax. This is easy. You must now summarize and provide your final report/answer. Output now the XML wrapper exactly as instructed, and then summarize your work in the requested format.
+/home/user/src/ai-agent.git/src/prompts/turn-failed.md:31:{% when 'reasoning_only_persistent' %}Reasoning-only output repeated after the previous correction. Stop hidden reasoning and provide the visible final report/answer in the required XML wrapper now.
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:15:  const finalReasoning = op.reasoning?.final;
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:30:      const final = op.reasoning?.final;
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:1881:            this.addTurnFailure(isFinalTurn ? 'reasoning_only_final' : 'reasoning_only');
 [0m
 [0m$ [0mgrep -rn -E "reasoning\s*[:=].*\{" ~/src/ai-agent.git/src/session-tree.ts ~/src/ai-agent.git/src/persistence.ts 2>/dev/null | head -20
 (no output)
@@ -898,39 +898,39 @@ grep -rn "reasoning" ~/src/ai-agent.git/src/persistence.ts | head -20
 670:    op.reasoning = r;
 ---
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/session-tree.ts[90m [offset=60, limit=30][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/session-tree.ts[90m [offset=60, limit=30][0m
 [0m
 [0m$ [0mgrep -rn "op\.reasoning" ~/src/ai-agent.git/src/ 2>/dev/null | head -20
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:264:    op.reasoning = {
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:15:  const finalReasoning = op.reasoning?.final;
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:19:  const chunks = op.reasoning?.chunks ?? [];
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:28:    .filter((op) => op.kind === 'llm' && op.reasoning !== undefined)
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:30:      const final = op.reasoning?.final;
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:35:        ...(typeof op.reasoning?.chunkCount === 'number' ? { chunkCount: op.reasoning.chunkCount } : {}),
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:36:        ...(typeof op.reasoning?.charCount === 'number' ? { charCount: op.reasoning.charCount } : {}),
-/home/costa/src/ai-agent.git/src/history-compaction/reasoning.ts:37:        chunks: hasFinal ? [] : op.reasoning?.chunks ?? [],
-/home/costa/src/ai-agent.git/src/history-compaction/summarizer-input.ts:81:  .filter((op) => op.kind === 'llm' && op.reasoning !== undefined)
-/home/costa/src/ai-agent.git/src/session-tree.ts:656:    const r = op.reasoning ?? { chunks: [] as { text: string; ts: number }[] };
-/home/costa/src/ai-agent.git/src/session-tree.ts:662:    op.reasoning = r;
-/home/costa/src/ai-agent.git/src/session-tree.ts:668:    const r = op.reasoning ?? { chunks: [] as { text: string; ts: number }[] };
-/home/costa/src/ai-agent.git/src/session-tree.ts:670:    op.reasoning = r;
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:264:    op.reasoning = {
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:15:  const finalReasoning = op.reasoning?.final;
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:19:  const chunks = op.reasoning?.chunks ?? [];
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:28:    .filter((op) => op.kind === 'llm' && op.reasoning !== undefined)
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:30:      const final = op.reasoning?.final;
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:35:        ...(typeof op.reasoning?.chunkCount === 'number' ? { chunkCount: op.reasoning.chunkCount } : {}),
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:36:        ...(typeof op.reasoning?.charCount === 'number' ? { charCount: op.reasoning.charCount } : {}),
+/home/user/src/ai-agent.git/src/history-compaction/reasoning.ts:37:        chunks: hasFinal ? [] : op.reasoning?.chunks ?? [],
+/home/user/src/ai-agent.git/src/history-compaction/summarizer-input.ts:81:  .filter((op) => op.kind === 'llm' && op.reasoning !== undefined)
+/home/user/src/ai-agent.git/src/session-tree.ts:656:    const r = op.reasoning ?? { chunks: [] as { text: string; ts: number }[] };
+/home/user/src/ai-agent.git/src/session-tree.ts:662:    op.reasoning = r;
+/home/user/src/ai-agent.git/src/session-tree.ts:668:    const r = op.reasoning ?? { chunks: [] as { text: string; ts: number }[] };
+/home/user/src/ai-agent.git/src/session-tree.ts:670:    op.reasoning = r;
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/session-tree.ts[90m [offset=640, limit=50][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/session-tree.ts[90m [offset=640, limit=50][0m
 [0m
 [0m$ [0m# Now let me look at where setReasoningFinal is called from to see if it ever gets called
 grep -rn "setReasoningFinal\|setReasoning" ~/src/ai-agent.git/src/ 2>/dev/null | head -10
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:102:  tree.setReasoningFinal(llmOpId, 'Investigated the previous oversized tool output before replying.');
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:231:    tree.setReasoningFinal(llmOpId, 'first second');
-/home/costa/src/ai-agent.git/src/tests/unit/session-tree.spec.ts:99:    tree.setReasoningFinal(llmOp, 'Compacted final reasoning.');
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:14:    tree.setReasoningFinal(llmOpId, 'Investigated the previous oversized tool output before replying.');
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:121:    tree.setReasoningFinal(llmOpId, 'Need to inspect the derived tool result.');
-/home/costa/src/ai-agent.git/src/context-guard.ts:559:  setReasoningTokens(value?: number | string | null): void {
-/home/costa/src/ai-agent.git/src/session-tree.ts:665:  setReasoningFinal(opId: string, text: string): void {
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3613:        this.ctx.opTree.setReasoningFinal(opId, text);
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3625:        this.ctx.opTree.setReasoningFinal(opId, accumulator.toString());
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3845:        this.ctx.contextGuard.setReasoningTokens(effectiveReasoningValue);
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:102:  tree.setReasoningFinal(llmOpId, 'Investigated the previous oversized tool output before replying.');
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction.spec.ts:231:    tree.setReasoningFinal(llmOpId, 'first second');
+/home/user/src/ai-agent.git/src/tests/unit/session-tree.spec.ts:99:    tree.setReasoningFinal(llmOp, 'Compacted final reasoning.');
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:14:    tree.setReasoningFinal(llmOpId, 'Investigated the previous oversized tool output before replying.');
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:121:    tree.setReasoningFinal(llmOpId, 'Need to inspect the derived tool result.');
+/home/user/src/ai-agent.git/src/context-guard.ts:559:  setReasoningTokens(value?: number | string | null): void {
+/home/user/src/ai-agent.git/src/session-tree.ts:665:  setReasoningFinal(opId: string, text: string): void {
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3613:        this.ctx.opTree.setReasoningFinal(opId, text);
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3625:        this.ctx.opTree.setReasoningFinal(opId, accumulator.toString());
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3845:        this.ctx.contextGuard.setReasoningTokens(effectiveReasoningValue);
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=3600, limit=40][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=3600, limit=40][0m
 [0m
 [0m$ [0m# So setReasoningFinal IS called from setCurrentLlmReasoningFinal and finalizeCurrentLlmReasoning.
 # But let me check if finalizing happens for live sessions
@@ -940,7 +940,7 @@ grep -n "setCurrentLlmReasoningFinal\|finalizeCurrentLlmReasoning" ~/src/ai-agen
 3616:    private finalizeCurrentLlmReasoning(): void {
 4208:            this.finalizeCurrentLlmReasoning();
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=2478, limit=15][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=2478, limit=15][0m
 [0m
 [0m$ [0m# Now check if reasoning is actually written in non-failed attempts
 grep -n "collectReasoningChunks" ~/src/ai-agent.git/src/session-turn-runner.ts | head -5
@@ -984,7 +984,7 @@ grep -B2 -A4 "this.appendReasoningChunk\|appendReasoningChunk(this" ~/src/ai-age
 3978:                warn(`appendReasoningChunk failed: ${e instanceof Error ? e.message : String(e)}`);
 ---
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=3590, limit=15][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=3590, limit=15][0m
 [0m
 [0m$ [0m# Critical finding: appendReasoningChunk sets chunks = [] then increments chunkCount.
 # So `chunks` array is ALWAYS empty (cleared on first chunk) and only `chunkCount` is populated.
@@ -1423,24 +1423,24 @@ grep -rn -E "attributes\[.error.\]|attrs\[.error.\]|attributes\.error" ~/src/ai-
 echo "---"
 grep -rn -E "op.*failed.*attributes" ~/src/ai-agent.git/src/ 2>/dev/null | head -10
 ---
-/home/costa/src/ai-agent.git/src/session-tree.ts:753:  endOp(opId: string, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
-/home/costa/src/ai-agent.git/src/session-orchestration-steps.ts:125:  public endChildOp(opId: string | undefined, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
-/home/costa/src/ai-agent.git/src/ai-agent.ts:265:  public endOrchestrationChildOp(opId: string | undefined, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
+/home/user/src/ai-agent.git/src/session-tree.ts:753:  endOp(opId: string, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
+/home/user/src/ai-agent.git/src/session-orchestration-steps.ts:125:  public endChildOp(opId: string | undefined, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
+/home/user/src/ai-agent.git/src/ai-agent.ts:265:  public endOrchestrationChildOp(opId: string | undefined, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
 [0m
 [0m$ [0m# Find endOp callers with failed status and any error attribute
 grep -rn "endOp.*failed" ~/src/ai-agent.git/src/ 2>/dev/null | head -20
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:56:    tree.endOp(failedToolOpId, 'failed');
-/home/costa/src/ai-agent.git/src/tool-output/extractor.ts:547:        args.child.endOp(opId, 'failed', { error: message, latency: latencyMs });
-/home/costa/src/ai-agent.git/src/tool-output/extractor.ts:563:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
-/home/costa/src/ai-agent.git/src/tool-output/extractor.ts:575:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
-/home/costa/src/ai-agent.git/src/session-tree.ts:753:  endOp(opId: string, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:233:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureMessage });
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:236:    args.context.onWarn(`tools endOp failed: ${toErrorMessage(error)}`);
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:341:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:344:    args.context.onWarn(`tools endOp failed: ${toErrorMessage(error)}`);
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:441:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:444:    args.context.onWarn(`tools endOp failed: ${toErrorMessage(error)}`);
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3295:        this.ctx.opTree.endOp(accountingOpId, success ? 'ok' : 'failed');
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:56:    tree.endOp(failedToolOpId, 'failed');
+/home/user/src/ai-agent.git/src/tool-output/extractor.ts:547:        args.child.endOp(opId, 'failed', { error: message, latency: latencyMs });
+/home/user/src/ai-agent.git/src/tool-output/extractor.ts:563:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
+/home/user/src/ai-agent.git/src/tool-output/extractor.ts:575:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
+/home/user/src/ai-agent.git/src/session-tree.ts:753:  endOp(opId: string, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:233:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureMessage });
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:236:    args.context.onWarn(`tools endOp failed: ${toErrorMessage(error)}`);
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:341:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:344:    args.context.onWarn(`tools endOp failed: ${toErrorMessage(error)}`);
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:441:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:444:    args.context.onWarn(`tools endOp failed: ${toErrorMessage(error)}`);
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3295:        this.ctx.opTree.endOp(accountingOpId, success ? 'ok' : 'failed');
 [0m
 [0m$ [0m# Confirm: LLM failed ops call endOp(opId, 'failed') WITHOUT attributes
 grep -B2 -A2 "endOp.*failed" ~/src/ai-agent.git/src/session-turn-runner.ts | head -30
@@ -1452,15 +1452,15 @@ const accountingOpId = this.ctx.opTree.beginOp(currentTurn, 'system', { label: '
 [0m
 [0m$ [0m# Find ALL endOp(opId, 'failed', ...) calls and see which ones pass error
 grep -rn -E "endOp\(.*'failed'" ~/src/ai-agent.git/src/ 2>/dev/null | head -20
-/home/costa/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:56:    tree.endOp(failedToolOpId, 'failed');
-/home/costa/src/ai-agent.git/src/tool-output/extractor.ts:547:        args.child.endOp(opId, 'failed', { error: message, latency: latencyMs });
-/home/costa/src/ai-agent.git/src/tool-output/extractor.ts:563:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
-/home/costa/src/ai-agent.git/src/tool-output/extractor.ts:575:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
-/home/costa/src/ai-agent.git/src/session-tree.ts:753:  endOp(opId: string, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:233:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureMessage });
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:341:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
-/home/costa/src/ai-agent.git/src/tools/tool-execution-finalization.ts:441:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3295:        this.ctx.opTree.endOp(accountingOpId, success ? 'ok' : 'failed');
+/home/user/src/ai-agent.git/src/tests/unit/history-compaction-summarizer-input.spec.ts:56:    tree.endOp(failedToolOpId, 'failed');
+/home/user/src/ai-agent.git/src/tool-output/extractor.ts:547:        args.child.endOp(opId, 'failed', { error: message, latency: latencyMs });
+/home/user/src/ai-agent.git/src/tool-output/extractor.ts:563:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
+/home/user/src/ai-agent.git/src/tool-output/extractor.ts:575:        args.child.endOp(opId, 'failed', { error: message, latency: result.latencyMs });
+/home/user/src/ai-agent.git/src/session-tree.ts:753:  endOp(opId: string, status: 'ok' | 'failed', attributes?: Record<string, unknown>): void {
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:233:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureMessage });
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:341:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
+/home/user/src/ai-agent.git/src/tools/tool-execution-finalization.ts:441:      args.context.opTree.endOp(args.context.opId, 'failed', { latency: args.latency, error: args.failureReason });
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3295:        this.ctx.opTree.endOp(accountingOpId, success ? 'ok' : 'failed');
 [0m
 [0m$ [0m# So tool endOp calls include error, but session-turn-runner.ts:3295 doesn't.
 # Let me search for LLM failed completion path
@@ -1540,20 +1540,20 @@ grep -n "encodeSnapshotPayload\|encodeSdk\|format.*encoding.*value" ~/src/ai-age
 2998:        const encoded = this.encodeSnapshotPayload(payload, 'sdk');
 3020:        const encoded = this.encodeSnapshotPayload(payload, 'sdk');
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=2975, limit=35][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/session-turn-runner.ts[90m [offset=2975, limit=35][0m
 [0m
 [0m$ [0m# Check what evidenceRecorder is
 grep -rn "evidenceRecorder" ~/src/ai-agent.git/src/ 2>/dev/null | head -10
-/home/costa/src/ai-agent.git/src/session-run-turn-runner.ts:17:  evidenceRecorder?: TurnRunnerContext['evidenceRecorder'];
-/home/costa/src/ai-agent.git/src/session-run-turn-runner.ts:108:  evidenceRecorder: params.evidenceRecorder,
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:96:  readonly evidenceRecorder?: SessionEvidenceRecorder;
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:824:            this.ctx.evidenceRecorder?.recordTurnEnd(
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2383:        this.ctx.evidenceRecorder?.recordTurnStart(currentTurn);
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2985:        if (this.ctx.evidenceRecorder !== undefined) {
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2986:            await this.ctx.evidenceRecorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3007:        if (this.ctx.evidenceRecorder !== undefined) {
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3008:            await this.ctx.evidenceRecorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/ai-agent.ts:147:  private readonly evidenceRecorder?: SessionEvidenceRecorder;
+/home/user/src/ai-agent.git/src/session-run-turn-runner.ts:17:  evidenceRecorder?: TurnRunnerContext['evidenceRecorder'];
+/home/user/src/ai-agent.git/src/session-run-turn-runner.ts:108:  evidenceRecorder: params.evidenceRecorder,
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:96:  readonly evidenceRecorder?: SessionEvidenceRecorder;
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:824:            this.ctx.evidenceRecorder?.recordTurnEnd(
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2383:        this.ctx.evidenceRecorder?.recordTurnStart(currentTurn);
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2985:        if (this.ctx.evidenceRecorder !== undefined) {
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2986:            await this.ctx.evidenceRecorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3007:        if (this.ctx.evidenceRecorder !== undefined) {
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3008:            await this.ctx.evidenceRecorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/ai-agent.ts:147:  private readonly evidenceRecorder?: SessionEvidenceRecorder;
 [0m
 [0m$ [0m# So when evidenceRecorder is set, it creates { sdk: { ref } } — and THAT's the shape the mapper understands.
 # When NOT set (the common case), it inlines the base64 payload as { sdk: { format, encoding, value } }.
@@ -1562,35 +1562,35 @@ grep -rn "evidenceRecorder" ~/src/ai-agent.git/src/ 2>/dev/null | head -10
 
 # Let me also check if there's some other code path that uses evidenceRecorder
 grep -rn "recordJsonPayload\|recordEvidence" ~/src/ai-agent.git/src/ | head -10
-/home/costa/src/ai-agent.git/src/tests/unit/session-orchestration-runner.spec.ts:84:    recordEvidenceSummary: (result: AIAgentResult) => {
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:385:    await expect(recorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:656:    const payloadRef = await recorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/evidence/session-recorder.ts:285:  recordJsonPayload(
-/home/costa/src/ai-agent.git/src/session-orchestration-runner.ts:212:    await session.recordEvidenceSummary(shaped);
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2986:            await this.ctx.evidenceRecorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3008:            await this.ctx.evidenceRecorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/ai-agent.ts:269:  public async recordEvidenceSummary(result: AIAgentResult): Promise<void> {
+/home/user/src/ai-agent.git/src/tests/unit/session-orchestration-runner.spec.ts:84:    recordEvidenceSummary: (result: AIAgentResult) => {
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:385:    await expect(recorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:656:    const payloadRef = await recorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/evidence/session-recorder.ts:285:  recordJsonPayload(
+/home/user/src/ai-agent.git/src/session-orchestration-runner.ts:212:    await session.recordEvidenceSummary(shaped);
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2986:            await this.ctx.evidenceRecorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3008:            await this.ctx.evidenceRecorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/ai-agent.ts:269:  public async recordEvidenceSummary(result: AIAgentResult): Promise<void> {
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/evidence/session-recorder.ts[90m [offset=280, limit=60][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/evidence/session-recorder.ts[90m [offset=280, limit=60][0m
 [0m
 [0m$ [0m# Now let me look at how payloadRef is stored in the evidence writer to understand its shape
 grep -rn "EvidencePayloadRef\b" ~/src/ai-agent.git/src/ | head -10
-/home/costa/src/ai-agent.git/src/llm-client.ts:5:  EvidencePayloadRef,
-/home/costa/src/ai-agent.git/src/llm-client.ts:893:    let capture: EvidencePayloadCapture | EvidencePayloadRef | undefined;
-/home/costa/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:7:import type { EvidenceAccountingSummary, EvidenceChildSessionRef, EvidencePayloadIdentity, EvidencePayloadRef } from '../../evidence/types.js';
-/home/costa/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:193:  payloadRefs: readonly EvidencePayloadRef[],
-/home/costa/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:220:): Promise<EvidencePayloadRef> => {
-/home/costa/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:250:): Promise<EvidencePayloadRef[]> => {
-/home/costa/src/ai-agent.git/src/evidence/reader.ts:9:  EvidencePayloadRef,
-/home/costa/src/ai-agent.git/src/evidence/reader.ts:34:  payloadRefs: EvidencePayloadRef[];
-/home/costa/src/ai-agent.git/src/evidence/reader.ts:44:  payloadRefs: EvidencePayloadRef[];
-/home/costa/src/ai-agent.git/src/evidence/reader.ts:334:export const collectEvidencePayloadRefs = (records: readonly EvidenceRecord[]): EvidencePayloadRef[] => (
+/home/user/src/ai-agent.git/src/llm-client.ts:5:  EvidencePayloadRef,
+/home/user/src/ai-agent.git/src/llm-client.ts:893:    let capture: EvidencePayloadCapture | EvidencePayloadRef | undefined;
+/home/user/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:7:import type { EvidenceAccountingSummary, EvidenceChildSessionRef, EvidencePayloadIdentity, EvidencePayloadRef } from '../../evidence/types.js';
+/home/user/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:193:  payloadRefs: readonly EvidencePayloadRef[],
+/home/user/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:220:): Promise<EvidencePayloadRef> => {
+/home/user/src/ai-agent.git/src/tests/memory/evidence-stress-harness.ts:250:): Promise<EvidencePayloadRef[]> => {
+/home/user/src/ai-agent.git/src/evidence/reader.ts:9:  EvidencePayloadRef,
+/home/user/src/ai-agent.git/src/evidence/reader.ts:34:  payloadRefs: EvidencePayloadRef[];
+/home/user/src/ai-agent.git/src/evidence/reader.ts:44:  payloadRefs: EvidencePayloadRef[];
+/home/user/src/ai-agent.git/src/evidence/reader.ts:334:export const collectEvidencePayloadRefs = (records: readonly EvidenceRecord[]): EvidencePayloadRef[] => (
 [0m
 [0m$ [0mgrep -n "EvidencePayloadRef" ~/src/ai-agent.git/src/evidence/types.ts | head -10
 62:export interface EvidencePayloadRef {
 97:  payloadRefs?: EvidencePayloadRef[];
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/evidence/types.ts[90m [offset=60, limit=15][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/evidence/types.ts[90m [offset=60, limit=15][0m
 [0m
 [0m$ [0m# Now let me confirm the producer code path - is the evidence recorder enabled by default?
 grep -rn "evidenceRecorder" ~/src/ai-agent.git/src/ai-agent.ts | head -20
@@ -1611,28 +1611,28 @@ grep -rn "evidenceRecorder" ~/src/ai-agent.git/src/ai-agent.ts | head -20
 [0m$ [0m# Now let me confirm: when the agent is run from the operator, is the evidence recorder typically enabled?
 # Look at operator config
 grep -rn "evidenceRecorder\|createSessionEvidenceRecorder" ~/src/ai-agent.git/src/ 2>/dev/null | head -20
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:23:import { createSessionEvidenceRecorder } from '../../evidence/session-recorder.js';
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:375:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:582:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:608:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:637:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:675:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:729:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:780:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:827:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:896:    const recorder = createSessionEvidenceRecorder({
-/home/costa/src/ai-agent.git/src/evidence/session-recorder.ts:393:export const createSessionEvidenceRecorder = (options: SessionEvidenceRecorderOptions): SessionEvidenceRecorder | undefined => {
-/home/costa/src/ai-agent.git/src/session-run-turn-runner.ts:17:  evidenceRecorder?: TurnRunnerContext['evidenceRecorder'];
-/home/costa/src/ai-agent.git/src/session-run-turn-runner.ts:108:  evidenceRecorder: params.evidenceRecorder,
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:96:  readonly evidenceRecorder?: SessionEvidenceRecorder;
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:824:            this.ctx.evidenceRecorder?.recordTurnEnd(
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2383:        this.ctx.evidenceRecorder?.recordTurnStart(currentTurn);
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2985:        if (this.ctx.evidenceRecorder !== undefined) {
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:2986:            await this.ctx.evidenceRecorder.recordJsonPayload({
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3007:        if (this.ctx.evidenceRecorder !== undefined) {
-/home/costa/src/ai-agent.git/src/session-turn-runner.ts:3008:            await this.ctx.evidenceRecorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:23:import { createSessionEvidenceRecorder } from '../../evidence/session-recorder.js';
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:375:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:582:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:608:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:637:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:675:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:729:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:780:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:827:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/tests/unit/evidence-writer.spec.ts:896:    const recorder = createSessionEvidenceRecorder({
+/home/user/src/ai-agent.git/src/evidence/session-recorder.ts:393:export const createSessionEvidenceRecorder = (options: SessionEvidenceRecorderOptions): SessionEvidenceRecorder | undefined => {
+/home/user/src/ai-agent.git/src/session-run-turn-runner.ts:17:  evidenceRecorder?: TurnRunnerContext['evidenceRecorder'];
+/home/user/src/ai-agent.git/src/session-run-turn-runner.ts:108:  evidenceRecorder: params.evidenceRecorder,
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:96:  readonly evidenceRecorder?: SessionEvidenceRecorder;
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:824:            this.ctx.evidenceRecorder?.recordTurnEnd(
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2383:        this.ctx.evidenceRecorder?.recordTurnStart(currentTurn);
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2985:        if (this.ctx.evidenceRecorder !== undefined) {
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:2986:            await this.ctx.evidenceRecorder.recordJsonPayload({
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3007:        if (this.ctx.evidenceRecorder !== undefined) {
+/home/user/src/ai-agent.git/src/session-turn-runner.ts:3008:            await this.ctx.evidenceRecorder.recordJsonPayload({
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/evidence/session-recorder.ts[90m [offset=388, limit=25][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/evidence/session-recorder.ts[90m [offset=388, limit=25][0m
 [0m
 [0m$ [0m# So if persistence.sessionsDir is unset, evidenceRecorder is undefined. If set, it captures the SDK payloads to disk.
 # In the operator's case, sessionsDir is the same dir as the v2 snapshots, so evidence IS captured.
@@ -1677,11 +1677,11 @@ turn-0002
 turn-0003
 ---
 total 1056
-drwxr-xr-x     5 costa costa    4096 May 18 12:30 .
-drwxr-xr-x 16858 costa costa 1060864 Jun 22 08:03 ..
-drwxr-xr-x     2 costa costa    4096 May 18 12:30 turn-0001
-drwxr-xr-x     2 costa costa    4096 May 18 12:30 turn-0002
-drwxr-xr-x     2 costa costa    4096 May 18 12:30 turn-0003
+drwxr-xr-x     5 user user    4096 May 18 12:30 .
+drwxr-xr-x 16858 user user 1060864 Jun 22 08:03 ..
+drwxr-xr-x     2 user user    4096 May 18 12:30 turn-0001
+drwxr-xr-x     2 user user    4096 May 18 12:30 turn-0002
+drwxr-xr-x     2 user user    4096 May 18 12:30 turn-0003
 [0m
 [0m$ [0mls ~/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/ | head -10
 echo "---"
@@ -1696,9 +1696,9 @@ llm-0001-sdk-response.json.gz
 ---
 4
 ---
-/home/costa/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/llm-0001-sdk-request.json.gz
-/home/costa/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/llm-0001-response.sse.gz
-/home/costa/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/llm-0001-sdk-response.json.gz
+/home/user/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/llm-0001-sdk-request.json.gz
+/home/user/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/llm-0001-response.sse.gz
+/home/user/.ai-agent/sessions/payloads/00021c39-fd58-4634-b31b-8fb0f15cfdff/turn-0001/llm-0001-sdk-response.json.gz
 [0m
 [0m$ [0m# Now let's see if the v2 snapshot HAS the { ref } form when evidence was captured
 zcat ~/.ai-agent/sessions/00021c39-fd58-4634-b31b-8fb0f15cfdff.json.gz 2>/dev/null > /tmp/ai-viewer-review/with-evidence.json
@@ -1721,8 +1721,8 @@ echo "..."
 echo "---"
 # So it appears the file is not present. Let me check what's actually present
 ls ~/.ai-agent/sessions/ | grep "00021c39" | head -5
-ls: cannot access '/home/costa/.ai-agent/sessions/00021c39-fd58-4634-b31b-8fb0f15cfdff.json.gz': No such file or directory
-gzip: /home/costa/.ai-agent/sessions/00021c39-fd58-4634-b31b-8fb0f15cfdff.json.gz: No such file or directory
+ls: cannot access '/home/user/.ai-agent/sessions/00021c39-fd58-4634-b31b-8fb0f15cfdff.json.gz': No such file or directory
+gzip: /home/user/.ai-agent/sessions/00021c39-fd58-4634-b31b-8fb0f15cfdff.json.gz: No such file or directory
 ---
 ...
 ---
@@ -1750,7 +1750,7 @@ grep -n "evidence\|sessionsDir\|writeSnapshot" ~/src/ai-agent.git/src/persistenc
 58:  if (typeof config?.sessionsDir === 'string' && config.sessionsDir.trim().length > 0) {
 59:    const dir = resolveSafeDirectoryPath(config.sessionsDir, 'persistence.sessionsDir');
 [0m
-[0m→ [0mRead /home/costa/src/ai-agent.git/src/persistence.ts[90m [offset=1, limit=100][0m
+[0m→ [0mRead /home/user/src/ai-agent.git/src/persistence.ts[90m [offset=1, limit=100][0m
 [0m
 [0m$ [0m# Now I understand: v2 snapshot is written by persistence.ts based on SessionSnapshotPayload.
 # The opTree passed in has whatever shape the in-memory tree has when endOp() is called.
@@ -1768,14 +1768,14 @@ grep -n "evidence\|sessionsDir\|writeSnapshot" ~/src/ai-agent.git/src/persistenc
 # So v2 snapshots = legacy (no evidence recorder) → inline payloads → mapper misses them.
 #
 # Now let me check: does the adapter even handle the inline SDK-encoded shape at all?
-grep -n "format.*encoding\|sdk\.format\|inline" /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload.go
+grep -n "format.*encoding\|sdk\.format\|inline" /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload.go
 260:// is inline (no ref), the event is skipped silently — inline-payload
 [0m
 [0m$ [0m# Confirmed: mapper_payload.go says "When a side is inline (no ref), the event is skipped silently"
 # Now let me check if there's any v3 adapter that handles inline payloads — the v3 adapter is the reference for inline handling
-ls /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v3/
+ls /home/user/src/ai-viewer.git/internal/adapters/aiagent_v3/
 echo "---"
-grep -n "sdk\.value\|sdk\.format\|inline\|base64" /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v3/payloads.go 2>/dev/null | head -10
+grep -n "sdk\.value\|sdk\.format\|inline\|base64" /home/user/src/ai-viewer.git/internal/adapters/aiagent_v3/payloads.go 2>/dev/null | head -10
 adapter.go
 adapter_test.go
 coverage2_test.go
@@ -1813,7 +1813,7 @@ testdata
 # NOT { sdk: { format, encoding, value } } inline shape.
 
 # Let me also check subagent linking — child sessions
-ls /home/costa/src/ai-viewer.git/.agents/sow/specs/ 2>/dev/null | head -20
+ls /home/user/src/ai-viewer.git/.agents/sow/specs/ 2>/dev/null | head -20
 adapter-aiagent-v2.md
 adapter-aiagent-v3.md
 adapter-claude-code.md
@@ -1836,7 +1836,7 @@ rest-api.md
 second-opinions.md
 [0m
 [0m$ [0m# Let me see the v2 spec to understand expected behavior
-head -150 /home/costa/src/ai-viewer.git/.agents/sow/specs/adapter-aiagent-v2.md
+head -150 /home/user/src/ai-viewer.git/.agents/sow/specs/adapter-aiagent-v2.md
 # Adapter: ai-agent v2 (Legacy Single Gzipped JSON)
 
 ## Status
@@ -1989,7 +1989,7 @@ Verified key union across 200 random samples:
   "startedAt":           <int millis>,
 [0m
 [0m$ [0m# Continue reading the spec - look for canonical gaps section
-grep -n "Canonical Model Gaps\|Gaps\|gap\|payload\|reasoning" /home/costa/src/ai-viewer.git/.agents/sow/specs/adapter-aiagent-v2.md | head -40
+grep -n "Canonical Model Gaps\|Gaps\|gap\|payload\|reasoning" /home/user/src/ai-viewer.git/.agents/sow/specs/adapter-aiagent-v2.md | head -40
 39:- v3 subdirectories: `session/<sessionId>.jsonl`, `payloads/<sessionId>/turn-NNNN/...`.
 45:- Watch only the root directory non-recursively, ignoring all subdirectories (`session/`, `payloads/`, and anything else).
 156:  "reasoning":           { ... },                         // optional, llm ops only
@@ -2021,47 +2021,47 @@ grep -n "Canonical Model Gaps\|Gaps\|gap\|payload\|reasoning" /home/costa/src/ai
 [0m
 [0m$ [0m# Spec EXPLICITLY documents gap #10: inline payloads are deliberately skipped.
 # Now let me check child session linking — does the v2 mapper set child_session_id?
-grep -n "child_session_id\|ChildSessionNativeID\|childSession" /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_session.go /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go | head -30
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:68:		started.ChildSessionNativeID = op.ChildSession.TraceID
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:72:		started.ChildSessionNativeID = op.ChildSessionRef.SessionID
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:167:		out["childSessionRef"] = op.ChildSessionRef.SessionID
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:170:		out["childSessionSummary"] = op.ChildSessionSummary
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_session.go:10:// recursion happens through session-kind ops with embedded childSession.
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:68:// operationNode mirrors `session-tree.ts:58-80`. childSession is a
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:82:	ChildSession        *opTree                    `json:"childSession,omitempty"`
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:83:	ChildSessionRef     *childSessionRef           `json:"childSessionRef,omitempty"`
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:84:	ChildSessionSummary json.RawMessage            `json:"childSessionSummary,omitempty"`
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:149:// childSessionRef is the lightweight reference variant of childSession
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:153:type childSessionRef struct {
+grep -n "child_session_id\|ChildSessionNativeID\|childSession" /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_session.go /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go | head -30
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:68:		started.ChildSessionNativeID = op.ChildSession.TraceID
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:72:		started.ChildSessionNativeID = op.ChildSessionRef.SessionID
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:167:		out["childSessionRef"] = op.ChildSessionRef.SessionID
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_ops.go:170:		out["childSessionSummary"] = op.ChildSessionSummary
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_session.go:10:// recursion happens through session-kind ops with embedded childSession.
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:68:// operationNode mirrors `session-tree.ts:58-80`. childSession is a
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:82:	ChildSession        *opTree                    `json:"childSession,omitempty"`
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:83:	ChildSessionRef     *childSessionRef           `json:"childSessionRef,omitempty"`
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:84:	ChildSessionSummary json.RawMessage            `json:"childSessionSummary,omitempty"`
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:149:// childSessionRef is the lightweight reference variant of childSession
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser.go:153:type childSessionRef struct {
 [0m
 [0m$ [0m# Let me check how ChildSessionNativeID is used by the ingest writer to see if it actually writes child_session_id
-grep -rn "ChildSessionNativeID\|child_session_id" /home/costa/src/ai-viewer.git/internal/ingest/ /home/costa/src/ai-viewer.git/internal/store/ | head -20
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:227:// linkOpChildren re-links ops.child_session_id from the child native id stashed
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:230:// session exists, so child_session_id starts NULL and the native id is stashed;
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:242:UPDATE ops SET child_session_id = (
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:248:WHERE ops.child_session_id IS NULL
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:271:// linkOpChildrenByToolUse re-links ops.child_session_id by matching the parent op's
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:276:// ChildSessionNativeID (so the childNativeId pass above cannot link it), but it does
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:303:UPDATE ops SET child_session_id = (
-/home/costa/src/ai-viewer.git/internal/ingest/resolver.go:314:WHERE ops.child_session_id IS NULL
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:233:// ChildSessionNativeID stash used by every adapter that knows the child native id
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:986:// propagated unchanged. When the event carries no ChildSessionNativeID, the
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:989:	if ev.ChildSessionNativeID == "" {
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:992:	cid, err := w.lookupSessionID(ctx, tx, ev.ChildSessionNativeID)
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:1002:	// The resolver re-links child_session_id from that stash once the child
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:1006:		"aiViewer": map[string]any{"childNativeId": ev.ChildSessionNativeID},
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:1033:    child_session_id, extras_json
-/home/costa/src/ai-viewer.git/internal/ingest/writer.go:1045:    child_session_id = COALESCE(ops.child_session_id, excluded.child_session_id),
-/home/costa/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:14:// ops.child_session_id starts NULL and the child native id is stashed in
-/home/costa/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:18:// ordering and asserts the resolver re-links ops.child_session_id once the child
-/home/costa/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:65:		ChildSessionNativeID: childNative,
-/home/costa/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:77:	// Before the child lands: child_session_id is NULL and the stash carries
+grep -rn "ChildSessionNativeID\|child_session_id" /home/user/src/ai-viewer.git/internal/ingest/ /home/user/src/ai-viewer.git/internal/store/ | head -20
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:227:// linkOpChildren re-links ops.child_session_id from the child native id stashed
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:230:// session exists, so child_session_id starts NULL and the native id is stashed;
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:242:UPDATE ops SET child_session_id = (
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:248:WHERE ops.child_session_id IS NULL
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:271:// linkOpChildrenByToolUse re-links ops.child_session_id by matching the parent op's
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:276:// ChildSessionNativeID (so the childNativeId pass above cannot link it), but it does
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:303:UPDATE ops SET child_session_id = (
+/home/user/src/ai-viewer.git/internal/ingest/resolver.go:314:WHERE ops.child_session_id IS NULL
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:233:// ChildSessionNativeID stash used by every adapter that knows the child native id
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:986:// propagated unchanged. When the event carries no ChildSessionNativeID, the
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:989:	if ev.ChildSessionNativeID == "" {
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:992:	cid, err := w.lookupSessionID(ctx, tx, ev.ChildSessionNativeID)
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:1002:	// The resolver re-links child_session_id from that stash once the child
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:1006:		"aiViewer": map[string]any{"childNativeId": ev.ChildSessionNativeID},
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:1033:    child_session_id, extras_json
+/home/user/src/ai-viewer.git/internal/ingest/writer.go:1045:    child_session_id = COALESCE(ops.child_session_id, excluded.child_session_id),
+/home/user/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:14:// ops.child_session_id starts NULL and the child native id is stashed in
+/home/user/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:18:// ordering and asserts the resolver re-links ops.child_session_id once the child
+/home/user/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:65:		ChildSessionNativeID: childNative,
+/home/user/src/ai-viewer.git/internal/ingest/resolver_op_child_test.go:77:	// Before the child lands: child_session_id is NULL and the stash carries
 [0m
 [0m→ [0mRead internal/ingest/resolver.go[90m [offset=220, limit=90][0m
 [0m
 [0m$ [0m# So linkOpChildren needs childNativeId in ops.extras_json.aiViewer.childNativeId
 # Let me check writer.go:1006 — that's where ChildSessionNativeID is stashed
-sed -n '980,1015p' /home/costa/src/ai-viewer.git/internal/ingest/writer.go
+sed -n '980,1015p' /home/user/src/ai-viewer.git/internal/ingest/writer.go
 }
 
 // resolveOpStartedChild looks up the child session row (when the event names
@@ -2138,10 +2138,10 @@ opencode       3189    3184
 [0m
 [0m$ [0m# Wait — for aiagent_v2 there ARE 169,423 with child_session_id set. But the SOW says 0!
 # Let me double-check the SOW claim
-grep -A2 "child_session_id.*0\|kind='session'.*0" /home/costa/src/ai-viewer.git/.agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md | head -5
+grep -A2 "child_session_id.*0\|kind='session'.*0" /home/user/src/ai-viewer.git/.agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md | head -5
 echo "---"
 # Re-read the relevant section
-sed -n '11,21p' /home/costa/src/ai-viewer.git/.agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md
+sed -n '11,21p' /home/user/src/ai-viewer.git/.agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md
 - `aiagent_v2`: 1,343,664 llm ops vs 6,169+6,054 = 12,223 captured llm request+response refs. **99.1% of llm ops have no captured payload.** 1,062,490 tool ops vs 0 tool_request/tool_response refs. **0% of tool payloads captured.** 175,612 `kind='session'` ops, **0 with `child_session_id` populated** → 0% deterministic subagent link.
 - `aiagent_v3`: 0 reasoning ops captured (0 of 46,300 llm ops). 78,210 tool ops vs 0 tool refs.
 - `claude-code`: 65,278 tool ops, 31,171 tool_response refs, **0 tool_request refs**. 122,679 llm ops, 0 llm_request refs.
@@ -2392,13 +2392,13 @@ jq: error (at /tmp/ai-viewer-review/dual.json:0): null (null) has no keys
 ls -la --time-style=full-iso ~/.ai-agent/sessions/000369d3-8e00-4e1e-b28e-0789f9fd6d28.json.gz 2>/dev/null
 echo "---"
 ls -la --time-style=full-iso ~/.ai-agent/sessions/payloads/000369d3-8e00-4e1e-b28e-0789f9fd6d28/turn-0001/ 2>/dev/null
--rw-r--r-- 1 costa costa 3501 2026-05-30 20:33:31.693677591 +0300 /home/costa/.ai-agent/sessions/000369d3-8e00-4e1e-b28e-0789f9fd6d28.json.gz
+-rw-r--r-- 1 user user 3501 2026-05-30 20:33:31.693677591 +0300 /home/user/.ai-agent/sessions/000369d3-8e00-4e1e-b28e-0789f9fd6d28.json.gz
 ---
 total 16
-drwxr-xr-x 2 costa costa 4096 2026-05-30 20:33:31.692265863 +0300 .
-drwxr-xr-x 3 costa costa 4096 2026-05-30 20:33:31.678676829 +0300 ..
--rw-r--r-- 1 costa costa 1676 2026-05-30 20:33:31.681676982 +0300 llm-0001-sdk-request.json.gz
--rw-r--r-- 1 costa costa 1055 2026-05-30 20:33:31.690677439 +0300 llm-0001-sdk-response.json.gz
+drwxr-xr-x 2 user user 4096 2026-05-30 20:33:31.692265863 +0300 .
+drwxr-xr-x 3 user user 4096 2026-05-30 20:33:31.678676829 +0300 ..
+-rw-r--r-- 1 user user 1676 2026-05-30 20:33:31.681676982 +0300 llm-0001-sdk-request.json.gz
+-rw-r--r-- 1 user user 1055 2026-05-30 20:33:31.690677439 +0300 llm-0001-sdk-response.json.gz
 [0m
 [0m$ [0m# Both have same timestamp (same session). Let me check the content
 zcat ~/.ai-agent/sessions/payloads/000369d3-8e00-4e1e-b28e-0789f9fd6d28/turn-0001/llm-0001-sdk-request.json.gz 2>/dev/null | jq '. | {provider, model, messages_count: (.messages | length)}'
@@ -2479,8 +2479,8 @@ WHERE src.format = 'aiagent_v2' AND s.native_id = '000369d3-8e00-4e1e-b28e-0789f
 EOF
 native_id                      kind                                                               location_uri                                                          original_bytes
 ------------------------------------  ----------------  ---------------------------------------------------------------------------------------------------------------------------  --------------
-000369d3-8e00-4e1e-b28e-0789f9fd6d28  llm_sdk_request   file:///home/costa/.ai-agent/sessions/payloads/000369d3-8e00-4e1e-b28e-0789f9fd6d28/turn-0001/llm-0001-sdk-request.json.gz             4435
-000369d3-8e00-4e1e-b28e-0789f9fd6d28  llm_sdk_response  file:///home/costa/.ai-agent/sessions/payloads/000369d3-8e00-4e1e-b28e-0789f9fd6d28/turn-0001/llm-0001-sdk-response.json.gz            4934
+000369d3-8e00-4e1e-b28e-0789f9fd6d28  llm_sdk_request   file:///home/user/.ai-agent/sessions/payloads/000369d3-8e00-4e1e-b28e-0789f9fd6d28/turn-0001/llm-0001-sdk-request.json.gz             4435
+000369d3-8e00-4e1e-b28e-0789f9fd6d28  llm_sdk_response  file:///home/user/.ai-agent/sessions/payloads/000369d3-8e00-4e1e-b28e-0789f9fd6d28/turn-0001/llm-0001-sdk-response.json.gz            4934
 [0m
 [0m$ [0m# Excellent! When the v2 snapshot has { sdk: { ref: ... } } shape, the mapper DOES capture it.
 # So the gap is solely about inline payloads (which the spec explicitly skips).
@@ -2763,7 +2763,7 @@ system        {"original_kind":"system"}  0000174a-5d17-480f-b  1769350838026000
 [0m$ [0m# Now let me check: do v2 sessions have user prompts captured as their own op kind?
 # In the v2 mapper, user prompts are part of the turn model, not ops. There's no user_input op kind.
 # But the canonical model has 'user_input' in the kinds list?
-grep -n "user_input\|userInput\|UserInput" /home/costa/src/ai-viewer.git/internal/canonical/*.go | head -10
+grep -n "user_input\|userInput\|UserInput" /home/user/src/ai-viewer.git/internal/canonical/*.go | head -10
 (no output)
 [0m
 [0m$ [0m# user_input is NOT in canonical OpKind — that's interesting. Invariant #2 says 
@@ -2771,7 +2771,7 @@ grep -n "user_input\|userInput\|UserInput" /home/costa/src/ai-viewer.git/interna
 # But canonical doesn't have user_input! So this invariant can't be expressed against canonical.
 
 # Let me check the OpKind enum
-grep -A1 "OpLLM OpKind\|OpKind =" /home/costa/src/ai-viewer.git/internal/canonical/events.go | head -15
+grep -A1 "OpLLM OpKind\|OpKind =" /home/user/src/ai-viewer.git/internal/canonical/events.go | head -15
 OpLLM OpKind = "llm"
 	// OpTool is a tool invocation (shell, fs, MCP, builtin).
 	OpTool OpKind = "tool"
@@ -2788,18 +2788,18 @@ OpLLM OpKind = "llm"
 )
 [0m
 [0m$ [0m# Confirm: no user_input in canonical OpKind
-grep "user_input\|UserInput" /home/costa/src/ai-viewer.git/internal/canonical/*.go
+grep "user_input\|UserInput" /home/user/src/ai-viewer.git/internal/canonical/*.go
 echo "---"
-grep "user_input\|UserInput" /home/costa/src/ai-viewer.git/internal/canonical/*.md
+grep "user_input\|UserInput" /home/user/src/ai-viewer.git/internal/canonical/*.md
 ---
-zsh:4: no matches found: /home/costa/src/ai-viewer.git/internal/canonical/*.md
+zsh:4: no matches found: /home/user/src/ai-viewer.git/internal/canonical/*.md
 [0m
 [0m$ [0m# Let me also check turns invariants in the canonical model
 # Turn-started events should capture user prompts? Let me check turn_started event structure
-grep -B1 -A5 "TurnStartedEvent\b" /home/costa/src/ai-viewer.git/internal/canonical/events.go | head -15
+grep -B1 -A5 "TurnStartedEvent\b" /home/user/src/ai-viewer.git/internal/canonical/events.go | head -15
 echo "---"
 # Look at turns table schema
-grep -A2 "CREATE TABLE turns" /home/costa/src/ai-viewer.git/internal/store/migrations/*.sql 2>/dev/null | head -30
+grep -A2 "CREATE TABLE turns" /home/user/src/ai-viewer.git/internal/store/migrations/*.sql 2>/dev/null | head -30
 // TurnStartedEvent marks the beginning of a turn within a session. Seq
 // is 1-based within a session; seq 0 is reserved for init turns (ai-agent v2).
 type TurnStartedEvent struct {
@@ -2815,11 +2815,11 @@ func (TurnStartedEvent) EventKind() EventKind { return EvTurnStarted }
 // per-turn aggregate token / cost numbers. Token counts are always
 // deltas (the adapter converts cumulative source counters before
 ---
-/home/costa/src/ai-viewer.git/internal/store/migrations/0001_initial.sql:CREATE TABLE turns (
-/home/costa/src/ai-viewer.git/internal/store/migrations/0001_initial.sql-    id                 TEXT PRIMARY KEY NOT NULL,
-/home/costa/src/ai-viewer.git/internal/store/migrations/0001_initial.sql-    session_id         TEXT NOT NULL REFERENCES sessions(id),
+/home/user/src/ai-viewer.git/internal/store/migrations/0001_initial.sql:CREATE TABLE turns (
+/home/user/src/ai-viewer.git/internal/store/migrations/0001_initial.sql-    id                 TEXT PRIMARY KEY NOT NULL,
+/home/user/src/ai-viewer.git/internal/store/migrations/0001_initial.sql-    session_id         TEXT NOT NULL REFERENCES sessions(id),
 [0m
-[0m$ [0mgrep -A 15 "CREATE TABLE turns" /home/costa/src/ai-viewer.git/internal/store/migrations/0001_initial.sql
+[0m$ [0mgrep -A 15 "CREATE TABLE turns" /home/user/src/ai-viewer.git/internal/store/migrations/0001_initial.sql
 CREATE TABLE turns (
     id                 TEXT PRIMARY KEY NOT NULL,
     session_id         TEXT NOT NULL REFERENCES sessions(id),
@@ -2838,19 +2838,19 @@ CREATE TABLE turns (
     UNIQUE (session_id, seq)
 [0m
 [0m$ [0m# No user_prompt column. So how is user prompt text stored?
-grep -r "user_prompt\|UserPrompt\|userPrompt\|prompt_text" /home/costa/src/ai-viewer.git/internal/store/migrations/*.sql | head -10
+grep -r "user_prompt\|UserPrompt\|userPrompt\|prompt_text" /home/user/src/ai-viewer.git/internal/store/migrations/*.sql | head -10
 echo "---"
 # Also search the code
-grep -rn "UserPrompt\|userPrompt\|promptText" /home/costa/src/ai-viewer.git/internal/canonical/ /home/costa/src/ai-viewer.git/internal/presenter/ 2>/dev/null | head -10
+grep -rn "UserPrompt\|userPrompt\|promptText" /home/user/src/ai-viewer.git/internal/canonical/ /home/user/src/ai-viewer.git/internal/presenter/ 2>/dev/null | head -10
 ---
 [0m
 [0m$ [0m# So user prompts are NOT captured at all in canonical model — they're inferred from the request payload
 # This is a significant gap with invariant #2 — "every user prompt becomes a captured op"
 # 
 # Let me also check the CTS schema 
-grep -i "user" /home/costa/src/ai-viewer.git/internal/store/migrations/0001_initial.sql | head -10
+grep -i "user" /home/user/src/ai-viewer.git/internal/store/migrations/0001_initial.sql | head -10
 echo "---"
-ls /home/costa/src/ai-viewer.git/internal/store/migrations/ | head -5
+ls /home/user/src/ai-viewer.git/internal/store/migrations/ | head -5
 ---
 0001_initial.sql
 0002_source_progress.sql
@@ -2861,10 +2861,10 @@ ls /home/costa/src/ai-viewer.git/internal/store/migrations/ | head -5
 [0m$ [0m# OK - no user-related fields. The canonical model relies on the request payload to surface the user prompt.
 # 
 # Let me also check turn extras for user_prompt
-grep -A2 "extras_json" /home/costa/src/ai-viewer.git/internal/store/migrations/0001_initial.sql | head -20
+grep -A2 "extras_json" /home/user/src/ai-viewer.git/internal/store/migrations/0001_initial.sql | head -20
 echo "---"
 # Check if extras_json gets user prompt
-grep -rn "extras.*user" /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/ | head -10
+grep -rn "extras.*user" /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/ | head -10
 -- Format-specific extras live in compact JSON extras_json fields.
 
 -- ---------------------------------------------------------------------
@@ -2969,7 +2969,7 @@ avg_op_count     max_op_count  total_turns  zero_op_turns
 [0m
 [0m$ [0m# 1.4M turns with avg 2.67 ops. Reasonable.
 # Now let me look at the adapter tests to confirm what they cover
-head -100 /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_test.go
+head -100 /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_test.go
 package aiagent_v2
 
 import (
@@ -3072,7 +3072,7 @@ func assertUncapturedPayloadRef(t *testing.T) {
 	got := refs[0]
 [0m
 [0m$ [0m# Now let me look at the mapper_payload_test for the SDK ref case
-grep -A 30 "assertSDKPayloadRef\b" /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_test.go | head -45
+grep -A 30 "assertSDKPayloadRef\b" /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_test.go | head -45
 assertSDKPayloadRef(t)
 	})
 }
@@ -3120,7 +3120,7 @@ func assertSDKPayloadRef(t *testing.T) {
 	if len(refs) != 1 {
 [0m
 [0m$ [0m# Now let me look at the recent commit history to see if this was recently fixed
-cd /home/costa/src/ai-viewer.git
+cd /home/user/src/ai-viewer.git
 git log --oneline -20 -- internal/adapters/aiagent_v2/ 2>/dev/null
 91eb1b8 fix(ingest): throttle SourceProgressEvent cursor marshal + add pprof endpoint
 7becacb fix(adapters): align ctx_used to canonical 4-term formula (SOW-0031)
@@ -3138,7 +3138,7 @@ da3f759 SOW-0001 Chunk 8: ai-agent v2 adapter implementation
 e98599d SOW-0001 Chunk 4: adapter scaffolding (registry + v3/v2 skeletons)
 [0m
 [0m$ [0m# SOW-0047 hardened payload refs. Let me also see if SOW-0031 is relevant
-cd /home/costa/src/ai-viewer.git
+cd /home/user/src/ai-viewer.git
 ls .agents/sow/done/ | grep -i "47\|31" | head -5
 SOW-0026-20260531-op-duration-from-start-ts.md
 SOW-0027-20260531-op-duration-start-ts-recompute.md
@@ -3146,7 +3146,7 @@ SOW-0028-20260531-claude-code-real-data-robustness.md
 SOW-0029-20260531-token-cost-cache-semantics.md
 SOW-0030-20260531-codex-token-persistence.md
 [0m
-[0m$ [0mcd /home/costa/src/ai-viewer.git
+[0m$ [0mcd /home/user/src/ai-viewer.git
 ls .agents/sow/done/ | grep -i "0047\|0031" | head -5
 echo "---"
 # Look at SOW-0047
@@ -3154,31 +3154,31 @@ ls -la .agents/sow/done/SOW-0047* 2>/dev/null
 SOW-0031-20260531-ctx-used-cross-adapter-alignment.md
 SOW-0047-20260605-codacy-complexity-backlog.md
 ---
--rw-r--r-- 1 costa costa 208171 Jun  6 14:52 .agents/sow/done/SOW-0047-20260605-codacy-complexity-backlog.md
+-rw-r--r-- 1 user user 208171 Jun  6 14:52 .agents/sow/done/SOW-0047-20260605-codacy-complexity-backlog.md
 [0m
 [0m$ [0m# Now let me look at all the test files briefly to understand what they cover
-ls /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/*test*.go
+ls /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/*test*.go
 echo "---"
 # Look at coverage_test.go briefly
-head -50 /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/adapter_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/bench_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage2_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage3_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/cursor_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/fuzz_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/golden_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/helpers_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_characterization_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_fixes_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_multi_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/parser_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/scanner_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/streamer_test.go
-/home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/tailer_test.go
+head -50 /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/adapter_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/bench_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage2_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage3_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/coverage_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/cursor_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/fuzz_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/golden_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/helpers_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_characterization_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_fixes_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_multi_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/parser_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/scanner_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/streamer_test.go
+/home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/tailer_test.go
 ---
 package aiagent_v2
 
@@ -3232,7 +3232,7 @@ func TestSnapshotCursor_PopulatesAllFiles(t *testing.T) {
 }
 [0m
 [0m$ [0m# Now let me check the cursor logic - is the cursor re-emitting unchanged files?
-cat /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/cursor.go | head -100
+cat /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/cursor.go | head -100
 package aiagent_v2
 
 import (
@@ -3361,9 +3361,9 @@ aiagent_v2  running              714     714
 # Now let me look at the full picture for a complete analysis
 # Time to finalize my findings.
 # Let me look at the docs/ folder for any extra context
-ls /home/costa/src/ai-viewer.git/docs/ 2>/dev/null
+ls /home/user/src/ai-viewer.git/docs/ 2>/dev/null
 echo "---"
-ls /home/costa/src/ai-viewer.git/.agents/skills/ | head -10
+ls /home/user/src/ai-viewer.git/.agents/skills/ | head -10
 architecture-overview.md
 runbook.md
 setup.md
@@ -3422,7 +3422,7 @@ aiagent_v2  tool  1062490         0
 # 0 of 1.06M tool ops (0%) have any payload_ref
 # 
 # Now let me look at scanner to understand how the data flows
-head -50 /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/scanner.go
+head -50 /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/scanner.go
 package aiagent_v2
 
 import (
@@ -3520,7 +3520,7 @@ bigquery           14224
 [0m
 [0m$ [0m# All 446,378 agent tools are correctly tagged. Good.
 # Now let me do one final cross-check on what mapper_payload.go does when there's a tool op with inline payload
-grep -n "extractPayloadRefs\|extractPayloadRef" /home/costa/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload.go | head -10
+grep -n "extractPayloadRefs\|extractPayloadRef" /home/user/src/ai-viewer.git/internal/adapters/aiagent_v2/mapper_payload.go | head -10
 45:// extractPayloadRef decodes the first ref-form payload descriptor.
 46:// Kept for legacy unit coverage; mapper emission uses extractPayloadRefs
 48:func extractPayloadRef(raw json.RawMessage) (payloadRef, bool) {

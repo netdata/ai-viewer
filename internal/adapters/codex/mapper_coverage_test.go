@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -26,6 +27,37 @@ func TestMapper_ImageGenerationOp(t *testing.T) {
 	}
 	if media != 1 {
 		t.Fatalf("image_generation op count = %d, want 1", media)
+	}
+	wantEnd, err := parseTsToMicros(tsEvent)
+	if err != nil {
+		t.Fatalf("parse tsEvent: %v", err)
+	}
+	finals := opFinals(events)
+	if len(finals) != 1 {
+		t.Fatalf("image_generation finalize count = %d, want 1", len(finals))
+	}
+	if finals[0].Status != "completed" || finals[0].EndTs != wantEnd {
+		t.Fatalf("image_generation finalize = status %q end %d, want completed at %d", finals[0].Status, finals[0].EndTs, wantEnd)
+	}
+}
+
+func TestMapper_LegacyJSONLSessionHeaderAfterFirstRecordErrors(t *testing.T) {
+	t.Parallel()
+
+	m := newTestMapper("sid")
+	first, skip, err := parseLine([]byte(metaLine("sid", `"exec"`)))
+	if err != nil || skip {
+		t.Fatalf("parse first meta: err=%v skip=%v", err, skip)
+	}
+	if _, err := m.mapRecord(first); err != nil {
+		t.Fatalf("map first meta: %v", err)
+	}
+	late, skip, err := parseLine([]byte(`{"timestamp":"2025-09-10T19:21:08Z","id":"late-legacy","instructions":null}`))
+	if err != nil || skip {
+		t.Fatalf("parse late legacy header: err=%v skip=%v", err, skip)
+	}
+	if _, err := m.mapRecord(late); err == nil || !strings.Contains(err.Error(), "legacy session header after first record") {
+		t.Fatalf("late legacy header map error = %v, want legacy session header error", err)
 	}
 }
 
@@ -218,10 +250,21 @@ func TestMapper_EventError(t *testing.T) {
 	events := runLines(t, m, lines)
 	errLog := false
 	for _, ev := range events {
-		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Severity == "ERR" && le.Message == "error" {
+		if le, ok := ev.(canonical.LogEntryEvent); ok && le.Severity == "ERR" && le.Message == "boom happened" {
 			errLog = true
 			if le.Extras["message"] != "boom happened" {
 				t.Errorf("error extras message = %v, want 'boom happened'", le.Extras["message"])
+			}
+			aiViewer, ok := le.Extras["aiViewer"].(map[string]any)
+			if !ok {
+				t.Fatalf("error extras missing aiViewer parity metadata: %+v", le.Extras)
+			}
+			parity, ok := aiViewer["parity"].(map[string]any)
+			if !ok {
+				t.Fatalf("error extras missing parity metadata: %+v", le.Extras)
+			}
+			if parity["nativeArtifactId"] != "line:3:/payload/message" || parity["jsonPointer"] != "/payload/message" {
+				t.Fatalf("error parity metadata = %+v", parity)
 			}
 		}
 	}

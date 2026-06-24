@@ -16,17 +16,19 @@
 #   3. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
 #   4. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
 #   5. scripts/spec-drift.sh + its self-test     the 5 spec↔code drift indicators.
-#   6. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
-#   7. scripts/test/codacy-config-test.sh   Codacy tool/pattern + path policy self-test.
-#   8. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
-#   9. scripts/build.sh                 frontend build + REAL bundle-size gate +
+#   6. scripts/test/check-ingestion-parity-test.sh + scripts/check-ingestion-parity.sh --fixtures
+#                                       deterministic ingestion parity fixture gate.
+#   7. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
+#   8. scripts/test/codacy-config-test.sh   Codacy tool/pattern + path policy self-test.
+#   9. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
+#  10. scripts/build.sh                 frontend build + REAL bundle-size gate +
 #                                       embed + both Go binaries.
-#  10. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
+#  11. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
 #                                       gate self-test + local regression gate.
-#  11. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
+#  12. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
 #                                       coverage gate + frontend Vitest.
-#  12. deterministic adapter fuzz seed corpus + target-set lock.
-#  13. frontend Playwright E2E (includes axe a11y specs) against the built binary.
+#  13. deterministic adapter fuzz seed corpus + target-set lock.
+#  14. frontend Playwright E2E (includes axe a11y specs) against the built binary.
 #
 # ORDERING: fast static gates first so a quick failure surfaces early. The
 # benchmark regression gate runs after the build while the workstation is still
@@ -135,12 +137,53 @@ run_fuzz_seed_gate() {
   fi
 }
 
+validate_tcp_port() {
+  local port="$1" n
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  n=$((10#$port))
+  (( n >= 1 && n <= 65535 ))
+}
+
+port_in_use() {
+  local port="$1"
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -ltn "sport = :$port" 2>/dev/null | awk 'NR > 1 { found=1 } END { exit found ? 0 : 1 }'
+}
+
+choose_frontend_e2e_port() {
+  local port
+  if [[ -n "${AI_VIEWER_E2E_PORT:-}" ]]; then
+    if ! validate_tcp_port "$AI_VIEWER_E2E_PORT"; then
+      printf '%s[ERROR]%s AI_VIEWER_E2E_PORT must be an integer TCP port from 1 to 65535.\n' "$RED" "$NC" >&2
+      return 2
+    fi
+    printf '%s\n' "$AI_VIEWER_E2E_PORT"
+    return 0
+  fi
+
+  for port in 7710 17710 17711 17712 17713; do
+    if ! port_in_use "$port"; then
+      printf '%s\n' "$port"
+      return 0
+    fi
+  done
+
+  printf '%s[ERROR]%s no free frontend E2E port found in 7710, 17710-17713; set AI_VIEWER_E2E_PORT to a free localhost port.\n' "$RED" "$NC" >&2
+  return 1
+}
+
 run_frontend_e2e() {
   if [[ ! -f frontend/package.json ]]; then
     printf '%sno frontend/package.json — skipping frontend E2E.%s\n' "$GRAY" "$NC" >&2
     return 0
   fi
-  (cd frontend && npm run e2e) || return $?
+  local port
+  port="$(choose_frontend_e2e_port)" || return $?
+  if [[ -z "${AI_VIEWER_E2E_PORT:-}" && "$port" != "7710" ]]; then
+    printf '%s[info]%s 127.0.0.1:7710 is occupied; running Playwright E2E on 127.0.0.1:%s via AI_VIEWER_E2E_PORT.%s\n' \
+      "$YELLOW" "$NC" "$port" "$NC" >&2
+  fi
+  (cd frontend && AI_VIEWER_E2E_PORT="$port" npm run e2e) || return $?
 }
 
 run_bench_gate() {
@@ -173,42 +216,47 @@ section "scan-ai-attribution" bash scripts/scan-ai-attribution.sh
 section "spec-drift self-test" bash scripts/test/spec-drift-test.sh
 section "spec-drift" bash scripts/spec-drift.sh
 
-# 6. Codacy coverage upload state-machine self-test. Fast hermetic gate for the
+# 6. Ingestion parity fixture gate. Self-test first, then the named fixture
+# parity wrapper over source/canonical/diff/CLI parity tests.
+section "ingestion parity self-test" bash scripts/test/check-ingestion-parity-test.sh
+section "ingestion parity fixtures" bash scripts/check-ingestion-parity.sh --fixtures
+
+# 7. Codacy coverage upload state-machine self-test. Fast hermetic gate for the
 #    reporting-only upload orchestration script.
 section "codacy coverage upload self-test" bash scripts/test/codacy-coverage-upload-test.sh
 
-# 7. Codacy tool/pattern + path-exclusion policy self-test. Fast hermetic gate.
+# 8. Codacy tool/pattern + path-exclusion policy self-test. Fast hermetic gate.
 section "codacy config self-test" bash scripts/test/codacy-config-test.sh
 
-# 8. systemd unit static lint (present in this repo; skip cleanly if removed).
+# 9. systemd unit static lint (present in this repo; skip cleanly if removed).
 if [[ -f scripts/test/systemd-units-test.sh ]]; then
   section "systemd units" bash scripts/test/systemd-units-test.sh
 fi
 
 # --- slow gates last ---------------------------------------------------------
 
-# 9. Full build + the REAL bundle-size gate on the built dist/ + embed + both
+# 10. Full build + the REAL bundle-size gate on the built dist/ + embed + both
 #    binaries. (Slower than the static gates; faster than the -race suite.)
 section "build.sh (frontend build + bundle-size gate + embed + binaries)" bash scripts/build.sh
 
-# 10. Benchmark gate self-test + local workstation regression gate. This is not
+# 11. Benchmark gate self-test + local workstation regression gate. This is not
 #     comparable on CI hardware, but it is a required local/workstation gate.
 #     Run it before the thermal-heavy correctness gates so it measures code, not
 #     residual load from the aggregate itself.
 section "benchmark regression gate" run_bench_gate
 
-# 11. The long pole: Go -race suite + statement-coverage gate, then (inside
+# 12. The long pole: Go -race suite + statement-coverage gate, then (inside
 #    test.sh) the frontend Vitest run. check-coverage.sh consumes the
 #    coverage.out test.sh writes.
 section "test.sh (Go -race + coverage + frontend Vitest)" bash scripts/test.sh
 section "check-coverage.sh (Go statement coverage gate)" bash scripts/check-coverage.sh coverage.out
 
-# 12. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
+# 13. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
 #    exercises seeds too, but this named section makes the gate visible and pins
 #    the package:target matrix against fuzz-nightly.yml.
 section "adapter fuzz seed corpus" run_fuzz_seed_gate
 
-# 13. Playwright E2E against the built embedded binary. The gating chromium
+# 14. Playwright E2E against the built embedded binary. The gating chromium
 #    project includes the axe a11y specs, so this covers Frontend — E2E and
 #    Frontend — Accessibility without a duplicate second Playwright run.
 section "frontend E2E + axe" run_frontend_e2e

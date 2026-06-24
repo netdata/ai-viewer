@@ -55,6 +55,9 @@ CRUSH.local.md
 # Local fixture caches (real session data; never commit)
 /testdata-local/
 
+# Local ingestion-parity work directories (may contain frozen live sources).
+ai-viewer-parity-*/
+
 # Playwright MCP local cache (regenerated per run; never commit)
 /.playwright-mcp/
 *.png

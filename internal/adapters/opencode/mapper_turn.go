@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -109,11 +108,11 @@ func addClampWarn(a, b int64, field string, onWarn func(error)) int64 {
 // treating a bare null (or empty) as no bytes so an absent input does not
 // contribute a phantom 4-byte ("null") size to bytes_in.
 func jsonTrimBytes(raw []byte) []byte {
-	b := strings.TrimSpace(string(raw))
-	if b == "" || b == "null" {
+	b := bytes.TrimSpace(raw)
+	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
 		return nil
 	}
-	return []byte(b)
+	return b
 }
 
 // --- turn finalize ------------------------------------------------------------

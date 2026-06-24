@@ -45,3 +45,15 @@ func buildPayloadURI(partID, field string) string {
 	return payloadURIScheme + "://?part_id=" + url.QueryEscape(partID) +
 		"&field=" + url.QueryEscape(field)
 }
+
+func buildInputPayloadURI(inputID, field string) string {
+	return payloadURIScheme + "://?input_id=" + url.QueryEscape(inputID) +
+		"&field=" + url.QueryEscape(field)
+}
+
+func buildTableSelectorURI(table, id string) string {
+	values := url.Values{}
+	values.Set("table", table)
+	values.Set("id", id)
+	return payloadURIScheme + "://?" + values.Encode()
+}

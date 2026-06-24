@@ -81,9 +81,15 @@ Threshold: zero high/critical findings from gosec; zero known vulnerabilities fr
 
 **Suppressions:** gosec honors the **hash** form `// #nosec G705 -- justification` (NOT `//nosec`). Per the Operating Rule, any `#nosec`/`//nolint` MUST be a verified false positive AND justified in the active SOW. Prefer restructuring to the gosec-clean pattern of a sibling handler over suppressing; suppress only when the finding is provably impossible (e.g. body is trusted embedded build output served on an exact-match route).
 
-## Verifying CI Before Merge (do not trust `--watch` exit code)
+## Verifying CI Before PR Merge (do not trust `--watch` exit code)
 
-Before SOW-0013's post-merge setup runs, branch protection may still have no required status checks. After setup, the required contexts are recorded in `.github/workflows-checks.yaml` and `docs/setup.md`. In both states, never gate a merge on `gh pr checks <pr> --watch` alone: it fails only on required checks, so a non-required red row can still leave `--watch` green. Before `gh pr merge`, run `gh pr checks <pr>` and confirm EVERY row reads `pass` (no `fail`/`pending`).
+When GA or explicit-PR flow is active, branch protection may still have no
+required status checks before SOW-0013's post-merge setup runs. After setup, the
+required contexts are recorded in `.github/workflows-checks.yaml` and
+`docs/setup.md`. In both states, never gate a merge on
+`gh pr checks <pr> --watch` alone: it fails only on required checks, so a
+non-required red row can still leave `--watch` green. Before `gh pr merge`, run
+`gh pr checks <pr>` and confirm EVERY row reads `pass` (no `fail`/`pending`).
 
 ### Go — Tests
 
@@ -117,6 +123,39 @@ go test -run='^$' -fuzz='^FuzzParseSnapshot$' -fuzztime=5m ./internal/adapters/a
 Every adapter parser exposes at least one `FuzzXxx` target (10 across the 5 adapter packages). `internal/canonical` has **no** fuzz target — it owns no parsers/decoders. CI per-push runs the seed corpus deterministically (`-run='^Fuzz'`, PR-blocking); `fuzz-nightly.yml` runs `-fuzz -fuzztime=5m` per target (non-blocking, uploads any crash reproducer). Commit a found reproducer under `testdata/fuzz/<Target>/` to make it a deterministic per-push regression. Auto-filing a GitHub issue on crash is a deferred follow-up.
 
 Threshold: zero crashes per run. A seed-corpus crash blocks merge.
+
+### Go — Ingestion Parity
+
+```bash
+scripts/test/check-ingestion-parity-test.sh   # hermetic wrapper self-test
+scripts/check-ingestion-parity.sh --fixtures  # source-vs-canonical parity fixture gate
+go test -count=1 ./internal/parity ./internal/ingest ./cmd/ai-viewer-ingest -run 'Parity|Source|Manifest|Diff|Canonical|Matrix|CheckParity'
+go test -run='^Fuzz' ./internal/parity       # deterministic parity fuzz seed corpus
+```
+
+SOW-0097 gate. The wrapper is the named local/CI fixture gate over the parity
+source extractors, canonical extractor, diff engine, ingest parity tests,
+matrix drift tests, `ai-viewer-ingest check-parity` CLI tests, and
+`internal/parity` fuzz seeds. It exists so future agents run one durable gate
+instead of remembering scattered package-level commands.
+
+Threshold: exit zero only when every fixture parity check is clean. Missing
+wrapper/script, invalid wrapper mode, missing required parity package, malformed
+fixture, source extractor error, canonical extractor error, source/canonical
+mismatch, unverifiable artifact, matrix drift or open matrix gap, parity fuzz
+seed crash, or failing CLI mismatch test is a gate failure.
+
+Live local diagnostic entry point:
+
+```bash
+ai-viewer-ingest check-parity --db /opt/ai-viewer/data/index.db --source <adapter:path> ...
+```
+
+The live full gate is workstation-only because it reads private local sources.
+Do not publish live manifests or raw payload bodies. Until SOW-0097 closes, the
+advanced live controls (streaming manifests, snapshot mutation detection,
+resume, sample mode, timeout, memory cap) remain open requirements, not a reason
+to claim full live parity done.
 
 ### Go — Benchmarks
 
@@ -206,6 +245,12 @@ cd frontend && npm run e2e
 ```
 
 Playwright headless. One scenario per primary user flow at minimum: sessions list filter, session detail load, sources panel, real-time update via SSE, theme toggle.
+
+Default bind is `127.0.0.1:7710`. For local workstations where the installed
+ai-viewer service already owns that port, set `AI_VIEWER_E2E_PORT=<free-port>`;
+`scripts/gates.sh` auto-selects a fallback for the aggregate gate. Keep
+`reuseExistingServer: false`: E2E must test the freshly seeded server, never an
+arbitrary existing process or live DB.
 
 Threshold: all pass. Flaky tests are quarantined into a separate suite with a linked SOW to fix; never marked `test.skip`.
 
@@ -328,13 +373,14 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
 ./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
 ./scripts/spec-drift.sh   # the 5 spec↔code drift indicators, fail-closed (SOW-0013; EXISTS)
+./scripts/check-ingestion-parity.sh --fixtures # deterministic source-vs-canonical parity fixture gate (SOW-0097; EXISTS)
 ./scripts/test/codacy-config-test.sh  # Codacy tool/pattern + path policy self-test (SOW-0046; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast, per-section timing (SOW-0013; EXISTS)
 ```
 
 `scripts/lint.sh` is the build-free module/static-analysis entrypoint: it runs Go module tidiness, tracked-file Go formatter checks, Go vet/lint/security checks, frontend static checks, the coverage-config verifier, and hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, `scripts/test/codacy-config-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044/0046). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, and complete coverage of the local gate catalog including the lint formatter-scope self-test, Codacy coverage-upload self-test, Codacy config self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. The benchmark regression gate runs after build and before the long CPU-heavy `-race` and Playwright sections so the local workstation benchmark measures code behavior, not residual thermal/load state created by the aggregate itself. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/lint-test/Codacy coverage-upload self-test/Codacy config self-test/AI-attribution fail-closed, spec-drift self-test before live detector, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/check-ingestion-parity.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/check-ingestion-parity-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, `scripts/test/codacy-config-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044/0046/0097). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, and complete coverage of the local gate catalog including the lint formatter-scope self-test, ingestion parity fixture gate, Codacy coverage-upload self-test, Codacy config self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. The benchmark regression gate runs after build and before the long CPU-heavy `-race` and Playwright sections so the local workstation benchmark measures code behavior, not residual thermal/load state created by the aggregate itself. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/ingestion-parity/lint-test/Codacy coverage-upload self-test/Codacy config self-test/AI-attribution fail-closed, spec-drift and ingestion-parity self-tests before live detectors, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
 
 Required CI jobs are **not** bootstrap probes anymore. They fail closed when
 their mature repo prerequisites disappear: `lint`/`test` require Go module files

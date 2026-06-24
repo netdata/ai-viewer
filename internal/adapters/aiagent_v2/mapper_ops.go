@@ -1,6 +1,7 @@
 package aiagent_v2
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
@@ -50,7 +51,7 @@ func buildOpStarted(ctx *mapContext, v opVisit, kind canonical.OpKind, startUs i
 		Name:            attrString(v.op.Attributes, "name"),
 		Provider:        attrString(v.op.Attributes, "provider"),
 		Model:           attrString(v.op.Attributes, "model"),
-		Extras:          opStartedExtras(v.op),
+		Extras:          opStartedExtrasForVisit(v),
 	}
 	populateStartedToolFields(&started, v.op, kind)
 	populateStartedChildSession(&started, v.op)
@@ -136,11 +137,19 @@ func applyToolCharacterAccounting(ev *canonical.OpFinalizedEvent, acc accounting
 }
 
 func opStartedExtras(op operationNode) map[string]any {
+	return opStartedExtrasForVisit(opVisit{op: op})
+}
+
+func opStartedExtrasForVisit(v opVisit) map[string]any {
 	out := map[string]any{}
-	addOriginalKindExtra(out, op)
-	addReasoningExtras(out, op.Reasoning)
-	addChildSessionExtras(out, op)
-	addAccountingCacheExtras(out, op.Accounting)
+	addOriginalKindExtra(out, v.op)
+	if needsCompactionProofExtras(v) {
+		addAttributeExtras(out, "attr.", v.op.Attributes)
+		addStepExtras(out, v.scope)
+	}
+	addReasoningExtras(out, v.op.Reasoning)
+	addChildSessionExtras(out, v.op)
+	addAccountingCacheExtras(out, v.op.Accounting)
 	return out
 }
 
@@ -148,6 +157,28 @@ func addOriginalKindExtra(out map[string]any, op operationNode) {
 	if op.Kind != "" {
 		out["original_kind"] = op.Kind
 	}
+}
+
+func needsCompactionProofExtras(v opVisit) bool {
+	return v.scope.stepKind == "internal" &&
+		v.op.Kind == "session" &&
+		attrString(v.op.Attributes, "provider") == "history-compaction"
+}
+
+func addAttributeExtras(out map[string]any, prefix string, attrs map[string]json.RawMessage) {
+	for key, raw := range attrs {
+		if key == "" || len(raw) == 0 {
+			continue
+		}
+		out[prefix+key] = append(json.RawMessage(nil), raw...)
+	}
+}
+
+func addStepExtras(out map[string]any, scope opScope) {
+	if scope.stepKind != "" {
+		out["step.kind"] = scope.stepKind
+	}
+	addAttributeExtras(out, "step.attr.", scope.stepAttributes)
 }
 
 func addReasoningExtras(out map[string]any, r *reasoning) {
@@ -191,11 +222,16 @@ func addTokenCacheExtras(out map[string]any, t *tokens) {
 func (m *mapEmitter) emitOpLogs(v opVisit, fallbackTs int64) {
 	for li := range v.op.Logs {
 		l := v.op.Logs[li]
-		m.append(buildOpLog(m.ctx, v, l, li, fallbackTs))
+		pointer := fmt.Sprintf("%s/logs/%d/message", v.jsonPointer, li)
+		extras, err := logExtras(m.ctx, l, pointer)
+		if err != nil {
+			m.report(err)
+		}
+		m.append(buildOpLog(m.ctx, v, l, li, fallbackTs, extras))
 	}
 }
 
-func buildOpLog(ctx *mapContext, v opVisit, l logEntry, idx int, fallbackTs int64) canonical.LogEntryEvent {
+func buildOpLog(ctx *mapContext, v opVisit, l logEntry, idx int, fallbackTs int64, extras map[string]any) canonical.LogEntryEvent {
 	ts := msToMicros(l.Timestamp)
 	if ts == 0 {
 		ts = fallbackTs
@@ -208,15 +244,19 @@ func buildOpLog(ctx *mapContext, v opVisit, l logEntry, idx int, fallbackTs int6
 		Severity:        normaliseSeverity(l.Severity),
 		Source:          Format,
 		Message:         l.Message,
-		Extras:          logExtras(l),
+		Extras:          extras,
 	}
 }
 
-func logExtras(l logEntry) map[string]any {
-	if l.Path == "" {
-		return nil
+func logExtras(ctx *mapContext, l logEntry, pointer string) (map[string]any, error) {
+	parity, err := aiAgentV2LogParityExtras(ctx, pointer)
+	if err != nil {
+		return nil, err
 	}
-	return map[string]any{"path": l.Path}
+	if l.Path == "" {
+		return mergeLogExtras(nil, parity), nil
+	}
+	return mergeLogExtras(map[string]any{"path": l.Path}, parity), nil
 }
 
 func (m *mapEmitter) emitFailedOpLog(v opVisit, endUs int64) {
@@ -224,6 +264,10 @@ func (m *mapEmitter) emitFailedOpLog(v opVisit, endUs int64) {
 		return
 	}
 	if msg := attrString(v.op.Attributes, "error"); msg != "" {
+		extras, err := aiAgentV2LogParityExtras(m.ctx, v.jsonPointer+"/attributes/error")
+		if err != nil {
+			m.report(err)
+		}
 		m.append(canonical.LogEntryEvent{
 			EventBase:       baseEvent(m.ctx, v.path+"::failure", endUs),
 			SessionNativeID: v.scope.sessionTrace,
@@ -232,6 +276,7 @@ func (m *mapEmitter) emitFailedOpLog(v opVisit, endUs int64) {
 			Severity:        "ERR",
 			Source:          Format,
 			Message:         msg,
+			Extras:          extras,
 		})
 	}
 }
@@ -246,6 +291,7 @@ func (m *mapEmitter) emitChildSession(v opVisit) {
 		parentOpKey:    v.op.OpID,
 		kind:           canonical.KindSubAgent,
 		depth:          v.scope.depth + 1,
+		jsonPointer:    v.jsonPointer + "/childSession",
 	})
 }
 

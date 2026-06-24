@@ -1,5 +1,11 @@
 # SOW-0090 — Turn-View Polish
 
+## Status
+
+Status: completed
+
+Sub-state: Completed by chunks 7-10. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene pass.
+
 ## Problem
 
 The turn viewer shipped in SOW-0088 chunk 2 (`80de942`) and the JSON-extraction
@@ -114,3 +120,7 @@ foreground color is in the app's color family.
 
 Each chunk: 5/5 PRODUCTION GRADE. The pieces are small, well-isolated,
 test-driven, and ship behind existing turn-view tests.
+
+## Outcome
+
+Completed. Readable JSON-envelope extraction shipped in commit `0218c1f`; payload cap adjustment shipped in `b51f106`; per-step metadata shipped in `095b9c1`; step-kind filters shipped in `5b88490`; custom syntax highlighting shipped in `ff748be`.

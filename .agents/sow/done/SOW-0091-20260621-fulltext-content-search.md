@@ -1,5 +1,11 @@
 # SOW-0091 — Full-Text Content Search
 
+## Status
+
+Status: completed
+
+Sub-state: Completed by chunks 1-4. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene pass.
+
 ## Problem
 
 `/api/search` (SOW-0035) currently uses two FTS5 indexes (`fts_ops`,
@@ -115,3 +121,7 @@ reversible (no destructive ALTER); the backfill is idempotent and
 bounded; the API change is additive (existing fields unchanged, new
 fields have safe defaults); the UI is a single route addition that
 doesn't touch existing surfaces.
+
+## Outcome
+
+Completed. Schema migration shipped in `5f86985`, backfill command in `2e41b54`, API integration in `b8c19c2`, and the `/search` UI in `da0fa73`.

@@ -17,7 +17,8 @@ main()
   ├─ for each source:
   │    ├─ instantiate adapter via registry (ParseCursor from source_progress.cursor)
   │    ├─ goroutine: adapter.Scan(...) → events chan
-  │    ├─ on Scan return: goroutine: adapter.Tail(...) → events chan
+  │    ├─ after all Scan calls return: bounded read-model backfill attempt
+  │    ├─ on Scan return and backfill gate close: adapter.Tail(...) → events chan
   │    └─ Ingester.Submit(sourceID, events) — spawns one worker
   └─ wait for SIGTERM/SIGINT → Ingester.Stop() → graceful shutdown
 ```
@@ -25,6 +26,19 @@ main()
 The ingester owns the write-side `*sql.DB`; downstream packages do not
 touch it. The store remains the only SQLite handle; the ingester is the
 only writer (per `data-model.md` §single-writer invariant).
+
+The post-scan read-model backfill is a derived-data repair step, not part of
+the primary canonical ingestion contract. Initial Scan may defer FTS and
+rollup maintenance for throughput, but Tail startup is guarded by a bounded
+backfill gate: after every source Scan returns, the daemon attempts the
+one-shot FTS/rollup backfill with a five-minute startup timeout. If the
+backfill completes, Tail starts with read models current. If the timeout or
+another error cancels the backfill, the daemon logs the failure, closes the
+gate, and starts Tail so new source records continue entering the canonical
+tables. A stuck or expensive read-model rebuild must not leave source_progress
+stale or prevent new sessions, turns, ops, payload refs, or log entries from
+being ingested. The repair path is to rerun the dedicated backfill subcommands;
+primary ingestion remains live.
 
 ## Ingester API
 
@@ -51,7 +65,8 @@ func (i *Ingester) Start(ctx context.Context) error
 func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error
 
 // Stop drains every worker's pending batch, commits, persists
-// source_progress, stops the resolver, and returns. Idempotent.
+// source_progress, runs one final resolver pass over the just-committed rows,
+// stops the resolver, and returns. Idempotent.
 func (i *Ingester) Stop() error
 ```
 
@@ -118,15 +133,17 @@ merely because the parent run context was canceled before or during shutdown
 `BeginTx` / event application; the bounded drain context is the explicit
 shutdown deadline.
 
-On active-run write error: `tx.Rollback()`, report the failure through the
-worker batch-failure path (`worker.report`; tests may install the private
-`onErr` seam, production falls back to `logger.Error`), advance past the
-offending batch and continue. The offending events are NOT retried. Worker write
-failures are not converted into `SourceErrorEvent` rows, because the same write
-path or database failure may prevent reliable persistence of that diagnostic
-event; adapter parse errors and writer-detected data-quality defects use
-`SourceErrorEvent` for `/api/health` visibility, while worker transaction
-failures are logged/reported as batch failures.
+On active-run write error: `tx.Rollback()`, retry the batch a small bounded
+number of times for transient SQLite contention/checkpoint races. Retry attempts
+are logged as recoverable warnings and must not invoke the terminal worker
+batch-failure path. After retries are exhausted, report the failure through
+`worker.report` (tests may install the private `onErr` seam, production falls
+back to `logger.Error`), advance past the offending batch and continue. Terminal
+worker write failures are not converted into `SourceErrorEvent` rows, because
+the same write path or database failure may prevent reliable persistence of that
+diagnostic event; adapter parse errors and writer-detected data-quality defects
+use `SourceErrorEvent` for `/api/health` visibility, while terminal worker
+transaction failures are logged/reported as batch failures.
 
 ## Dedup and Idempotency
 
@@ -200,6 +217,25 @@ or a re-scan of a changed file) at the SQL layer:
     empty object), or SQL `NULL` when the existing row has no such stash — so the
     stash survives a no-extras re-emit while every other stale key is correctly
     dropped.
+  - **Synthetic parent-side `SessionStartedEvent` rows are repair hints, not
+    source-owned replacements.** Some adapters, including aiagent_v3, emit
+    `SessionStartedEvent{Extras.synthesizedFromParent=true}` from a parent-side
+    child-session reference before or after the child's own ledger is ingested.
+    The writer may use those synthetic events to fill missing
+    `parent_session_id`, `root_session_id`, and resolver-owned `aiViewer` linkage
+    hints, but when the existing row already carries real source metadata from a
+    child `session_start` (for aiagent_v3 this is proven by
+    `extras_json.capturePayloads`), the synthetic replay MUST NOT overwrite
+    source-owned columns or extras: `kind`, `agent_name`, `model`, `provider`,
+    `provider_alias`, `cwd`, `call_path`, and non-`aiViewer` `extras_json` remain
+    the real child row's values. This prevents a parent summary from changing a
+    real `tool_output` child into a generic `sub_agent` or erasing
+    `session_metadata` parity proof. The same synthetic replay may resolve
+    `parent_session_id` / `root_session_id` only when it agrees with, or fills a
+    blank in, the real child row's stashed `$.aiViewer.parentNativeId` /
+    `$.aiViewer.rootNativeId`; it must not install a foreign key that contradicts
+    those source-owned native ids. The resolver keeps retrying the stashed real
+    native ids until the matching real parent/root rows are present.
   - **The graft uses `json_set`, NOT `json_patch`.** `json_patch` (RFC 7386
     merge-patch) treats a JSON `null` VALUE as a DELETE directive, and adapters copy
     arbitrary source attributes into op extras (e.g. `aiagent_v3` emits
@@ -475,16 +511,21 @@ On SIGTERM/SIGINT:
 1. Cancel adapter contexts.
 2. Wait up to 5 s for in-flight Scan/Tail goroutines to return. If an adapter
    does not drain in that window, log a warning and continue shutdown.
-3. Stop the resolver goroutine, cancel the ingester context, and wait for
-   worker goroutines.
+3. Stop the resolver ticker, cancel the ingester context, and wait for worker
+   goroutines.
 4. Each worker drains already-buffered events and pending rollup buckets. A
    final flush persists `source_progress` rows (`last_seq`, cursor) and notify
    rows in the same transaction as the batch.
-5. Worker shutdown writes use the bounded shutdown-drain context. The current
+5. After every worker has drained, `Ingester.Stop()` runs one synchronous
+   resolver pass before returning. This is required for one-shot/bulk ingestion:
+   parent/root and op→child linkage stashed in the final committed batch must
+   be repaired even when the process exits before the next 5 s background
+   resolver tick.
+6. Worker shutdown writes use the bounded shutdown-drain context. The current
    bound is 10 s per worker write/drain context. Active writes selected before
    cancellation detach from immediate lifecycle cancellation, but if shutdown
    arrives while the write is in flight they arm the same 10 s bound.
-6. Close SQLite after `Ingester.Stop()` returns.
+7. Close SQLite after `Ingester.Stop()` returns.
 7. Exit 0.
 
 There is no separate process-level hard timeout in the current implementation:
@@ -495,5 +536,5 @@ update this contract, the CLI behavior, and tests together.
 ## Failure Recovery
 
 - Crashed adapter (returned error from Tail) → log loudly, mark source `parse_errors++`, restart adapter after exponential backoff (1 s, 2 s, 4 s, … max 60 s).
-- SQLite transaction failed → log loudly, drop the failed batch's events, advance past them. Future batches continue. The decision NOT to retry is deliberate: SQL failures here are deterministic (bad data, schema mismatch); retrying never converges and burns CPU. If the failure rate spikes the operator must intervene (this surfaces in `/api/health`).
+- SQLite transaction failed → retry briefly for transient contention, then log loudly, drop the failed batch's events, and advance past them only after retries are exhausted. Future batches continue. Recovered retries are warnings, not terminal worker errors. If terminal failures spike the operator must intervene (this surfaces in `/api/health`).
 - Disk full → log loudly, refuse new writes until space returns. Adapters continue scanning into a memory-buffered queue with cap 10000 events; oldest dropped if cap exceeded (counted in metrics).

@@ -204,7 +204,7 @@ export function UnifiedView({ detail }: { detail: SessionDetailResponse }) {
                 </div>
                 <div className={styles.vizContent}>
                   {vizTab === 'waterfall' ? (
-                    <TraceTab detail={detail} />
+                    <TraceTab detail={detail} mode="viz" />
                   ) : vizTab === 'topology' ? (
                     <TopologyTab sessionId={detail.session.id} />
                   ) : vizTab === 'timeline' ? (

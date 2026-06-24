@@ -164,6 +164,7 @@ func TestTail_PeriodicProgress(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = a.Tail(ctx, out) }()
+	time.Sleep(80 * time.Millisecond)
 
 	// The tail now emits SourceProgress only when the cursor actually
 	// changes (SOW-0094 — emitting the full cursor every 5 s on a 482k-

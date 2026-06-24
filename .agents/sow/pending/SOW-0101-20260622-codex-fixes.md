@@ -5,6 +5,10 @@
 Status: open (proposed 2026-06-22)
 Sub-state: CTO-proposed. Reviewer 1 (codex) of SOW-0096 produced the findings this SOW fixes. Depends on SOW-0097 (canonical `user_input` op kind) for the 24,149-row reclassification.
 
+## Correction - 2026-06-22
+
+SOW-0097 has been reframed from a `user_input` op-kind migration into a deterministic ingestion parity-gate SOW. Any references below to a SOW-0097 migration 0012 or automatic `user_input` reclassification are provisional and superseded. The codex fix must follow the SOW-0097 parity spec: prove the 24,149 source user-input artifacts and their canonical representation first, then reclassify rows or add op kinds only if the parity contract requires them.
+
 ## Pre-Implementation Gate
 
 ### Problem / root-cause model
@@ -15,14 +19,14 @@ Reviewer 1 (codex) walked the codex adapter end-to-end and surfaced 4 distinct g
 
 2. **T10-codex-2 P1** — `parent_thread_id` not decoded as fallback subagent link. The codex JSONL has a `session_meta.parent_thread_id` field (per the OpenAI codex schema, also referenced in `internal/adapters/codex/types.go:49,64`) that's parsed but never used as a subagent-link fallback. The current subagent-link path uses `source.subagent.thread_spawn.parent_thread_id` (nested, may be absent). When the nested is absent but the top-level is present, the link is missed. **Mapper fix; in scope.**
 
-3. **T2-codex-1 P0** — 24,149 `kind='internal', name='user_input'` ops are intentional user inputs. The canonical model has no `user_input` op kind (per Reviewer 3), so codex overloads `internal`. The fix is not to reclassify manually but to (a) add `user_input` to the canonical enum (SOW-0097) and (b) re-emit those ops with the new kind. The 24,149 rows are migrated by SOW-0097's migration 0012. **Mapper fix; in scope (depends on SOW-0097).**
+3. **T2-codex-1 P0** — 24,149 `kind='internal', name='user_input'` ops are intentional user inputs. The canonical model has no `user_input` op kind (per Reviewer 3), so codex overloads `internal`. SOW-0097 now decides the canonical representation through the parity spec: either those source user-input artifacts remain represented as `internal/user_input` with exact artifact metadata, or the spec adds a first-class op/payload representation and this SOW updates the mapper accordingly. **Mapper fix; in scope (depends on SOW-0097's parity contract).**
 
-4. **T6-codex-1 P1** — `tool_request` overcount = 24,149 misclassified user_inputs. The 670,183 tool_request refs include 24,149 refs attached to the misclassified user_input ops. After SOW-0097's reclassification, those 24,149 refs become `user_input` payload_refs (not `tool_request`); the overcount resolves automatically. **Resolved by SOW-0097.**
+4. **T6-codex-1 P1** — `tool_request` overcount = 24,149 misclassified user_inputs. The 670,183 tool_request refs include 24,149 refs attached to the user-input ops. SOW-0097's parity contract decides whether these remain canonical user-prompt artifacts under the existing representation or move to a new artifact/op kind. **Resolved only after SOW-0097 proves the correct artifact classification.**
 
 5. **T5-codex-1 P1** — dynamic tool call event messages (`event_msg.dynamic_tool_call`) may only become debug logs. The mapper recognizes them at `ops_event.go:84` but the corpus may show they persist without a companion `response_item.function_call`, in which case they're orphans. Needs a corpus check. **Open question for SOW-0101 chunk 2.**
 
 Plus one structural item tied to SOW-0097:
-6. After SOW-0097 lands, emit `kind='user_input'` for user prompts at the 3 emission sites (`ops_response.go:119`, `:160`, `:171`) so future sessions don't re-create the misclassification.
+6. After SOW-0097 lands, update the 3 user-prompt emission sites (`ops_response.go:119`, `:160`, `:171`) to match the parity-approved canonical representation.
 
 ### Evidence reviewed
 
@@ -113,12 +117,12 @@ b. Update the SOW-0096 triage doc to mark T7-codex-1, T10-codex-2, T2-codex-1, T
 - `internal/adapters/codex/ops_tools.go` — synthetic response emission
 - `internal/adapters/codex/ops_enrich.go` — synthetic response emission
 - `internal/adapters/codex/ops_collab.go` — parent_thread_id fallback
-- `internal/adapters/codex/ops_response.go` (post-SOW-0097) — kind='user_input'
+- `internal/adapters/codex/ops_response.go` (post-SOW-0097) — parity-approved user-prompt representation
 - `.agents/sow/specs/adapter-codex.md`
 - `.agents/sow/specs/canonical-events.md`
 - `.agents/sow/current/SOW-0096-review-triage.md`
 
-**Schema impact**: none (SOW-0097's migration 0012 handles the data reclassification).
+**Schema impact**: none known in this SOW. SOW-0097's parity spec decides whether any canonical/schema change is required for user-prompt artifacts.
 
 ### Open decisions
 

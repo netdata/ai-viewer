@@ -157,8 +157,8 @@ func discoverRollouts(root string, onError func(error)) (discovered, error) {
 			}
 			out.modern = append(out.modern, rollout{rel: rel, abs: path})
 		case atRoot && legacyNameRe.MatchString(name):
-			// Legacy flat .json directly under the root: recorded by basename so a
-			// single informational SourceError is emitted once (rule #24/§Legacy).
+			// Legacy flat .json directly under the root: recorded by basename so
+			// Scan can consume the static file once.
 			out.legacy = append(out.legacy, name)
 		}
 		return nil

@@ -3,6 +3,8 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,6 +309,47 @@ func TestWorkerRuntime_FlushBatchSurvivesLifecycleCancellationRace(t *testing.T)
 	}
 }
 
+func TestWorkerRuntime_RecoveredFlushRetryDoesNotInvokeOnErr(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	var errs []error
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.onErr = func(err error) {
+		errs = append(errs, err)
+	}
+	rt := newWorkerRuntime(w)
+	defer rt.close()
+
+	rt.appendEvent(canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "retry-then-success",
+		RootNativeID: "retry-then-success",
+		Kind:         canonical.KindRoot,
+	})
+	attempts := 0
+	rt.flush = func(context.Context, *writer, []canonical.Event) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("transient flush failure")
+		}
+		return nil
+	}
+
+	rt.flushBatchWithWriteContext(context.Background(), "test retry")
+
+	if attempts != 2 {
+		t.Fatalf("flush attempts = %d, want one retry then success", attempts)
+	}
+	if len(errs) > 0 {
+		t.Fatalf("recovered retry invoked onErr: %v", errs[0])
+	}
+	if len(rt.batch) != 0 {
+		t.Fatalf("batch len after recovered retry = %d, want 0", len(rt.batch))
+	}
+}
+
 // TestDetachedWriteContext pins the unbounded context.WithoutCancel risk: active
 // writes detach from lifecycle cancellation, but shutdown must still arm the
 // bounded drain timeout while preserving parent context values.
@@ -496,7 +539,7 @@ func TestWorkerRuntime_CanceledParentShutdownIdleRefreshMaterializesClosedBucket
 
 	assertRuntimeCarriedRollups(t, db, rt, errs, hourH, day0)
 
-	clk.now = ts(1, 0, 1) // close both the carried hour and day.
+	clk.Set(ts(1, 0, 1)) // close both the carried hour and day.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	rt.handleCancel(ctx)
@@ -756,6 +799,36 @@ func TestWorker_OnErrCallbackFires(t *testing.T) {
 	}
 }
 
+func TestIngesterStopReturnsWorkerErrors(t *testing.T) {
+	t.Parallel()
+
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(silentLogger()), WithBatchSize(1), WithBatchInterval(time.Hour))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	events := make(chan canonical.Event, 1)
+	if err := i.Submit("aiagent_v3:/tmp", events); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	events <- canonical.SessionStartedEvent{
+		EventBase: canonical.EventBase{SourceID: "aiagent_v3:/tmp", SourceSeq: 1, Ts: 0},
+	}
+	close(events)
+
+	err = i.Stop()
+	if err == nil {
+		t.Fatal("Stop returned nil, want worker batch error")
+	}
+	if !strings.Contains(err.Error(), "DROPPING") {
+		t.Fatalf("Stop error = %v, want dropped-batch context", err)
+	}
+}
+
 // TestWorker_IdleTickMaterializesClosedBucket pins the round-7 idle
 // materialization tick (Part 2). Ops arrive entirely within the OPEN hour H, then
 // ingestion goes quiet (no further events). When the injected clock advances past
@@ -818,7 +891,7 @@ func TestWorker_IdleTickMaterializesClosedBucket(t *testing.T) {
 	}
 
 	// Close H by advancing the clock; the idle tick (no new events) must materialize it.
-	clk.now = ts(0, 11, 1)
+	clk.Set(ts(0, 11, 1))
 	if !waitFor(2*time.Second, func() bool {
 		return scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH) == 1
 	}) {
@@ -890,7 +963,7 @@ func TestWorker_IdleTickMaterializesClosedDayAfterMidnight(t *testing.T) {
 
 	// Step 1: close H (day0 still open). The idle tick materializes H; day0 must NOT
 	// appear yet, and the timer must stay armed because the DAY is still pending.
-	clk.now = ts(0, 11, 1)
+	clk.Set(ts(0, 11, 1))
 	if !waitFor(2*time.Second, func() bool {
 		return scanInt(t, db, `SELECT COUNT(*) FROM rollup_hourly WHERE bucket_ts=? AND dimension='total'`, hourH) == 1
 	}) {
@@ -905,7 +978,7 @@ func TestWorker_IdleTickMaterializesClosedDayAfterMidnight(t *testing.T) {
 	// was pending after the hour drained — must materialize day0 into rollup_daily
 	// with NO new events. This is the round-8 P1 proof: before the fix the timer had
 	// stopped and day0 was stranded.
-	clk.now = ts(1, 0, 1)
+	clk.Set(ts(1, 0, 1))
 	if !waitFor(2*time.Second, func() bool {
 		return scanInt(t, db, `SELECT COUNT(*) FROM rollup_daily WHERE bucket_ts=? AND dimension='total'`, day0) == 1
 	}) {

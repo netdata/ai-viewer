@@ -12,9 +12,9 @@
 // seek-back is the correct watch strategy.
 //
 // A pre-mid-2025 legacy flat layout (rollout-YYYY-MM-DD-<uuid>.json directly
-// under sessions/) is recognized but not ingested by default: the adapter emits
-// one informational SourceError per legacy file and suppresses it thereafter
-// via the cursor's LegacyJSON map.
+// under sessions/) is ingested during full scans. The cursor's LegacyJSON map
+// records which static legacy files have already been consumed, so repeated
+// scans do not re-emit the same historical content.
 //
 // Codex rollouts carry no native turn/op rollups, no cost data, and no
 // per-session terminal signal, so the adapter is a state machine over the line

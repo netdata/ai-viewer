@@ -28,13 +28,12 @@ func selectByIDList(s tableSchema) string {
 	return "SELECT " + presentColsSQL(s) + " FROM " + quoteIdent(s.Table) + " WHERE id = ?"
 }
 
-// selectByColumn builds "SELECT <present> FROM <t> WHERE <col> = ? ORDER BY
-// <orderBy>" for an ordered child load. col and orderBy are fixed schema
-// identifiers (session_id/message_id; the order key), never user input; orderBy
-// is already a comma-separated quoted key.
-func selectByColumn(s tableSchema, col, orderBy string) string {
+// selectBySessionID builds "SELECT <present> FROM <t> WHERE session_id = ?
+// ORDER BY <orderBy>" for an ordered child load. orderBy is a fixed schema
+// order key, never user input, and is already comma-separated/quoted.
+func selectBySessionID(s tableSchema, orderBy string) string {
 	return "SELECT " + presentColsSQL(s) + " FROM " + quoteIdent(s.Table) +
-		" WHERE " + quoteIdent(col) + " = ? ORDER BY " + orderBy
+		" WHERE " + quoteIdent("session_id") + " = ? ORDER BY " + orderBy
 }
 
 // messageOrderBy returns the message ordering key: "time_created", "id" when the

@@ -94,6 +94,7 @@ CREATE TABLE sessions (
     error_message     TEXT,
     start_ts          INTEGER NOT NULL,
     end_ts            INTEGER,
+    duration_us       INTEGER,                  -- end_ts - start_ts when end_ts is known; NULL while running or unknown.
     last_activity_ts  INTEGER NOT NULL,         -- updated on every event for this session; powers "stale running" filter
     tokens_in         INTEGER NOT NULL DEFAULT 0,
     tokens_out        INTEGER NOT NULL DEFAULT 0,
@@ -103,6 +104,7 @@ CREATE TABLE sessions (
     turn_count        INTEGER NOT NULL DEFAULT 0,
     op_count          INTEGER NOT NULL DEFAULT 0,
     failure_count     INTEGER NOT NULL DEFAULT 0,
+    first_user_message_hash TEXT,               -- sha256 of normalized first user prompt text; NULL until populated/backfilled.
     extras_json       TEXT,                     -- format-specific extras (finalReport, pluginMetas, latestStatus, etc.)
     UNIQUE (source_id, native_id)
 );
@@ -116,6 +118,13 @@ CREATE INDEX idx_sessions_status ON sessions(status);
 CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX idx_sessions_cwd ON sessions(cwd);
 CREATE INDEX idx_sessions_activity ON sessions(last_activity_ts DESC);
+CREATE INDEX idx_sessions_first_user_message_hash
+    ON sessions(first_user_message_hash)
+    WHERE first_user_message_hash IS NOT NULL;
+CREATE INDEX idx_sessions_duration ON sessions(duration_us DESC, id ASC);
+CREATE INDEX idx_sessions_op_count ON sessions(op_count DESC, id ASC);
+CREATE INDEX idx_sessions_cost ON sessions(cost_usd DESC, id ASC);
+CREATE INDEX idx_sessions_tokens ON sessions((tokens_in + tokens_out) DESC, id ASC);
 ```
 
 Notes:
@@ -219,13 +228,13 @@ Pointers to payload artifacts living on disk in the source system. ai-viewer NEV
 CREATE TABLE payload_refs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     op_id           TEXT NOT NULL REFERENCES ops(id),
-    kind            TEXT NOT NULL,           -- 'llm_request'|'llm_response'|'llm_sdk_request'|'llm_sdk_response'|'llm_reasoning'|'tool_request'|'tool_response'|'log'
+    kind            TEXT NOT NULL,           -- 'llm_request'|'llm_response'|'llm_sdk_request'|'llm_sdk_response'|'sdk_request'|'sdk_response'|'llm_reasoning'|'reasoning_stream'|'tool_request'|'tool_response'|'log'
     format          TEXT NOT NULL,           -- 'http'|'sse'|'json'|'jsonrpc'|'text'|'binary'
     compression     TEXT,                    -- 'gzip' | NULL
-    location_uri    TEXT NOT NULL,           -- 'file:///<absolute-path>'
-    original_bytes  INTEGER,
+    location_uri    TEXT NOT NULL,           -- selector URI, e.g. file://...?json_pointer=...#L<n>
+    original_bytes  INTEGER,                 -- logical payload bytes when recoverable
     stored_bytes    INTEGER,
-    sha256          TEXT                     -- hex; NULL when source does not provide
+    sha256          TEXT                     -- hex; NULL when source/verifier computes later
 );
 
 CREATE INDEX idx_payload_refs_op ON payload_refs(op_id);
@@ -249,9 +258,48 @@ distinct row rather than colliding. If a future adapter ever rewrites a
 payload at the same `location_uri` with different content, switch this
 INSERT to `ON CONFLICT ... DO UPDATE`.
 
+#### Payload proof contract
+
+The ingestion parity gate (`ingestion-parity.md`) treats `payload_refs` as proof
+objects, not just UI preview pointers.
+
+For any source-available payload artifact:
+
+- `location_uri` MUST identify the exact logical payload or combine with
+  canonical selector metadata that does. Examples: `file://...#L<line>` plus a
+  JSON pointer into that line, a payload file path for one standalone payload,
+  or `opencode-sqlite://?part_id=<id>&field=<field>`.
+- `kind` stores the adapter-facing payload kind. The parity extractor normalizes
+  accepted aliases before assigning artifact classes; aiagent_v3
+  `sdk_request`/`sdk_response` are SDK LLM request/response artifacts, and
+  `reasoning_stream` is a reasoning-text artifact. Adapter-specific selectors
+  may refine a generic payload kind into a more precise artifact class; for
+  claude-code, `llm_response` plus `/message/content/<index>/text` is an
+  `assistant_message`, and an internal `user_input` op's `tool_request` plus
+  `/message/content` is a `user_prompt`.
+- `original_bytes` MUST be the byte length of the logical payload when bytes are
+  recoverable. `-1` or NULL is allowed only when the adapter spec documents why
+  the source format cannot provide or reconstruct the logical payload length.
+- `sha256` SHOULD be source-provided when available. If omitted and bytes are
+  recoverable, the parity extractor computes SHA-256 during verification. A
+  missing hash is not by itself a failure when the verifier can compute it, but
+  an unresolvable payload is a failure.
+- A row that points at a containing transcript with no exact line/field selector
+  is `unverifiable` for parity, even if the UI can preview the file.
+
+The DB remains a derived artifact. If a payload proof bug is fixed, deleting and
+re-ingesting the DB is an acceptable repair path.
+
 ### log_entries
 
 Structured log lines attached to a session/turn/op, surfaced in the per-session detail page. The table also stores source-level log entries that have no session attached — most notably the rows written from `SourceErrorEvent` (parse errors surfaced in `/api/health`). For those rows `session_id` is `NULL` and `source_id` references `sources(id)`. The `CHECK` constraint enforces that at least one of `session_id` and `source_id` is set so every row has a navigable owner in the UI.
+
+When a log row represents an exact source-visible log artifact, `extras_json`
+may include `aiViewer.parity.nativeArtifactId`,
+`aiViewer.parity.selectorURI`, and `aiViewer.parity.jsonPointer`. The ingestion
+parity extractor uses those fields to match the log row against the source
+manifest. Generic derived logs that do not represent one exact source field omit
+the parity block and use the deterministic `log://...` selector fallback.
 
 ```sql
 CREATE TABLE log_entries (
@@ -613,6 +661,10 @@ Two FTS5 virtual tables back `GET /api/search` (`rest-api.md`). `modernc.org/sql
 
 - **`fts_ops`** — FTS5 over the op's searchable text: `name`, `model`, `provider`, `tool_namespace`, and the op's `error_message` / `error_class` (joined by the ingester into a single `error_text` indexed column). Carries UNINDEXED linkage columns `op_id`, `session_id` so a match resolves back to its op without a join.
 - **`fts_logs`** — FTS5 over `log_entries.message`, with UNINDEXED linkage/display columns `log_id`, `session_id`, `op_id`, `severity`, `ts`.
+- **`fts_content`** — FTS5 over extracted user/assistant/tool payload text, with
+  UNINDEXED linkage columns `op_id`, `session_id`, `turn_id`. It is
+  content-owning, not external-content, for the same reason as `fts_ops`: ops
+  are keyed by stable text ids, not durable integer rowids.
 
 ```sql
 CREATE VIRTUAL TABLE fts_ops USING fts5(
@@ -633,9 +685,36 @@ CREATE VIRTUAL TABLE fts_logs USING fts5(
     severity UNINDEXED,
     ts UNINDEXED
 );
+
+CREATE VIRTUAL TABLE fts_content USING fts5(
+    text,
+    op_id UNINDEXED,
+    session_id UNINDEXED,
+    turn_id UNINDEXED
+);
 ```
 
-**Content mode (decided in the `0006` migration): CONTENT-OWNING** (the default FTS5 mode — no `content=` option), for both tables, NOT external-content. External-content FTS5 requires `content='<table>', content_rowid='<INTEGER rowid column>'` mapping each FTS rowid to a stable INTEGER rowid in the source. `ops` is keyed `id TEXT PRIMARY KEY` (`0001_initial.sql`) — it has no stable INTEGER rowid to map to (its implicit rowid is unrelated to `ops.id` and is not durable across vacuum), so external-content is structurally unavailable for ops. A content-owning table stores the indexed text plus the explicit UNINDEXED linkage/display columns above, which the ingester populates from the same op/log row it indexes (an FTS row is rebuilt whenever its op/log is re-emitted, so the duplicated columns never go stale) and `/api/search` reads back directly. `log_entries` *does* have an INTEGER rowid (`id INTEGER PRIMARY KEY AUTOINCREMENT`), so `fts_logs` could in principle be external-content; it is content-owning too for symmetry (one ingester population/maintenance path) and because the per-source `fts5_index_logs=false` flag below requires the ingester to selectively skip or clear log indexing — a content-owning table the ingester fully owns makes that a plain `DELETE`/skip, whereas external-content would couple index contents to `log_entries` row lifetime. Both rank with BM25 and expose `snippet()`; `modernc.org/sqlite` compiles FTS5 in, so no build flag or extension is needed.
+**Content mode (decided in the `0006` and `0010` migrations): CONTENT-OWNING**
+(the default FTS5 mode — no `content=` option), for all three FTS tables, NOT
+external-content. External-content FTS5 requires `content='<table>',
+content_rowid='<INTEGER rowid column>'` mapping each FTS rowid to a stable
+INTEGER rowid in the source. `ops` is keyed `id TEXT PRIMARY KEY`
+(`0001_initial.sql`) — it has no stable INTEGER rowid to map to (its implicit
+rowid is unrelated to `ops.id` and is not durable across vacuum), so
+external-content is structurally unavailable for `fts_ops` and `fts_content`. A
+content-owning table stores the indexed text plus the explicit UNINDEXED
+linkage/display columns above, which the ingester populates from the same
+op/log row it indexes (an FTS row is rebuilt whenever its op/log is re-emitted,
+so the duplicated columns never go stale) and `/api/search` reads back directly.
+`log_entries` *does* have an INTEGER rowid (`id INTEGER PRIMARY KEY
+AUTOINCREMENT`), so `fts_logs` could in principle be external-content; it is
+content-owning too for symmetry (one ingester population/maintenance path) and
+because the per-source `fts5_index_logs=false` flag below requires the ingester
+to selectively skip or clear log indexing — a content-owning table the ingester
+fully owns makes that a plain `DELETE`/skip, whereas external-content would
+couple index contents to `log_entries` row lifetime. All three rank with BM25
+and expose `snippet()`; `modernc.org/sqlite` compiles FTS5 in, so no build flag
+or extension is needed.
 
 All indexed timestamps remain UTC microseconds; the UI converts for display.
 

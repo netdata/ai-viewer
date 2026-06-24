@@ -11,10 +11,10 @@ import (
 // mapToolCall handles function_call / custom_tool_call / local_shell_call /
 // tool_search_call (spec rule #9, #10, #13). It emits an OpStarted (Kind=tool)
 // with the namespace heuristic and tracks the op by call_id so the matching
-// *_output finalizes it. The arguments string becomes a tool_request PayloadRef.
+// *_output finalizes it. The arguments value becomes a tool_request PayloadRef.
 // The op is finalized later by mapToolOutput (or at turn close as dangling —
 // spec edge #9).
-func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
+func (m *fileMapper) mapToolCall(rec record, p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	ts := m.ensureTurn(tsUs)
 	out := make([]canonical.Event, 0, 2)
 	if ev := m.emitTurnStarted(ts, advance(tsUs)); ev != nil {
@@ -37,10 +37,14 @@ func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) can
 		ToolNamespace:   namespace,
 		Extras:          extras,
 	})
-	// Arguments string → tool_request PayloadRef (spec rule #9). Only emit when
+	// Arguments value -> tool_request PayloadRef (spec rule #9). Only emit when
 	// the op has a body to point at.
 	if bodyBytes > 0 {
-		out = append(out, m.payloadRef(advance(tsUs), turnSeq, opSeq, "tool_request", "json", bodyBytes))
+		refs := rawPayloadPointer(rec.payloadPath("/arguments"), p.Arguments)
+		if p.Type == "local_shell_call" {
+			refs = rawPayloadPointer(rec.payloadPath("/action"), p.Action)
+		}
+		out = appendPayloadRefs(out, m, advance, tsUs, turnSeq, opSeq, "tool_request", "json", bodyBytes, refs)
 	}
 	m.trackOp(p.CallID, m.activeTurnID, turnSeq, opSeq, name, namespace)
 	ts.hasOpenToolCall = true
@@ -55,7 +59,7 @@ func (m *fileMapper) mapToolCall(p *responseItemPayload, advance func(int64) can
 // SourceError-class event surfaced as a WRN LogEntry (spec edge #10 — the
 // scanner does not see it; the mapper has no SourceError channel, so a WRN log
 // keeps it visible without dropping silently).
-func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
+func (m *fileMapper) mapToolOutput(rec record, p *responseItemPayload, advance func(int64) canonical.EventBase, tsUs, bodyBytes int64) []canonical.Event {
 	op, ok := m.openOps[p.CallID]
 	if !ok || op.finalized {
 		// The op may already exist and be finalized because its enrichment
@@ -65,7 +69,7 @@ func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) c
 		// #9 — the body still belongs to the op). Only a truly unmatched output
 		// surfaces a WRN (spec edge #10).
 		if fop, found := m.finalizedOps[p.CallID]; found && bodyBytes > 0 {
-			return []canonical.Event{m.payloadRef(advance(tsUs), fop.turnSeq, fop.opSeq, "tool_response", "json", bodyBytes)}
+			return appendPayloadRefs(nil, m, advance, tsUs, fop.turnSeq, fop.opSeq, "tool_response", "json", bodyBytes, rawPayloadPointer(rec.payloadPath("/output"), p.Output))
 		}
 		return []canonical.Event{m.logEntry(advance(tsUs), "WRN", "tool_output_unmatched", map[string]any{"call_id": p.CallID})}
 	}
@@ -105,7 +109,7 @@ func (m *fileMapper) mapToolOutput(p *responseItemPayload, advance func(int64) c
 		EndTs:           tsUs,
 	})
 	if bodyBytes > 0 {
-		out = append(out, m.payloadRef(advance(tsUs), op.turnSeq, op.opSeq, "tool_response", "json", bodyBytes))
+		out = appendPayloadRefs(out, m, advance, tsUs, op.turnSeq, op.opSeq, "tool_response", "json", bodyBytes, rawPayloadPointer(rec.payloadPath("/output"), p.Output))
 	}
 	delete(m.openOps, p.CallID)
 	// SOW-0089 chunk 5c: clear the per-turn open-tool flag when this op closes.

@@ -237,6 +237,8 @@ type pricingMissKey struct {
 // incomplete — a whole-object graft would never fire for sessions.
 var aiViewerStashKeys = []string{"toolUseId", "childNativeId"}
 
+var sessionSyntheticLinkageKeys = []string{"parentNativeId", "parentOpKey", "rootNativeId", "toolUseId", "childNativeId"}
+
 // graftAiViewerExtras returns the ON CONFLICT extras_json expression shared by the
 // sessions and ops UPSERT paths (applySessionStarted, applyOpStarted). Both are
 // full re-emits of the same natural-identity row, so the new (`excluded`) extras
@@ -313,6 +315,64 @@ func graftAiViewerKey(base, existingCol, key string) string {
 	return fmt.Sprintf(`CASE WHEN json_extract(%[1]s, %[3]s) IS NOT NULL AND json_extract(%[2]s, %[3]s) IS NULL
         THEN json_set(%[2]s, %[3]s, json_extract(%[1]s, %[3]s))
         ELSE %[2]s END`, existingCol, base, path)
+}
+
+func preserveRealSessionMetadataPredicate() string {
+	return `json_extract(excluded.extras_json, '$.synthesizedFromParent') = 1
+        AND json_type(sessions.extras_json, '$.capturePayloads') IS NOT NULL`
+}
+
+func sessionStartedExtrasConflictExpression() string {
+	return fmt.Sprintf(`CASE
+    WHEN %[1]s THEN (%[2]s)
+    ELSE (%[3]s)
+END`,
+		preserveRealSessionMetadataPredicate(),
+		graftIncomingSessionLinkageKeys("sessions.extras_json", "excluded.extras_json"),
+		graftAiViewerExtras("sessions.extras_json"))
+}
+
+func sessionStartedParentIDConflictExpression() string {
+	return fmt.Sprintf(`CASE
+    WHEN %[1]s THEN sessions.parent_session_id
+    ELSE COALESCE(sessions.parent_session_id, excluded.parent_session_id)
+END`, syntheticConflictsWithExistingSessionLineage("parentNativeId"))
+}
+
+func sessionStartedRootIDConflictExpression() string {
+	return fmt.Sprintf(`CASE
+    WHEN %[1]s THEN sessions.root_session_id
+    ELSE excluded.root_session_id
+END`, syntheticConflictsWithExistingSessionLineage("rootNativeId"))
+}
+
+func syntheticConflictsWithExistingSessionLineage(key string) string {
+	path := "'$.aiViewer." + key + "'"
+	return fmt.Sprintf(`%[1]s
+        AND json_extract(sessions.extras_json, %[2]s) IS NOT NULL
+        AND json_extract(sessions.extras_json, %[2]s) <> ''
+        AND (
+            json_extract(excluded.extras_json, %[2]s) IS NULL
+            OR json_extract(excluded.extras_json, %[2]s) = ''
+            OR json_extract(excluded.extras_json, %[2]s) <> json_extract(sessions.extras_json, %[2]s)
+        )`, preserveRealSessionMetadataPredicate(), path)
+}
+
+func graftIncomingSessionLinkageKeys(base, incoming string) string {
+	out := base
+	for _, key := range sessionSyntheticLinkageKeys {
+		out = graftIncomingSessionLinkageKey(out, incoming, key)
+	}
+	return out
+}
+
+func graftIncomingSessionLinkageKey(base, incoming, key string) string {
+	path := "'$.aiViewer." + key + "'"
+	return fmt.Sprintf(`CASE WHEN json_extract(%[2]s, %[3]s) IS NOT NULL
+        AND json_extract(%[2]s, %[3]s) <> ''
+        AND (json_extract(%[1]s, %[3]s) IS NULL OR json_extract(%[1]s, %[3]s) = '')
+        THEN json_set(%[1]s, %[3]s, json_extract(%[2]s, %[3]s))
+        ELSE %[1]s END`, base, incoming, path)
 }
 
 func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
@@ -581,36 +641,62 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	// erase that join key and permanently orphan the op→child edge. The graft
 	// (json_set, NOT json_patch) preserves the stash without the json_patch
 	// null-as-delete hazard (see graftAiViewerExtras).
-	// #nosec G202 -- the only interpolated value is graftAiViewerExtras's output,
-	// built solely from the compile-time-constant column literal "sessions.extras_json"
-	// and the package-const aiViewerStashKeys; no caller/source input reaches the SQL.
-	if _, err := tx.ExecContext(ctx, `
+	// A synthetic parent-side SessionStartedEvent is a linkage hint, not a
+	// replacement for a real child session_start. When the existing row already
+	// carries real source metadata, keep source-owned fields and graft only
+	// missing aiViewer linkage hints from the synthetic replay.
+	if !existed {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO sessions (
+    id, source_id, native_id, parent_session_id, root_session_id,
+    kind, agent_name, model, provider, provider_alias, cwd, call_path, status,
+    start_ts, last_activity_ts, extras_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+			id, w.sourceID, ev.NativeID, parentID, rootID,
+			kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model),
+			nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),
+			nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
+			ev.Ts, ev.Ts, extrasJSON,
+		); err != nil {
+			return fmt.Errorf("writer: insert session: %w", err)
+		}
+	} else {
+		preserveRealMetadata := preserveRealSessionMetadataPredicate()
+		sessionExtrasConflict := sessionStartedExtrasConflictExpression()
+		parentIDConflict := sessionStartedParentIDConflictExpression()
+		rootIDConflict := sessionStartedRootIDConflictExpression()
+		// #nosec G202 -- the interpolated values are SQL fragments built solely from
+		// compile-time-constant column literals and package-const JSON key lists; no
+		// caller/source input reaches the SQL.
+		if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
     kind, agent_name, model, provider, provider_alias, cwd, call_path, status,
     start_ts, last_activity_ts, extras_json
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (source_id, native_id) DO UPDATE SET
-    parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
-    root_session_id   = excluded.root_session_id,
-    kind              = excluded.kind,
-    agent_name        = COALESCE(NULLIF(excluded.agent_name, ''), sessions.agent_name),
-    model             = COALESCE(NULLIF(excluded.model, ''), sessions.model),
-    provider          = COALESCE(NULLIF(excluded.provider, ''), sessions.provider),
-    provider_alias    = COALESCE(NULLIF(excluded.provider_alias, ''), sessions.provider_alias),
-    cwd               = COALESCE(NULLIF(excluded.cwd, ''), sessions.cwd),
-    call_path         = COALESCE(NULLIF(excluded.call_path, ''), sessions.call_path),
+    parent_session_id = `+parentIDConflict+`,
+    root_session_id   = `+rootIDConflict+`,
+    kind              = CASE WHEN `+preserveRealMetadata+` THEN sessions.kind ELSE excluded.kind END,
+    agent_name        = CASE WHEN `+preserveRealMetadata+` THEN sessions.agent_name ELSE COALESCE(NULLIF(excluded.agent_name, ''), sessions.agent_name) END,
+    model             = CASE WHEN `+preserveRealMetadata+` THEN sessions.model ELSE COALESCE(NULLIF(excluded.model, ''), sessions.model) END,
+    provider          = CASE WHEN `+preserveRealMetadata+` THEN sessions.provider ELSE COALESCE(NULLIF(excluded.provider, ''), sessions.provider) END,
+    provider_alias    = CASE WHEN `+preserveRealMetadata+` THEN sessions.provider_alias ELSE COALESCE(NULLIF(excluded.provider_alias, ''), sessions.provider_alias) END,
+    cwd               = CASE WHEN `+preserveRealMetadata+` THEN sessions.cwd ELSE COALESCE(NULLIF(excluded.cwd, ''), sessions.cwd) END,
+    call_path         = CASE WHEN `+preserveRealMetadata+` THEN sessions.call_path ELSE COALESCE(NULLIF(excluded.call_path, ''), sessions.call_path) END,
     start_ts          = MIN(sessions.start_ts, excluded.start_ts),
     last_activity_ts  = MAX(sessions.last_activity_ts, excluded.last_activity_ts),
-    extras_json       = `+graftAiViewerExtras("sessions.extras_json")+`
+    extras_json       = `+sessionExtrasConflict+`
 `,
-		id, w.sourceID, ev.NativeID, parentID, rootID,
-		kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model),
-		nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),
-		nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
-		ev.Ts, ev.Ts, extrasJSON,
-	); err != nil {
-		return fmt.Errorf("writer: insert session: %w", err)
+			id, w.sourceID, ev.NativeID, parentID, rootID,
+			kind, nullIfEmpty(ev.AgentName), nullIfEmpty(ev.Model),
+			nullIfEmpty(ev.Provider), nullIfEmpty(ev.ProviderAlias),
+			nullIfEmpty(ev.Cwd), nullIfEmpty(ev.CallPath), string(canonical.StatusRunning),
+			ev.Ts, ev.Ts, extrasJSON,
+		); err != nil {
+			return fmt.Errorf("writer: insert session: %w", err)
+		}
 	}
 	w.markDirtySession(id)
 	// The session start contributes session_starts to its start-hour bucket

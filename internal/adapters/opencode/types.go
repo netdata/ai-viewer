@@ -2,8 +2,10 @@ package opencode
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // errEmptyData marks a message.data or part.data blob that is empty or
@@ -66,6 +68,16 @@ type messageRow struct {
 	Data          []byte
 }
 
+// sessionInputRow is optional prompt-body evidence from newer opencode schemas.
+// Older databases either lack session_input or have zero rows; in that case a
+// paired user message still emits a source-unavailable user_prompt artifact.
+type sessionInputRow struct {
+	ID            string
+	SessionID     string
+	Prompt        []byte
+	TimeCreatedMs int64
+}
+
 // partRow is one row of the part table. data is the raw discriminated union
 // (12 variants on $.type) decoded by decodePartData.
 type partRow struct {
@@ -110,9 +122,44 @@ type sessionMessageRow struct {
 	ID            string
 	SessionID     string
 	Type          string // "agent-switched" | "model-switched" | future
+	Seq           int64
 	TimeCreatedMs int64
 	TimeUpdatedMs int64
 	Data          []byte
+}
+
+type sessionMessageData struct {
+	Agent string    `json:"agent"`
+	Model *modelRef `json:"model"`
+}
+
+func decodeSessionMessageData(raw []byte) (sessionMessageData, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return sessionMessageData{}, errEmptyData
+	}
+	var d sessionMessageData
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return sessionMessageData{}, err
+	}
+	return d, nil
+}
+
+func canonicalJSONSHA256(raw []byte) (string, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "", errEmptyData
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%x", sum), nil
 }
 
 // modelRef is the session.model JSON ({id, providerID, variant?}) and the

@@ -94,6 +94,15 @@ frontend/
 - **UI state** (open tab, hover state, modal open) is per-component `useState`.
 - **No global app state library.** If we ever need it, Zustand goes in; not before.
 
+### Same-Origin API Links
+
+Frontend links to ai-viewer's own API endpoints use same-origin relative paths
+(`/api/...`), never a hardcoded loopback host or port. This keeps installed,
+developer, and Playwright E2E binds equivalent: a UI served from an alternate
+port still opens the matching server's `/api/health`, `/api/sources`, and other
+internal endpoints instead of silently crossing to another local ai-viewer
+instance.
+
 ### URL Filter Contract
 
 `state/filters.ts` is the single frontend boundary for translating browser
