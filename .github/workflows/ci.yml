@@ -16,7 +16,7 @@
 #   scripts/test/spec-drift-test.sh, scripts/check-ingestion-parity.sh,
 #   scripts/test/check-ingestion-parity-test.sh, scripts/codacy-coverage-upload.sh,
 #   scripts/test/codacy-coverage-upload-test.sh,
-#   scripts/test/codacy-config-test.sh,
+#   scripts/test/codacy-config-test.sh, scripts/test/install-system-test.sh,
 #   scripts/scan-ai-attribution.sh, or scripts/gates.sh are absent. Only
 #   optional helpers such as systemd lint skip by presence.
 #
@@ -794,23 +794,24 @@ jobs:
           echo "secrets scanner and self-test present."
 
       # Fail-closed: lint-test, spec-drift, ingestion parity, Codacy
-      # coverage/config self-tests, AI-attribution, and gates.sh are mandatory
+      # coverage/config self-tests, install-system self-test,
+      # AI-attribution, and gates.sh are mandatory
       # gate infrastructure. Missing files are missing gates, not passes.
       - name: Require cross-cutting gates present (fail-closed)
         shell: bash
         run: |
           missing=0
-          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/check-ingestion-parity.sh scripts/test/check-ingestion-parity-test.sh scripts/codacy-coverage-upload.sh scripts/test/codacy-coverage-upload-test.sh .codacy/codacy.config.json .codacy.yml scripts/test/codacy-config-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
+          for f in scripts/test/lint-test.sh scripts/spec-drift.sh scripts/test/spec-drift-test.sh scripts/check-ingestion-parity.sh scripts/test/check-ingestion-parity-test.sh scripts/codacy-coverage-upload.sh scripts/test/codacy-coverage-upload-test.sh .codacy/codacy.config.json .codacy.yml scripts/test/codacy-config-test.sh scripts/test/install-system-test.sh scripts/scan-ai-attribution.sh scripts/gates.sh; do
             if [[ ! -f "$f" ]]; then
               echo "::error::required gate file is absent: $f"
               missing=1
             fi
           done
           if [[ "$missing" -ne 0 ]]; then
-            echo "The lint self-test, spec-drift detector, ingestion parity gate, Codacy self-tests, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
+            echo "The lint self-test, spec-drift detector, ingestion parity gate, Codacy self-tests, install-system self-test, AI-attribution scanner, and local aggregate are fail-closed: missing required gate files fail the gates job." >&2
             exit 1
           fi
-          echo "lint self-test, spec-drift detector, ingestion parity gate, Codacy self-tests, AI-attribution scanner, and local aggregate present."
+          echo "lint self-test, spec-drift detector, ingestion parity gate, Codacy self-tests, install-system self-test, AI-attribution scanner, and local aggregate present."
 
       - name: Local aggregate syntax check
         run: |
@@ -818,6 +819,7 @@ jobs:
           bash -n scripts/check-ingestion-parity.sh
           bash -n scripts/test/check-ingestion-parity-test.sh
           bash -n scripts/test/codacy-config-test.sh
+          bash -n scripts/test/install-system-test.sh
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -874,6 +876,11 @@ jobs:
         run: |
           chmod +x scripts/test/codacy-config-test.sh
           ./scripts/test/codacy-config-test.sh
+
+      - name: Install-system self-test
+        run: |
+          chmod +x scripts/test/install-system-test.sh
+          ./scripts/test/install-system-test.sh
 
       - name: Scan AI attribution
         run: |

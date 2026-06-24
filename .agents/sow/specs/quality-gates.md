@@ -416,7 +416,8 @@ CI enforces the gate catalog as **dedicated parallel jobs** (`lint`, `test`,
 (+ `scripts/test/spec-drift-test.sh`), `scripts/test/lint-test.sh`,
 `scripts/codacy-coverage-upload.sh`
 (+ `scripts/test/codacy-coverage-upload-test.sh`), `scripts/gates.sh`,
-`scripts/check-bench.sh`, and `scripts/install-systemd-user.sh`.
+`scripts/check-bench.sh`, `scripts/install-systemd-user.sh`,
+`scripts/install-system.sh`, and `scripts/test/install-system-test.sh`.
 
 `scripts/lint.sh` (SOW-0009; frontend section added SOW-0012) **is present**: it
 is the local, **build-free** module/static-analysis entrypoint mirroring CI's
@@ -457,7 +458,8 @@ frontend static analysis), `scripts/scan-secrets.sh` + its self-test,
 `scripts/scan-ai-attribution.sh`, `scripts/spec-drift.sh` + its self-test,
 `scripts/test/codacy-coverage-upload-test.sh`,
 `scripts/test/codacy-config-test.sh`,
-`scripts/test/systemd-units-test.sh` when present, `scripts/build.sh` (build +
+`scripts/test/install-system-test.sh`, `scripts/test/systemd-units-test.sh`
+when present, `scripts/build.sh` (build +
 real bundle-size gate + embed + both binaries), `scripts/test.sh` +
 `scripts/check-coverage.sh` (Go race suite + coverage + frontend Vitest), the
 deterministic adapter fuzz seed corpus + target-set lock, frontend Playwright
@@ -474,7 +476,8 @@ uses the `gates` job for cross-cutting repo scans and required gate
 infrastructure checks: secrets + scanner self-test (fail-closed), lint
 formatter-scope self-test (fail-closed), spec drift + detector self-test
 (fail-closed, self-test first), AI-attribution scan (fail-closed),
-Codacy coverage-upload self-test, Codacy config self-test, `scripts/gates.sh`
+Codacy coverage-upload self-test, Codacy config self-test, install-system
+self-test, `scripts/gates.sh`
 presence + syntax check, `scripts/test/codacy-config-test.sh` presence +
 syntax check,
 and systemd unit lint when present.

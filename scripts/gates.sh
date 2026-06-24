@@ -20,15 +20,16 @@
 #                                       deterministic ingestion parity fixture gate.
 #   7. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
 #   8. scripts/test/codacy-config-test.sh   Codacy tool/pattern + path policy self-test.
-#   9. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
-#  10. scripts/build.sh                 frontend build + REAL bundle-size gate +
+#   9. scripts/test/install-system-test.sh  system installer upgrade contract.
+#  10. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
+#  11. scripts/build.sh                 frontend build + REAL bundle-size gate +
 #                                       embed + both Go binaries.
-#  11. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
+#  12. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
 #                                       gate self-test + local regression gate.
-#  12. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
+#  13. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
 #                                       coverage gate + frontend Vitest.
-#  13. deterministic adapter fuzz seed corpus + target-set lock.
-#  14. frontend Playwright E2E (includes axe a11y specs) against the built binary.
+#  14. deterministic adapter fuzz seed corpus + target-set lock.
+#  15. frontend Playwright E2E (includes axe a11y specs) against the built binary.
 #
 # ORDERING: fast static gates first so a quick failure surfaces early. The
 # benchmark regression gate runs after the build while the workstation is still
@@ -228,14 +229,18 @@ section "codacy coverage upload self-test" bash scripts/test/codacy-coverage-upl
 # 8. Codacy tool/pattern + path-exclusion policy self-test. Fast hermetic gate.
 section "codacy config self-test" bash scripts/test/codacy-config-test.sh
 
-# 9. systemd unit static lint (present in this repo; skip cleanly if removed).
+# 9. System installer self-test (present in this repo; fail if removed from the
+#    mandatory cross-cutting gate list in CI).
+section "system installer" bash scripts/test/install-system-test.sh
+
+# 10. systemd unit static lint (present in this repo; skip cleanly if removed).
 if [[ -f scripts/test/systemd-units-test.sh ]]; then
   section "systemd units" bash scripts/test/systemd-units-test.sh
 fi
 
 # --- slow gates last ---------------------------------------------------------
 
-# 10. Full build + the REAL bundle-size gate on the built dist/ + embed + both
+# 11. Full build + the REAL bundle-size gate on the built dist/ + embed + both
 #    binaries. (Slower than the static gates; faster than the -race suite.)
 section "build.sh (frontend build + bundle-size gate + embed + binaries)" bash scripts/build.sh
 

@@ -2,14 +2,13 @@
 
 ## Status
 
-Status: in-progress
-Sub-state: Active. Operator objective is deterministic ingestion parity: source-visible artifacts must match canonical artifacts exactly, or be explicitly documented as source-unavailable.
+Status: completed
+Sub-state: Completed on 2026-06-24. Deterministic ingestion parity gates are implemented, reviewed, committed, pushed, and installed on the workstation service.
 
 Current-state note for reviewers:
 
-- This SOW is still marked `in-progress` only because the final completion
-  commit and installation have not completed yet. Reviewer convergence is now
-  complete and recorded near the end of this file.
+- This SOW is complete. Reviewer convergence, pre-commit gates, push evidence,
+  and installation evidence are recorded near the end of this file.
 - Earlier chunk-local `Not done yet` sections are historical progress snapshots
   from the moment those chunks were written. They are superseded by later
   closure evidence near the end of this file.
@@ -14647,3 +14646,60 @@ Current status:
   aggregate sections through build, standalone benchmark gate, remaining
   test/coverage/fuzz/E2E sections, and final reviewer convergence.
 - Next step: commit, push, then install/restart the local ai-viewer service.
+
+### 2026-06-24 - completion commit, push, install, and closure
+
+Implementation commit:
+
+- `33439d5 feat(SOW-0097): add deterministic ingestion parity gates`.
+- Scope: independent source-vs-canonical parity manifests, fail-closed diffs,
+  `ai-viewer-ingest check-parity`, fixture parity gate, adapter parity fixes,
+  reviewer/process guidance updates, and SOW evidence.
+
+Push evidence:
+
+- `git push origin master` succeeded.
+- GitHub reported the expected development-phase direct-`master` ruleset bypass:
+  PR requirement and required checks were bypassed by the configured admin
+  bypass.
+
+Install evidence:
+
+- `scripts/install-system.sh` initially exposed a deployment bug while closing
+  this SOW: the installer copied directly over running binaries and failed with
+  `Text file busy`.
+- The closure batch fixed the installer to stage rebuilt binaries in
+  `/opt/ai-viewer/bin`, rename them atomically into place, validate rendered
+  systemd units with valid `.service` names, and restart only the two exact
+  ai-viewer units.
+- `scripts/install-system.sh` then completed successfully.
+- The install reported `5` explicit configured sources and
+  `http://127.0.0.1:7710/`.
+- `systemctl is-active ai-viewer-ingest.service ai-viewer-serve.service`
+  returned `active` / `active`.
+- `/api/health` responded with version `33439d56a74e`, schema version `11`, and
+  the configured operator sources. The health status was `degraded` because
+  existing source parse errors are surfaced instead of hidden.
+
+Focused closure validation:
+
+- `bash scripts/test/install-system-test.sh` passed.
+- `bash scripts/test/systemd-units-test.sh` passed.
+- `bash scripts/spec-drift.sh` passed.
+- `bash scripts/scan-secrets.sh` passed:
+  `[PASS] no secrets or operator-PII in 1249 tracked files (16 decompressed
+  from .gz).`
+- `git diff --check` passed.
+
+Follow-up created:
+
+- `.agents/sow/pending/SOW-0104-20260624-ingester-graceful-restart-timeout.md`
+  tracks the live restart finding that the previous ingester process exceeded
+  systemd's stop timeout and was killed before the new instance started. This is
+  not part of the deterministic parity implementation, but it is a real
+  operational defect and must not be forgotten.
+
+Outcome:
+
+- SOW-0097 is complete.
+- The completion closure commit moves this file to `.agents/sow/done/`.

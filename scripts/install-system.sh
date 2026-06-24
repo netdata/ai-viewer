@@ -112,6 +112,14 @@ render_unit() {
     "$tmpl" > "$out"
 }
 
+install_binary_atomically() {
+  local src="$1" dst="$2" tmp
+  tmp="${dst}.tmp.$$.$RANDOM"
+  sudorun rm -f "$tmp"
+  sudorun install -m 0755 "$src" "$tmp"
+  sudorun mv -f "$tmp" "$dst"
+}
+
 do_build() {
   run cd "$REPO_ROOT"
   echo -e "${GRAY}== build (frontend + Go binaries) ==${NC}" >&2
@@ -141,29 +149,33 @@ do_install() {
 
   echo -e "${GRAY}== lay out ${OPT_DIR} ==${NC}" >&2
   sudorun mkdir -p "$BIN_DIR" "$DATA_DIR" "$LOG_DIR"
-  sudorun cp "$REPO_ROOT/bin/ai-viewer-ingest" "$REPO_ROOT/bin/ai-viewer-serve" "$BIN_DIR/"
-  sudorun chmod 0755 "$BIN_DIR/ai-viewer-ingest" "$BIN_DIR/ai-viewer-serve"
+  install_binary_atomically "$REPO_ROOT/bin/ai-viewer-ingest" "$BIN_DIR/ai-viewer-ingest"
+  install_binary_atomically "$REPO_ROOT/bin/ai-viewer-serve" "$BIN_DIR/ai-viewer-serve"
 
   echo -e "${GRAY}== install systemd units (run-as ${op_user}, explicit sources) ==${NC}" >&2
   local src_flags=""
   for s in "${sources[@]}"; do src_flags+=" $(printf '%q' "$s")"; done
-  local rendered_ingest="/tmp/ai-viewer-ingest.unit.$$.rendered"
-  local rendered_serve="/tmp/ai-viewer-serve.unit.$$.rendered"
+  local render_dir rendered_ingest rendered_serve
+  render_dir="$(mktemp -d -t ai-viewer-units.XXXXXX)"
+  rendered_ingest="$render_dir/ai-viewer-ingest.service"
+  rendered_serve="$render_dir/ai-viewer-serve.service"
   render_unit "$REPO_ROOT/deploy/systemd-system/ai-viewer-ingest.service" "$rendered_ingest" "$op_user" "$op_group" "$src_flags"
   render_unit "$REPO_ROOT/deploy/systemd-system/ai-viewer-serve.service"  "$rendered_serve"  "$op_user" "$op_group" ""
   # Validate the rendered units (catches token misses / typos).
-  systemd-analyze verify "$rendered_ingest" "$rendered_serve" || true
+  run systemd-analyze verify "$rendered_ingest" "$rendered_serve"
   sudorun install -m 0644 "$rendered_ingest" "$UNIT_DIR/ai-viewer-ingest.service"
   sudorun install -m 0644 "$rendered_serve"  "$UNIT_DIR/ai-viewer-serve.service"
-  rm -f "$rendered_ingest" "$rendered_serve"
+  rm -rf "$render_dir"
   sudorun systemctl daemon-reload
 
   # Data dir owned by the operator (the ingester runs as them).
   sudorun chown -R "${op_user}:${op_group}" "$OPT_DIR"
 
-  echo -e "${GRAY}== enable + start ==${NC}" >&2
-  sudorun systemctl enable --now ai-viewer-ingest.service
-  sudorun systemctl enable --now ai-viewer-serve.service
+  echo -e "${GRAY}== enable + restart ==${NC}" >&2
+  sudorun systemctl enable ai-viewer-ingest.service
+  sudorun systemctl enable ai-viewer-serve.service
+  sudorun systemctl restart ai-viewer-ingest.service
+  sudorun systemctl restart ai-viewer-serve.service
 
   echo -e "${GRAY}== waiting for server to come up ==${NC}" >&2
   local ok=""

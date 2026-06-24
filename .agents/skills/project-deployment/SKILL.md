@@ -23,9 +23,9 @@ This skill is the durable record of how ai-viewer gets installed and run on the 
    - `~/.claude/projects` → `claude-code`
    - `~/.codex/sessions` → `codex`
    - `~/.local/share/opencode/opencode.db` → `opencode`
-3. Lays out `/opt/ai-viewer/{bin,data,logs}`, copies the binaries.
+3. Lays out `/opt/ai-viewer/{bin,data,logs}`, atomically stages each rebuilt binary and renames it into place.
 4. Renders the unit templates (`deploy/systemd-system/ai-viewer-{ingest,serve}.service`) — substituting `__OPERATOR_USER__`, `__OPERATOR_GROUP__`, and `__AI_VIEWER_SOURCES__` — into `/etc/systemd/system/`.
-5. `systemctl daemon-reload`, `enable --now` both units, waits up to 20s for the server, prints the URL.
+5. `systemctl daemon-reload`, enables both units, restarts `ai-viewer-ingest.service` and `ai-viewer-serve.service`, waits up to 20s for the server, prints the URL.
 
 ### Commands
 
@@ -72,7 +72,7 @@ scripts/install-system.sh status                                       # the bun
 ## Operating
 
 - **Logs:** `journalctl -u ai-viewer-ingest -u ai-viewer-serve -f` (journald via stdout; the primary sink).
-- **Restart after a code change:** `scripts/install-system.sh` (uninstall is NOT needed — install is idempotent; it rebuilds + re-renders + `daemon-reload` + restarts).
+- **Restart after a code change:** `scripts/install-system.sh` (uninstall is NOT needed — install is idempotent; it rebuilds + atomically replaces binaries + re-renders + `daemon-reload` + restarts).
 - **Data is disposable.** `/opt/ai-viewer/data/index.db` is derived. Deleting it (or `uninstall`) triggers a full re-ingest on next start; the source files are the source of truth. Never back up the index.
 - **Read-only on sources.** Neither binary writes to `~/.ai-agent`/`~/.claude`/etc. The ingester opens source files `os.O_RDONLY`; the server never touches them.
 - **Port:** `7710` (the spec default; `127.0.0.1:7710`). Changing it requires editing the rendered serve unit + the frontend's Vite proxy target (dev only).
