@@ -1070,6 +1070,140 @@ func TestCodexIngestCollabSpawnLinkMatchesSourceManifest(t *testing.T) {
 	}
 }
 
+func TestCodexIngestNestedSubagentSessionBoundariesMatchSourceManifest(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := writeCodexNestedSubagentParityFixture(t)
+	sourceID := "codex:" + root
+
+	adapter, err := codex.New(root, canonical.AdapterOptions{
+		SourceID: sourceID,
+		Logger:   silentLogger(),
+		OnError: func(err error) {
+			t.Fatalf("codex adapter error: %v", err)
+		},
+	})
+	if err != nil {
+		t.Fatalf("codex.New: %v", err)
+	}
+
+	events := make(chan canonical.Event, 128)
+	if err := adapter.Scan(ctx, nil, events); err != nil {
+		t.Fatalf("codex Scan: %v", err)
+	}
+	close(events)
+
+	_, db := openTestStore(t)
+	if err := ensureSourceRowDirect(ctx, db, sourceID, "codex", root); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	applyEventsForParity(t, ctx, db, sourceID, root, events)
+	if err := newResolver(db, silentLogger(), time.Minute).linkOrphans(ctx); err != nil {
+		t.Fatalf("resolver linkOrphans: %v", err)
+	}
+
+	rootID := canonicalSessionID(sourceID, "root-session")
+	childID := canonicalSessionID(sourceID, "child-session")
+	if got := scanString(t, db, `SELECT root_session_id FROM sessions WHERE id=?`, childID); got != rootID {
+		t.Fatalf("nested child root_session_id = %q, want top-level root %q", got, rootID)
+	}
+
+	sourceArtifacts, err := parity.ExtractCodexSource(ctx, parity.CodexSourceOptions{
+		Root:     root,
+		SourceID: sourceID,
+	})
+	if err != nil {
+		t.Fatalf("ExtractCodexSource: %v", err)
+	}
+	canonicalArtifacts, err := parity.ExtractCanonical(ctx, db)
+	if err != nil {
+		t.Fatalf("ExtractCanonical: %v", err)
+	}
+
+	sourceArtifacts = filterCodexSessionBoundaryParityArtifacts(sourceArtifacts)
+	canonicalArtifacts = filterCodexSessionBoundaryParityArtifacts(canonicalArtifacts)
+	if len(sourceArtifacts) != 3 {
+		t.Fatalf("source session_boundary count = %d, want 3", len(sourceArtifacts))
+	}
+	if len(canonicalArtifacts) != 3 {
+		t.Fatalf("canonical session_boundary count = %d, want 3", len(canonicalArtifacts))
+	}
+
+	result := parity.Diff(sourceArtifacts, canonicalArtifacts)
+	if result.State != parity.StatePass {
+		t.Fatalf("codex nested session boundary parity failed: state=%s findings=%+v", result.State, result.Findings)
+	}
+}
+
+func TestCodexIngestAbsentParentSessionBoundaryUsesStashedNativeLineage(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := writeCodexAbsentParentSessionBoundaryFixture(t)
+	sourceID := "codex:" + root
+
+	adapter, err := codex.New(root, canonical.AdapterOptions{
+		SourceID: sourceID,
+		Logger:   silentLogger(),
+		OnError: func(err error) {
+			t.Fatalf("codex adapter error: %v", err)
+		},
+	})
+	if err != nil {
+		t.Fatalf("codex.New: %v", err)
+	}
+
+	events := make(chan canonical.Event, 128)
+	if err := adapter.Scan(ctx, nil, events); err != nil {
+		t.Fatalf("codex Scan: %v", err)
+	}
+	close(events)
+
+	_, db := openTestStore(t)
+	if err := ensureSourceRowDirect(ctx, db, sourceID, "codex", root); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	applyEventsForParity(t, ctx, db, sourceID, root, events)
+	if err := newResolver(db, silentLogger(), time.Minute).linkOrphans(ctx); err != nil {
+		t.Fatalf("resolver linkOrphans: %v", err)
+	}
+
+	childID := canonicalSessionID(sourceID, "child-session")
+	if got := scanString(t, db, `SELECT IFNULL(parent_session_id,'') FROM sessions WHERE id=?`, childID); got != "" {
+		t.Fatalf("child parent_session_id = %q, want unresolved absent parent", got)
+	}
+	if got := scanString(t, db, `SELECT root_session_id FROM sessions WHERE id=?`, childID); got != childID {
+		t.Fatalf("child root_session_id = %q, want self while parent row is absent", got)
+	}
+
+	sourceArtifacts, err := parity.ExtractCodexSource(ctx, parity.CodexSourceOptions{
+		Root:     root,
+		SourceID: sourceID,
+	})
+	if err != nil {
+		t.Fatalf("ExtractCodexSource: %v", err)
+	}
+	canonicalArtifacts, err := parity.ExtractCanonical(ctx, db)
+	if err != nil {
+		t.Fatalf("ExtractCanonical: %v", err)
+	}
+
+	sourceArtifacts = filterCodexSessionBoundaryParityArtifacts(sourceArtifacts)
+	canonicalArtifacts = filterCodexSessionBoundaryParityArtifacts(canonicalArtifacts)
+	if len(sourceArtifacts) != 1 {
+		t.Fatalf("source session_boundary count = %d, want 1", len(sourceArtifacts))
+	}
+	if len(canonicalArtifacts) != 1 {
+		t.Fatalf("canonical session_boundary count = %d, want 1", len(canonicalArtifacts))
+	}
+
+	result := parity.Diff(sourceArtifacts, canonicalArtifacts)
+	if result.State != parity.StatePass {
+		t.Fatalf("codex absent-parent session boundary parity failed: state=%s findings=%+v", result.State, result.Findings)
+	}
+}
+
 func TestCodexIngestCollabLifecycleLogsMatchSourceManifest(t *testing.T) {
 	t.Parallel()
 
@@ -1934,6 +2068,65 @@ func writeCodexCollabSpawnParityFixture(t *testing.T) (string, string) {
 	return root, parentFile
 }
 
+func writeCodexNestedSubagentParityFixture(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	shard := filepath.Join(root, "2025", "12", "01")
+	rootFile := filepath.Join(shard, "rollout-1-root.jsonl")
+	parentFile := filepath.Join(shard, "rollout-2-parent.jsonl")
+	childFile := filepath.Join(shard, "rollout-3-child.jsonl")
+	if err := os.MkdirAll(shard, 0o755); err != nil {
+		t.Fatalf("mkdir codex fixture: %v", err)
+	}
+	rootLines := []string{
+		`{"timestamp":"2025-12-01T16:59:09.000Z","type":"session_meta","payload":{"id":"root-session","cwd":"<ROOT>","originator":"codex_exec","cli_version":"0.125.0","model_provider":"openai","source":"exec"}}`,
+		`{"timestamp":"2025-12-01T16:59:10.000Z","type":"turn_context","payload":{"turn_id":"turn-root","model":"gpt-5.1-codex-max"}}`,
+		`{"timestamp":"2025-12-01T16:59:11.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-root"}}`,
+		`{"timestamp":"2025-12-01T16:59:12.000Z","type":"event_msg","payload":{"type":"collab_agent_spawn_end","sender_thread_id":"root-session","new_thread_id":"parent-session","new_agent_nickname":"Planner","new_agent_role":"planner","model":"gpt-5.1-codex-max","reasoning_effort":"high","status":"completed"}}`,
+		`{"timestamp":"2025-12-01T16:59:13.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-root","completed_at":"2025-12-01T16:59:13.000Z"}}`,
+	}
+	parentSource := `{"subagent":{"thread_spawn":{"parent_thread_id":"root-session","depth":1,"agent_nickname":"Planner","agent_role":"planner"}}}`
+	parentLines := []string{
+		`{"timestamp":"2025-12-01T17:00:00.000Z","type":"session_meta","payload":{"id":"parent-session","originator":"codex_exec","agent_nickname":"Planner","agent_role":"planner","thread_source":"subagent","source":` + parentSource + `}}`,
+		`{"timestamp":"2025-12-01T17:00:01.000Z","type":"turn_context","payload":{"turn_id":"turn-parent","model":"gpt-5.1-codex-max"}}`,
+		`{"timestamp":"2025-12-01T17:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-parent"}}`,
+		`{"timestamp":"2025-12-01T17:00:03.000Z","type":"event_msg","payload":{"type":"collab_agent_spawn_end","sender_thread_id":"parent-session","new_thread_id":"child-session","new_agent_nickname":"Verifier","new_agent_role":"reviewer","model":"gpt-5.1-codex-max","reasoning_effort":"high","status":"completed"}}`,
+		`{"timestamp":"2025-12-01T17:00:04.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-parent","completed_at":"2025-12-01T17:00:04.000Z"}}`,
+	}
+	childSource := `{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":2,"agent_nickname":"Verifier","agent_role":"reviewer"}}}`
+	childLines := []string{
+		`{"timestamp":"2025-12-01T17:01:00.000Z","type":"session_meta","payload":{"id":"child-session","originator":"codex_exec","agent_nickname":"Verifier","agent_role":"reviewer","thread_source":"subagent","source":` + childSource + `}}`,
+	}
+	for path, lines := range map[string][]string{
+		rootFile:   rootLines,
+		parentFile: parentLines,
+		childFile:  childLines,
+	} {
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("write codex fixture %s: %v", path, err)
+		}
+	}
+	return root
+}
+
+func writeCodexAbsentParentSessionBoundaryFixture(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	sessionFile := filepath.Join(root, "2025", "12", "01", "rollout-absent-parent-child.jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o755); err != nil {
+		t.Fatalf("mkdir codex fixture: %v", err)
+	}
+	lines := []string{
+		`{"timestamp":"2025-12-01T17:00:00.000Z","type":"session_meta","payload":{"id":"child-session","parent_thread_id":"parent-session","originator":"codex_exec","agent_nickname":"Verifier","agent_role":"reviewer","thread_source":"subagent","source":{"subagent":"review"}}}`,
+	}
+	if err := os.WriteFile(sessionFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write codex fixture: %v", err)
+	}
+	return root
+}
+
 func writeCodexPatchApplyEndParityFixture(t *testing.T) (string, string) {
 	t.Helper()
 
@@ -2390,6 +2583,16 @@ func filterCodexSubagentLinkParityArtifacts(artifacts []parity.Artifact) []parit
 	out := make([]parity.Artifact, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		if _, ok := allowed[artifact.Class]; ok {
+			out = append(out, artifact)
+		}
+	}
+	return out
+}
+
+func filterCodexSessionBoundaryParityArtifacts(artifacts []parity.Artifact) []parity.Artifact {
+	out := make([]parity.Artifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		if artifact.Class == parity.ClassSessionBoundary {
 			out = append(out, artifact)
 		}
 	}

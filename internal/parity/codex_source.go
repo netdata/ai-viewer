@@ -64,11 +64,15 @@ func ExtractCodexSourceToWriter(ctx context.Context, opts CodexSourceOptions, wr
 			sourceErrs = append(sourceErrs, err)
 		}
 	}
+	rootIndex, err := buildCodexSourceRootIndex(ctx, files.modern)
+	if err != nil {
+		return fmt.Errorf("extract codex source: %w", err)
+	}
 	for _, path := range files.modern {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("extract codex source: %w", err)
 		}
-		if err := writeCodexSourceFile(ctx, path, sourceID, writer); err != nil {
+		if err := writeCodexSourceFile(ctx, path, sourceID, rootIndex, writer); err != nil {
 			if codexSourceContextError(err) {
 				return fmt.Errorf("extract codex source: %w", err)
 			}
@@ -213,9 +217,13 @@ type codexSourceState struct {
 	sessionStartedAt      int64
 	sessionStatus         string
 	sessionEndedAt        *int64
+	sessionKind           string
+	sessionParentNativeID string
+	sessionRootNativeID   string
 	sessionMetadata       codexSessionMetadataIdentity
 	sessionMetadataOK     bool
 	sessionMetadataLineNo int64
+	rootIndex             codexSourceRootIndex
 	lastContentTsUs       int64
 	activeTurn            *codexSourceTurn
 	turnSeqCounter        int64
@@ -278,19 +286,120 @@ type codexCompactionEventIdentity struct {
 	EndedAt                *int64 `json:"ended_at,omitempty"`
 }
 
-func newCodexSourceState(sourceID string, sourceFile string, sourceMtime time.Time) codexSourceState {
+type codexSourceRootIndex struct {
+	parentBySession map[string]string
+}
+
+func buildCodexSourceRootIndex(ctx context.Context, paths []string) (codexSourceRootIndex, error) {
+	index := codexSourceRootIndex{parentBySession: map[string]string{}}
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return index, err
+		}
+		nativeID, parentID, ok := codexSourceRootIndexEntry(path)
+		if ok {
+			index.parentBySession[nativeID] = parentID
+		}
+	}
+	return index, nil
+}
+
+func codexSourceRootIndexEntry(path string) (string, string, bool) {
+	file, err := os.Open(path) // #nosec G304 -- path comes from Codex parity discovery after source-root containment checks.
+	if err != nil {
+		return "", "", false
+	}
+	defer func() { _ = file.Close() }()
+
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := readCodexSourceLine(reader)
+		if readErr != nil && len(line) == 0 {
+			return "", "", false
+		}
+		nativeID, parentID, ok := codexSourceRootIndexEntryFromLine(trimLineEnding(line))
+		if ok {
+			return nativeID, parentID, true
+		}
+		if errors.Is(readErr, io.EOF) {
+			return "", "", false
+		}
+	}
+}
+
+func codexSourceRootIndexEntryFromLine(line []byte) (string, string, bool) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return "", "", false
+	}
+	var env codexEnvelope
+	if err := decodeJSON(trimmed, &env); err != nil {
+		return "", "", false
+	}
+	if env.RecordType == "state" && env.Type == "" {
+		return "", "", false
+	}
+	if env.Type == "" {
+		if env.ID == "" || env.Timestamp == "" {
+			return "", "", false
+		}
+		env.Type = "session_meta"
+	}
+	if env.Type != "session_meta" {
+		return "", "", false
+	}
+	var body codexSessionMetaPayload
+	if err := decodeJSONPayload(codexPayloadOrLine(env.Payload, trimmed), &body); err != nil {
+		return "", "", false
+	}
+	if body.ID == "" {
+		return "", "", false
+	}
+	_, parentID := codexSourceSessionKindAndParent(body)
+	return body.ID, parentID, true
+}
+
+func (i codexSourceRootIndex) rootFor(nativeID string, parentID string) string {
+	if parentID == "" {
+		return nativeID
+	}
+	if nativeID == "" || len(i.parentBySession) == 0 {
+		return parentID
+	}
+	seen := map[string]struct{}{nativeID: {}}
+	rootID := parentID
+	for rootID != "" {
+		if _, ok := seen[rootID]; ok {
+			return parentID
+		}
+		seen[rootID] = struct{}{}
+		next, ok := i.parentBySession[rootID]
+		if !ok || next == "" {
+			return rootID
+		}
+		rootID = next
+	}
+	return parentID
+}
+
+func newCodexSourceState(sourceID string, sourceFile string, sourceMtime time.Time, rootIndex codexSourceRootIndex) codexSourceState {
 	return codexSourceState{
 		sourceID:      sourceID,
 		sourceFile:    sourceFile,
 		sourceMtimeUs: sourceMtime.UnixMicro(),
 		sourceStale:   time.Since(sourceMtime) >= time.Hour,
 		openTools:     map[string]codexSourceOpenOp{},
+		rootIndex:     rootIndex,
 	}
 }
 
 func extractCodexSourceFile(ctx context.Context, path string, sourceID string) ([]Artifact, error) {
 	var artifacts []Artifact
-	err := writeCodexSourceFile(ctx, path, sourceID, ArtifactWriterFunc(func(ctx context.Context, artifact Artifact) error {
+	rootIndex, err := buildCodexSourceRootIndex(ctx, []string{path})
+	if err != nil {
+		return nil, err
+	}
+	err = writeCodexSourceFile(ctx, path, sourceID, rootIndex, ArtifactWriterFunc(func(ctx context.Context, artifact Artifact) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -300,7 +409,7 @@ func extractCodexSourceFile(ctx context.Context, path string, sourceID string) (
 	return artifacts, err
 }
 
-func writeCodexSourceFile(ctx context.Context, path string, sourceID string, writer ArtifactWriter) error {
+func writeCodexSourceFile(ctx context.Context, path string, sourceID string, rootIndex codexSourceRootIndex, writer ArtifactWriter) error {
 	file, err := os.Open(path) // #nosec G304 -- path comes from Codex parity discovery after source-root containment checks.
 	if err != nil {
 		return fmt.Errorf("open codex source file read-only: %w", err)
@@ -311,7 +420,7 @@ func writeCodexSourceFile(ctx context.Context, path string, sourceID string, wri
 	if err != nil {
 		return fmt.Errorf("stat codex source file: %w", err)
 	}
-	state := newCodexSourceState(sourceID, path, info.ModTime())
+	state := newCodexSourceState(sourceID, path, info.ModTime(), rootIndex)
 	reader := bufio.NewReader(file)
 	var lineNo int64
 	for {
@@ -485,6 +594,8 @@ func updateCodexSourceSession(state *codexSourceState, payload json.RawMessage, 
 	if body.ID != "" {
 		state.nativeSessionID = body.ID
 	}
+	state.sessionKind, state.sessionParentNativeID = codexSourceSessionKindAndParent(body)
+	state.sessionRootNativeID = state.rootIndex.rootFor(state.sessionID(), state.sessionParentNativeID)
 	identity, ok, err := codexSessionMetadataIdentityFromSource(state.sessionID(), body)
 	if err != nil {
 		return err
@@ -511,13 +622,24 @@ func (s *codexSourceState) finalizeSessionBoundary() ([]Artifact, error) {
 		return nil, nil
 	}
 	nativeID := s.sessionID()
+	kind := s.sessionKind
+	if kind == "" {
+		kind = "root"
+	}
+	rootID := nativeID
+	if s.sessionRootNativeID != "" {
+		rootID = s.sessionRootNativeID
+	} else if s.sessionParentNativeID != "" {
+		rootID = s.sessionParentNativeID
+	}
 	identity := sessionBoundaryIdentity{
-		NativeSessionID:     nativeID,
-		RootNativeSessionID: nativeID,
-		Kind:                "root",
-		Status:              s.sessionStatus,
-		StartedAt:           s.sessionStartedAt,
-		EndedAt:             s.sessionEndedAt,
+		NativeSessionID:       nativeID,
+		ParentNativeSessionID: s.sessionParentNativeID,
+		RootNativeSessionID:   rootID,
+		Kind:                  kind,
+		Status:                s.sessionStatus,
+		StartedAt:             s.sessionStartedAt,
+		EndedAt:               s.sessionEndedAt,
 	}
 	artifact, err := identityArtifact(identityArtifactInput{
 		sourceID:         s.sourceID,

@@ -95,6 +95,7 @@ func TestParseLine_SessionMeta(t *testing.T) {
 	t.Parallel()
 	line := `{"timestamp":"2025-11-20T16:59:09.857Z","type":"session_meta","payload":{` +
 		`"id":"019aa234-a2a1-75c3-a9bf-d8425e1785f5",` +
+		`"parent_thread_id":"019aa234-parent",` +
 		`"timestamp":"2025-11-20T16:59:09.857Z",` +
 		`"cwd":"<ROOT>","originator":"codex_exec","cli_version":"0.125.0",` +
 		`"source":"exec","model_provider":"openai",` +
@@ -114,6 +115,9 @@ func TestParseLine_SessionMeta(t *testing.T) {
 	}
 	if rec.SessionMeta.Originator != "codex_exec" || rec.SessionMeta.CLIVersion != "0.125.0" {
 		t.Errorf("originator/cli_version wrong: %+v", rec.SessionMeta)
+	}
+	if rec.SessionMeta.ParentThreadID != "019aa234-parent" {
+		t.Errorf("parent_thread_id = %q", rec.SessionMeta.ParentThreadID)
 	}
 	if rec.SessionMeta.Git == nil || rec.SessionMeta.Git.Branch != "main" {
 		t.Errorf("git not decoded: %+v", rec.SessionMeta.Git)

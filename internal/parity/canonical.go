@@ -1113,10 +1113,10 @@ func artifactFromSession(row canonicalSessionRow) (Artifact, error) {
 func canonicalSessionNativeLineage(row canonicalSessionRow) (string, string, error) {
 	parentNativeID := nullString(row.parentNativeSessionID)
 	rootNativeID := row.rootNativeSessionID
-	if row.adapter != aiAgentV3Format {
+	if !canonicalSessionNeedsStashedLineage(row, parentNativeID, rootNativeID) {
 		return parentNativeID, rootNativeID, nil
 	}
-	fields, err := jsonObjectFromNullString(row.extrasJSON, "aiagent_v3 session lineage extras")
+	fields, err := jsonObjectFromNullString(row.extrasJSON, row.adapter+" session lineage extras")
 	if err != nil {
 		return "", "", err
 	}
@@ -1137,6 +1137,16 @@ func canonicalSessionNativeLineage(row canonicalSessionRow) (string, string, err
 		}
 	}
 	return parentNativeID, rootNativeID, nil
+}
+
+func canonicalSessionNeedsStashedLineage(row canonicalSessionRow, parentNativeID string, rootNativeID string) bool {
+	if parentNativeID == "" && row.kind != "root" {
+		return true
+	}
+	if rootNativeID == "" {
+		return true
+	}
+	return rootNativeID == row.nativeSessionID && row.kind != "root"
 }
 
 func aiAgentV3SyntheticSessionBoundary(row canonicalSessionRow) (bool, error) {

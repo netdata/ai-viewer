@@ -47,7 +47,7 @@ func writeCodexLegacySourceFile(ctx context.Context, path string, sourceID strin
 		return fmt.Errorf("%s: decode legacy flat JSON: %w", path, err)
 	}
 
-	state := newCodexSourceState(sourceID, path, info.ModTime())
+	state := newCodexSourceState(sourceID, path, info.ModTime(), codexSourceRootIndex{})
 	if err := updateCodexSourceSession(&state, legacy.Session, 0); err != nil {
 		return err
 	}

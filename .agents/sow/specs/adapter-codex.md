@@ -189,6 +189,13 @@ References: `codex-rs/protocol/src/protocol.rs:2642-2703`.
 - `{"custom": "<name>"}`
 - `{"internal": "memory_consolidation"}`
 - `{"subagent": "review"|"compact"|"memory_consolidation"|{"thread_spawn": {parent_thread_id, depth, agent_path, agent_nickname, agent_role}}}`
+
+Modern Codex `SessionMeta` also carries top-level
+`payload.parent_thread_id`. For sub-agent sessions, the nested
+`source.subagent.thread_spawn.parent_thread_id` is preferred when present; if
+the nested source shape is a bare subagent marker with no parent, the adapter
+falls back to top-level `parent_thread_id`. This mirrors upstream
+`codex-rs/protocol/src/protocol.rs` `SessionMeta.parent_thread_id`.
 - `{"other": "<name>"}` — unknown variants fall through (forward-compat)
 
 Observed in real files: 164/200 `"exec"`, 28/200 `"cli"`, plus a handful of `{"subagent": {"thread_spawn": {...}}}` (sub-agent spawns).
@@ -402,7 +409,16 @@ Codex rollout files emit fine-grained `RolloutItem` records but do NOT carry pre
    `type=session_meta` or the no-`type` legacy JSONL header):**
    - Emit `SessionStartedEvent` with:
      - `NativeID = payload.id`
-     - `ParentNativeID = payload.forked_from_id` (when present), OR `source.subagent.thread_spawn.parent_thread_id` (when present), else empty
+     - `ParentNativeID = payload.forked_from_id` (when present), OR `source.subagent.thread_spawn.parent_thread_id` (when present), falling back to top-level `payload.parent_thread_id` for sub-agent sessions when the nested source marker carries no parent, else empty
+     - `RootNativeID =` the top-level root of the Codex session tree. When all
+       ancestor rollout metadata is visible, the adapter/source parity extractor
+       walk `ParentNativeID` ancestry to the root. If an ancestor rollout has not
+       landed yet, the immediate parent is a provisional root and the ingester
+       resolver repairs the stored `root_session_id` after the missing ancestor
+       is linked. Canonical parity extraction still reads the stashed native
+       parent/root ids for `session_boundary` comparison while those rows are
+       absent; this records the source lineage without inventing missing
+       canonical sessions.
      - `Kind`: `'root'` when `source` is `cli`/`vscode`/`exec`/`mcp`/`unknown`/`custom`; `'sub_agent'` when `source` is `subagent` or `thread_source=="subagent"`; `'tool_internal'` when `source` is `internal`
      - `AgentName = payload.agent_nickname` or `payload.agent_role` (when sub-agent); else `"codex:" + payload.originator`
      - `Model`: unknown at this point (left empty; learned from first `turn_context` and emitted as `SessionUpdatedEvent`)
@@ -790,14 +806,18 @@ Codex rollouts do NOT record cost (only tokens). The ingester computes cost via 
 
 Codex supports sub-agents (`SubAgentSource::ThreadSpawn`) and forks (`forked_from_id`). Both produce SEPARATE rollout files under the normal `sessions/YYYY/MM/DD/` tree:
 
-- **Sub-agent**: `session_meta.payload.source = {"subagent": {"thread_spawn": {"parent_thread_id": "<uuid>", "depth": N, "agent_nickname": "...", "agent_role": "..."}}}` and `thread_source = "subagent"`. The parent session's rollout file does NOT inline the child; it appears separately and the parent is identified via `parent_thread_id`.
+- **Sub-agent**: `session_meta.payload.source = {"subagent": {"thread_spawn": {"parent_thread_id": "<uuid>", "depth": N, "agent_nickname": "...", "agent_role": "..."}}}` and `thread_source = "subagent"`. The parent session's rollout file does NOT inline the child; it appears separately and the parent is identified via the nested `source.subagent.thread_spawn.parent_thread_id`, falling back to top-level `session_meta.payload.parent_thread_id` when the nested source marker does not carry a parent.
 - **Fork**: `session_meta.payload.forked_from_id = "<uuid>"` — branched/resumed from another session.
 - **`event_msg.collab_agent_spawn_begin`/`_end`** in the PARENT rollout name the spawn but the `_begin` event is NOT persisted (`policy.rs:215`). Only `_end` is. The `_end` event carries the parent→child link as `sender_thread_id` (parent) → `new_thread_id` (child), alongside `new_agent_nickname`, `new_agent_role`, `model`, `reasoning_effort`, and `status`. (Real workstation corpus: 5 `collab_agent_spawn_end` files; the field is `new_thread_id`, NOT `agent_ref.thread_id` as an earlier draft of this spec wrongly stated.)
 - **`event_msg.collab_close_end`** (72 files) and **`event_msg.collab_waiting_end`** (74 files) also appear in collab sessions. They carry no parent→child edge the topology view needs, so the adapter recognizes them (no `SourceError`) and surfaces each as a `LogEntry` only — no canonical op. When either event carries `payload.message`, the `LogEntry` message is the exact source message and `Extras.aiViewer.parity` carries `nativeArtifactId=line:<line>:/payload/message`, `selectorURI=file://...#L<line>`, and `jsonPointer=/payload/message`, matching the `event_msg.error` source-backed log parity contract.
 
 Adapter behavior:
 
-- Emit `SessionStartedEvent.ParentNativeID = parent_thread_id` when the child's `session_meta.source` is `subagent`.
+- Emit `SessionStartedEvent.ParentNativeID = parent_thread_id` when the child's `session_meta.source` is `subagent`, using nested source parent first and top-level `payload.parent_thread_id` second.
+- Emit `SessionStartedEvent.RootNativeID` as the top-level root when the
+  session tree is visible. Nested sub-agents must not remain rooted at their
+  immediate parent after the parent/root rows exist; the ingester resolver
+  repairs any provisional direct-parent root to the parent's resolved root.
 - Emit `SessionStartedEvent.ParentNativeID = forked_from_id` otherwise when `forked_from_id` is present.
 - In the parent, when an `event_msg.collab_agent_spawn_end` line appears, emit an Op Kind=`session`, Name=`spawn`, ChildSessionNativeID=`new_thread_id`. (If the child rollout file doesn't yet exist at that moment, the ingester's foreign-key constraint must be relaxed temporarily — the canonical-events spec allows out-of-order child arrival.)
 - Source-manifest parity mirrors the parent-side spawn event. The source extractor emits both an `op_boundary` for the `session/spawn` op and a `subagent_link` artifact keyed as `op:<turn_seq>:<op_seq>:child_session:<new_thread_id>`. If the child rollout has not landed yet, the canonical side is incomplete until the resolver can link `ops.child_session_id`; silently dropping the link is a P0 parity failure.

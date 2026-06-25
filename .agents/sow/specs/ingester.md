@@ -329,6 +329,23 @@ UPDATE sessions
 
 The `parent_native_id` is persisted into `extras_json.aiViewer.parentNativeId` at insert time so the resolver can re-run against the durable state. This is implementation detail of the ingester (the field is not part of the public schema or API contract).
 
+The resolver also repairs `root_session_id` in two cases:
+
+1. **Explicit native root**: when a child was inserted before its native root
+   row existed, `extras_json.aiViewer.rootNativeId` is resolved to the matching
+   `(source_id, native_id)` row once it lands.
+2. **Transitive parent root**: after `parent_session_id` is known, a child whose
+   root still points at itself or its immediate parent is re-rooted to the
+   top-level ancestor of the resolved parent chain. This keeps stored session
+   trees aligned with `canonical-events.md`: `root_session_id` is the top-level
+   root, not the direct parent of a nested child.
+
+Canonical parity extraction may still use the stashed
+`extras_json.aiViewer.parentNativeId` / `rootNativeId` as native lineage
+evidence while a parent or root row is absent. This does not create foreign-key
+links; it only lets source-vs-canonical parity compare the same source-native
+ids for partial corpora.
+
 The resolver also re-links **op→child** edges, by two complementary passes (both run inside the same transaction as the parent/root link, and both add the affected **parent** session id to the notify set):
 
 1. `linkOpChildren` — re-links `ops.child_session_id` from `ops.extras_json.aiViewer.childNativeId` (stashed when a parent child-session op was written before its child `sessions` row existed) once a session with the matching `(source_id, native_id)` lands. Used by every adapter that emits `OpStartedEvent.ChildSessionNativeID` (ai-agent v2/v3, claude-code when the child native id is known at op-write time).

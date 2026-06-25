@@ -24,17 +24,18 @@ type codexSessionMetadataIdentity struct {
 }
 
 type codexSessionMetaPayload struct {
-	ID            string               `json:"id"`
-	ForkedFromID  string               `json:"forked_from_id"`
-	Cwd           string               `json:"cwd"`
-	Originator    string               `json:"originator"`
-	CLIVersion    string               `json:"cli_version"`
-	ThreadSource  string               `json:"thread_source"`
-	AgentNickname string               `json:"agent_nickname"`
-	AgentRole     string               `json:"agent_role"`
-	ModelProvider string               `json:"model_provider"`
-	Source        json.RawMessage      `json:"source"`
-	Git           *codexSessionGitInfo `json:"git"`
+	ID             string               `json:"id"`
+	ForkedFromID   string               `json:"forked_from_id"`
+	ParentThreadID string               `json:"parent_thread_id"`
+	Cwd            string               `json:"cwd"`
+	Originator     string               `json:"originator"`
+	CLIVersion     string               `json:"cli_version"`
+	ThreadSource   string               `json:"thread_source"`
+	AgentNickname  string               `json:"agent_nickname"`
+	AgentRole      string               `json:"agent_role"`
+	ModelProvider  string               `json:"model_provider"`
+	Source         json.RawMessage      `json:"source"`
+	Git            *codexSessionGitInfo `json:"git"`
 }
 
 type codexSessionGitInfo struct {
@@ -134,6 +135,28 @@ func codexSessionRelationship(p codexSessionMetaPayload) string {
 	}
 }
 
+func codexSourceSessionKindAndParent(p codexSessionMetaPayload) (string, string) {
+	kind := codexClassifySource(p.Source)
+	switch {
+	case kind == codexSessionSourceSubagent:
+		parent := codexParentThreadIDFromSource(p.Source)
+		if parent == "" {
+			parent = p.ParentThreadID
+		}
+		return "sub_agent", parent
+	case p.ForkedFromID != "":
+		return "fork", p.ForkedFromID
+	case kind == codexSessionSourceInternal:
+		return "tool_internal", ""
+	case p.ThreadSource == "subagent":
+		return "sub_agent", p.ParentThreadID
+	case p.ThreadSource == "memory_consolidation":
+		return "tool_internal", ""
+	default:
+		return "root", ""
+	}
+}
+
 func codexClassifySource(raw json.RawMessage) codexSessionSourceKind {
 	body := bytes.TrimSpace(raw)
 	if len(body) == 0 || bytes.Equal(body, []byte("null")) {
@@ -187,6 +210,28 @@ func codexSourceString(raw json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+func codexParentThreadIDFromSource(raw json.RawMessage) string {
+	body := bytes.TrimSpace(raw)
+	if len(body) == 0 || bytes.Equal(body, []byte("null")) {
+		return ""
+	}
+	var obj struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(body, &obj) != nil || len(obj.Subagent) == 0 {
+		return ""
+	}
+	var nested struct {
+		ThreadSpawn struct {
+			ParentThreadID string `json:"parent_thread_id"`
+		} `json:"thread_spawn"`
+	}
+	if json.Unmarshal(obj.Subagent, &nested) != nil {
+		return ""
+	}
+	return nested.ThreadSpawn.ParentThreadID
 }
 
 func codexSubagentDepth(raw json.RawMessage) int {

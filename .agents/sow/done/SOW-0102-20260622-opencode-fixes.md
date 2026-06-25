@@ -2,12 +2,41 @@
 
 ## Status
 
-Status: open (proposed 2026-06-22)
+Status: completed
 Sub-state: CTO-proposed. Reviewer 6 (kimi) of SOW-0096 is pending; this SOW is the fix-side plan that will be refined after Reviewer 6's fact-finding pass. Depends on SOW-0097 for the `user_input`/`assistant` kind emission.
 
 ## Correction - 2026-06-22
 
 SOW-0097 has been reframed from `user_input`/`assistant` kind emission into a deterministic ingestion parity-gate SOW. Any references below to "after SOW-0097 lands, emit new op kinds" are provisional. The opencode fix must follow the SOW-0097 parity spec: first prove which request/message/tool artifacts exist in the opencode SQLite source, then map them to canonical artifacts or document source-unavailable cases.
+
+## Implementation Update - 2026-06-25
+
+The current SOW-0097 parity contract resolves the main open questions in this
+SOW:
+
+- Opencode does not persist raw provider `llm_request`, `llm_response`,
+  `llm_sdk_request`, or `llm_sdk_response` envelopes separately. The adapter
+  matrix marks those classes `not_source_visible`.
+- User prompts are represented as internal `kind=internal,name=user_input` ops
+  with `payload_refs.kind=tool_request` pointing at
+  `session_input.prompt.text` when present; when a paired user message exists
+  but no prompt row exists, parity records the source-unavailable artifact
+  explicitly.
+- Assistant text is represented as `assistant_message` via `part.text`
+  `llm_response` selectors.
+- Tool requests and responses are available from `part.data.state.input` and
+  `part.data.state.output`; current mapper tests pin `tool_request` emission and
+  the no-empty-`tool_response` rule.
+- Subagent links are source-visible only when a task tool carries
+  `state.metadata.sessionId`. Missing source session ids are source absence, not
+  mapper debt.
+- The historical "5 missing `child_session_id`" rows are not silently forgotten:
+  the current contract is explicit that a parent-child turn edge exists only for
+  `tool='task'` parts with `state.metadata.sessionId`. The reference DB evidence
+  in `adapter-opencode.md` records 1,274/1,274 task parts with a session id match
+  their child session's `parent_id`; the remaining parent-set sessions are
+  created through source mechanisms that do not populate a task edge and are
+  source/topology absence rather than mapper loss.
 
 ## Pre-Implementation Gate
 
@@ -131,3 +160,32 @@ c. Update the SOW-0096 triage doc.
 - **The 5 missing child_session_id cases** — if the investigation finds they're unfixable, document and move on. If fixable, fix in this SOW.
 - **The SOW-0096 framework + SQL reviewers** — paused per operator directive; re-dispatched after SOW-0097..0103 land.
 - **The reasoning capture rate (99.6%)** — already best-in-class; nothing to fix. The pattern is the model for other adapters.
+
+## Validation
+
+### 2026-06-25
+
+- `go test -count=1 ./internal/adapters/claude_code ./internal/adapters/codex ./internal/adapters/opencode` - passed.
+- `go test -count=1 ./internal/adapters/aiagent_v2 ./internal/adapters/claude_code ./internal/adapters/codex ./internal/adapters/opencode` - passed after the aiagent_v2 and Codex derivative fixes.
+- `go test -count=1 ./internal/parity ./internal/paritycheck ./cmd/ai-viewer-ingest -run 'Parity|Source|Manifest|Diff|Canonical|Matrix|CheckParity'` - passed.
+
+## Reviews
+
+### 2026-06-25
+
+- Included in the broader SOW-0099 to SOW-0102 derivative implementation review
+  chunk. Final six-reviewer gate result: `PRODUCTION GRADE`.
+  - `glm`: `PRODUCTION GRADE`.
+  - `minimax`: `PRODUCTION GRADE`.
+  - `kimi`: `PRODUCTION GRADE`.
+  - `mimo`: `PRODUCTION GRADE`.
+  - `deepseek`: `PRODUCTION GRADE`.
+  - `qwen`: `PRODUCTION GRADE`.
+- No P0/P1/P2 findings remain.
+- Action taken: Implementation Update now records the current opencode
+  sub-agent contract: `tool='task'` plus `state.metadata.sessionId` is the
+  source-visible turn edge; other parent-set sessions are source/topology
+  absence, not mapper loss.
+- P3 disposition:
+  - The older SOW-0096 "Reviewer 6" checkbox remains historical triage state.
+    SOW-0102 itself is closed against the current SOW-0097 parity contract.

@@ -2,12 +2,48 @@
 
 ## Status
 
-Status: open (proposed 2026-06-22)
+Status: completed
 Sub-state: CTO-proposed. Reviewer 2 (claude) of SOW-0096 produced the findings this SOW fixes. Depends on SOW-0097 (canonical `user_input`/`assistant` op kinds) for the invariant #2/#4 work; the payload-capture fixes in this SOW stand alone.
 
 ## Correction - 2026-06-22
 
 SOW-0097 has been reframed from a `user_input`/`assistant` op-kind change into a deterministic ingestion parity-gate SOW. Any references below to "after SOW-0097 lands, emit new op kinds" are provisional. The actual claude-code mapper work must follow the SOW-0097 parity spec: prove exact source text/tool/reasoning fragments with selectors, hashes, and lengths first, then add op kinds only if the parity contract requires them.
+
+## Implementation Update - 2026-06-25
+
+The current SOW-0097 parity contract and claude-code implementation supersede
+the older `user_input` / `assistant` op-kind migration language below:
+
+- User prompts and images are represented as internal `kind=internal,name=user_input`
+  ops with exact `payload_refs.kind=tool_request` selectors.
+- Assistant text is represented as `assistant_message` via exact
+  `payload_refs.kind=llm_response` text selectors.
+- Reasoning text, tool requests, and tool responses all have exact source
+  selectors and parity source coverage.
+- Claude Code does not persist raw provider request/response envelopes; those
+  remain `source_unavailable`/`not_source_visible` according to the adapter
+  matrix rather than invented canonical payloads.
+- `system.subtype=="api_error"` now emits a source-visible failed synthetic LLM
+  attempt plus the ERR log, matching the current spec.
+- The current sidecar/toolUseId contract is the canonical sub-agent linkage path:
+  parent `Agent` ops stash `aiViewer.toolUseId`, child sessions carry the sidecar
+  `toolUseId`, and the resolver repairs the parent op -> child link without
+  transcript re-read. The sidecar-absent 30% historical miss remains tracked as
+  SOW-0103 UI/source-absence work, not a SOW-0100 mapper change.
+
+Resolution ledger:
+
+| Original finding | Resolution |
+|---|---|
+| T6-claude-1 `tool_request` missing | Resolved by SOW-0097 claude-code tool-use payload refs. |
+| T7-claude-1 `tool_response` block-only miss | Resolved by SOW-0097 block-level `tool_result` payload refs. |
+| R3-claude-1 `llm_reasoning` missing | Resolved by SOW-0097 thinking-block selectors and payload refs. |
+| A4-claude-1 `llm_response` missing | Resolved by SOW-0097 assistant text selectors and payload refs. |
+| E8-claude-1 LLM failures invisible | Resolved by SOW-0097 `api_error` failed synthetic LLM attempt plus ERR log. |
+| S10-claude-1 inline sidechain fallback | Superseded by sidecar/toolUseId contract for source-visible links; sidecar-absent misses are SOW-0103. |
+| Inline signals parsed-but-dead | Accepted under the sidecar/toolUseId contract; not consumed unless a future source corpus proves they are needed. |
+| `requestId` parsed and dropped | Not required for current parity contract because exact selectors and source lines identify artifacts. |
+| Coarse payload refs | Deferred as the original SOW said; exact selectors now exist, byte-offset indexing remains a v2 enhancement. |
 
 ## Pre-Implementation Gate
 
@@ -163,4 +199,31 @@ c. Update the SOW-0096 triage doc.
 
 - **Byte-offset indexing** for payload_refs (v2 enhancement; would let the UI jump to the exact line in the transcript).
 - **Consuming `IsSidechain` / `AgentID` for non-claude-code adapters** — claude-code-specific behavior; other adapters have their own sub-agent signals.
+
+## Validation
+
+### 2026-06-25
+
+- `go test -count=1 ./internal/adapters/claude_code ./internal/adapters/codex ./internal/adapters/opencode` - passed.
+- `go test -count=1 ./internal/adapters/aiagent_v2 ./internal/adapters/claude_code ./internal/adapters/codex ./internal/adapters/opencode` - passed after the aiagent_v2 and Codex derivative fixes.
+- `go test -count=1 ./internal/parity ./internal/paritycheck ./cmd/ai-viewer-ingest -run 'Parity|Source|Manifest|Diff|Canonical|Matrix|CheckParity'` - passed.
+
+## Reviews
+
+### 2026-06-25
+
+- Included in the broader SOW-0099 to SOW-0102 derivative implementation review
+  chunk. Final six-reviewer gate result: `PRODUCTION GRADE`.
+  - `glm`: `PRODUCTION GRADE`.
+  - `minimax`: `PRODUCTION GRADE`.
+  - `kimi`: `PRODUCTION GRADE`.
+  - `mimo`: `PRODUCTION GRADE`.
+  - `deepseek`: `PRODUCTION GRADE`.
+  - `qwen`: `PRODUCTION GRADE`.
+- No P0/P1/P2 findings remain.
+- Action taken: Implementation Update now maps every original claude-code
+  finding to resolved/superseded/deferred status.
+- P3 dispositions:
+  - The genuine sidecar-absent subagent-link miss remains assigned to SOW-0103
+    UI/source-absence surfacing, not this mapper-ledger closure.
 - **The 30% subagent-link miss that is genuinely sidecar-absent** — this is a SOW-0103 UX concern (surface "sidecar absent" as a SourceError/drift signal); the operator can decide whether to make the sidecar a hard requirement.

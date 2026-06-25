@@ -449,7 +449,7 @@ func TestExtractAIAgentV2SourceSystemOpArtifacts(t *testing.T) {
 							"endedAt":   int64(1_700_000_000_500),
 							"status":    "ok",
 							"attributes": map[string]any{
-								"name": "init",
+								"label": "init",
 							},
 						},
 					},

@@ -191,8 +191,8 @@ RETURNING id, parent_session_id, root_session_id
 	return nil
 }
 
-// linkRoots runs the root-re-resolution UPDATE and records, for every child
-// it re-roots, both the child id and its newly-set root id into affected.
+// linkRoots runs the root-re-resolution UPDATEs and records, for every child
+// it re-roots, the changed child and the related parent/root ids into affected.
 func (r *resolver) linkRoots(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error {
 	before := len(affected)
 	rows, err := tx.QueryContext(ctx, `
@@ -213,10 +213,37 @@ WHERE sessions.root_session_id = sessions.id
 RETURNING id, root_session_id
 `)
 	if err != nil {
-		return fmt.Errorf("resolver UPDATE root: %w", err)
+		return fmt.Errorf("resolver UPDATE explicit root: %w", err)
 	}
 	if err := scanLinkedRows(rows, affected); err != nil {
-		return fmt.Errorf("resolver UPDATE root: %w", err)
+		return fmt.Errorf("resolver UPDATE explicit root: %w", err)
+	}
+	rows, err = tx.QueryContext(ctx, `
+WITH RECURSIVE session_roots(id, root_id) AS (
+    SELECT id, id
+      FROM sessions
+     WHERE parent_session_id IS NULL
+    UNION ALL
+    SELECT child.id, session_roots.root_id
+      FROM sessions child
+      JOIN session_roots ON child.parent_session_id = session_roots.id
+)
+UPDATE sessions SET root_session_id = (
+    SELECT root_id FROM session_roots
+     WHERE session_roots.id = sessions.id
+)
+WHERE EXISTS (
+    SELECT 1 FROM session_roots
+     WHERE session_roots.id = sessions.id
+       AND session_roots.root_id <> sessions.root_session_id
+)
+RETURNING id, parent_session_id, root_session_id
+`)
+	if err != nil {
+		return fmt.Errorf("resolver UPDATE transitive root: %w", err)
+	}
+	if err := scanLinkedRows(rows, affected); err != nil {
+		return fmt.Errorf("resolver UPDATE transitive root: %w", err)
 	}
 	if r.logger != nil && len(affected) > before {
 		r.logger.Debug("resolver: linked orphan roots", "affected", len(affected)-before)

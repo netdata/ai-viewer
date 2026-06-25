@@ -48,7 +48,7 @@ func buildOpStarted(ctx *mapContext, v opVisit, kind canonical.OpKind, startUs i
 		Seq:             v.seq,
 		ParentOpSeq:     -1,
 		Kind:            kind,
-		Name:            attrString(v.op.Attributes, "name"),
+		Name:            opDisplayName(v.op),
 		Provider:        attrString(v.op.Attributes, "provider"),
 		Model:           attrString(v.op.Attributes, "model"),
 		Extras:          opStartedExtrasForVisit(v),
@@ -56,6 +56,14 @@ func buildOpStarted(ctx *mapContext, v opVisit, kind canonical.OpKind, startUs i
 	populateStartedToolFields(&started, v.op, kind)
 	populateStartedChildSession(&started, v.op)
 	return started
+}
+
+func opDisplayName(op operationNode) string {
+	name := attrString(op.Attributes, "name")
+	if name == "" && op.Kind == "system" {
+		return attrString(op.Attributes, "label")
+	}
+	return name
 }
 
 func populateStartedToolFields(started *canonical.OpStartedEvent, op operationNode, kind canonical.OpKind) {

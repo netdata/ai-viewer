@@ -140,6 +140,7 @@ func TestMap_SystemOpKindMapsToOpSystem(t *testing.T) {
 		Attributes: rawAttrs(map[string]any{"label": "tick"}),
 	}
 	events := mapSimple(t, snap)
+	var sawSystem bool
 	for _, ev := range events {
 		if os, ok := ev.(canonical.OpStartedEvent); ok {
 			if os.Kind != canonical.OpSystem {
@@ -148,7 +149,14 @@ func TestMap_SystemOpKindMapsToOpSystem(t *testing.T) {
 			if got, _ := os.Extras["original_kind"].(string); got != "system" {
 				t.Fatalf("extras.original_kind: %v", os.Extras["original_kind"])
 			}
+			if os.Name != "tick" {
+				t.Fatalf("system op Name = %q, want label fallback %q", os.Name, "tick")
+			}
+			sawSystem = true
 		}
+	}
+	if !sawSystem {
+		t.Fatalf("expected OpStartedEvent, not found")
 	}
 }
 

@@ -36,6 +36,7 @@ func applySessionMeta(ev *canonical.SessionStartedEvent, p *sessionMetaPayload, 
 	case kind == sourceSubagent:
 		ev.Kind = canonical.KindSubAgent
 		relationship = "sub_agent"
+		parent = p.parentThreadIDFromSource(parent)
 		if parent != "" && ev.ParentNativeID == "" {
 			ev.ParentNativeID = parent
 		}
@@ -56,6 +57,9 @@ func applySessionMeta(ev *canonical.SessionStartedEvent, p *sessionMetaPayload, 
 	if ev.Kind == canonical.KindRoot && p.ThreadSource == "subagent" {
 		ev.Kind = canonical.KindSubAgent
 		relationship = "sub_agent"
+		if p.ParentThreadID != "" && ev.ParentNativeID == "" {
+			ev.ParentNativeID = p.ParentThreadID
+		}
 	}
 	// thread_source="memory_consolidation" → tool_internal (spec gap #6).
 	if ev.Kind == canonical.KindRoot && p.ThreadSource == "memory_consolidation" {
@@ -78,8 +82,9 @@ func applySessionMeta(ev *canonical.SessionStartedEvent, p *sessionMetaPayload, 
 	ev.Extras = sessionExtras(p, relationship)
 }
 
-// rootOf returns the root native id for a session: the parent when present
-// (the resolver walks the chain), else the session's own id.
+// rootOf returns the best root known from one rollout file. A parent is a
+// provisional root until the resolver and parity source prepass can see more
+// of the session tree.
 func rootOf(nativeID, parentNativeID string) string {
 	if parentNativeID != "" {
 		return parentNativeID

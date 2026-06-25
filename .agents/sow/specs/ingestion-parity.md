@@ -223,6 +223,15 @@ Canonical artifacts may be built from:
 - `payload_refs` rows plus read-only payload resolution for content artifacts.
 - `log_entries` rows only when the adapter spec says the source artifact is intentionally represented as a log artifact.
 
+For `session_boundary` lineage, the canonical extractor uses resolved
+`sessions.parent_session_id` / `sessions.root_session_id` when those foreign
+keys exist. If an out-of-order or partial corpus leaves a native lineage edge
+unresolved, the extractor may use the writer-stashed
+`sessions.extras_json.aiViewer.parentNativeId` and `rootNativeId` as evidence
+for the native parent/root ids. This preserves source-native parity without
+inventing missing session rows; the unresolved database foreign keys remain
+unresolved until the ingester resolver can link them.
+
 If the extractor cannot prove the exact logical source artifact because selector, length, or hash data is absent, it emits an `unverifiable` finding. A row that exists but cannot be verified is not a pass.
 
 ### Canonical Artifact Shapes By Class

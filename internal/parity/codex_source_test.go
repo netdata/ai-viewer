@@ -72,7 +72,7 @@ func TestExtractCodexSourcePayloadArtifacts(t *testing.T) {
 func TestCodexPointerArtifactsFromDecodedDocument(t *testing.T) {
 	t.Parallel()
 
-	state := newCodexSourceState("codex:test-source", "/tmp/rollout.jsonl", time.Unix(0, 0))
+	state := newCodexSourceState("codex:test-source", "/tmp/rollout.jsonl", time.Unix(0, 0), codexSourceRootIndex{})
 	state.nativeSessionID = "session-1"
 	payload := json.RawMessage(`{"type":"tool_search_call","arguments":{"query":"q"},"content":[{"type":"output_text","text":"hello"}]}`)
 	doc, err := decodeCodexPayloadDocument(payload)
@@ -554,6 +554,40 @@ func TestExtractCodexSourceSessionMetadataArtifacts(t *testing.T) {
 		Source:          "exec",
 		ModelProvider:   "openai",
 		GitSHA256:       mustCanonicalJSONHash(t, `{"commit_hash":"abc123","branch":"main","repository_url":"git@github.com:example/project.git"}`),
+	})
+}
+
+func TestExtractCodexSourceSessionBoundaryTopLevelParentThreadFallback(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sessionFile := codexSourceTestRollout(root, "2026", "07", "12", "subagent")
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o700); err != nil {
+		t.Fatalf("mkdir fixture: %v", err)
+	}
+	lines := []string{
+		`{"timestamp":"2026-07-12T00:00:00Z","type":"session_meta","payload":{"id":"child-session","parent_thread_id":"parent-session","thread_source":"subagent","agent_role":"reviewer","source":{"subagent":"review"}}}`,
+	}
+	if err := os.WriteFile(sessionFile, []byte(joinJSONLLines(lines)), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	artifacts, err := ExtractCodexSource(context.Background(), CodexSourceOptions{
+		Root:     root,
+		SourceID: "codex:" + root,
+	})
+	if err != nil {
+		t.Fatalf("extract codex source: %v", err)
+	}
+
+	startedAt := mustCodexTestMicros(t, "2026-07-12T00:00:00Z")
+	assertIdentityArtifact(t, findArtifact(t, artifacts, ClassSessionBoundary, "session:child-session"), sessionBoundaryIdentity{
+		NativeSessionID:       "child-session",
+		ParentNativeSessionID: "parent-session",
+		RootNativeSessionID:   "parent-session",
+		Kind:                  "sub_agent",
+		Status:                "running",
+		StartedAt:             startedAt,
 	})
 }
 

@@ -274,6 +274,150 @@ func TestResolver_EmitsNotifyForRootOnParentLink(t *testing.T) {
 	}
 }
 
+func TestResolver_PropagatesNestedDirectParentRoot(t *testing.T) {
+	t.Parallel()
+	const src = "codex:/tmp"
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "codex", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "codex", "/tmp", NopPricer{})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	for _, ev := range []canonical.SessionStartedEvent{
+		{
+			EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+			NativeID:     "root",
+			RootNativeID: "root",
+			Kind:         canonical.KindRoot,
+			AgentName:    "root",
+		},
+		{
+			EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 2000},
+			NativeID:       "parent",
+			RootNativeID:   "root",
+			ParentNativeID: "root",
+			Kind:           canonical.KindSubAgent,
+			AgentName:      "parent",
+		},
+		{
+			EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 3000},
+			NativeID:       "child",
+			RootNativeID:   "parent",
+			ParentNativeID: "parent",
+			Kind:           canonical.KindSubAgent,
+			AgentName:      "child",
+		},
+	} {
+		if err := w.apply(ctx, tx, ev); err != nil {
+			t.Fatalf("apply %s: %v", ev.NativeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	rootID := canonicalSessionID(src, "root")
+	parentID := canonicalSessionID(src, "parent")
+	childID := canonicalSessionID(src, "child")
+	if got := scanString(t, db, `SELECT root_session_id FROM sessions WHERE id=?`, childID); got != parentID {
+		t.Fatalf("child root before resolver = %q, want provisional direct parent %q", got, parentID)
+	}
+
+	r := newResolver(db, silentLogger(), time.Minute)
+	if err := r.linkOrphans(ctx); err != nil {
+		t.Fatalf("linkOrphans: %v", err)
+	}
+	if got := scanString(t, db, `SELECT root_session_id FROM sessions WHERE id=?`, childID); got != rootID {
+		t.Fatalf("child root_session_id = %q, want transitive root %q", got, rootID)
+	}
+
+	rows := readNotify(t, db)
+	sessChanged := map[string]bool{}
+	for _, row := range rows {
+		if row.kind == "session_changed" {
+			sessChanged[row.sess] = true
+			if row.root != rootID {
+				t.Errorf("session_changed %q root_session_id = %q, want %q", row.sess, row.root, rootID)
+			}
+		}
+	}
+	for _, want := range []string{childID, parentID, rootID} {
+		if !sessChanged[want] {
+			t.Errorf("missing session_changed for %q; got rows %+v", want, rows)
+		}
+	}
+}
+
+func TestResolver_MutualParentCycleDoesNotHangTransitiveRootRepair(t *testing.T) {
+	t.Parallel()
+	const src = "codex:/tmp"
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "codex", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "codex", "/tmp", NopPricer{})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	for _, ev := range []canonical.SessionStartedEvent{
+		{
+			EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+			NativeID:       "a",
+			RootNativeID:   "b",
+			ParentNativeID: "b",
+			Kind:           canonical.KindSubAgent,
+			AgentName:      "a",
+		},
+		{
+			EventBase:      canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 2000},
+			NativeID:       "b",
+			RootNativeID:   "a",
+			ParentNativeID: "a",
+			Kind:           canonical.KindSubAgent,
+			AgentName:      "b",
+		},
+	} {
+		if err := w.apply(ctx, tx, ev); err != nil {
+			t.Fatalf("apply %s: %v", ev.NativeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- newResolver(db, silentLogger(), time.Minute).linkOrphans(context.Background())
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("linkOrphans: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("linkOrphans hung on mutual parent cycle")
+	}
+
+	aID := canonicalSessionID(src, "a")
+	bID := canonicalSessionID(src, "b")
+	if got := scanString(t, db, `SELECT IFNULL(parent_session_id,'') FROM sessions WHERE id=?`, aID); got != bID {
+		t.Fatalf("a parent_session_id = %q, want %q", got, bID)
+	}
+	if got := scanString(t, db, `SELECT IFNULL(parent_session_id,'') FROM sessions WHERE id=?`, bID); got != aID {
+		t.Fatalf("b parent_session_id = %q, want %q", got, aID)
+	}
+}
+
 // TestResolver_NoNotifyWhenNothingLinked asserts the resolver writes ZERO
 // notify rows when a pass links nothing (no orphans). An open poller must not
 // be spammed with refetch signals for a no-op pass.

@@ -77,6 +77,24 @@ func TestMapper_SubAgentLinkage(t *testing.T) {
 	}
 }
 
+func TestMapper_SubAgentTopLevelParentThreadFallback(t *testing.T) {
+	t.Parallel()
+	line := `{"timestamp":"` + tsMeta + `","type":"session_meta","payload":{"id":"child-uuid","parent_thread_id":"parent-top","originator":"codex_exec","agent_role":"reviewer","thread_source":"subagent","source":{"subagent":"review"}}}`
+	m := newFileMapper(mapperConfig{sourceID: "codex:/t", absPath: "/t/child.jsonl", nativeID: "child-uuid"})
+	events := runLines(t, m, []string{line})
+
+	s := firstStarted(t, events)
+	if s.Kind != canonical.KindSubAgent {
+		t.Errorf("Kind = %q, want sub_agent", s.Kind)
+	}
+	if s.ParentNativeID != "parent-top" || s.RootNativeID != "parent-top" {
+		t.Errorf("parent/root = {%q %q}, want {parent-top parent-top}", s.ParentNativeID, s.RootNativeID)
+	}
+	if s.Extras["relationship"] != "sub_agent" {
+		t.Errorf("relationship = %v, want sub_agent", s.Extras["relationship"])
+	}
+}
+
 // TestMapper_ForkLinkage asserts a forked_from_id session is Kind=fork with the
 // parent set from forked_from_id and relationship=fork (spec rule #1, gap #5).
 func TestMapper_ForkLinkage(t *testing.T) {

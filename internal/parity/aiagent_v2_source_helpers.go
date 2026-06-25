@@ -81,6 +81,14 @@ func aiAgentV2AttrString(attrs map[string]json.RawMessage, key string) string {
 	return value
 }
 
+func aiAgentV2OpName(op aiAgentV2Operation) string {
+	name := aiAgentV2AttrString(op.Attributes, "name")
+	if name == "" && op.Kind == "system" {
+		return aiAgentV2AttrString(op.Attributes, "label")
+	}
+	return name
+}
+
 func aiAgentV2TimestampUS(ms int64) int64 {
 	if ms <= 0 {
 		return 0

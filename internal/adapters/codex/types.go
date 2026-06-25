@@ -47,18 +47,19 @@ type gitInfo struct {
 // the load-bearing fields are typed; the rest stay accessible via the record's
 // Raw for the mapper's Extras path.
 type sessionMetaPayload struct {
-	ID            string          `json:"id"`
-	ForkedFromID  string          `json:"forked_from_id"`
-	Timestamp     string          `json:"timestamp"`
-	Cwd           string          `json:"cwd"`
-	Originator    string          `json:"originator"`
-	CLIVersion    string          `json:"cli_version"`
-	ThreadSource  string          `json:"thread_source"`
-	AgentNickname string          `json:"agent_nickname"`
-	AgentRole     string          `json:"agent_role"`
-	ModelProvider string          `json:"model_provider"`
-	Source        json.RawMessage `json:"source"`
-	Git           *gitInfo        `json:"git"`
+	ID             string          `json:"id"`
+	ForkedFromID   string          `json:"forked_from_id"`
+	ParentThreadID string          `json:"parent_thread_id"`
+	Timestamp      string          `json:"timestamp"`
+	Cwd            string          `json:"cwd"`
+	Originator     string          `json:"originator"`
+	CLIVersion     string          `json:"cli_version"`
+	ThreadSource   string          `json:"thread_source"`
+	AgentNickname  string          `json:"agent_nickname"`
+	AgentRole      string          `json:"agent_role"`
+	ModelProvider  string          `json:"model_provider"`
+	Source         json.RawMessage `json:"source"`
+	Git            *gitInfo        `json:"git"`
 }
 
 // classifySource resolves the polymorphic source enum into a canonical
@@ -97,6 +98,13 @@ func (p *sessionMetaPayload) classifySource() (sourceKind, string) {
 	default:
 		return sourceOther, ""
 	}
+}
+
+func (p *sessionMetaPayload) parentThreadIDFromSource(parentFromSource string) string {
+	if parentFromSource != "" {
+		return parentFromSource
+	}
+	return p.ParentThreadID
 }
 
 // parentFromSubagent extracts parent_thread_id from a subagent source. The
