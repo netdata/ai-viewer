@@ -151,8 +151,8 @@ function CardsRow({ data }: { data: CompareResponse }) {
             <Link to={`/sessions/${encodeURIComponent(s.id)}`} className={styles.cardLink}>
               {s.agent_name || s.kind}
             </Link>
-            <span className={`${styles.statusBadge} ${badgeClassFor(s.effective_status ?? s.status)}`}>
-              {s.effective_status ?? s.status}
+            <span className={`${styles.statusBadge} ${badgeClassFor(s.effective_status)}`}>
+              {s.effective_status}
             </span>
           </header>
           <dl className={styles.cardMeta}>
@@ -219,7 +219,7 @@ function OverviewTab({ data }: { data: CompareResponse }) {
   }[] = [
     { label: 'Agent', values: (s) => s.agent_name || '—', best: undefined, worst: undefined, pickId: (s) => s.id },
     { label: 'Model', values: (s) => s.model || '—', best: undefined, worst: undefined, pickId: (s) => s.id },
-    { label: 'Status', values: (s) => s.effective_status ?? s.status, best: undefined, worst: undefined, pickId: (s) => s.id },
+    { label: 'Status', values: (s) => s.effective_status, best: undefined, worst: undefined, pickId: (s) => s.id },
     { label: 'Ops', values: (s) => formatNumber(s.op_count), best: undefined, worst: undefined, pickId: (s) => s.id },
     {
       label: 'Duration',

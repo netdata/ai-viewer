@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: Implementation reviewer round 12 converged after the operator-requested SOW-0105 re-review. All six reviewers (`glm`, `minimax`, `kimi`, `mimo`, `deepseek`, `qwen`) voted `PRODUCTION GRADE`; no accepted code, test, or contract P0/P1/P2 remains. Local and reviewer-run contract/spec/frontend/backend checks are green. The aggregate benchmark blocker remains tracked separately under SOW-0106 because it is adapter scan performance outside SOW-0105's touched code. Gap review converged on 2026-06-25 with 6/6 reviewers voting `NOTHING MORE CAN BE DONE`; implementation-plan review converged on 2026-06-25 with 6/6 reviewers voting `READY FOR IMPLEMENTATION`.
+Sub-state: The post-regression SOW-0105 implementation review converged after the 2026-06-26 lint correction. All six reviewers (`glm`, `minimax`, `kimi`, `mimo`, `deepseek`, `qwen`) voted `PRODUCTION GRADE`; no accepted code, test, or contract P0/P1/P2 remains. Local and reviewer-run contract/spec/frontend/backend checks are green. The aggregate benchmark blocker remains tracked separately under SOW-0106 because it is adapter scan performance outside SOW-0105's touched code. Gap review converged on 2026-06-25 with 6/6 reviewers voting `NOTHING MORE CAN BE DONE`; implementation-plan review converged on 2026-06-25 with 6/6 reviewers voting `READY FOR IMPLEMENTATION`.
 
 ## Requirements
 
@@ -1443,7 +1443,9 @@ remain open until SOW-0104 and SOW-0106 are resolved.
 
 ## Followup
 
-None yet.
+P3-only raw-status UI consistency evidence from the post-regression review is
+recorded in the dated regression entry below. It does not block SOW-0105
+closure, but it should be considered before future status-surface UI work.
 
 ## Implementation Review - 2026-06-26
 
@@ -1545,6 +1547,92 @@ votes. No P0/P1/P2 findings remain.
 
 ## Regression Log
 
-None yet.
+See dated regression entries below.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
+
+## Regression - 2026-06-26
+
+### Trigger
+
+The operator requested another external implementation review of SOW-0105. The
+review was run against a clean detached worktree at commit `6f30d66`.
+
+### Finding
+
+The committed SOW-0105 state was not production-grade because the frontend lint
+gate failed:
+
+- `npm --prefix frontend run lint` failed with 7
+  `@typescript-eslint/no-unnecessary-condition` errors.
+- Affected files:
+  - `frontend/src/pages/Compare/Compare.tsx`
+  - `frontend/src/pages/SessionDetail/UnifiedView/OverviewTiles.tsx`
+  - `frontend/src/pages/SessionDetail/UnifiedView/UnifiedView.tsx`
+  - `frontend/src/pages/SessionsList/SessionsList.tsx`
+
+### Root Cause
+
+SOW-0105 correctly made these frontend contract fields required:
+
+- `SessionListItem.effective_status`
+- `SessionDetail.effective_status`
+- `PayloadRef.op_id`
+
+Existing UI files still carried defensive fallbacks for the older optional
+contract. Those files were outside the committed SOW-0105 diff, but the lint
+failure is still SOW-0105 fallout because the new required TypeScript contract
+made the stale fallbacks invalid.
+
+### Correction Plan
+
+- Remove stale `effective_status ?? status` fallbacks where `effective_status`
+  is now guaranteed by the API contract.
+- Remove the impossible `PayloadRef.op_id === undefined` guard where every
+  returned payload ref now carries `op_id`.
+- Re-run frontend lint, TypeScript, focused component/page tests, contract
+  matrix gates, and diff whitespace checks.
+- Re-run the same SOW-0105 implementation review gate after the correction.
+
+### Validation
+
+- `npm --prefix frontend run lint` passed.
+- `npm --prefix frontend run typecheck` passed.
+- `npm --prefix frontend test -- --run src/pages/Compare/Compare.test.tsx src/pages/SessionDetail/UnifiedView/UnifiedView.test.tsx src/pages/SessionsList/SessionsList.test.tsx`
+  passed: 3 files, 43 tests.
+- `bash scripts/check-contract-matrix.sh` passed: 54 rows verified.
+- `bash scripts/test/check-contract-matrix-test.sh` passed: 13 passed, 0
+  failed.
+- `bash scripts/spec-drift.sh` passed: 6 indicators green.
+- `git diff --check` passed.
+
+### Review
+
+- `glm`: `PRODUCTION GRADE`; P3-only notes for stale comments, redundant
+  nullable-field fallback style, the earlier validation command naming a
+  non-existent `OverviewTiles.test.tsx`, and the lesson that lint must run after
+  DTO optionality changes. The stale comment and validation command have been
+  corrected in this entry.
+- `minimax`: `PRODUCTION GRADE`; P3-only notes for raw `status` checks in
+  secondary UI decisions, the previously recorded `call_path` masking policy
+  question, the local `PayloadContent` type duplication, and the validation
+  command file-count mismatch.
+- `kimi`: `PRODUCTION GRADE`; P3-only notes for raw `status` rendering on
+  secondary status surfaces (`OverviewTab`, `SessionRow`, Agent/Tool/Model
+  detail tables, and SessionsList status sort), missing explicit
+  `status != effective_status` UI fixtures, and the previously recorded
+  `call_path` masking policy question.
+- `mimo`: `PRODUCTION GRADE`; P3-only notes for raw `status` error-badge checks,
+  the previously recorded `call_path` masking policy question, the local
+  `PayloadContent` type duplication, and historical matrix row-count wording.
+- `deepseek`: `PRODUCTION GRADE`; P3-only note for `SessionRow` using raw
+  `status` in a secondary/non-primary row component, plus previously recorded
+  `PayloadContent` and `call_path` notes.
+- `qwen`: `PRODUCTION GRADE`; P3-only note for `SessionRow` raw `status`
+  rendering, plus previously recorded `PayloadContent` and `call_path` notes.
+
+Reviewer-gate disposition: no P0/P1/P2 findings remain. The correction removes
+the stale fallbacks that caused the frontend lint regression and does not change
+runtime behavior for valid API responses. The broader raw-status UI consistency
+notes are accepted as P3 follow-up evidence; they are outside this lint
+correction and do not block SOW-0105 closure.

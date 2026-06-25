@@ -61,7 +61,7 @@ export function OverviewTiles({ detail }: { detail: SessionDetailResponse }) {
   // session live?" check, so the Overview tile flips to "stale · Nm" as
   // soon as the activity threshold trips (without waiting for ingest to
   // notice the source died).
-  const displayStatus = session.effective_status ?? session.status;
+  const displayStatus = session.effective_status;
   const isRunning = displayStatus === 'running';
 
   // StaleBadge needs nowUs; Date.now() is impure so we read it once per
