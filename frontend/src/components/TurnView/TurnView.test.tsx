@@ -3,7 +3,7 @@ import { render, screen, waitFor, within, type RenderOptions } from '@testing-li
 import userEvent from '@testing-library/user-event';
 import { axe } from 'jest-axe';
 import { MemoryRouter } from 'react-router-dom';
-import type { OpDetail, TurnDetail } from '../../api/types';
+import type { OpDetail, PayloadRef, TurnDetail } from '../../api/types';
 import { TurnView } from './TurnView';
 
 // TurnView (ui-turn-view.md): renders ONE TurnDetail as a vertical timeline of
@@ -26,7 +26,11 @@ function makeOp(over: Partial<OpDetail>): OpDetail {
     error_message: null,
     tokens_in: 1234,
     tokens_out: 5678,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
     cost_usd: 0.42,
+    bytes_in: 0,
+    bytes_out: 0,
     ctx_used: 1000,
     ctx_max: 200_000,
     child_session_id: null,
@@ -44,9 +48,22 @@ function makeTurn(over: Partial<TurnDetail> & { ops?: OpDetail[] } = {}): TurnDe
     status: 'completed',
     tokens_in: 1234,
     tokens_out: 5678,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
     cost_usd: 0.42,
     op_count: 1,
     ops: [],
+    ...over,
+  };
+}
+
+function payload(over: Partial<PayloadRef> & { id: number; kind: string; artifact_class: string }): PayloadRef {
+  return {
+    op_id: 'op-default',
+    format: 'text',
+    compression: null,
+    original_bytes: null,
+    stored_bytes: null,
     ...over,
   };
 }
@@ -108,7 +125,7 @@ describe('TurnView — step dispatch', () => {
       id: 'op-user',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 100, kind: 'request', format: 'text', compression: null, original_bytes: 30, stored_bytes: 30 }],
+      payload_refs: [payload({ id: 100, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 30, stored_bytes: 30 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -130,13 +147,15 @@ describe('TurnView — step dispatch', () => {
       id: 'op-reason',
       kind: 'reasoning',
       name: 'thinking',
-      payload_refs: [{ id: 101, kind: 'reasoning', format: 'text', compression: null, original_bytes: 35, stored_bytes: 35 }],
+      payload_refs: [payload({ id: 101, kind: 'llm_reasoning', artifact_class: 'reasoning_text', format: 'text', original_bytes: 35, stored_bytes: 35 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
 
     const step = await screen.findByTestId('turn-step-op-reason');
     expect(step.dataset['kind']).toBe('reasoning');
+    const reasoning = await within(step).findByRole('region', { name: /reasoning/i });
+    expect(reasoning.textContent).toContain('The CSS bug is in the');
   });
 
   it('renders an llm message op as the assistant reply', async () => {
@@ -147,7 +166,7 @@ describe('TurnView — step dispatch', () => {
       id: 'op-llm',
       kind: 'llm',
       name: 'message',
-      payload_refs: [{ id: 102, kind: 'response', format: 'text', compression: null, original_bytes: 35, stored_bytes: 35 }],
+      payload_refs: [payload({ id: 102, kind: 'llm_response', artifact_class: 'llm_response', format: 'text', original_bytes: 35, stored_bytes: 35 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -167,8 +186,8 @@ describe('TurnView — step dispatch', () => {
       kind: 'tool',
       name: 'exec_command',
       payload_refs: [
-        { id: 103, kind: 'request', format: 'json', compression: null, original_bytes: 18, stored_bytes: 18 },
-        { id: 104, kind: 'response', format: 'text', compression: null, original_bytes: 14, stored_bytes: 14 },
+        payload({ id: 103, kind: 'tool_request', artifact_class: 'tool_request', format: 'json', original_bytes: 18, stored_bytes: 18 }),
+        payload({ id: 104, kind: 'tool_response', artifact_class: 'tool_response', format: 'text', original_bytes: 14, stored_bytes: 14 }),
       ],
     });
 
@@ -190,6 +209,56 @@ describe('TurnView — step dispatch', () => {
 
     expect(within(params).getByRole('button', { name: /copy code/i })).toBeInTheDocument();
     expect(within(response).getByRole('button', { name: /copy code/i })).toBeInTheDocument();
+  });
+
+  it('selects tool params and response by artifact class, not array position', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response('{"cmd":"npm test"}', { status: 200, headers: { 'X-Payload-Truncated': 'false' } }))
+      .mockResolvedValueOnce(new Response('PASS 42 tests', { status: 200, headers: { 'X-Payload-Truncated': 'false' } }));
+
+    const op = makeOp({
+      id: 'op-tool-semantic',
+      kind: 'tool',
+      name: 'exec_command',
+      payload_refs: [
+        payload({ id: 204, kind: 'tool_response', artifact_class: 'tool_response', format: 'text', original_bytes: 14, stored_bytes: 14 }),
+        payload({ id: 203, kind: 'tool_request', artifact_class: 'tool_request', format: 'json', original_bytes: 18, stored_bytes: 18 }),
+      ],
+    });
+
+    renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
+
+    const step = await screen.findByTestId('turn-step-op-tool-semantic');
+    await waitFor(() => {
+      expect(wasFetchedWithUrl('/api/payloads/203')).toBe(true);
+      expect(wasFetchedWithUrl('/api/payloads/204')).toBe(true);
+    });
+    const params = await within(step).findByRole('region', { name: /params/i });
+    const response = await within(step).findByRole('region', { name: /response/i });
+    await waitFor(() => {
+      expect(params.textContent).toContain('npm test');
+      expect(response.textContent).toContain('PASS 42 tests');
+    });
+  });
+
+  it('renders SDK response payloads through the assistant path with an SDK badge', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('SDK response text', { status: 200, headers: { 'X-Payload-Truncated': 'false' } }),
+    );
+    const op = makeOp({
+      id: 'op-sdk',
+      kind: 'llm',
+      name: 'message',
+      payload_refs: [payload({ id: 205, kind: 'sdk_response', artifact_class: 'llm_sdk_response', format: 'text', original_bytes: 17, stored_bytes: 17 })],
+    });
+
+    renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
+
+    const step = await screen.findByTestId('turn-step-op-sdk');
+    expect(within(step).getByText('SDK')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(step.textContent).toContain('SDK response text');
+    });
   });
 
   it('renders a session op as a link to the sub-session', () => {
@@ -214,7 +283,7 @@ describe('TurnView — step dispatch', () => {
       id: 'op-weird',
       kind: 'compaction',
       name: 'ctx-prune',
-      payload_refs: [{ id: 105, kind: 'raw', format: 'json', compression: null, original_bytes: 14, stored_bytes: 14 }],
+      payload_refs: [payload({ id: 105, kind: 'log', artifact_class: 'log', format: 'json', original_bytes: 14, stored_bytes: 14 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -231,7 +300,7 @@ describe('TurnView — payload fetching', () => {
       id: 'op-fetch',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 200, kind: 'request', format: 'text', compression: null, original_bytes: 5, stored_bytes: 5 }],
+      payload_refs: [payload({ id: 200, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 5, stored_bytes: 5 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -250,7 +319,7 @@ describe('TurnView — payload fetching', () => {
       id: 'op-cache',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 300, kind: 'request', format: 'text', compression: null, original_bytes: 5, stored_bytes: 5 }],
+      payload_refs: [payload({ id: 300, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 5, stored_bytes: 5 })],
     });
 
     const { rerender } = renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -267,7 +336,7 @@ describe('TurnView — payload fetching', () => {
       id: 'op-err',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 400, kind: 'request', format: 'text', compression: null, original_bytes: 5, stored_bytes: 5 }],
+      payload_refs: [payload({ id: 400, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 5, stored_bytes: 5 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -288,7 +357,7 @@ describe('TurnView — payload fetching', () => {
       id: 'op-trunc',
       kind: 'llm',
       name: 'message',
-      payload_refs: [{ id: 500, kind: 'response', format: 'text', compression: null, original_bytes: 8192, stored_bytes: 4096 }],
+      payload_refs: [payload({ id: 500, kind: 'llm_response', artifact_class: 'llm_response', format: 'text', original_bytes: 8192, stored_bytes: 4096 })],
     });
 
     renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -341,7 +410,7 @@ describe('TurnView — focusOpId + scroll behavior', () => {
       id: 'op-target',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 600, kind: 'request', format: 'text', compression: null, original_bytes: 2, stored_bytes: 2 }],
+      payload_refs: [payload({ id: 600, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 2, stored_bytes: 2 })],
     });
 
     const scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
@@ -358,7 +427,7 @@ describe('TurnView — focusOpId + scroll behavior', () => {
       id: 'op-reduce',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 700, kind: 'request', format: 'text', compression: null, original_bytes: 2, stored_bytes: 2 }],
+      payload_refs: [payload({ id: 700, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 2, stored_bytes: 2 })],
     });
 
     vi.spyOn(window, 'matchMedia').mockImplementation((q: string) => ({
@@ -388,7 +457,7 @@ describe('TurnView — copy buttons', () => {
       id: 'op-copy',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 800, kind: 'request', format: 'text', compression: null, original_bytes: 11, stored_bytes: 11 }],
+      payload_refs: [payload({ id: 800, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 11, stored_bytes: 11 })],
     });
 
     const user = userEvent.setup();
@@ -427,7 +496,7 @@ describe('TurnView — accessibility', () => {
       id: 'op-a11y',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 900, kind: 'request', format: 'text', compression: null, original_bytes: 2, stored_bytes: 2 }],
+      payload_refs: [payload({ id: 900, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 2, stored_bytes: 2 })],
     });
 
     const { container } = renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
@@ -447,8 +516,8 @@ describe('TurnView — Copy turn button (header)', () => {
     fetchMock.mockResolvedValueOnce(new Response('the assistant reply', { status: 200, headers: { 'X-Payload-Truncated': 'false' } }));
 
     const ops: OpDetail[] = [
-      makeOp({ id: 'op-1', kind: 'internal', name: 'user_input', payload_refs: [{ id: 1000, kind: 'request', format: 'text', compression: null, original_bytes: 15, stored_bytes: 15 }] }),
-      makeOp({ id: 'op-2', kind: 'llm', name: 'message', payload_refs: [{ id: 1001, kind: 'response', format: 'text', compression: null, original_bytes: 19, stored_bytes: 19 }] }),
+      makeOp({ id: 'op-1', kind: 'internal', name: 'user_input', payload_refs: [payload({ id: 1000, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 15, stored_bytes: 15 })] }),
+      makeOp({ id: 'op-2', kind: 'llm', name: 'message', payload_refs: [payload({ id: 1001, kind: 'llm_response', artifact_class: 'llm_response', format: 'text', original_bytes: 19, stored_bytes: 19 })] }),
     ];
 
     const user = userEvent.setup();
@@ -487,7 +556,7 @@ describe('TurnView — Copy turn button (header)', () => {
       id: 'op-pending',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 1002, kind: 'request', format: 'text', compression: null, original_bytes: 5, stored_bytes: 5 }],
+      payload_refs: [payload({ id: 1002, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 5, stored_bytes: 5 })],
     });
 
     const user = userEvent.setup();
@@ -515,7 +584,7 @@ describe('TurnView — Copy turn button (header)', () => {
       id: 'op-clip-fail',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 1003, kind: 'request', format: 'text', compression: null, original_bytes: 4, stored_bytes: 4 }],
+      payload_refs: [payload({ id: 1003, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 4, stored_bytes: 4 })],
     });
 
     const user = userEvent.setup();
@@ -552,7 +621,7 @@ describe('CopyButton — fallback path', () => {
       id: 'op-clip-happy',
       kind: 'internal',
       name: 'user_input',
-      payload_refs: [{ id: 1005, kind: 'request', format: 'text', compression: null, original_bytes: 4, stored_bytes: 4 }],
+      payload_refs: [payload({ id: 1005, kind: 'llm_request', artifact_class: 'llm_request', format: 'text', original_bytes: 4, stored_bytes: 4 })],
     });
 
     const user = userEvent.setup();

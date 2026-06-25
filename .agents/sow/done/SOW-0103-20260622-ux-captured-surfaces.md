@@ -2,12 +2,29 @@
 
 ## Status
 
-Status: open (proposed 2026-06-22)
-Sub-state: CTO-proposed. Reviewer 3 (glm) of SOW-0096 produced the findings this SOW fixes. Depends on SOW-0097 (the new `user_input`/`assistant` op kinds need UI surfaces) and on the per-adapter fix SOWs (the SOW-0096 framework's invariant #11 can only pass once the data is in the canonical model AND surfaced in the UI).
+Status: closed
+Sub-state: SUPERSEDED 2026-06-25 by SOW-0105, which absorbs the remaining captured-but-unsurfaced UI contract work into a complete DB/API/TypeScript/UI matrix. SOW-0103's provisional `user_input` / `assistant` op-kind assumption is stale after SOW-0097 was reframed as deterministic ingestion parity gates.
 
 ## Correction - 2026-06-22
 
 SOW-0097 has been reframed from new op kinds into deterministic ingestion parity gates. Any references below to new `user_input`/`assistant` op kinds are provisional. This UX SOW should surface whatever canonical artifact representation the parity spec approves, whether that is new op kinds, existing `kind + name` combinations, or payload-derived artifact classes.
+
+## Superseded - 2026-06-25
+
+SOW-0105 owns this work now. The useful SOW-0103 chunks are absorbed as follows:
+
+- Type extensions for session/turn/op fields: absorbed into SOW-0105's field-intent matrix.
+- Turn header cache/error surfacing: absorbed.
+- Span detail rows for reasoning kind, byte/char counters, provider alias, and call path: absorbed and expanded.
+- Stats/provider/call-path display decisions: absorbed as matrix decisions, not automatic UI additions.
+- Backend verification including `session_trace.go`: absorbed and expanded to all REST/SSE surfaces.
+- Documentation/spec updates: absorbed.
+
+The obsolete chunks are not carried forward:
+
+- New `user_input` / `assistant` op-kind rendering is rejected as stale. SOW-0097 did not approve those op kinds; SOW-0105 uses canonical payload kinds and the existing op model unless a later spec explicitly changes the taxonomy.
+
+This file is moved to `done/` as a closed superseded record. SOW-0105 is the active contract for the remaining UI-vs-DB gap work.
 
 ## Pre-Implementation Gate
 

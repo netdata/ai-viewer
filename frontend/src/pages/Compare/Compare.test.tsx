@@ -65,6 +65,7 @@ function fixtureCompareResponse(ids: string[]): CompareResponse {
       source_id: 's',
       kind: 'root',
       agent_name: `agent-${i + 1}`,
+      provider: i === 0 ? 'anthropic' : 'openai',
       model: i === 0 ? 'claude-opus-4-7' : 'gpt-5',
       status: 'completed',
       effective_status: 'completed',

@@ -55,7 +55,7 @@ The two binaries communicate **only via the SQLite file**: the canonical rows pl
 │  │   GET  /api/stats?filter=...         (REST)               │   │
 │  │   POST /api/subscriptions            (REST)               │   │
 │  │   GET  /api/events?sub=...           (SSE)                │   │
-│  │   GET  /api/payloads/:ref            (REST, lazy — Phase 2)│   │
+│  │   GET  /api/payloads/:id             (REST, lazy bytes)    │   │
 │  │   GET  /                             (embedded frontend)  │   │
 │  └─────┬─────────────────────────────────────────────────────┘   │
 │        │ go:embed                                                │

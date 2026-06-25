@@ -252,7 +252,7 @@ func loadCompareSessionSummaries(ctx context.Context, db *sql.DB, ids []string, 
 	query := `
 SELECT
     s.id, s.native_id, s.root_session_id, s.parent_session_id, s.source_id,
-    s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''), s.status,
+    s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''), IFNULL(s.provider, ''), s.status,
     s.start_ts, s.end_ts, s.last_activity_ts,
     s.tokens_in, s.tokens_out, s.cost_usd,
     s.turn_count, s.op_count, s.failure_count,

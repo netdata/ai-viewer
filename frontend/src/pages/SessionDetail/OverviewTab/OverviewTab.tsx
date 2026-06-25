@@ -19,6 +19,15 @@ interface ToolUsage {
   failures: number;
 }
 
+function maskPath(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  const tail = parts.at(-1);
+  if (tail === undefined) {
+    return path;
+  }
+  return path.startsWith('/') ? `/.../${tail}` : `.../${tail}`;
+}
+
 /** toolsUsed aggregates tool ops across all turns, by op name. */
 export function toolsUsed(turns: TurnDetail[]): ToolUsage[] {
   const byName = new Map<string, ToolUsage>();
@@ -62,6 +71,15 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
         <span className={styles.model}>{s.model || '—'}</span>
         <StatusBadge status={s.status} />
       </header>
+
+      <dl className={styles.sessionFacts}>
+        {s.provider ? <Fact label="Provider" value={s.provider} /> : null}
+        {s.provider_alias ? <Fact label="Provider alias" value={s.provider_alias} /> : null}
+        {s.cwd ? <Fact label="Working dir" value={maskPath(s.cwd)} mono /> : null}
+        {s.call_path ? <Fact label="Call path" value={s.call_path} mono /> : null}
+        {s.duration_us !== undefined ? <Fact label="Duration" value={formatDuration(s.duration_us)} mono /> : null}
+        {s.error_message !== null ? <Fact label="Error message" value={s.error_message} /> : null}
+      </dl>
 
       <div className={styles.cards}>
         <StatCard label="Tokens in (fresh)" value={formatNumber(s.tokens_in)} hint="uncached input" />
@@ -174,6 +192,23 @@ export function OverviewTab({ detail }: { detail: SessionDetailResponse }) {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+function Fact({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className={styles.fact}>
+      <dt>{label}</dt>
+      <dd className={mono ? styles.factMono : undefined}>{value}</dd>
     </div>
   );
 }

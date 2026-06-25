@@ -36,6 +36,14 @@ function sourceColorVar(format: string): string {
   }
 }
 
+function metadataSummary(meta: SourceItem['meta']): string {
+  const count = meta === undefined ? 0 : Object.keys(meta).length;
+  if (count === 0) {
+    return '—';
+  }
+  return `${formatNumber(count)} metadata ${count === 1 ? 'key' : 'keys'}`;
+}
+
 export function Sources() {
   const sources = useSources();
   const health = useHealth();
@@ -127,6 +135,7 @@ export function Sources() {
                 <th scope="col" className="px-4 py-2 text-left font-medium">Enabled</th>
                 <th scope="col" className="px-4 py-2 text-right font-medium">Parse errors</th>
                 <th scope="col" className="px-4 py-2 text-right font-medium">Lag</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Metadata</th>
                 <th scope="col" className="px-4 py-2 text-right font-medium">Last seq</th>
                 <th scope="col" className="px-4 py-2 text-left font-medium">Last seen</th>
               </tr>
@@ -183,6 +192,9 @@ export function Sources() {
                     </td>
                     <td className="px-4 py-2 text-right font-mono tabular-nums text-muted-foreground">
                       {lagFor(lagBySource, src)}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-muted-foreground">
+                      {metadataSummary(src.meta)}
                     </td>
                     <td className="px-4 py-2 text-right font-mono tabular-nums text-muted-foreground">
                       {formatNumber(src.last_seq)}

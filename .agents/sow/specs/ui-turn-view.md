@@ -44,11 +44,28 @@ Some turns are short (just `user_input → llm`). Some are long (multiple `tool`
 | `llm` + other name (rare) | `<AssistantStep>` | Same as message. |
 | `session` | `<SubSessionStep>` | One-line "Spawned sub-session <child_session_id>". Link to the sub-session. |
 | `compaction` | `<CompactionStep>` | Info pill: "Compaction". |
-| anything else | `<GenericStep>` | Header with op kind + name + status. Raw JSON of first payload. |
+| anything else | `<GenericStep>` | Header with op kind + name + status. Semantic fallback for the first available payload. |
 
 ### Data flow
 
-Each step lazily fetches its payload content on mount via a shared hook `usePayloadContent(payloadId)`:
+Each step chooses payload refs by semantic kind/class, not array position. The
+raw `payload_refs.kind` remains available in payload metadata for provenance;
+the backend-derived `artifact_class` drives rendering:
+
+- LLM request/response: `llm_request`, `llm_response`.
+- SDK request/response: `llm_sdk_request`, `llm_sdk_response`, rendered through
+  the LLM request/response path with an `SDK` label.
+- Reasoning text: `reasoning_text`, rendered as prose/markdown.
+- Tool parameters/results: `tool_request`, `tool_response`.
+- Logs/fallback: `log`.
+
+Legacy fixture-only payload kinds such as `request`, `response`, `reasoning`,
+and `raw` are not valid payload-ref dispatch keys. Missing, duplicate, or
+`source_unavailable` refs render an explicit fallback state instead of silently
+choosing a different array element.
+
+Each step lazily fetches selected payload content on mount via a shared hook
+`usePayloadContent(payloadId)`:
 
 - `useState<string | null>` for the fetched text
 - `useState<boolean>` for loading
@@ -119,8 +136,11 @@ The pulse: `outline: 2px solid var(--accent)` for 200ms, then fade out over 1800
 ### Failure modes
 
 - `usePayloadContent` errors render an inline error block ("Failed to load payload: <reason>") with a `Retry` button.
-- A 4 KB truncation shows a "Showing first 4 KB of <total>" footer.
+- A truncated payload shows a "Showing first <preview> of <total>" footer using
+  the payload streaming headers.
 - A network failure shows an error block (NOT a silent empty block — Hard Rule #6).
+- A proof/debug affordance may show masked selector/path metadata; full selector
+  copy is an explicit action and is never primary step chrome.
 
 ## Where this fits in the app
 

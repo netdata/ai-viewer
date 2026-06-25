@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';
+import { fetchPayloadContent } from '../../api/payloads';
+import { fetchOpPayloadRefs } from '../../api/sessions';
 import type { OpDetail, PayloadRef, TopologyNode } from '../../api/types';
 import {
   formatBytes,
@@ -83,9 +85,29 @@ function formatNodeMetric(label: string, value: number): string {
   }
 }
 
+function hasPositiveNumber(value: unknown): value is number {
+  return typeof value === 'number' && value > 0;
+}
+
+function maskLocationURI(uri: string): string {
+  const filePrefix = 'file://';
+  if (uri.startsWith(filePrefix)) {
+    const path = uri.slice(filePrefix.length);
+    const basename = path.split('/').filter(Boolean).pop();
+    return basename ? `${filePrefix}.../${basename}` : `${filePrefix}...`;
+  }
+  const schemeIdx = uri.indexOf('://');
+  if (schemeIdx > 0) {
+    return `${uri.slice(0, schemeIdx + 3)}...`;
+  }
+  return uri.length > 24 ? `...${uri.slice(-21)}` : uri;
+}
+
 export interface SpanDetailDrawerProps {
   /** The source-aware detail to show, or null when the drawer is closed. */
   detail: SpanDetail | null;
+  /** Owning session id, required only for lazy op proof loading. */
+  sessionId?: string;
   onClose: () => void;
 }
 
@@ -115,7 +137,7 @@ function focusableBounds(panel: HTMLElement): FocusableBounds | null {
   return { firstFocusable, lastFocusable };
 }
 
-export function SpanDetailDrawer({ detail, onClose }: SpanDetailDrawerProps) {
+export function SpanDetailDrawer({ detail, sessionId, onClose }: SpanDetailDrawerProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -236,7 +258,11 @@ export function SpanDetailDrawer({ detail, onClose }: SpanDetailDrawerProps) {
         </header>
 
         {detail.kind === 'op' ? (
-          <OpBody op={detail.op} titleId={titleId} />
+          <OpBody
+            op={detail.op}
+            {...(sessionId !== undefined ? { sessionId } : {})}
+            titleId={titleId}
+          />
         ) : detail.kind === 'span' ? (
           <SpanBody span={detail.span} />
         ) : (
@@ -263,8 +289,56 @@ function headerOf(detail: SpanDetail): { kind: string; title: string } {
 /** OpBody is the full Trace-tab rendering: every op field + the payload_refs
  *  list. This is the only variant that shows token/cost/model/context/payloads —
  *  the Trace tab is the only source that carries them. */
-function OpBody({ op, titleId }: { op: TraceOpFields | OpDetail; titleId: string }) {
+function payloadHasProof(ref: PayloadRef): boolean {
+  return ref.location_uri !== undefined || ref.sha256 !== undefined;
+}
+
+interface OpProofState {
+  key: string;
+  refs: PayloadRef[] | null;
+  loading: boolean;
+  error: string | null;
+}
+
+function OpBody({
+  op,
+  sessionId,
+  titleId,
+}: {
+  op: TraceOpFields | OpDetail;
+  sessionId?: string;
+  titleId: string;
+}) {
   const failed = op.error_class !== null && op.error_class !== undefined;
+  const proofKey = `${sessionId ?? ''}\0${op.id}`;
+  const [proofState, setProofState] = useState<OpProofState>({
+    key: '',
+    refs: null,
+    loading: false,
+    error: null,
+  });
+  const activeProof = proofState.key === proofKey
+    ? proofState
+    : { key: proofKey, refs: null, loading: false, error: null };
+
+  const loadProofRefs = useCallback(async () => {
+    if (sessionId === undefined || sessionId === '') {
+      return;
+    }
+    setProofState({ key: proofKey, refs: null, loading: true, error: null });
+    try {
+      const out = await fetchOpPayloadRefs(sessionId, op.id, { includeProof: true });
+      setProofState({ key: proofKey, refs: out.refs, loading: false, error: null });
+    } catch (e) {
+      setProofState({
+        key: proofKey,
+        refs: null,
+        loading: false,
+        error: e instanceof Error ? e.message : 'fetch failed',
+      });
+    }
+  }, [op.id, proofKey, sessionId]);
+
   // Source-aware metrics: OpDetail carries model/tokens/cost/ctx; TraceOpFields
   // does NOT (SOW-0092 dropped them for high-volume perf). We detect by
   // checking for tokens_in (a non-zero on real ops, absent on the slim
@@ -279,6 +353,15 @@ function OpBody({ op, titleId }: { op: TraceOpFields | OpDetail; titleId: string
         <Field label="Status" value={op.status} highlight={failed ? 'error' : undefined} />
         {'model' in op && op.model ? <Field label="Model" value={op.model} mono /> : null}
         {'provider' in op && op.provider ? <Field label="Provider" value={op.provider} /> : null}
+        {'tool_namespace' in op && op.tool_namespace ? (
+          <Field label="Tool namespace" value={op.tool_namespace} />
+        ) : null}
+        {'provider_alias' in op && op.provider_alias ? (
+          <Field label="Provider alias" value={op.provider_alias} />
+        ) : null}
+        {'reasoning_kind' in op && op.reasoning_kind ? (
+          <Field label="Reasoning kind" value={op.reasoning_kind} />
+        ) : null}
         <Field label="Start" value={formatTimestamp(op.start_ts)} mono />
         <Field label="End" value={formatTimestamp(op.end_ts)} mono />
         {/* Source-aware (P2): a point-event op is persisted with end_ts==start_ts
@@ -296,12 +379,30 @@ function OpBody({ op, titleId }: { op: TraceOpFields | OpDetail; titleId: string
               <Field label="Cost" value={formatCost(metricsOp.cost_usd)} mono />
               <Field label="Tokens in" value={formatNumber(metricsOp.tokens_in)} mono />
               <Field label="Tokens out" value={formatNumber(metricsOp.tokens_out)} mono />
+              {hasPositiveNumber(metricsOp.tokens_cache_read) ? (
+                <Field label="Cache read" value={formatNumber(metricsOp.tokens_cache_read)} mono />
+              ) : null}
+              {hasPositiveNumber(metricsOp.tokens_cache_write) ? (
+                <Field label="Cache write" value={formatNumber(metricsOp.tokens_cache_write)} mono />
+              ) : null}
               {metricsOp.ctx_used !== null && metricsOp.ctx_max !== null ? (
                 <Field
                   label="Context"
                   value={`${formatNumber(metricsOp.ctx_used)} / ${formatNumber(metricsOp.ctx_max)}`}
                   mono
                 />
+              ) : null}
+              {hasPositiveNumber(metricsOp.bytes_in) ? (
+                <Field label="Bytes in" value={formatBytes(metricsOp.bytes_in)} mono />
+              ) : null}
+              {hasPositiveNumber(metricsOp.bytes_out) ? (
+                <Field label="Bytes out" value={formatBytes(metricsOp.bytes_out)} mono />
+              ) : null}
+              {hasPositiveNumber(metricsOp.chars_in) ? (
+                <Field label="Chars in" value={formatNumber(metricsOp.chars_in)} mono />
+              ) : null}
+              {hasPositiveNumber(metricsOp.chars_out) ? (
+                <Field label="Chars out" value={formatNumber(metricsOp.chars_out)} mono />
               ) : null}
             </>
           ))(op as OpDetail)
@@ -326,15 +427,48 @@ function OpBody({ op, titleId }: { op: TraceOpFields | OpDetail; titleId: string
           Payloads
         </h3>
         {(() => {
-          const refs: PayloadRef[] = 'payload_refs' in op ? (op.payload_refs ?? []) : [];
+          const inlineRefs: PayloadRef[] = 'payload_refs' in op ? (op.payload_refs ?? []) : [];
+          const refs = activeProof.refs ?? inlineRefs;
+          const canLoadProof = sessionId !== undefined && sessionId !== '';
+          const needsProof = canLoadProof && activeProof.refs === null && !refs.some(payloadHasProof);
           return refs.length === 0 ? (
-            <p className={styles.noPayloads}>No payloads for this op.</p>
+            <>
+              {needsProof ? (
+                <button
+                  type="button"
+                  className={styles.payloadPreview}
+                  onClick={() => { void loadProofRefs(); }}
+                  disabled={activeProof.loading}
+                >
+                  {activeProof.loading ? 'Loading proof…' : 'Load proof'}
+                </button>
+              ) : null}
+              {activeProof.error !== null ? (
+                <div className={styles.payloadError} role="alert">{activeProof.error}</div>
+              ) : null}
+              <p className={styles.noPayloads}>No payloads for this op.</p>
+            </>
           ) : (
-            <ul className={styles.payloadList}>
-              {refs.map((ref) => (
-                <PayloadRow key={ref.id} payload={ref} />
-              ))}
-            </ul>
+            <>
+              {needsProof ? (
+                <button
+                  type="button"
+                  className={styles.payloadPreview}
+                  onClick={() => { void loadProofRefs(); }}
+                  disabled={activeProof.loading}
+                >
+                  {activeProof.loading ? 'Loading proof…' : 'Load proof'}
+                </button>
+              ) : null}
+              {activeProof.error !== null ? (
+                <div className={styles.payloadError} role="alert">{activeProof.error}</div>
+              ) : null}
+              <ul className={styles.payloadList}>
+                {refs.map((ref) => (
+                  <PayloadRow key={ref.id} payload={ref} />
+                ))}
+              </ul>
+            </>
           );
         })()}
       </section>
@@ -422,6 +556,22 @@ function PayloadRow({ payload }: { payload: PayloadRef }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
+  const [showProof, setShowProof] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+
+  const hasProof = payload.location_uri !== undefined || payload.sha256 !== undefined;
+
+  const copyLocation = useCallback(async () => {
+    if (payload.location_uri === undefined) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(payload.location_uri);
+      setCopyError(null);
+    } catch (e) {
+      setCopyError(e instanceof Error ? e.message : 'copy failed');
+    }
+  }, [payload.location_uri]);
 
   const fetchPreview = useCallback(async () => {
     if (preview !== null) {
@@ -431,17 +581,11 @@ function PayloadRow({ payload }: { payload: PayloadRef }) {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch(`/api/payloads/${payload.id}`);
-      if (!resp.ok) {
-        const body = await resp.text();
-        setError(`HTTP ${resp.status}: ${body.slice(0, 200)}`);
-      } else {
-        const text = await resp.text();
-        const truncated = resp.headers.get('X-Payload-Truncated') === 'true';
-        const total = resp.headers.get('X-Payload-Total-Bytes');
-        setPreview(truncated && total ? `${text}\n\n--- truncated (showing first 4 KB of ${formatBytes(parseInt(total, 10))}) ---` : text);
-        setShowPreview(true);
-      }
+      const content = await fetchPayloadContent(payload.id);
+      const { text, headers } = content;
+      const total = headers.totalBytes;
+      setPreview(headers.truncated && total !== null ? `${text}\n\n--- truncated (showing first 4 KB of ${formatBytes(total)}) ---` : text);
+      setShowPreview(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'fetch failed');
     } finally {
@@ -453,6 +597,7 @@ function PayloadRow({ payload }: { payload: PayloadRef }) {
     <li className={styles.payloadRow}>
       <div className={styles.payloadMeta}>
         <span className={styles.payloadKind}>{payload.kind}</span>
+        <span className={styles.payloadClass}>{payload.artifact_class}</span>
         <span className={styles.payloadFormat}>{payload.format}</span>
         {payload.compression !== null ? (
           <span className={styles.payloadCompression}>{payload.compression}</span>
@@ -463,19 +608,64 @@ function PayloadRow({ payload }: { payload: PayloadRef }) {
             ? ` (of ${formatBytes(payload.original_bytes)})`
             : ''}
         </span>
+        {payload.location_uri !== undefined ? (
+          <span className={styles.payloadSelector}>{maskLocationURI(payload.location_uri)}</span>
+        ) : null}
       </div>
-      <button
-        type="button"
-        className={styles.payloadPreview}
-        onClick={() => { void fetchPreview(); }}
-        disabled={loading}
-        title="Preview payload content (first 4 KB)"
-      >
-        {loading ? 'Loading…' : showPreview ? 'Hide' : 'Preview'}
-      </button>
+      <div className={styles.payloadActions}>
+        {hasProof ? (
+          <button
+            type="button"
+            className={styles.payloadPreview}
+            onClick={() => {
+              setShowProof((v) => !v);
+            }}
+            title="Show payload selector/hash proof"
+          >
+            {showProof ? 'Hide proof' : 'Proof'}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className={styles.payloadPreview}
+          onClick={() => { void fetchPreview(); }}
+          disabled={loading}
+          title="Preview payload content (first 4 KB)"
+        >
+          {loading ? 'Loading…' : showPreview ? 'Hide' : 'Preview'}
+        </button>
+      </div>
       {error !== null && (
         <div className={styles.payloadError} role="alert">{error}</div>
       )}
+      {copyError !== null && (
+        <div className={styles.payloadError} role="alert">{copyError}</div>
+      )}
+      {showProof ? (
+        <dl className={styles.payloadProof}>
+          {payload.location_uri !== undefined ? (
+            <div className={styles.payloadProofRow}>
+              <dt>Selector</dt>
+              <dd>
+                <code>{payload.location_uri}</code>
+                <button
+                  type="button"
+                  className={styles.payloadPreview}
+                  onClick={() => { void copyLocation(); }}
+                >
+                  Copy selector
+                </button>
+              </dd>
+            </div>
+          ) : null}
+          {payload.sha256 !== undefined && payload.sha256 !== null ? (
+            <div className={styles.payloadProofRow}>
+              <dt>SHA-256</dt>
+              <dd><code>{payload.sha256}</code></dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
       {showPreview && preview !== null && (
         <pre className={styles.payloadPreviewContent}>
           <code>{preview}</code>

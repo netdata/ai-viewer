@@ -149,7 +149,7 @@ All gates run in CI on every push and must be green before merge — **except th
 | Go test | `go test -race ./...` | all pass |
 | Go coverage | `go test -coverprofile -covermode=atomic ./...` → `scripts/check-coverage.sh` | ≥ 80% statements per gated `internal/*` package + their aggregate (`/cmd/` excluded); branch + new-code-in-PR ≥ 90% deferred (SOW-0036) |
 | Go fuzz | per-push: `go test -run='^Fuzz' ./internal/adapters/...` (deterministic seed corpus); nightly: `-fuzz -fuzztime=5m` per target (`fuzz-nightly.yml`). Canonical has no fuzz target. | zero crashes |
-| Go bench | `scripts/check-bench.sh` (benchstat vs `bench/baseline.txt`, `-count=6`) — **local/workstation gate, not CI**; CI runs the bench compile-smoke + the gate self-test | significant > 20% **sec/op** regression per benchmark (geomean + other metrics excluded) |
+| Go bench | `scripts/check-bench.sh` (benchstat vs `bench/baseline.txt`, `-count=6`, `-cpu=1`, `-p=1`) — **local/workstation gate, not CI**; CI runs the bench compile-smoke + the gate self-test | significant > 20% **sec/op** regression per benchmark (geomean + other metrics excluded) |
 | Frontend lint | `eslint` flat config, `@typescript-eslint`, `react`, `react-hooks` | zero warnings |
 | Frontend types | `tsc --noEmit` with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` | zero errors |
 | Frontend unit | `vitest run --coverage` | ≥ 80% lines per component dir |
@@ -160,6 +160,13 @@ All gates run in CI on every push and must be green before merge — **except th
 | Spec drift | `scripts/spec-drift.sh` + `scripts/test/spec-drift-test.sh` | zero drift on listed indicators |
 
 The authoritative gate catalog with exact commands lives at `.agents/sow/specs/quality-gates.md` (durable) and `.agents/skills/project-quality-gates/SKILL.md` (runtime).
+
+Benchmark gate note: `scripts/check-bench.sh` serializes package benchmark
+binaries with `-p=1` and fails closed with `exit 2` before collecting samples
+when the workstation is too busy for valid wall-time benchmark evidence. Treat
+that `exit 2` as an invalid-measurement result, not proof of adapter regression:
+wait for a quieter host, or request explicit operator approval before stopping
+the exact contending workload.
 
 Failing any gate locally means the work is not done. Failing any gate in CI blocks merge. There is no "I'll fix this later" path.
 

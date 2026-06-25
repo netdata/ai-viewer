@@ -160,21 +160,23 @@ to claim full live parity done.
 ### Go — Benchmarks
 
 ```bash
-scripts/check-bench.sh             # count=6, -cpu=1, benchstat vs bench/baseline.txt, > 20% sec/op gate
+scripts/check-bench.sh             # count=6, -cpu=1, -p=1, benchstat vs bench/baseline.txt, > 20% sec/op gate
 scripts/test/check-bench-test.sh   # hardware-independent self-test of the gate's benchstat parser
 ```
 
 Marked benchmarks (`func BenchmarkXxx`) exist for the 11 performance-critical paths: ai-agent v2 adapter `Scan`, ai-agent v2 adapter `Tail`, claude-code adapter `Scan`, claude-code adapter `Tail`, Codex adapter `Scan`, Codex adapter `Tail`, Opencode adapter `Scan`, Opencode adapter `Tail`, SQLite batch insert, REST query path, SSE fanout. (No canonical encode/decode benchmark — canonical events are constructed directly, never serialized.)
 
-Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). In real local/workstation mode, the same benchmark name must regress on the script's second benchmark attempt before the gate exits red; a first-run-only regression, or disjoint first/second-attempt regression sets, is reported as local measurement noise and exits green. The retry is not a threshold change: both attempts compare against the same checked-in `bench/baseline.txt` with the same `-count=6`, `-cpu=1`, and parser, while compare-file mode remains single-pass so the self-test still proves a real >20% regression exits non-zero. The script runs the serial hot-path suite with `go test -run=^$ -bench=. -benchmem -count=6 -cpu=1`; do not remove `-cpu=1` unless a later explicit SOW proves the suite should measure multi-P scheduler behavior. Real benchmark runs emit compact diagnostics (Go version, effective `GOMAXPROCS`, benchmark CPU setting, package list, baseline/current paths, and load averages when available) so red local runs are auditable without exposing process command lines. It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries benchmark-code provenance: an implementing commit SHA when available, or a same-commit `git blame` note when benchmark code and baseline land together, plus the exact command and `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update); SOW-0058 owns the `-cpu=1` baseline refresh.
+Threshold: a statistically-significant **> 20% sec/op** regression for any individual benchmark fails `scripts/check-bench.sh` (the `geomean` aggregate + custom `ReportMetric` values are not gated; benchstat's `~` neutralizes noisy benchmarks). In real local/workstation mode, the same benchmark name must regress on the script's second benchmark attempt before the gate exits red; a first-run-only regression, or disjoint first/second-attempt regression sets, is reported as local measurement noise and exits green. The retry is not a threshold change: both attempts compare against the same checked-in `bench/baseline.txt` with the same `-count=6`, `-cpu=1`, `-p=1`, and parser, while compare-file mode remains single-pass so the self-test still proves a real >20% regression exits non-zero. The script runs the serial hot-path suite with `go test -p=1 -run=^$ -bench=. -benchmem -count=6 -cpu=1`; do not remove `-cpu=1` or `-p=1` unless a later explicit SOW proves the suite should measure multi-P or cross-package scheduler behavior. `-cpu=1` pins the benchmark binary's Go benchmark CPU list; `-p=1` serializes package benchmark binaries so the gate does not create cross-package contention. Real benchmark attempts fail closed with exit 2 before sampling when the 1-minute host load is at or above `0.50 * effective_GOMAXPROCS`, when `/proc/loadavg` is unavailable or malformed, or when the effective CPU divisor cannot be resolved. Passing and failing runs emit compact diagnostics (Go version, effective `GOMAXPROCS`, benchmark CPU setting, package parallelism, busy-host threshold, package list, baseline/current paths, and load averages) without process command lines. It is a **local/workstation** gate — `bench/baseline.txt` is workstation-measured (carries benchmark-code provenance: an implementing commit SHA when available, or a same-commit `git blame` note when benchmark code and baseline land together, plus the exact command and `goos/goarch/pkg/cpu` config lines) and is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate self-test, not the regression gate itself. Baseline refresh requires an explicit SOW (no auto-update); SOW-0058 owns the original `-cpu=1` baseline refresh.
 
 Fail-closed benchmark-gate behavior is part of the contract: missing, empty, or
 benchmarkless baseline, missing/empty current output, failed `go test`, failed
-`benchstat`, dropped/renamed baseline benchmark, and disjoint benchmark config
-groups all exit non-zero. The self-test must dynamically exercise both
-compare-file parser behavior and real-mode retry/error behavior with hermetic
-fakes, including disjoint first/second-attempt regression sets; static string
-assertions alone are not enough for the retry path.
+`benchstat`, dropped/renamed baseline benchmark, disjoint benchmark config
+groups, busy-host preflight failure, unavailable/malformed loadavg source, and
+unavailable effective CPU divisor all exit non-zero. The self-test must
+dynamically exercise both compare-file parser behavior and real-mode
+retry/error behavior with hermetic fakes, including disjoint first/second-attempt
+regression sets and busy-host preflight cases; static string assertions alone
+are not enough for the retry path.
 
 CI's `Require benchmarks` compile-smoke presence check must normalize both
 suffixed Go benchmark rows (`BenchmarkName-N`) and unsuffixed `-cpu=1` rows
@@ -326,28 +328,34 @@ Threshold: zero hits.
 ### Spec Drift
 
 ```bash
-scripts/spec-drift.sh              # the 5 spec↔code drift indicators; exit 0 = no drift
+scripts/test/check-contract-matrix-test.sh # hermetic self-test for the field-contract helper
+scripts/spec-drift.sh              # the 6 spec↔code drift indicators; exit 0 = no drift
 scripts/test/spec-drift-test.sh    # hermetic self-test: plants each drift class + a clean case
 ```
 
-grep/awk-based (no `go/ast` — the surfaces are line-oriented), **fail-closed**
-(exits non-zero naming the offending indicator + token). Five indicators, the
+Fail-closed (exits non-zero naming the offending indicator + token). Five
+indicators are grep/awk-based because their surfaces are line-oriented; the
+contract-matrix indicator delegates to a small Go helper for Go AST JSON tags
+and restricted TypeScript interface parsing. Six indicators, the
 **actual** code/spec locations (the old skill named stale paths —
 `internal/presenter/sse.go`, `internal/ingest/discover.go` — neither exists):
 
-- **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus each handler's in-body `r.Method` guard in the presenter package, vs. `### <VERB> /api/…` headings in `.agents/sow/specs/rest-api.md`. The compared token is `<VERB> <normalized-path>`, not path alone; `{id}`↔`:id`, single-value `:ref`↔`:id`, and catalog groups are normalized. `HEAD` is implicit parity for `GET`. Keep registered handler method gates directly visible as `r.Method != http.Method...` comparisons inside the handler body; extracting the guard into a helper is treated as method-extraction failure and correctly fails closed. **Exemption:** a spec endpoint whose section is marked *not registered / Phase 2 / not implemented* (`/api/catalog/{…}`, `/api/payloads/:ref`) is NOT drift — documenting a future route ahead of its handler is allowed; every *registered* route+verb pair must be documented (code→spec unconditional).
+- **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` in `internal/presenter/presenter.go` plus each handler's in-body `r.Method` guard in the presenter package, vs. `### <VERB> /api/…` headings in `.agents/sow/specs/rest-api.md`. The compared token is `<VERB> <normalized-path>`, not path alone; `{id}`↔`:id`, single-value `:ref`↔`:id`, and catalog groups are normalized. `HEAD` is implicit parity for `GET`. Keep registered handler method gates directly visible as `r.Method != http.Method...` comparisons inside the handler body; extracting the guard into a helper is treated as method-extraction failure and correctly fails closed. **Exemption:** a spec endpoint whose section is marked *not registered / Phase 2 / not implemented* is NOT drift — documenting a future route ahead of its handler is allowed; every *registered* route+verb pair must be documented (code→spec unconditional).
 - **SSE event types** — the wire kinds in `internal/presenter/events_sse.go` (`eventPayload` `case "<kind>"` arms + `event:`/control frames; `stats_invalidated` is the `default` arm, sourced from `subscription_filter.go`) vs. the event-type headings in `.agents/sow/specs/sse-protocol.md`. `resync` is a reconnect-control frame (spec §Reconnect Behavior), treated as known.
 - **SQLite columns** — every `table.column` pair from `internal/store/migrations/*.sql` (`CREATE TABLE`, `CREATE VIRTUAL TABLE … fts5(…)`, `ALTER … ADD COLUMN`) vs. SQL schema blocks in `.agents/sow/specs/data-model.md`. Column direction is **code→spec** and table-scoped: a global mention of the same column name under another table is not enough. Table names are bidirectional.
 - **Canonical event kinds** — `EvXxx EventKind = "<value>"` in `internal/canonical/events.go` vs. the identical fenced block in `.agents/sow/specs/canonical-events.md`. Bidirectional, exact.
 - **Adapter discovery probes** — `format: "<name>"` probe structs in `cmd/ai-viewer-ingest/sources.go` vs. the matching `.agents/sow/specs/adapter-<name>.md` (underscore→hyphen) and that spec mentioning the default probe path.
+- **Contract matrix** — `testdata/contracts/field-matrix.yaml` vs. presenter JSON tags in `internal/presenter/*.go`, API TypeScript interfaces in `frontend/src/api/types.ts`, `test_refs`, include-token policy, and payload-kind `artifact_class` normalization.
 
 Threshold: zero drift — via genuine agreement, never by weakening an indicator. Real drift on the live tree is reported + adjudicated (fix spec or code), not masked.
 
 CI fail-closed rule: `.github/workflows/ci.yml` must fail if
-`scripts/spec-drift.sh` or `scripts/test/spec-drift-test.sh` is absent. The
-`gates` job runs the self-test **before** the live detector, matching
-`scripts/gates.sh`; a detector that cannot catch planted drift is a failed gate,
-not an all-clear.
+`scripts/spec-drift.sh`, `scripts/test/spec-drift-test.sh`,
+`scripts/check-contract-matrix.sh`, or
+`scripts/test/check-contract-matrix-test.sh` is absent. The `gates` job runs
+the contract-matrix self-test and spec-drift self-test **before** the live
+detector, matching `scripts/gates.sh`; a detector that cannot catch planted
+drift is a failed gate, not an all-clear.
 
 ### Build
 
@@ -372,7 +380,8 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 ./scripts/test.sh         # ALL tests: Go (race + coverage profile) then, in normal mode, the frontend Vitest run (real per-dir coverage gate); skips frontend when absent (SOW-0010/0012; EXISTS)
 ./scripts/build.sh        # frontend build + the REAL bundle-size gate on the built dist/ + embed + both Go binaries (SOW-0012; EXISTS)
 ./scripts/check-coverage.sh  # Go statement coverage gate, internal/* >= 80% (SOW-0010; EXISTS)
-./scripts/spec-drift.sh   # the 5 spec↔code drift indicators, fail-closed (SOW-0013; EXISTS)
+./scripts/check-contract-matrix.sh # DB/API/TypeScript/UI field-contract matrix helper (SOW-0105; EXISTS)
+./scripts/spec-drift.sh   # the 6 spec↔code drift indicators, fail-closed (SOW-0013/SOW-0105; EXISTS)
 ./scripts/check-ingestion-parity.sh --fixtures # deterministic source-vs-canonical parity fixture gate (SOW-0097; EXISTS)
 ./scripts/test/codacy-config-test.sh  # Codacy tool/pattern + path policy self-test (SOW-0046; EXISTS)
 ./scripts/gates.sh        # every gate above, in order, fail-fast, per-section timing (SOW-0013; EXISTS)
@@ -380,7 +389,7 @@ Mutation testing surfaces tests that pass even when the code is broken. Not enfo
 
 `scripts/lint.sh` is the build-free module/static-analysis entrypoint: it runs Go module tidiness, tracked-file Go formatter checks, Go vet/lint/security checks, frontend static checks, the coverage-config verifier, and hermetic gate-logic self-tests. It does NOT run the REAL bundle-size-vs-built-manifest gate (`npm run check:bundle-size`, needs a `vite build`) or the REAL coverage run (`npm run test -- --run --coverage`); those live in the CI `frontend` job and in `scripts/build.sh` (which runs `check:bundle-size` on the just-built `dist/`) and `scripts/test.sh` (which runs the frontend `npm run test -- --run --coverage` after the Go suite, in normal mode). `scripts/lint.sh`'s frontend section ensures `frontend/node_modules` is present by reusing `scripts/build.sh`'s `npm ci` / `npm install` fallback, but only when it is missing (so a warm tree stays fast).
 
-Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/check-ingestion-parity.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/check-ingestion-parity-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, `scripts/test/codacy-config-test.sh`, `scripts/test/install-system-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044/0046/0097). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, and complete coverage of the local gate catalog including the lint formatter-scope self-test, ingestion parity fixture gate, Codacy coverage-upload self-test, Codacy config self-test, install-system self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. The benchmark regression gate runs after build and before the long CPU-heavy `-race` and Playwright sections so the local workstation benchmark measures code behavior, not residual thermal/load state created by the aggregate itself. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/ingestion-parity/lint-test/Codacy coverage-upload self-test/Codacy config self-test/install-system self-test/AI-attribution fail-closed, spec-drift and ingestion-parity self-tests before live detectors, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
+Current state: `scripts/lint.sh`, `scripts/test.sh`, `scripts/check-coverage.sh`, `scripts/spec-drift.sh`, `scripts/check-contract-matrix.sh`, `scripts/check-ingestion-parity.sh`, `scripts/codacy-coverage-upload.sh`, `scripts/test/lint-test.sh`, `scripts/test/check-contract-matrix-test.sh`, `scripts/test/check-ingestion-parity-test.sh`, `scripts/test/codacy-coverage-upload-test.sh`, `scripts/test/codacy-config-test.sh`, `scripts/test/install-system-test.sh`, and the canonical `scripts/gates.sh` aggregate all exist (SOW-0009/0010/0012/0013/0044/0046/0097/0105). `scripts/gates.sh` is the full local workstation gate: fail-fast, per-section timing, and complete coverage of the local gate catalog including the lint formatter-scope self-test, contract-matrix self-test, ingestion parity fixture gate, Codacy coverage-upload self-test, Codacy config self-test, install-system self-test, fuzz seed corpus, Playwright E2E/axe, and the local benchmark regression gate. The benchmark regression gate runs after build and before the long CPU-heavy `-race` and Playwright sections so the local workstation benchmark measures code behavior, not residual thermal/load state created by the aggregate itself. CI enforces equivalent gates as dedicated parallel jobs (`lint` via the same module-tidiness + standalone gofmt/goimports/vet checks, the pinned `golangci-lint-action`, and standalone gosec/govulncheck; `test`; `frontend`; `embed-smoke`) plus a cross-cutting `gates` job (secrets/spec-drift/contract-matrix/ingestion-parity/lint-test/Codacy coverage-upload self-test/Codacy config self-test/install-system self-test/AI-attribution fail-closed, contract-matrix, spec-drift, and ingestion-parity self-tests before live detectors, local aggregate presence + syntax check, optional systemd helper) and explicit CodeQL matrix jobs — see "Local Pass + CI Fail Invariant" below.
 
 Required CI jobs are **not** bootstrap probes anymore. They fail closed when
 their mature repo prerequisites disappear: `lint`/`test` require Go module files

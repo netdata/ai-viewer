@@ -5,7 +5,7 @@ import {
   type UseInfiniteQueryResult,
   type InfiniteData,
 } from '@tanstack/react-query';
-import { get, buildQuery } from './client';
+import { get, buildIncludeQuery, buildQuery, type IncludeToken } from './client';
 import type { Filters } from '../state/filters';
 import type {
   CompareResponse,
@@ -121,9 +121,16 @@ export function useSessionsInfinite(
  *  passes false because it fetches payloads lazily via /api/payloads/:id. */
 export function fetchSessionDetail(
   id: string,
-  opts: { includePayloadRefs?: boolean; signal?: AbortSignal } = {},
+  opts: { includePayloadRefs?: boolean; includeProof?: boolean; signal?: AbortSignal } = {},
 ): Promise<SessionDetailResponse> {
-  const qs = opts.includePayloadRefs ? '?include=payload_refs' : '';
+  const include: IncludeToken[] = [];
+  if (opts.includePayloadRefs) {
+    include.push('payload_refs');
+  }
+  if (opts.includeProof) {
+    include.push('proof');
+  }
+  const qs = buildIncludeQuery(include);
   return get<SessionDetailResponse>(
     `/sessions/${encodeURIComponent(id)}${qs}`,
     opts.signal,
@@ -163,11 +170,13 @@ export interface PayloadRefsEnvelope {
 export function fetchOpPayloadRefs(
   sessionID: string,
   opID: string,
-  signal?: AbortSignal,
+  opts: { includeProof?: boolean; signal?: AbortSignal } = {},
 ): Promise<PayloadRefsEnvelope> {
+  const include = opts.includeProof ? buildIncludeQuery(['proof']) : '';
+  const sep = include === '' ? '' : `&${include.slice(1)}`;
   return get<PayloadRefsEnvelope>(
-    `/sessions/${encodeURIComponent(sessionID)}/payload_refs?op=${encodeURIComponent(opID)}`,
-    signal,
+    `/sessions/${encodeURIComponent(sessionID)}/payload_refs?op=${encodeURIComponent(opID)}${sep}`,
+    opts.signal,
   );
 }
 
@@ -180,7 +189,7 @@ export function useOpPayloadRefs(
 ): UseQueryResult<PayloadRefsEnvelope> {
   return useQuery({
     queryKey: ['opPayloadRefs', sessionID, opID ?? ''] as const,
-    queryFn: ({ signal }) => fetchOpPayloadRefs(sessionID, opID!, signal),
+    queryFn: ({ signal }) => fetchOpPayloadRefs(sessionID, opID!, { signal }),
     enabled: !!opID,
   });
 }
@@ -192,11 +201,13 @@ export function useOpPayloadRefs(
 export function fetchTurnPayloadRefs(
   sessionID: string,
   turnID: string,
-  signal?: AbortSignal,
+  opts: { includeProof?: boolean; signal?: AbortSignal } = {},
 ): Promise<PayloadRefsEnvelope> {
+  const include = opts.includeProof ? buildIncludeQuery(['proof']) : '';
+  const sep = include === '' ? '' : `&${include.slice(1)}`;
   return get<PayloadRefsEnvelope>(
-    `/sessions/${encodeURIComponent(sessionID)}/payload_refs?turn=${encodeURIComponent(turnID)}`,
-    signal,
+    `/sessions/${encodeURIComponent(sessionID)}/payload_refs?turn=${encodeURIComponent(turnID)}${sep}`,
+    opts.signal,
   );
 }
 
@@ -208,7 +219,7 @@ export function useTurnPayloadRefs(
 ): UseQueryResult<PayloadRefsEnvelope> {
   return useQuery({
     queryKey: ['turnPayloadRefs', sessionID, turnID ?? ''] as const,
-    queryFn: ({ signal }) => fetchTurnPayloadRefs(sessionID, turnID!, signal),
+    queryFn: ({ signal }) => fetchTurnPayloadRefs(sessionID, turnID!, { signal }),
     enabled: !!turnID,
   });
 }
@@ -281,8 +292,19 @@ export function useTimeline(id: string): UseQueryResult<TimelineResponse> {
  * resolved tree, tagged by owning session — rest-api.md §GET /api/sessions/:id/
  * trace, SOW-0070). The client builds a merged op tree from the flat op list.
  */
-export function fetchSessionTrace(id: string, signal?: AbortSignal): Promise<TraceResponse> {
-  return get<TraceResponse>(`/sessions/${encodeURIComponent(id)}/trace`, signal);
+export function fetchSessionTrace(
+  id: string,
+  opts: { includePayloadRefs?: boolean; includeProof?: boolean; signal?: AbortSignal } = {},
+): Promise<TraceResponse> {
+  const include: IncludeToken[] = [];
+  if (opts.includePayloadRefs) {
+    include.push('payload_refs');
+  }
+  if (opts.includeProof) {
+    include.push('proof');
+  }
+  const qs = buildIncludeQuery(include);
+  return get<TraceResponse>(`/sessions/${encodeURIComponent(id)}/trace${qs}`, opts.signal);
 }
 
 /**
@@ -290,10 +312,15 @@ export function fetchSessionTrace(id: string, signal?: AbortSignal): Promise<Tra
  * Distinct query key (['session-trace', id]) keeps its refetch independent of
  * the detail's ['session', id] SSE invalidation.
  */
-export function useSessionTrace(id: string): UseQueryResult<TraceResponse> {
+export function useSessionTrace(
+  id: string,
+  opts: { includePayloadRefs?: boolean; includeProof?: boolean } = {},
+): UseQueryResult<TraceResponse> {
+  const includePayloadRefs = opts.includePayloadRefs ?? false;
+  const includeProof = opts.includeProof ?? false;
   return useQuery({
-    queryKey: ['session-trace', id] as const,
-    queryFn: ({ signal }) => fetchSessionTrace(id, signal),
+    queryKey: ['session-trace', id, includePayloadRefs, includeProof] as const,
+    queryFn: ({ signal }) => fetchSessionTrace(id, { includePayloadRefs, includeProof, signal }),
     enabled: id.length > 0,
   });
 }

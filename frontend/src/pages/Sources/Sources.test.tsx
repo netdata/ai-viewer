@@ -118,6 +118,30 @@ describe('Sources', () => {
     expect(within(table).getByText('99')).toBeInTheDocument();
   });
 
+  it('shows only a safe source metadata summary, not raw metadata values', () => {
+    sourcesSpy.mockReturnValue(
+      qr({
+        data: sourcesResp([
+          makeSource({
+            id: 'src-meta',
+            meta: {
+              adapter_version: '3',
+              local_path: '/workspace/private/project',
+            },
+          }),
+        ]),
+      }),
+    );
+
+    renderPage();
+
+    const table = screen.getByRole('table');
+    const row = within(table).getByText('src-meta').closest('tr');
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLTableRowElement).getByText('2 metadata keys')).toBeInTheDocument();
+    expect(within(table).queryByText('/workspace/private/project')).not.toBeInTheDocument();
+  });
+
   it('maps source formats to their dedicated theme color variables', () => {
     const expected = [
       ['aiagent_v3', '--source-aiagent-v3'],
@@ -247,7 +271,8 @@ describe('Sources', () => {
     expect(within(table).queryByText('5s')).not.toBeInTheDocument();
     const row = within(table).getByText('src-a').closest('tr');
     expect(row).not.toBeNull();
-    expect(within(row as HTMLTableRowElement).getByText('—')).toBeInTheDocument();
+    const cells = within(row as HTMLTableRowElement).getAllByRole('cell');
+    expect(cells[4]?.textContent).toBe('—');
   });
 
   it('renders the sources error state even when health is ok (health ok + sources error)', () => {

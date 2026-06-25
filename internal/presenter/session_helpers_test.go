@@ -13,7 +13,7 @@ func TestSessionDetailResponseLoader_HappyPathAndMissing(t *testing.T) {
 	defer cleanup()
 	seedGraph(t, db, seedBase())
 
-	resp, op, err := p.loadSessionDetailResponse(context.Background(), "rootA", true)
+	resp, op, err := p.loadSessionDetailResponse(context.Background(), "rootA", true, false)
 	if err != nil {
 		t.Fatalf("load detail response: op=%q err=%v", op, err)
 	}
@@ -30,7 +30,7 @@ func TestSessionDetailResponseLoader_HappyPathAndMissing(t *testing.T) {
 		t.Fatalf("child sessions = %d, want 2", len(resp.ChildSessions))
 	}
 
-	_, _, err = p.loadSessionDetailResponse(context.Background(), "missing", true)
+	_, _, err = p.loadSessionDetailResponse(context.Background(), "missing", true, false)
 	if !isNoRows(err) {
 		t.Fatalf("missing session err = %v, want sql.ErrNoRows", err)
 	}

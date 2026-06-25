@@ -5,7 +5,7 @@
 import { useEffect, useRef } from 'react';
 import { Brain, ChevronRight, MessageSquare, Sparkles, User, Wrench } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import type { OpDetail } from '../../api/types';
+import type { OpDetail, PayloadRef } from '../../api/types';
 import { usePayloadContent } from './payloadStore';
 import { Markdown } from './Markdown';
 import { CopyButton } from './CopyButton';
@@ -52,11 +52,70 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function artifactClassOf(ref: PayloadRef | null): string | undefined {
+  if (ref === null) {
+    return undefined;
+  }
+  return ref.artifact_class || undefined;
+}
+
+function isClass(ref: PayloadRef, classes: string[]): boolean {
+  const artifactClass = artifactClassOf(ref);
+  return artifactClass !== undefined && classes.includes(artifactClass);
+}
+
+function firstByClass(refs: PayloadRef[], classes: string[]): PayloadRef | null {
+  return refs.find((ref) => isClass(ref, classes)) ?? null;
+}
+
+function primaryPayloadRef(op: OpDetail, refs: PayloadRef[]): PayloadRef | null {
+  if (op.kind === 'reasoning') {
+    return firstByClass(refs, ['reasoning_text']) ?? refs[0] ?? null;
+  }
+  if (op.kind === 'llm' && op.name === 'message') {
+    return firstByClass(refs, ['llm_response', 'llm_sdk_response']) ?? refs[0] ?? null;
+  }
+  if (op.kind === 'internal' && op.name === 'user_input') {
+    return firstByClass(refs, ['llm_request', 'llm_sdk_request']) ?? refs[0] ?? null;
+  }
+  return firstByClass(refs, ['log', 'llm_response', 'llm_sdk_response', 'reasoning_text'])
+    ?? refs[0]
+    ?? null;
+}
+
+function toolPayloadRefs(refs: PayloadRef[]): { request: PayloadRef | null; response: PayloadRef | null } {
+  const request = firstByClass(refs, ['tool_request']);
+  const response = firstByClass(refs, ['tool_response']);
+  if (request !== null || response !== null) {
+    return { request, response };
+  }
+  return { request: refs[0] ?? null, response: refs[1] ?? null };
+}
+
 /** detectLanguage returns a best-effort language hint for fenced code blocks. */
-function detectLanguage(payloadKind: string | undefined): string {
-  if (payloadKind === 'request') return 'json';
-  if (payloadKind === 'response') return 'text';
+function detectLanguage(payload: PayloadRef | null): string {
+  if (payload === null) {
+    return 'text';
+  }
+  switch (payload.format) {
+    case 'json':
+    case 'jsonrpc':
+      return 'json';
+    case 'http':
+      return 'http';
+    default:
+      break;
+  }
+  const artifactClass = artifactClassOf(payload);
+  if (artifactClass === 'tool_request' || artifactClass === 'llm_request' || artifactClass === 'llm_sdk_request') {
+    return 'json';
+  }
   return 'text';
+}
+
+function isSDKPayload(payload: PayloadRef | null): boolean {
+  const artifactClass = artifactClassOf(payload);
+  return artifactClass === 'llm_sdk_request' || artifactClass === 'llm_sdk_response';
 }
 
 /** wrapAsFenced turns plain text into a fenced code block string so the
@@ -115,7 +174,7 @@ function ReasoningBody({
   totalBytes: number | null;
 }) {
   return (
-    <div className={styles.reasoningBody} role="region" aria-label="Prose">
+    <div className={styles.reasoningBody} role="region" aria-label="Reasoning">
       <Markdown source={content} />
       {truncated && totalBytes !== null ? <TruncationFooter totalBytes={totalBytes} /> : null}
     </div>
@@ -126,11 +185,11 @@ function ReasoningBody({
 function ToolSection({
   label,
   payloadState,
-  payloadKind,
+  payload,
 }: {
   label: string;
   payloadState: ReturnType<typeof usePayloadContent>;
-  payloadKind: string | undefined;
+  payload: PayloadRef | null;
 }) {
   if (payloadState.error !== null) {
     return <PayloadError message={payloadState.error} onRetry={payloadState.retry} />;
@@ -148,7 +207,7 @@ function ToolSection({
         <CopyButton text={payloadState.content.text} kind="code" />
       </header>
       <Markdown
-        source={wrapAsFenced(payloadState.content.text, detectLanguage(payloadKind))}
+        source={wrapAsFenced(payloadState.content.text, detectLanguage(payload))}
       />
       {payloadState.content.truncated && payloadState.content.totalBytes !== null ? (
         <TruncationFooter totalBytes={payloadState.content.totalBytes} />
@@ -206,8 +265,11 @@ export function TurnStep({
   // splices refs in via useOpPayloadRefs + useTurnPayloadRefs when the
   // operator focuses a turn.
   const payloadRefs = op.payload_refs ?? [];
-  const firstRef = payloadRefs[0] ?? null;
-  const secondRef = op.kind === 'tool' ? (payloadRefs[1] ?? null) : null;
+  const toolRefs = op.kind === 'tool'
+    ? toolPayloadRefs(payloadRefs)
+    : { request: null, response: null };
+  const firstRef = op.kind === 'tool' ? toolRefs.request : primaryPayloadRef(op, payloadRefs);
+  const secondRef = op.kind === 'tool' ? toolRefs.response : null;
   const primary = usePayloadContent(firstRef?.id ?? null);
   const secondary = usePayloadContent(secondRef?.id ?? null);
 
@@ -254,6 +316,11 @@ export function TurnStep({
         <span className={styles.stepMetaItem} title={`Wall-clock start (UTC): ${new Date(op.start_ts / 1000).toISOString()}`}>
           {formatWallClock(op.start_ts)}
         </span>
+        {isSDKPayload(firstRef) || isSDKPayload(secondRef) ? (
+          <span className={styles.sdkBadge} title="SDK request/response payload">
+            SDK
+          </span>
+        ) : null}
         <OpIdBadge opId={op.id} />
       </div>
 
@@ -263,16 +330,16 @@ export function TurnStep({
       ) : op.kind === 'tool' ? (
         <div className={styles.toolBody}>
           {firstRef ? (
-            <ToolSection label="Params" payloadState={primary} payloadKind={firstRef.kind} />
+            <ToolSection label="Params" payloadState={primary} payload={firstRef} />
           ) : null}
           {secondRef ? (
-            <ToolSection label="Response" payloadState={secondary} payloadKind={secondRef.kind} />
+            <ToolSection label="Response" payloadState={secondary} payload={secondRef} />
           ) : null}
           {payloadRefs.length === 0 ? (
             <p className={styles.emptyBody}>No payloads for this op.</p>
           ) : null}
         </div>
-      ) : op.kind === 'reasoning' && primary.content !== null ? (
+      ) : artifactClassOf(firstRef) === 'reasoning_text' && primary.content !== null ? (
         <ReasoningBody
           content={primary.content.text}
           truncated={primary.content.truncated}

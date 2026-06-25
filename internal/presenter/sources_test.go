@@ -204,6 +204,27 @@ func doSourcesWith(t *testing.T, p *Presenter, query string) (int, sourcesBody) 
 	return rr.Code, body
 }
 
+// TestSources_RejectsUnknownIncludeToken keeps /api/sources on the shared
+// fail-closed include-token contract: cursors is the only accepted token.
+func TestSources_RejectsUnknownIncludeToken(t *testing.T) {
+	t.Parallel()
+	p, _, cleanup := newTestPresenter(t)
+	defer cleanup()
+	req := httptest.NewRequest(http.MethodGet, "/api/sources?include=payload_refs", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(rr.Body).Decode(&env); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if env.Error.Code != CodeBadRequest {
+		t.Fatalf("error.code = %q, want %q", env.Error.Code, CodeBadRequest)
+	}
+}
+
 // TestSources_EmptyReturns200WithEmptyItems asserts an empty database
 // returns 200 with `items: []`.
 func TestSources_EmptyReturns200WithEmptyItems(t *testing.T) {

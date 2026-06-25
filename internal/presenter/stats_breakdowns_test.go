@@ -77,7 +77,7 @@ func TestLoadHelpers_QueryErrorBranches(t *testing.T) {
 	if _, _, err := p.loadTurns(ctx, "x"); err == nil {
 		t.Error("loadTurns: want error on closed DB")
 	}
-	if _, err := p.loadTurnsWithOps(ctx, "x", true); err == nil {
+	if _, err := p.loadTurnsWithOps(ctx, "x", true, false); err == nil {
 		t.Error("loadTurnsWithOps: want error on closed DB")
 	}
 }

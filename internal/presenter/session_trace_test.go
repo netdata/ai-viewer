@@ -31,6 +31,14 @@ type traceOpT struct {
 	SessionID      string  `json:"session_id"`
 	SessionAgent   string  `json:"session_agent_name"`
 	SessionKind    string  `json:"session_kind"`
+	PayloadRefs    []struct {
+		ID            int64   `json:"id"`
+		OpID          string  `json:"op_id"`
+		Kind          string  `json:"kind"`
+		ArtifactClass string  `json:"artifact_class"`
+		LocationURI   *string `json:"location_uri"`
+		SHA256        *string `json:"sha256"`
+	} `json:"payload_refs"`
 }
 
 func getTrace(t *testing.T, p *Presenter, id string) (int, traceBody, errorEnvelope) {
@@ -274,7 +282,8 @@ func TestTrace_PayloadRefsOptIn(t *testing.T) {
 		t.Errorf("default response should NOT contain payload_refs, got: %s", raw)
 	}
 
-	// Opt-in: payload_refs field is present per op.
+	// Opt-in: payload_refs field is present per op, but proof-only fields
+	// remain omitted until include=proof is also requested.
 	req2 := httptest.NewRequest(http.MethodGet, "/api/sessions/rootTr/trace?include=payload_refs", nil)
 	rr2 := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr2, req2)
@@ -284,5 +293,71 @@ func TestTrace_PayloadRefsOptIn(t *testing.T) {
 	raw2 := rr2.Body.Bytes()
 	if !bytes.Contains(raw2, []byte(`"payload_refs"`)) {
 		t.Errorf("opt-in response should contain payload_refs, got: %s", raw2)
+	}
+	for _, forbidden := range [][]byte{[]byte(`"location_uri"`), []byte(`"sha256"`)} {
+		if bytes.Contains(raw2, forbidden) {
+			t.Fatalf("include=payload_refs leaked proof field %s: %s", forbidden, raw2)
+		}
+	}
+}
+
+func TestTrace_IncludeProofAddsProofMetadata(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcTrProof", "aiagent_v3", "/tmp/tr-proof", base)
+	seedSession(t, db, sessionRow{
+		id: "rootTrProof", sourceID: "srcTrProof", nativeID: "nR", rootID: "rootTrProof",
+		kind: "root", agent: "nedi", status: "completed",
+	})
+	seedTurn(t, db, turnRow{id: "tTrProof", sessionID: "rootTrProof", seq: 1, startTS: base, status: "completed", opCount: 1})
+	seedOp(t, db, opRow{id: "opTrProof", turnID: "tTrProof", sessionID: "rootTrProof", seq: 1, kind: "llm", name: "sdk", startTS: base, status: "completed"})
+	sha := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seedPayload(t, db, payloadRow{
+		opID: "opTrProof", kind: "sdk_response", format: "json",
+		locationURI: "file:///tmp/tr-proof/sdk-response.json",
+		sha256:      sha, originalBytes: 120, storedBytes: 120,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/rootTrProof/trace?include=payload_refs,proof", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var body traceBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode trace: %v (body=%s)", err, rr.Body.String())
+	}
+	if len(body.Ops) != 1 || len(body.Ops[0].PayloadRefs) != 1 {
+		t.Fatalf("payload refs = %+v, want one ref", body.Ops)
+	}
+	ref := body.Ops[0].PayloadRefs[0]
+	if ref.OpID != "opTrProof" {
+		t.Fatalf("payload op_id = %q, want opTrProof", ref.OpID)
+	}
+	if ref.Kind != "sdk_response" || ref.ArtifactClass != "llm_sdk_response" {
+		t.Fatalf("payload class = %q/%q, want sdk_response/llm_sdk_response", ref.Kind, ref.ArtifactClass)
+	}
+	if ref.LocationURI == nil || *ref.LocationURI != "file:///tmp/tr-proof/sdk-response.json" {
+		t.Fatalf("location_uri = %v, want proof URI", ref.LocationURI)
+	}
+	if ref.SHA256 == nil || *ref.SHA256 != sha {
+		t.Fatalf("sha256 = %v, want %s", ref.SHA256, sha)
+	}
+}
+
+func TestTrace_IncludeProofRequiresPayloadRefs(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	seedGraph(t, db, seedBase())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/rootA/trace?include=proof", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
 	}
 }

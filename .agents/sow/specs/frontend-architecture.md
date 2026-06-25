@@ -46,7 +46,7 @@ frontend/
 │   │   ├── sources.ts           # /api/sources
 │   │   ├── stats.ts             # /api/stats
 │   │   ├── catalog.ts           # catalog client stub (Phase-2 routes)
-│   │   ├── payloads.ts          # payload helpers (Phase-2 route)
+│   │   ├── payloads.ts          # typed /api/payloads/:id GET/HEAD client
 │   │   ├── sse.ts               # SSE subscription + EventSource wrapper
 │   │   └── types.ts             # response types (mirror Go DTOs)
 │   ├── state/
@@ -139,6 +139,25 @@ SSE subscription mapping:
   contains only the bounds that are present.
 - `q` is deliberately dropped because the SSE subscription contract has no
   free-text filter; list refetches still apply `q`.
+- `cwd`, `provider_alias`, `call_path`, and `error_class` are not subscription
+  filter dimensions. The frontend must not send them to
+  `POST /api/subscriptions`.
+
+### Include Tokens
+
+`api/client.ts` owns the shared include-token builder for REST endpoints that
+accept `?include=`. Endpoint clients pass an allowlisted token set and receive a
+stable query string:
+
+- empty/missing token arrays omit the `include` parameter;
+- duplicates are collapsed;
+- output order is deterministic;
+- current tokens are `payload_refs`, `proof`, and `cursors`;
+- endpoint clients never hand-concatenate include strings.
+
+Session detail and trace use `payload_refs` and `proof`; the dedicated
+payload-ref endpoint accepts `proof` and treats `payload_refs` as a no-op
+compatibility token; sources use `cursors`.
 
 ## SSE Integration
 
@@ -173,6 +192,13 @@ One subscription per active page. Filter changes → new subscription, old one c
 **Malformed frames.** A frame whose `data` is not valid JSON is never silently dropped (AGENTS.md §"No silent failures"): it is routed to an optional `onMalformedEvent` handler, else `console.warn`ed with the event name; the stream stays alive (a single bad frame does not kill the connection).
 
 **API client empty-body.** `api/client.ts` supports `HEAD` and treats any bodiless success (`HEAD`, `204`, or `Content-Length: 0`) as `undefined` rather than attempting a JSON parse, so HEAD parity (`/api/health`, `/api/sources`, `/api/events`) and the `204` from subscription `DELETE` are handled without throwing.
+
+**Payload byte-streaming client.** `api/payloads.ts` is the typed client for
+`GET` and `HEAD /api/payloads/:id`. It returns text plus payload metadata from
+response headers (`X-Payload-Format`, truncation state, total bytes, preview
+bytes) and preserves caller-owned abort behavior. `TurnView/payloadStore.ts`
+keeps the per-id cache and concurrency limit; `SpanDetailDrawer` consumes the
+same client rather than owning separate fetch/header parsing logic.
 
 **`useLiveUpdates(filter)` — the per-view connection lifecycle hook.** Pages do
 not call `connectSse` directly; they call `useLiveUpdates(filter)`

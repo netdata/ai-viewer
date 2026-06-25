@@ -9,6 +9,13 @@ JSON over HTTP. All implemented endpoints return `application/json` except `/api
 - **Time params**: `?from=<us>&to=<us>` UNIX microseconds UTC. `to` omitted = now.
 - **Pagination**: `?limit=<n>&cursor=<opaque>`. Responses include `"next_cursor"` when more rows exist. Default limit 100; max 1000. The `cursor` is opaque and is bound to a fingerprint of the **entire result-defining query** it was issued under (all filters, group, time window, sort/order, search; for logs the session id + severity set), not just `sort`/`order`. Replaying a cursor against a changed query (e.g. minting on `?group=root` then replaying with `?group=all&cursor=...`, or changing any of `from`/`to`/`agents`/`models`/`tools`/`status`/`sources`/`q`, or `severity` on logs), or a cursor that is malformed, truncated, partial, or carries unknown fields, returns `BAD_REQUEST`. Re-ordering the same filter set (`?models=a,b` vs `?models=b,a`) is accepted — the fingerprint is order-insensitive. `limit` may change between pages. An absent or empty `cursor` means "first page".
 - **Filter array params**: `?agents=a&agents=b` (repeated) or `?agents=a,b` (comma-separated). Server accepts both. A present array key whose every element is empty (`?agents=` or `?agents=,`) returns `BAD_REQUEST`; an absent key is no constraint. The same present-but-empty rule applies to the logs `?severity=` param: `?severity=` or `?severity=,` is a `BAD_REQUEST`, while an absent `severity` key means "all severities". A user-supplied value (any array element, `q`, or the path `:id`) containing an ASCII control character (byte `< 0x20`) returns `BAD_REQUEST` — legitimate names, search text, and ids never carry control bytes. The check runs on the raw value before any whitespace trim, so a leading/trailing control byte cannot be silently trimmed away and accepted.
+- **Include params**: include-aware endpoints parse `?include=<token>[,<token>...]`
+  with endpoint-specific allowlists. Missing/empty include means "no optional
+  groups"; duplicate tokens are accepted once; unknown tokens return
+  `BAD_REQUEST`. Current tokens: `payload_refs`, `proof`, and `cursors`.
+  `proof` may be used only where payload refs are present: on session detail and
+  trace it requires `payload_refs`; on `/api/sessions/:id/payload_refs` refs are
+  inherent and `proof` is valid by itself.
 - **Errors**:
   ```json
   { "error": { "code": "BAD_REQUEST", "message": "...", "details": { ... } } }
@@ -99,7 +106,8 @@ Response:
     {
       "id":"...","native_id":"...","root_session_id":"...","parent_session_id":null,
       "source_id":"...","kind":"root","agent_name":"nedi","model":"claude-opus-4-7",
-      "status":"completed","start_ts":<us>,"end_ts":<us>,
+      "provider":"anthropic","status":"completed","effective_status":"completed",
+      "error_class":"","start_ts":<us>,"end_ts":<us>,
       "tokens_in":1234,"tokens_out":5678,"cost_usd":0.42,
       "turn_count":7,"op_count":42,"failure_count":0,
       "child_session_count":3
@@ -111,25 +119,42 @@ Response:
 
 When `group=root`, each item includes `child_session_count`; the UI uses this to render the expander.
 
+Session list stays compact. It does not include `provider_alias`, `cwd`,
+`call_path`, `duration_us`, cache tokens, `first_user_message_hash`, proof
+metadata, or raw `extras_json`.
+
 ### GET /api/sessions/:id
 
 ```json
 {
-  "session": { ...full row plus computed children list... },
+  "session": {
+    ...full row plus computed children list...,
+    "provider_alias": null,
+    "cwd": null,
+    "call_path": null,
+    "error_message": null,
+    "duration_us": 123456,
+    "first_user_message_hash": null
+  },
   "turns": [
     {
       "id":"...","seq":1,"start_ts":<us>,"end_ts":<us>,"status":"completed",
-      "tokens_in":...,"tokens_out":...,"cost_usd":...,"op_count":...,
+      "tokens_in":...,"tokens_out":...,"tokens_cache_read":...,
+      "tokens_cache_write":...,"cost_usd":...,"op_count":...,
       "ops": [
         { "id":"...","kind":"llm","name":"...","model":"...","provider":"...",
+          "tool_namespace":null,"provider_alias":null,"reasoning_kind":null,
           "parent_op_id":null,
           "start_ts":<us>,"end_ts":<us>,"duration_us":...,
           "status":"...","error_class":null,"error_message":null,
-          "tokens_in":...,"tokens_out":...,"cost_usd":...,
+          "tokens_in":...,"tokens_out":...,
+          "tokens_cache_read":...,"tokens_cache_write":...,"cost_usd":...,
+          "bytes_in":0,"bytes_out":0,"chars_in":null,"chars_out":null,
           "ctx_used":...,"ctx_max":...,
           "child_session_id":null,
           "payload_refs":[
-            { "id":1,"kind":"llm_request","format":"http","compression":"gzip",
+            { "id":1,"kind":"llm_request","artifact_class":"llm_request",
+              "format":"http","compression":"gzip",
               "original_bytes":1234,"stored_bytes":456 }
           ]
         }
@@ -137,7 +162,8 @@ When `group=root`, each item includes `child_session_count`; the UI uses this to
     }
   ],
   "child_sessions": [
-    { ..."agent_name","model","status","cost_usd","tokens_in","op_count",...,
+    { ..."agent_name","model","provider","status","error_class",
+      "cost_usd","tokens_in","op_count",...,
       "child_sessions": [ ...this child's own children, recursively (SOW-0069)... ] }
   ]
 }
@@ -155,6 +181,11 @@ Each op row carries `parent_op_id` — the canonical id of the op it nests under
 (`ops.parent_op_id`, set by the ingest writer), or `null` for a top-level op. The
 Trace view rebuilds the authoritative span tree from this parentage; the key is
 always present (nullable), never omitted.
+
+`?include=payload_refs` embeds the same payload-ref shape as the dedicated
+payload-ref endpoint. `?include=payload_refs,proof` additionally includes
+proof/debug fields (`location_uri` / selector URI and `sha256`) on each ref.
+`?include=proof` without `payload_refs` returns `BAD_REQUEST`.
 
 ### GET /api/sessions/:id/payload_refs
 
@@ -178,7 +209,7 @@ probe.
 ```json
 {
   "refs": [
-    { "id":1,"op_id":"...","kind":"llm_request","format":"http",
+    { "id":1,"op_id":"...","kind":"llm_request","artifact_class":"llm_request","format":"http",
       "compression":"gzip","original_bytes":1234,"stored_bytes":456 }
   ]
 }
@@ -187,6 +218,11 @@ probe.
 Ordering is deterministic: full-session and turn-scoped responses sort by
 `op_id ASC, payload_refs.id ASC`; op-scoped responses sort by
 `payload_refs.id ASC`.
+
+`?include=proof` augments each row with proof/debug fields:
+`location_uri` (or an equivalent selector URI) and nullable `sha256`.
+`?include=payload_refs` is accepted as a no-op compatibility token on this
+endpoint because refs are already inherent.
 
 ### GET /api/sessions/:id/logs
 
@@ -400,12 +436,10 @@ other session sub-routes. Scope = the whole session tree, like `/timeline`.
   "root_id": "<root session id>",
   "ops": [
     {
-      "id":"...","turn_seq":1,"kind":"llm","name":"...","model":"...","provider":"...",
+      "id":"...","turn_seq":1,"kind":"llm","name":"...",
       "parent_op_id":null,"child_session_id":null,
       "start_ts":<us>,"end_ts":<us>,"duration_us":...,
       "status":"...","error_class":null,"error_message":null,
-      "tokens_in":...,"tokens_out":...,"cost_usd":...,
-      "ctx_used":...,"ctx_max":...,
       "session_id":"...","session_agent_name":"nedi","session_kind":"root",
       "payload_refs":[ ...same shape as /sessions/:id opDetail.payload_refs... ]
     }
@@ -415,11 +449,15 @@ other session sub-routes. Scope = the whole session tree, like `/timeline`.
 
 - **ops** is a FLAT list of every op in the tree (root + all descendants),
   ordered by `(session.start_ts, session.id, op.start_ts, op.seq, op.id)` for a
-  deterministic, stable feed. Each op carries the full `opDetail` field set PLUS
-  the session tags `session_id`, `session_agent_name`, `session_kind` (so the
-  client colors/filters by sub-agent without a second round-trip) and
-  `turn_seq` (the op's turn sequence within its session, for per-session
-  parent/turn ordering).
+  deterministic, stable feed. Each op carries a narrow trace DTO: `id`,
+  `turn_seq`, `kind`, `name`, `parent_op_id`, `start_ts`, `end_ts`,
+  `duration_us`, `status`, `error_class`, `error_message`, `child_session_id`,
+  `session_id`, `session_agent_name`, `session_kind`, and optional
+  `payload_refs`. It deliberately omits model/provider/token/cost/context and
+  proof fields by default for high-volume performance. Callers that need
+  payload metadata opt in with `?include=payload_refs`; callers that also need
+  selector/hash proof use `?include=payload_refs,proof`, which adds proof fields
+  only to the included payload refs.
 - **`error_message`** is the op's free-text error message (`ops.error_message`,
   nullable) — surfaced for failed ops (SOW-0070 AC3); also added to the
   `/sessions/:id` `opDetail` in the same SOW.
@@ -794,23 +832,26 @@ ingester but no handler serves them yet; returns a structured `NOT_FOUND` today.
 
 Catalog table contents with filters and sorting.
 
-### GET /api/payloads/
+### GET /api/payloads/:id
 
 Streams a payload's bytes by numeric ref (SOW-0033). The route is registered as
 a prefix handler (`/api/payloads/`); the `<id>` is the `payload_refs.id`
-(parsed, `> 0`). A 4 KB UTF-8 text **preview** is served when the client asks
-for the JSON envelope (`GET /api/payloads/<id>` with the default accept path);
-a full byte **download** is served when `?full=1` (capped at 10 MB). `payload_refs` entries
-carry `id`/`kind`/`format`/`compression`/bytes so the viewer can link and serve
-them. The shape below is the served contract.
+(parsed, `> 0`). A UTF-8 text **preview** is served by default; JSON payloads
+use a larger preview cap and are truncated only at a valid top-level JSON
+boundary when possible. A full byte **download** is served when `?full=1`
+(capped at 10 MB). The response body is bytes, not JSON.
 
 Streams the payload bytes. Headers:
 
-- `Content-Type` reflects the payload format (`application/http`, `text/event-stream`, `application/json`, `application/json-rpc`, `text/plain`).
-- `Content-Encoding: gzip` set when the underlying file is gzip and the client accepts gzip.
-- `Cache-Control: public, max-age=86400` (payload files are append-only and immutable once written).
+- `Content-Type: text/plain; charset=utf-8` for the preview/download body the UI consumes.
+- `X-Payload-Format` carries the stored payload format.
+- `X-Payload-Truncated` is `true` when the body is a preview.
+- `X-Payload-Total-Bytes` is the resolved logical total byte count.
+- `X-Payload-Preview-Bytes` is present on previews and names the returned byte count.
 
-Query: `?decompress=1` forces inline decompression for clients that can't handle gzip.
+`HEAD /api/payloads/:id` returns the same headers with an empty body. Payload
+resolution is confined to configured source roots; missing refs, invalid ids,
+unresolvable files, and source-root violations return structured errors.
 
 ### POST /api/subscriptions
 
@@ -828,6 +869,9 @@ array → `BAD_REQUEST`; ASCII control char `< 0x20` in any value →
 normalized; a present-but-whitespace-only value → `BAD_REQUEST` (consistent with
 the array dimensions and the other ID paths, which all trim). A bad filter
 returns `400`. Response `200`:
+
+`cwd`, `provider_alias`, `call_path`, and `error_class` are not subscription
+filter dimensions in this SOW. They are rejected as unknown filter keys.
 
 ```json
 { "id": "sub-<32 hex>", "filter_normalized": { ... } }

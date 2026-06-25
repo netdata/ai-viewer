@@ -193,6 +193,7 @@ export function TraceTab({ detail, mode = 'full' }: { detail: SessionDetailRespo
 
       <SpanDetailDrawer
         detail={selected ? { kind: 'op', op: selected.op } : null}
+        sessionId={selected?.op.session_id ?? detail.session.id}
         onClose={() => {
           setSelected(null);
         }}

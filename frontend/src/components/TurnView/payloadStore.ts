@@ -4,6 +4,7 @@
 // same op never refetches.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { fetchPayloadContent } from '../../api/payloads';
 
 export interface PayloadContent {
   /** Server text response (truncated to 4 KB server-side if too big). */
@@ -47,16 +48,12 @@ function makeStore() {
   const cache = new Map<number, PayloadContent>();
 
   async function fetchOnce(id: number, signal: AbortSignal): Promise<PayloadContent> {
-    const resp = await fetch(`/api/payloads/${id}`, { signal });
-    if (!resp.ok) {
-      const body = await resp.text();
-      throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200)}`);
-    }
-    const text = await resp.text();
-    const truncated = resp.headers.get('X-Payload-Truncated') === 'true';
-    const totalRaw = resp.headers.get('X-Payload-Total-Bytes');
-    const totalBytes = totalRaw !== null ? parseInt(totalRaw, 10) : null;
-    return { text, truncated, totalBytes };
+    const content = await fetchPayloadContent(id, { signal });
+    return {
+      text: content.text,
+      truncated: content.headers.truncated,
+      totalBytes: content.headers.totalBytes,
+    };
   }
 
   // FIFO scheduling of fetch tasks. Each task owns one AbortController and

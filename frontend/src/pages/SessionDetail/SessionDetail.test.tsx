@@ -49,6 +49,7 @@ function makeSessionDetail(over: Partial<{
     provider: 'anthropic',
     status: 'completed',
     error_class: null,
+    error_message: null,
     start_ts: 1_700_000_000_000_000,
     end_ts: 1_700_000_005_000_000,
     tokens_in: 100,

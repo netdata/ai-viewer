@@ -182,3 +182,18 @@ export function buildQuery(
   const qs = sp.toString();
   return qs ? `?${qs}` : '';
 }
+
+export type IncludeToken = 'payload_refs' | 'proof' | 'cursors';
+
+const INCLUDE_ORDER: IncludeToken[] = ['payload_refs', 'proof', 'cursors'];
+
+export function buildIncludeQuery(tokens: IncludeToken[]): string {
+  const selected = new Set(tokens);
+  const ordered = INCLUDE_ORDER.filter((token) => selected.has(token));
+  if (ordered.length === 0) {
+    return '';
+  }
+  const sp = new URLSearchParams();
+  sp.set('include', ordered.join(','));
+  return `?${sp.toString()}`;
+}

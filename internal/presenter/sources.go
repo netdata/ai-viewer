@@ -104,7 +104,12 @@ func (p *Presenter) handleSources(w http.ResponseWriter, r *http.Request) {
 			CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
 		return
 	}
-	includeCursors := r.URL.Query().Get("include") == "cursors"
+	includes, err := parseIncludeOptions(r.URL.Query().Get("include"), includeAllow("cursors"))
+	if err != nil {
+		p.writeBadFilter(w, r, err)
+		return
+	}
+	includeCursors := includes.Cursors
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()

@@ -295,7 +295,7 @@ GET  /api/stats                 → cross-session statistics with filters       
 GET  /api/catalog/tools         → catalog_tools, with filters                               (Chunks 12+ — not yet implemented)
 GET  /api/catalog/models        → catalog_models, with filters                              (Chunks 12+ — not yet implemented)
 GET  /api/catalog/agents        → catalog_agents, with filters                              (Chunks 12+ — not yet implemented)
-GET  /api/payloads/:ref         → streams payload bytes (gz-decompressed inline if asked)   (Chunks 12+ — not yet implemented)
+GET  /api/payloads/:id          → streams payload bytes with preview/full headers            (live)
 POST /api/subscriptions         → create an SSE subscription with a filter                  (live)
 DELETE /api/subscriptions/:id   → cancel                                                    (live)
 GET  /api/events?sub=:id        → SSE event stream                                          (live)

@@ -99,16 +99,17 @@ func (p *Presenter) handleSessionTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Opt-in payload_refs: by default the trace is consumed by
-	// Waterfall/FlameGraph/EventList/ByTurnWaterfall, none of which render
-	// payload previews. The default response skips the payload_refs scan
-	// (a full-tree table query) AND omits the field, cutting the response
-	// size ~3×. Callers that DO need refs (the session-detail TurnView
-	// fetching per-op payloads, or future trace-with-preview surfaces) pass
-	// ?include=payload_refs to opt in.
-	includeRefs := r.URL.Query().Get("include") == "payload_refs"
+	includes, err := parseIncludeOptions(r.URL.Query().Get("include"), includeAllow("payload_refs", "proof"))
+	if err != nil {
+		p.writeBadFilter(w, r, err)
+		return
+	}
+	if err := requireProofPayloadRefs(includes); err != nil {
+		p.writeBadFilter(w, r, err)
+		return
+	}
 
-	resp, err := p.buildTrace(ctx, rootID, includeRefs)
+	resp, err := p.buildTrace(ctx, rootID, includes.PayloadRefs, includes.Proof)
 	if err != nil {
 		p.writeDBError(ctx, w, r, "session.trace.build", err)
 		return
@@ -126,7 +127,7 @@ func (p *Presenter) handleSessionTrace(w http.ResponseWriter, r *http.Request) {
 // via a goroutine when includeRefs is true — the reader's pool has 8
 // connections and the two queries are independent. On the production DB
 // this halves the wall-clock latency of the include=payload_refs path.
-func (p *Presenter) buildTrace(ctx context.Context, rootID string, includeRefs bool) (traceResponse, error) {
+func (p *Presenter) buildTrace(ctx context.Context, rootID string, includeRefs bool, includeProof bool) (traceResponse, error) {
 	ops, err := p.loadTraceOps(ctx, rootID)
 	if err != nil {
 		return traceResponse{}, err
@@ -137,7 +138,7 @@ func (p *Presenter) buildTrace(ctx context.Context, rootID string, includeRefs b
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			refsErr = p.attachTracePayloadRefs(ctx, rootID, ops)
+			refsErr = p.attachTracePayloadRefs(ctx, rootID, ops, includeProof)
 		}()
 		wg.Wait()
 		if refsErr != nil {
@@ -222,14 +223,14 @@ ORDER BY s.start_ts ASC, s.id ASC, o.start_ts ASC, o.seq ASC, o.id ASC`
 // query joined on the tree's sessions) and appends each to its op by id. ops is
 // keyed into a map first so the attachment is O(refs) not O(ops×refs). The
 // cursor is fully drained before return.
-func (p *Presenter) attachTracePayloadRefs(ctx context.Context, rootID string, ops []traceOp) error {
+func (p *Presenter) attachTracePayloadRefs(ctx context.Context, rootID string, ops []traceOp, includeProof bool) error {
 	byID := make(map[string]int, len(ops))
 	for i := range ops {
 		byID[ops[i].ID] = i
 	}
 	q := `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
-       pr.original_bytes, pr.stored_bytes
+       pr.original_bytes, pr.stored_bytes, pr.location_uri, pr.sha256
 FROM payload_refs pr
 JOIN ops o ON o.id = pr.op_id
 JOIN sessions s ON s.id = o.session_id
@@ -248,23 +249,15 @@ ORDER BY pr.op_id ASC, pr.id ASC`
 			compression sql.NullString
 			origBytes   sql.NullInt64
 			storedBytes sql.NullInt64
+			locationURI string
+			sha256      sql.NullString
 		)
 		if err := rows.Scan(&pr.ID, &opID, &pr.Kind, &pr.Format, &compression,
-			&origBytes, &storedBytes); err != nil {
+			&origBytes, &storedBytes, &locationURI, &sha256); err != nil {
 			return err
 		}
-		if compression.Valid {
-			v := compression.String
-			pr.Compression = &v
-		}
-		if origBytes.Valid {
-			v := origBytes.Int64
-			pr.OriginalBytes = &v
-		}
-		if storedBytes.Valid {
-			v := storedBytes.Int64
-			pr.StoredBytes = &v
-		}
+		pr.OpID = opID
+		applyPayloadRefScalars(&pr, compression, origBytes, storedBytes, locationURI, sha256, includeProof)
 		if idx, ok := byID[opID]; ok {
 			ops[idx].PayloadRefs = append(ops[idx].PayloadRefs, pr)
 		}

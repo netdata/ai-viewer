@@ -36,7 +36,11 @@ function op(over: Partial<OpDetail>): OpDetail {
     error_class: null,
     tokens_in: 0,
     tokens_out: 0,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
     cost_usd: 0,
+    bytes_in: 0,
+    bytes_out: 0,
     ctx_used: null,
     ctx_max: null,
     child_session_id: null,
@@ -54,6 +58,8 @@ function turn(ops: OpDetail[]): TurnDetail {
     status: 'completed',
     tokens_in: 0,
     tokens_out: 0,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
     cost_usd: 0,
     op_count: ops.length,
     ops,
@@ -67,6 +73,7 @@ function child(over: Partial<ChildSummary>): ChildSummary {
     kind: 'sub_agent',
     agent_name: 'nedi-sub',
     model: 'claude-haiku-4-5',
+    provider: 'anthropic',
     status: 'running',
     start_ts: 1,
     end_ts: null,
@@ -91,10 +98,15 @@ function detail(turns: TurnDetail[], children: ChildSummary[] = []): SessionDeta
       agent_name: 'nedi',
       model: 'claude-opus-4-7',
       provider: 'anthropic',
+      provider_alias: 'claude',
+      cwd: '/workspace/root-a',
+      call_path: 'rootA>childA',
       status: 'completed',
       error_class: null,
+      error_message: null,
       start_ts: 1,
       end_ts: 2,
+      duration_us: 1,
       tokens_in: 1234,
       tokens_out: 5678,
       tokens_cache_read: 3000,
@@ -165,6 +177,25 @@ describe('OverviewTab', () => {
     expect(screen.getByText('nedi')).toBeInTheDocument();
     expect(screen.getByText('claude-opus-4-7')).toBeInTheDocument();
     expect(screen.getByText('completed')).toBeInTheDocument();
+  });
+
+  it('renders session-level diagnostics from the detail contract', () => {
+    const d = detail([]);
+    d.session.error_message = 'root warning';
+    renderTab(d);
+    expect(screen.getByText('Provider')).toBeInTheDocument();
+    expect(screen.getByText('anthropic')).toBeInTheDocument();
+    expect(screen.getByText('Provider alias')).toBeInTheDocument();
+    expect(screen.getByText('claude')).toBeInTheDocument();
+    expect(screen.getByText('Working dir')).toBeInTheDocument();
+    expect(screen.getByText('/.../root-a')).not.toHaveAttribute('title');
+    expect(screen.queryByText('/workspace/root-a')).not.toBeInTheDocument();
+    expect(screen.getByText('Call path')).toBeInTheDocument();
+    expect(screen.getByText('rootA>childA')).toBeInTheDocument();
+    expect(screen.getByText('Duration')).toBeInTheDocument();
+    expect(screen.getByText('1µs')).toBeInTheDocument();
+    expect(screen.getByText('Error message')).toBeInTheDocument();
+    expect(screen.getByText('root warning')).toBeInTheDocument();
   });
 
   it('renders per-session aggregate stat cards from the detail row', () => {

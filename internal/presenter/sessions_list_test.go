@@ -19,6 +19,7 @@ type sessionListBody struct {
 		Kind              string  `json:"kind"`
 		AgentName         string  `json:"agent_name"`
 		Model             string  `json:"model"`
+		Provider          string  `json:"provider"`
 		Status            string  `json:"status"`
 		StartTS           int64   `json:"start_ts"`
 		EndTS             *int64  `json:"end_ts"`
@@ -102,6 +103,9 @@ func TestSessions_GroupRootDefault(t *testing.T) {
 	}
 	if it.AgentName != "nedi" || it.Model != "claude-opus-4-7" {
 		t.Fatalf("agent/model = %q/%q", it.AgentName, it.Model)
+	}
+	if it.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", it.Provider)
 	}
 	if it.TurnCount != 2 || it.OpCount != 4 || it.FailureCount != 1 {
 		t.Fatalf("counts turn=%d op=%d fail=%d", it.TurnCount, it.OpCount, it.FailureCount)

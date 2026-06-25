@@ -52,7 +52,10 @@ type sessionRow struct {
 	parentID                          string // "" => NULL
 	rootID                            string
 	kind, agent, model                string
-	provider                          string
+	provider, providerAlias           string
+	callPath                          string
+	errorClass, errorMessage          string
+	firstUserMessageHash              string
 	status                            string
 	startTS, endTS                    int64
 	tokensIn, tokensOut               int64
@@ -93,17 +96,27 @@ func seedSession(t *testing.T, db *sql.DB, s sessionRow) {
 	if s.cwd != "" {
 		cwd = s.cwd
 	}
+	nullStr := func(v string) any {
+		if v == "" {
+			return nil
+		}
+		return v
+	}
 	if _, err := db.Exec(`
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id, kind,
-    agent_name, model, provider, status, start_ts, end_ts, last_activity_ts,
+    agent_name, model, provider, provider_alias, cwd, call_path,
+    status, error_class, error_message, start_ts, end_ts, last_activity_ts,
+    first_user_message_hash,
     tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,
-    cost_usd, turn_count, op_count, failure_count, cwd
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    cost_usd, turn_count, op_count, failure_count
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.id, s.sourceID, s.nativeID, parent, s.rootID, s.kind,
-		s.agent, s.model, s.provider, s.status, s.startTS, endTS, s.startTS,
+		s.agent, s.model, s.provider, nullStr(s.providerAlias), cwd, nullStr(s.callPath),
+		s.status, nullStr(s.errorClass), nullStr(s.errorMessage), s.startTS, endTS, s.startTS,
+		nullStr(s.firstUserMessageHash),
 		s.tokensIn, s.tokensOut, s.tokensCacheRead, s.tokensCacheWrite,
-		s.costUSD, s.turnCount, s.opCount, s.failureCount, cwd,
+		s.costUSD, s.turnCount, s.opCount, s.failureCount,
 	); err != nil {
 		t.Fatalf("seed session %s: %v", s.id, err)
 	}
@@ -123,7 +136,10 @@ type turnRow struct {
 	seq                 int64
 	startTS, endTS      int64
 	status              string
+	errorClass          string
 	tokensIn, tokensOut int64
+	tokensCacheRead     int64
+	tokensCacheWrite    int64
 	costUSD             float64
 	opCount             int64
 }
@@ -135,13 +151,20 @@ func seedTurn(t *testing.T, db *sql.DB, tr turnRow) {
 	if tr.endTS != 0 {
 		endTS = tr.endTS
 	}
+	nullStr := func(v string) any {
+		if v == "" {
+			return nil
+		}
+		return v
+	}
 	if _, err := db.Exec(`
 INSERT INTO turns (
-    id, session_id, seq, start_ts, end_ts, status,
-    tokens_in, tokens_out, cost_usd, op_count
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    id, session_id, seq, start_ts, end_ts, status, error_class,
+    tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, op_count
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tr.id, tr.sessionID, tr.seq, tr.startTS, endTS, tr.status,
-		tr.tokensIn, tr.tokensOut, tr.costUSD, tr.opCount,
+		nullStr(tr.errorClass), tr.tokensIn, tr.tokensOut, tr.tokensCacheRead, tr.tokensCacheWrite,
+		tr.costUSD, tr.opCount,
 	); err != nil {
 		t.Fatalf("seed turn %s: %v", tr.id, err)
 	}
@@ -155,6 +178,8 @@ type opRow struct {
 	kind, name            string
 	toolNamespace         string
 	model, provider       string
+	providerAlias         string
+	reasoningKind         string
 	startTS, endTS        int64
 	durationUS            int64
 	status                string
@@ -163,6 +188,8 @@ type opRow struct {
 	tokensCacheRead       int64 // SOW-0067: op-level cache tokens (by_model cache-hit)
 	tokensCacheWrite      int64
 	costUSD               float64
+	bytesIn, bytesOut     int64
+	charsIn, charsOut     int64
 	ctxUsed, ctxMax       int64
 	childSessionID        string
 }
@@ -189,14 +216,18 @@ func seedOp(t *testing.T, db *sql.DB, o opRow) {
 	if _, err := db.Exec(`
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq, kind, name, tool_namespace, model, provider,
+    provider_alias, reasoning_kind,
     start_ts, end_ts, duration_us, status, error_class,
-    tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, ctx_used, ctx_max, child_session_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd,
+    bytes_in, bytes_out, chars_in, chars_out, ctx_used, ctx_max, child_session_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		o.id, o.turnID, o.sessionID, nullStr(o.parentOpID), o.seq, o.kind, o.name,
 		nullStr(o.toolNamespace), nullStr(o.model), nullStr(o.provider),
+		nullStr(o.providerAlias), nullStr(o.reasoningKind),
 		o.startTS, endTS, nullInt(o.durationUS), o.status, nullStr(o.errorClass),
 		o.tokensIn, o.tokensOut, o.tokensCacheRead, o.tokensCacheWrite,
-		o.costUSD, nullInt(o.ctxUsed), nullInt(o.ctxMax),
+		o.costUSD, o.bytesIn, o.bytesOut, nullInt(o.charsIn), nullInt(o.charsOut),
+		nullInt(o.ctxUsed), nullInt(o.ctxMax),
 		nullStr(o.childSessionID),
 	); err != nil {
 		t.Fatalf("seed op %s: %v", o.id, err)
@@ -208,6 +239,7 @@ type payloadRow struct {
 	opID                       string
 	kind, format, compression  string
 	locationURI                string
+	sha256                     string
 	originalBytes, storedBytes int64
 }
 
@@ -218,10 +250,17 @@ func seedPayload(t *testing.T, db *sql.DB, p payloadRow) int64 {
 	if p.compression != "" {
 		compression = p.compression
 	}
+	nullStr := func(v string) any {
+		if v == "" {
+			return nil
+		}
+		return v
+	}
 	res, err := db.Exec(`
-INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes, sha256)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.opID, p.kind, p.format, compression, p.locationURI, p.originalBytes, p.storedBytes,
+		nullStr(p.sha256),
 	)
 	if err != nil {
 		t.Fatalf("seed payload for op %s: %v", p.opID, err)
@@ -274,9 +313,12 @@ func seedGraph(t *testing.T, db *sql.DB, base int64) {
 	seedSession(t, db, sessionRow{
 		id: "rootA", sourceID: "src1", nativeID: "nA", rootID: "rootA",
 		kind: "root", agent: "nedi", model: "claude-opus-4-7", provider: "anthropic",
-		status: "completed", startTS: base + 1_000, endTS: base + 9_000,
+		providerAlias: "claude", callPath: "rootA", errorMessage: "root warning",
+		firstUserMessageHash: "hash-root-a",
+		status:               "completed", startTS: base + 1_000, endTS: base + 9_000,
 		tokensIn: 1000, tokensOut: 2000, tokensCacheRead: 3000, tokensCacheWrite: 500, costUSD: 0.30,
 		turnCount: 2, opCount: 4, failureCount: 1,
+		cwd: "/workspace/root-a",
 	})
 	seedSession(t, db, sessionRow{
 		id: "childA1", sourceID: "src1", nativeID: "nC1", parentID: "rootA", rootID: "rootA",
@@ -287,17 +329,19 @@ func seedGraph(t *testing.T, db *sql.DB, base int64) {
 	seedSession(t, db, sessionRow{
 		id: "childA2", sourceID: "src1", nativeID: "nC2", parentID: "rootA", rootID: "rootA",
 		kind: "sub_agent", agent: "worker", model: "gpt-5", provider: "openai",
-		status: "failed", startTS: base + 5_000, endTS: base + 6_000,
+		status: "failed", errorClass: "child_error", startTS: base + 5_000, endTS: base + 6_000,
 		tokensIn: 50, tokensOut: 60, costUSD: 0.01, turnCount: 1, opCount: 1, failureCount: 1,
 	})
 
 	seedTurn(t, db, turnRow{
 		id: "t1", sessionID: "rootA", seq: 1, startTS: base + 1_000, endTS: base + 5_000,
-		status: "completed", tokensIn: 600, tokensOut: 1200, costUSD: 0.18, opCount: 3,
+		status: "completed", tokensIn: 600, tokensOut: 1200, tokensCacheRead: 900,
+		tokensCacheWrite: 90, costUSD: 0.18, opCount: 3,
 	})
 	seedTurn(t, db, turnRow{
 		id: "t2", sessionID: "rootA", seq: 2, startTS: base + 5_000, endTS: base + 9_000,
-		status: "completed", tokensIn: 400, tokensOut: 800, costUSD: 0.12, opCount: 1,
+		status: "completed", errorClass: "io_error", tokensIn: 400, tokensOut: 800,
+		tokensCacheRead: 300, tokensCacheWrite: 30, costUSD: 0.12, opCount: 1,
 	})
 
 	seedGraphOps(t, db, base)
@@ -311,15 +355,18 @@ func seedGraphOps(t *testing.T, db *sql.DB, base int64) {
 	t.Helper()
 	seedOp(t, db, opRow{
 		id: "o1", turnID: "t1", sessionID: "rootA", seq: 1, kind: "llm", name: "claude-opus-4-7",
-		model: "claude-opus-4-7", provider: "anthropic", startTS: base + 1_100, endTS: base + 2_100,
+		model: "claude-opus-4-7", provider: "anthropic", providerAlias: "claude",
+		reasoningKind: "summary", startTS: base + 1_100, endTS: base + 2_100,
 		durationUS: 1_000, status: "completed", tokensIn: 500, tokensOut: 1000,
 		tokensCacheRead: 3000, tokensCacheWrite: 500, costUSD: 0.15,
+		bytesIn: 2048, bytesOut: 4096, charsIn: 1200, charsOut: 2400,
 		ctxUsed: 12000, ctxMax: 200000,
 	})
 	seedOp(t, db, opRow{
 		id: "o2", turnID: "t1", sessionID: "rootA", seq: 2, kind: "tool", name: "Bash",
 		toolNamespace: "shell", startTS: base + 2_200, endTS: base + 2_500, durationUS: 300,
 		status: "completed", tokensIn: 50, tokensOut: 100, costUSD: 0.01,
+		bytesIn: 18, bytesOut: 42, charsIn: 18, charsOut: 42,
 	})
 	seedOp(t, db, opRow{
 		id: "o3", turnID: "t1", sessionID: "rootA", seq: 3, kind: "session", name: "worker",
@@ -340,7 +387,9 @@ func seedGraphPayloadsAndLogs(t *testing.T, db *sql.DB, base int64) {
 	t.Helper()
 	seedPayload(t, db, payloadRow{
 		opID: "o1", kind: "llm_request", format: "http", compression: "gzip",
-		locationURI: "file:///tmp/a/req.gz", originalBytes: 1234, storedBytes: 456,
+		locationURI:   "file:///tmp/a/req.gz",
+		sha256:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		originalBytes: 1234, storedBytes: 456,
 	})
 	seedPayload(t, db, payloadRow{
 		opID: "o1", kind: "llm_response", format: "sse", compression: "gzip",

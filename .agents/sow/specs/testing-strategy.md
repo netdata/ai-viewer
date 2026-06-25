@@ -96,6 +96,26 @@ assistant messages, reasoning, tool output, secrets, or operator identity.
 - SSE: connect a test client, push events, assert delivery order and dedup.
 - Error handling: malformed query → 400 with structured error.
 - Auth: confirm bind defaults to 127.0.0.1 (when applicable).
+- Contract-matrix tests: `testdata/contracts/field-matrix.yaml` is the
+  machine-readable DB/API/TypeScript/UI field contract. The checker self-test
+  proves the clean fixture passes and planted drift fails for missing matrices,
+  empty matrices, duplicate rows, missing required keys, schema enums, missing
+  include tokens, missing internal reasons, exposed-field evidence,
+  token-cache field evidence, unknown TypeScript contract types, payload-kind
+  `artifact_class`, and missing `test_refs`.
+- Include-token tests: shared parser coverage for missing/empty include,
+  comma-separated composition, whitespace trimming, duplicate collapse, unknown
+  token `BAD_REQUEST`, per-endpoint allowlists, and `proof` requiring
+  `payload_refs` except on the dedicated payload-ref endpoint.
+- Presenter contract tests cover sessions list/detail, child summaries, turns,
+  ops, trace, payload refs, payload streaming, sources, health, search,
+  stats/top/aggregate, compare, topology/timeline/related/logs, subscription
+  filters, and parse-error surfaces.
+- Payload streaming tests cover `GET`, `HEAD`, preview caps, headers, gzip
+  source reads, JSON-aware truncation, source-root containment, and structured
+  error codes.
+- Subscription filter tests explicitly reject `cwd`, `provider_alias`,
+  `call_path`, and `error_class`.
 
 ### 5. End-to-end integration tests (Go)
 
@@ -112,6 +132,10 @@ assistant messages, reasoning, tool output, secrets, or operator identity.
 `frontend/`:
 
 - **Vitest + RTL**: every page component has a render test against mocked API responses.
+- Contract tests cover API types and clients for include-token construction,
+  payload streaming metadata, semantic payload lookup by `artifact_class`,
+  SDK labels, reasoning-text rendering, source-unavailable refs, source/health
+  metadata presentation, log `extras`, and proof metadata masking.
 - **Playwright E2E** (`frontend/tests/`): one happy-path scenario per primary page, running against a real backend started by the test harness. Headless by default; `--headed` for debugging.
 
 ## Fixture Management
@@ -251,7 +275,7 @@ per-PR gates.
 
 A benchmark suite covering the performance-critical paths (11 benchmarks across 7 packages): ai-agent v2 adapter `Scan` + `Tail` (`internal/adapters/aiagent_v2/bench_test.go`), claude-code adapter `Scan` + `Tail` (`internal/adapters/claude_code/bench_test.go`), Codex adapter `Scan` + `Tail` (`internal/adapters/codex/bench_test.go`), Opencode adapter `Scan` + `Tail` (`internal/adapters/opencode/bench_test.go`), SQLite batch insert (`internal/ingest`), REST query (`internal/presenter`), SSE fanout (`internal/notify`).
 
-The committed baseline is `bench/baseline.txt` (`-count=6`, with `goos/goarch/pkg/cpu` config lines). `scripts/check-bench.sh` runs `benchstat` against it and fails on a statistically-significant > 20% sec/op regression. It is a **local/workstation gate** — the baseline is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate's self-test, not the regression comparison. Baseline refresh requires an explicit SOW (no auto-update). See `quality-gates.md` §Go — Benchmarks.
+The committed baseline is `bench/baseline.txt` (`go test -p=1 -run=^$ -bench=. -benchmem -count=6 -cpu=1`, with `goos/goarch/pkg/cpu` config lines). `scripts/check-bench.sh` runs `benchstat` against it and fails on a statistically-significant > 20% sec/op regression. The local gate serializes package benchmark binaries with `-p=1`, pins the benchmark CPU list with `-cpu=1`, and fails closed with exit 2 before sampling when real-mode host load is at or above `0.50 * effective_GOMAXPROCS` or when load/CPU preflight evidence is unavailable. It is a **local/workstation gate** — the baseline is not comparable to GitHub-runner hardware, so CI runs only the bench compile-smoke + the gate's self-test, not the regression comparison. Baseline refresh requires an explicit SOW (no auto-update). See `quality-gates.md` §Go — Benchmarks.
 
 ## Local Test Commands
 

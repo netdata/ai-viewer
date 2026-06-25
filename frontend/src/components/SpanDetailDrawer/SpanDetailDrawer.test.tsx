@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'jest-axe';
-import type { OpDetail, TopologyNode } from '../../api/types';
+import type { OpDetail, PayloadRef, TopologyNode } from '../../api/types';
 import { SpanDetailDrawer, type SpanDetail } from './SpanDetailDrawer';
 
 // SpanDetailDrawer is the shared right-side drawer (ui-pages.md §Span detail
@@ -35,11 +35,26 @@ function op(over: Partial<OpDetail>): OpDetail {
     error_class: null,
     tokens_in: 1234,
     tokens_out: 5678,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
     cost_usd: 0.42,
+    bytes_in: 0,
+    bytes_out: 0,
     ctx_used: 1000,
     ctx_max: 200_000,
     child_session_id: null,
     payload_refs: [],
+    ...over,
+  };
+}
+
+function payload(over: Partial<PayloadRef> & { id: number; kind: string; artifact_class: string }): PayloadRef {
+  return {
+    op_id: 'op-1',
+    format: 'text',
+    compression: null,
+    original_bytes: null,
+    stored_bytes: null,
     ...over,
   };
 }
@@ -87,6 +102,7 @@ function nodeDetail(node: Partial<TopologyNode>, metricLabel: string, metricValu
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -153,16 +169,17 @@ describe('SpanDetailDrawer', () => {
       <SpanDetailDrawer
         detail={opDetail({
           payload_refs: [
-            { id: 1, kind: 'llm_request', format: 'http', compression: 'gzip', original_bytes: 2048, stored_bytes: 512 },
-            { id: 2, kind: 'llm_response', format: 'json', compression: null, original_bytes: 4096, stored_bytes: 4096 },
+            payload({ id: 1, kind: 'llm_request', artifact_class: 'llm_request', format: 'http', compression: 'gzip', original_bytes: 2048, stored_bytes: 512 }),
+            payload({ id: 2, kind: 'llm_response', artifact_class: 'llm_response', format: 'json', original_bytes: 4096, stored_bytes: 4096 }),
           ],
         })}
         onClose={vi.fn()}
       />,
     );
     const dialog = screen.getByRole('dialog');
-    expect(within(dialog).getByText('llm_request')).toBeInTheDocument();
-    expect(within(dialog).getByText('llm_response')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('llm_request')).toHaveLength(2);
+    expect(within(dialog).getAllByText('llm_response')).toHaveLength(2);
+    expect(within(dialog).queryByText('llm_sdk_request')).not.toBeInTheDocument();
     // The preview button is enabled (fetches GET /api/payloads/:id on click).
     const previews = within(dialog).getAllByRole('button', { name: /preview/i });
     expect(previews.length).toBeGreaterThan(0);
@@ -171,9 +188,134 @@ describe('SpanDetailDrawer', () => {
     }
   });
 
+  it('renders proof metadata behind an explicit proof action', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      writable: true,
+      value: { writeText },
+    });
+    render(
+      <SpanDetailDrawer
+        detail={opDetail({
+          payload_refs: [
+            payload({
+              id: 3,
+              kind: 'sdk_request',
+              artifact_class: 'llm_sdk_request',
+              format: 'json',
+              original_bytes: 100,
+              stored_bytes: 80,
+              location_uri: 'file:///tmp/proof/sdk-request.json',
+              sha256: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            }),
+          ],
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('llm_sdk_request')).toBeInTheDocument();
+    expect(within(dialog).getByText('file://.../sdk-request.json')).toBeInTheDocument();
+    expect(within(dialog).queryByText('file:///tmp/proof/sdk-request.json')).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: /proof/i }));
+
+    expect(within(dialog).getByText('file:///tmp/proof/sdk-request.json')).toBeInTheDocument();
+    expect(within(dialog).getByText('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: /copy selector/i }));
+    expect(writeText).toHaveBeenCalledWith('file:///tmp/proof/sdk-request.json');
+  });
+
+  it('lazy-loads proof metadata for a selected op', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          refs: [
+            payload({
+              id: 4,
+              op_id: 'op-proof',
+              kind: 'sdk_request',
+              artifact_class: 'llm_sdk_request',
+              format: 'json',
+              original_bytes: 100,
+              stored_bytes: 80,
+              location_uri: 'file:///tmp/proof/lazy-sdk-request.json',
+              sha256: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+            }),
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <SpanDetailDrawer
+        detail={opDetail({ id: 'op-proof', payload_refs: [] })}
+        sessionId="session-proof"
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /load proof/i }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sessions/session-proof/payload_refs?op=op-proof&include=proof',
+      expect.any(Object),
+    );
+    expect(await screen.findByText('file://.../lazy-sdk-request.json')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^proof$/i }));
+    expect(screen.getByText('file:///tmp/proof/lazy-sdk-request.json')).toBeInTheDocument();
+    expect(screen.getByText('dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd')).toBeInTheDocument();
+  });
+
   it('shows an empty-payloads note when the op has no payload_refs (op variant)', () => {
     render(<SpanDetailDrawer detail={opDetail({ payload_refs: [] })} onClose={vi.fn()} />);
     expect(screen.getByText(/no payloads/i)).toBeInTheDocument();
+  });
+
+  it('renders op diagnostics that are exposed by the session-detail contract', () => {
+    render(
+      <SpanDetailDrawer
+        detail={opDetail({
+          kind: 'tool',
+          name: 'exec_command',
+          tool_namespace: 'shell',
+          provider_alias: 'local',
+          reasoning_kind: 'summary',
+          tokens_cache_read: 3000,
+          tokens_cache_write: 500,
+          bytes_in: 2048,
+          bytes_out: 4096,
+          chars_in: 1200,
+          chars_out: 2400,
+        })}
+        onClose={vi.fn()}
+      />,
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Tool namespace')).toBeInTheDocument();
+    expect(within(dialog).getByText('shell')).toBeInTheDocument();
+    expect(within(dialog).getByText('Provider alias')).toBeInTheDocument();
+    expect(within(dialog).getByText('local')).toBeInTheDocument();
+    expect(within(dialog).getByText('Reasoning kind')).toBeInTheDocument();
+    expect(within(dialog).getByText('summary')).toBeInTheDocument();
+    expect(within(dialog).getByText('Cache read')).toBeInTheDocument();
+    expect(within(dialog).getByText('3,000')).toBeInTheDocument();
+    expect(within(dialog).getByText('Cache write')).toBeInTheDocument();
+    expect(within(dialog).getByText('500')).toBeInTheDocument();
+    expect(within(dialog).getByText('Bytes in')).toBeInTheDocument();
+    expect(within(dialog).getByText('2.0 KB')).toBeInTheDocument();
+    expect(within(dialog).getByText('Bytes out')).toBeInTheDocument();
+    expect(within(dialog).getByText('4.0 KB')).toBeInTheDocument();
+    expect(within(dialog).getByText('Chars in')).toBeInTheDocument();
+    expect(within(dialog).getByText('1,200')).toBeInTheDocument();
+    expect(within(dialog).getByText('Chars out')).toBeInTheDocument();
+    expect(within(dialog).getByText('2,400')).toBeInTheDocument();
   });
 
   // ── 'span' variant (Timeline tab) — no fabricated op metrics ────────────────
@@ -412,7 +554,7 @@ describe('SpanDetailDrawer', () => {
       <SpanDetailDrawer
         detail={opDetail({
           payload_refs: [
-            { id: 1, kind: 'llm_request', format: 'http', compression: 'gzip', original_bytes: 2048, stored_bytes: 512 },
+            payload({ id: 1, kind: 'llm_request', artifact_class: 'llm_request', format: 'http', compression: 'gzip', original_bytes: 2048, stored_bytes: 512 }),
           ],
         })}
         onClose={vi.fn()}
@@ -448,7 +590,7 @@ describe('SpanDetailDrawer', () => {
         <SpanDetailDrawer
           detail={opDetail({
             payload_refs: [
-              { id: 42, kind: 'llm_request', format: 'http', compression: null, original_bytes: 100, stored_bytes: 100 },
+              payload({ id: 42, kind: 'llm_request', artifact_class: 'llm_request', format: 'http', original_bytes: 100, stored_bytes: 100 }),
             ],
           })}
           onClose={vi.fn()}
@@ -457,7 +599,7 @@ describe('SpanDetailDrawer', () => {
       const previewBtn = screen.getByRole('button', { name: /preview/i });
       await user.click(previewBtn);
       // The fetch fires with the payload id.
-      expect(mockFetch).toHaveBeenCalledWith('/api/payloads/42');
+      expect(mockFetch.mock.calls[0]?.[0]).toBe('/api/payloads/42');
       // The content renders in a <pre>.
       expect(await screen.findByText(/payload content here/)).toBeInTheDocument();
       // The button is now "Hide".
@@ -487,7 +629,7 @@ describe('SpanDetailDrawer', () => {
         <SpanDetailDrawer
           detail={opDetail({
             payload_refs: [
-              { id: 1, kind: 'llm_request', format: 'http', compression: null, original_bytes: 8192, stored_bytes: 4096 },
+              payload({ id: 1, kind: 'llm_request', artifact_class: 'llm_request', format: 'http', original_bytes: 8192, stored_bytes: 4096 }),
             ],
           })}
           onClose={vi.fn()}
@@ -511,7 +653,7 @@ describe('SpanDetailDrawer', () => {
         <SpanDetailDrawer
           detail={opDetail({
             payload_refs: [
-              { id: 99, kind: 'llm_response', format: 'sse', compression: 'gzip', original_bytes: 10, stored_bytes: 5 },
+              payload({ id: 99, kind: 'llm_response', artifact_class: 'llm_response', format: 'sse', compression: 'gzip', original_bytes: 10, stored_bytes: 5 }),
             ],
           })}
           onClose={vi.fn()}
@@ -532,7 +674,7 @@ describe('SpanDetailDrawer', () => {
         <SpanDetailDrawer
           detail={opDetail({
             payload_refs: [
-              { id: 1, kind: 'llm_request', format: 'http', compression: null, original_bytes: 1, stored_bytes: 1 },
+              payload({ id: 1, kind: 'llm_request', artifact_class: 'llm_request', format: 'http', original_bytes: 1, stored_bytes: 1 }),
             ],
           })}
           onClose={vi.fn()}

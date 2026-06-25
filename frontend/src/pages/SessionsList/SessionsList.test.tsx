@@ -58,6 +58,7 @@ function makeSession(over: Partial<SessionListItem>): SessionListItem {
     kind: 'root',
     agent_name: 'nedi',
     model: 'claude-opus-4-7',
+    provider: 'anthropic',
     status: 'completed',
     start_ts: 1_700_000_000_000_000,
     end_ts: 1_700_000_060_000_000,

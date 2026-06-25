@@ -32,7 +32,7 @@ type opLoc struct {
 // the largest sessions in production carry 1-2 payload_refs per op, which
 // at 7k ops adds ~1 MB of metadata the operator rarely needs upfront
 // (TurnView fetches refs only for the focused op).
-func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string, includeRefs bool) ([]turnDetail, error) {
+func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string, includeRefs bool, includeProof bool) ([]turnDetail, error) {
 	turns, turnIndex, err := p.loadTurns(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string, incl
 		return nil, err
 	}
 	if includeRefs {
-		if err := p.attachPayloadRefs(ctx, sessionID, turns, opIndex); err != nil {
+		if err := p.attachPayloadRefs(ctx, sessionID, turns, opIndex, includeProof); err != nil {
 			return nil, err
 		}
 	}
@@ -60,7 +60,8 @@ func (p *Presenter) loadTurnsWithOps(ctx context.Context, sessionID string, incl
 // slice plus a turn_id → slice-index map for op grouping.
 func (p *Presenter) loadTurns(ctx context.Context, sessionID string) ([]turnDetail, map[string]int, error) {
 	rows, err := p.db.QueryContext(ctx, `
-SELECT id, seq, start_ts, end_ts, status, tokens_in, tokens_out, cost_usd, op_count
+SELECT id, seq, start_ts, end_ts, status, error_class, tokens_in, tokens_out,
+       tokens_cache_read, tokens_cache_write, cost_usd, op_count
 FROM turns WHERE session_id = ? ORDER BY seq ASC, id ASC`, sessionID)
 	if err != nil {
 		return nil, nil, err
@@ -71,16 +72,22 @@ FROM turns WHERE session_id = ? ORDER BY seq ASC, id ASC`, sessionID)
 	index := map[string]int{}
 	for rows.Next() {
 		var (
-			td    turnDetail
-			endTS sql.NullInt64
+			td       turnDetail
+			endTS    sql.NullInt64
+			errClass sql.NullString
 		)
 		if err := rows.Scan(&td.ID, &td.Seq, &td.StartTS, &endTS, &td.Status,
-			&td.TokensIn, &td.TokensOut, &td.CostUSD, &td.OpCount); err != nil {
+			&errClass, &td.TokensIn, &td.TokensOut, &td.TokensCacheRead,
+			&td.TokensCacheWrite, &td.CostUSD, &td.OpCount); err != nil {
 			return nil, nil, err
 		}
 		if endTS.Valid {
 			v := endTS.Int64
 			td.EndTS = &v
+		}
+		if errClass.Valid {
+			v := errClass.String
+			td.ErrorClass = &v
 		}
 		td.Ops = []opDetail{}
 		index[td.ID] = len(turns)
@@ -97,8 +104,11 @@ FROM turns WHERE session_id = ? ORDER BY seq ASC, id ASC`, sessionID)
 func (p *Presenter) loadOps(ctx context.Context, sessionID string, turns []turnDetail, turnIndex map[string]int) (map[string]opLoc, error) {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT id, turn_id, parent_op_id, kind, name, IFNULL(model, ''), IFNULL(provider, ''),
+       tool_namespace, provider_alias, reasoning_kind,
        start_ts, end_ts, duration_us, status, error_class, error_message,
-       tokens_in, tokens_out, cost_usd, ctx_used, ctx_max, child_session_id
+       tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,
+       cost_usd, bytes_in, bytes_out, chars_in, chars_out,
+       ctx_used, ctx_max, child_session_id
 FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 	if err != nil {
 		return nil, err
@@ -111,18 +121,45 @@ FROM ops WHERE session_id = ? ORDER BY turn_id ASC, seq ASC, id ASC`, sessionID)
 			op         opDetail
 			turnID     string
 			parentID   sql.NullString
+			toolNS     sql.NullString
+			alias      sql.NullString
+			reasonKind sql.NullString
 			endTS      sql.NullInt64
 			duration   sql.NullInt64
 			errClass   sql.NullString
 			errMessage sql.NullString
+			charsIn    sql.NullInt64
+			charsOut   sql.NullInt64
 			ctxUsed    sql.NullInt64
 			ctxMax     sql.NullInt64
 			childID    sql.NullString
 		)
 		if err := rows.Scan(&op.ID, &turnID, &parentID, &op.Kind, &op.Name, &op.Model, &op.Provider,
-			&op.StartTS, &endTS, &duration, &op.Status, &errClass, &errMessage,
-			&op.TokensIn, &op.TokensOut, &op.CostUSD, &ctxUsed, &ctxMax, &childID); err != nil {
+			&toolNS, &alias, &reasonKind, &op.StartTS, &endTS, &duration, &op.Status,
+			&errClass, &errMessage, &op.TokensIn, &op.TokensOut,
+			&op.TokensCacheRead, &op.TokensCacheWrite, &op.CostUSD,
+			&op.BytesIn, &op.BytesOut, &charsIn, &charsOut, &ctxUsed, &ctxMax, &childID); err != nil {
 			return nil, err
+		}
+		if toolNS.Valid {
+			v := toolNS.String
+			op.ToolNamespace = &v
+		}
+		if alias.Valid {
+			v := alias.String
+			op.ProviderAlias = &v
+		}
+		if reasonKind.Valid {
+			v := reasonKind.String
+			op.ReasoningKind = &v
+		}
+		if charsIn.Valid {
+			v := charsIn.Int64
+			op.CharsIn = &v
+		}
+		if charsOut.Valid {
+			v := charsOut.Int64
+			op.CharsOut = &v
 		}
 		fillOpNullables(&op, parentID, endTS, duration, errClass, errMessage, ctxUsed, ctxMax, childID)
 		op.PayloadRefs = []payloadRef{}
@@ -180,10 +217,10 @@ func fillOpNullables(op *opDetail, parentID sql.NullString, endTS, duration sql.
 // metadata is surfaced here; the byte-streaming route (GET /api/payloads/<id>,
 // SOW-0033) is registered, but no url is built here (the Trace drawer's Preview
 // button builds it client-side from the ref id — rest-api.md §GET /api/payloads).
-func (p *Presenter) attachPayloadRefs(ctx context.Context, sessionID string, turns []turnDetail, opIndex map[string]opLoc) error {
+func (p *Presenter) attachPayloadRefs(ctx context.Context, sessionID string, turns []turnDetail, opIndex map[string]opLoc, includeProof bool) error {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
-       pr.original_bytes, pr.stored_bytes
+       pr.original_bytes, pr.stored_bytes, pr.location_uri, pr.sha256
 FROM payload_refs pr
 JOIN ops o ON o.id = pr.op_id
 WHERE o.session_id = ?
@@ -199,23 +236,14 @@ ORDER BY pr.op_id ASC, pr.id ASC`, sessionID)
 			compression sql.NullString
 			origBytes   sql.NullInt64
 			storedBytes sql.NullInt64
+			locationURI string
+			sha256      sql.NullString
 		)
 		if err := rows.Scan(&pr.ID, &pr.OpID, &pr.Kind, &pr.Format, &compression,
-			&origBytes, &storedBytes); err != nil {
+			&origBytes, &storedBytes, &locationURI, &sha256); err != nil {
 			return err
 		}
-		if compression.Valid {
-			v := compression.String
-			pr.Compression = &v
-		}
-		if origBytes.Valid {
-			v := origBytes.Int64
-			pr.OriginalBytes = &v
-		}
-		if storedBytes.Valid {
-			v := storedBytes.Int64
-			pr.StoredBytes = &v
-		}
+		applyPayloadRefScalars(&pr, compression, origBytes, storedBytes, locationURI, sha256, includeProof)
 		loc, ok := opIndex[pr.OpID]
 		if !ok {
 			continue

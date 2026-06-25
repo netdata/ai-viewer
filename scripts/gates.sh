@@ -15,7 +15,8 @@
 #                                       govulncheck, plus frontend static checks.
 #   3. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
 #   4. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
-#   5. scripts/spec-drift.sh + its self-test     the 5 spec↔code drift indicators.
+#   5. scripts/test/check-contract-matrix-test.sh + scripts/spec-drift.sh + its self-test
+#                                       the 6 spec↔code drift indicators.
 #   6. scripts/test/check-ingestion-parity-test.sh + scripts/check-ingestion-parity.sh --fixtures
 #                                       deterministic ingestion parity fixture gate.
 #   7. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
@@ -213,7 +214,9 @@ section "scan-secrets" bash scripts/scan-secrets.sh
 # 4. No-AI-attribution scan. Required fail-closed gate.
 section "scan-ai-attribution" bash scripts/scan-ai-attribution.sh
 
-# 5. Spec ↔ code drift. Self-test first, then the detector on the live tree.
+# 5. Spec ↔ code drift. Contract-matrix self-test first, then the full
+#    spec-drift self-test, then the detector on the live tree.
+section "contract-matrix self-test" bash scripts/test/check-contract-matrix-test.sh
 section "spec-drift self-test" bash scripts/test/spec-drift-test.sh
 section "spec-drift" bash scripts/spec-drift.sh
 

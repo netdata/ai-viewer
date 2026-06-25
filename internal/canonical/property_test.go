@@ -787,7 +787,9 @@ func genFullSession(rt *rapid.T) ([]canonical.Event, fullSessionWant) {
 		TurnSeq:         want.turnSeq,
 		OpSeq:           want.opSeq,
 		PayloadKind: rapid.SampledFrom([]string{
-			"llm_request", "llm_response", "tool_request", "tool_response", "log",
+			"llm_request", "llm_response", "llm_sdk_request", "llm_sdk_response",
+			"sdk_request", "sdk_response", "llm_reasoning", "reasoning_stream",
+			"tool_request", "tool_response", "log",
 		}).Draw(rt, "payloadKind"),
 		Format: rapid.SampledFrom([]string{
 			"http", "sse", "json", "jsonrpc", "text", "binary",

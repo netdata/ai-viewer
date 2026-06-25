@@ -84,6 +84,7 @@ export interface SessionListItem {
   kind: SessionKind;
   agent_name: string;
   model: string;
+  provider: string;
   status: SessionStatus;
   /** Operator-facing status (SOW-0089 chunk 5a) — derived from the snapshot
    *  + freshness signals. Prefer this over `status` for any UI decision. */
@@ -194,13 +195,19 @@ export interface SessionDetail {
   agent_name: string;
   model: string;
   provider: string;
+  provider_alias?: string;
+  cwd?: string;
+  call_path?: string;
   status: SessionStatus;
   /** Operator-facing status (SOW-0089 chunk 5a) — derived from the snapshot
    *  + freshness signals. Prefer this over `status` for any UI decision. */
   effective_status?: SessionStatus;
   error_class: string | null;
+  error_message: string | null;
   start_ts: number;
   end_ts: number | null;
+  duration_us?: number;
+  first_user_message_hash?: string;
   /** UNIX µs of the most recent op the session produced. SOW-0087 chunk 5. */
   last_activity_ts?: number | null;
   tokens_in: number;
@@ -234,10 +241,13 @@ export interface PayloadRef {
   id: number;
   op_id?: string;
   kind: string;
+  artifact_class: string;
   format: string;
   compression: string | null;
   original_bytes: number | null;
   stored_bytes: number | null;
+  location_uri?: string;
+  sha256?: string | null;
 }
 
 /** One ops row plus its payload_refs (presenter opDetail). */
@@ -247,6 +257,9 @@ export interface OpDetail {
   name: string;
   model: string;
   provider: string;
+  tool_namespace?: string | null;
+  provider_alias?: string | null;
+  reasoning_kind?: string | null;
   /** Canonical id of the op this op nests under (ops.parent_op_id); null for a
    *  top-level op. The server always emits the key (Go `*string`, no omitempty);
    *  typed optional so existing op literals/fixtures that predate the Trace view
@@ -262,7 +275,13 @@ export interface OpDetail {
   error_message?: string | null;
   tokens_in: number;
   tokens_out: number;
+  tokens_cache_read: number;
+  tokens_cache_write: number;
   cost_usd: number;
+  bytes_in: number;
+  bytes_out: number;
+  chars_in?: number | null;
+  chars_out?: number | null;
   ctx_used: number | null;
   ctx_max: number | null;
   child_session_id: string | null;
@@ -281,8 +300,11 @@ export interface TurnDetail {
   start_ts: number;
   end_ts: number | null;
   status: string;
+  error_class?: string | null;
   tokens_in: number;
   tokens_out: number;
+  tokens_cache_read: number;
+  tokens_cache_write: number;
   cost_usd: number;
   op_count: number;
   ops: OpDetail[];
@@ -295,6 +317,7 @@ export interface ChildSummary {
   kind: SessionKind;
   agent_name: string;
   model: string;
+  provider: string;
   status: SessionStatus;
   error_class?: string;
   start_ts: number;
@@ -728,6 +751,7 @@ export interface SourceItem {
   last_seq: number;
   last_ts_us: number | null;
   updated_at: number | null;
+  meta?: Record<string, unknown>;
 }
 
 export interface SourcesResponse {
@@ -746,6 +770,7 @@ export interface HealthSource {
   lag_us: number;
   parse_errors: number;
   last_seq: number;
+  meta?: Record<string, unknown>;
 }
 
 export interface HealthNotify {

@@ -20,13 +20,11 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 //      fixtures do not capture payloads), so the drawer's Payloads section shows
 //      "No payloads for this op." here. The per-payload metadata ROW path is
 //      covered by SpanDetailDrawer.test.tsx, not exercised live.
-//   2. AC#4 also asks for a "first 4 KB payload preview via /api/payloads/:ref".
-//      That byte-preview is DEFERRED to Phase 2 in the shipped drawer
-//      (SpanDetailDrawer.tsx PayloadRow renders a DISABLED "Preview (coming
-//      soon)" control; the /api/payloads route is not yet registered —
-//      api/types.ts PayloadRef has no url). So the 4 KB preview cannot be
-//      asserted; it is logged as a known gap. The open/close + op-fields path
-//      (the live part of AC#4) is asserted in full.
+//   2. AC#4's first-4-KB payload preview path is live through
+//      /api/payloads/:id, but this deterministic seed carries no payload_refs.
+//      The metadata-row and preview-fetch paths are covered by
+//      SpanDetailDrawer.test.tsx; this E2E keeps the live no-payload fixture
+//      path honest.
 
 /** richestSessionId returns the seeded session with the most ops (most bars). */
 async function richestSessionId(request: APIRequestContext): Promise<string> {
@@ -84,11 +82,10 @@ test.describe('span detail drawer (AC#4)', () => {
       });
     }
     testInfo.annotations.push({
-      type: 'implementation-gap',
+      type: 'fixture',
       description:
-        'AC#4 4 KB byte-preview via /api/payloads/:ref is DEFERRED to Phase 2 ' +
-        '(SpanDetailDrawer renders a disabled "Preview (coming soon)" control; ' +
-        'no /api/payloads route). The open/close + op-fields path is asserted live.',
+        'payload preview route is live, but this E2E seed has no payload_refs; ' +
+        'preview-fetch behavior is covered by SpanDetailDrawer unit tests.',
     });
   });
 

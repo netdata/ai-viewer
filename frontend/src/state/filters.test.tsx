@@ -276,6 +276,22 @@ describe('filtersToSubscription', () => {
     expect(sub).toEqual({ agents: ['a'] });
   });
 
+  it('does not synthesize unsupported subscription dimensions from extra fields', () => {
+    const sub = filtersToSubscription({
+      ...EMPTY,
+      agents: ['nedi'],
+      cwd: '/workspace/project',
+      provider_alias: 'claude',
+      call_path: 'root>child',
+      error_class: 'io_error',
+    } as Filters & Record<string, unknown>);
+    expect(sub).toEqual({ agents: ['nedi'] });
+    expect('cwd' in sub).toBe(false);
+    expect('provider_alias' in sub).toBe(false);
+    expect('call_path' in sub).toBe(false);
+    expect('error_class' in sub).toBe(false);
+  });
+
   it('maps all non-empty structured dimensions, time range, and omits q', () => {
     const sub = filtersToSubscription({
       agents: ['nedi'],

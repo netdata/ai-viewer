@@ -240,12 +240,30 @@ representation that the ingestion parity gate verifies. The gate is defined in
 Rules:
 
 - A canonical payload artifact MUST identify the exact logical source artifact.
+- `PayloadKind` is persisted as the adapter-facing/source-facing value. Adapters
+  do not rewrite source aliases merely to satisfy UI rendering.
 - Payload kind aliases are normalized by the parity extractor:
   `sdk_request -> llm_sdk_request`, `sdk_response -> llm_sdk_response`, and
   `reasoning_stream -> reasoning_text`.
   A URI pointing only to a containing file is insufficient for parity unless a
   line/field/json-pointer selector or equivalent metadata identifies the exact
   fragment.
+- Presenter payload-ref DTOs expose a derived `artifact_class` for UI dispatch:
+
+  | Persisted `PayloadKind` | Derived `artifact_class` |
+  |---|---|
+  | `llm_request` | `llm_request` |
+  | `llm_response` | `llm_response` |
+  | `llm_sdk_request`, `sdk_request` | `llm_sdk_request` |
+  | `llm_sdk_response`, `sdk_response` | `llm_sdk_response` |
+  | `llm_reasoning`, `reasoning_stream` | `reasoning_text` |
+  | `tool_request` | `tool_request` |
+  | `tool_response` | `tool_response` |
+  | `log` | `log` |
+
+  The raw `PayloadKind` remains present for provenance. UI code dispatches
+  payload rendering by `artifact_class` and `PayloadKind`, not by payload array
+  position.
 - Adapter-specific inline transcript selectors may refine the artifact class.
   For claude-code, `llm_response` refs on an LLM op whose JSON pointer matches
   `/message/content/<index>/text` are assistant-message artifacts, and

@@ -138,3 +138,79 @@ func TestPayloadRefs_EmptySessionReturnsEmptyArray(t *testing.T) {
 		t.Errorf("body should contain empty refs array, got %s", rr.Body.String())
 	}
 }
+
+func TestPayloadRefs_RejectsUnknownIncludeToken(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	seedGraph(t, db, seedBase())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/rootA/payload_refs?include=bogus", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPayloadRefs_IncludePayloadRefsTokenOmitsProofMetadata(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	seedGraph(t, db, seedBase())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/rootA/payload_refs?include=payload_refs", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	raw := rr.Body.String()
+	if !strings.Contains(raw, `"artifact_class":"llm_request"`) {
+		t.Fatalf("response missing artifact_class: %s", raw)
+	}
+	for _, forbidden := range []string{`"location_uri"`, `"sha256"`} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("include=payload_refs leaked proof field %s: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestPayloadRefs_IncludeProofAddsProofAndArtifactClass(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+	base := seedBase()
+	seedSource(t, db, "srcProof", "aiagent_v3", "/tmp/proof", base)
+	seedSession(t, db, sessionRow{
+		id: "rootProof", sourceID: "srcProof", nativeID: "nProof", rootID: "rootProof",
+		kind: "root", agent: "nedi", status: "completed", startTS: base,
+		turnCount: 1, opCount: 1,
+	})
+	seedTurn(t, db, turnRow{id: "turnProof", sessionID: "rootProof", seq: 1, startTS: base, status: "completed", opCount: 1})
+	seedOp(t, db, opRow{id: "opProof", turnID: "turnProof", sessionID: "rootProof", seq: 1, kind: "llm", name: "sdk", startTS: base, status: "completed"})
+	location := "file:///tmp/proof/sdk-request.json"
+	sha := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := db.Exec(`INSERT INTO payload_refs (op_id, kind, format, location_uri, original_bytes, stored_bytes, sha256) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"opProof", "sdk_request", "json", location, 120, 120, sha); err != nil {
+		t.Fatalf("seed proof payload_ref: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/rootProof/payload_refs?include=proof", nil)
+	rr := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	raw := rr.Body.String()
+	for _, want := range []string{
+		`"kind":"sdk_request"`,
+		`"artifact_class":"llm_sdk_request"`,
+		`"location_uri":"` + location + `"`,
+		`"sha256":"` + sha + `"`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("response missing %s: %s", want, raw)
+		}
+	}
+}

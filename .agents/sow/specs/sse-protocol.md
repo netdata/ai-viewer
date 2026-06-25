@@ -58,6 +58,12 @@ any value containing an ASCII control character (byte `< 0x20`) is a
 `BAD_REQUEST`. The normalized filter is echoed back as `filter_normalized` on
 the `POST /api/subscriptions` response.
 
+Subscription filters remain index-backed invalidation filters. `cwd`,
+`provider_alias`, `call_path`, and `error_class` are not subscription filter
+dimensions in SOW-0105 and are rejected as unknown fields. SSE event payloads
+stay minimal invalidation frames; clients refetch REST details for any newly
+exposed metadata or proof fields.
+
 ## Event Envelope
 
 Standard SSE format:

@@ -19,6 +19,7 @@ type sessionListItem struct {
 	Kind              string  `json:"kind"`
 	AgentName         string  `json:"agent_name"`
 	Model             string  `json:"model"`
+	Provider          string  `json:"provider"`
 	Status            string  `json:"status"`
 	EffectiveStatus   string  `json:"effective_status"`
 	ErrorClass        string  `json:"error_class"`
@@ -78,7 +79,7 @@ func buildSessionListQuery(f sessionFilter) (string, []any) {
 	query := `
 SELECT
     s.id, s.native_id, s.root_session_id, s.parent_session_id, s.source_id,
-    s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''), s.status,
+    s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''), IFNULL(s.provider, ''), s.status,
     s.start_ts, s.end_ts, s.last_activity_ts,
     s.tokens_in, s.tokens_out, s.cost_usd,
     s.turn_count, s.op_count, s.failure_count,
@@ -159,7 +160,7 @@ func scanSessionListItem(rows *sql.Rows, nowUs int64) (sessionListItem, error) {
 	)
 	if err := rows.Scan(
 		&it.ID, &it.NativeID, &it.RootSessionID, &parent, &it.SourceID,
-		&it.Kind, &it.AgentName, &it.Model, &it.Status,
+		&it.Kind, &it.AgentName, &it.Model, &it.Provider, &it.Status,
 		&it.StartTS, &endTS, &lastActTS, &it.TokensIn, &it.TokensOut, &it.CostUSD,
 		&it.TurnCount, &it.OpCount, &it.FailureCount, &it.ErrorClass, &it.ChildSessionCount,
 	); err != nil {

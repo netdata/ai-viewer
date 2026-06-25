@@ -72,7 +72,10 @@ The home page. After SOW-0079:
 
 (SOW-0077)
 - Header: "Sources"
-- Content: source list with health indicators
+- Content: source list with health indicators.
+- Adapter metadata (`meta`) is typed as part of the source API contract but is
+  not dumped into primary chrome. The page may show safe summary keys and keeps
+  raw metadata collapsed or diagnostic-only.
 
 ### `/agents` — Agents list (SOW-0081)
 
@@ -117,6 +120,24 @@ Same shape as /agents/:name, but filtered to the tool.
 - Tabbed layout: Overview / Trace / Topology / Timeline / Logs / Raw Data.
 - H1 shows the agent name (not just "Session detail").
 - The breadcrumb's parent link lets the operator walk up the sub-session tree without using browser back.
+- Overview/detail surfaces show `provider`, `provider_alias`, masked `cwd`,
+  `call_path`, `duration_us`, `error_message`, child-session `provider`, and
+  child-session `error_class` when present. `first_user_message_hash` is
+  API-only/debug metadata, not primary chrome.
+- Span detail shows op diagnostics (`tool_namespace`, `provider_alias`,
+  `reasoning_kind`, cache-token counters, byte counters, char counters) when
+  present. Payload rows show raw `kind`, derived `artifact_class`,
+  format/compression/byte metadata, and a masked selector hint when proof is
+  available.
+- Span detail and payload inspectors expose full proof metadata (`location_uri`
+  / selector URI, `sha256`) only behind an explicit proof/debug affordance.
+  Primary UI masks path-like values; full path/selector copy is an explicit user
+  action.
+- Trace remains a compact, high-volume surface. It shows the narrow trace fields
+  and optional payload refs, not full model/provider/token/cost/context/proof
+  detail.
+- Logs preserve the default `extras` API contract. UI may keep extras collapsed
+  or diagnostic-only; it must not parse arbitrary extras for primary behavior.
 
 ### `/failures` — Recent failures (SOW-0079, SOW-0083)
 

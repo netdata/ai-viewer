@@ -4,7 +4,7 @@
 # Authoritative gate: .agents/sow/specs/quality-gates.md §"Spec Drift" and the
 # runtime companion .agents/skills/project-quality-gates/SKILL.md §"Spec Drift".
 # Specs are the assistant's durable memory; silent drift corrupts future SOWs.
-# This script lints FIVE structural spec↔code indicators and exits non-zero on
+# This script lints SIX structural spec↔code indicators and exits non-zero on
 # ANY drift, naming the offending indicator + the specific code/spec token so a
 # regression is actionable, not a mystery.
 #
@@ -13,9 +13,9 @@
 # data-model column prose). The code/spec surfaces are line-oriented and regular
 # (route literals, `case "<kind>"` strings, `EventKind = "<value>"` consts, SQL
 # CREATE/ALTER, and `format: "<name>"` discovery structs), so grep/awk is
-# structurally sufficient — no `go/ast` parse is required. (Decision recorded in
-# quality-gates.md §Spec Drift; revisit only if a handler-factory or codegen
-# pattern makes a surface non-regular.)
+# structurally sufficient for those five. The sixth indicator delegates to
+# scripts/check-contract-matrix.sh because field-contract evidence needs Go AST
+# and TypeScript-interface parsing.
 #
 # Self-tested by scripts/test/spec-drift-test.sh, which plants a synthetic
 # mismatch of EACH indicator class in a throwaway repo copy and asserts the
@@ -56,6 +56,8 @@ REST_SPEC="${SPEC_DIR}/rest-api.md"
 SSE_SPEC="${SPEC_DIR}/sse-protocol.md"
 DATA_SPEC="${SPEC_DIR}/data-model.md"
 CANON_SPEC="${SPEC_DIR}/canonical-events.md"
+CONTRACT_MATRIX="testdata/contracts/field-matrix.yaml"
+CONTRACT_MATRIX_SCRIPT="scripts/check-contract-matrix.sh"
 
 # Deferred REST marker vocabulary. A spec-only REST endpoint is exempt only when
 # its own section body contains one of these explicit phrases.
@@ -116,7 +118,7 @@ require_file() {
 #   of its handler is allowed (a viewer must not advertise a route it does not
 #   serve, but the planned contract may be written down).
 normalize_rest_path() {
-  sed -E 's#\{tools,models,agents\}#:catalog#g; s#\{[a-zA-Z_]+\}#:id#g; s#:ref#:id#g'
+  sed -E 's#/api/payloads/$#/api/payloads/:id#g; s#\{tools,models,agents\}#:catalog#g; s#\{[a-zA-Z_]+\}#:id#g; s#:ref#:id#g'
 }
 
 collect_handler_method_tokens() {
@@ -865,6 +867,32 @@ check_adapters() {
   done <<< "$formats"
 }
 
+# --- Indicator (f): DB/API/TypeScript/UI field matrix -----------------------
+#
+# The matrix records current/planned field exposure across DB columns,
+# presenter JSON, TypeScript contracts, UI surfaces, include-token policy,
+# privacy class, index/filter eligibility, test evidence, and payload-kind
+# artifact-class aliases. It is delegated to a small Go checker because the
+# contract needs structured Go tags and TypeScript interface properties.
+check_contract_matrix() {
+  local ind="contract-matrix"
+  require_file "$CONTRACT_MATRIX_SCRIPT" "$ind" || return 0
+  require_file "$CONTRACT_MATRIX" "$ind" || return 0
+
+  local out ec line
+  set +e
+  out="$(bash "$CONTRACT_MATRIX_SCRIPT" 2>&1)"
+  ec=$?
+  set -e
+  if [[ "$ec" -eq 0 ]]; then
+    return 0
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    note_drift "${ind}: ${line}"
+  done <<< "$out"
+}
+
 # --- main -------------------------------------------------------------------
 
 check_rest
@@ -872,6 +900,7 @@ check_sse
 check_data_model
 check_canonical
 check_adapters
+check_contract_matrix
 
 if [[ -n "${drift//[$'\n\t ']/}" ]]; then
   printf >&2 '%s[FAIL]%s spec ↔ code drift detected:\n' "$RED" "$NC"
@@ -880,4 +909,4 @@ if [[ -n "${drift//[$'\n\t ']/}" ]]; then
   exit 1
 fi
 
-printf '%s[PASS]%s no spec ↔ code drift across all 5 indicators (rest, sse, data-model, canonical, adapter-probes).\n' "$GREEN" "$NC"
+printf '%s[PASS]%s no spec ↔ code drift across all 6 indicators (rest, sse, data-model, canonical, adapter-probes, contract-matrix).\n' "$GREEN" "$NC"

@@ -6,7 +6,7 @@
 # gate; a gate that cannot prove it still detects can silently rot. This harness
 # builds a THROWAWAY copy of the repo's relevant code + spec files (the detector
 # resolves its inputs at fixed repo-relative paths, so it must run inside a tree
-# whose contents we control), then for EACH of the five indicator classes plants
+# whose contents we control), then for EACH of the six indicator classes plants
 # synthetic mismatches covering every unidirectional indicator and both sides of
 # every bidirectional indicator, then asserts the detector:
 #
@@ -58,13 +58,35 @@ contains_text() {
 # mux registrations to handler method gates spread across presenter/*.go.
 DETECTOR_INPUTS=(
   "scripts/spec-drift.sh"
+  "scripts/check-contract-matrix.sh"
+  "scripts/lib/check-contract-matrix/main.go"
+  "go.mod"
   "internal/canonical/events.go"
   "cmd/ai-viewer-ingest/sources.go"
+  "frontend/src/api/types.ts"
+  "frontend/src/api/payloads.ts"
+  "frontend/src/viz/trace.ts"
+  "testdata/contracts/field-matrix.yaml"
   ".agents/sow/specs/rest-api.md"
   ".agents/sow/specs/sse-protocol.md"
   ".agents/sow/specs/data-model.md"
   ".agents/sow/specs/canonical-events.md"
 )
+
+matrix_test_refs() {
+  awk -F': ' '
+    /^[[:space:]]+test_refs:/ {
+      v=$2
+      gsub(/^"/, "", v)
+      gsub(/"$/, "", v)
+      n=split(v, parts, ",")
+      for (i=1; i<=n; i++) {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", parts[i])
+        if (parts[i] != "") print parts[i]
+      }
+    }
+  ' "$1" | sort -u
+}
 
 # new_fixture -> prints a fresh throwaway repo-root copy containing the detector
 # inputs (real content) plus the migrations dir and adapter spec files the
@@ -113,7 +135,22 @@ new_fixture() {
   mkdir -p "$dir/internal/store/migrations"
   cp "${migration_files[@]}" "$dir/internal/store/migrations/"
   cp "${adapter_specs[@]}" "$dir/.agents/sow/specs/"
+
+  # The contract-matrix indicator validates that every matrix test_refs path
+  # exists. Touch refs inside the fixture so this self-test isolates drift
+  # detection behavior instead of depending on SOW-in-progress test files.
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    mkdir -p "$dir/$(dirname "$ref")"
+    if [[ -f "$REPO_ROOT/$ref" ]]; then
+      cp "$REPO_ROOT/$ref" "$dir/$ref"
+    else
+      : > "$dir/$ref"
+    fi
+  done < <(matrix_test_refs "$dir/testdata/contracts/field-matrix.yaml")
+
   chmod +x "$dir/scripts/spec-drift.sh"
+  chmod +x "$dir/scripts/check-contract-matrix.sh"
   printf '%s' "$dir"
 }
 
@@ -504,6 +541,58 @@ case_adapter_probe_extractor_empty() {
   assert_drift "$name" "$fix" "no 'format:"
 }
 
+# (f) contract-matrix: plant an invalid matrix enum. The delegated checker must
+#     return a named contract-matrix drift finding through spec-drift.sh.
+case_contract_matrix_invalid_enum() {
+  local name="contract-matrix::invalid_enum"
+  local fix; fix="$(new_fixture)"
+  sed -i '0,/state: "exposed"/s//state: "bogus-state"/' \
+    "$fix/testdata/contracts/field-matrix.yaml"
+  assert_drift "$name" "$fix" "contract-matrix"
+}
+
+# (f') contract-matrix: mark an exposed field that neither the Go presenter DTO
+#      nor TypeScript interface exposes.
+case_contract_matrix_exposed_field_missing() {
+  local name="contract-matrix::exposed_field_missing"
+  local fix; fix="$(new_fixture)"
+  cat >> "$fix/testdata/contracts/field-matrix.yaml" <<'EOF'
+
+  - entity: "session"
+    field: "phantom_provider"
+    entity_kind: "session"
+    db_column: "sessions.provider"
+    derived_from: ""
+    rest_surfaces: "/api/sessions/:id"
+    typescript_types: "SessionDetail"
+    ui_surfaces: "Session detail"
+    state: "exposed"
+    intent: "detail"
+    include_token: ""
+    privacy_class: "public"
+    adapter_population: "broad"
+    index_status: "indexed"
+    stats_dimension_eligible: "eligible"
+    subscription_filter_eligible: "excluded"
+    internal_reason: ""
+    sow_ref: "SOW-0105"
+    pending_ref: ""
+    test_refs: "internal/presenter/session_detail_test.go"
+    artifact_class: ""
+EOF
+  assert_drift "$name" "$fix" "phantom_provider"
+}
+
+# (f'') contract-matrix: remove a payload-kind artifact class. The matrix gate
+#       protects the adapter-facing kind → UI artifact-class mapping.
+case_contract_matrix_artifact_class_missing() {
+  local name="contract-matrix::artifact_class_missing"
+  local fix; fix="$(new_fixture)"
+  sed -i '0,/artifact_class: "llm_request"/s//artifact_class: ""/' \
+    "$fix/testdata/contracts/field-matrix.yaml"
+  assert_drift "$name" "$fix" "artifact_class"
+}
+
 # --- main -------------------------------------------------------------------
 
 main() {
@@ -539,6 +628,9 @@ main() {
   case_adapter_probe_no_spec
   case_adapter_probe_spec_missing_anchor
   case_adapter_probe_extractor_empty
+  case_contract_matrix_invalid_enum
+  case_contract_matrix_exposed_field_missing
+  case_contract_matrix_artifact_class_missing
 
   echo
   printf '%s%d passed%s, %s%d failed%s\n' \

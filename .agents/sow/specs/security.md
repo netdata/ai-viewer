@@ -35,11 +35,11 @@ Out of scope:
 
 ## Payload Serving Safety
 
-**Phase 2 — the payload route is not implemented in Phase 1** (it is not
-registered, and `payload_refs` deliberately carries no `url`). The defenses below
-are the design for when the streaming route lands; they are not yet active code.
+The payload route is implemented as a registered prefix handler. `payload_refs`
+still deliberately carries no client-facing URL; clients build the request from
+the integer ref id.
 
-`GET /api/payloads/:ref` could be a vector if the `ref` is attacker-controlled. Defense:
+`GET /api/payloads/:id` could be a vector if the id is attacker-controlled. Defense:
 
 - Refs are integer IDs from the `payload_refs` table, not arbitrary paths from the URL.
 - The server looks up the `location_uri` from SQLite and validates it starts with `file://` and resolves inside one of the configured source roots before opening.

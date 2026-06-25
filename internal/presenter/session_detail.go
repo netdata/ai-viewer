@@ -29,12 +29,18 @@ type sessionDetail struct {
 	AgentName         string  `json:"agent_name"`
 	Model             string  `json:"model"`
 	Provider          string  `json:"provider"`
+	ProviderAlias     *string `json:"provider_alias,omitempty"`
+	Cwd               *string `json:"cwd,omitempty"`
+	CallPath          *string `json:"call_path,omitempty"`
 	Status            string  `json:"status"`
 	EffectiveStatus   string  `json:"effective_status"`
 	ErrorClass        *string `json:"error_class"`
+	ErrorMessage      *string `json:"error_message"`
 	StartTS           int64   `json:"start_ts"`
 	EndTS             *int64  `json:"end_ts"`
 	LastActivityTS    *int64  `json:"last_activity_ts"`
+	DurationUS        *int64  `json:"duration_us,omitempty"`
+	FirstUserHash     *string `json:"first_user_message_hash,omitempty"`
 	TokensIn          int64   `json:"tokens_in"`
 	TokensOut         int64   `json:"tokens_out"`
 	TokensCacheRead   int64   `json:"tokens_cache_read"`
@@ -48,16 +54,19 @@ type sessionDetail struct {
 
 // turnDetail is one turns row with its ordered ops.
 type turnDetail struct {
-	ID        string     `json:"id"`
-	Seq       int64      `json:"seq"`
-	StartTS   int64      `json:"start_ts"`
-	EndTS     *int64     `json:"end_ts"`
-	Status    string     `json:"status"`
-	TokensIn  int64      `json:"tokens_in"`
-	TokensOut int64      `json:"tokens_out"`
-	CostUSD   float64    `json:"cost_usd"`
-	OpCount   int64      `json:"op_count"`
-	Ops       []opDetail `json:"ops"`
+	ID               string     `json:"id"`
+	Seq              int64      `json:"seq"`
+	StartTS          int64      `json:"start_ts"`
+	EndTS            *int64     `json:"end_ts"`
+	Status           string     `json:"status"`
+	ErrorClass       *string    `json:"error_class,omitempty"`
+	TokensIn         int64      `json:"tokens_in"`
+	TokensOut        int64      `json:"tokens_out"`
+	TokensCacheRead  int64      `json:"tokens_cache_read"`
+	TokensCacheWrite int64      `json:"tokens_cache_write"`
+	CostUSD          float64    `json:"cost_usd"`
+	OpCount          int64      `json:"op_count"`
+	Ops              []opDetail `json:"ops"`
 }
 
 // opDetail is one ops row plus its payload_refs. ParentOpID is the canonical
@@ -65,25 +74,34 @@ type turnDetail struct {
 // op. The Trace view uses it to rebuild the authoritative span tree from the
 // stored parentage the ingest writer records (rest-api.md §GET /api/sessions/:id).
 type opDetail struct {
-	ID             string       `json:"id"`
-	Kind           string       `json:"kind"`
-	Name           string       `json:"name"`
-	Model          string       `json:"model"`
-	Provider       string       `json:"provider"`
-	ParentOpID     *string      `json:"parent_op_id"`
-	StartTS        int64        `json:"start_ts"`
-	EndTS          *int64       `json:"end_ts"`
-	DurationUS     *int64       `json:"duration_us"`
-	Status         string       `json:"status"`
-	ErrorClass     *string      `json:"error_class"`
-	ErrorMessage   *string      `json:"error_message"`
-	TokensIn       int64        `json:"tokens_in"`
-	TokensOut      int64        `json:"tokens_out"`
-	CostUSD        float64      `json:"cost_usd"`
-	CtxUsed        *int64       `json:"ctx_used"`
-	CtxMax         *int64       `json:"ctx_max"`
-	ChildSessionID *string      `json:"child_session_id"`
-	PayloadRefs    []payloadRef `json:"payload_refs,omitempty"`
+	ID               string       `json:"id"`
+	Kind             string       `json:"kind"`
+	Name             string       `json:"name"`
+	Model            string       `json:"model"`
+	Provider         string       `json:"provider"`
+	ToolNamespace    *string      `json:"tool_namespace,omitempty"`
+	ProviderAlias    *string      `json:"provider_alias,omitempty"`
+	ReasoningKind    *string      `json:"reasoning_kind,omitempty"`
+	ParentOpID       *string      `json:"parent_op_id"`
+	StartTS          int64        `json:"start_ts"`
+	EndTS            *int64       `json:"end_ts"`
+	DurationUS       *int64       `json:"duration_us"`
+	Status           string       `json:"status"`
+	ErrorClass       *string      `json:"error_class"`
+	ErrorMessage     *string      `json:"error_message"`
+	TokensIn         int64        `json:"tokens_in"`
+	TokensOut        int64        `json:"tokens_out"`
+	TokensCacheRead  int64        `json:"tokens_cache_read"`
+	TokensCacheWrite int64        `json:"tokens_cache_write"`
+	CostUSD          float64      `json:"cost_usd"`
+	BytesIn          int64        `json:"bytes_in"`
+	BytesOut         int64        `json:"bytes_out"`
+	CharsIn          *int64       `json:"chars_in,omitempty"`
+	CharsOut         *int64       `json:"chars_out,omitempty"`
+	CtxUsed          *int64       `json:"ctx_used"`
+	CtxMax           *int64       `json:"ctx_max"`
+	ChildSessionID   *string      `json:"child_session_id"`
+	PayloadRefs      []payloadRef `json:"payload_refs,omitempty"`
 }
 
 // payloadRef is one payload_refs row. The byte-streaming route
@@ -94,10 +112,13 @@ type payloadRef struct {
 	ID            int64   `json:"id"`
 	OpID          string  `json:"op_id"`
 	Kind          string  `json:"kind"`
+	ArtifactClass string  `json:"artifact_class"`
 	Format        string  `json:"format"`
 	Compression   *string `json:"compression"`
 	OriginalBytes *int64  `json:"original_bytes"`
 	StoredBytes   *int64  `json:"stored_bytes"`
+	LocationURI   *string `json:"location_uri,omitempty"`
+	SHA256        *string `json:"sha256,omitempty"`
 }
 
 // childSummary is one node in the child_sessions tree. SOW-0069: child_sessions
@@ -110,7 +131,9 @@ type childSummary struct {
 	Kind         string         `json:"kind"`
 	AgentName    string         `json:"agent_name"`
 	Model        string         `json:"model"`
+	Provider     string         `json:"provider"`
 	Status       string         `json:"status"`
+	ErrorClass   *string        `json:"error_class,omitempty"`
 	StartTS      int64          `json:"start_ts"`
 	EndTS        *int64         `json:"end_ts"`
 	TokensIn     int64          `json:"tokens_in"`
@@ -144,15 +167,17 @@ func (p *Presenter) handleSessionDetail(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := withQueryTimeout(r.Context())
 	defer cancel()
 
-	// payload_refs add ~30% to the response size on a typical session and
-	// require a separate query. The operator-facing pages that consume this
-	// endpoint (TurnView + UnifiedView's right sidebar) fetch per-op
-	// payloads lazily via /api/payloads/:id — they do NOT need the
-	// payload_refs metadata up front. Default off; opt in via
-	// ?include=payload_refs for callers that need the ref list.
-	includeRefs := r.URL.Query().Get("include") == "payload_refs"
+	includes, err := parseIncludeOptions(r.URL.Query().Get("include"), includeAllow("payload_refs", "proof"))
+	if err != nil {
+		p.writeBadFilter(w, r, err)
+		return
+	}
+	if err := requireProofPayloadRefs(includes); err != nil {
+		p.writeBadFilter(w, r, err)
+		return
+	}
 
-	resp, op, err := p.loadSessionDetailResponse(ctx, id, includeRefs)
+	resp, op, err := p.loadSessionDetailResponse(ctx, id, includes.PayloadRefs, includes.Proof)
 	if isNoRows(err) {
 		writeJSONError(w, r, p.logger, http.StatusNotFound,
 			CodeNotFound, "session not found", map[string]any{"id": id})
@@ -171,7 +196,7 @@ func (p *Presenter) writeSessionMethodNotAllowed(w http.ResponseWriter, r *http.
 		CodeMethodNotAllowed, "method not allowed", map[string]any{"method": r.Method})
 }
 
-func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string, includeRefs bool) (sessionDetailResponse, string, error) {
+func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string, includeRefs bool, includeProof bool) (sessionDetailResponse, string, error) {
 	// Fan out the 3 sub-queries in parallel on the 8-connection reader
 	// pool. The dominant query is loadTurnsWithOps (turns + ops can be
 	// ~600ms on a 7k-op session), so running loadSession + loadChildTree
@@ -199,7 +224,7 @@ func (p *Presenter) loadSessionDetailResponse(ctx context.Context, id string, in
 	}()
 	go func() {
 		defer wg.Done()
-		tr.turns, tr.err = p.loadTurnsWithOps(ctx, id, includeRefs)
+		tr.turns, tr.err = p.loadTurnsWithOps(ctx, id, includeRefs, includeProof)
 	}()
 	go func() {
 		defer wg.Done()
@@ -228,23 +253,30 @@ func (p *Presenter) loadSession(ctx context.Context, id string) (sessionDetail, 
 	var (
 		s         sessionDetail
 		parent    sql.NullString
+		alias     sql.NullString
+		cwd       sql.NullString
+		callPath  sql.NullString
 		errClass  sql.NullString
+		errMsg    sql.NullString
 		endTS     sql.NullInt64
 		lastActTS sql.NullInt64
+		duration  sql.NullInt64
+		firstHash sql.NullString
 	)
 	err := p.db.QueryRowContext(ctx, `
 SELECT
     id, native_id, root_session_id, parent_session_id, source_id, kind,
     IFNULL(agent_name, ''), IFNULL(model, ''), IFNULL(provider, ''),
-    status, error_class, start_ts, end_ts, last_activity_ts,
+    provider_alias, cwd, call_path,
+    status, error_class, error_message, start_ts, end_ts, last_activity_ts, duration_us, first_user_message_hash,
     tokens_in, tokens_out,
     tokens_cache_read, tokens_cache_write, cost_usd,
     turn_count, op_count, failure_count,
     (SELECT COUNT(*) FROM sessions c WHERE c.parent_session_id = sessions.id)
 FROM sessions WHERE id = ?`, id).Scan(
 		&s.ID, &s.NativeID, &s.RootSessionID, &parent, &s.SourceID, &s.Kind,
-		&s.AgentName, &s.Model, &s.Provider, &s.Status, &errClass,
-		&s.StartTS, &endTS, &lastActTS, &s.TokensIn, &s.TokensOut,
+		&s.AgentName, &s.Model, &s.Provider, &alias, &cwd, &callPath, &s.Status, &errClass, &errMsg,
+		&s.StartTS, &endTS, &lastActTS, &duration, &firstHash, &s.TokensIn, &s.TokensOut,
 		&s.TokensCacheRead, &s.TokensCacheWrite, &s.CostUSD,
 		&s.TurnCount, &s.OpCount, &s.FailureCount, &s.ChildSessionCount,
 	)
@@ -259,6 +291,22 @@ FROM sessions WHERE id = ?`, id).Scan(
 		v := errClass.String
 		s.ErrorClass = &v
 	}
+	if errMsg.Valid {
+		v := errMsg.String
+		s.ErrorMessage = &v
+	}
+	if alias.Valid {
+		v := alias.String
+		s.ProviderAlias = &v
+	}
+	if cwd.Valid {
+		v := cwd.String
+		s.Cwd = &v
+	}
+	if callPath.Valid {
+		v := callPath.String
+		s.CallPath = &v
+	}
 	if endTS.Valid {
 		v := endTS.Int64
 		s.EndTS = &v
@@ -266,6 +314,14 @@ FROM sessions WHERE id = ?`, id).Scan(
 	if lastActTS.Valid {
 		v := lastActTS.Int64
 		s.LastActivityTS = &v
+	}
+	if duration.Valid {
+		v := duration.Int64
+		s.DurationUS = &v
+	}
+	if firstHash.Valid {
+		v := firstHash.String
+		s.FirstUserHash = &v
 	}
 	// SOW-0089 chunk 5a: derive the operator-facing status from the snapshot
 	// + freshness signals. Done on every read so a session that the watcher
@@ -339,7 +395,7 @@ WITH RECURSIVE descendants(id, parent, depth) AS (
     WHERE d.depth < ?
 )
 SELECT s.id, s.native_id, s.kind, IFNULL(s.agent_name, ''), IFNULL(s.model, ''),
-       s.status, s.start_ts, s.end_ts, s.tokens_in, s.tokens_out, s.cost_usd,
+       IFNULL(s.provider, ''), s.status, s.error_class, s.start_ts, s.end_ts, s.tokens_in, s.tokens_out, s.cost_usd,
        s.op_count, s.failure_count,
        (SELECT parent FROM descendants WHERE id = s.id) AS parent
 FROM sessions s
@@ -360,14 +416,19 @@ ORDER BY s.start_ts ASC, s.id ASC`, id, childTreeMaxDepth)
 	var order []string // preserve first-seen (start_ts) order for stable child lists
 	for rows.Next() {
 		var (
-			c      childSummary
-			endTS  sql.NullInt64
-			parent string
+			c        childSummary
+			endTS    sql.NullInt64
+			errClass sql.NullString
+			parent   string
 		)
 		if err := rows.Scan(&c.ID, &c.NativeID, &c.Kind, &c.AgentName, &c.Model,
-			&c.Status, &c.StartTS, &endTS, &c.TokensIn, &c.TokensOut, &c.CostUSD,
+			&c.Provider, &c.Status, &errClass, &c.StartTS, &endTS, &c.TokensIn, &c.TokensOut, &c.CostUSD,
 			&c.OpCount, &c.FailureCount, &parent); err != nil {
 			return nil, err
+		}
+		if errClass.Valid {
+			v := errClass.String
+			c.ErrorClass = &v
 		}
 		if endTS.Valid {
 			v := endTS.Int64

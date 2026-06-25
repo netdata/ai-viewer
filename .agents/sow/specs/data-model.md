@@ -130,7 +130,13 @@ CREATE INDEX idx_sessions_tokens ON sessions((tokens_in + tokens_out) DESC, id A
 Notes:
 
 - `status` is an explicit 5-value enum. `running` covers in-flight AND sessions from sources without a per-session terminal signal (claude-code, codex). The UI uses `last_activity_ts` to render "stale running" sessions distinctly from active ones.
-- `cwd`, `provider_alias`, and `call_path` are promoted to first-class columns because at least one adapter populates them today AND they drive a filter or grouping path in the UI. Extras_json holds the long tail (finalReport, pluginMetas, claude-code title, codex sandbox policy, etc.).
+- `cwd`, `provider_alias`, and `call_path` are promoted to first-class columns
+  because at least one adapter populates them today and the UI needs them as
+  typed metadata. They are not all equivalent query dimensions: `cwd` is indexed
+  and already participates in stats rollups; `provider_alias` and `call_path`
+  are detail/debug fields until a future SOW adds index/query-cost support for
+  list filters or group-by dimensions. Extras_json holds the long tail
+  (finalReport, pluginMetas, claude-code title, codex sandbox policy, etc.).
 
 ### turns
 
@@ -277,6 +283,14 @@ For any source-available payload artifact:
   claude-code, `llm_response` plus `/message/content/<index>/text` is an
   `assistant_message`, and an internal `user_input` op's `tool_request` plus
   `/message/content` is a `user_prompt`.
+- Presenter payload-ref DTOs add a derived `artifact_class` while preserving the
+  raw `kind`. The derived class is used by the UI and contract matrix:
+  `llm_request`, `llm_response`, `llm_sdk_request`, `llm_sdk_response`,
+  `reasoning_text`, `tool_request`, `tool_response`, or `log`.
+- `location_uri` and selector-like values are path-sensitive proof metadata.
+  They are exposed only through proof/debug contracts, never list defaults. UI
+  primary surfaces must mask them; full values are available only through an
+  explicit proof/debug copy action.
 - `original_bytes` MUST be the byte length of the logical payload when bytes are
   recoverable. `-1` or NULL is allowed only when the adapter spec documents why
   the source format cannot provide or reconstruct the logical payload length.
@@ -286,6 +300,24 @@ For any source-available payload artifact:
   an unresolvable payload is a failure.
 - A row that points at a containing transcript with no exact line/field selector
   is `unverifiable` for parity, even if the UI can preview the file.
+
+#### Field exposure intent
+
+The canonical DB is wider than the REST/UI contracts. Presenter contracts choose
+fields by endpoint intent, privacy, and index support:
+
+- Session list defaults stay compact. `provider` is list-safe; `cwd`,
+  `provider_alias`, `call_path`, `duration_us`, cache tokens,
+  `first_user_message_hash`, and `extras_json` are detail/API/debug fields unless
+  a future SOW adds a specific indexed list or grouping contract.
+- `first_user_message_hash` is hash-linkable metadata. It may appear in API-only
+  detail/proof contexts, but it is not primary UI chrome.
+- `extras_json` on sessions, turns, and ops is internal by default. Known safe
+  keys may be lifted into typed DTO fields. Source metadata, health metadata,
+  and log `extras` keep their documented endpoint contracts.
+- A field used as a REST list filter or stats/subscription grouping dimension
+  must be backed by an index, partial index, or rollup table recorded in the
+  field matrix.
 
 The DB remains a derived artifact. If a payload proof bug is fixed, deleting and
 re-ingesting the DB is an acceptable repair path.

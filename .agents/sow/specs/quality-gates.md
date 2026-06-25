@@ -105,11 +105,11 @@ The runtime companion to this spec is `.agents/skills/project-quality-gates/SKIL
 ### Go — Benchmarks
 
 - Marked benchmarks for the 11 performance-critical paths: ai-agent v2 adapter `Scan` + adapter `Tail` (`internal/adapters/aiagent_v2`), claude-code adapter `Scan` + adapter `Tail` (`internal/adapters/claude_code`), Codex adapter `Scan` + adapter `Tail` (`internal/adapters/codex`), Opencode adapter `Scan` + adapter `Tail` (`internal/adapters/opencode`), SQLite batch insert (`internal/ingest` `worker.flush`), REST query path (`internal/presenter` `handleSessionsList`), SSE fanout (`internal/notify` `Hub.Deliver`). There is **no canonical encode/decode** benchmark — canonical events are constructed directly by adapters and never serialized (`internal/canonical` has no encoders/decoders).
-- `scripts/check-bench.sh` runs `go test -run=^$ -bench=. -benchmem -count=6 -cpu=1` over the 7 benchmark packages (11 benchmarks; adapter `Scan` + `Tail` share `aiagent_v2`, claude-code adapter `Scan` + `Tail` share `claude_code`, Codex adapter `Scan` + `Tail` share `codex`, and Opencode adapter `Scan` + `Tail` share `opencode`) and compares to `bench/baseline.txt` via `benchstat` (`-count=6` is benchstat's minimum for a 0.95 confidence interval). The baselined benchmarks are serial hot-path checks, so the gate pins Go's benchmark CPU list to `1` instead of inheriting workstation-wide `GOMAXPROCS` scheduler noise.
+- `scripts/check-bench.sh` runs `go test -p=1 -run=^$ -bench=. -benchmem -count=6 -cpu=1` over the 7 benchmark packages (11 benchmarks; adapter `Scan` + `Tail` share `aiagent_v2`, claude-code adapter `Scan` + `Tail` share `claude_code`, Codex adapter `Scan` + `Tail` share `codex`, and Opencode adapter `Scan` + `Tail` share `opencode`) and compares to `bench/baseline.txt` via `benchstat` (`-count=6` is benchstat's minimum for a 0.95 confidence interval). The baselined benchmarks are serial hot-path checks: `-cpu=1` pins the benchmark binary's Go benchmark CPU list, and `-p=1` serializes package benchmark binaries so the gate does not create cross-package contention.
 - Threshold: a **statistically-significant > 20% sec/op regression for any individual benchmark** fails the gate. In real local/workstation mode, the **same benchmark name** must regress on a second benchmark run before the gate exits red; a first-run-only regression, or disjoint first/second-attempt regression sets, is reported as a local-noise warning and the gate exits green. The retry does not widen the threshold, skip the benchmark suite, or refresh the baseline: both attempts use the same `bench/baseline.txt`, `-count=6`, `-cpu=1`, and `benchstat` parser. Compare-file mode (`scripts/check-bench.sh BASE CURRENT`) remains single-pass and fails immediately, so the hardware-independent self-test can prove a real >20% `sec/op` regression still exits non-zero. Only **sec/op** is gated — the custom `ReportMetric` values (B/s, events/sec, peak_heap_mb, …) are informational (peak_heap_mb is benchtime-sensitive), and the per-block `geomean` aggregate is excluded (a noisy benchmark moves it without any single benchmark significantly regressing). Self-tested by `scripts/test/check-bench-test.sh`.
-- Fail-closed cases: missing, empty, or benchmarkless baseline, missing or empty current output, failed benchmark command, failed `benchstat`, a dropped/renamed baseline benchmark, or disjoint benchmark config groups all exit non-zero. `scripts/test/check-bench-test.sh` must dynamically exercise compare-file parser behavior and real-mode retry/error behavior with hermetic fakes, including disjoint first/second-attempt regression sets, without running the expensive benchmark suite.
+- Fail-closed cases: missing, empty, or benchmarkless baseline, missing or empty current output, failed benchmark command, failed `benchstat`, a dropped/renamed baseline benchmark, disjoint benchmark config groups, unreadable/malformed loadavg source, unavailable effective `GOMAXPROCS`, or a real-mode host 1-minute load at or above `0.50 * effective_GOMAXPROCS` all exit non-zero. Busy-host and unavailable-preflight cases exit 2 before collecting samples, because they cannot provide valid workstation wall-time evidence. `scripts/test/check-bench-test.sh` must dynamically exercise compare-file parser behavior and real-mode retry/error behavior with hermetic fakes, including disjoint first/second-attempt regression sets and busy-host preflight paths, without running the expensive benchmark suite.
 - Gated benchmarks must measure the intended hot path without helper-goroutine scheduler noise in the timed region. If the production path is serial (for example SSE `Hub.Deliver` fanout), the benchmark fixture uses deterministic buffering/pre-seeding instead of background helper goroutines to keep the fast path open; otherwise the local workstation gate can fail on unchanged code under ordinary desktop/VM load. Very small serial hot-path benchmarks may amortize a deterministic fixed batch inside each benchmark operation when a single call is too small to be a stable local `sec/op` signal; they still report the per-hot-path-unit metric (for example deliveries/sec) so the underlying operation remains visible.
-- Real benchmark runs print compact diagnostic context before measuring: Go version, effective `GOMAXPROCS`, benchmark `-cpu` setting, package list, baseline path, temporary current path, and `/proc/loadavg` values when available. These diagnostics do not change pass/fail status; they make a red local benchmark gate auditable without exposing process command lines or sensitive data.
+- Real benchmark runs print compact diagnostic context before measuring: Go version, effective `GOMAXPROCS`, benchmark `-cpu` setting, package parallelism `-p`, busy-host threshold, package list, baseline path, temporary current path, and load averages when available. A real-mode benchmark attempt first validates the host load against the configured workstation limit; above-threshold, exact-threshold, unavailable loadavg, or unavailable effective-CPU evidence exits 2 with an actionable diagnostic and no process command lines. These diagnostics make local benchmark gates auditable without exposing process command lines or sensitive data.
 - **`check-bench.sh` is a local/workstation gate**, not a CI gate: `bench/baseline.txt` is workstation-measured and is not comparable to GitHub-runner hardware. CI keeps the bench compile-smoke (`-benchtime=1x`, artifact-uploaded for trend) and runs the hardware-independent gate self-test; a runner-baselined CI regression gate is a deferred follow-up. `bench/baseline.txt` carries benchmark-code provenance (an implementing commit SHA when the benchmark code predates the baseline, or a same-commit `git blame` note when benchmark code and baseline land together), the exact benchmark command, and the `goos/goarch/pkg/cpu` config lines (benchstat groups by config — baseline and current must share them). Baseline refresh requires an explicit SOW (no auto-update); SOW-0058 refreshes the workstation baseline for the `-cpu=1` serial-hot-path contract.
 - CI's `Require benchmarks` compile-smoke presence check extracts required
   benchmark names from `bench/baseline.txt` and implemented benchmark names from
@@ -320,15 +320,17 @@ local or CI logs.
 
 ### Spec Drift
 
-`scripts/spec-drift.sh` lints five spec↔code drift indicators and **exits
+`scripts/spec-drift.sh` lints six spec↔code drift indicators and **exits
 non-zero on any drift, naming the offending indicator + the specific
 code/spec token**. Each indicator is **bidirectional** (code-not-in-spec AND
 spec-not-in-code) except where an intentional one-direction exemption is
-documented below. It is grep/awk-based (the code and spec surfaces are
-line-oriented and regular — route literals, `case "<kind>"` strings,
-`EventKind = "<value>"` consts, SQL `CREATE TABLE`/`ALTER … ADD COLUMN`, and
-`format: "<name>"` discovery structs; no `go/ast` parse is required). The five
-indicators and their authoritative code/spec locations:
+documented below. The original structural indicators are grep/awk-based because
+their code/spec surfaces are line-oriented and regular — route literals,
+`case "<kind>"` strings, `EventKind = "<value>"` consts, SQL
+`CREATE TABLE`/`ALTER … ADD COLUMN`, and `format: "<name>"` discovery structs.
+The contract-matrix indicator uses a small Go helper for Go AST extraction plus
+a restricted TypeScript interface parser. The six indicators and their
+authoritative code/spec locations:
 
 - **REST endpoints** — `mux.HandleFunc("/api/…", p.<handler>)` registrations in
   `internal/presenter/presenter.go`, plus each handler's `r.Method` guard in the
@@ -341,7 +343,7 @@ indicators and their authoritative code/spec locations:
   single-value `:ref` ↔ `:id`, `{tools,models,agents}` ↔ the catalog group).
   **One-direction exemption:** a spec-only endpoint whose section is explicitly
   marked **not registered / Phase 2 / not implemented** (today
-  `GET /api/catalog/{…}` and `GET /api/payloads/:ref`) is NOT drift — a viewer
+  `GET /api/catalog/{…}`) is NOT drift — a viewer
   must not advertise a route it does not serve, so documenting a future route
   ahead of its handler is allowed. Every *registered* route+verb pair MUST be
   documented (code→spec is unconditional).
@@ -376,6 +378,18 @@ indicators and their authoritative code/spec locations:
   mentioning the adapter's default probe path. Format→spec-file name maps
   underscore→hyphen (`aiagent_v3` → `adapter-aiagent-v3.md`, `claude-code` →
   `adapter-claude-code.md`).
+- **Contract matrix** — `testdata/contracts/field-matrix.yaml` is the
+  machine-readable DB/API/TypeScript/UI field contract. The checker validates
+  required keys, closed enums, duplicate rows, include-token requirements,
+  `internal_reason` requirements, Go presenter JSON-tag evidence for exposed
+  REST fields, TypeScript contract type existence and field evidence for
+  exposed frontend fields, and `test_refs` for UI/non-JSON contracts. Go
+  evidence is extracted from `internal/presenter/*.go` with `go/parser` /
+  `go/ast`; TypeScript evidence is extracted from flat exported interfaces in
+  the contract-bearing files `frontend/src/api/types.ts`,
+  `frontend/src/api/payloads.ts`, and `frontend/src/viz/trace.ts` with a
+  restricted parser that fails closed if the API type surface moves to
+  unsupported constructs without upgrading the gate.
 
 - **Fail-closed in CI.** The `gates` job fails if `scripts/spec-drift.sh` or
   `scripts/test/spec-drift-test.sh` is absent, then runs the self-test **before**
@@ -385,11 +399,11 @@ indicators and their authoritative code/spec locations:
   a throwaway copy of the repo. It covers every one-direction indicator and both
   sides of each bidirectional indicator (REST path and REST method, SSE,
   data-model table names and table-scoped column pairs, canonical event kinds,
-  adapter probe files/anchors), then asserts the clean copy exits 0 — so the
-  detector itself cannot silently rot. Fixture creation is fail-closed: if
-  required migration SQL or adapter spec inputs are absent, the self-test fails
-  instead of building a vacuous copy. (Mirrors the `scan-secrets`/coverage gate
-  self-test discipline.)
+  adapter probe files/anchors, and contract-matrix mismatches), then asserts the
+  clean copy exits 0 — so the detector itself cannot silently rot. Fixture
+  creation is fail-closed: if required migration SQL, adapter spec inputs, or
+  contract-matrix inputs are absent, the self-test fails instead of building a
+  vacuous copy. (Mirrors the `scan-secrets`/coverage gate self-test discipline.)
 - **Threshold:** zero drift. Exit 0 must come from genuine spec↔code agreement,
   never from weakening an indicator. Real drift found on the live tree is
   reported and adjudicated (fix the spec or the code), not masked.

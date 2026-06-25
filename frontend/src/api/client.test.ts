@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, buildQuery, del, get, head, post, request } from './client';
+import {
+  ApiError,
+  buildIncludeQuery,
+  buildQuery,
+  del,
+  get,
+  head,
+  post,
+  request,
+} from './client';
 
 // client.ts is the typed fetch wrapper. These tests mock global fetch to verify
 // success decoding, the structured error-envelope mapping, the 204 path, the
@@ -191,5 +200,17 @@ describe('buildQuery', () => {
 
   it('stringifies number scalars', () => {
     expect(buildQuery({ from: 0 })).toBe('?from=0');
+  });
+});
+
+describe('buildIncludeQuery', () => {
+  it('deduplicates include tokens while preserving canonical order', () => {
+    expect(buildIncludeQuery(['proof', 'payload_refs', 'proof'])).toBe(
+      '?include=payload_refs%2Cproof',
+    );
+  });
+
+  it('omits include when no token is set', () => {
+    expect(buildIncludeQuery([])).toBe('');
   });
 });

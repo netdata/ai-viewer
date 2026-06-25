@@ -343,7 +343,8 @@ type PayloadRefEvent struct {
 	TurnSeq         int
 	OpSeq           int
 	// PayloadKind is one of: 'llm_request' | 'llm_response' |
-	// 'llm_sdk_request' | 'llm_sdk_response' | 'llm_reasoning' |
+	// 'llm_sdk_request' | 'llm_sdk_response' | 'sdk_request' |
+	// 'sdk_response' | 'llm_reasoning' | 'reasoning_stream' |
 	// 'tool_request' | 'tool_response' | 'log'.
 	PayloadKind string
 	// Format is one of: 'http' | 'sse' | 'json' | 'jsonrpc' | 'text' | 'binary'.

@@ -60,8 +60,13 @@ func (p *Presenter) handleSessionPayloadRefs(w http.ResponseWriter, r *http.Requ
 			"bad_request", "specify at most one of ?op or ?turn", nil)
 		return
 	}
+	includes, err := parseIncludeOptions(q.Get("include"), includeAllow("payload_refs", "proof"))
+	if err != nil {
+		p.writeBadFilter(w, r, err)
+		return
+	}
 
-	refs, err := p.loadPayloadRefs(ctx, id, opID, turnID)
+	refs, err := p.loadPayloadRefs(ctx, id, opID, turnID, includes.Proof)
 	if err != nil {
 		p.writeDBError(ctx, w, r, "session.payload_refs", err)
 		return
@@ -75,7 +80,7 @@ func (p *Presenter) handleSessionPayloadRefs(w http.ResponseWriter, r *http.Requ
 // loadPayloadRefs fetches the payload_refs rows for a session, optionally
 // scoped to a single op or turn. Always non-nil (empty slice when no
 // matches, marshalled as `[]` not null).
-func (p *Presenter) loadPayloadRefs(ctx context.Context, sessionID, opID, turnID string) ([]payloadRef, error) {
+func (p *Presenter) loadPayloadRefs(ctx context.Context, sessionID, opID, turnID string, includeProof bool) ([]payloadRef, error) {
 	var (
 		q    string
 		args []any
@@ -85,7 +90,7 @@ func (p *Presenter) loadPayloadRefs(ctx context.Context, sessionID, opID, turnID
 		// Single-op lookup. Indexed on (op_id, id).
 		q = `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
-       pr.original_bytes, pr.stored_bytes
+       pr.original_bytes, pr.stored_bytes, pr.location_uri, pr.sha256
 FROM payload_refs pr
 JOIN ops o ON o.id = pr.op_id
 WHERE o.session_id = ? AND pr.op_id = ?
@@ -96,7 +101,7 @@ ORDER BY pr.op_id ASC, pr.id ASC`
 		// to match the inline payload_refs ordering on each op.
 		q = `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
-       pr.original_bytes, pr.stored_bytes
+       pr.original_bytes, pr.stored_bytes, pr.location_uri, pr.sha256
 FROM payload_refs pr
 JOIN ops o ON o.id = pr.op_id
 WHERE o.session_id = ? AND o.turn_id = ?
@@ -108,7 +113,7 @@ ORDER BY pr.op_id ASC, pr.id ASC`
 		// should use the inline include flag instead.
 		q = `
 SELECT pr.id, pr.op_id, pr.kind, pr.format, pr.compression,
-       pr.original_bytes, pr.stored_bytes
+       pr.original_bytes, pr.stored_bytes, pr.location_uri, pr.sha256
 FROM payload_refs pr
 JOIN ops o ON o.id = pr.op_id
 WHERE o.session_id = ?
@@ -129,26 +134,15 @@ ORDER BY pr.op_id ASC, pr.id ASC`
 			compression sql.NullString
 			origBytes   sql.NullInt64
 			storedBytes sql.NullInt64
+			locationURI string
+			sha256      sql.NullString
 		)
 		if err := rows.Scan(&pr.ID, &pr.OpID, &pr.Kind, &pr.Format, &compression,
-			&origBytes, &storedBytes); err != nil {
+			&origBytes, &storedBytes, &locationURI, &sha256); err != nil {
 			return nil, err
 		}
-		if compression.Valid {
-			v := compression.String
-			pr.Compression = &v
-		}
-		if origBytes.Valid {
-			v := origBytes.Int64
-			pr.OriginalBytes = &v
-		}
-		if storedBytes.Valid {
-			v := storedBytes.Int64
-			pr.StoredBytes = &v
-		}
+		applyPayloadRefScalars(&pr, compression, origBytes, storedBytes, locationURI, sha256, includeProof)
 		out = append(out, pr)
 	}
 	return out, rows.Err()
 }
-
-// avoid unused-import warnings when this file is built in isolation.

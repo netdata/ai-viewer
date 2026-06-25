@@ -86,6 +86,10 @@ func TestParseSubscriptionFilter_Rejects(t *testing.T) {
 	}{
 		{"unknown top field", `{"filter":{},"bogus":1}`},
 		{"unknown filter field", `{"filter":{"nope":1}}`},
+		{"cwd is not a subscription field", `{"filter":{"cwd":"/workspace/project"}}`},
+		{"provider_alias is not a subscription field", `{"filter":{"provider_alias":"claude"}}`},
+		{"call_path is not a subscription field", `{"filter":{"call_path":"root>child"}}`},
+		{"error_class is not a subscription field", `{"filter":{"error_class":"io_error"}}`},
 		{"empty agents array", `{"filter":{"agents":[]}}`},
 		{"empty-string element", `{"filter":{"models":[""]}}`},
 		{"control char in agent", ctrlAgent},

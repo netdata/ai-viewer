@@ -17,6 +17,7 @@ type compareBody struct {
 		ID        string  `json:"id"`
 		AgentName string  `json:"agent_name"`
 		Model     string  `json:"model"`
+		Provider  string  `json:"provider"`
 		Status    string  `json:"status"`
 		OpCount   int64   `json:"op_count"`
 		TokensIn  int64   `json:"tokens_in"`
@@ -183,6 +184,9 @@ func TestCompare_OrderPreserved(t *testing.T) {
 	}
 	if body.Sessions[0].ID != "childA1" {
 		t.Errorf("session[0].id = %q, want childA1 (order preserved)", body.Sessions[0].ID)
+	}
+	if body.Sessions[0].Provider != "anthropic" {
+		t.Errorf("session[0].provider = %q, want anthropic", body.Sessions[0].Provider)
 	}
 	if body.Sessions[1].ID != "rootA" {
 		t.Errorf("session[1].id = %q, want rootA (order preserved)", body.Sessions[1].ID)
