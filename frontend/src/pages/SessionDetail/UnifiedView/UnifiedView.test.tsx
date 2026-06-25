@@ -97,6 +97,7 @@ function makeDetail(): SessionDetailResponse {
       model: 'm',
       provider: 'p',
       status: 'completed',
+      effective_status: 'completed',
       error_class: null,
       error_message: null,
       start_ts: 1,

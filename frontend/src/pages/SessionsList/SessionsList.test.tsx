@@ -60,8 +60,11 @@ function makeSession(over: Partial<SessionListItem>): SessionListItem {
     model: 'claude-opus-4-7',
     provider: 'anthropic',
     status: 'completed',
+    effective_status: 'completed',
+    error_class: '',
     start_ts: 1_700_000_000_000_000,
     end_ts: 1_700_000_060_000_000,
+    last_activity_ts: 1_700_000_060_000_000,
     tokens_in: 100,
     tokens_out: 200,
     cost_usd: 0.42,
@@ -302,8 +305,8 @@ describe('SessionsList', () => {
         data: {
           pages: [
             page([
-              makeSession({ id: 'r', status: 'running' }),
-              makeSession({ id: 'f', status: 'failed' }),
+              makeSession({ id: 'r', status: 'running', effective_status: 'running', end_ts: null }),
+              makeSession({ id: 'f', status: 'failed', effective_status: 'failed' }),
               makeSession({ id: 'c', status: 'completed' }),
               makeSession({ id: 'c2', status: 'completed' }),
             ]),
@@ -327,14 +330,14 @@ describe('SessionsList', () => {
     infiniteSpy.mockReturnValue(
       result({
         data: {
-          pages: [page([makeSession({ id: 'r', status: 'running' })])],
+          pages: [page([makeSession({ id: 'r', status: 'running', effective_status: 'running', end_ts: null })])],
           pageParams: [''],
         },
       }),
     );
     renderPage();
     expect(screen.getAllByText('Reliability').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('—')).toBeInTheDocument();
+    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(1);
   });
 
   it('colors reliability red when below 70%', () => {
@@ -343,9 +346,9 @@ describe('SessionsList', () => {
         data: {
           pages: [
             page([
-              makeSession({ id: 'f1', status: 'failed' }),
-              makeSession({ id: 'f2', status: 'failed' }),
-              makeSession({ id: 'f3', status: 'failed' }),
+              makeSession({ id: 'f1', status: 'failed', effective_status: 'failed' }),
+              makeSession({ id: 'f2', status: 'failed', effective_status: 'failed' }),
+              makeSession({ id: 'f3', status: 'failed', effective_status: 'failed' }),
               makeSession({ id: 'c1', status: 'completed' }),
             ]),
           ],

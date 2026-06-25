@@ -1479,6 +1479,70 @@ No P0 or P1 findings. Two P3 observations remain; both are documented as non-blo
 
 `PRODUCTION GRADE`. All automated gates pass. No blocking findings. The two P3 items are tracked above and do not prevent SOW closure.
 
+## External Review Follow-Up - 2026-06-26
+
+Reviewer gate: implementation review rerun after the accepted `PayloadRef.op_id`
+contract finding was fixed.
+
+Fixes reviewed:
+
+- `PayloadRef.op_id` is required in `frontend/src/api/types.ts`, locked by a
+  compile-time assertion in `frontend/src/api/types.contract.test.ts`, and
+  recorded as an exposed row in `testdata/contracts/field-matrix.yaml`.
+- `SessionListItem.effective_status`, `SessionListItem.error_class`,
+  `SessionListItem.last_activity_ts`, `SessionDetail.effective_status`, and
+  `SessionDetail.last_activity_ts` are required in TypeScript where the Go
+  presenter always emits the JSON key.
+- `internal/presenter/payloads_test.go` covers plain preview truncation, gzip
+  decompression, JSON boundary truncation, and source-root containment rejection.
+
+Validation evidence:
+
+- `go test ./internal/presenter -run 'TestPayloadPreview|TestSessionDetail|TestTrace|TestPayloadRefs|TestParseIncludeOptions|TestRequireProofPayloadRefs' -count=1`
+  passed.
+- `go test ./internal/presenter -count=1` passed.
+- `npm --prefix frontend run typecheck` passed.
+- Focused frontend Vitest contract/component/page suite passed: 9 files, 101
+  tests.
+- `bash scripts/check-contract-matrix.sh` passed: 54 rows verified.
+- `bash scripts/test/check-contract-matrix-test.sh` passed: 13 passed, 0 failed.
+- `bash scripts/spec-drift.sh` passed: 6 indicators green.
+- `bash scripts/test/spec-drift-test.sh` passed: 29 passed, 0 failed.
+- `git diff --check` passed.
+
+Reviewer votes:
+
+- `glm`: `PRODUCTION GRADE`; P3-only row-count/log and follow-up notes.
+- `minimax`: `PRODUCTION GRADE`; no P0/P1/P2 findings.
+- `kimi`: `PRODUCTION GRADE`; P3-only optionality/style note.
+- `mimo`: first retry session failed technically; same-scope retry voted
+  `PRODUCTION GRADE`; no P0/P1/P2 findings.
+- `deepseek`: `PRODUCTION GRADE`; P3-only privacy/style notes.
+- `qwen`: `PRODUCTION GRADE`; P3-only notes.
+
+Lineage disposition verified:
+
+- No SOW-0098 file exists.
+- SOW-0099 through SOW-0102 are completed adapter/parity follow-ups.
+- SOW-0103 is closed as superseded by SOW-0105.
+- SOW-0104 remains open and explicitly records SOW-0097 lineage restart debt.
+- SOW-0106 remains open and explicitly records SOW-0097 cleanup/benchmark-gate
+  lineage debt.
+- The SOW-0097 parity-gate framework deliverable remains completed, but the
+  broader SOW-0097 ingestion/parity lineage must not be reported finished until
+  SOW-0104 and SOW-0106 are resolved.
+
+Remaining P3 items:
+
+- Historical validation log entries still mention 53 matrix rows; the current
+  contract-matrix gate verifies 54 rows after the `payload_ref.op_id` row.
+- `PayloadContent` has two compatible local TypeScript definitions.
+- `call_path` masking remains a policy clarification/follow-up; `cwd` and
+  `location_uri` masking are already covered.
+
+Disposition: implementation review gate converged with 6/6 usable positive
+votes. No P0/P1/P2 findings remain.
+
 ## Regression Log
 
 None yet.

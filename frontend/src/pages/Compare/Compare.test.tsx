@@ -69,6 +69,7 @@ function fixtureCompareResponse(ids: string[]): CompareResponse {
       model: i === 0 ? 'claude-opus-4-7' : 'gpt-5',
       status: 'completed',
       effective_status: 'completed',
+      error_class: '',
       start_ts: 1_000_000 + i * 1_000,
       end_ts: 1_000_000 + i * 1_000 + 5_000_000,
       last_activity_ts: 1_000_000 + i * 1_000 + 5_000_000,

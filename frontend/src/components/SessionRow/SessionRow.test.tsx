@@ -20,8 +20,11 @@ function makeSession(over: Partial<SessionListItem>): SessionListItem {
     model: 'claude-opus-4-7',
     provider: 'anthropic',
     status: 'completed',
+    effective_status: 'completed',
+    error_class: '',
     start_ts: 1_700_000_000_000_000,
     end_ts: 1_700_000_060_000_000,
+    last_activity_ts: 1_700_000_060_000_000,
     tokens_in: 100,
     tokens_out: 200,
     cost_usd: 0.42,
@@ -68,7 +71,7 @@ describe('SessionRow', () => {
   });
 
   it('renders an em dash for an empty model and a running (null end_ts) duration', () => {
-    renderRow(makeSession({ model: '', end_ts: null, status: 'running' }));
+    renderRow(makeSession({ model: '', end_ts: null, status: 'running', effective_status: 'running' }));
     const row = screen.getByRole('row');
     expect(within(row).getAllByText('—').length).toBeGreaterThanOrEqual(2);
     expect(within(row).getByText('running')).toBeInTheDocument();

@@ -12,7 +12,26 @@ import type {
   TurnDetail,
 } from './types';
 
+type OptionalKeys<T> = {
+  [K in keyof T]-?: Record<never, never> extends Pick<T, K> ? K : never;
+}[keyof T];
+
+type IsRequired<T, K extends keyof T> = K extends OptionalKeys<T> ? false : true;
+
+function expectRequiredField<T extends true>(value: T): void {
+  expect(value).toBe(true);
+}
+
 describe('API field contract types', () => {
+  it('locks required fields that mirror always-emitted presenter JSON fields', () => {
+    expectRequiredField<IsRequired<SessionListItem, 'effective_status'>>(true);
+    expectRequiredField<IsRequired<SessionListItem, 'error_class'>>(true);
+    expectRequiredField<IsRequired<SessionListItem, 'last_activity_ts'>>(true);
+    expectRequiredField<IsRequired<SessionDetail, 'effective_status'>>(true);
+    expectRequiredField<IsRequired<SessionDetail, 'last_activity_ts'>>(true);
+    expectRequiredField<IsRequired<PayloadRef, 'op_id'>>(true);
+  });
+
   it('types list/session/child fields from the field matrix', () => {
     const listItem: SessionListItem = {
       id: 's1',

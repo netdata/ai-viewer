@@ -88,14 +88,12 @@ export interface SessionListItem {
   status: SessionStatus;
   /** Operator-facing status (SOW-0089 chunk 5a) — derived from the snapshot
    *  + freshness signals. Prefer this over `status` for any UI decision. */
-  effective_status?: SessionStatus;
-  error_class?: string;
+  effective_status: SessionStatus;
+  error_class: string;
   start_ts: number;
   end_ts: number | null;
-  /** UNIX µs of the most recent op the session produced. SOW-0087 chunk 5
-   *  (A10): used to flag "stale running" sessions that haven't produced an
-   *  op in a while. Optional — older DB rows may lack the column. */
-  last_activity_ts?: number | null;
+  /** UNIX µs of the most recent op the session produced. SOW-0087 chunk 5. */
+  last_activity_ts: number | null;
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
@@ -201,7 +199,7 @@ export interface SessionDetail {
   status: SessionStatus;
   /** Operator-facing status (SOW-0089 chunk 5a) — derived from the snapshot
    *  + freshness signals. Prefer this over `status` for any UI decision. */
-  effective_status?: SessionStatus;
+  effective_status: SessionStatus;
   error_class: string | null;
   error_message: string | null;
   start_ts: number;
@@ -209,7 +207,7 @@ export interface SessionDetail {
   duration_us?: number;
   first_user_message_hash?: string;
   /** UNIX µs of the most recent op the session produced. SOW-0087 chunk 5. */
-  last_activity_ts?: number | null;
+  last_activity_ts: number | null;
   tokens_in: number;
   tokens_out: number;
   /** Cached input tokens READ (cache-read rate); separate from tokens_in (fresh). */
@@ -229,17 +227,16 @@ export interface SessionDetail {
  * advertise it — no `url` field is present; only the ref metadata is surfaced
  * (the Trace drawer's Preview button builds the URL client-side from the id).
  *
- * op_id is the owning op's id. Included on responses from
+ * op_id is the owning op's id. It is included on every payload-ref row returned
+ * by any payload-ref surface:
  * /api/sessions/:id/payload_refs (SOW-0092 chunk 3 — the lazy-fetch
- * endpoint the TurnViewPane uses) and on every payload_refs row
- * returned inline by /api/sessions/:id (so the client can group refs
- * by op_id when splicing). ABSENT on the slim default session-detail
- * response where payload_refs is omitted — the lazy endpoint is the
- * source of truth in that case.
+ * endpoint the TurnViewPane uses), inline payload_refs from /api/sessions/:id,
+ * and /api/sessions/:id/trace. The whole payload_refs array is absent on slim
+ * default responses; when a ref is present, op_id is present.
  */
 export interface PayloadRef {
   id: number;
-  op_id?: string;
+  op_id: string;
   kind: string;
   artifact_class: string;
   format: string;
