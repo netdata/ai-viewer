@@ -4,10 +4,9 @@
 
 Status: in-progress
 
-Sub-state: Gap analysis reviewer round 3 did not converge. Accepted findings
-from `minimax` and `kimi` are folded into this SOW. The next step is a
-same-scope gap-analysis rerun after this revision; `glm` ended without a usable
-final vote and is not retried in round 3 because accepted P1/P2 findings exist.
+Sub-state: Gap analysis converged in reviewer round 7 with six
+`NOTHING MORE CAN BE DONE` votes. The next step is drafting the implementation
+plan for plan-gate review.
 
 ## Requirements
 
@@ -136,11 +135,21 @@ External reference evidence:
   SIGTERM first, then SIGKILL/`FinalKillSignal` after `TimeoutStopSec` if
   processes remain:
   `https://manpages.ubuntu.com/manpages/focal/man5/systemd.kill.5.html`.
+- Official Go `os/signal.NotifyContext` documentation states that the returned
+  context is canceled when a listed signal arrives, and that calling the
+  returned stop function unregisters signal behavior and may restore the
+  default disposition for the signal:
+  `https://pkg.go.dev/os/signal#NotifyContext`.
 - Local mirrored service templates from Grafana Agent, Grafana Alloy,
   Prometheus Ansible, and Netdata set explicit `TimeoutStopSec` values. This is
   not proof ai-viewer should copy their values, but it is evidence that packaged
   daemons commonly make stop-timeout contracts explicit instead of relying on a
   manager default.
+- Local workstation evidence on 2026-06-26:
+  `systemctl show --property=DefaultTimeoutStopUSec` returned
+  `DefaultTimeoutStopUSec=1min 30s`. This records the observed default class
+  for the failure investigation, but the repository must still set explicit unit
+  values instead of relying on the manager default.
 
 ### Current Contract Gaps
 
@@ -201,10 +210,14 @@ External reference evidence:
    gate must cover that directory too.
 
 11. **The stop budget is not decomposed.**
-   The target contract must define a formula before choosing `TimeoutStopSec`,
-   for example:
-   `adapter_grace + active_write_bound + worker_drain_bound + backfill_bound +
-   final_resolver_bound + safety_margin`.
+   The target contract must define a formula before choosing `TimeoutStopSec`.
+   The formula must be serialization-aware: with the writer pool pinned to one
+   connection, worker drain cost may be `sum(per-worker drain)` rather than a
+   single max term unless tests prove the effective bound is parallel. The plan
+   must write the exact arithmetic before specs/tests/code choose a concrete
+   `TimeoutStopSec` value, for example:
+   `max(adapter_grace, active_write_bound) + serialized_worker_drain_bound +
+   backfill_bound + final_resolver_bound + store_close_bound + safety_margin`.
 
 12. **SQLite busy-timeout/context-cancellation behavior is an assumption.**
    The 10-second drain bound is only meaningful if blocked SQLite writes observe
@@ -218,11 +231,14 @@ External reference evidence:
    under cancellation. They do not prove behavior when the drain context is
    already expired or when `Stop()` is under heavy in-flight flush pressure.
 
-14. **Serve restart is related but lower risk.**
-   `scripts/install-system.sh` restarts the server unit too. The server has a
-   separate bounded HTTP shutdown path and no ingest drain, so implementation may
-   keep serve out of scope, but the specs/tests must state that explicitly if
-   only the ingester units receive a stop-timeout change.
+14. **Serve restart is related but not fully bounded by its HTTP timeout.**
+   `scripts/install-system.sh` restarts the server unit too. The server's
+   `http.Server.Shutdown` drain has a 30 s bound, but graceful shutdown waits
+   for the notify poller to stop before the HTTP shutdown window starts, and
+   that poller wait has no independent timeout. Implementation may keep serve
+   out of scope, but the specs/tests must state that explicitly from the
+   accurate property: HTTP drain is bounded; poller drain depends on cancelable
+   SQLite notify queries.
 
 15. **SIGKILL recovery can leave temporary UI staleness.**
    If the ingester is killed before a final batch commits, no notify rows exist
@@ -264,20 +280,21 @@ External reference evidence:
     replay-safe state. The formula must account for serialization or document
     the tested bound.
 
-20. **The observed systemd timeout value is not recorded.**
-    The failure was "systemd stop timed out", but the SOW has not recorded
-    whether the manager used the default `DefaultTimeoutStopSec` value or a
-    workstation-specific override. The shutdown budget and static unit value
-    must be anchored to the observed timeout class and an explicit safety
-    margin.
+20. **The observed systemd timeout value is evidence, not a contract.**
+    The failure was "systemd stop timed out"; the local manager default observed
+    for this SOW is `DefaultTimeoutStopUSec=1min 30s`. The shutdown budget and
+    static unit value must still be anchored to an explicit repository-owned
+    `TimeoutStopSec` value and safety margin, not to the host default.
 
 21. **Serve unit timeout scope must be decided before implementation.**
     The installer restarts both `ai-viewer-ingest.service` and
     `ai-viewer-serve.service`. The serve binary has its own 30 s bounded HTTP
-    shutdown path, so it is lower risk than the ingester, but both system and
-    user serve unit templates also lack explicit `TimeoutStopSec`. The SOW must
-    decide whether serve units receive an explicit timeout for consistency or
-    remain on the systemd default with a written rationale and matching tests.
+    shutdown path, but the notify-poller wait that precedes it is not separately
+    bounded. It is lower risk than the ingester because it has no ingest drain,
+    but both system and user serve unit templates also lack explicit
+    `TimeoutStopSec`. The SOW must decide whether serve units receive an
+    explicit timeout and poller-bound proof for consistency or remain on the
+    systemd default with a written rationale and matching tests.
 
 22. **Store close errors and close latency need a shutdown contract.**
     `Store.Close()` returns an error but the ingester currently discards it.
@@ -287,11 +304,14 @@ External reference evidence:
     assumption.
 
 23. **Second-signal and abandoned-goroutine behavior is implicit.**
-    A second SIGTERM/SIGINT after Go's signal context is cancelled can
-    force-terminate the process, and goroutines not drained before process exit
-    are reaped by the OS. This may be acceptable, but it needs to be stated in
-    the shutdown contract so later reviews do not treat it as an accidental
-    leak.
+    The current `signal.NotifyContext` path cancels the signal context on the
+    first SIGTERM/SIGINT, but it does not install a deliberate second-signal
+    fast-exit handler. A second SIGTERM/SIGINT therefore does not, by itself,
+    create an explicit force-terminate contract while notification remains
+    active. If the target design wants second-signal fast exit, it must add and
+    test that behavior; otherwise the spec must state that forced termination
+    comes from systemd's final SIGKILL or process exit, and goroutines not
+    drained before process exit are reaped by the OS.
 
 24. **Source scan accounting can strand the centralized backfill.**
     `scanWG.Add(len(sources))` pre-adds one scan counter per configured source.
@@ -341,6 +361,144 @@ External reference evidence:
     hardening, and run-as operator fields survive rendering with the expected
     values.
 
+30. **Startup signal registration has a non-graceful window.**
+    `signal.NotifyContext` is registered only after `ing.Start()`, the
+    post-scan backfill goroutine, and all configured source goroutines have
+    been started. A SIGTERM/SIGINT delivered in that startup window follows the
+    Go/runtime default signal disposition instead of the intended graceful path:
+    adapters are not canceled, `Ingester.Stop()` is not called, and accepted
+    in-memory events rely entirely on cursor replay. The shutdown contract must
+    either close this window by registering signal handling before source work
+    starts, or document it as an intentional startup-only non-graceful path with
+    replay-safe recovery evidence.
+
+31. **Systemd memory and IO controls are independent shutdown risk inputs.**
+    The system ingester unit sets `MemoryHigh=4G`, `MemoryMax=8G`, and
+    `IOSchedulingClass=idle`. A shutdown drain under high in-flight batch,
+    backfill, resolver, or SQLite pressure can be killed by the memory cgroup or
+    delayed by idle-priority writes before `TimeoutStopSec` is reached. The
+    stop-budget formula must account for resource controls, or document tested
+    residual risk and the safety margin.
+
+32. **Shutdown forensics are insufficient if systemd kills the process.**
+    Terminal drain-expiry logs cover the path where the process remains alive
+    long enough to report expiry. If systemd sends SIGKILL before a terminal log
+    is emitted, the journal can end with only retry warnings. The target
+    observability contract needs an earlier structured shutdown-state marker
+    and a terminal expiry/replay-required marker so a later operator can
+    distinguish clean drain, bounded replay-required exit, and forced-kill
+    interruption without reading private source paths or payloads.
+
+33. **One-shot ingest subcommands have no signal/shutdown contract.**
+    `dispatchSubcommand` routes `check-parity`, `rollups-backfill`,
+    `fts-content-backfill`, and `reprice` before the daemon signal path is
+    installed. These helpers use `context.Background()`-derived contexts and
+    share the same DB/resource surfaces as the daemon. They also bypass the
+    daemon's single-instance flock while some helpers open the canonical DB for
+    write, so they can create a second OS-level writer while the daemon is
+    running. The SOW must explicitly decide whether they share the daemon's
+    bounded-shutdown and single-writer lock contract or are out of scope, and
+    deployment docs must not imply they are safe to interrupt or run concurrently
+    with service restarts unless tests prove it.
+
+34. **Restart-ordering and flock release affect operator-visible latency.**
+    `scripts/install-system.sh` restarts the ingester before the server, while
+    the single-instance flock is released only after the process has finished
+    deferred cleanup, including store close. This is not necessarily wrong, but
+    the deployment contract should state the resulting staleness and restart
+    latency window so the chosen `TimeoutStopSec` budget maps to the operator's
+    observed upgrade delay.
+
+35. **The worker drain contract is best-effort plus replay-safe, not lossless.**
+    The current drain drains the buffered channel length and one pending event;
+    events emitted later by an adapter that has not returned are not guaranteed
+    to be committed before exit. This can be correct only because cursor
+    progress advances inside committed transactions. The spec and tests must
+    state this property directly so future work does not assume every accepted
+    event is synchronously lossless on shutdown.
+
+36. **Store-close latency includes database/sql and WAL-reader interactions.**
+    Gap 22 captures close errors and close latency, but the plan must name the
+    concrete contributors: `sql.DB.Close()` waits for in-flight connections,
+    the writer pool has one connection, and SQLite WAL/checkpoint behavior can
+    be affected by the server's reader handle during ingester-only restarts.
+    Tests or residual-risk notes must cover these contributors explicitly.
+
+37. **System install validates the server but not ingester liveness.**
+    `scripts/install-system.sh` restarts the ingester and server, then waits for
+    the HTTP server URL only. A successful server response can be served from an
+    existing SQLite file even if the newly restarted ingester crashed or failed
+    to start. Reliable upgrade validation must include an ingester-active check
+    or another explicit post-restart ingester health signal, and the installer
+    self-test must assert that behavior.
+
+38. **Crash-safety, power-loss safety, and WAL-growth boundaries are implicit.**
+    The replay contract relies on SQLite WAL crash safety for process kill, but
+    the store uses `synchronous(normal)`, which is not the same as a power-loss
+    durability guarantee. Repeated ingester-only restarts while the server keeps
+    a reader open can also defer WAL truncation. The shutdown contract and
+    runbook must distinguish process-kill replay safety from power-loss safety,
+    and decide whether a final checkpoint/truncate is in scope or deliberately
+    avoided to keep shutdown bounded.
+
+39. **Systemd exit classification and OOM policy are part of the deployment
+    contract.**
+    If terminal drain expiry exits non-zero, `Restart=on-failure` and optional
+    `SuccessExitStatus=` choices decide how systemd classifies that condition.
+    Likewise, memory-limit kills interact with systemd's `OOMPolicy`. The SOW
+    must require the implementation plan to make these choices explicit or
+    document why the defaults are correct.
+
+40. **Serve notify-poller shutdown has the same cancellation-assumption class.**
+    The serve shutdown path stops the notify poller and waits for it before
+    closing SSE clients and entering the 30 s HTTP `Shutdown` window. That wait
+    is `<-done` with no timeout, so the plan must either scope serve in and
+    bound/test notify-poller cancellation, or scope serve out with an explicit
+    residual-risk note. Specs must not describe serve shutdown as fully bounded
+    unless the poller wait is proven bounded.
+
+41. **Systemd readiness/watchdog mechanisms are unconsidered.**
+    Both system and user units currently use `Type=simple` and have no
+    `NotifyAccess=` or `WatchdogSec=` contract. Because this SOW already needs
+    post-restart ingester liveness validation and an explicit stop-budget
+    contract, the implementation plan must consider or reject `Type=notify`,
+    `sd_notify` readiness/stopping/watchdog messages, and `WatchdogSec` with a
+    deployment-spec rationale. Rejection is acceptable if the dependency,
+    portability, or complexity cost outweighs the benefit.
+
+42. **Flush retry/backoff arithmetic is part of the shutdown budget.**
+    `flushBatchWithWriteContext` can perform multiple flush attempts with
+    exponential backoff under a single shutdown-drain context. With SQLite
+    `busy_timeout(5000)`, the wall-clock cost is not just one write timeout; it
+    includes retry attempts, backoffs, and whether the driver observes context
+    cancellation promptly. The serialized budget and tests must account for
+    retry/backoff/busy-timeout interaction and prove the selected drain bound.
+
+43. **One-shot subcommand lock choices need a concrete matrix.**
+    Gap 33 captures that subcommands bypass daemon locking, but the plan must
+    enumerate each subcommand's DB access mode and lock decision:
+    `check-parity`, `rollups-backfill`, `fts-content-backfill`, and `reprice`.
+    Writer subcommands must either acquire/refuse on the daemon lock or be
+    explicitly documented as unsafe to run concurrently with the daemon; read
+    paths must not use a writer handle unless they truly need one.
+
+44. **Installer ownership repair can race a running old unit.**
+    `scripts/install-system.sh` runs recursive ownership repair on
+    `/opt/ai-viewer` before restarting the units, while the previous ingester
+    may still hold DB, WAL, SHM, log, and lockfile handles. The common case
+    reasserts the same operator/group and is likely idempotent, but user/group
+    changes or permission repair during a live writer can create confusing
+    failures. The implementation plan must decide the safe ordering or scope
+    for ownership repair and add a static installer assertion for that choice.
+
+45. **Migration failure restart-loop behavior is implicit.**
+    A startup migration error exits non-zero under `Restart=on-failure`, which
+    can create a restart loop until operator intervention. This SOW does not
+    need to solve migration safety broadly, but the deployment contract must
+    either state that migration failure loops are out of scope or choose a
+    systemd classification/circuit-breaker behavior if the implementation
+    touches startup readiness.
+
 ### Required Additions Before This SOW Can Close
 
 - A focused worker-runtime test that starts from an already-expired shutdown
@@ -355,7 +513,9 @@ External reference evidence:
   not advance persisted source progress.
 - A SQLite contention/cancellation test proving the driver stops blocked writes
   within the shutdown budget, or proving and documenting the exact
-  `busy_timeout` contribution.
+  `busy_timeout` contribution. The test or budget proof must include
+  `flushMaxRetries`, retry backoff, and driver context-cancellation behavior so
+  the selected drain bound is wall-clock true, not just nominal.
 - A post-scan backfill shutdown test proving SIGTERM during read-model backfill
   cancels or bounds the backfill, does not race store close, and leaves derived
   read models safely rebuildable.
@@ -364,10 +524,19 @@ External reference evidence:
   channel-close final flush within budget.
 - A source-start failure accounting test proving `scanWG` drains when any source
   fails before `runAdapter` starts, `scanDone` and `backfillDone` still close,
-  and successful sources are not stranded before Tail.
+  and successful sources are not stranded before Tail. The test and plan must
+  treat the `scanWG` leak and adapters blocked on `<-backfillDone>` as one
+  causal chain, not unrelated bugs.
 - Per-adapter cancellation tests, or explicit adapter-by-adapter residual-risk
   entries, proving concrete adapters return promptly from `Scan`/`Tail` when
-  `ctx` is canceled.
+  `ctx` is canceled. The adapter list must explicitly cover read-only DB handles
+  and fsnotify watchers where a registered adapter owns them, including the
+  opencode read-only SQLite handle and WAL watcher.
+- A serve shutdown in/out decision based on the accurate serve property:
+  notify-poller wait is unbounded unless tested, while HTTP `Shutdown` has a
+  30 s bound. If serve is scoped in, tests must prove notify-poller cancellation
+  returns within the selected budget; if scoped out, specs must record the
+  residual risk.
 - A final-resolver shutdown test or command-level test that proves resolver work
   is bounded during process shutdown.
 - A resolver-loop in-flight test proving shutdown cancellation does not let an
@@ -403,27 +572,95 @@ External reference evidence:
   applies to `deploy/systemd-system/ai-viewer-serve.service` and
   `deploy/systemd/ai-viewer-serve.service`; if they are scoped out, the test
   must preserve the documented out-of-scope decision.
+- A deployment decision that considers or rejects `Type=notify`, `sd_notify`
+  readiness/stopping/watchdog messages, `NotifyAccess=`, and `WatchdogSec`.
+  Rejection must include a rationale such as dependency cost, portability,
+  complexity, or sufficient evidence from explicit timeout and liveness checks.
 - `scripts/test/install-system-test.sh` must verify rendered system units keep
   the selected stop-timeout value and must not drop existing hardening
   directives while rendering. Assertions must check exact directive values, not
   mere presence.
+- `scripts/install-system.sh` must validate post-restart ingester liveness in
+  addition to server HTTP readiness, and `scripts/test/install-system-test.sh`
+  must assert that check exists.
+- `scripts/install-system.sh` must either avoid recursive ownership repair while
+  the old ingester may still be running, or document why the live `chown -R`
+  ordering is safe for same-user upgrades. The installer self-test must assert
+  the selected ordering.
+- The installer/runbook must either warn when a restart's previous ingester was
+  force-killed, or explicitly document that previous-stop forensics are journal
+  evidence only and outside installer success/failure detection.
+- A startup-signal test or contract proof that either closes the signal-handler
+  window before source work starts, or records the startup window as a
+  replay-safe non-graceful path with bounded blast radius.
+- A shutdown resource-budget test, measurement, or documented residual-risk
+  proof that covers `MemoryHigh`, `MemoryMax`, and idle-priority IO under the
+  shutdown-under-load harness. If the selected `TimeoutStopSec` or drain design
+  depends on these values, static/rendered-unit tests must assert the exact
+  values that make the budget true.
+- A serialized shutdown-budget proof that uses the observed local
+  `DefaultTimeoutStopUSec=1min 30s` only as evidence, chooses a concrete
+  repository-owned `TimeoutStopSec`, and states whether worker drain cost is
+  summed across sources or proven parallel. Static tests must assert the exact
+  selected value.
+- A shutdown-forensics test proving structured logs include an early
+  shutdown-state marker and a terminal drain-expiry/replay-required marker
+  without raw source paths, payloads, hostnames, or operator identity. The test
+  must make clear what evidence remains in journald if systemd kills the process
+  before terminal expiry logging.
+- A one-shot subcommand signal-scope decision for `check-parity`,
+  `rollups-backfill`, `fts-content-backfill`, and `reprice`: either implement
+  and test bounded SIGTERM plus single-instance locking behavior for them, or
+  document them as out of scope for daemon restart semantics and unsafe to
+  interrupt or run concurrently with the daemon unless their own command
+  contract says otherwise. The implementation plan must include a matrix for
+  each subcommand: DB handle mode, write/read requirement, lock/refuse behavior,
+  and signal/shutdown behavior.
+- A deployment/restart latency assertion or spec note covering ingester-before-
+  server restart order, UI/SSE staleness while the ingester is stopped, and the
+  fact that the single-instance flock is released only after deferred cleanup.
+- A best-effort-drain replay test or explicit proof that events accepted but not
+  committed before exit are re-emitted from the unadvanced cursor and deduped
+  without corrupting aggregates.
+- A deployment/systemd decision covering terminal drain-expiry exit
+  classification (`Restart=on-failure`, optional `SuccessExitStatus=`) and
+  memory-kill classification (`OOMPolicy` or documented default). If startup
+  migration failures remain subject to a restart loop, the deployment spec or
+  runbook must say so explicitly or define a circuit-breaker/classification.
+- A deployment/systemd decision stating whether `KillMode`, `KillSignal`, and
+  `FinalKillSignal` defaults are intentional. The default final SIGKILL must
+  remain the last-resort terminator unless a later SOW changes the kill
+  contract with tests.
+- A store-close/WAL decision covering whether shutdown runs an explicit final
+  checkpoint/truncate, and, if not, how the runbook explains possible WAL growth
+  across ingester-only restarts with a live server reader.
 - Spec updates before tests/code:
   - `.agents/sow/specs/ingester.md`: define terminal shutdown-drain expiry,
     replay semantics, duplicate-warning suppression, backfill shutdown, SQLite
     contention assumptions, final resolver bound, worker serialization under
     `SetMaxOpenConns(1)`, terminal exit-code behavior, second-signal behavior,
     source-start scan accounting, adapter cancellation/resource-release
-    behavior, adapter-cursor replay assumptions, one-shot subcommand non-scope,
-    and store-close/WAL behavior.
+    behavior, adapter-cursor replay assumptions, startup signal behavior,
+    best-effort-drain semantics, one-shot subcommand signal/concurrency/lock
+    scope, precise second-signal behavior under `signal.NotifyContext`, process
+    kill versus power-loss durability boundaries, store-close/WAL behavior, the
+    pprof server's off-by-default process-exit cleanup scope, and the existing
+    duplicate step numbering in the graceful-shutdown sequence.
   - `.agents/sow/specs/deployment.md`: define the systemd stop-timeout budget
     formula and its relationship to ingester shutdown budgets in system and user
     install modes, including the serve-unit in/out decision, sum-vs-max
-    budget arithmetic, rendered-unit assertions, and operator-visible restart
-    latency.
+    budget arithmetic, rendered-unit assertions, memory/IO resource-control
+    assumptions, ingester-before-server restart ordering, flock-release timing,
+    post-restart ingester health validation, exit-status/OOM classification,
+    `Type=notify`/watchdog decision, kill-mode defaults, ownership-repair
+    ordering, migration-failure restart-loop behavior, and operator-visible
+    restart latency/staleness.
   - `.agents/sow/specs/observability.md`: define the shutdown log messages and
     structured fields for transient retry, drain expiry, replay-required,
     terminal drop, backfill cancellation, final resolver timeout, store close
-    failures, and selected non-zero/zero exit behavior.
+    failures, early forced-kill forensics, selected non-zero/zero exit behavior,
+    and exact log field names for clean-drain, replay-required, and forced-kill
+    diagnostic paths.
 - Skill/doc updates if the restart validation process changes:
   - `.agents/skills/project-deployment/SKILL.md` for operator restart checks.
   - `scripts/test/install-system-test.sh` and/or unit tests for static gate
@@ -445,7 +682,7 @@ External reference evidence:
 
 ## Gap Review Gate
 
-Status: rerun pending after round-2 findings were folded into the gap analysis.
+Status: converged in round 7.
 
 Positive vote required: `NOTHING MORE CAN BE DONE`.
 
@@ -455,7 +692,7 @@ side-effect concern before implementation planning begins.
 
 ## Pre-Implementation Gate
 
-Status: blocked until gap-analysis gate converges.
+Status: implementation plan drafting pending after gap-analysis convergence.
 
 Problem / root-cause model:
 
@@ -605,7 +842,7 @@ Accepted findings added to this SOW:
   out with documented rationale.
 - Add store-close error and close-latency behavior to shutdown observability and
   tests.
-- Document second-signal force termination and abandoned goroutine behavior.
+- Document current second-signal behavior and abandoned goroutine behavior.
 - Extend static tests to cover rendered system units and, depending on the
   serve decision, serve unit timeout assertions.
 
@@ -618,6 +855,191 @@ Rejected or downgraded findings:
 - Claim: pprof server shutdown is a blocking gap. Disposition: P3. The pprof
   server is off by default and process exit closes its listener, but the
   behavior is now included in the shutdown-contract documentation requirement.
+
+### Gap Analysis Gate - Round 4
+
+Outcome: `NEEDS WORK`.
+
+Reviewer votes:
+
+- `kimi`: `NOTHING MORE CAN BE DONE` with one P3 note.
+- `mimo`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `deepseek`: `NOTHING MORE CAN BE DONE` with one P3 note.
+- `qwen`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `glm`: `NEEDS WORK`.
+- `minimax`: `NEEDS WORK`.
+
+Accepted findings added to this SOW:
+
+- Registering `signal.NotifyContext` after source startup leaves a startup
+  signal window outside the intended graceful path. The gap analysis now
+  requires either closing that window or documenting and testing it as
+  replay-safe.
+- Systemd `MemoryHigh`, `MemoryMax`, and idle-priority IO can interact with the
+  shutdown budget. The budget, static tests, or residual-risk documentation must
+  cover these resource controls.
+- Shutdown forensics need an early structured marker plus terminal
+  drain-expiry/replay-required evidence so a forced kill does not leave only
+  retry warnings.
+- One-shot ingest subcommands need an explicit signal/shutdown scope decision
+  because they bypass the daemon signal path and use `context.Background()`-
+  derived contexts.
+- Deployment docs/specs need to state ingester-before-server restart ordering,
+  UI/SSE staleness during ingester stop/start, and single-instance flock release
+  timing as part of operator-visible restart latency.
+- The worker drain contract must be stated as best-effort plus replay-safe, not
+  synchronously lossless.
+- Store-close budget evidence must explicitly include `sql.DB.Close`,
+  single-connection writer behavior, and SQLite WAL/reader interactions.
+
+Rejected, downgraded, or already-covered findings:
+
+- Claim: pprof server shutdown blocks this SOW. Disposition: still P3. It is
+  off by default, operator-gated, and process exit closes the listener; the
+  contract can mention it without making it part of the restart-timeout fix.
+- Claim: WAL checkpoint-on-close needs a separate top-level gap. Disposition:
+  folded into the store-close latency gap rather than separate, because the
+  required evidence is the same budget/latency proof.
+- Claim: `runAdapter` panic recovery needs a test. Disposition: P3. The process
+  has no goroutine-level recovery contract today; the shutdown SOW only needs
+  to state whether panic exits are process-fatal or intentionally recovered.
+- Claim: second-signal force termination is already true. Disposition: false as
+  written. The SOW now states the current `signal.NotifyContext` behavior and
+  requires an explicit design/test if second-signal fast exit is desired.
+
+### Gap Analysis Gate - Round 5
+
+Outcome: `NEEDS WORK`.
+
+Reviewer votes:
+
+- `kimi`: `NOTHING MORE CAN BE DONE`.
+- `mimo`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `deepseek`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `qwen`: `NOTHING MORE CAN BE DONE`.
+- `glm`: `NEEDS WORK`.
+- `minimax`: `NEEDS WORK`.
+
+Accepted findings added to this SOW:
+
+- The system installer validates server HTTP readiness after restart but does
+  not validate that `ai-viewer-ingest.service` restarted cleanly. Reliable
+  upgrade validation now requires a post-restart ingester-liveness check and
+  installer self-test assertion.
+- One-shot ingest subcommands bypass the daemon's single-instance flock while
+  some open the canonical DB for writes. The subcommand scope decision now
+  includes concurrent-writer/lock behavior, not only signal handling.
+- The stop-budget formula must be serialization-aware. With `SetMaxOpenConns(1)`
+  and per-worker drain contexts, the plan must decide and prove whether worker
+  drain cost is summed across sources or effectively parallel.
+- The local systemd default observed for this investigation is
+  `DefaultTimeoutStopUSec=1min 30s`, but the implementation must choose an
+  explicit repository-owned `TimeoutStopSec` and assert the exact rendered unit
+  value in tests.
+- The Go `signal.NotifyContext` contract is now cited as external evidence for
+  second-signal behavior.
+- Adapter resource proof must explicitly include adapters that own read-only DB
+  handles or fsnotify watchers, including opencode's read-only SQLite handle and
+  WAL watcher.
+- Shutdown observability specs must name exact structured log fields for
+  clean-drain, replay-required, and forced-kill diagnostic paths.
+- Deployment/systemd specs must decide drain-expiry exit classification
+  (`Restart=on-failure`, optional `SuccessExitStatus=`) and memory-kill
+  classification (`OOMPolicy` or documented default).
+- Store-close/WAL specs must decide whether shutdown runs a final checkpoint/
+  truncate, distinguish process-kill crash safety from power-loss safety, and
+  document WAL-growth implications when the server keeps a reader open.
+
+Rejected, downgraded, or already-covered findings:
+
+- Claim: the gap analysis must specify the exact code fix for the `scanWG` leak.
+  Disposition: too detailed for gap analysis, but the causal chain is now
+  explicit. The exact fix belongs in the implementation plan gate.
+- Claim: the SOW must choose a concrete `TimeoutStopSec` value during gap
+  analysis. Disposition: premature. The gap now requires the implementation
+  plan to choose an exact value from the serialized budget before specs/tests/
+  code land.
+- Claim: pprof in-flight requests are a P2 restart input. Disposition: P3. The
+  endpoint is off by default and operator-gated; it remains documented as
+  out-of-critical-path unless the implementation plan deliberately scopes it in.
+- Claim: test isolation needs a separate top-level gap. Disposition: already
+  covered by the shutdown-under-load harness and project test discipline; the
+  implementation plan will name temp DB/state-dir fixtures.
+
+### Gap Analysis Gate - Round 6
+
+Outcome: `NEEDS WORK`.
+
+Reviewer votes:
+
+- `kimi`: `NOTHING MORE CAN BE DONE`.
+- `mimo`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `deepseek`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `qwen`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `glm`: `NEEDS WORK`.
+- `minimax`: `NEEDS WORK`.
+
+Accepted findings added to this SOW:
+
+- Serve shutdown was corrected from "bounded" to the actual contract:
+  `http.Server.Shutdown` has a 30 s bound, but the notify-poller wait that
+  precedes it has no independent timeout. The serve in/out decision must now be
+  made from that accurate property.
+- The deployment plan must consider or reject `Type=notify`, `sd_notify`
+  readiness/stopping/watchdog messages, `NotifyAccess=`, and `WatchdogSec`.
+- The shutdown-budget proof must include flush retry count, retry backoff,
+  SQLite `busy_timeout(5000)`, and driver context-cancellation behavior.
+- One-shot subcommands need a concrete matrix for DB access mode, write/read
+  requirement, lock/refuse behavior, and signal/shutdown behavior.
+- Installer ownership repair currently runs before service restart while the
+  old ingester may still hold DB/WAL/SHM/log/lock handles. The plan must choose
+  safe ordering or document why live same-user repair is safe.
+- Deployment specs/runbook must state whether previous forced-kill detection is
+  an installer responsibility or journal/runbook evidence only.
+- Deployment specs must state whether default `KillMode`, `KillSignal`, and
+  `FinalKillSignal` behavior is intentional.
+- The ingester spec rewrite must fix the duplicate step number in the graceful
+  shutdown sequence.
+- Migration failure under `Restart=on-failure` must be documented or classified
+  if startup readiness changes touch that path.
+
+Rejected, downgraded, or already-covered findings:
+
+- Claim: test isolation needs a separate top-level gap. Disposition: still P3.
+  Existing project test discipline plus the plan-stage validation matrix will
+  require temp DB/state-dir fixtures for shutdown tests.
+- Claim: pprof cleanup is a blocking restart gap. Disposition: P3. The endpoint
+  is off by default and process exit reaps the listener; the ingester spec will
+  record that it is outside the shutdown wait set unless a future SOW scopes it
+  in.
+
+### Gap Analysis Gate - Round 7
+
+Outcome: `NOTHING MORE CAN BE DONE`.
+
+Reviewer votes:
+
+- `glm`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `minimax`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+- `kimi`: `NOTHING MORE CAN BE DONE`.
+- `mimo`: `NOTHING MORE CAN BE DONE`.
+- `deepseek`: `NOTHING MORE CAN BE DONE`.
+- `qwen`: `NOTHING MORE CAN BE DONE` with P3-only notes.
+
+P3-only observations recorded for planning awareness:
+
+- If the final stop budget depends on summing per-source worker drains, the
+  deployment spec should state the source-count assumption or the rule for
+  re-deriving `TimeoutStopSec` when source count grows.
+- The implementation-plan budget proof should be explicit about fixture
+  measurement limits versus production-scale shutdown duration.
+- The migration-failure runbook may name `StartLimitBurst` /
+  `StartLimitIntervalSec` as the systemd mechanism behind restart-loop
+  diagnosis.
+- Serve's read-only store close error handling and startup signal window are
+  low-risk but should be considered under the serve in/out decision.
+- A `--shutdown-timeout` CLI flag is not part of this SOW unless the
+  implementation plan proves operator configurability is necessary.
 
 ## Lessons Extracted
 
