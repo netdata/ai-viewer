@@ -31,9 +31,10 @@ func TestE2E_SubAgentFixture(t *testing.T) {
 	}
 
 	_, db := openTestStore(t)
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2000),
+		WithBatchSize(1),
 		WithBatchInterval(50*time.Millisecond),
 		WithSourceFormat("aiagent_v3:"+fixtureDir, "aiagent_v3"),
 		WithLocation("aiagent_v3:"+fixtureDir, fixtureDir),
@@ -46,13 +47,13 @@ func TestE2E_SubAgentFixture(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	events := make(chan canonical.Event, 256)
+	events := make(chan canonical.Event)
 	scanDone := make(chan struct{})
 	var scanErr error
 	go func() {
+		defer close(scanDone)
 		defer close(events)
 		scanErr = a.Scan(ctx, nil, events)
-		close(scanDone)
 	}()
 	if err := ing.Submit("aiagent_v3:"+fixtureDir, events); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -61,6 +62,11 @@ func TestE2E_SubAgentFixture(t *testing.T) {
 	waitForScan(t, scanDone, "aiagent_v3 sub_agent")
 	if scanErr != nil {
 		t.Fatalf("Scan: %v", scanErr)
+	}
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 2
+	}) {
+		t.Fatalf("session count before Stop = %d, want 2", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -133,9 +139,10 @@ func TestE2E_SessionErrorFixture(t *testing.T) {
 	}
 	_, db := openTestStore(t)
 	sourceID := "aiagent_v3:" + fixtureDir
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2000), WithBatchInterval(50*time.Millisecond),
+		WithBatchSize(1), WithBatchInterval(50*time.Millisecond),
 		WithSourceFormat(sourceID, "aiagent_v3"),
 		WithLocation(sourceID, fixtureDir),
 	)
@@ -146,12 +153,12 @@ func TestE2E_SessionErrorFixture(t *testing.T) {
 	if err := ing.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	events := make(chan canonical.Event, 256)
+	events := make(chan canonical.Event)
 	scanDone := make(chan struct{})
 	var scanErr error
 	go func() {
-		defer close(events)
 		defer close(scanDone)
+		defer close(events)
 		scanErr = a.Scan(ctx, nil, events)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
@@ -160,6 +167,12 @@ func TestE2E_SessionErrorFixture(t *testing.T) {
 	waitForScan(t, scanDone, "aiagent_v3 session_error")
 	if scanErr != nil {
 		t.Fatalf("Scan: %v", scanErr)
+	}
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='ERR' AND session_id IS NOT NULL`) >= 1
+	}) {
+		t.Fatalf("log count before Stop = %d, want >=1",
+			scanInt(t, db, `SELECT COUNT(*) FROM log_entries WHERE severity='ERR' AND session_id IS NOT NULL`))
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -189,9 +202,10 @@ func TestE2E_HappyPathFixture(t *testing.T) {
 	}
 	_, db := openTestStore(t)
 	sourceID := "aiagent_v3:" + fixtureDir
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2000), WithBatchInterval(50*time.Millisecond),
+		WithBatchSize(1), WithBatchInterval(50*time.Millisecond),
 		WithSourceFormat(sourceID, "aiagent_v3"),
 		WithLocation(sourceID, fixtureDir),
 	)
@@ -202,12 +216,12 @@ func TestE2E_HappyPathFixture(t *testing.T) {
 	if err := ing.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	events := make(chan canonical.Event, 256)
+	events := make(chan canonical.Event)
 	scanDone := make(chan struct{})
 	var scanErr error
 	go func() {
-		defer close(events)
 		defer close(scanDone)
+		defer close(events)
 		scanErr = a.Scan(ctx, nil, events)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
@@ -216,6 +230,11 @@ func TestE2E_HappyPathFixture(t *testing.T) {
 	waitForScan(t, scanDone, "aiagent_v3 happy_single_turn")
 	if scanErr != nil {
 		t.Fatalf("Scan: %v", scanErr)
+	}
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 1
+	}) {
+		t.Fatalf("session count before Stop = %d, want 1", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)

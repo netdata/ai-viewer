@@ -26,6 +26,44 @@ Mandatory log moments:
   state is visible without flooding the log on every request.
 - Graceful shutdown progress.
 
+Graceful shutdown log markers are structured and stable. They must not include
+raw payloads, raw payload locations, or operator-specific host/user names.
+`source_id` is the existing canonical diagnostic source key; do not add separate
+raw `location` or payload fields to shutdown markers.
+
+Mandatory shutdown markers:
+
+- `shutdown_start`: emitted synchronously from the signal-observer path before
+  deferred shutdown work begins. Fields: `subsystem`, `signal`, `timeout_ms`.
+- `shutdown_adapter_grace_expired`: aggregate adapter wait exceeded the 5 s
+  grace. Fields: `elapsed_ms`, `grace_ms`. This marker is aggregate because the
+  shutdown wait group does not identify which adapter goroutine is still active.
+- `shutdown_worker_retry_suppressed`: shutdown context expired and normal
+  transient retry logging was suppressed. Fields: `source_id`, `reason`.
+- `shutdown_replay_required`: a final batch could not commit before the bounded
+  drain deadline and source progress was left unadvanced. Fields: `source_id`,
+  `source_format`, `outcome=replay_required`, `pending_events`, `reason`.
+- `shutdown_backfill_cancelled`: read-model backfill observed shutdown and is
+  safe to retry. Fields: `phase`, `elapsed_ms`.
+- `shutdown_backfill_timeout`: the 5 s backfill wait expired and explicit DB
+  close will be skipped. Fields: `elapsed_ms`, `timeout_ms`.
+- `shutdown_resolver_timeout`: the final resolver pass had no remaining caller
+  deadline or exceeded its capped window. Fields: `remaining_ms`, `timeout_ms`.
+- `shutdown_store_close_error`: explicit store close returned an error. Fields:
+  `store_role` (`writer` or `reader`), `elapsed_ms`, `err`.
+- `shutdown_store_close_timeout`: explicit store close exceeded its 5 s close
+  timer. Fields: `store_role`, `elapsed_ms`, `timeout_ms`.
+- `shutdown_clean`: graceful shutdown completed with all bounded phases clean.
+  Fields: `subsystem`, `elapsed_ms`, `outcome=clean`.
+- `shutdown_bounded_guard`: shutdown exited non-zero because a bounded guard
+  fired while live work may still own SQLite. Fields: `phase`, `elapsed_ms`,
+  `outcome`.
+
+Forced-kill evidence comes from missing terminal markers plus systemd status and
+journal timing. The process must log enough phase markers that an operator can
+distinguish clean drain, replay-required drain, bounded guard, and external
+SIGKILL without journal scraping inside the installer.
+
 Prohibited log patterns:
 
 - `log.Printf("error: %v", err)` without context. Every error log includes the subsystem and the operation in progress.

@@ -47,7 +47,7 @@ var (
 	checkParityNativeQuotedTokenRE = regexp.MustCompile(`\b(session|session_input|part)\s+"([^"]+)"`)
 )
 
-func runCheckParity(args []string, stdout, stderr *os.File) int {
+func runCheckParity(parent context.Context, args []string, stdout, stderr *os.File) int {
 	cfg, exitCode, ok := parseCheckParityFlags(args, stderr)
 	if !ok {
 		return exitCode
@@ -62,7 +62,7 @@ func runCheckParity(args []string, stdout, stderr *os.File) int {
 		_, _ = fmt.Fprintf(stderr, "ai-viewer-ingest check-parity: %v\n", err)
 		return 2
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
+	ctx, cancel := context.WithTimeout(parent, cfg.timeout)
 	defer cancel()
 	result, err := paritycheck.CheckSources(ctx, paritycheck.Options{
 		DBPath:                 cfg.dbPath,

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/ingest"
-	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // runBackfill implements the `rollups-backfill` subcommand: a one-shot
@@ -20,10 +19,11 @@ import (
 //
 // It deliberately reuses resolveDBPath + newLogger from main.go so the flag
 // surface stays consistent with the daemon path.
-func runBackfill(args []string, stdout, stderr *os.File) int {
+func runBackfill(ctx context.Context, args []string, stdout, stderr *os.File) int {
 	fs := flag.NewFlagSet("ai-viewer-ingest rollups-backfill", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "SQLite path (default ~/.local/share/ai-viewer/index.db)")
+	stateDir := fs.String("state-dir", "", "state directory (default ~/.local/share/ai-viewer)")
 	logLevel := fs.String("log-level", "info", "log level (debug|info|warn|error)")
 	logFormat := fs.String("log-format", "json", "log format (json|text)")
 	fs.Usage = func() {
@@ -52,10 +52,20 @@ func runBackfill(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	releaseLock, resolvedStateDir, err := acquireOneShotDaemonLock(*stateDir, logger)
+	if err != nil {
+		logger.Error("rollups-backfill: daemon lock unavailable",
+			"state_dir", resolvedStateDir,
+			"err", err,
+			"hint", "stop ai-viewer-ingest.service or pass the matching --state-dir for an offline database")
+		return 1
+	}
+	defer releaseLock()
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	ws, err := store.OpenWriter(ctx, resolvedDB, logger)
+	ws, err := openWriterStore(ctx, resolvedDB, logger)
 	if err != nil {
 		logger.Error("rollups-backfill: failed to open store", "db", resolvedDB, "err", err)
 		return 1
@@ -68,7 +78,8 @@ func runBackfill(args []string, stdout, stderr *os.File) int {
 		logger.Error("rollups-backfill: failed", "db", resolvedDB, "err", err)
 		return 1
 	}
-	logger.Info("rollups-backfill complete",
+	logger.Info(
+		"rollups-backfill complete",
 		"hourly_rows", stats.HourlyRows,
 		"daily_rows", stats.DailyRows,
 		"days_processed", stats.DaysProcessed,
@@ -83,7 +94,8 @@ func runBackfill(args []string, stdout, stderr *os.File) int {
 		logger.Error("fts-backfill: failed", "db", resolvedDB, "err", err)
 		return 1
 	}
-	logger.Info("fts-backfill complete",
+	logger.Info(
+		"fts-backfill complete",
 		"fts_ops_rows", ftsStats.OpRows,
 		"fts_logs_rows", ftsStats.LogRows,
 		"elapsed", ftsStats.Elapsed.String(),

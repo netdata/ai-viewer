@@ -10,6 +10,7 @@ After=default.target
 ExecStart=%h/.local/bin/ai-viewer-ingest
 Restart=on-failure
 RestartSec=3s
+TimeoutStopSec=45s
 
 [Install]
 WantedBy=default.target

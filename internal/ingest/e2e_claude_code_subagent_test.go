@@ -70,9 +70,10 @@ func TestClaudeCodeSubAgent_OpChildLinkedViaToolUseId(t *testing.T) {
 
 	_, db := openTestStore(t)
 	sourceID := "claude-code:" + root
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2000),
+		WithBatchSize(1),
 		WithBatchInterval(50*time.Millisecond),
 		WithSourceFormat(sourceID, "claude-code"),
 		WithLocation(sourceID, root),
@@ -85,13 +86,13 @@ func TestClaudeCodeSubAgent_OpChildLinkedViaToolUseId(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	events := make(chan canonical.Event, 256)
+	events := make(chan canonical.Event)
 	scanDone := make(chan struct{})
 	var scanErr error
 	go func() {
+		defer close(scanDone)
 		defer close(events)
 		scanErr = a.Scan(ctx, nil, events)
-		close(scanDone)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -99,6 +100,11 @@ func TestClaudeCodeSubAgent_OpChildLinkedViaToolUseId(t *testing.T) {
 	waitForScan(t, scanDone, "claude-code sub-agent")
 	if scanErr != nil {
 		t.Fatalf("Scan: %v", scanErr)
+	}
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == 2
+	}) {
+		t.Fatalf("session count before Stop = %d, want 2", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)

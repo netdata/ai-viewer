@@ -321,6 +321,12 @@ func startSource(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup
 type adapterFactoryLookup func(format string) (canonical.AdapterFactory, bool)
 
 func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanWG *sync.WaitGroup, ing *ingest.Ingester, lookup cursorLookup, src configuredSource, logger *slog.Logger, factoryLookup adapterFactoryLookup, backfillDone <-chan struct{}) error {
+	scanStarted := false
+	defer func() {
+		if !scanStarted {
+			scanWG.Done()
+		}
+	}()
 	factory, ok := factoryLookup(src.format)
 	if !ok {
 		return fmt.Errorf("unknown adapter format %q (registered: %v)", src.format, adapters.Formats())
@@ -352,6 +358,7 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanW
 	}
 
 	wg.Add(1)
+	scanStarted = true
 	// NOTE: scanWG.Add was already called by main.go (scanWG.Add(len(sources)))
 	// BEFORE the scanWG.Wait goroutine started — required by sync.WaitGroup
 	// semantics (Add must happen before Wait). Do NOT Add here.
@@ -472,7 +479,12 @@ func runAdapter(ctx context.Context, adapter canonical.Adapter, since canonical.
 	// tail-mode flushes on the single SQLite connection (SOW-0063).
 	// On a resume (no deferred read models), backfillDone is already
 	// closed and this is a no-op.
-	<-backfillDone
+	select {
+	case <-backfillDone:
+	case <-ctx.Done():
+		logger.Info("ai-viewer-ingest: adapter tail skipped during shutdown before read-model backfill completed")
+		return
+	}
 	logger.Info("ai-viewer-ingest: tail starting")
 	if err := adapter.Tail(ctx, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

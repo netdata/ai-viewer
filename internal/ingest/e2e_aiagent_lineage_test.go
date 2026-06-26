@@ -59,7 +59,8 @@ func TestE2E_AIAgentLineageGolden_RealUpstreamFixtures(t *testing.T) {
 	// The adapter walks <root>/session/*.jsonl; point it at the fixture
 	// scenario dir that contains the session/ subtree.
 	fixtureDir, err := filepath.Abs(filepath.Join(
-		"..", "adapters", "aiagent_v3", "testdata", "sub-agent-with-parent-id"))
+		"..", "adapters", "aiagent_v3", "testdata", "sub-agent-with-parent-id",
+	))
 	if err != nil {
 		t.Fatalf("abs fixture dir: %v", err)
 	}
@@ -162,7 +163,8 @@ func TestE2E_AIAgentLineageGolden_ChildSideOwnLedger(t *testing.T) {
 	}
 	srcChild, err := filepath.Abs(filepath.Join(
 		"..", "adapters", "aiagent_v3", "testdata", "sub-agent-with-parent-id",
-		"session", "child-session.jsonl"))
+		"session", "child-session.jsonl",
+	))
 	if err != nil {
 		t.Fatalf("abs child fixture: %v", err)
 	}
@@ -241,7 +243,8 @@ func TestE2E_AIAgentLineageGolden_ParentSideSynthesizer(t *testing.T) {
 	}
 	srcRoot, err := filepath.Abs(filepath.Join(
 		"..", "adapters", "aiagent_v3", "testdata", "sub-agent-with-parent-id",
-		"session", "root-session.jsonl"))
+		"session", "root-session.jsonl",
+	))
 	if err != nil {
 		t.Fatalf("abs root fixture: %v", err)
 	}
@@ -309,9 +312,10 @@ func ingestV3Dir(t *testing.T, src, scanRoot string, wantSessions int64) *sql.DB
 		t.Fatalf("aiagent_v3.New: %v", err)
 	}
 	_, db := openTestStore(t)
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2000),
+		WithBatchSize(1),
 		WithBatchInterval(50*time.Millisecond),
 		WithSourceFormat(src, "aiagent_v3"),
 		WithLocation(src, scanRoot),
@@ -324,19 +328,25 @@ func ingestV3Dir(t *testing.T, src, scanRoot string, wantSessions int64) *sql.DB
 		t.Fatalf("Start: %v", err)
 	}
 
-	events := make(chan canonical.Event, 256)
+	events := make(chan canonical.Event)
 	scanDone := make(chan struct{})
 	go func() {
+		defer close(scanDone)
 		defer close(events)
 		if err := a.Scan(ctx, nil, events); err != nil {
 			t.Errorf("Scan: %v", err)
 		}
-		close(scanDone)
 	}()
 	if err := ing.Submit(src, events); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	waitForScan(t, scanDone, "aiagent_v3 lineage")
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) == wantSessions
+	}) {
+		t.Fatalf("session count before Stop = %d, want %d",
+			scanInt(t, db, `SELECT COUNT(*) FROM sessions`), wantSessions)
+	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}

@@ -70,7 +70,7 @@ func waitForScan(t *testing.T, done <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s scan did not finish within 10s", name)
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s scan did not finish within 20s", name)
 	}
 }

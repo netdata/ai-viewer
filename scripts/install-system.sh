@@ -120,6 +120,29 @@ install_binary_atomically() {
   sudorun mv -f "$tmp" "$dst"
 }
 
+stop_unit_if_active() {
+  local unit="$1"
+  if systemctl is-active --quiet "$unit"; then
+    sudorun systemctl stop "$unit"
+  else
+    echo -e "${GRAY}skip stop ${unit}: not active${NC}" >&2
+  fi
+}
+
+wait_for_ingester_active() {
+  local phase="$1"
+  for _ in $(seq 1 15); do
+    if systemctl is-active --quiet ai-viewer-ingest.service; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo -e "${RED}[ERROR]${NC} ingester not active during ${phase} validation." >&2
+  sudorun systemctl status ai-viewer-ingest.service --no-pager -l || true
+  sudorun journalctl -u ai-viewer-ingest --since '2 min ago' --no-pager -n 80 || true
+  return 1
+}
+
 do_build() {
   run cd "$REPO_ROOT"
   echo -e "${GRAY}== build (frontend + Go binaries) ==${NC}" >&2
@@ -168,14 +191,19 @@ do_install() {
   rm -rf "$render_dir"
   sudorun systemctl daemon-reload
 
+  echo -e "${GRAY}== stop active units before ownership repair ==${NC}" >&2
+  stop_unit_if_active ai-viewer-serve.service
+  stop_unit_if_active ai-viewer-ingest.service
+
   # Data dir owned by the operator (the ingester runs as them).
   sudorun chown -R "${op_user}:${op_group}" "$OPT_DIR"
 
-  echo -e "${GRAY}== enable + restart ==${NC}" >&2
+  echo -e "${GRAY}== enable + start ==${NC}" >&2
   sudorun systemctl enable ai-viewer-ingest.service
   sudorun systemctl enable ai-viewer-serve.service
-  sudorun systemctl restart ai-viewer-ingest.service
-  sudorun systemctl restart ai-viewer-serve.service
+  sudorun systemctl start ai-viewer-ingest.service
+  wait_for_ingester_active "post-start"
+  sudorun systemctl start ai-viewer-serve.service
 
   echo -e "${GRAY}== waiting for server to come up ==${NC}" >&2
   local ok=""
@@ -189,6 +217,7 @@ do_install() {
     echo -e "             journalctl -u ai-viewer-serve -u ai-viewer-ingest --since '1 min ago'" >&2
     exit 1
   fi
+  wait_for_ingester_active "post-server"
 
   echo >&2
   echo -e "${GREEN}install complete${NC}" >&2

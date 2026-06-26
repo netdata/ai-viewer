@@ -21,6 +21,7 @@ ExecStart=/opt/ai-viewer/bin/ai-viewer-serve --db /opt/ai-viewer/data/index.db -
 WorkingDirectory=/opt/ai-viewer
 Restart=on-failure
 RestartSec=3s
+TimeoutStopSec=45s
 
 # Hardening. The server is read-only on the DB (CheckSchema + SELECTs; never
 # writes), so ProtectSystem=strict with no ReadWritePaths is safe — only the

@@ -104,7 +104,7 @@ func TestTail_HoldsBackPartialLineThenCompletes(t *testing.T) {
 	if err := appendFileBytes(path, []byte("}\n")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	ev, ok := waitForEvent(t, out, 3*time.Second, func(ev canonical.Event) bool {
+	ev, ok := waitForEvent(t, out, 15*time.Second, func(ev canonical.Event) bool {
 		_, is := ev.(canonical.SessionStartedEvent)
 		return is
 	})

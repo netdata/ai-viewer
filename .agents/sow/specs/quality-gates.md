@@ -486,6 +486,35 @@ so it runs before CPU-heavy correctness gates can raise load and invalidate its
 busy-host preflight. The remaining static-analysis/spec/security gates still run
 fail-fast after the benchmark so no gate is dropped or weakened.
 
+`scripts/test/systemd-units-test.sh` statically verifies both user-unit
+templates under `deploy/systemd/` and system-unit templates under
+`deploy/systemd-system/`. Its contract is per-variant, not a flat shared loop:
+
+- all four units: `Restart=on-failure`, `RestartSec=3s`,
+  `TimeoutStopSec=45s`, no `Type=notify`, no watchdog directives, expected
+  template `ExecStart` command/flags/placeholders, and expected `WantedBy`.
+- system units only: explicit `Type=simple`.
+- user units only: no explicit `Type=` directive; systemd's default simple
+  behavior is the contract.
+- system ingester: `After=network.target`,
+  `ReadWritePaths=/opt/ai-viewer/data /opt/ai-viewer/logs`, `OOMPolicy=stop`,
+  `MemoryHigh=4G`, `MemoryMax=8G`, `IOSchedulingClass=idle`, and
+  `LimitNOFILE=65536`.
+- system serve: `After=network.target ai-viewer-ingest.service`, no
+  `ReadWritePaths`, and no `MemoryHigh`, `MemoryMax`, `IOSchedulingClass`, or
+  `OOMPolicy` directives.
+- user ingester: `After=default.target` and no `MemoryHigh`, `MemoryMax`, or
+  `OOMPolicy` directives.
+- user serve: `After=ai-viewer-ingest.service` and no `MemoryHigh`,
+  `MemoryMax`, or `OOMPolicy` directives.
+
+`scripts/test/install-system-test.sh` statically verifies the rendered system
+installer flow. It must fail if stop/chown/start ordering regresses, if a first
+install can fail because missing units are stopped unguarded under
+`set -euo pipefail`, if rendered token values for sources/operator/group are
+wrong, if the ingester liveness poll before and after server readiness is
+removed, or if stale `systemctl restart` / `enable --now` expectations return.
+
 The CI `gates` job does **not** run the full serial `scripts/gates.sh`
 aggregate. CI keeps the expensive gates parallel in their dedicated jobs and
 uses the `gates` job for cross-cutting repo scans and required gate

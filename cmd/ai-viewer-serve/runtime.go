@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/notify"
@@ -13,12 +14,27 @@ import (
 type serveRuntime struct {
 	store     *store.Store
 	presenter *presenter.Presenter
+	mu        sync.Mutex
+	closed    bool
 }
 
-func (rt *serveRuntime) close() {
-	if rt != nil {
-		_ = rt.store.Close()
+func (rt *serveRuntime) close() error {
+	if rt == nil {
+		return nil
 	}
+	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return nil
+	}
+	rt.closed = true
+	st := rt.store
+	rt.store = nil
+	rt.mu.Unlock()
+	if st != nil {
+		return st.Close()
+	}
+	return nil
 }
 
 func newServeRuntime(
@@ -35,14 +51,18 @@ func newServeRuntime(
 	}
 	rt := &serveRuntime{store: rs}
 	if err := presenter.CheckSchema(ctx, rs.DB(), presenter.SchemaVersion); err != nil {
-		rt.close()
+		if closeErr := rt.close(); closeErr != nil {
+			logger.Warn("ai-viewer-serve: store close after schema failure failed", "err", closeErr)
+		}
 		logger.Error("ai-viewer-serve: schema version mismatch",
 			"db", dbPath, "expected", presenter.SchemaVersion, "err", err)
 		return nil, err
 	}
 	p, err := newServePresenter(logger, cfg, dbPath, rs)
 	if err != nil {
-		rt.close()
+		if closeErr := rt.close(); closeErr != nil {
+			logger.Warn("ai-viewer-serve: store close after presenter failure failed", "err", closeErr)
+		}
 		logger.Error("ai-viewer-serve: presenter.New failed", "err", err)
 		return nil, err
 	}

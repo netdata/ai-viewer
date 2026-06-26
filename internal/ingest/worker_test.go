@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
+	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // TestWorker_FlushesAtBatchSize covers the size-based flush path: the
@@ -17,7 +20,8 @@ import (
 func TestWorker_FlushesAtBatchSize(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(2),
 		WithBatchInterval(10*time.Second), // ensure size triggers, not timer
@@ -57,7 +61,8 @@ func TestWorker_FlushesAtBatchSize(t *testing.T) {
 func TestWorker_FlushesAtInterval(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1000), // never trip on size
 		WithBatchInterval(50*time.Millisecond),
@@ -350,6 +355,183 @@ func TestWorkerRuntime_RecoveredFlushRetryDoesNotInvokeOnErr(t *testing.T) {
 	}
 }
 
+func TestWorkerRuntime_ExpiredShutdownContextReportsReplayRequiredOnce(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	var errs []error
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.onErr = func(err error) {
+		errs = append(errs, err)
+	}
+	rt := newWorkerRuntime(w)
+	defer rt.close()
+
+	rt.appendEvent(canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "replay-required",
+		RootNativeID: "replay-required",
+		Kind:         canonical.KindRoot,
+	})
+
+	attempts := 0
+	rt.flush = func(context.Context, *writer, []canonical.Event) error {
+		attempts++
+		return context.DeadlineExceeded
+	}
+	writeCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rt.flushBatchWithWriteContext(writeCtx, "shutdown expired")
+
+	if attempts > 1 {
+		t.Fatalf("flush attempts = %d, want at most one attempt after shutdown deadline", attempts)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("reported errors = %d (%v), want exactly one replay-required error", len(errs), errs)
+	}
+	if !errors.Is(errs[0], ErrReplayRequired) {
+		t.Fatalf("reported error = %v, want ErrReplayRequired", errs[0])
+	}
+	if len(rt.batch) != 1 {
+		t.Fatalf("batch len after replay-required drain = %d, want preserved batch", len(rt.batch))
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='replay-required'`); got != 0 {
+		t.Fatalf("session rows after replay-required drain = %d, want 0", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM source_progress WHERE source_id=?`, src); got != 0 {
+		t.Fatalf("source_progress rows after replay-required drain = %d, want 0", got)
+	}
+}
+
+func TestWorkerRuntime_SQLiteContentionReportsReplayRequiredAndReplays(t *testing.T) {
+	const src = "aiagent_v3:/tmp/contention"
+
+	db, path := openContentionTestDB(t)
+	releaseLock := holdSQLiteWriteLock(t, path)
+	t.Cleanup(releaseLock)
+
+	var errs []error
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp/contention")
+	w.onErr = func(err error) {
+		errs = append(errs, err)
+	}
+	rt := newWorkerRuntime(w)
+	rt.appendEvent(canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "contention-replay",
+		RootNativeID: "contention-replay",
+		Kind:         canonical.KindRoot,
+	})
+
+	writeCtx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	started := time.Now()
+	rt.flushBatchWithWriteContext(writeCtx, "sqlite contention")
+	cancel()
+	elapsed := time.Since(started)
+	rt.close()
+	if elapsed > time.Second {
+		t.Fatalf("contention flush elapsed = %s, want bounded by test drain context", elapsed)
+	}
+	if len(errs) != 1 || !errors.Is(errs[0], ErrReplayRequired) {
+		t.Fatalf("reported errors = %v, want exactly one ErrReplayRequired", errs)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='contention-replay'`); got != 0 {
+		t.Fatalf("session rows after contended drain = %d, want 0", got)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM source_progress WHERE source_id=?`, src); got != 0 {
+		t.Fatalf("source_progress rows after contended drain = %d, want 0", got)
+	}
+
+	releaseLock()
+
+	i, err := New(
+		db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1),
+		WithBatchInterval(time.Hour),
+		WithSourceFormat(src, "aiagent_v3"),
+		WithLocation(src, "/tmp/contention"),
+	)
+	if err != nil {
+		t.Fatalf("New replay ingester: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start replay ingester: %v", err)
+	}
+	events := make(chan canonical.Event, 1)
+	events <- canonical.SessionStartedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:     "contention-replay",
+		RootNativeID: "contention-replay",
+		Kind:         canonical.KindRoot,
+	}
+	close(events)
+	if err := i.Submit(src, events); err != nil {
+		t.Fatalf("Submit replay events: %v", err)
+	}
+	if err := i.Stop(); err != nil {
+		t.Fatalf("Stop replay ingester: %v", err)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='contention-replay'`); got != 1 {
+		t.Fatalf("session rows after replay = %d, want 1", got)
+	}
+	if got := scanInt(t, db, `SELECT last_seq FROM source_progress WHERE source_id=?`, src); got != 1 {
+		t.Fatalf("source_progress last_seq after replay = %d, want 1", got)
+	}
+}
+
+func openContentionTestDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "contention.db")
+	db, err := sql.Open("sqlite", sqliteContentionURI(path, "busy_timeout(50)"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("PingContext: %v", err)
+	}
+	if err := store.Up(context.Background(), db, silentLogger()); err != nil {
+		t.Fatalf("store.Up: %v", err)
+	}
+	return db, path
+}
+
+func holdSQLiteWriteLock(t *testing.T, path string) func() {
+	t.Helper()
+	locker, err := sql.Open("sqlite", sqliteContentionURI(path, "busy_timeout(5000)"))
+	if err != nil {
+		t.Fatalf("open lock holder: %v", err)
+	}
+	if _, err := locker.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		_ = locker.Close()
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		_, _ = locker.ExecContext(context.Background(), `ROLLBACK`)
+		_ = locker.Close()
+	}
+}
+
+func sqliteContentionURI(path string, busyTimeout string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", busyTimeout)
+	q.Add("_pragma", "journal_mode(wal)")
+	q.Add("_pragma", "synchronous(normal)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // TestDetachedWriteContext pins the unbounded context.WithoutCancel risk: active
 // writes detach from lifecycle cancellation, but shutdown must still arm the
 // bounded drain timeout while preserving parent context values.
@@ -614,7 +796,8 @@ func TestWorker_LowSeqEventsNotDropped(t *testing.T) {
 		t.Fatalf("seed sp: %v", err)
 	}
 
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(4),
 		WithBatchInterval(time.Second),
@@ -670,7 +853,8 @@ func TestWorker_LowSeqEventsNotDropped(t *testing.T) {
 func TestWorker_SourceProgressUpdatesCursor(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(2),
 		WithBatchInterval(time.Second),
@@ -714,7 +898,8 @@ func TestWorker_SourceProgressUpdatesCursor(t *testing.T) {
 func TestWorker_EnsureSourceRowCreated(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1),
 		WithBatchInterval(time.Second),
@@ -847,7 +1032,8 @@ func TestWorker_IdleTickMaterializesClosedBucket(t *testing.T) {
 	hourHEnd := ts(0, 10, 30)
 	clk := &mutableClock{now: ts(0, 10, 10)} // open hour = H → H carried, not materialized.
 
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1000),                    // never trip on size
 		WithBatchInterval(20*time.Millisecond), // short idle tick
@@ -921,7 +1107,8 @@ func TestWorker_IdleTickMaterializesClosedDayAfterMidnight(t *testing.T) {
 	day0 := ts(0, 0, 0)
 	clk := &mutableClock{now: ts(0, 10, 10)} // open hour=10:00, open day=day0 → both carried.
 
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1000),                    // never trip on size
 		WithBatchInterval(20*time.Millisecond), // short idle tick
@@ -1001,7 +1188,8 @@ func TestWorker_FlushPromotesPendingMissDedupAfterCommit(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	pricer := &fakeDetailPricer{miss: "unknown_provider_model"}
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithPricer(pricer),
 		WithBatchSize(3),                  // one batch per triplet of events

@@ -4,9 +4,12 @@
 
 Status: in-progress
 
-Sub-state: Implementation plan reviewer round 8 converged with six
-`READY FOR IMPLEMENTATION` votes. The next step is spec updates before tests
-or runtime code.
+Sub-state: Implementation, tests, specs, installer/unit updates, and local
+non-benchmark gates are complete. Implementation review has five
+`PRODUCTION GRADE` votes; `glm` produced useful partial validation but no final
+vote after two 30-minute timeouts. `scripts/check-bench.sh` is still blocked by
+host load, so the SOW remains current until valid benchmark evidence can be
+captured or explicitly waived.
 
 ## Requirements
 
@@ -1987,9 +1990,376 @@ P3 notes folded or recorded:
 - Source-count runtime logging/warning, `e2e-serve.sh` bounded waiting, and a
   mandatory nightly workflow remain P3 and non-blocking.
 
+## Implementation Evidence - 2026-06-26
+
+Implemented scope:
+
+- Specs updated first:
+  - `.agents/sow/specs/ingester.md`: bounded `StopContext`, replay-required
+    drain semantics, shutdown outcome classes, pprof residual, one-shot lock
+    behavior, and graceful-shutdown budget.
+  - `.agents/sow/specs/deployment.md`: stop/chown/start install order,
+    ingester liveness polling, `TimeoutStopSec=45s`, system resource
+    directives, `OOMPolicy=stop`, one-shot `--state-dir` behavior, and
+    `StartLimit*` diagnostic guidance.
+  - `.agents/sow/specs/observability.md`: structured shutdown markers and
+    fields.
+  - `.agents/sow/specs/presenter.md`: serve signal/shutdown/store-close
+    behavior.
+  - `.agents/sow/specs/quality-gates.md`: expanded systemd and installer static
+    gate contracts.
+  - `.agents/skills/project-deployment/SKILL.md`: operator runbook aligned with
+    the new install and shutdown behavior.
+- Tests added or hardened before runtime changes:
+  - Ingester `StopContext` pre-start, timeout, and concurrent follower-state
+    tests.
+  - Worker replay-required tests proving expired shutdown context preserves
+    batch/source progress and reports one replay-required error.
+  - Ingest command tests for pre-added `scanWG` failure cleanup, post-scan
+    backfill shutdown channels, one-shot default `--state-dir` lock refusal, and
+    subcommand state-dir parsing.
+  - Serve tests for signal-aware startup, bounded notify-poller wait, bounded
+    store close, and idempotent runtime close.
+  - Installer/systemd tests pin stop-before-chown-before-start, ingester
+    liveness polling, first-install guarded stop, resource directives,
+    `TimeoutStopSec=45s`, no notify/watchdog, and absence of wrong-unit
+    directives.
+  - Finite-scan E2E harnesses were hardened to use unbuffered channels and
+    per-event flushing for deterministic race/coverage behavior; unrelated
+    fixed-timeout tests that failed only under whole-suite race load were
+    widened without changing product behavior.
+- Runtime changes:
+  - `ai-viewer-ingest` creates the top-level signal context before subcommand
+    dispatch and writer-store open, passes it through one-shot commands, and
+    uses bounded `StopContext`, bounded backfill wait, and bounded writer-store
+    close.
+  - `ai-viewer-ingest` writer one-shots acquire the same state-dir daemon lock
+    before opening the writer DB; default state dir mirrors daemon
+    `resolveStateDir`, including custom `--db` cases.
+  - `internal/ingest` now exposes typed shutdown outcomes and replay-required
+    semantics; worker shutdown preserves uncommitted batches when the drain
+    deadline expires.
+  - Post-scan backfill channel ownership is single-owner and shutdown-safe.
+  - Source startup failure decrements the pre-added scan wait group before
+    returning.
+  - `ai-viewer-serve` creates its signal context before reader-store open,
+    drains notify poller/SSE/HTTP in order, closes the store with a bounded
+    guard, and makes runtime close idempotent.
+  - Installer uses explicit active-unit stop, ownership repair, ingester start
+    and liveness verification, server start, and post-server ingester
+    verification instead of `systemctl restart`.
+  - User and system unit templates set `TimeoutStopSec=45s`; system ingester
+    carries the pinned resource/OOM directives.
+
+Local validation completed:
+
+- `go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...`
+  via `scripts/test.sh`: passed.
+- Frontend Vitest coverage via `scripts/test.sh`: passed, 929 tests.
+- `scripts/check-coverage.sh`: passed; gated aggregate 85.4%, every gated
+  package >= 80%.
+- `scripts/lint.sh`: passed after implementation fixes; includes gofmt,
+  goimports, vet, golangci-lint, gosec, govulncheck, eslint, TypeScript,
+  bundle-size self-test, and frontend coverage-gate self-tests.
+- `scripts/build.sh`: passed; frontend build, bundle-size gate, embedded assets,
+  and both Go binaries.
+- `scripts/check-ingestion-parity.sh --fixtures`: passed.
+- `go test -run='^Fuzz' ./internal/adapters/...`: passed.
+- `scripts/spec-drift.sh`: passed.
+- `scripts/test/systemd-units-test.sh`: passed.
+- `scripts/test/install-system-test.sh`: passed.
+- `git diff --check`: passed.
+- `bash -n scripts/install-system.sh scripts/test/install-system-test.sh
+  scripts/test/systemd-units-test.sh`: passed.
+- `scripts/scan-ai-attribution.sh`: passed.
+- `scripts/scan-secrets.sh`: passed; existing null-byte warnings came from
+  tracked binary/fixture content and the scanner reported no secrets or
+  operator PII.
+- `scripts/test/check-bench-test.sh`: passed.
+
+Pending validation:
+
+- `scripts/check-bench.sh` actual benchmark gate is not yet valid evidence:
+  it refused to run twice on 2026-06-26 because the workstation was busy:
+  first `loadavg 1m=29.74`, then `loadavg 1m=24.70`, threshold `12.00`.
+  Retry in a quieter window before closing the SOW.
+
+### Implementation Review Gate - Round 1
+
+Outcome: `NEEDS WORK`.
+
+Accepted findings:
+
+- Adapter wait was sequential before `StopContext`, violating the budget model
+  `max(adapter_grace=5s, ingesterStopTimeout=30s)`. Fixed by starting adapter
+  wait in a goroutine before `StopContext` and joining it after `StopContext`.
+- Serve registered its signal context before opening the store but did not call
+  the returned `stop()` function on the first signal. Fixed by passing the
+  release function into `serveHTTP` and calling it immediately on `ctx.Done()`.
+- Worker shutdown classified any joined error containing `ErrReplayRequired` as
+  replay-required, which could mask permanent worker drops. Fixed by
+  classifying replay-required only when every recorded worker error wraps
+  `ErrReplayRequired`.
+- Structured shutdown marker names in `observability.md` were not reflected in
+  the implementation. Fixed for shutdown start, adapter grace expiry, retry
+  suppression, replay-required, backfill cancellation/timeout, resolver timeout,
+  store-close error/timeout, clean shutdown, and bounded-guard exit.
+- The finite-scan E2E helper still used a 10 s timeout after the harness changed
+  to per-event flushing and unbuffered channels. Fixed by widening
+  `waitForScan` to 20 s; whole-package `internal/ingest` race tests now pass.
+- Missing validation tests were real. Added tests for parallel adapter/ingester
+  shutdown timing, writer-store close error/timeout, replay-only vs mixed
+  worker-error classification, five-source clean drain, resolver deadline/loop
+  shutdown, and real SQLite write contention followed by replay from unadvanced
+  source progress.
+
+Rejected or downgraded findings:
+
+- A production-constant 25 s/N=5 wall-clock contention proof remains too slow
+  for the per-push gate and is still treated as long-running validation. The
+  new per-push tests use scaled deadlines and a real SQLite contention path with
+  a short test-only busy timeout.
+- Per-adapter cancellation matrix remains documented as a residual-risk class
+  rather than fully tested in this patch. The runtime `runAdapter` shutdown
+  escape and the existing adapter tests cover the changed shared path; deeper
+  adapter-specific cancellation proofs can be split into a follow-up SOW if
+  reviewers continue to require them for closure.
+
+### Reviewer-Fix Evidence - 2026-06-26
+
+Additional validation after round-1 fixes:
+
+- `go test -count=1 ./cmd/ai-viewer-ingest ./cmd/ai-viewer-serve
+  ./internal/ingest`: passed.
+- Focused race run for the previously failing E2E cases plus the new shutdown
+  tests: passed.
+- `go test -race -count=1 ./internal/ingest/...`: passed in 45.734 s.
+- `go test -race -count=1 ./cmd/ai-viewer-ingest ./cmd/ai-viewer-serve`:
+  initially found a race in the test close hook, then passed after the hook was
+  mutex-protected and rerun.
+- `go test -count=1 ./...`: passed.
+- `scripts/test.sh`: passed; Go race/coverage and frontend Vitest coverage.
+- `scripts/check-coverage.sh`: passed; gated aggregate 85.4%, every gated
+  package >= 80%.
+- `scripts/test/systemd-units-test.sh`: passed.
+- `scripts/test/install-system-test.sh`: passed.
+- `bash -n scripts/install-system.sh scripts/test/install-system-test.sh
+  scripts/test/systemd-units-test.sh`: passed.
+- `scripts/lint.sh`: passed.
+- `scripts/build.sh`: passed.
+- `scripts/spec-drift.sh`: passed.
+- `scripts/check-ingestion-parity.sh --fixtures`: passed.
+- `go test -run='^Fuzz' ./internal/adapters/...`: passed.
+- `scripts/scan-ai-attribution.sh`: passed.
+- `scripts/scan-secrets.sh`: passed; existing null-byte fixture warnings only,
+  final scanner result clean.
+- `git diff --check`: passed.
+
+Pending validation:
+
+- External implementation-review rerun is pending after these fixes.
+- `scripts/check-bench.sh` still cannot produce valid benchmark evidence while
+  host load remains above threshold.
+
+### Implementation Review Gate - Round 2
+
+Outcome: `NEEDS WORK`.
+
+Reviewer votes:
+
+- `glm`: `NEEDS WORK`.
+- `kimi`: `PRODUCTION GRADE`.
+- `mimo`: `PRODUCTION GRADE`.
+- `qwen`: `PRODUCTION GRADE`.
+- `deepseek`: `PRODUCTION GRADE`.
+- `minimax`: timed out before final vote, but independently confirmed the
+  startup-close validation gap while reviewing.
+
+Accepted findings:
+
+- Missing shutdown-forensics validation was real. The SOW validation plan
+  required a test proving early shutdown-state markers and terminal
+  replay-required/bounded-guard markers. Runtime markers existed, but no test
+  pinned marker names or field shape. Fixed with
+  `TestIngestShutdownForensicsMarkers` and
+  `TestRecordWorkerErrorLogsReplayRequiredFields`.
+- Missing partial-startup signal validation was real. The code registered the
+  signal context before writer open, but the post-open/pre-start error path
+  still used the old unbounded deferred `Store.Close()`. Fixed by using the
+  bounded writer close in the deferred startup/error path, adding
+  `TestRun_StoreOpenReceivesCanceledSignalContext`, and adding
+  `TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock`.
+- `shutdown_replay_required` field drift was real. `pending_events` and
+  `reason` were embedded in the error string instead of structured fields.
+  Fixed by introducing an internal replay-required error carrying structured
+  reason and pending-event count.
+- Serve runtime close idempotency existed in code but was not pinned by a test.
+  Fixed with `TestServeRuntimeCloseIsIdempotent`.
+
+Rejected or downgraded findings:
+
+- Aggregate adapter-wait timeout cannot honestly report per-source
+  `source_id`/`source_format` without new active-adapter ownership tracking.
+  The observability spec was corrected to define
+  `shutdown_adapter_grace_expired` as an aggregate marker with `elapsed_ms` and
+  `grace_ms`.
+- Shutdown markers must not add separate raw `location` or payload fields. The
+  spec now states that `source_id` is the existing canonical diagnostic key and
+  forbids additional raw location/payload fields on shutdown markers.
+
+### Reviewer-Fix Evidence - Round 2 - 2026-06-26
+
+Code/spec fixes:
+
+- Startup/error deferred writer-store close now uses the same 5 s
+  `closeStoreWithTimeout` path as normal shutdown.
+- A signal-canceled startup path logs `shutdown_start` before returning from
+  writer-open or pre-start errors.
+- Writer-store open and ingester start are test-seamed without changing
+  production behavior, so cancellation and partial-startup close behavior can
+  be verified deterministically.
+- Shutdown marker fields now include elapsed timing for adapter grace expiry,
+  backfill timeout/cancel, writer/reader store close error/timeout, and serve
+  clean shutdown.
+- `shutdown_replay_required` now exposes structured `pending_events` and
+  `reason`.
+- Serve logs terminal `shutdown_clean` from the HTTP shutdown path that knows
+  the elapsed duration.
+- `.agents/sow/specs/observability.md` was aligned to the marker field
+  contract and aggregate adapter wait behavior.
+
+Additional validation after round-2 fixes:
+
+- Focused race tests for new validation points:
+  `go test -race -count=1 -timeout=120s -run
+  'TestIngestShutdownForensicsMarkers|TestRun_StoreOpenReceivesCanceledSignalContext|TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock|TestShutdownIngestRuntimeWaitsAdaptersInParallelWithStopContext|TestCloseStoreWithTimeoutReportsErrorAndTimeout'
+  ./cmd/ai-viewer-ingest`: passed.
+- Focused replay/marker tests:
+  `go test -race -count=1 -timeout=120s -run
+  'TestRecordWorkerErrorLogsReplayRequiredFields|TestStopContext_ReplayOnlyWorkerErrorsClassifyReplayRequired|TestWorkerRuntime_ExpiredShutdownContextReportsReplayRequiredOnce|TestWorkerRuntime_SQLiteContentionReportsReplayRequiredAndReplays'
+  ./internal/ingest`: passed.
+- Focused serve tests:
+  `go test -race -count=1 -timeout=120s -run
+  'TestServeRuntimeCloseIsIdempotent|TestServeGracefulShutdownOrder|TestServeGracefulShutdownBoundsNotifyPollerWait|TestServeGracefulShutdownBoundsStoreClose'
+  ./cmd/ai-viewer-serve`: passed.
+- Affected-package race suite:
+  `go test -race -count=1 -timeout=240s ./cmd/ai-viewer-ingest
+  ./cmd/ai-viewer-serve ./internal/ingest`: passed.
+- `scripts/test.sh`: passed; Go race/coverage total 81.7%, frontend Vitest
+  929 tests passed.
+- `scripts/check-coverage.sh`: passed; gated aggregate 85.4%, every gated
+  package >= 80%.
+- `scripts/lint.sh`: passed.
+- `scripts/build.sh`: passed.
+- `scripts/check-ingestion-parity.sh --fixtures`: passed.
+- `go test -run='^Fuzz' ./internal/adapters/...`: passed.
+- `scripts/spec-drift.sh`: passed.
+- `scripts/test/systemd-units-test.sh`: passed.
+- `scripts/test/install-system-test.sh`: passed.
+- `bash -n scripts/install-system.sh scripts/test/install-system-test.sh
+  scripts/test/systemd-units-test.sh`: passed.
+- `scripts/scan-ai-attribution.sh`: passed.
+- `scripts/scan-secrets.sh`: passed; existing null-byte fixture warnings only,
+  final scanner result clean.
+- `git diff --check`: passed.
+
+Pending validation:
+
+- External implementation-review rerun is pending after round-2 fixes.
+- `scripts/check-bench.sh` still cannot produce valid benchmark evidence:
+  latest refusal on 2026-06-26 was `loadavg 1m=33.66`, threshold `12.00`.
+
+### Implementation Review Gate - Round 3
+
+Outcome: `PRODUCTION GRADE` from five reviewers; `glm` unavailable for a final
+vote after two 30-minute timeouts. The partial `glm` output still identified one
+real spec-memory gap, which was accepted and fixed.
+
+Reviewer votes:
+
+- `mimo`: `PRODUCTION GRADE`.
+- `deepseek`: `PRODUCTION GRADE`.
+- `qwen`: `PRODUCTION GRADE`.
+- `minimax`: `PRODUCTION GRADE` with P3-only residual test-depth observations.
+- `kimi`: `PRODUCTION GRADE` with P3-only residual observations.
+- `glm`: no final vote; two 30-minute runs timed out after read-only validation.
+  The first run passed focused tests, systemd/install tests, spec drift,
+  secrets/attribution scans, lint, and build before timing out. The second run
+  passed focused race tests, affected-package race tests, spec drift, and
+  systemd/install tests before timing out.
+
+Accepted findings and fixes:
+
+- `glm` partial review found that the `scanWG` pre-add/source-start-failure
+  contract was only in code comments/tests, not durable specs. Fixed in
+  `.agents/sow/specs/ingester.md`: source-start failures before the adapter
+  `Scan` goroutine starts must decrement the pre-added scan counter exactly once;
+  started sources delegate the decrement to `runAdapter` after `Scan` completes
+  or is canceled.
+- `kimi` flagged a P3 observability inconsistency: serve could log
+  `shutdown_clean` even when the read-only store close timed out. Fixed by
+  making `runGracefulShutdown` return an all-phases-clean boolean and logging
+  `shutdown_clean` only when listener wait succeeds and every bounded phase was
+  clean.
+- The stale serve shutdown comment still said the store was closed only by the
+  `run()` defer. Fixed to describe the bounded close path plus idempotent defer
+  fallback.
+- The ingester pprof residual text overstated the risk by implying pprof can keep
+  the process alive until systemd timeout. Fixed to state that process exit reaps
+  the pprof listener/handlers and `StopContext` does not wait for pprof.
+
+Rejected or downgraded residuals:
+
+- Missing dedicated `ShutdownResolverTimeout` tests remain P3. Existing tests
+  cover caller-deadline worker timeout, resolver deadline capping, resolver-loop
+  stop behavior, and clean final resolver pass. A direct resolver-timeout
+  outcome seam can be added later if a future change touches resolver internals.
+- Missing direct tests for `check-parity` not taking the daemon write lock and
+  serve signal-registration ordering remain P3. Both are statically evident from
+  the code paths and were not required to close SOW-0104.
+
+Post-fix validation:
+
+- Focused serve race tests:
+  `go test -race -count=1 -timeout=120s -run
+  'TestServeGracefulShutdownOrder|TestServeGracefulShutdownReportsCleanWhenAllPhasesClean|TestServeGracefulShutdownBoundsNotifyPollerWait|TestServeGracefulShutdownBoundsStoreClose|TestServeRuntimeCloseIsIdempotent'
+  ./cmd/ai-viewer-serve`: passed.
+- Focused ingester race tests:
+  `go test -race -count=1 -timeout=120s -run
+  'TestIngestShutdownForensicsMarkers|TestRun_StoreOpenReceivesCanceledSignalContext|TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock|TestShutdownIngestRuntimeWaitsAdaptersInParallelWithStopContext|TestCloseStoreWithTimeoutReportsErrorAndTimeout'
+  ./cmd/ai-viewer-ingest`: passed.
+- `scripts/spec-drift.sh`: passed.
+- Affected-package race suite:
+  `go test -race -count=1 -timeout=240s ./cmd/ai-viewer-ingest
+  ./cmd/ai-viewer-serve ./internal/ingest`: passed.
+- `scripts/test/systemd-units-test.sh && scripts/test/install-system-test.sh`:
+  passed.
+- `git diff --check`: passed.
+- `scripts/lint.sh`: passed.
+- `scripts/test.sh`: first concurrent run failed once in
+  `TestTail_AppendsToExistingFileTriggerEvents` while `scripts/lint.sh` was also
+  running heavy static analysis; immediate isolated reruns of that test and the
+  full `./internal/adapters/aiagent_v3` package passed. A sequential rerun of
+  `scripts/test.sh` passed: Go race/coverage total 81.8%, frontend Vitest 929
+  tests passed.
+- `scripts/check-coverage.sh`: passed; gated aggregate 85.4%, every gated
+  package >= 80%.
+- `scripts/build.sh`: passed; frontend bundle-size gate passed, binaries built.
+- `scripts/check-ingestion-parity.sh --fixtures`: passed.
+- `go test -run='^Fuzz' ./internal/adapters/...`: passed.
+- `scripts/scan-ai-attribution.sh && scripts/scan-secrets.sh`: passed; existing
+  null-byte fixture warnings only, final scanner result clean.
+- `scripts/check-bench.sh`: still blocked by host load; latest refusal on
+  2026-06-26 was `loadavg 1m=16.47`, threshold `12.00`.
+
 ## Lessons Extracted
 
-Pending.
+- Shutdown terminal markers must reflect all bounded phases, not only the
+  listener/server result. A prior warning marker is not enough if the terminal
+  marker says `shutdown_clean`.
+- Wait-group pre-add patterns are durable contracts when a later gate depends on
+  the counter reaching zero. Tests prove the race, but specs must also record who
+  owns each decrement on success and failure paths.
 
 ## Followup
 

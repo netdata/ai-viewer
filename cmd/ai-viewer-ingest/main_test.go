@@ -16,6 +16,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +34,8 @@ import (
 	_ "github.com/netdata/ai-viewer/internal/adapters/aiagent_v3"
 	_ "github.com/netdata/ai-viewer/internal/adapters/claude_code"
 	"github.com/netdata/ai-viewer/internal/canonical"
+	"github.com/netdata/ai-viewer/internal/ingest"
+	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // captureStderr returns a *os.File whose writes we collect for the
@@ -384,7 +388,8 @@ func realV3Adapter(t *testing.T) canonical.Adapter {
 
 func TestLoadSourceCursor_NilLookupShortCircuits(t *testing.T) {
 	t.Parallel()
-	cur := loadSourceCursor(context.Background(),
+	cur := loadSourceCursor(
+		context.Background(),
 		realV3Adapter(t),
 		nil,
 		"aiagent_v3:/tmp",
@@ -397,7 +402,8 @@ func TestLoadSourceCursor_NilLookupShortCircuits(t *testing.T) {
 
 func TestLoadSourceCursor_EmptyReturnsNilCursor(t *testing.T) {
 	t.Parallel()
-	cur := loadSourceCursor(context.Background(),
+	cur := loadSourceCursor(
+		context.Background(),
 		realV3Adapter(t),
 		fakeCursorLookup{stored: "", err: nil},
 		"aiagent_v3:/tmp",
@@ -410,7 +416,8 @@ func TestLoadSourceCursor_EmptyReturnsNilCursor(t *testing.T) {
 
 func TestLoadSourceCursor_LookupErrorFallsBackToNil(t *testing.T) {
 	t.Parallel()
-	cur := loadSourceCursor(context.Background(),
+	cur := loadSourceCursor(
+		context.Background(),
 		realV3Adapter(t),
 		fakeCursorLookup{err: errors.New("db gone")},
 		"aiagent_v3:/tmp",
@@ -425,7 +432,8 @@ func TestLoadSourceCursor_CorruptStoredFallsBackToNil(t *testing.T) {
 	t.Parallel()
 	// aiagent_v3.ParseCursor rejects garbage JSON; the helper must
 	// log WARN and fall back to nil rather than crashing.
-	cur := loadSourceCursor(context.Background(),
+	cur := loadSourceCursor(
+		context.Background(),
 		realV3Adapter(t),
 		fakeCursorLookup{stored: "{not json"},
 		"aiagent_v3:/tmp",
@@ -528,7 +536,8 @@ func TestLoadSourceCursor_DecodeRoundTripV3(t *testing.T) {
 	// pins the lookup→ParseCursor wiring through the production
 	// adapter, not a stub.
 	adapter := realV3Adapter(t)
-	cur := loadSourceCursor(context.Background(),
+	cur := loadSourceCursor(
+		context.Background(),
 		adapter,
 		fakeCursorLookup{stored: "{}"},
 		"aiagent_v3:/tmp",
@@ -537,6 +546,323 @@ func TestLoadSourceCursor_DecodeRoundTripV3(t *testing.T) {
 	if cur == nil {
 		t.Fatal("loadSourceCursor(stored=\"{}\") = nil, want non-nil cursor")
 	}
+}
+
+func TestStartSourceFailureDecrementsPreAddedScanWG(t *testing.T) {
+	t.Parallel()
+
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	scanDone := make(chan struct{})
+	go func() {
+		scanWG.Wait()
+		close(scanDone)
+	}()
+
+	err := startSourceWithFactoryLookup(
+		context.Background(),
+		&adapterWG,
+		&scanWG,
+		nil,
+		nil,
+		configuredSource{id: "missing:/tmp", format: "missing", location: "/tmp"},
+		silentLogger(),
+		func(string) (canonical.AdapterFactory, bool) { return nil, false },
+		closedChannel(),
+	)
+	if err == nil {
+		t.Fatal("startSourceWithFactoryLookup returned nil for unknown format")
+	}
+	select {
+	case <-scanDone:
+	case <-time.After(time.Second):
+		t.Fatal("scanWG did not drain after source-start failure")
+	}
+}
+
+func closedChannel() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+type fakeShutdownIngester struct {
+	delay  time.Duration
+	result ingest.ShutdownResult
+	err    error
+}
+
+func (f fakeShutdownIngester) StopContext(ctx context.Context) (ingest.ShutdownResult, error) {
+	if f.delay <= 0 {
+		return f.result, f.err
+	}
+	timer := time.NewTimer(f.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return f.result, f.err
+	case <-ctx.Done():
+		return ingest.ShutdownResult{Outcome: ingest.ShutdownTimeout}, ctx.Err()
+	}
+}
+
+func TestShutdownIngestRuntimeWaitsAdaptersInParallelWithStopContext(t *testing.T) {
+	var adapterWG sync.WaitGroup
+	adapterWG.Add(1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		adapterWG.Done()
+	}()
+	backfillWait := closedChannel()
+
+	started := time.Now()
+	result, ok := shutdownIngestRuntime(
+		silentLogger(),
+		func() {},
+		&adapterWG,
+		fakeShutdownIngester{
+			delay:  150 * time.Millisecond,
+			result: ingest.ShutdownResult{Outcome: ingest.ShutdownClean},
+		},
+		backfillWait,
+		nil,
+	)
+	elapsed := time.Since(started)
+	if !ok {
+		t.Fatalf("shutdownIngestRuntime ok = false, result=%+v", result)
+	}
+	if elapsed > 260*time.Millisecond {
+		t.Fatalf("shutdown elapsed = %s, want adapter wait and StopContext in parallel", elapsed)
+	}
+}
+
+func TestCloseStoreWithTimeoutReportsErrorAndTimeout(t *testing.T) {
+	s, err := store.OpenWriter(context.Background(), ":memory:", silentLogger())
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	orig := closeWriterStore
+	t.Cleanup(func() {
+		closeWriterStoreMu.Lock()
+		closeWriterStore = orig
+		closeWriterStoreMu.Unlock()
+	})
+
+	closeWriterStoreMu.Lock()
+	closeWriterStore = func(*store.Store) error {
+		return errors.New("close failed")
+	}
+	closeWriterStoreMu.Unlock()
+	if closeStoreWithTimeout(s, time.Second, silentLogger()) {
+		t.Fatal("closeStoreWithTimeout returned true on close error")
+	}
+
+	block := make(chan struct{})
+	closeWriterStoreMu.Lock()
+	closeWriterStore = func(*store.Store) error {
+		<-block
+		return nil
+	}
+	closeWriterStoreMu.Unlock()
+	started := time.Now()
+	if closeStoreWithTimeout(s, 20*time.Millisecond, silentLogger()) {
+		t.Fatal("closeStoreWithTimeout returned true on close timeout")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("close timeout elapsed = %s, want bounded", elapsed)
+	}
+	close(block)
+}
+
+func TestIngestShutdownForensicsMarkers(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	var adapterWG sync.WaitGroup
+
+	started := logIngestShutdownStart(logger)
+	result, ok := shutdownIngestRuntime(
+		logger,
+		func() {},
+		&adapterWG,
+		fakeShutdownIngester{
+			result: ingest.ShutdownResult{Outcome: ingest.ShutdownReplayRequired},
+			err:    ingest.ErrReplayRequired,
+		},
+		closedChannel(),
+		nil,
+	)
+	if !ok {
+		t.Fatalf("shutdownIngestRuntime replay-required ok = false, result=%+v", result)
+	}
+	logIngestShutdownTerminal(logger, result, started)
+
+	s, err := store.OpenWriter(context.Background(), ":memory:", silentLogger())
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	orig := closeWriterStore
+	closeWriterStoreMu.Lock()
+	closeWriterStore = func(*store.Store) error {
+		return errors.New("close failed")
+	}
+	closeWriterStoreMu.Unlock()
+	t.Cleanup(func() {
+		closeWriterStoreMu.Lock()
+		closeWriterStore = orig
+		closeWriterStoreMu.Unlock()
+	})
+
+	started = logIngestShutdownStart(logger)
+	result, ok = shutdownIngestRuntime(
+		logger,
+		func() {},
+		&adapterWG,
+		fakeShutdownIngester{
+			result: ingest.ShutdownResult{Outcome: ingest.ShutdownClean},
+		},
+		closedChannel(),
+		s,
+	)
+	if ok {
+		t.Fatalf("shutdownIngestRuntime bounded-guard ok = true, result=%+v", result)
+	}
+	logIngestShutdownBoundedGuard(logger, result, started, "runtime")
+
+	got := logs.String()
+	for _, want := range []string{
+		"msg=shutdown_start",
+		"subsystem=ingest",
+		"timeout_ms=30000",
+		"msg=shutdown_replay_required",
+		"outcome=replay_required",
+		"msg=shutdown_bounded_guard",
+		"phase=runtime",
+		"elapsed_ms=",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logs = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "payload") || strings.Contains(got, "location") {
+		t.Fatalf("shutdown forensics log includes raw payload/location field: %q", got)
+	}
+}
+
+func TestRun_StoreOpenReceivesCanceledSignalContext(t *testing.T) {
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	origSignalContext := signalContext
+	origOpenWriterStore := openWriterStore
+	t.Cleanup(func() {
+		signalContext = origSignalContext
+		openWriterStore = origOpenWriterStore
+	})
+
+	signalContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, func() {}
+	}
+	called := false
+	openWriterStore = func(ctx context.Context, _ string, _ *slog.Logger) (*store.Store, error) {
+		called = true
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("OpenWriter context err = %v, want context.Canceled", ctx.Err())
+		}
+		return nil, ctx.Err()
+	}
+
+	stderr, read := captureStderr(t)
+	code := run([]string{
+		"--db", dbPath,
+		"--state-dir", stateDir,
+		"--source", "aiagent_v3:/tmp/source",
+		"--log-format", "text",
+		"--log-level", "info",
+	}, stderr, stderr)
+	if code == 0 {
+		t.Fatalf("run exit = 0, want non-zero; stderr=%q", read())
+	}
+	if !called {
+		t.Fatal("OpenWriter hook was not called")
+	}
+	if !strings.Contains(read(), "shutdown_start") {
+		t.Fatalf("stderr = %q, want shutdown_start marker", read())
+	}
+}
+
+func TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock(t *testing.T) {
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	origSignalContext := signalContext
+	origOpenWriterStore := openWriterStore
+	origStartIngester := startIngester
+	origCloseWriterStore := closeWriterStore
+	origTimeout := writerStoreCloseTimeout
+	blockClose := make(chan struct{})
+	t.Cleanup(func() {
+		close(blockClose)
+		signalContext = origSignalContext
+		openWriterStore = origOpenWriterStore
+		startIngester = origStartIngester
+		closeWriterStoreMu.Lock()
+		closeWriterStore = origCloseWriterStore
+		closeWriterStoreMu.Unlock()
+		writerStoreCloseTimeout = origTimeout
+	})
+
+	signalContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, func() {}
+	}
+	openWriterStore = func(_ context.Context, db string, logger *slog.Logger) (*store.Store, error) {
+		return store.OpenWriter(context.Background(), db, logger)
+	}
+	startIngester = func(_ *ingest.Ingester, ctx context.Context) error {
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("Start context err = %v, want context.Canceled", ctx.Err())
+		}
+		return ctx.Err()
+	}
+	writerStoreCloseTimeout = 20 * time.Millisecond
+	closeWriterStoreMu.Lock()
+	closeWriterStore = func(st *store.Store) error {
+		<-blockClose
+		return st.Close()
+	}
+	closeWriterStoreMu.Unlock()
+
+	stderr, read := captureStderr(t)
+	started := time.Now()
+	code := run([]string{
+		"--db", dbPath,
+		"--state-dir", stateDir,
+		"--source", "aiagent_v3:/tmp/source",
+		"--log-format", "text",
+		"--log-level", "info",
+	}, stderr, stderr)
+	elapsed := time.Since(started)
+	if code == 0 {
+		t.Fatalf("run exit = 0, want non-zero; stderr=%q", read())
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("partial startup signal elapsed = %s, want bounded close timeout", elapsed)
+	}
+	if !strings.Contains(read(), "shutdown_start") || !strings.Contains(read(), "shutdown_store_close_timeout") {
+		t.Fatalf("stderr = %q, want shutdown_start and shutdown_store_close_timeout markers", read())
+	}
+	release, err := acquireSingleInstanceLock(stateDir, silentLogger())
+	if err != nil {
+		t.Fatalf("single-instance lock was not released after partial startup failure: %v", err)
+	}
+	release()
 }
 
 type fakeReadModelBackfiller struct {
@@ -573,7 +899,8 @@ func TestStartPostScanBackfillClosesGateOnTimeout(t *testing.T) {
 	close(scanDone)
 	backfiller := newFakeReadModelBackfiller(true)
 
-	backfillDone := startPostScanBackfill(scanDone, backfiller, silentLogger(), 10*time.Millisecond)
+	shutdownCtx := context.Background()
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), 10*time.Millisecond)
 
 	select {
 	case <-backfiller.calls:
@@ -590,6 +917,11 @@ func TestStartPostScanBackfillClosesGateOnTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("backfill gate did not close after timeout")
 	}
+	select {
+	case <-backfillWait:
+	case <-time.After(time.Second):
+		t.Fatal("backfill wait channel did not close after timeout")
+	}
 }
 
 func TestStartPostScanBackfillWaitsForScanDone(t *testing.T) {
@@ -597,7 +929,8 @@ func TestStartPostScanBackfillWaitsForScanDone(t *testing.T) {
 
 	scanDone := make(chan struct{})
 	backfiller := newFakeReadModelBackfiller(true)
-	backfillDone := startPostScanBackfill(scanDone, backfiller, silentLogger(), 10*time.Millisecond)
+	shutdownCtx := context.Background()
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), 10*time.Millisecond)
 
 	select {
 	case <-backfiller.calls:
@@ -621,6 +954,11 @@ func TestStartPostScanBackfillWaitsForScanDone(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("backfill gate did not close after scanDone closed")
 	}
+	select {
+	case <-backfillWait:
+	case <-time.After(time.Second):
+		t.Fatal("backfill wait channel did not close after scanDone closed")
+	}
 }
 
 func TestStartPostScanBackfillSkipsWhenReadModelsNotDeferred(t *testing.T) {
@@ -630,7 +968,8 @@ func TestStartPostScanBackfillSkipsWhenReadModelsNotDeferred(t *testing.T) {
 	close(scanDone)
 	backfiller := newFakeReadModelBackfiller(false)
 
-	backfillDone := startPostScanBackfill(scanDone, backfiller, silentLogger(), time.Minute)
+	shutdownCtx := context.Background()
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), time.Minute)
 
 	select {
 	case <-backfillDone:
@@ -640,6 +979,37 @@ func TestStartPostScanBackfillSkipsWhenReadModelsNotDeferred(t *testing.T) {
 	select {
 	case <-backfiller.calls:
 		t.Fatal("BackfillReadModels called even though read models were not deferred")
+	default:
+	}
+	select {
+	case <-backfillWait:
+	case <-time.After(time.Second):
+		t.Fatal("backfill wait channel did not close when read models were not deferred")
+	}
+}
+
+func TestStartPostScanBackfillShutdownBeforeScanDoneClosesChannels(t *testing.T) {
+	t.Parallel()
+
+	shutdownCtx, cancel := context.WithCancel(context.Background())
+	scanDone := make(chan struct{})
+	backfiller := newFakeReadModelBackfiller(true)
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), time.Minute)
+
+	cancel()
+	select {
+	case <-backfillDone:
+	case <-time.After(time.Second):
+		t.Fatal("backfillDone did not close after shutdown before scanDone")
+	}
+	select {
+	case <-backfillWait:
+	case <-time.After(time.Second):
+		t.Fatal("backfillWait did not close after shutdown before scanDone")
+	}
+	select {
+	case <-backfiller.calls:
+		t.Fatal("BackfillReadModels called after shutdown before scanDone")
 	default:
 	}
 }

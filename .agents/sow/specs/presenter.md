@@ -9,13 +9,14 @@ HTTP server. Serves the embedded frontend at `/`, exposes REST endpoints under `
 ```
 main()
   ├─ load config (db path, bind addr, state dir)
+  ├─ register top-level signal context
   ├─ open SQLite (read-only mode for safety; WAL allows concurrent writer)
   ├─ run migration check (refuse to start if schema_meta.version != supported — any mismatch, older or newer; CheckSchema)
   ├─ start SSE hub goroutine
   ├─ start notify-table poller goroutine (read-only; cursor starts at MAX(seq))
   ├─ register HTTP routes
   ├─ ListenAndServe on bind addr
-  └─ wait for SIGTERM/SIGINT → graceful shutdown
+  └─ wait for SIGTERM/SIGINT → bounded graceful shutdown
 ```
 
 ## SQLite Access
@@ -342,16 +343,29 @@ Full schemas: `rest-api.md`.
 
 ## Graceful Shutdown
 
-1. Stop the notify-table poller FIRST (cancel its context and wait for it to
-   exit) so no new events are produced while the SSE clients are being torn
-   down — this avoids a race where the poller delivers onto channels that are
-   about to close.
+Serve registers its top-level signal context before opening the read-only store,
+checking schema, constructing presenter state, starting the notify poller, or
+serving HTTP. `serveHTTP` consumes that context; it does not install a second
+signal handler. On first SIGTERM/SIGINT, serve calls the signal context's
+`stop()` function so a second signal uses the default disposition.
+
+The serve unit stop budget is 45 s:
+`notify_poller_wait=5s + http_shutdown=30s + store_close=5s + margin=5s`.
+
+1. Stop the notify-table poller FIRST (cancel its context and wait up to 5 s for
+   it to exit) so no new events are produced while the SSE clients are being
+   torn down. If the poller does not exit in that window, log the timeout and
+   continue shutdown; the unit-level budget remains the final guard.
 2. Deliver a `disconnect` event to every active SSE subscription, then close
    all SSE client channels (`hub.Shutdown`) so the long-lived stream handlers
    return and the browser reconnects cleanly.
 3. Stop accepting new connections and wait for in-flight handlers to drain
    (`http.Server.Shutdown` with a 30 s timeout).
-4. Close SQLite.
+4. Close the read-only SQLite store under a 5 s goroutine/timer. Log close
+   errors and close timeouts. On timeout, let process exit close the handle.
+   Prevent double close by making `runtime.close` idempotent with an explicit
+   closed flag or nil-guard, or by clearing/disabling any deferred close after
+   the bounded close path starts.
 5. Exit 0.
 
 ### SSE Lifecycle Mutex (create vs. shutdown)

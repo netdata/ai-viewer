@@ -62,12 +62,72 @@ Layout (`/opt/ai-viewer`):
 | `/etc/systemd/system/ai-viewer-{ingest,serve}.service` | system unit templates (under `deploy/systemd-system/`) |
 
 - The services run as the installing operator. The operator owns `/opt/ai-viewer` so the ingester can write `index.db` while reading the operator's owner-only source directories without ACLs.
-- Install/upgrade atomically stages each rebuilt binary under `/opt/ai-viewer/bin` and renames it into place, then restarts `ai-viewer-ingest.service` and `ai-viewer-serve.service`. Direct `cp` over a mapped executable is forbidden because it can fail with `Text file busy`, and replacing a binary without restarting leaves the old process running old code.
+- Install/upgrade atomically stages each rebuilt binary under `/opt/ai-viewer/bin` and renames it into place. Upgrade ordering is stop, chown/permission repair, start/verify ingester, start/verify server, then re-check ingester. Direct `cp` over a mapped executable is forbidden because it can fail with `Text file busy`, and replacing a binary without restarting leaves the old process running old code.
 - The server binds `127.0.0.1:7710` (localhost-only; same as the user install) — no auth in v1 (`security.md` §bind).
 - **Source read access**: the operator reads the operator's agent data (`~/.ai-agent`, `~/.claude`, `~/.codex`, `~/.local/share/opencode`). Those directories are commonly owner-only (`0700`), so a dedicated service user is intentionally not used.
 - The system units apply systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `ReadWritePaths` scoped to the data dir for the ingester). The server has no `ReadWritePaths` — it is read-only on the DB (`CheckSchema` + `SELECT`s; never writes).
+- Both system units and both user units set `TimeoutStopSec=45s`. This is an explicit repository-owned graceful-stop budget, not a reliance on host defaults.
+- The memory-capped system ingester unit sets `OOMPolicy=stop` alongside its existing `MemoryHigh=4G`, `MemoryMax=8G`, `LimitNOFILE=65536`, and `IOSchedulingClass=idle` resource directives. Serve units and user units do not set memory caps or `OOMPolicy`.
 - The server starts after the ingester (`After=ai-viewer-ingest.service`) but this orders START only, not readiness — on a fresh install the server may cycle a few `RestartSec=3s` retries until the ingester has created+migrated the schema (same race as the user units; `deployment.md` §systemd).
 - **Data is disposable.** `/opt/ai-viewer/data/index.db` is a derived artifact — deleting it triggers a full re-ingest on the next start (the source files are the source of truth). `uninstall` removes it without warning; re-running `install` rebuilds it.
+- Writer one-shot commands are daemon-lock aware and key the lock on `--state-dir`. For a system install, a one-shot targeting `/opt/ai-viewer/data/index.db` must also pass `--state-dir /opt/ai-viewer/data`; otherwise it probes the default user state dir and cannot detect the system daemon lock.
+
+### Graceful Stop Budget
+
+The ingester unit stop budget is 45 s:
+
+- `max(adapter_grace=5s, ingesterStopTimeout=30s) = 30s`
+- `backfill_cancel_wait=5s`
+- `store_close=5s`
+- `systemd margin=5s`
+
+`ingesterStopTimeout=30s` is `worker_exit_bound=25s + final_resolver<=5s`.
+The idle-worker clean-drain path must fit within 15 s. The worst mid-flush
+worker path is bounded at 25 s. If tests with the configured source-count
+assumption disprove those bounds, the timeout budget must be re-derived before
+the implementation is accepted.
+
+The serve unit stop budget is also 45 s:
+
+- `notify_poller_wait=5s`
+- `http_shutdown=30s`
+- `store_close=5s`
+- `systemd margin=5s`
+
+The default/operator install assumption is no more than five configured sources.
+Larger custom source sets are supported, but they rely more on replay-required
+outcomes under contention. If an operator requires clean commits for larger
+source counts, the worker budget and `TimeoutStopSec` must be re-derived.
+
+Do not add `Type=notify`, `NotifyAccess`, `WatchdogSec`, `KillMode`,
+`KillSignal`, or `FinalKillSignal` in SOW-0104. `Type=simple`, systemd's
+default `SIGTERM` then final `SIGKILL`, and explicit bounded shutdown logs are
+the contract. A future service-readiness SOW may revisit `sd_notify`.
+
+No final checkpoint/truncate runs during shutdown. WAL growth while a live
+server reader exists is an operator-observable residual risk, not a stop-path
+correctness requirement; the DB is derived and repaired by re-ingest/backfill.
+
+Process kill and power loss are distinct boundaries. A process kill during
+shutdown must either commit a complete transaction with source progress or leave
+source progress unadvanced for replay. Power loss and filesystem corruption are
+outside graceful-shutdown guarantees and are handled by SQLite/WAL durability
+plus re-ingest of source snapshots.
+
+Migration-failure restart loops use the effective systemd `StartLimitBurst` and
+`StartLimitIntervalSec` values from the host. The runbook must tell operators to
+inspect those values with `systemctl show ai-viewer-ingest.service -p
+StartLimitBurst -p StartLimitIntervalUSec` (and the serve equivalent) rather
+than assume portable cross-distro defaults. SOW-0104 does not add custom
+`StartLimit*` directives.
+
+Installer liveness checks are immediate evidence, not a complete migration
+circuit breaker. After starting the ingester, `scripts/install-system.sh` polls
+`systemctl is-active --quiet ai-viewer-ingest.service` once per second for up to
+15 attempts, starts and validates the server, then re-checks the ingester. A
+delayed migration failure after those checks is diagnosed from `systemctl
+status`, bounded journal output, structured startup/shutdown markers, and the
+effective `StartLimit*` values.
 
 ## Build Pipeline
 
@@ -255,13 +315,14 @@ After=default.target
 ExecStart=%h/.local/bin/ai-viewer-ingest
 Restart=on-failure
 RestartSec=3s
+TimeoutStopSec=45s
 
 [Install]
 WantedBy=default.target
 ```
 
 `deploy/systemd/ai-viewer-serve.service`: analogous (`Description=ai-viewer
-server`), with `After=ai-viewer-ingest.service`.
+server`), with `After=ai-viewer-ingest.service` and `TimeoutStopSec=45s`.
 
 **Start-order note.** `After=` orders START only, not readiness. On a fresh
 machine the server may start before the ingester has created+migrated the SQLite

@@ -17,6 +17,7 @@ After=ai-viewer-ingest.service
 ExecStart=%h/.local/bin/ai-viewer-serve
 Restart=on-failure
 RestartSec=3s
+TimeoutStopSec=45s
 
 [Install]
 WantedBy=default.target

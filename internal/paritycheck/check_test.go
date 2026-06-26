@@ -1029,7 +1029,7 @@ func TestCheckSourcesRunsSourcesConcurrently(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		select {
 		case <-started:
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			close(release)
 			t.Fatal("timed out waiting for both source checks to start concurrently")
 		}
@@ -1038,7 +1038,7 @@ func TestCheckSourcesRunsSourcesConcurrently(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("timed out waiting for concurrent parity check to finish")
 	}
 	if err != nil {

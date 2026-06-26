@@ -27,8 +27,10 @@ const (
 	// defaultBatchInterval is the max time between flushes when the batch hasn't
 	// reached the size threshold. Keeps the UI seeing fresh data during a slow
 	// tail without waiting for a full batch. Unchanged from the original 500ms.
-	defaultBatchInterval    = 500 * time.Millisecond
-	defaultResolverInterval = 5 * time.Second
+	defaultBatchInterval       = 500 * time.Millisecond
+	defaultResolverInterval    = 5 * time.Second
+	defaultIngesterStopTimeout = 30 * time.Second
+	finalResolverStopTimeout   = 5 * time.Second
 )
 
 // defaultNow is the production wall-clock the incremental rollup refresh
@@ -43,6 +45,66 @@ var ErrSourceAlreadySubmitted = errors.New("ingest: source already submitted")
 
 // ErrNotStarted is returned when Submit/Stop is called before Start.
 var ErrNotStarted = errors.New("ingest: ingester not started")
+
+// ErrShutdownTimeout is returned when StopContext cannot finish inside the
+// caller's deadline.
+var ErrShutdownTimeout = errors.New("ingest: shutdown timeout")
+
+// ErrReplayRequired is returned by shutdown drain paths that deliberately leave
+// source progress unadvanced so the next run replays uncommitted source records.
+var ErrReplayRequired = errors.New("ingest: replay required")
+
+type replayRequiredError struct {
+	reason        string
+	pendingEvents int
+	cause         error
+}
+
+func (e *replayRequiredError) Error() string {
+	return fmt.Sprintf("%s: flush (%s) could not commit %d events before shutdown deadline: %v",
+		ErrReplayRequired, e.reason, e.pendingEvents, e.cause)
+}
+
+func (e *replayRequiredError) Unwrap() error {
+	return e.cause
+}
+
+func (e *replayRequiredError) Is(target error) bool {
+	return target == ErrReplayRequired
+}
+
+// ShutdownOutcome classifies bounded shutdown results.
+type ShutdownOutcome string
+
+const (
+	// ShutdownClean means every worker and the final resolver pass completed.
+	ShutdownClean ShutdownOutcome = "clean"
+	// ShutdownReplayRequired means at least one worker preserved uncommitted work for the next run.
+	ShutdownReplayRequired ShutdownOutcome = "replay_required"
+	// ShutdownTimeout means workers did not drain before the caller's deadline.
+	ShutdownTimeout ShutdownOutcome = "timeout"
+	// ShutdownWorkerFailure means a worker returned a non-replayable error.
+	ShutdownWorkerFailure ShutdownOutcome = "worker_failure"
+	// ShutdownResolverTimeout means the final resolver pass exceeded its shutdown budget.
+	ShutdownResolverTimeout ShutdownOutcome = "resolver_timeout"
+	// ShutdownAlreadyStopping means another caller owns the active shutdown.
+	ShutdownAlreadyStopping ShutdownOutcome = "already_stopping"
+	// ShutdownAlreadyStopped means shutdown already completed.
+	ShutdownAlreadyStopped ShutdownOutcome = "already_stopped"
+)
+
+// ShutdownResult is the typed StopContext result consumed by commands and tests.
+type ShutdownResult struct {
+	Outcome ShutdownOutcome
+}
+
+type stopState uint8
+
+const (
+	stopStateIdle stopState = iota
+	stopStateStopping
+	stopStateStopped
+)
 
 // Option configures the Ingester at construction time.
 type Option func(*Ingester)
@@ -186,15 +248,16 @@ type Ingester struct {
 	hwm      *hwmCache
 	resolver *resolver
 
-	mu       sync.Mutex
-	started  bool
-	stopped  bool
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
-	workers  map[string]*worker
-	ctx      context.Context
-	errMu    sync.Mutex
-	errs     []error
+	mu        sync.Mutex
+	started   bool
+	stopped   bool
+	stopState stopState
+	cancelFn  context.CancelFunc
+	wg        sync.WaitGroup
+	workers   map[string]*worker
+	ctx       context.Context
+	errMu     sync.Mutex
+	errs      []error
 
 	formatOverrides   map[string]string
 	locationOverrides map[string]string
@@ -330,43 +393,137 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 	return nil
 }
 
-// Stop cancels the workers' context, waits for every worker to drain its
-// pending batch, runs one final resolver pass over the committed rows, stops the
-// resolver, and returns. Safe to call multiple times.
+// Stop cancels the workers' context, waits for every worker to drain within the
+// bounded default timeout, runs one final resolver pass over the committed rows,
+// stops the resolver, and returns. Safe to call multiple times.
 func (i *Ingester) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultIngesterStopTimeout)
+	defer cancel()
+	result, err := i.StopContext(ctx)
+	switch result.Outcome {
+	case ShutdownClean, ShutdownReplayRequired, ShutdownAlreadyStopping, ShutdownAlreadyStopped:
+		return nil
+	default:
+		return err
+	}
+}
+
+// StopContext is the bounded shutdown API. It preserves uncommitted batches for
+// replay when ctx expires and returns typed owner/follower outcomes so callers
+// can map shutdown to process exit codes without parsing error text.
+func (i *Ingester) StopContext(ctx context.Context) (ShutdownResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	i.mu.Lock()
 	if !i.started {
 		i.mu.Unlock()
-		return ErrNotStarted
+		return ShutdownResult{}, ErrNotStarted
 	}
-	if i.stopped {
+	switch i.stopState {
+	case stopStateStopping:
 		i.mu.Unlock()
-		return nil
+		return ShutdownResult{Outcome: ShutdownAlreadyStopping}, nil
+	case stopStateStopped:
+		i.mu.Unlock()
+		return ShutdownResult{Outcome: ShutdownAlreadyStopped}, nil
 	}
 	i.stopped = true
+	i.stopState = stopStateStopping
 	cancel := i.cancelFn
 	resolver := i.resolver
 	i.mu.Unlock()
+
+	defer func() {
+		i.mu.Lock()
+		i.stopState = stopStateStopped
+		i.mu.Unlock()
+	}()
+
 	if cancel != nil {
 		cancel()
 	}
-	i.wg.Wait()
+
+	workersDone := make(chan struct{})
+	go func() {
+		i.wg.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-ctx.Done():
+		if resolver != nil {
+			resolver.Stop()
+		}
+		return ShutdownResult{Outcome: ShutdownTimeout}, ErrShutdownTimeout
+	}
+
 	var resolverErr error
 	if resolver != nil {
-		resolverErr = resolver.linkOrphans(context.Background())
+		resolverCtx, cancelResolver, ok := boundedResolverContext(ctx)
+		if !ok {
+			resolver.Stop()
+			if i.logger != nil {
+				i.logger.Warn("shutdown_resolver_timeout",
+					"remaining_ms", 0,
+					"timeout_ms", finalResolverStopTimeout.Milliseconds())
+			}
+			return ShutdownResult{Outcome: ShutdownResolverTimeout}, ErrShutdownTimeout
+		}
+		resolverErr = resolver.linkOrphans(resolverCtx)
+		cancelResolver()
 		resolver.Stop()
 	}
-	workerErr := i.workerError()
+	replayOnly, workerErr := i.workerError()
 	if workerErr != nil && resolverErr != nil {
-		return errors.Join(workerErr, fmt.Errorf("final resolver: %w", resolverErr))
+		return ShutdownResult{Outcome: ShutdownWorkerFailure},
+			errors.Join(workerErr, fmt.Errorf("final resolver: %w", resolverErr))
 	}
 	if workerErr != nil {
-		return workerErr
+		if replayOnly {
+			return ShutdownResult{Outcome: ShutdownReplayRequired}, workerErr
+		}
+		return ShutdownResult{Outcome: ShutdownWorkerFailure}, workerErr
 	}
 	if resolverErr != nil {
-		return resolverErr
+		if errors.Is(resolverErr, context.DeadlineExceeded) || errors.Is(resolverErr, context.Canceled) {
+			if i.logger != nil {
+				i.logger.Warn("shutdown_resolver_timeout",
+					"remaining_ms", remainingMillis(ctx),
+					"timeout_ms", finalResolverStopTimeout.Milliseconds())
+			}
+			return ShutdownResult{Outcome: ShutdownResolverTimeout}, ErrShutdownTimeout
+		}
+		return ShutdownResult{Outcome: ShutdownWorkerFailure}, resolverErr
 	}
-	return nil
+	return ShutdownResult{Outcome: ShutdownClean}, nil
+}
+
+func boundedResolverContext(parent context.Context) (context.Context, context.CancelFunc, bool) {
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, func() {}, false
+		}
+		if remaining < finalResolverStopTimeout {
+			ctx, cancel := context.WithTimeout(parent, remaining)
+			return ctx, cancel, true
+		}
+	}
+	ctx, cancel := context.WithTimeout(parent, finalResolverStopTimeout)
+	return ctx, cancel, true
+}
+
+func remainingMillis(ctx context.Context) int64 {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 func (i *Ingester) recordWorkerError(sourceID string, err error) {
@@ -377,19 +534,43 @@ func (i *Ingester) recordWorkerError(sourceID string, err error) {
 	i.errs = append(i.errs, err)
 	i.errMu.Unlock()
 	if i.logger != nil {
+		if errors.Is(err, ErrReplayRequired) {
+			sourceFormat, _, _ := strings.Cut(sourceID, ":")
+			attrs := []any{
+				"source_id", sourceID,
+				"source_format", sourceFormat,
+				"outcome", ShutdownReplayRequired,
+				"err", err,
+			}
+			var replayErr *replayRequiredError
+			if errors.As(err, &replayErr) {
+				attrs = append(attrs,
+					"pending_events", replayErr.pendingEvents,
+					"reason", replayErr.reason)
+			}
+			i.logger.Warn("shutdown_replay_required", attrs...)
+			return
+		}
 		i.logger.Error("worker: batch failed",
 			"source_id", sourceID,
 			"err", err)
 	}
 }
 
-func (i *Ingester) workerError() error {
+func (i *Ingester) workerError() (bool, error) {
 	i.errMu.Lock()
 	defer i.errMu.Unlock()
 	if len(i.errs) == 0 {
-		return nil
+		return false, nil
 	}
-	return fmt.Errorf("ingest worker errors: %w", errors.Join(i.errs...))
+	replayOnly := true
+	for _, err := range i.errs {
+		if !errors.Is(err, ErrReplayRequired) {
+			replayOnly = false
+			break
+		}
+	}
+	return replayOnly, fmt.Errorf("ingest worker errors: %w", errors.Join(i.errs...))
 }
 
 // HWM returns the current per-source observability counter (max

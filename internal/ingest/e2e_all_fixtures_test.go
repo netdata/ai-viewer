@@ -43,9 +43,10 @@ func TestE2E_AllFixtures(t *testing.T) {
 			}
 			_, db := openTestStore(t)
 			sourceID := "aiagent_v3:" + fixtureDir
-			ing, err := New(db,
+			ing, err := New(
+				db,
 				WithLogger(silentLogger()),
-				WithBatchSize(2000),
+				WithBatchSize(1),
 				WithBatchInterval(50*time.Millisecond),
 				WithSourceFormat(sourceID, "aiagent_v3"),
 				WithLocation(sourceID, fixtureDir),
@@ -57,12 +58,12 @@ func TestE2E_AllFixtures(t *testing.T) {
 			if err := ing.Start(ctx); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			events := make(chan canonical.Event, 256)
+			events := make(chan canonical.Event)
 			scanDone := make(chan struct{})
 			var scanErr error
 			go func() {
-				defer close(events)
 				defer close(scanDone)
+				defer close(events)
 				scanErr = a.Scan(ctx, nil, events)
 			}()
 			if err := ing.Submit(sourceID, events); err != nil {
@@ -71,6 +72,11 @@ func TestE2E_AllFixtures(t *testing.T) {
 			waitForScan(t, scanDone, "aiagent_v3 "+name)
 			if scanErr != nil {
 				t.Fatalf("Scan: %v", scanErr)
+			}
+			if !waitFor(20*time.Second, func() bool {
+				return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) >= 1
+			}) {
+				t.Fatalf("session count before Stop = %d, want >=1", scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
 			}
 			if err := ing.Stop(); err != nil {
 				t.Fatalf("Stop: %v", err)

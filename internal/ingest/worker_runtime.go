@@ -161,10 +161,34 @@ func (rt *workerRuntime) flushBatchWithWriteContext(writeCtx context.Context, re
 		return
 	}
 	batch := rt.batch
+	reportReplayRequired := func(err error) {
+		if rt.worker.logger != nil {
+			rt.worker.logger.Warn("shutdown_worker_retry_suppressed",
+				"source_id", rt.worker.sourceID,
+				"source_format", rt.worker.sourceFormat,
+				"reason", reason)
+		}
+		rt.worker.report(&replayRequiredError{
+			reason:        reason,
+			pendingEvents: len(batch),
+			cause:         err,
+		})
+		rt.batch = batch
+		rt.writer.resetBatch()
+		rt.rearmTimer()
+	}
+	if err := writeCtx.Err(); err != nil {
+		reportReplayRequired(err)
+		return
+	}
 	for attempt := 0; attempt <= flushMaxRetries; attempt++ {
 		err := rt.flush(writeCtx, rt.writer, batch)
 		if err == nil {
 			break
+		}
+		if ctxErr := writeCtx.Err(); ctxErr != nil {
+			reportReplayRequired(ctxErr)
+			return
 		}
 		if attempt < flushMaxRetries {
 			// Transient: retry with backoff (100ms, 200ms, 400ms). The events
@@ -178,9 +202,7 @@ func (rt *workerRuntime) flushBatchWithWriteContext(writeCtx context.Context, re
 			select {
 			case <-time.After(backoff):
 			case <-writeCtx.Done():
-				// Context cancelled during backoff (shutdown): preserve the batch
-				// in rt.batch so the shutdown drain path can attempt it once more.
-				rt.batch = batch
+				reportReplayRequired(writeCtx.Err())
 				return
 			}
 			rt.writer.resetBatch()

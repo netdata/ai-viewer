@@ -72,7 +72,13 @@ const adapterContextGracePeriod = 5 * time.Second
 // readModelBackfillStartupTimeout bounds the derived-data repair that runs
 // between historical Scan and live Tail. Primary canonical ingestion must not
 // stay offline indefinitely because FTS/rollup rebuilds are expensive or stuck.
-const readModelBackfillStartupTimeout = 5 * time.Minute
+const (
+	readModelBackfillStartupTimeout = 5 * time.Minute
+	ingesterStopTimeout             = 30 * time.Second
+	backfillCancelWait              = 5 * time.Second
+)
+
+var writerStoreCloseTimeout = 5 * time.Second
 
 // stateDirPerm is the permission bits applied when the binary creates
 // its state directory + DB parent directory. 0o750 keeps the operator
@@ -87,12 +93,15 @@ func main() {
 // run is the testable entrypoint. Returns the process exit code so
 // main() is a one-liner.
 func run(args []string, stdout, stderr *os.File) int {
+	rootCtx, stopSignals := signalContext(context.Background())
+	defer stopSignals()
+
 	// Thin subcommand dispatch. Existing invocations pass only flags
 	// (leading '-'), so the daemon path below is preserved. A bare
 	// subcommand first arg routes to a one-shot helper. The subcommand
 	// dispatch is split into a small table so the surrounding `run` stays
 	// below the cyclomatic-complexity gate (SOW-0089 chunk 5b).
-	if exitCode, ok := dispatchSubcommand(args, stdout, stderr); ok {
+	if exitCode, ok := dispatchSubcommand(rootCtx, args, stdout, stderr); ok {
 		return exitCode
 	}
 
@@ -142,7 +151,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	logger.Info("ai-viewer-ingest starting",
+	logger.Info(
+		"ai-viewer-ingest starting",
 		"db", dbPath,
 		"state_dir", stateDir,
 		"version", versionString(),
@@ -171,27 +181,34 @@ func run(args []string, stdout, stderr *os.File) int {
 		}()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
 
-	ws, err := store.OpenWriter(ctx, dbPath, logger)
+	ws, err := openWriterStore(ctx, dbPath, logger)
 	if err != nil {
+		logIngestStartupSignalIfCanceled(rootCtx, logger)
 		logger.Error("ai-viewer-ingest: failed to open store", "db", dbPath, "err", err)
 		return 1
 	}
-	defer func() { _ = ws.Close() }()
+	defer func() {
+		if ws != nil {
+			_ = closeStoreWithTimeout(ws, writerStoreCloseTimeout, logger)
+		}
+	}()
 
 	pricer, err := pricing.New()
 	if err != nil {
 		logger.Error("ai-viewer-ingest: failed to load embedded pricing data", "err", err)
 		return 1
 	}
-	logger.Info("ai-viewer-ingest pricing loaded",
+	logger.Info(
+		"ai-viewer-ingest pricing loaded",
 		"hits", pricer.Stats().Hits,
 		"miss_provider_model", pricer.Stats().MissProviderModel,
 	)
 
-	ing, err := ingest.New(ws.DB(),
+	ing, err := ingest.New(
+		ws.DB(),
 		ingest.WithLogger(logger),
 		ingest.WithPricer(pricer),
 	)
@@ -199,7 +216,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		logger.Error("ai-viewer-ingest: failed to construct ingester", "err", err)
 		return 1
 	}
-	if err := ing.Start(ctx); err != nil {
+	if err := startIngester(ing, ctx); err != nil {
+		logIngestStartupSignalIfCanceled(rootCtx, logger)
 		logger.Error("ai-viewer-ingest: ingester start failed", "err", err)
 		return 1
 	}
@@ -263,7 +281,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		close(scanDone)
 	}()
 
-	backfillDone := startPostScanBackfill(scanDone, ing, logger, readModelBackfillStartupTimeout)
+	backfillDone, backfillWait := startPostScanBackfill(ctx, scanDone, ing, logger, readModelBackfillStartupTimeout)
 
 	var adapterWG sync.WaitGroup
 	for _, src := range sources {
@@ -274,20 +292,108 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 	}
 
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	<-rootCtx.Done()
+	stopSignals()
+	shutdownStarted := logIngestShutdownStart(logger)
 
-	<-sigCtx.Done()
-	logger.Info("ai-viewer-ingest received shutdown signal; draining")
-
-	cancelAdapters()
-	waitWithTimeout(&adapterWG, adapterContextGracePeriod, logger)
-
-	if err := ing.Stop(); err != nil {
-		logger.Warn("ai-viewer-ingest: ingester stop reported error", "err", err)
+	result, ok := shutdownIngestRuntime(logger, cancelAdapters, &adapterWG, ing, backfillWait, ws)
+	if !ok {
+		logIngestShutdownBoundedGuard(logger, result, shutdownStarted, "runtime")
+		ws = nil
+		return 1
 	}
-	logger.Info("ai-viewer-ingest stopped")
+	ws = nil
+	logIngestShutdownTerminal(logger, result, shutdownStarted)
 	return 0
+}
+
+var (
+	signalContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		return signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+	}
+	openWriterStore = store.OpenWriter
+	startIngester   = func(ing *ingest.Ingester, ctx context.Context) error {
+		return ing.Start(ctx)
+	}
+)
+
+func logIngestStartupSignalIfCanceled(ctx context.Context, logger *slog.Logger) {
+	if ctx.Err() != nil {
+		_ = logIngestShutdownStart(logger)
+	}
+}
+
+func logIngestShutdownStart(logger *slog.Logger) time.Time {
+	started := time.Now()
+	logger.Info("shutdown_start",
+		"subsystem", "ingest",
+		"signal", "SIGTERM/SIGINT",
+		"timeout_ms", ingesterStopTimeout.Milliseconds())
+	return started
+}
+
+func logIngestShutdownBoundedGuard(logger *slog.Logger, result ingest.ShutdownResult, started time.Time, phase string) {
+	logger.Error("shutdown_bounded_guard",
+		"subsystem", "ingest",
+		"phase", phase,
+		"elapsed_ms", time.Since(started).Milliseconds(),
+		"outcome", result.Outcome)
+}
+
+func logIngestShutdownTerminal(logger *slog.Logger, result ingest.ShutdownResult, started time.Time) {
+	if result.Outcome == ingest.ShutdownReplayRequired {
+		logger.Warn("shutdown_replay_required",
+			"subsystem", "ingest",
+			"elapsed_ms", time.Since(started).Milliseconds(),
+			"outcome", result.Outcome)
+	} else {
+		logger.Info("shutdown_clean",
+			"subsystem", "ingest",
+			"elapsed_ms", time.Since(started).Milliseconds(),
+			"outcome", result.Outcome)
+	}
+}
+
+func shutdownIngestRuntime(
+	logger *slog.Logger,
+	cancelAdapters context.CancelFunc,
+	adapterWG *sync.WaitGroup,
+	ing shutdownIngester,
+	backfillWait <-chan struct{},
+	ws *store.Store,
+) (ingest.ShutdownResult, bool) {
+	cancelAdapters()
+	adaptersDone := make(chan struct{})
+	go func() {
+		waitWithTimeout(adapterWG, adapterContextGracePeriod, logger)
+		close(adaptersDone)
+	}()
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), ingesterStopTimeout)
+	result, err := ing.StopContext(stopCtx)
+	cancelStop()
+	<-adaptersDone
+	if err != nil && result.Outcome != ingest.ShutdownReplayRequired {
+		logger.Warn("ai-viewer-ingest: ingester stop reported error",
+			"outcome", result.Outcome,
+			"err", err)
+		return result, false
+	}
+	backfillWaitStarted := time.Now()
+	if !waitChannelWithTimeout(backfillWait, backfillCancelWait) {
+		logger.Error("shutdown_backfill_timeout",
+			"elapsed_ms", time.Since(backfillWaitStarted).Milliseconds(),
+			"timeout_ms", backfillCancelWait.Milliseconds())
+		return result, false
+	}
+	if !closeStoreWithTimeout(ws, writerStoreCloseTimeout, logger) {
+		return result, false
+	}
+	return result, true
+}
+
+type shutdownIngester interface {
+	StopContext(context.Context) (ingest.ShutdownResult, error)
 }
 
 // ingestConfig holds the parsed CLI flag values for the ingester.
@@ -437,6 +543,7 @@ var nowMicros = func() int64 { return time.Now().UnixMicro() }
 // waitWithTimeout waits up to d for wg to drain. Returns when wg
 // either reaches zero or the timer fires.
 func waitWithTimeout(wg *sync.WaitGroup, d time.Duration, logger *slog.Logger) {
+	started := time.Now()
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -446,8 +553,64 @@ func waitWithTimeout(wg *sync.WaitGroup, d time.Duration, logger *slog.Logger) {
 	case <-done:
 		return
 	case <-time.After(d):
-		logger.Warn("ai-viewer-ingest: adapter goroutines did not drain within grace period",
-			"grace_period", d)
+		logger.Warn("shutdown_adapter_grace_expired",
+			"elapsed_ms", time.Since(started).Milliseconds(),
+			"grace_ms", d.Milliseconds())
+	}
+}
+
+func waitChannelWithTimeout(done <-chan struct{}, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+var (
+	closeWriterStoreMu sync.RWMutex
+	closeWriterStore   = func(st *store.Store) error {
+		return st.Close()
+	}
+)
+
+func closeWriterStoreWithHook(st *store.Store) error {
+	closeWriterStoreMu.RLock()
+	fn := closeWriterStore
+	closeWriterStoreMu.RUnlock()
+	return fn(st)
+}
+
+func closeStoreWithTimeout(st *store.Store, d time.Duration, logger *slog.Logger) bool {
+	if st == nil {
+		return true
+	}
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- closeWriterStoreWithHook(st)
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			logger.Error("shutdown_store_close_error",
+				"store_role", "writer",
+				"elapsed_ms", time.Since(started).Milliseconds(),
+				"err", err)
+			return false
+		}
+		return true
+	case <-timer.C:
+		logger.Error("shutdown_store_close_timeout",
+			"store_role", "writer",
+			"elapsed_ms", time.Since(started).Milliseconds(),
+			"timeout_ms", d.Milliseconds())
+		return false
 	}
 }
 
@@ -456,15 +619,27 @@ type readModelBackfiller interface {
 	BackfillReadModels(context.Context) error
 }
 
-func startPostScanBackfill(scanDone <-chan struct{}, backfiller readModelBackfiller, logger *slog.Logger, timeout time.Duration) <-chan struct{} {
+func startPostScanBackfill(shutdownCtx context.Context, scanDone <-chan struct{}, backfiller readModelBackfiller, logger *slog.Logger, timeout time.Duration) (<-chan struct{}, <-chan struct{}) {
 	backfillDone := make(chan struct{})
+	backfillWait := make(chan struct{})
 	go func() {
+		started := time.Now()
 		defer close(backfillDone)
-		<-scanDone
+		defer close(backfillWait)
+		select {
+		case <-scanDone:
+		case <-shutdownCtx.Done():
+			if logger != nil {
+				logger.Info("shutdown_backfill_cancelled",
+					"phase", "before_scan_done",
+					"elapsed_ms", time.Since(started).Milliseconds())
+			}
+			return
+		}
 		if !backfiller.DeferReadModels() {
 			return
 		}
-		backfillCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		backfillCtx, cancel := context.WithTimeout(shutdownCtx, timeout)
 		defer cancel()
 
 		if logger != nil {
@@ -481,11 +656,18 @@ func startPostScanBackfill(scanDone <-chan struct{}, backfiller readModelBackfil
 					"err", err)
 				return
 			}
+			if errors.Is(err, context.Canceled) || errors.Is(backfillCtx.Err(), context.Canceled) {
+				logger.Warn("shutdown_backfill_cancelled",
+					"phase", "backfill",
+					"elapsed_ms", time.Since(started).Milliseconds(),
+					"err", err)
+				return
+			}
 			logger.Error("ai-viewer-ingest: read-model backfill failed; tailing will continue without completed read-model backfill",
 				"err", err)
 		}
 	}()
-	return backfillDone
+	return backfillDone, backfillWait
 }
 
 // versionString returns the binary's build-time version. When the
@@ -511,19 +693,19 @@ func versionString() string {
 // other input — flags-only, unknown subcommand — handled=false so the
 // caller falls through to the daemon path. Extracted from run to keep
 // cyclomatic complexity below the project gate.
-func dispatchSubcommand(args []string, stdout, stderr *os.File) (int, bool) {
+func dispatchSubcommand(ctx context.Context, args []string, stdout, stderr *os.File) (int, bool) {
 	if len(args) == 0 {
 		return 0, false
 	}
 	switch args[0] {
 	case "check-parity":
-		return runCheckParity(args[1:], stdout, stderr), true
+		return runCheckParity(ctx, args[1:], stdout, stderr), true
 	case "rollups-backfill":
-		return runBackfill(args[1:], stdout, stderr), true
+		return runBackfill(ctx, args[1:], stdout, stderr), true
 	case "fts-content-backfill":
-		return runBackfillFTSContent(args[1:], stdout, stderr), true
+		return runBackfillFTSContent(ctx, args[1:], stdout, stderr), true
 	case "reprice":
-		return runReprice(args[1:], stdout, stderr), true
+		return runReprice(ctx, args[1:], stdout, stderr), true
 	default:
 		return 0, false
 	}

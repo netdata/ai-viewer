@@ -1,9 +1,12 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +109,8 @@ func TestSubmit_DuplicateSourceReturnsError(t *testing.T) {
 func TestStop_DrainsPendingBatch(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(100),
 		WithBatchInterval(50*time.Millisecond),
@@ -143,7 +147,8 @@ func TestStop_RunsFinalResolverPassAfterWorkerDrain(t *testing.T) {
 	const childNative = "child-session"
 
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(100),
 		WithBatchInterval(time.Hour),
@@ -211,7 +216,8 @@ func TestStop_RunsFinalResolverPassBeforeReturningWorkerErrors(t *testing.T) {
 	const childNative = "child-session"
 
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(4),
 		WithBatchInterval(time.Hour),
@@ -317,6 +323,288 @@ func TestStop_BeforeStartReturnsError(t *testing.T) {
 	}
 }
 
+func TestStopContext_BeforeStartReturnsErrNotStarted(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(db)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, err := i.StopContext(context.Background()); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("StopContext before Start = (%+v, %v), want ErrNotStarted", got, err)
+	}
+}
+
+func TestStopContext_RespectsCallerDeadlineWhileWorkersStuck(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(silentLogger()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Simulate a worker that cannot finish. StopContext must return on the
+	// caller deadline instead of waiting forever on wg.Wait.
+	i.wg.Add(1)
+	t.Cleanup(i.wg.Done)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	got, err := i.StopContext(ctx)
+	elapsed := time.Since(started)
+
+	if !errors.Is(err, ErrShutdownTimeout) {
+		t.Fatalf("StopContext error = %v, want ErrShutdownTimeout (result=%+v)", err, got)
+	}
+	if got.Outcome != ShutdownTimeout {
+		t.Fatalf("StopContext outcome = %q, want %q", got.Outcome, ShutdownTimeout)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("StopContext elapsed = %s, want bounded by caller deadline", elapsed)
+	}
+}
+
+func TestStopContext_ConcurrentFollowerOutcomes(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(silentLogger()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	i.wg.Add(1)
+	ownerDone := make(chan ShutdownResult, 1)
+	ownerErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		result, err := i.StopContext(ctx)
+		ownerDone <- result
+		ownerErr <- err
+	}()
+
+	if !waitFor(250*time.Millisecond, func() bool {
+		i.mu.Lock()
+		state := i.stopState
+		i.mu.Unlock()
+		return state == stopStateStopping
+	}) {
+		t.Fatal("owning StopContext did not enter stopping state")
+	}
+	follower, err := i.StopContext(context.Background())
+	if err != nil {
+		t.Fatalf("StopContext follower error = %v", err)
+	}
+	if follower.Outcome != ShutdownAlreadyStopping {
+		t.Fatalf("StopContext follower outcome = %q, want %q", follower.Outcome, ShutdownAlreadyStopping)
+	}
+
+	i.wg.Done()
+	var owner ShutdownResult
+	select {
+	case owner = <-ownerDone:
+	case <-time.After(time.Second):
+		t.Fatal("owning StopContext did not return after worker release")
+	}
+	if err := <-ownerErr; err != nil {
+		t.Fatalf("owning StopContext error = %v", err)
+	}
+	if owner.Outcome != ShutdownClean {
+		t.Fatalf("owning StopContext outcome = %q, want %q", owner.Outcome, ShutdownClean)
+	}
+
+	after, err := i.StopContext(context.Background())
+	if err != nil {
+		t.Fatalf("StopContext after completion error = %v", err)
+	}
+	if after.Outcome != ShutdownAlreadyStopped {
+		t.Fatalf("StopContext after completion outcome = %q, want %q", after.Outcome, ShutdownAlreadyStopped)
+	}
+}
+
+func TestStopContext_ReplayOnlyWorkerErrorsClassifyReplayRequired(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(silentLogger()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	i.recordWorkerError("aiagent_v3:/tmp", fmt.Errorf("%w: replay", ErrReplayRequired))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := i.StopContext(ctx)
+	if !errors.Is(err, ErrReplayRequired) {
+		t.Fatalf("StopContext error = %v, want ErrReplayRequired", err)
+	}
+	if got.Outcome != ShutdownReplayRequired {
+		t.Fatalf("StopContext outcome = %q, want %q", got.Outcome, ShutdownReplayRequired)
+	}
+}
+
+func TestRecordWorkerErrorLogsReplayRequiredFields(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(logger))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	i.recordWorkerError("aiagent_v3:test-source", &replayRequiredError{
+		reason:        "sqlite contention",
+		pendingEvents: 3,
+		cause:         context.DeadlineExceeded,
+	})
+
+	got := logs.String()
+	for _, want := range []string{
+		"msg=shutdown_replay_required",
+		"source_id=aiagent_v3:test-source",
+		"source_format=aiagent_v3",
+		"outcome=replay_required",
+		"pending_events=3",
+		`reason="sqlite contention"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "payload") || strings.Contains(got, "location") {
+		t.Fatalf("log includes raw payload/location field: %q", got)
+	}
+}
+
+func TestStopContext_MixedWorkerErrorsClassifyWorkerFailure(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(silentLogger()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	i.recordWorkerError("aiagent_v3:/tmp/replay", fmt.Errorf("%w: replay", ErrReplayRequired))
+	i.recordWorkerError("aiagent_v3:/tmp/drop", errors.New("permanent drop"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := i.StopContext(ctx)
+	if err == nil {
+		t.Fatal("StopContext error = nil, want worker failure")
+	}
+	if got.Outcome != ShutdownWorkerFailure {
+		t.Fatalf("StopContext outcome = %q, want %q", got.Outcome, ShutdownWorkerFailure)
+	}
+}
+
+func TestStopContext_FiveSourcesCleanDrainWithinScaledBound(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(
+		db,
+		WithLogger(silentLogger()),
+		WithBatchSize(1000),
+		WithBatchInterval(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	for n := 1; n <= 5; n++ {
+		sourceID := fmt.Sprintf("aiagent_v3:/tmp/source-%d", n)
+		events := make(chan canonical.Event, 1)
+		events <- canonical.SessionStartedEvent{
+			EventBase:    canonical.EventBase{SourceID: sourceID, SourceSeq: 1, Ts: int64(n)},
+			NativeID:     fmt.Sprintf("session-%d", n),
+			RootNativeID: fmt.Sprintf("session-%d", n),
+			Kind:         canonical.KindRoot,
+		}
+		close(events)
+		if err := i.Submit(sourceID, events); err != nil {
+			t.Fatalf("Submit %s: %v", sourceID, err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	got, err := i.StopContext(ctx)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("StopContext error = %v (result=%+v)", err, got)
+	}
+	if got.Outcome != ShutdownClean {
+		t.Fatalf("StopContext outcome = %q, want %q", got.Outcome, ShutdownClean)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("StopContext elapsed = %s, want clean five-source drain within scaled bound", elapsed)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions`); got != 5 {
+		t.Fatalf("sessions = %d, want 5", got)
+	}
+}
+
+func TestBoundedResolverContextCapsRemainingDeadline(t *testing.T) {
+	t.Parallel()
+	parent, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+
+	ctx, cancelResolver, ok := boundedResolverContext(parent)
+	defer cancelResolver()
+	if !ok {
+		t.Fatal("boundedResolverContext ok = false, want true")
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("boundedResolverContext returned context without deadline")
+	}
+	if remaining := time.Until(deadline); remaining > 100*time.Millisecond {
+		t.Fatalf("resolver context remaining = %s, want capped by parent deadline", remaining)
+	}
+}
+
+func TestStopContext_StopsResolverLoopWithinDeadline(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(
+		db,
+		WithLogger(silentLogger()),
+		WithResolverInterval(50*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := i.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	got, err := i.StopContext(ctx)
+	if err != nil {
+		t.Fatalf("StopContext error = %v (result=%+v)", err, got)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("StopContext elapsed = %s, want resolver loop to observe cancellation promptly", elapsed)
+	}
+}
+
 func TestParseSourceID(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -361,7 +649,8 @@ func TestWithPricer_Override(t *testing.T) {
 func TestWithOptionsIgnoreZeroValues(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(nil),         // nil logger ignored
 		WithBatchSize(0),        // zero ignored
 		WithBatchInterval(0),    // zero ignored
@@ -418,7 +707,8 @@ func TestSubmit_AfterStopReturnsError(t *testing.T) {
 func TestWithSourceFormat_OverridesParsing(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithSourceFormat("custom-id", "my-format"),
 		WithLocation("custom-id", "/data"),
@@ -464,7 +754,8 @@ func TestWithFTS5IndexLogs_PersistsZeroWhenDisabled(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	const sourceID = "aiagent_v3:/tmp"
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1),
 		WithBatchInterval(time.Second),
@@ -494,7 +785,8 @@ func TestFTS5IndexLogs_DefaultsToOneWithoutOption(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)
 	const sourceID = "aiagent_v3:/tmp"
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1),
 		WithBatchInterval(time.Second),
@@ -534,7 +826,8 @@ func TestWithFTS5IndexLogs_ReassertsOnRestart(t *testing.T) {
 		t.Fatalf("seed prior source row: %v", err)
 	}
 
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1),
 		WithBatchInterval(time.Second),
@@ -584,7 +877,8 @@ func TestIngester_PersistsSourceMeta(t *testing.T) {
 	const withoutMeta = "aiagent_v3:/tmp/without"
 	ctx := context.Background()
 
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1),
 		WithBatchInterval(time.Second),
@@ -638,7 +932,8 @@ func TestIngester_SourceMetaReassertsOnRestart(t *testing.T) {
 		t.Fatalf("seed prior source row: %v", err)
 	}
 
-	i, err := New(db,
+	i, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(1),
 		WithBatchInterval(time.Second),

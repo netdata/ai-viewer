@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/netdata/ai-viewer/internal/presenter"
@@ -15,7 +13,11 @@ import (
 // shutdownTimeout is how long http.Server.Shutdown waits for in-flight
 // handlers to drain. Per presenter.md §"Graceful Shutdown" the timeout
 // is 30 s.
-const shutdownTimeout = 30 * time.Second
+const (
+	shutdownTimeout         = 30 * time.Second
+	notifyPollerWaitTimeout = 5 * time.Second
+	storeCloseTimeout       = 5 * time.Second
+)
 
 func newHTTPServer(bind string, handler http.Handler) *http.Server {
 	return &http.Server{
@@ -75,20 +77,84 @@ type serveShutdownHooks struct {
 	waitPoller     func()
 	shutdownSSE    func()
 	shutdownServer func(context.Context) error
+	closeStore     func() error
 	waitListener   func() error
 }
 
-func runGracefulShutdown(logger *slog.Logger, timeout time.Duration, hooks serveShutdownHooks) error {
+type serveShutdownTimeouts struct {
+	notifyPollerWait time.Duration
+	httpShutdown     time.Duration
+	storeClose       time.Duration
+}
+
+func runGracefulShutdown(logger *slog.Logger, timeouts serveShutdownTimeouts, hooks serveShutdownHooks) (bool, error) {
+	clean := true
 	hooks.stopPoller()
-	hooks.waitPoller()
+	if !runWithTimeout(timeouts.notifyPollerWait, hooks.waitPoller) {
+		clean = false
+		logger.Warn("ai-viewer-serve: notify poller did not stop before shutdown timeout",
+			"timeout", timeouts.notifyPollerWait.String())
+	}
 	hooks.shutdownSSE()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeouts.httpShutdown)
 	defer cancel()
 	if err := hooks.shutdownServer(shutdownCtx); err != nil {
+		clean = false
 		logger.Warn("ai-viewer-serve: graceful shutdown error", "err", err)
 	}
-	return hooks.waitListener()
+	if hooks.closeStore != nil {
+		storeCloseStarted := time.Now()
+		if ok, err := runErrWithTimeout(timeouts.storeClose, hooks.closeStore); !ok {
+			clean = false
+			logger.Warn("shutdown_store_close_timeout",
+				"store_role", "reader",
+				"elapsed_ms", time.Since(storeCloseStarted).Milliseconds(),
+				"timeout_ms", timeouts.storeClose.Milliseconds())
+		} else if err != nil {
+			clean = false
+			logger.Warn("shutdown_store_close_error",
+				"store_role", "reader",
+				"elapsed_ms", time.Since(storeCloseStarted).Milliseconds(),
+				"err", err)
+		}
+	}
+	err := hooks.waitListener()
+	if err != nil {
+		clean = false
+	}
+	return clean, err
+}
+
+func runWithTimeout(timeout time.Duration, fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func runErrWithTimeout(timeout time.Duration, fn func() error) (bool, error) {
+	done := make(chan error, 1)
+	go func() {
+		done <- fn()
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return true, err
+	case <-timer.C:
+		return false, nil
+	}
 }
 
 // serveHTTP wires up the HTTP server, the read-only notify poller, signal
@@ -104,31 +170,47 @@ func runGracefulShutdown(logger *slog.Logger, timeout time.Duration, hooks serve
 // Graceful-shutdown order (presenter.md §Graceful Shutdown): on signal we
 // (1) stop the notify poller, (2) deliver a `disconnect` to every SSE
 // client and close the hub so the long-lived stream goroutines unblock and
-// return, then (3) http.Server.Shutdown drains the now-returning handlers
-// within shutdownTimeout. The store is closed by run()'s defer afterwards.
-func serveHTTP(ctx context.Context, logger *slog.Logger, bind string, p *presenter.Presenter) error {
+// return, (3) http.Server.Shutdown drains the now-returning handlers within
+// shutdownTimeout, then (4) the read-only store is closed under a bounded
+// timer. run()'s deferred close is an idempotent fallback.
+func serveHTTP(ctx context.Context, logger *slog.Logger, bind string, p *presenter.Presenter, closeStore func() error, releaseSignals func()) error {
 	srv := newHTTPServer(bind, p.Handler())
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	poller := startNotifyPoller(ctx, p.RunNotifyPoller)
 	errCh := startHTTPListener(logger, srv, bind)
 
 	select {
-	case <-sigCtx.Done():
-		logger.Info("ai-viewer-serve received shutdown signal; draining")
+	case <-ctx.Done():
+		if releaseSignals != nil {
+			releaseSignals()
+		}
+		shutdownStarted := time.Now()
+		logger.Info("shutdown_start",
+			"subsystem", "serve",
+			"signal", "SIGTERM/SIGINT",
+			"timeout_ms", shutdownTimeout.Milliseconds())
+		clean, err := runGracefulShutdown(logger, serveShutdownTimeouts{
+			notifyPollerWait: notifyPollerWaitTimeout,
+			httpShutdown:     shutdownTimeout,
+			storeClose:       storeCloseTimeout,
+		}, serveShutdownHooks{
+			stopPoller:     poller.stop,
+			waitPoller:     poller.wait,
+			shutdownSSE:    p.ShutdownSSE,
+			shutdownServer: srv.Shutdown,
+			closeStore:     closeStore,
+			waitListener: func() error {
+				return <-errCh
+			},
+		})
+		if err == nil && clean {
+			logger.Info("shutdown_clean",
+				"subsystem", "serve",
+				"elapsed_ms", time.Since(shutdownStarted).Milliseconds(),
+				"outcome", "clean")
+		}
+		return err
 	case err := <-errCh:
 		poller.stopAndWait()
 		return err
 	}
-
-	return runGracefulShutdown(logger, shutdownTimeout, serveShutdownHooks{
-		stopPoller:     poller.stop,
-		waitPoller:     poller.wait,
-		shutdownSSE:    p.ShutdownSSE,
-		shutdownServer: srv.Shutdown,
-		waitListener: func() error {
-			return <-errCh
-		},
-	})
 }

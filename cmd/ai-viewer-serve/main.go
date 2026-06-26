@@ -24,9 +24,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 )
 
 // frontendFS holds the Vite build output. scripts/build.sh writes the
@@ -76,27 +78,31 @@ func run(args []string, stdout, stderr *os.File) int {
 		logger.Error("ai-viewer-serve: failed to resolve --state-dir", "err", err)
 		return 1
 	}
-	logger.Info("ai-viewer-serve starting",
+	logger.Info(
+		"ai-viewer-serve starting",
 		"db", dbPath,
 		"state_dir", stateDir,
 		"bind", cfg.bind,
 		"version", versionString(cfg.version),
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 
 	runtime, err := newServeRuntime(ctx, logger, cfg, dbPath)
 	if err != nil {
 		return 1
 	}
-	defer runtime.close()
+	defer func() {
+		if err := runtime.close(); err != nil {
+			logger.Warn("ai-viewer-serve: store close error", "err", err)
+		}
+	}()
 
-	if err := serveHTTP(ctx, logger, cfg.bind, runtime.presenter); err != nil {
+	if err := serveHTTP(ctx, logger, cfg.bind, runtime.presenter, runtime.close, stopSignals); err != nil {
 		logger.Error("ai-viewer-serve: server exited with error", "err", err)
 		return 1
 	}
-	logger.Info("ai-viewer-serve stopped")
 	return 0
 }
 

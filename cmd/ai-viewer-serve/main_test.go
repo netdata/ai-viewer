@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // captureStderr returns a *os.File whose writes we collect for the
@@ -267,7 +269,11 @@ func TestServeGracefulShutdownOrder(t *testing.T) {
 	listenerErr := errors.New("listener failed")
 	var steps []string
 
-	err := runGracefulShutdown(testLogger(), time.Second, serveShutdownHooks{
+	clean, err := runGracefulShutdown(testLogger(), serveShutdownTimeouts{
+		notifyPollerWait: time.Second,
+		httpShutdown:     time.Second,
+		storeClose:       time.Second,
+	}, serveShutdownHooks{
 		stopPoller: func() {
 			steps = append(steps, "stop-poller")
 		},
@@ -284,6 +290,10 @@ func TestServeGracefulShutdownOrder(t *testing.T) {
 			}
 			return errors.New("graceful shutdown warning")
 		},
+		closeStore: func() error {
+			steps = append(steps, "close-store")
+			return nil
+		},
 		waitListener: func() error {
 			steps = append(steps, "wait-listener")
 			return listenerErr
@@ -292,10 +302,144 @@ func TestServeGracefulShutdownOrder(t *testing.T) {
 	if !errors.Is(err, listenerErr) {
 		t.Fatalf("runGracefulShutdown error = %v, want %v", err, listenerErr)
 	}
+	if clean {
+		t.Fatal("runGracefulShutdown clean = true despite shutdown/listener errors")
+	}
 
-	want := []string{"stop-poller", "wait-poller", "shutdown-sse", "http-shutdown", "wait-listener"}
+	want := []string{"stop-poller", "wait-poller", "shutdown-sse", "http-shutdown", "close-store", "wait-listener"}
 	if strings.Join(steps, ",") != strings.Join(want, ",") {
 		t.Fatalf("shutdown order = %v, want %v", steps, want)
+	}
+}
+
+func TestServeGracefulShutdownReportsCleanWhenAllPhasesClean(t *testing.T) {
+	t.Parallel()
+
+	clean, err := runGracefulShutdown(testLogger(), serveShutdownTimeouts{
+		notifyPollerWait: time.Second,
+		httpShutdown:     time.Second,
+		storeClose:       time.Second,
+	}, serveShutdownHooks{
+		stopPoller:     func() {},
+		waitPoller:     func() {},
+		shutdownSSE:    func() {},
+		shutdownServer: func(context.Context) error { return nil },
+		closeStore:     func() error { return nil },
+		waitListener:   func() error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("runGracefulShutdown error = %v", err)
+	}
+	if !clean {
+		t.Fatal("runGracefulShutdown clean = false for clean shutdown")
+	}
+}
+
+func TestServeGracefulShutdownBoundsNotifyPollerWait(t *testing.T) {
+	t.Parallel()
+	blockPoller := make(chan struct{})
+	var steps []string
+
+	clean, err := runGracefulShutdown(testLogger(), serveShutdownTimeouts{
+		notifyPollerWait: 20 * time.Millisecond,
+		httpShutdown:     time.Second,
+		storeClose:       time.Second,
+	}, serveShutdownHooks{
+		stopPoller: func() {
+			steps = append(steps, "stop-poller")
+		},
+		waitPoller: func() {
+			<-blockPoller
+		},
+		shutdownSSE: func() {
+			steps = append(steps, "shutdown-sse")
+		},
+		shutdownServer: func(context.Context) error {
+			steps = append(steps, "http-shutdown")
+			return nil
+		},
+		closeStore: func() error {
+			steps = append(steps, "close-store")
+			return nil
+		},
+		waitListener: func() error {
+			steps = append(steps, "wait-listener")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runGracefulShutdown error = %v", err)
+	}
+	if clean {
+		t.Fatal("runGracefulShutdown clean = true despite notify poller timeout")
+	}
+	want := []string{"stop-poller", "shutdown-sse", "http-shutdown", "close-store", "wait-listener"}
+	if strings.Join(steps, ",") != strings.Join(want, ",") {
+		t.Fatalf("shutdown order after poller timeout = %v, want %v", steps, want)
+	}
+	close(blockPoller)
+}
+
+func TestServeGracefulShutdownBoundsStoreClose(t *testing.T) {
+	t.Parallel()
+	blockClose := make(chan struct{})
+	var steps []string
+
+	clean, err := runGracefulShutdown(testLogger(), serveShutdownTimeouts{
+		notifyPollerWait: time.Second,
+		httpShutdown:     time.Second,
+		storeClose:       20 * time.Millisecond,
+	}, serveShutdownHooks{
+		stopPoller: func() {
+			steps = append(steps, "stop-poller")
+		},
+		waitPoller: func() {
+			steps = append(steps, "wait-poller")
+		},
+		shutdownSSE: func() {
+			steps = append(steps, "shutdown-sse")
+		},
+		shutdownServer: func(context.Context) error {
+			steps = append(steps, "http-shutdown")
+			return nil
+		},
+		closeStore: func() error {
+			<-blockClose
+			return nil
+		},
+		waitListener: func() error {
+			steps = append(steps, "wait-listener")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runGracefulShutdown error = %v", err)
+	}
+	if clean {
+		t.Fatal("runGracefulShutdown clean = true despite store close timeout")
+	}
+	want := []string{"stop-poller", "wait-poller", "shutdown-sse", "http-shutdown", "wait-listener"}
+	if strings.Join(steps, ",") != strings.Join(want, ",") {
+		t.Fatalf("shutdown order after close timeout = %v, want %v", steps, want)
+	}
+	close(blockClose)
+}
+
+func TestServeRuntimeCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	st, err := store.OpenWriter(context.Background(), ":memory:", testLogger())
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	rt := &serveRuntime{store: st}
+	if err := rt.close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if rt.store != nil {
+		t.Fatal("runtime store was not cleared after first close")
+	}
+	if err := rt.close(); err != nil {
+		t.Fatalf("second close: %v", err)
 	}
 }
 

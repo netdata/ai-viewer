@@ -7,7 +7,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +87,7 @@ func TestRun_RollupsBackfillDispatch(t *testing.T) {
 	seedClosedHourOp(t, path)
 
 	stderr, read := captureStderr(t)
-	code := run([]string{"rollups-backfill", "--db", path, "--log-level", "error"}, stderr, stderr)
+	code := run([]string{"rollups-backfill", "--db", path, "--state-dir", t.TempDir(), "--log-level", "error"}, stderr, stderr)
 	if code != 0 {
 		t.Fatalf("run(rollups-backfill) exit = %d, want 0; stderr=%q", code, read())
 	}
@@ -99,8 +101,41 @@ func TestRun_RollupsBackfillDispatch(t *testing.T) {
 func TestRun_RollupsBackfillBadDB(t *testing.T) {
 	stderr, _ := captureStderr(t)
 	bad := filepath.Join(t.TempDir(), "does-not-exist", "nested", "index.db")
-	code := run([]string{"rollups-backfill", "--db", bad}, stderr, stderr)
+	code := run([]string{"rollups-backfill", "--db", bad, "--state-dir", t.TempDir()}, stderr, stderr)
 	if code == 0 {
 		t.Fatal("run(rollups-backfill) on unwritable DB path returned 0, want non-zero")
+	}
+}
+
+func TestRun_WriterOneShotsRefuseDefaultStateDirLockWithCustomDB(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	stateDir, err := resolveStateDir("")
+	if err != nil {
+		t.Fatalf("resolve default state dir: %v", err)
+	}
+	if err := os.MkdirAll(stateDir, stateDirPerm); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	release, err := acquireSingleInstanceLock(stateDir, silentLogger())
+	if err != nil {
+		t.Fatalf("acquire default state-dir lock: %v", err)
+	}
+	defer release()
+
+	for _, subcommand := range []string{"rollups-backfill", "fts-content-backfill", "reprice"} {
+		subcommand := subcommand
+		t.Run(subcommand, func(t *testing.T) {
+			path := migratedDBPath(t)
+			stderr, read := captureStderr(t)
+			code := run([]string{subcommand, "--db", path, "--log-level", "error"}, stderr, stderr)
+			if code == 0 {
+				t.Fatalf("%s with held default state-dir lock returned 0, want non-zero", subcommand)
+			}
+			if !strings.Contains(read(), "ingester.lock") {
+				t.Fatalf("%s stderr = %q, want lock-resolution message", subcommand, read())
+			}
+		})
 	}
 }

@@ -47,9 +47,10 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 	// The adapter prefixes SourceID with "claude-code:" (sourceIDPrefix);
 	// register the same format/location so sources.format is populated.
 	sourceID := "claude-code:" + fixtureDir
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
-		WithBatchSize(2000),
+		WithBatchSize(1),
 		WithBatchInterval(50*time.Millisecond),
 		WithSourceFormat(sourceID, "claude-code"),
 		WithLocation(sourceID, fixtureDir),
@@ -62,12 +63,12 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	events := make(chan canonical.Event, 256)
+	events := make(chan canonical.Event)
 	scanDone := make(chan struct{})
 	var scanErr error
 	go func() {
-		defer close(events)
 		defer close(scanDone)
+		defer close(events)
 		scanErr = a.Scan(ctx, nil, events)
 	}()
 	// Submit drives the real worker; the worker applies every event in one
@@ -81,6 +82,12 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 	waitForScan(t, scanDone, "claude-code compaction")
 	if scanErr != nil {
 		t.Fatalf("Scan: %v", scanErr)
+	}
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE kind='compaction'`) == 1
+	}) {
+		t.Fatalf("compaction op count before Stop = %d, want 1",
+			scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE kind='compaction'`))
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -105,7 +112,8 @@ func TestClaudeCodeCompaction_IngestsWithoutFKError(t *testing.T) {
 	// the writer uses), then assert the row is present and is a compaction.
 	const sessionNativeID = "33333333-3333-4333-8333-333333333333"
 	compactionOpID := canonicalOpID(
-		canonicalTurnID(canonicalSessionID(sourceID, sessionNativeID), 1), 3)
+		canonicalTurnID(canonicalSessionID(sourceID, sessionNativeID), 1), 3,
+	)
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM ops WHERE id=? AND kind='compaction'`, compactionOpID); got != 1 {
 		t.Fatalf("compaction op row count = %d, want 1 (id=%s)", got, compactionOpID)
 	}

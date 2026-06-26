@@ -20,7 +20,7 @@ main()
   │    ├─ after all Scan calls return: bounded read-model backfill attempt
   │    ├─ on Scan return and backfill gate close: adapter.Tail(...) → events chan
   │    └─ Ingester.Submit(sourceID, events) — spawns one worker
-  └─ wait for SIGTERM/SIGINT → Ingester.Stop() → graceful shutdown
+  └─ wait for SIGTERM/SIGINT → bounded graceful shutdown
 ```
 
 The ingester owns the write-side `*sql.DB`; downstream packages do not
@@ -64,9 +64,38 @@ func (i *Ingester) Start(ctx context.Context) error
 // ErrSourceAlreadySubmitted.
 func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error
 
-// Stop drains every worker's pending batch, commits, persists
-// source_progress, runs one final resolver pass over the just-committed rows,
-// stops the resolver, and returns. Idempotent.
+// ShutdownOutcome classifies StopContext results for process-exit mapping,
+// tests, and operator logs.
+type ShutdownOutcome string
+
+const (
+    ShutdownClean             ShutdownOutcome = "clean"
+    ShutdownReplayRequired    ShutdownOutcome = "replay_required"
+    ShutdownTimeout           ShutdownOutcome = "timeout"
+    ShutdownWorkerFailure     ShutdownOutcome = "worker_failure"
+    ShutdownResolverTimeout   ShutdownOutcome = "resolver_timeout"
+    ShutdownAlreadyStopping   ShutdownOutcome = "already_stopping"
+    ShutdownAlreadyStopped    ShutdownOutcome = "already_stopped"
+)
+
+// ShutdownResult carries the typed shutdown outcome plus bounded timing and
+// replay evidence suitable for structured logs.
+type ShutdownResult struct {
+    Outcome ShutdownOutcome
+}
+
+// StopContext drains workers within ctx, preserves uncommitted batches for
+// source replay when the drain deadline expires, runs a final resolver pass
+// bounded by the caller's remaining deadline (maximum 5s), stops the resolver,
+// and returns a typed result. Exactly one concurrent caller owns shutdown; other
+// callers return already_stopping while the owner is active or already_stopped
+// after it completes.
+func (i *Ingester) StopContext(ctx context.Context) (ShutdownResult, error)
+
+// Stop is the compatibility wrapper. It uses the production bounded default
+// timeout, maps clean and replay-required outcomes to nil, preserves the legacy
+// ErrNotStarted pre-start error, and maps timeout/failure outcomes to non-nil
+// errors. It must not call StopContext(context.Background()).
 func (i *Ingester) Stop() error
 ```
 
@@ -525,30 +554,91 @@ Auto-discovery (Phase 1.5): if no `--source` flags are given, the ingester probe
 
 On SIGTERM/SIGINT:
 
-1. Cancel adapter contexts.
-2. Wait up to 5 s for in-flight Scan/Tail goroutines to return. If an adapter
-   does not drain in that window, log a warning and continue shutdown.
-3. Stop the resolver ticker, cancel the ingester context, and wait for worker
-   goroutines.
-4. Each worker drains already-buffered events and pending rollup buckets. A
-   final flush persists `source_progress` rows (`last_seq`, cursor) and notify
-   rows in the same transaction as the batch.
-5. After every worker has drained, `Ingester.Stop()` runs one synchronous
-   resolver pass before returning. This is required for one-shot/bulk ingestion:
-   parent/root and op→child linkage stashed in the final committed batch must
-   be repaired even when the process exits before the next 5 s background
-   resolver tick.
-6. Worker shutdown writes use the bounded shutdown-drain context. The current
-   bound is 10 s per worker write/drain context. Active writes selected before
-   cancellation detach from immediate lifecycle cancellation, but if shutdown
-   arrives while the write is in flight they arm the same 10 s bound.
-7. Close SQLite after `Ingester.Stop()` returns.
-7. Exit 0.
+1. The process installs a top-level `signal.NotifyContext` before opening the
+   writer DB or dispatching one-shot subcommands. On the first SIGTERM/SIGINT it
+   emits the shutdown-start log marker synchronously, calls the context's
+   `stop()` function so a second signal uses the default disposition, and enters
+   the bounded shutdown path.
+2. Adapter contexts and `StopContext` are canceled/started together. Adapter
+   waiting runs in parallel with worker drain, not as a sequential wait after
+   `StopContext`. Adapters get a 5 s grace window; expiry is logged, but process
+   shutdown continues.
+   The scan wait group is pre-added for every configured source before any
+   goroutine waits on it. A source that fails before its adapter `Scan`
+   goroutine starts must decrement that pre-added counter exactly once; a source
+   that starts delegates the decrement to `runAdapter` after `Scan` completes or
+   is canceled. This prevents source-start failures from parking the post-scan
+   backfill gate forever.
+3. Workers drain already-buffered events and pending rollup buckets under the
+   bounded shutdown-drain context. The current worker drain bound is 10 s, plus
+   a conservative post-deadline SQLite `busy_timeout(5000)` tail for any flush
+   attempt that starts before the drain context expires. Active writes selected
+   before cancellation detach from immediate lifecycle cancellation, arm the
+   same bounded write context, and then workers use a fresh drain context for
+   remaining buffered work.
+4. The effective idle-worker bound is 15 s. The worst mid-flush worker bound is
+   25 s: 10 s detached active write, one conservative post-deadline busy tail,
+   and 10 s fresh shutdown drain. Under persistent contention, workers may see
+   fewer than `flushMaxRetries` attempts and must report replay-required instead
+   of retrying past the drain context.
+5. A final flush persists `source_progress` (`last_seq`, cursor) and notify rows
+   in the same transaction as the batch. If a final batch cannot commit before
+   the bounded drain deadline, the worker logs exactly one replay-required
+   outcome for that source/reason, leaves source progress unadvanced, and
+   returns a replay-required outcome so the next start re-emits the uncommitted
+   source records. This is best-effort replay safety, not a lossless shutdown
+   promise.
+6. `StopContext` waits for worker completion with `wg.Wait()` in a goroutine and
+   `select` on the caller context. It never waits indefinitely. The final
+   resolver pass gets `min(remaining caller deadline, 5s)`; if no time remains,
+   resolver work returns a timeout outcome instead of extending shutdown.
+7. Post-scan read-model backfill is canceled by the shutdown context. The
+   backfill goroutine is the sole closer of `backfillDone` and `backfillWait`;
+   shutdown waits up to 5 s for `backfillWait`. If the backfill cannot stop in
+   that window, shutdown exits through the bounded guard and skips explicit DB
+   close so live SQLite work is not raced by `Store.Close()`.
+8. Explicit writer DB close runs under a 5 s goroutine/timer. On timeout, log a
+   bounded writer-close timeout and let process exit close the handle. Startup
+   and partial-startup paths use the close strategy matrix from SOW-0104:
+   before store open no close; post-open/pre-start bounded close and no
+   `StopContext`; post-start/pre-source `StopContext` then bounded close; normal
+   shutdown parallel adapter wait plus `StopContext`, bounded backfill wait, and
+   bounded close; bounded guard skips explicit close; ordinary startup/config
+   errors after store open use bounded logged close.
+9. Exit 0 for clean drain and replay-required drain expiry. Exit non-zero for
+   store-close failure, permanent worker drop errors, startup/migration errors,
+   timeout/failure outcomes, and bounded-guard failure.
 
-There is no separate process-level hard timeout in the current implementation:
-the shutdown guarantees are the 5 s adapter wait plus the per-worker bounded
-write/drain contexts above. A future SOW that adds a process-level timeout must
-update this contract, the CLI behavior, and tests together.
+The production ingester stop budget is 30 s:
+`worker_exit_bound=25s + final_resolver<=5s`. The process-level systemd stop
+budget is 45 s: `max(adapter_grace=5s, ingesterStopTimeout=30s) +
+backfill_cancel_wait=5s + store_close=5s + 5s systemd margin`.
+
+The pprof server is intentionally outside the shutdown wait group. It is off by
+default and operator-gated; process exit reaps its listener and in-flight
+handlers. `StopContext` does not wait for pprof.
+
+`runAdapter` panic recovery is out of scope for SOW-0104. Panics remain
+process-fatal, matching the pre-existing behavior.
+
+## One-Shot Commands And Locks
+
+`check-parity` opens the canonical DB read-only and does not take the daemon
+write lock.
+
+Writer one-shot commands (`rollups-backfill`, `fts-content-backfill`,
+`reprice`) use the dispatcher's signal-aware parent context, acquire/refuse the
+same daemon lock key as the daemon before opening a writer handle, and exit
+non-zero with a resolution-oriented message if the lock is held. The lock is
+keyed on `--state-dir`. The default `--state-dir` uses the same
+`resolveStateDir` path as the daemon, not `filepath.Dir(--db)`. A one-shot that
+targets the system-install DB must pass `--state-dir /opt/ai-viewer/data` to
+detect the system daemon lock.
+
+`store.OpenWriter` already accepts `context.Context`. SOW-0104 requires every
+daemon and one-shot call site to pass the signal-aware context so migrations and
+schema repair observe SIGTERM through their existing `ExecContext` and
+`QueryContext` calls.
 
 ## Failure Recovery
 

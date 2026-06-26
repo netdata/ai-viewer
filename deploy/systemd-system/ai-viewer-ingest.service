@@ -37,6 +37,7 @@ ExecStart=/opt/ai-viewer/bin/ai-viewer-ingest --db /opt/ai-viewer/data/index.db 
 WorkingDirectory=/opt/ai-viewer
 Restart=on-failure
 RestartSec=3s
+TimeoutStopSec=45s
 # SOW-0094 chunk 3: watchdog + multi-process lockout.
 #
 # MemoryHigh=4G: soft cap — ingester is throttled under memory pressure
@@ -55,6 +56,7 @@ RestartSec=3s
 #   latency-sensitive). Avoids stalls during the operator's own I/O.
 MemoryHigh=4G
 MemoryMax=8G
+OOMPolicy=stop
 LimitNOFILE=65536
 IOSchedulingClass=idle
 

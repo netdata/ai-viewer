@@ -227,7 +227,8 @@ func ingestParityFixture(t *testing.T, db *sql.DB, now func() int64, sourceForma
 	// natural format on every rollup row. The returned sourceID lets the caller
 	// count distinct source_ids per format (the multi-source coverage guard).
 	sourceID := sourceFormat + ":" + root
-	ing, err := New(db,
+	ing, err := New(
+		db,
 		WithLogger(silentLogger()),
 		WithBatchSize(2000),
 		WithBatchInterval(50*time.Millisecond),
@@ -247,8 +248,8 @@ func ingestParityFixture(t *testing.T, db *sql.DB, now func() int64, sourceForma
 	var scanErr error
 	scanDone := make(chan struct{})
 	go func() {
-		defer close(events)
 		defer close(scanDone)
+		defer close(events)
 		scanErr = a.Scan(ctx, nil, events)
 	}()
 	if err := ing.Submit(sourceID, events); err != nil {
@@ -260,6 +261,12 @@ func ingestParityFixture(t *testing.T, db *sql.DB, now func() int64, sourceForma
 	case <-scanDone:
 	case <-time.After(10 * time.Second):
 		t.Fatalf("%s/%s: Scan did not finish within 10s", fa.format, name)
+	}
+	if !waitFor(20*time.Second, func() bool {
+		return scanInt(t, db, `SELECT COUNT(*) FROM sessions`) >= 1
+	}) {
+		t.Fatalf("%s/%s: session count before Stop = %d, want >=1",
+			fa.format, name, scanInt(t, db, `SELECT COUNT(*) FROM sessions`))
 	}
 	if err := ing.Stop(); err != nil {
 		t.Fatalf("%s/%s: Stop: %v", fa.format, name, err)

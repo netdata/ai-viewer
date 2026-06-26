@@ -25,7 +25,10 @@ This skill is the durable record of how ai-viewer gets installed and run on the 
    - `~/.local/share/opencode/opencode.db` → `opencode`
 3. Lays out `/opt/ai-viewer/{bin,data,logs}`, atomically stages each rebuilt binary and renames it into place.
 4. Renders the unit templates (`deploy/systemd-system/ai-viewer-{ingest,serve}.service`) — substituting `__OPERATOR_USER__`, `__OPERATOR_GROUP__`, and `__AI_VIEWER_SOURCES__` — into `/etc/systemd/system/`.
-5. `systemctl daemon-reload`, enables both units, restarts `ai-viewer-ingest.service` and `ai-viewer-serve.service`, waits up to 20s for the server, prints the URL.
+5. `systemctl daemon-reload`, enables both units, stops active units, fixes
+   ownership/permissions while they are down, starts the ingester, verifies
+   ingester liveness, starts and verifies the server, re-checks ingester
+   liveness, then prints the URL.
 
 ### Commands
 
@@ -68,20 +71,38 @@ scripts/install-system.sh status                                       # the bun
 
 - `/api/health.status` is `degraded` on a fresh install until sources catch up (parse errors from real-data edge cases + historical staleness) — that's **correct** (errors are surfaced, not hidden). It is NOT an install failure.
 - `/api/health.sources` is empty for the first few seconds (sources register on the first batch flush, after the adapters scan) — wait, don't panic.
+- The ingester liveness check catches immediate startup failures. A delayed
+  migration/startup failure after the poll window is diagnosed from
+  `systemctl status`, bounded `journalctl` output, and the effective
+  `StartLimit*` values from `systemctl show`.
 
 ## Operating
 
 - **Logs:** `journalctl -u ai-viewer-ingest -u ai-viewer-serve -f` (journald via stdout; the primary sink).
-- **Restart after a code change:** `scripts/install-system.sh` (uninstall is NOT needed — install is idempotent; it rebuilds + atomically replaces binaries + re-renders + `daemon-reload` + restarts).
+- **Restart after a code change:** `scripts/install-system.sh` (uninstall is NOT needed — install is idempotent; it rebuilds + atomically replaces binaries + re-renders + `daemon-reload` + stop/start verification).
 - **Data is disposable.** `/opt/ai-viewer/data/index.db` is derived. Deleting it (or `uninstall`) triggers a full re-ingest on next start; the source files are the source of truth. Never back up the index.
 - **Read-only on sources.** Neither binary writes to `~/.ai-agent`/`~/.claude`/etc. The ingester opens source files `os.O_RDONLY`; the server never touches them.
 - **Port:** `7710` (the spec default; `127.0.0.1:7710`). Changing it requires editing the rendered serve unit + the frontend's Vite proxy target (dev only).
+- **Graceful stop budget:** all system and user units use
+  `TimeoutStopSec=45s`. The system ingester also has `MemoryHigh=4G`,
+  `MemoryMax=8G`, `LimitNOFILE=65536`, `IOSchedulingClass=idle`, and
+  `OOMPolicy=stop`.
+- **Writer one-shots:** for a system install, commands such as
+  `rollups-backfill`, `fts-content-backfill`, and `reprice` that target
+  `/opt/ai-viewer/data/index.db` must also pass
+  `--state-dir /opt/ai-viewer/data` so they detect the running system daemon
+  lock before opening a writer handle.
 
 ## Common issues
 
 - **`sources: 0` after install.** Either the units run as the wrong user (permission denied on the `0700` home dirs — re-run install so it renders `User=<operator>`), or you're checking too early (sources register on first batch flush — wait ~5s).
 - **`permission denied` on source paths in the ingest log.** The unit's `User=` doesn't own the data. Confirm `/etc/systemd/system/ai-viewer-ingest.service` has `User=<operator>` (the install script renders this from `SUDO_USER`/`$USER`).
 - **Server not responding after 20s.** `systemctl status ai-viewer-serve` + `journalctl -u ai-viewer-serve` — the usual cause is the schema-not-ready start-order race (the serve unit's `Restart=on-failure` cycles until the ingester migrates); give it another few seconds.
+- **Ingester start/restart loop.** Inspect `systemctl status ai-viewer-ingest`,
+  `journalctl -u ai-viewer-ingest`, and
+  `systemctl show ai-viewer-ingest.service -p StartLimitBurst -p StartLimitIntervalUSec`.
+  The project does not hard-code `StartLimit*` values; use the host's effective
+  settings when diagnosing migration failures.
 - **`bad substitution` / sed errors from the installer.** The script renders the unit via `sed` (no `-o`); if you edit it, don't reintroduce `sed -o`.
 
 ## The user install (alternative, no root)

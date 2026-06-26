@@ -9,7 +9,6 @@ import (
 
 	"github.com/netdata/ai-viewer/internal/ingest"
 	"github.com/netdata/ai-viewer/internal/pricing"
-	"github.com/netdata/ai-viewer/internal/store"
 )
 
 // runReprice implements the `reprice` subcommand: a one-shot re-pricing of all
@@ -18,10 +17,11 @@ import (
 // loads the embedded pricing table, re-prices each qualifying op, and cascades
 // the cost into turns/sessions aggregates. Idempotent: re-running does nothing
 // when all ops are already priced.
-func runReprice(args []string, stdout, stderr *os.File) int {
+func runReprice(ctx context.Context, args []string, stdout, stderr *os.File) int {
 	fs := flag.NewFlagSet("ai-viewer-ingest reprice", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "SQLite path (default ~/.local/share/ai-viewer/index.db)")
+	stateDir := fs.String("state-dir", "", "state directory (default ~/.local/share/ai-viewer)")
 	logLevel := fs.String("log-level", "info", "log level (debug|info|warn|error)")
 	logFormat := fs.String("log-format", "json", "log format (json|text)")
 	fs.Usage = func() {
@@ -50,10 +50,20 @@ func runReprice(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	releaseLock, resolvedStateDir, err := acquireOneShotDaemonLock(*stateDir, logger)
+	if err != nil {
+		logger.Error("reprice: daemon lock unavailable",
+			"state_dir", resolvedStateDir,
+			"err", err,
+			"hint", "stop ai-viewer-ingest.service or pass the matching --state-dir for an offline database")
+		return 1
+	}
+	defer releaseLock()
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	ws, err := store.OpenWriter(ctx, resolvedDB, logger)
+	ws, err := openWriterStore(ctx, resolvedDB, logger)
 	if err != nil {
 		logger.Error("reprice: failed to open store", "db", resolvedDB, "err", err)
 		return 1
@@ -72,7 +82,8 @@ func runReprice(args []string, stdout, stderr *os.File) int {
 		logger.Error("reprice: failed", "db", resolvedDB, "err", err)
 		return 1
 	}
-	logger.Info("reprice complete",
+	logger.Info(
+		"reprice complete",
 		"ops_priced", stats.OpsPriced,
 		"ops_skipped", stats.OpsSkipped,
 		"total_cost_added", fmt.Sprintf("%.4f", stats.TotalCostAdded),
