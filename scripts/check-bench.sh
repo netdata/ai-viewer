@@ -15,25 +15,38 @@
 #     from tripping the gate.
 #   - `-cpu=1` pins the benchmark CPU list for these serial hot-path checks
 #     instead of inheriting workstation-wide scheduler noise.
+#   - `-p=1` serializes package benchmark binaries so the gate does not create
+#     cross-package contention.
+#   - Real benchmark attempts fail closed with exit 2 before collecting samples
+#     when the workstation is too busy or load/CPU preflight evidence is
+#     unavailable.
 #   - Baseline refresh requires an explicit SOW. This script has NO auto-update
 #     mode — it never writes bench/baseline.txt.
 #
 # Usage:
-#   scripts/check-bench.sh                 # run the benchmarks, compare to bench/baseline.txt
+#   scripts/check-bench.sh                 # run go test -p=1 -run='^$' -bench=. -benchmem -count=6 -cpu=1, compare to bench/baseline.txt
 #   scripts/check-bench.sh BASE CURRENT    # compare two existing benchstat-input files (self-test)
-# Exit: 0 = within threshold; 1 = a reproduced > 20% sec/op regression; 2 = usage/tooling error.
+# Exit: 0 = within threshold; 1 = a reproduced > 20% sec/op regression; 2 = usage/tooling, busy-host, or unavailable-preflight error.
+# busy-host exit 2 and unavailable-preflight exit 2 happen before sample collection.
 set -euo pipefail
+export LC_ALL=C
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; GRAY='\033[0;90m'; NC='\033[0m'
 THRESH="${BENCH_THRESHOLD:-20}"
 BENCH_COUNT="6"
 BENCH_CPU="1"
+BENCH_PKG_PARALLELISM="1"
+BENCH_MAX_LOAD_PER_EFFECTIVE_CPU="0.50"
 # The 20% sec/op threshold is the documented contract (quality-gates.md). The
 # env override exists only for local experimentation; warn loudly so it can
 # never be a quiet way to land a regressing change.
 if [ "$THRESH" != "20" ]; then
   echo -e "${YELLOW}[warn]${NC} BENCH_THRESHOLD=${THRESH} overrides the contract 20% sec/op gate — for local experimentation only, never to land a regression." >&2
 fi
+# Package parallelism and busy-host load are physical validity constraints, not
+# operator-tunable knobs. Keep them as hard assignments even if same-named
+# environment variables are present; only BENCH_THRESHOLD remains overridable for
+# loud local experiments.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Resolve benchstat (GOBIN, then GOPATH/bin, then PATH).
@@ -74,15 +87,113 @@ effective_gomaxprocs() {
   printf '%s' "$out"
 }
 
-loadavg_values() {
-  if [ ! -r /proc/loadavg ]; then
-    printf 'unavailable (/proc/loadavg not readable)'
-    return
+loadavg_source() {
+  if [ -n "${BENCH_LOADAVG_FILE:-}" ] && [ "${BENCH_SELF_TEST:-}" != "1" ]; then
+    echo -e "${RED}[ERROR]${NC} BENCH_LOADAVG_FILE requires BENCH_SELF_TEST=1; this fixture hook is only for hermetic self-tests." >&2
+    return 2
+  fi
+  if [ "${BENCH_SELF_TEST:-}" = "1" ]; then
+    if [ -z "${BENCH_LOADAVG_FILE:-}" ]; then
+      echo -e "${RED}[ERROR]${NC} BENCH_SELF_TEST=1 requires BENCH_LOADAVG_FILE; hermetic benchmark self-test must not read host /proc/loadavg." >&2
+      return 2
+    fi
+    printf '%s' "$BENCH_LOADAVG_FILE"
+    return 0
+  fi
+  printf '%s' '/proc/loadavg'
+}
+
+is_nonnegative_float() {
+  awk -v value="$1" 'BEGIN { exit (value ~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)$/) ? 0 : 1 }'
+}
+
+is_positive_integer() {
+  case "$1" in
+    ''|0|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+read_loadavg_source() {
+  local source="$1" one five fifteen _rest
+  if [ ! -e "$source" ]; then
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source unavailable: ${source} (missing)." >&2
+    echo -e "${GRAY}        This Linux workstation benchmark gate needs readable load evidence; wait for a quieter window or fix the load source.${NC}" >&2
+    return 2
+  fi
+  if [ ! -f "$source" ] || [ ! -r "$source" ]; then
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source unavailable: ${source} (not a readable file)." >&2
+    echo -e "${GRAY}        This Linux workstation benchmark gate needs readable load evidence; wait for a quieter window or fix the load source.${NC}" >&2
+    return 2
+  fi
+  read -r one five fifteen _rest < "$source" || {
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source invalid: ${source} (expected at least three fields)." >&2
+    return 2
+  }
+  if [ -z "${one:-}" ] || [ -z "${five:-}" ] || [ -z "${fifteen:-}" ]; then
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source invalid: ${source} (expected at least three fields)." >&2
+    return 2
+  fi
+  if ! is_nonnegative_float "$one"; then
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source invalid: ${source} (first field must be a non-negative number)." >&2
+    return 2
+  fi
+  if ! is_nonnegative_float "$five"; then
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source invalid: ${source} (second field must be a non-negative number)." >&2
+    return 2
+  fi
+  if ! is_nonnegative_float "$fifteen"; then
+    echo -e "${RED}[ERROR]${NC} benchmark loadavg source invalid: ${source} (third field must be a non-negative number)." >&2
+    return 2
   fi
 
-  local one five fifteen _rest
-  read -r one five fifteen _rest < /proc/loadavg || { printf 'unavailable (/proc/loadavg unreadable)'; return; }
-  printf '%s %s %s' "$one" "$five" "$fifteen"
+  LOADAVG_SOURCE="$source"
+  LOADAVG_ONE="$one"
+  LOADAVG_FIVE="$five"
+  LOADAVG_FIFTEEN="$fifteen"
+}
+
+compute_load_threshold() {
+  awk -v gomax="$1" -v max="$BENCH_MAX_LOAD_PER_EFFECTIVE_CPU" 'BEGIN { printf "%.2f", gomax * max }'
+}
+
+load_at_or_above_threshold() {
+  awk -v one_minute_load="$1" -v threshold="$2" 'BEGIN { exit (one_minute_load >= threshold) ? 0 : 1 }'
+}
+
+preflight_benchmark_host() {
+  local attempt="$1" source gomax threshold
+  source="$(loadavg_source)" || return 2
+  read_loadavg_source "$source" || return 2
+
+  gomax="$(effective_gomaxprocs)"
+  if ! is_positive_integer "$gomax"; then
+    echo -e "${RED}[ERROR]${NC} effective GOMAXPROCS unavailable: ${gomax}" >&2
+    echo -e "${GRAY}        Cannot validate workstation load for benchmark attempt ${attempt}; wait for a quieter window or fix the effective CPU probe.${NC}" >&2
+    return 2
+  fi
+
+  threshold="$(compute_load_threshold "$gomax")"
+  PREFLIGHT_LOAD_SOURCE="$LOADAVG_SOURCE"
+  PREFLIGHT_LOAD_ONE="$LOADAVG_ONE"
+  PREFLIGHT_LOAD_FIVE="$LOADAVG_FIVE"
+  PREFLIGHT_LOAD_FIFTEEN="$LOADAVG_FIFTEEN"
+  PREFLIGHT_GOMAX="$gomax"
+  PREFLIGHT_THRESHOLD="$threshold"
+
+  if load_at_or_above_threshold "$PREFLIGHT_LOAD_ONE" "$PREFLIGHT_THRESHOLD"; then
+    echo -e "${RED}[ERROR]${NC} benchmark host too busy for valid wall-time evidence before attempt ${attempt}." >&2
+    printf '        loadavg source: %s\n' "$PREFLIGHT_LOAD_SOURCE" >&2
+    printf '        loadavg 1m: %s\n' "$PREFLIGHT_LOAD_ONE" >&2
+    printf '        loadavg (1m 5m 15m): %s %s %s\n' "$PREFLIGHT_LOAD_ONE" "$PREFLIGHT_LOAD_FIVE" "$PREFLIGHT_LOAD_FIFTEEN" >&2
+    printf '        effective GOMAXPROCS: %s\n' "$PREFLIGHT_GOMAX" >&2
+    printf '        busy-host max load per effective CPU: %s\n' "$BENCH_MAX_LOAD_PER_EFFECTIVE_CPU" >&2
+    printf '        busy-host threshold: %s\n' "$PREFLIGHT_THRESHOLD" >&2
+    printf '        benchmark -p: %s\n' "$BENCH_PKG_PARALLELISM" >&2
+    printf '        comparison: %s >= %s\n' "$PREFLIGHT_LOAD_ONE" "$PREFLIGHT_THRESHOLD" >&2
+    echo -e "${GRAY}        action: wait for a quieter window or request approval to stop the exact workload causing contention.${NC}" >&2
+    return 2
+  fi
 }
 
 display_path() {
@@ -93,21 +204,24 @@ display_path() {
 }
 
 emit_benchmark_diagnostics() {
-  local attempt="$1" base="$2" cur="$3" go_version gomax loadavg
+  local attempt="$1" base="$2" cur="$3" go_version
   go_version="$(go version 2>/dev/null || true)"
   [ -n "$go_version" ] || go_version="unavailable"
-  gomax="$(effective_gomaxprocs)"
-  loadavg="$(loadavg_values)"
 
   echo -e "${GRAY}benchmark diagnostics (attempt ${attempt}):${NC}" >&2
   printf '  go version: %s\n' "$go_version" >&2
-  printf '  effective GOMAXPROCS: %s\n' "$gomax" >&2
+  printf '  effective GOMAXPROCS: %s\n' "$PREFLIGHT_GOMAX" >&2
   printf '  benchmark -cpu: %s\n' "$BENCH_CPU" >&2
+  printf '  benchmark -p: %s\n' "$BENCH_PKG_PARALLELISM" >&2
+  printf '  busy-host max load per effective CPU: %s\n' "$BENCH_MAX_LOAD_PER_EFFECTIVE_CPU" >&2
+  printf '  busy-host load threshold: %s\n' "$PREFLIGHT_THRESHOLD" >&2
+  printf '  comparison: %s < %s\n' "$PREFLIGHT_LOAD_ONE" "$PREFLIGHT_THRESHOLD" >&2
   printf '  benchmark packages:\n' >&2
   printf '    %s\n' "${BENCH_PKGS[@]}" >&2
   printf '  baseline path: %s\n' "$(display_path "$base")" >&2
   printf '  current path: %s\n' "$(display_path "$cur")" >&2
-  printf '  loadavg (1m 5m 15m): %s\n' "$loadavg" >&2
+  printf '  loadavg source: %s\n' "$PREFLIGHT_LOAD_SOURCE" >&2
+  printf '  loadavg (1m 5m 15m): %s %s %s\n' "$PREFLIGHT_LOAD_ONE" "$PREFLIGHT_LOAD_FIVE" "$PREFLIGHT_LOAD_FIFTEEN" >&2
 }
 
 cleanup_files=()
@@ -151,11 +265,12 @@ filter_regressions_by_names() {
 
 run_real_bench_attempt() {
   local attempt="$1" base="$2" cur status
+  preflight_benchmark_host "$attempt" || return 2
   cur="$(mktemp)"
   cleanup_files+=("$cur")
   emit_benchmark_diagnostics "$attempt" "$base" "$cur"
-  echo -e "${GRAY}running benchmarks attempt ${attempt} (-count=${BENCH_COUNT}, -cpu=${BENCH_CPU}) for the gate...${NC}" >&2
-  if ( cd "$REPO_ROOT" && go test -run='^$' -bench=. -benchmem -count="$BENCH_COUNT" -cpu="$BENCH_CPU" "${BENCH_PKGS[@]}" ) > "$cur"; then
+  echo -e "${GRAY}running benchmarks attempt ${attempt} (-count=${BENCH_COUNT}, -cpu=${BENCH_CPU}, -p=${BENCH_PKG_PARALLELISM}) for the gate...${NC}" >&2
+  if ( cd "$REPO_ROOT" && go test -p="$BENCH_PKG_PARALLELISM" -run='^$' -bench=. -benchmem -count="$BENCH_COUNT" -cpu="$BENCH_CPU" "${BENCH_PKGS[@]}" ) > "$cur"; then
     REAL_BENCH_CUR="$cur"
     return 0
   else

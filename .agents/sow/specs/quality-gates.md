@@ -478,11 +478,13 @@ real bundle-size gate + embed + both binaries), `scripts/test.sh` +
 `scripts/check-coverage.sh` (Go race suite + coverage + frontend Vitest), the
 deterministic adapter fuzz seed corpus + target-set lock, frontend Playwright
 E2E (including the axe a11y specs), and the local benchmark gate self-test +
-`scripts/check-bench.sh`. Fast static-analysis/spec/security gates still run
-first so quick failures surface early; the local benchmark regression gate runs
-after the build and before the long CPU-heavy `-race` and Playwright sections so
-the workstation benchmark measures code behavior rather than residual thermal or
-load state created by the aggregate itself.
+`scripts/check-bench.sh`. The local benchmark regression gate runs immediately
+after the cheap lint formatter-scope self-test and before lint/static analysis,
+build, `-race`, fuzz, and Playwright sections. It is the only gate in this
+aggregate that depends on workstation load being a valid wall-time measurement,
+so it runs before CPU-heavy correctness gates can raise load and invalidate its
+busy-host preflight. The remaining static-analysis/spec/security gates still run
+fail-fast after the benchmark so no gate is dropped or weakened.
 
 The CI `gates` job does **not** run the full serial `scripts/gates.sh`
 aggregate. CI keeps the expensive gates parallel in their dedicated jobs and

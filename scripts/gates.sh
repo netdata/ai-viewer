@@ -10,34 +10,35 @@
 # It composes the existing per-gate scripts rather than re-implementing them, so
 # there is one source of truth per gate:
 #   1. scripts/test/lint-test.sh        tracked-file formatter-scope self-test.
-#   2. scripts/lint.sh                  Go module tidy + tracked formatters +
+#   2. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
+#                                       gate self-test + local regression gate.
+#   3. scripts/lint.sh                  Go module tidy + tracked formatters +
 #                                       vet + golangci-lint + gosec +
 #                                       govulncheck, plus frontend static checks.
-#   3. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
-#   4. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
-#   5. scripts/test/check-contract-matrix-test.sh + scripts/spec-drift.sh + its self-test
+#   4. scripts/scan-secrets.sh + its self-test   secrets + operator-PII (fail-closed).
+#   5. scripts/scan-ai-attribution.sh   no-AI-attribution rule on the public repo.
+#   6. scripts/test/check-contract-matrix-test.sh + scripts/spec-drift.sh + its self-test
 #                                       the 6 spec↔code drift indicators.
-#   6. scripts/test/check-ingestion-parity-test.sh + scripts/check-ingestion-parity.sh --fixtures
+#   7. scripts/test/check-ingestion-parity-test.sh + scripts/check-ingestion-parity.sh --fixtures
 #                                       deterministic ingestion parity fixture gate.
-#   7. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
-#   8. scripts/test/codacy-config-test.sh   Codacy tool/pattern + path policy self-test.
-#   9. scripts/test/install-system-test.sh  system installer upgrade contract.
-#  10. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
-#  11. scripts/build.sh                 frontend build + REAL bundle-size gate +
+#   8. scripts/test/codacy-coverage-upload-test.sh   Codacy coverage upload self-test.
+#   9. scripts/test/codacy-config-test.sh   Codacy tool/pattern + path policy self-test.
+#  10. scripts/test/install-system-test.sh  system installer upgrade contract.
+#  11. scripts/test/systemd-units-test.sh   systemd unit contract (when present).
+#  12. scripts/build.sh                 frontend build + REAL bundle-size gate +
 #                                       embed + both Go binaries.
-#  12. scripts/test/check-bench-test.sh + scripts/check-bench.sh   benchmark
-#                                       gate self-test + local regression gate.
 #  13. scripts/test.sh + scripts/check-coverage.sh   Go -race suite + statement
 #                                       coverage gate + frontend Vitest.
 #  14. deterministic adapter fuzz seed corpus + target-set lock.
 #  15. frontend Playwright E2E (includes axe a11y specs) against the built binary.
 #
-# ORDERING: fast static gates first so a quick failure surfaces early. The
-# benchmark regression gate runs after the build while the workstation is still
-# relatively cool; it is a local performance signal and must not be distorted by
-# the long CPU-heavy -race suite or Playwright run. Thermal-heavy correctness
-# gates run after the benchmark. Each section prints a header and its own
-# wall-clock; a final summary prints the per-section + total time.
+# ORDERING: run only the cheap formatter-scope self-test before the benchmark.
+# The benchmark regression gate is a local physical measurement; lint/static
+# analysis, build, -race, fuzz, and Playwright can raise workstation load enough
+# to make the benchmark preflight correctly fail with an invalid-measurement
+# result. All correctness gates still run fail-fast after the benchmark. Each
+# section prints a header and its own wall-clock; a final summary prints the
+# per-section + total time.
 #
 # PERFORMANCE (quality-gates.md §Performance Target): the target is < 5 min on
 # the operator's workstation, but the Go `-race` suite alone is the long pole
@@ -197,74 +198,76 @@ run_bench_gate() {
 # needs frontend/node_modules; those scripts install it on demand only when
 # missing, so gates.sh need not pre-provision anything.
 
-# --- fast static gates first -------------------------------------------------
+# --- benchmark-validity-sensitive gate first --------------------------------
 
 # 1. Formatter-scope self-test. Run before lint.sh so a regression to walking
 #    local ignored/untracked Go fails with the narrow diagnostic first.
 section "lint formatter-scope self-test" bash scripts/test/lint-test.sh
 
-# 2. Static analysis (Go + frontend, build-free).
+# 2. Benchmark gate self-test + local workstation regression gate. This is not
+#    comparable on CI hardware, but it is a required local/workstation gate. Run
+#    it before lint/static analysis, build, -race, fuzz, and Playwright so the
+#    benchmark measures code, not aggregate-created residual load.
+section "benchmark regression gate" run_bench_gate
+
+# --- remaining fast static gates --------------------------------------------
+
+# 3. Static analysis (Go + frontend, build-free).
 section "lint.sh (Go + frontend static analysis)" bash scripts/lint.sh
 
-# 3. Secrets + operator-PII scan. Self-test first (prove the scanner still
+# 4. Secrets + operator-PII scan. Self-test first (prove the scanner still
 #    detects), then the scan itself. Both fail-closed (the files must exist).
 section "scan-secrets self-test" bash scripts/test/scan-secrets-test.sh
 section "scan-secrets" bash scripts/scan-secrets.sh
 
-# 4. No-AI-attribution scan. Required fail-closed gate.
+# 5. No-AI-attribution scan. Required fail-closed gate.
 section "scan-ai-attribution" bash scripts/scan-ai-attribution.sh
 
-# 5. Spec ↔ code drift. Contract-matrix self-test first, then the full
+# 6. Spec ↔ code drift. Contract-matrix self-test first, then the full
 #    spec-drift self-test, then the detector on the live tree.
 section "contract-matrix self-test" bash scripts/test/check-contract-matrix-test.sh
 section "spec-drift self-test" bash scripts/test/spec-drift-test.sh
 section "spec-drift" bash scripts/spec-drift.sh
 
-# 6. Ingestion parity fixture gate. Self-test first, then the named fixture
+# 7. Ingestion parity fixture gate. Self-test first, then the named fixture
 # parity wrapper over source/canonical/diff/CLI parity tests.
 section "ingestion parity self-test" bash scripts/test/check-ingestion-parity-test.sh
 section "ingestion parity fixtures" bash scripts/check-ingestion-parity.sh --fixtures
 
-# 7. Codacy coverage upload state-machine self-test. Fast hermetic gate for the
+# 8. Codacy coverage upload state-machine self-test. Fast hermetic gate for the
 #    reporting-only upload orchestration script.
 section "codacy coverage upload self-test" bash scripts/test/codacy-coverage-upload-test.sh
 
-# 8. Codacy tool/pattern + path-exclusion policy self-test. Fast hermetic gate.
+# 9. Codacy tool/pattern + path-exclusion policy self-test. Fast hermetic gate.
 section "codacy config self-test" bash scripts/test/codacy-config-test.sh
 
-# 9. System installer self-test (present in this repo; fail if removed from the
+# 10. System installer self-test (present in this repo; fail if removed from the
 #    mandatory cross-cutting gate list in CI).
 section "system installer" bash scripts/test/install-system-test.sh
 
-# 10. systemd unit static lint (present in this repo; skip cleanly if removed).
+# 11. systemd unit static lint (present in this repo; skip cleanly if removed).
 if [[ -f scripts/test/systemd-units-test.sh ]]; then
   section "systemd units" bash scripts/test/systemd-units-test.sh
 fi
 
 # --- slow gates last ---------------------------------------------------------
 
-# 11. Full build + the REAL bundle-size gate on the built dist/ + embed + both
+# 12. Full build + the REAL bundle-size gate on the built dist/ + embed + both
 #    binaries. (Slower than the static gates; faster than the -race suite.)
 section "build.sh (frontend build + bundle-size gate + embed + binaries)" bash scripts/build.sh
 
-# 11. Benchmark gate self-test + local workstation regression gate. This is not
-#     comparable on CI hardware, but it is a required local/workstation gate.
-#     Run it before the thermal-heavy correctness gates so it measures code, not
-#     residual load from the aggregate itself.
-section "benchmark regression gate" run_bench_gate
-
-# 12. The long pole: Go -race suite + statement-coverage gate, then (inside
+# 13. The long pole: Go -race suite + statement-coverage gate, then (inside
 #    test.sh) the frontend Vitest run. check-coverage.sh consumes the
 #    coverage.out test.sh writes.
 section "test.sh (Go -race + coverage + frontend Vitest)" bash scripts/test.sh
 section "check-coverage.sh (Go statement coverage gate)" bash scripts/check-coverage.sh coverage.out
 
-# 13. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
+# 14. Explicit adapter fuzz seed gate + exact target-set lock. `go test ./...`
 #    exercises seeds too, but this named section makes the gate visible and pins
 #    the package:target matrix against fuzz-nightly.yml.
 section "adapter fuzz seed corpus" run_fuzz_seed_gate
 
-# 14. Playwright E2E against the built embedded binary. The gating chromium
+# 15. Playwright E2E against the built embedded binary. The gating chromium
 #    project includes the axe a11y specs, so this covers Frontend — E2E and
 #    Frontend — Accessibility without a duplicate second Playwright run.
 section "frontend E2E + axe" run_frontend_e2e

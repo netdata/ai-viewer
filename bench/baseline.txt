@@ -6,12 +6,13 @@
 #     regressions were fixed before this refresh.
 #   - Benchmark implementations predate this baseline unless changed by the same
 #     integration commit; use git blame on the benchmark files in that commit.
-#   - Pre-refresh repository HEAD: e783894bfe3e.
+#   - SOW-0058 pre-refresh repository HEAD: e783894bfe3e.
+#     SOW-0097 refresh provenance is recorded by the Regenerated note below.
 # Regenerated: 2026-06-24 (SOW-0097) - refreshes the workstation baseline for
 #   the -cpu=1 serial-hot-path contract after parity-visible payload and log
 #   artifacts changed the measured adapter event streams.
 # Benchmark command:
-#   go test -run='^$' -bench=. -benchmem -count=6 -cpu=1 \
+#   go test -p=1 -run='^$' -bench=. -benchmem -count=6 -cpu=1 \
 #     ./internal/adapters/aiagent_v2/ \
 #     ./internal/adapters/claude_code/ \
 #     ./internal/adapters/codex/ \
@@ -23,6 +24,8 @@
 #   - All 11 benchmarks are regenerated together from the command above.
 #   - count=6 is the benchstat minimum for a 0.95 confidence interval.
 #   - -cpu=1 pins the benchmark CPU list for serial hot-path measurements.
+#   - -p=1 serializes package benchmark binaries so the gate does not create
+#     cross-package contention.
 #   - HubFanout sec/op is per 256-delivery serial batch; deliveries/sec remains
 #     the human-readable per-delivery throughput metric.
 # Environment:
