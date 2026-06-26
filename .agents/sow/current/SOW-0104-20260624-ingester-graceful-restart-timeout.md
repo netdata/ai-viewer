@@ -2379,6 +2379,27 @@ Post-fix validation:
 - `git diff --check -- cmd/ai-viewer-ingest/main_test.go .agents/sow/current/SOW-0104-20260624-ingester-graceful-restart-timeout.md`
 - `scripts/scan-secrets.sh`
 
+### Benchmark Gate Attempt - 2026-06-26
+
+`scripts/check-bench.sh` started during a valid preflight window:
+
+- attempt 1 preflight: `loadavg 1m=11.02`, threshold `12.00`,
+  effective `GOMAXPROCS=24`, `-cpu=1`, `-p=1`.
+- attempt 1 result: the gate found first-pass `sec/op` regressions above the
+  20% threshold in `ClaudeScan_SyntheticCorpus` (`+36.53%`),
+  `CodexScan_SyntheticCorpus` (`+28.29%`), and `SessionsListQuery`
+  (`+24.49%`).
+- gate contract: a real workstation benchmark failure requires the same
+  benchmark to regress on the second attempt.
+- attempt 2 result: refused before sampling because the host became busy:
+  `loadavg 1m=13.51`, threshold `12.00`.
+
+Disposition: no valid benchmark pass and no reproduced benchmark failure yet.
+SOW-0104 remains current. Rerun the full benchmark gate in a quieter window,
+preferably only after `loadavg 1m` is comfortably below the `12.00` preflight
+threshold, so both attempts can complete if the first attempt reports a
+regression.
+
 ## Lessons Extracted
 
 - Shutdown terminal markers must reflect all bounded phases, not only the
