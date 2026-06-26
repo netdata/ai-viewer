@@ -95,7 +95,7 @@ func loadSession(ctx context.Context, q roQuerier, schema schemaSet, id string, 
 	if errors.Is(err, sql.ErrNoRows) {
 		return sessionRow{}, false, nil
 	}
-	if err != nil {
+	if err = normalizeContextSQLError(ctx, err); err != nil {
 		return sessionRow{}, false, fmt.Errorf("opencode: load session %s: %w", id, err)
 	}
 	return sessionRow{
@@ -182,7 +182,7 @@ func loadSessionInputs(ctx context.Context, qr roQuerier, s tableSchema, session
 	}
 	rows, err := qr.QueryContext(ctx, selectBySessionID(s, orderBy), sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("opencode: load session_input for %s: %w", sessionID, err)
+		return nil, fmt.Errorf("opencode: load session_input for %s: %w", sessionID, normalizeContextSQLError(ctx, err))
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -194,7 +194,7 @@ func loadSessionInputs(ctx context.Context, qr roQuerier, s tableSchema, session
 		}
 		d := newScanDest(len(s.Present)).withWarn("session_input", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
-			return nil, fmt.Errorf("opencode: scan session_input: %w", err)
+			return nil, fmt.Errorf("opencode: scan session_input: %w", normalizeContextSQLError(ctx, err))
 		}
 		row := sessionInputRow{
 			ID:            d.str(idx, "id"),
@@ -211,7 +211,7 @@ func loadSessionInputs(ctx context.Context, qr roQuerier, s tableSchema, session
 		rowCopy := row
 		out[row.ID] = &rowCopy
 	}
-	if err := rows.Err(); err != nil {
+	if err := normalizeContextSQLError(ctx, rows.Err()); err != nil {
 		return nil, fmt.Errorf("opencode: iterate session_input for %s: %w", sessionID, err)
 	}
 	return out, nil
@@ -229,7 +229,7 @@ func loadSessionMessages(ctx context.Context, qr roQuerier, s tableSchema, sessi
 	q := selectBySessionID(s, orderBy)
 	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("opencode: load session_message for %s: %w", sessionID, err)
+		return nil, fmt.Errorf("opencode: load session_message for %s: %w", sessionID, normalizeContextSQLError(ctx, err))
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -241,7 +241,7 @@ func loadSessionMessages(ctx context.Context, qr roQuerier, s tableSchema, sessi
 		}
 		d := newScanDest(len(s.Present)).withWarn("session_message", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
-			return nil, fmt.Errorf("opencode: scan session_message: %w", err)
+			return nil, fmt.Errorf("opencode: scan session_message: %w", normalizeContextSQLError(ctx, err))
 		}
 		id, ok := d.ownerOrWarn(idx, "id")
 		if !ok {
@@ -261,7 +261,7 @@ func loadSessionMessages(ctx context.Context, qr roQuerier, s tableSchema, sessi
 			Data:          d.bytes(idx, "data"),
 		})
 	}
-	if err := rows.Err(); err != nil {
+	if err := normalizeContextSQLError(ctx, rows.Err()); err != nil {
 		return nil, fmt.Errorf("opencode: iterate session_message for %s: %w", sessionID, err)
 	}
 	return out, nil
@@ -277,7 +277,7 @@ func loadMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID st
 	q := selectBySessionID(s, messageOrderBy(s))
 	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("opencode: load messages for %s: %w", sessionID, err)
+		return nil, fmt.Errorf("opencode: load messages for %s: %w", sessionID, normalizeContextSQLError(ctx, err))
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -288,7 +288,7 @@ func loadMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID st
 		}
 		d := newScanDest(len(s.Present)).withWarn("message", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
-			return nil, fmt.Errorf("opencode: scan message: %w", err)
+			return nil, fmt.Errorf("opencode: scan message: %w", normalizeContextSQLError(ctx, err))
 		}
 		// id is the key the mapper uses to attach this message's parts
 		// (partsByMessage[id]); session_id is a required ownership column. A
@@ -310,7 +310,7 @@ func loadMessages(ctx context.Context, qr roQuerier, s tableSchema, sessionID st
 			Data:          d.bytes(idx, "data"),
 		})
 	}
-	if err := rows.Err(); err != nil {
+	if err := normalizeContextSQLError(ctx, rows.Err()); err != nil {
 		return nil, fmt.Errorf("opencode: iterate messages: %w", err)
 	}
 	return out, nil
@@ -329,7 +329,7 @@ func loadSessionParts(ctx context.Context, qr roQuerier, s tableSchema, sessionI
 	q := selectBySessionID(s, quoteIdent("message_id")+", "+quoteIdent("id"))
 	rows, err := qr.QueryContext(ctx, q, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("opencode: load parts for session %s: %w", sessionID, err)
+		return nil, fmt.Errorf("opencode: load parts for session %s: %w", sessionID, normalizeContextSQLError(ctx, err))
 	}
 	return scanPartRows(ctx, rows, s, onWarn, "session "+sessionID)
 }
@@ -347,7 +347,7 @@ func scanPartRows(ctx context.Context, rows *sql.Rows, s tableSchema, onWarn fun
 		}
 		d := newScanDest(len(s.Present)).withWarn("part", onWarn)
 		if err := rows.Scan(d.ptrs...); err != nil {
-			return nil, fmt.Errorf("opencode: scan part (%s): %w", label, err)
+			return nil, fmt.Errorf("opencode: scan part (%s): %w", label, normalizeContextSQLError(ctx, err))
 		}
 		// message_id is the partition key (out[message_id]) and session_id is a
 		// required ownership column; a corrupt/empty value would land the part under
@@ -371,7 +371,7 @@ func scanPartRows(ctx context.Context, rows *sql.Rows, s tableSchema, onWarn fun
 		}
 		out[p.MessageID] = append(out[p.MessageID], p)
 	}
-	if err := rows.Err(); err != nil {
+	if err := normalizeContextSQLError(ctx, rows.Err()); err != nil {
 		return nil, fmt.Errorf("opencode: iterate parts (%s): %w", label, err)
 	}
 	return out, nil

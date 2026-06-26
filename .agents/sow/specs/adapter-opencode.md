@@ -343,6 +343,15 @@ Connection pool settings:
 
 Read transactions: every query batch wraps in `BEGIN DEFERRED ... COMMIT` so the adapter sees a consistent snapshot across multi-statement cursors. Long transactions on a WAL DB pin the WAL and stop checkpointing, so each cycle keeps its transaction shorter than 1 s of wall time. If a backfill must read more than a few thousand rows, it does so in **paged transactions** (close the transaction every N rows, then start a new one), accepting that the snapshot advances between pages.
 
+Cancellation contract: every read-only SQL boundary that observes caller
+cancellation or deadline expiry returns that context error, even when
+`modernc.org/sqlite` reports the canceled statement as `interrupted (9)` from
+`BeginTx`, `QueryContext`, `QueryRowContext`, row `Scan`, `Rows.Err`, or
+read-only `Commit`. This keeps restart/shutdown behavior deterministic and
+preserves the checkpoint-after-emit invariant: on cancellation, the adapter
+returns the last fully emitted/checkpointed cursor and never exposes a transient
+driver-specific interruption as a retryable data error.
+
 ### Delta query, affected-session derivation, and tree load (Chunk C)
 
 The delta-query layer is the bridge between the watermark cursor and the pure mapper. It runs three steps per change cycle, each in its own short read transaction:

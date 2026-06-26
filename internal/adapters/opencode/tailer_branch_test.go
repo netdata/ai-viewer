@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -67,6 +68,87 @@ func TestReloadAndEmit_CtxCancel(t *testing.T) {
 	err := reloadAndEmit(ctx, db, schema, "opencode:test", []string{"ses_real"}, out, silentLogger(), ce.onError)
 	if !isContextErr(err) {
 		t.Fatalf("reloadAndEmit(cancelled) = %v, want context error", err)
+	}
+}
+
+func TestNormalizeContextSQLError(t *testing.T) {
+	t.Parallel()
+
+	driverErr := errors.New("interrupted (9)")
+	if got := normalizeContextSQLError(context.Background(), nil); got != nil {
+		t.Fatalf("nil error normalized to %v, want nil", got)
+	}
+	if got := normalizeContextSQLError(context.Background(), driverErr); !errors.Is(got, driverErr) {
+		t.Fatalf("active context normalized to %v, want original driver error", got)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := normalizeContextSQLError(canceled, driverErr); !errors.Is(got, context.Canceled) {
+		t.Fatalf("canceled context normalized to %v, want context.Canceled", got)
+	}
+
+	deadline, cancelDeadline := context.WithTimeout(context.Background(), 0)
+	defer cancelDeadline()
+	<-deadline.Done()
+	if got := normalizeContextSQLError(deadline, driverErr); !errors.Is(got, context.DeadlineExceeded) {
+		t.Fatalf("expired context normalized to %v, want context.DeadlineExceeded", got)
+	}
+}
+
+func TestCommitSessionSnapshot_NormalizesCanceledCommit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_real", "", 1, 1, 0)
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, _ := introspect(t, path)
+
+	tx, err := beginRO(context.Background(), db)
+	if err != nil {
+		t.Fatalf("beginRO: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback before commit test: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = commitSessionSnapshot(ctx, tx, &warnSink{}, "ses_real", func(error) {
+		t.Fatal("commitSessionSnapshot flushed an unexpected warning")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("commitSessionSnapshot(canceled) = %v, want context.Canceled", err)
+	}
+}
+
+func TestScanOnePage_NormalizesCanceledRowScan(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_real", "", 1, 1, 0)
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+	db, _ := introspect(t, path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	driverErr := errors.New("interrupted (9)")
+	query := `SELECT id FROM session WHERE ? = ? OR ? IS NOT NULL`
+	onRow := func(*sql.Rows) (rowKey, error) {
+		cancel()
+		return rowKey{}, driverErr
+	}
+
+	_, err := scanOnePage(ctx, db, query, TableWatermark{}, onRow, &warnSink{}, func(error) {
+		t.Fatal("scanOnePage flushed an unexpected warning")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scanOnePage(canceled row scan) = %v, want context.Canceled", err)
 	}
 }
 

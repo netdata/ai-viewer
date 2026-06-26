@@ -246,7 +246,7 @@ func loadAndMapSession(ctx context.Context, db *sql.DB, schema schemaSet, source
 		rollbackFlush(tx, sink, onError)
 		return nil, skipped, err
 	}
-	if err := commitSessionSnapshot(tx, sink, sessionID, onError); err != nil {
+	if err := commitSessionSnapshot(ctx, tx, sink, sessionID, onError); err != nil {
 		return nil, false, err
 	}
 	evs, err = mapSession(sourceID, snap.session, snap.tree,
@@ -288,10 +288,10 @@ func readSessionSnapshot(ctx context.Context, tx *sql.Tx, schema schemaSet, sess
 	return sessionSnapshot{session: s, tree: tree, sessionMessages: sessionMessages, rootID: root}, true, false, nil
 }
 
-func commitSessionSnapshot(tx *sql.Tx, sink *warnSink, sessionID string, onError func(error)) error {
+func commitSessionSnapshot(ctx context.Context, tx *sql.Tx, sink *warnSink, sessionID string, onError func(error)) error {
 	commitErr := tx.Commit()
 	sink.flush(onError)
-	if commitErr != nil {
+	if commitErr = normalizeContextSQLError(ctx, commitErr); commitErr != nil {
 		return fmt.Errorf("opencode: commit session-read tx for %s: %w", sessionID, commitErr)
 	}
 	return nil

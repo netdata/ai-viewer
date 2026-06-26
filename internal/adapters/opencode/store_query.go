@@ -23,6 +23,20 @@ import (
 // short-page test reads against the same value the SELECT embeds.
 const deltaPageLimit = 1000
 
+// normalizeContextSQLError gives caller cancellation precedence over
+// driver-specific interruption strings emitted by modernc.org/sqlite after
+// ctx.Done. It preserves the original SQL error while the context is still
+// active.
+func normalizeContextSQLError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
+}
+
 // rowKey is the watermark pair (id, time_updated) the per-table delta scan
 // reports for each row so the paging loop can advance the cursor without
 // re-scanning the row. On an old schema lacking time_updated the scan reports
@@ -47,7 +61,7 @@ type tableDelta struct {
 func beginRO(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("opencode: begin ro tx: %w", err)
+		return nil, fmt.Errorf("opencode: begin ro tx: %w", normalizeContextSQLError(ctx, err))
 	}
 	return tx, nil
 }
@@ -60,7 +74,7 @@ func maxID(ctx context.Context, db *sql.DB, table string) (string, error) {
 	var id sql.NullString
 	q := `SELECT MAX(id) FROM ` + quoteIdent(table) // #nosec G202 -- table is a fixed trackedTables identifier via quoteIdent, never user input
 	if err := db.QueryRowContext(ctx, q).Scan(&id); err != nil {
-		return "", fmt.Errorf("opencode: max(id) %s: %w", table, err)
+		return "", fmt.Errorf("opencode: max(id) %s: %w", table, normalizeContextSQLError(ctx, err))
 	}
 	return id.String, nil
 }
@@ -75,7 +89,7 @@ func maxTimeUpdated(ctx context.Context, db *sql.DB, table string) (int64, error
 	var v sql.NullInt64
 	q := `SELECT MAX(time_updated) FROM ` + quoteIdent(table) // #nosec G202 -- table is a fixed trackedTables identifier via quoteIdent, never user input
 	if err := db.QueryRowContext(ctx, q).Scan(&v); err != nil {
-		return 0, fmt.Errorf("opencode: max(time_updated) %s: %w", table, err)
+		return 0, fmt.Errorf("opencode: max(time_updated) %s: %w", table, normalizeContextSQLError(ctx, err))
 	}
 	return v.Int64, nil
 }
@@ -154,14 +168,16 @@ func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWaterm
 	if err != nil {
 		_ = tx.Rollback() // close the tx before any (post-tx) error surfacing
 		sink.flush(onError)
-		return pageResult{}, fmt.Errorf("opencode: delta query: %w", err)
+		return pageResult{}, fmt.Errorf("opencode: delta query: %w", normalizeContextSQLError(ctx, err))
 	}
 
 	res := pageResult{watermark: from}
 	scanErr := iterDeltaPage(ctx, rows, &res, onRow)
 	_ = rows.Close()
-	if scanErr == nil {
-		scanErr = rows.Err()
+	if scanErr != nil {
+		scanErr = normalizeContextSQLError(ctx, scanErr)
+	} else {
+		scanErr = normalizeContextSQLError(ctx, rows.Err())
 	}
 	// Close the tx (releasing the WAL snapshot) BEFORE flushing buffered warnings
 	// or surfacing a fatal row error — so a backpressured onError can never block
@@ -174,7 +190,7 @@ func scanOnePage(ctx context.Context, db *sql.DB, query string, from TableWaterm
 	}
 	commitErr := tx.Commit()
 	sink.flush(onError)
-	if commitErr != nil {
+	if commitErr = normalizeContextSQLError(ctx, commitErr); commitErr != nil {
 		return res, fmt.Errorf("opencode: commit ro tx: %w", commitErr)
 	}
 	return res, nil

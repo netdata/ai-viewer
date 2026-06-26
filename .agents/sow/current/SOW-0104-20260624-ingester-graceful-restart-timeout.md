@@ -4,12 +4,123 @@
 
 Status: in-progress
 
-Sub-state: Implementation, tests, specs, installer/unit updates, and local
-non-benchmark gates are complete. Implementation review has five
-`PRODUCTION GRADE` votes; `glm` produced useful partial validation but no final
-vote after two 30-minute timeouts. `scripts/check-bench.sh` is still blocked by
-host load, so the SOW remains current until valid benchmark evidence can be
-captured or explicitly waived.
+Sub-state: Core restart/shutdown implementation, benchmark-gate triage
+(`SOW-0106`), and local non-benchmark gates are complete. The 2026-06-26
+CI-reopen fix for opencode cancellation and sessions-filter E2E has six
+`PRODUCTION GRADE` reviewer votes with only P3 residuals. The SOW remains
+current until this fix is committed, pushed, and CI confirms the race/E2E
+blockers are closed.
+
+### CI Gate Reopen - 2026-06-26
+
+The SOW remains open after the SOW-0105 review rerun because the pushed
+lineage-classification commit exposed two CI blockers:
+
+- Go race job: `TestProcessChanges_CheckpointAfterEmit_NoLoss` returned
+  `opencode: begin ro tx: interrupted (9)` after the test canceled the caller
+  context. This is SOW-0097/SOW-0104 lineage debt because adapter cancellation
+  during restart must surface as a bounded caller cancellation, not leak a
+  low-level SQLite interruption.
+- Frontend E2E job: `frontend/tests/sessions-filter.spec.ts` saw zero rows
+  after applying an agent filter derived from `/api/sessions`. This blocks
+  SOW-0105 UI/API contract closure until the seeded API contract and browser
+  synchronization are proven deterministic.
+
+Follow-up plan before any code changes:
+
+- Update `.agents/sow/specs/adapter-opencode.md` to state that once the caller
+  context is canceled or expired, opencode read-only SQL boundaries normalize
+  SQLite driver interruption errors to `context.Canceled` or
+  `context.DeadlineExceeded`.
+- Add focused tests for the cancellation-normalization helper and rerun the
+  checkpoint-after-emit resume test under repetition/race.
+- Reproduce the seeded browser/API filter path used by the E2E test. If the API
+  is correct, strengthen the E2E test to choose a filterable seeded agent and
+  wait for the filtered row/link state, not a stale pre-filter row.
+
+Resolution evidence:
+
+- `.agents/sow/specs/adapter-opencode.md` now records the cancellation
+  normalization contract for `BeginTx`, `QueryContext`, `QueryRowContext`,
+  row `Scan`, `Rows.Err`, and read-only `Commit`.
+- `internal/adapters/opencode/tailer_branch_test.go` adds
+  `TestNormalizeContextSQLError`,
+  `TestCommitSessionSnapshot_NormalizesCanceledCommit`, and
+  `TestScanOnePage_NormalizesCanceledRowScan`. The opencode SQL read path now
+  normalizes canceled/expired contexts before wrapping driver errors, including
+  full-tree read-only commits and per-row scan errors.
+- Local focused validation:
+  - `go test ./internal/adapters/opencode -run '^(TestNormalizeContextSQLError|TestCommitSessionSnapshot_NormalizesCanceledCommit|TestScanOnePage_NormalizesCanceledRowScan)$'`
+  - `go test -race -count=20 ./internal/adapters/opencode -run '^(TestNormalizeContextSQLError|TestCommitSessionSnapshot_NormalizesCanceledCommit|TestScanOnePage_NormalizesCanceledRowScan|TestProcessChanges_CheckpointAfterEmit_NoLoss)$'`
+  - `go test -race ./internal/adapters/opencode`
+- Seeded API diagnosis proved `/api/sessions?group=root&agents=<agent>` returns
+  one row for the fixture agents `research`, `bigquery`, and
+  `netdata-research`; the frontend failure was stale/loading DOM sampling.
+- `frontend/tests/sessions-filter.spec.ts` now derives a filterable root agent
+  and expected row count from the API, then waits for the browser table to reach
+  that exact filtered count.
+- Local frontend validation:
+  - `AI_VIEWER_E2E_PORT=17710 npm run e2e -- --project=chromium tests/sessions-filter.spec.ts`
+  - `npm run typecheck`
+  - `npm run lint`
+  - `git diff --check`
+- Broader local validation:
+  - `bash scripts/lint.sh`
+  - `bash scripts/test.sh`
+  - `bash scripts/check-coverage.sh`
+  - `bash scripts/build.sh`
+  - `AI_VIEWER_E2E_PORT=17710 npm run e2e -- --project=chromium tests/sessions-filter.spec.ts` after rebuild
+  - `bash scripts/spec-drift.sh`
+  - `bash scripts/scan-secrets.sh`
+  - `bash scripts/scan-ai-attribution.sh`
+
+First implementation-review round:
+
+- `glm`: `NEEDS WORK`; accepted P1 that
+  `commitSessionSnapshot` did not normalize its read-only commit error, and
+  accepted P2 that delta row-scan errors could still leak `interrupted (9)`.
+- `minimax`: `NEEDS WORK`; same accepted commit-boundary finding, plus missing
+  coverage for that boundary.
+- `qwen`: `PRODUCTION GRADE`, but identified the same
+  `commitSessionSnapshot` gap as non-blocking. The finding was accepted and
+  fixed because it is a spec completeness issue.
+- `mimo`: `PRODUCTION GRADE`.
+- `deepseek`: `PRODUCTION GRADE`.
+- `kimi`: technical failure before a final vote was retrievable; per reviewer
+  protocol, no retry was attempted before fixing the accepted blocking findings.
+
+Disposition: the accepted findings were fixed by threading `ctx` into
+`commitSessionSnapshot`, normalizing its read-only `Commit` error, normalizing
+non-nil row-scan errors before wrapping them in `scanOnePage` and
+`scanBoundaryBucket`, and adding targeted tests for the commit and row-scan
+normalization paths.
+
+Second implementation-review round:
+
+- `deepseek`: `PRODUCTION GRADE`; P3-only notes that the
+  `commitSessionSnapshot` test uses a rolled-back transaction to force commit
+  failure, and that `resolveRootID` intentionally preserves `sql.ErrNoRows`
+  before cancellation normalization.
+- `mimo`: `PRODUCTION GRADE`; P3-only note that the rolled-back-transaction
+  commit test is artificial but sufficient when combined with the helper and
+  row-scan tests.
+- `kimi`: `PRODUCTION GRADE`; P3-only style note that `rows.Err()` normalization
+  sites rely on Go `if err := ...` scoping, which is correct but requires a
+  reader to notice the scoped variable.
+- `minimax`: `PRODUCTION GRADE`; P3-only notes requesting possible future direct
+  tests for `scanBoundaryBucket`, direct `check-parity` write-lock behavior, and
+  serve signal-ordering. These are not required for this CI-reopen fix.
+- `glm`: `PRODUCTION GRADE`; verified the UI default `group=root` contract,
+  opencode-only SQLite scope, focused race tests, `go vet`, `gofmt`, and spec
+  drift. P3-only notes request possible direct `beginRO` coverage and a small
+  sessions-filter comment cleanup.
+- `qwen`: `PRODUCTION GRADE`; verified all opencode read-only SQL boundaries,
+  `sql.ErrNoRows` ordering, WAL snapshot release before warning flush, focused
+  race tests, and SOW lineage. P3-only notes request possible comments for the
+  artificial commit test and an explicit Playwright poll timeout.
+
+Disposition: no P0/P1/P2 findings remain. P3 notes are documented and do not
+block this SOW. No code was changed after the second-round review.
 
 ## Requirements
 

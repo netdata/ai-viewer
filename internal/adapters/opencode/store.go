@@ -128,7 +128,7 @@ func introspectTable(ctx context.Context, db *sql.DB, table string) (tableSchema
 	// source of the name.
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+quoteIdent(table)+`)`)
 	if err != nil {
-		return tableSchema{}, fmt.Errorf("opencode: table_info(%s): %w", table, err)
+		return tableSchema{}, fmt.Errorf("opencode: table_info(%s): %w", table, normalizeContextSQLError(ctx, err))
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -143,11 +143,11 @@ func introspectTable(ctx context.Context, db *sql.DB, table string) (tableSchema
 			pk      int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return tableSchema{}, fmt.Errorf("opencode: scan table_info(%s): %w", table, err)
+			return tableSchema{}, fmt.Errorf("opencode: scan table_info(%s): %w", table, normalizeContextSQLError(ctx, err))
 		}
 		live[name] = struct{}{}
 	}
-	if err := rows.Err(); err != nil {
+	if err := normalizeContextSQLError(ctx, rows.Err()); err != nil {
 		return tableSchema{}, fmt.Errorf("opencode: iterate table_info(%s): %w", table, err)
 	}
 

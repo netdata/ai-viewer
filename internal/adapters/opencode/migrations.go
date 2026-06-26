@@ -70,7 +70,7 @@ func queryMigrationNames(ctx context.Context, db *sql.DB) ([]string, error) {
 	q := `SELECT name FROM ` + quoteIdent(migrationsTable) + ` ORDER BY id ASC` // #nosec G202 -- migrationsTable is a fixed package constant via quoteIdent, never user input
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
-		return nil, fmt.Errorf("opencode: read %s: %w", migrationsTable, err)
+		return nil, fmt.Errorf("opencode: read %s: %w", migrationsTable, normalizeContextSQLError(ctx, err))
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -78,13 +78,13 @@ func queryMigrationNames(ctx context.Context, db *sql.DB) ([]string, error) {
 	for rows.Next() {
 		var name sql.NullString
 		if scanErr := rows.Scan(&name); scanErr != nil {
-			return nil, fmt.Errorf("opencode: scan %s.name: %w", migrationsTable, scanErr)
+			return nil, fmt.Errorf("opencode: scan %s.name: %w", migrationsTable, normalizeContextSQLError(ctx, scanErr))
 		}
 		if name.Valid && name.String != "" {
 			names = append(names, name.String)
 		}
 	}
-	if rErr := rows.Err(); rErr != nil {
+	if rErr := normalizeContextSQLError(ctx, rows.Err()); rErr != nil {
 		return nil, fmt.Errorf("opencode: iterate %s: %w", migrationsTable, rErr)
 	}
 	return names, nil
@@ -111,7 +111,7 @@ func migrationsTablePresent(ctx context.Context, db *sql.DB) (bool, error) {
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
 		migrationsTable).Scan(&count); err != nil {
-		return false, fmt.Errorf("opencode: probe %s presence: %w", migrationsTable, err)
+		return false, fmt.Errorf("opencode: probe %s presence: %w", migrationsTable, normalizeContextSQLError(ctx, err))
 	}
 	return count > 0, nil
 }
@@ -212,7 +212,7 @@ func countRows(ctx context.Context, db *sql.DB, table string) (int64, error) {
 	var n int64
 	q := `SELECT COUNT(*) FROM ` + quoteIdent(table) // #nosec G202 -- table is a fixed probeCountTables identifier via quoteIdent, never user input
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
-		return 0, fmt.Errorf("opencode: count %s: %w", table, err)
+		return 0, fmt.Errorf("opencode: count %s: %w", table, normalizeContextSQLError(ctx, err))
 	}
 	return n, nil
 }

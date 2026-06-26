@@ -96,12 +96,14 @@ func scanBoundaryBucket(ctx context.Context, db *sql.DB, table string, s tableSc
 	if err != nil {
 		_ = tx.Rollback()
 		sink.flush(onError)
-		return fmt.Errorf("opencode: boundary re-scan %s: %w", table, err)
+		return fmt.Errorf("opencode: boundary re-scan %s: %w", table, normalizeContextSQLError(ctx, err))
 	}
 	scanErr := iterBoundaryRows(ctx, rows, onRow)
 	_ = rows.Close()
-	if scanErr == nil {
-		scanErr = rows.Err()
+	if scanErr != nil {
+		scanErr = normalizeContextSQLError(ctx, scanErr)
+	} else {
+		scanErr = normalizeContextSQLError(ctx, rows.Err())
 	}
 	// Close the tx (release the WAL snapshot) BEFORE flushing warnings or surfacing
 	// a fatal row error, so a backpressured onError can never block with the
@@ -113,7 +115,7 @@ func scanBoundaryBucket(ctx context.Context, db *sql.DB, table string, s tableSc
 	}
 	commitErr := tx.Commit()
 	sink.flush(onError)
-	if commitErr != nil {
+	if commitErr = normalizeContextSQLError(ctx, commitErr); commitErr != nil {
 		return fmt.Errorf("opencode: commit boundary tx %s: %w", table, commitErr)
 	}
 	return nil

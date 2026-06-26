@@ -13,15 +13,39 @@ import { test, expect, type APIRequestContext } from '@playwright/test';
 // /api/sessions (never hardcoded), so the spec tracks the seed — the convention
 // every other E2E spec here follows (deep-link.spec.ts).
 
-/** firstAgentName reads a real agent_name from the seeded session list. */
-async function firstAgentName(request: APIRequestContext): Promise<string> {
-  const resp = await request.get('/api/sessions');
+interface SessionListEnvelope {
+  items: Array<{ agent_name: string }>;
+}
+
+interface FilterableAgent {
+  name: string;
+  expectedRows: number;
+}
+
+/**
+ * firstFilterableAgent reads a real root-session agent from the seeded list and
+ * verifies the same API contract the UI will use after the browser filter
+ * changes. This keeps the spec tied to the seed without assuming fixture order.
+ */
+async function firstFilterableAgent(request: APIRequestContext): Promise<FilterableAgent> {
+  const resp = await request.get('/api/sessions?group=root');
   expect(resp.ok()).toBeTruthy();
-  const body = (await resp.json()) as { items: Array<{ agent_name: string }> };
+  const body = (await resp.json()) as SessionListEnvelope;
   expect(body.items.length).toBeGreaterThanOrEqual(1);
-  const name = body.items[0]!.agent_name;
-  expect(name, 'seed sessions must carry an agent_name to filter on').toBeTruthy();
-  return name;
+
+  const candidates = [...new Set(body.items.map((item) => item.agent_name).filter(Boolean))];
+  for (const name of candidates) {
+    const filtered = await request.get(
+      `/api/sessions?group=root&agents=${encodeURIComponent(name)}`,
+    );
+    expect(filtered.ok()).toBeTruthy();
+    const filteredBody = (await filtered.json()) as SessionListEnvelope;
+    if (filteredBody.items.length > 0) {
+      return { name, expectedRows: filteredBody.items.length };
+    }
+  }
+
+  throw new Error('seed sessions must include at least one filterable root-session agent');
 }
 
 test.describe('sessions list — filter (AC#4)', () => {
@@ -29,7 +53,7 @@ test.describe('sessions list — filter (AC#4)', () => {
     page,
     request,
   }) => {
-    const agent = await firstAgentName(request);
+    const agent = await firstFilterableAgent(request);
 
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible();
@@ -50,14 +74,16 @@ test.describe('sessions list — filter (AC#4)', () => {
     // related rows visible for context, so assert the list narrows/settles and
     // contains the requested agent without requiring every visible row to have
     // the same agent name.
-    await filters.getByLabel('Agents filter').fill(agent);
-    await expect.poll(() => new URL(page.url()).searchParams.get('agents')).toBe(agent);
+    await filters.getByLabel('Agents filter').fill(agent.name);
+    await expect.poll(() => new URL(page.url()).searchParams.get('agents')).toBe(agent.name);
     await page.keyboard.press('Escape');
-    await expect(rows.first()).toBeVisible();
+    await expect
+      .poll(async () => rows.count(), { message: 'browser table reached the API-filtered row count' })
+      .toBe(agent.expectedRows);
     const filteredCount = await rows.count();
     expect(filteredCount).toBeGreaterThanOrEqual(1);
     expect(filteredCount).toBeLessThanOrEqual(baseline);
-    await expect(page.getByRole('link', { name: agent, exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('link', { name: agent.name, exact: true }).first()).toBeVisible();
 
     // A clearly non-existent agent collapses the list to the accessible empty
     // state (proves the filter actually narrows server-side, not just visually).

@@ -50,7 +50,7 @@ func resolveRootID(ctx context.Context, q roQuerier, id, parentID string, onErro
 			onError(fmt.Errorf("opencode: parent session %s of %s not found; using it as root", cur, id))
 			return cur
 		}
-		if err != nil {
+		if err = normalizeContextSQLError(ctx, err); err != nil {
 			onError(fmt.Errorf("opencode: resolve root for session %s at %s: %w", id, cur, err))
 			return cur
 		}
