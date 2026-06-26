@@ -2,14 +2,14 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
 Sub-state: Core restart/shutdown implementation, benchmark-gate triage
 (`SOW-0106`), and local non-benchmark gates are complete. The 2026-06-26
 CI-reopen fix for opencode cancellation and sessions-filter E2E has six
-`PRODUCTION GRADE` reviewer votes with only P3 residuals. The SOW remains
-current until this fix is committed, pushed, and CI confirms the race/E2E
-blockers are closed.
+`PRODUCTION GRADE` reviewer votes with only P3 residuals. Completed on
+2026-06-26 after commit `1884f0842cd26b95b8c7ea7021757bd7bb7be794` passed
+GitHub `ci` run `28235802975` and `codeql` run `28235802884`.
 
 ### CI Gate Reopen - 2026-06-26
 
@@ -2529,6 +2529,24 @@ Disposition: still no valid benchmark pass and no reproduced benchmark failure.
 This is repeated busy-host evidence only. SOW-0104 remains current until the
 local benchmark gate completes in a valid window or the operator explicitly
 accepts a documented exception.
+
+### CI Closeout - 2026-06-26
+
+The SOW-0104 benchmark blocker was resolved by `SOW-0106`, which completed the
+benchmark-gate regression triage and records the corrected standalone benchmark
+gate plus full `scripts/gates.sh` passing under valid preflight conditions.
+
+The later CI-reopen blockers from SOW-0105 review were closed by commit
+`1884f0842cd26b95b8c7ea7021757bd7bb7be794`:
+
+- GitHub `ci` run `28235802975`: success. Jobs passed: `lint`, `gates`,
+  `frontend` including Playwright E2E, `test`, `embed-smoke`, and
+  `codacy-coverage`.
+- GitHub `codeql` run `28235802884`: success for actions, Go, and
+  JavaScript/TypeScript.
+
+SOW-0104 is completed and moved to `.agents/sow/done/`. The remaining
+SOW-0097-lineage work is the parent SOW-0096 final closure review.
 
 ## Lessons Extracted
 

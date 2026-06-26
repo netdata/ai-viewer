@@ -5,11 +5,10 @@
 Status: in-progress
 Sub-state: Active parent SOW. The original DB-invariant framework plan is
 superseded by the completed deterministic source-to-canonical parity program in
-SOW-0097 plus its adapter/UI/operational follow-ups. SOW-0099 through SOW-0103,
-SOW-0105, and SOW-0106 are complete; SOW-0104 remains the only open
-SOW-0097-lineage follow-up currently known. This parent SOW remains current
-until SOW-0104 closes and a final parent-closure review confirms no SOW-0097 or
-SOW-0099 through SOW-0102 derivative debt remains.
+SOW-0097 plus its adapter/UI/operational follow-ups. SOW-0099 through SOW-0106
+are complete. This parent SOW remains current until a final parent-closure
+review confirms no SOW-0097 or SOW-0099 through SOW-0102 derivative debt
+remains.
 
 ## Correction - 2026-06-22
 
@@ -30,8 +29,8 @@ Current lineage disposition:
 - `SOW-0097`: completed parity framework and final six-reviewer convergence.
 - `SOW-0099` through `SOW-0102`: completed direct adapter/parity follow-ups.
 - `SOW-0103`: closed as superseded by SOW-0105.
-- `SOW-0104`: current; operational restart/shutdown debt found during SOW-0097
-  install validation. This is the only open known SOW-0097-lineage follow-up.
+- `SOW-0104`: completed operational restart/shutdown debt found during SOW-0097
+  install validation.
 - `SOW-0105`: completed downstream DB/API/UI contract reconciliation.
 - `SOW-0106`: completed benchmark-gate regression triage.
 
@@ -49,10 +48,9 @@ Pending-SOW audit:
 
 Closure requirements for this parent SOW:
 
-1. Close SOW-0104 or record a valid blocker according to the project workflow.
-2. Re-run a final parent-closure review scoped to SOW-0096 plus SOW-0097,
+1. Re-run a final parent-closure review scoped to SOW-0096 plus SOW-0097,
    SOW-0099 through SOW-0106, and the current/pending SOW audit.
-3. Move this parent SOW and `SOW-0096-review-triage.md` out of `current/` only
+2. Move this parent SOW and `SOW-0096-review-triage.md` out of `current/` only
    after the review confirms no SOW-0097 derivative P0/P1/P2 remains.
 
 ## Pre-Implementation Gate
