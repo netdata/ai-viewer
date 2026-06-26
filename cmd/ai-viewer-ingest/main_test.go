@@ -799,6 +799,10 @@ func TestRun_StoreOpenReceivesCanceledSignalContext(t *testing.T) {
 func TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock(t *testing.T) {
 	stateDir := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
+	preopened, err := store.OpenWriter(context.Background(), dbPath, silentLogger())
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
 
 	origSignalContext := signalContext
 	origOpenWriterStore := openWriterStore
@@ -822,8 +826,10 @@ func TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock(t *testing.T) {
 		cancel()
 		return ctx, func() {}
 	}
-	openWriterStore = func(_ context.Context, db string, logger *slog.Logger) (*store.Store, error) {
-		return store.OpenWriter(context.Background(), db, logger)
+	// Pre-open the store so this test measures only the partial-startup shutdown
+	// path. SQLite migration/open latency under -race belongs to store tests.
+	openWriterStore = func(_ context.Context, _ string, _ *slog.Logger) (*store.Store, error) {
+		return preopened, nil
 	}
 	startIngester = func(_ *ingest.Ingester, ctx context.Context) error {
 		if !errors.Is(ctx.Err(), context.Canceled) {

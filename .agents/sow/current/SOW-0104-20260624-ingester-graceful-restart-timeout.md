@@ -2352,6 +2352,33 @@ Post-fix validation:
 - `scripts/check-bench.sh`: still blocked by host load; latest refusal on
   2026-06-26 was `loadavg 1m=16.47`, threshold `12.00`.
 
+### CI Follow-Up - 2026-06-26
+
+The `test` CI job failed on commits `e5c320d` and `44df0dd` in
+`TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock`:
+
+- CI evidence: `partial startup signal elapsed = 632.75357ms, want bounded close
+  timeout`.
+- Root cause: the test measured the whole command path, including SQLite
+  writer-store open and migration under `-race`, while the behavior under test is
+  the bounded close path after a post-open/pre-start signal. On a loaded CI
+  runner, store open can consume the 500 ms test budget even when the bounded
+  close path is correct.
+- Fix: pre-open the writer store before the measured run and return it through
+  the `openWriterStore` seam. This keeps the test focused on the
+  partial-startup shutdown path, while existing store tests continue to own
+  SQLite open/migration behavior.
+
+Post-fix validation:
+
+- `go test -race -count=10 -timeout=120s -run '^TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock$' ./cmd/ai-viewer-ingest`
+- `go test -race -count=1 -timeout=240s ./cmd/ai-viewer-ingest`
+- `scripts/lint.sh`
+- `scripts/test.sh`
+- `scripts/check-coverage.sh coverage.out`
+- `git diff --check -- cmd/ai-viewer-ingest/main_test.go .agents/sow/current/SOW-0104-20260624-ingester-graceful-restart-timeout.md`
+- `scripts/scan-secrets.sh`
+
 ## Lessons Extracted
 
 - Shutdown terminal markers must reflect all bounded phases, not only the
