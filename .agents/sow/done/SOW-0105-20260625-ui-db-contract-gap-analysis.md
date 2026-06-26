@@ -1699,3 +1699,69 @@ SOWs between SOW-0097 and SOW-0105 are SOW-0097 technical debt.
 
 Reviewer-gate disposition: SOW-0105 remains `PRODUCTION GRADE`; no P0/P1/P2
 findings remain.
+
+## Operator-Requested External Review Rerun - 2026-06-26
+
+### Trigger
+
+The operator requested another external review of SOW-0105 and repeated the
+SOW-0097 lineage question: which SOWs exist between SOW-0097 and SOW-0105,
+whether they are SOW-0097 technical debt, and whether the SOW-0097 lineage can
+honestly be called finished.
+
+### Review Scope
+
+Same broad scope as the previous operator-requested review:
+
+- `.agents/sow/done/SOW-0105-20260625-ui-db-contract-gap-analysis.md`
+- `.agents/sow/current/SOW-0096-20260622-ingestion-accuracy-audit.md`
+- `.agents/sow/done/SOW-0097-20260622-deterministic-ingestion-parity-gates.md`
+- `.agents/sow/done/SOW-0099-20260622-aiagent-v2-fixes.md`
+- `.agents/sow/done/SOW-0100-20260622-claude-code-fixes.md`
+- `.agents/sow/done/SOW-0101-20260622-codex-fixes.md`
+- `.agents/sow/done/SOW-0102-20260622-opencode-fixes.md`
+- `.agents/sow/done/SOW-0103-20260622-ux-captured-surfaces.md`
+- `.agents/sow/current/SOW-0104-20260624-ingester-graceful-restart-timeout.md`
+- `.agents/sow/done/SOW-0106-20260625-benchmark-gate-regression-triage.md`
+
+### Reviewer Votes
+
+- `glm`: `PRODUCTION GRADE`; P3-only notes around duplicate
+  `PayloadContent`, `call_path` masking, historical 53-vs-54 matrix wording,
+  and raw-status secondary UI consistency.
+- `minimax`: first attempt timed out after read-only checks had passed but
+  before a final answer; retry returned `PRODUCTION GRADE`. P3-only notes were
+  the already-recorded `PayloadContent` duplication, `call_path` masking policy,
+  historical row-count wording, and raw-status secondary UI consistency.
+- `kimi`: `PRODUCTION GRADE`; no P0/P1/P2 findings. It independently confirmed
+  SOW-0098 does not exist, SOW-0099 through SOW-0102 are completed direct
+  adapter/parity follow-ups, SOW-0103 is superseded by SOW-0105, and SOW-0104
+  remains open lineage debt.
+- `mimo`: first session ended before final output could be captured; retry
+  returned `PRODUCTION GRADE`. P3-only observations matched the existing
+  `PayloadContent`, `call_path`, matrix row-count, and raw-status notes.
+- `deepseek`: `PRODUCTION GRADE`; P3-only observations matched the existing
+  maintenance/policy notes. It reran focused presenter/canonical/frontend
+  checks and found no P0/P1/P2.
+- `qwen`: `PRODUCTION GRADE`; P3-only observations matched the existing
+  maintenance/policy notes. It reran focused Go/frontend/contract checks and
+  found no P0/P1/P2.
+
+### Lineage Disposition
+
+- SOW-0098 does not exist.
+- SOW-0099 through SOW-0102 are completed direct SOW-0097 adapter/parity
+  follow-ups.
+- SOW-0103 is completed as a superseded SOW-0097 UI-surfacing follow-up, with
+  useful scope absorbed by SOW-0105.
+- SOW-0104 is still-open SOW-0097 lineage debt for restart/shutdown reliability.
+- SOW-0105 is completed downstream DB/API/UI contract debt from the same
+  ingestion/parity program.
+- SOW-0106 is completed SOW-0097 cleanup/benchmark-gate lineage debt.
+- The exact SOW-0097 parity-gate framework deliverable remains completed.
+  The broader ingestion/parity program is not finished while SOW-0104 and the
+  parent SOW-0096 audit remain current.
+
+Reviewer-gate disposition: SOW-0105 remains `PRODUCTION GRADE`; no P0/P1/P2
+findings remain. SOW-0104 remains the only known open SOW-0097-lineage
+follow-up, and SOW-0096 remains the parent closure gate.
