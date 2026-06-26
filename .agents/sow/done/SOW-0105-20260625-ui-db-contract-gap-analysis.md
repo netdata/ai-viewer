@@ -1431,8 +1431,9 @@ Follow-up mapping:
 ## Outcome
 
 Implementation review is complete and converged for SOW-0105. Lifecycle closure
-is pending final commit/move bookkeeping and the broader SOW-0097 lineage must
-remain open until SOW-0104 and SOW-0106 are resolved.
+is complete. SOW-0106 later resolved the benchmark-gate lineage item; the
+broader ingestion/parity program remains open through the parent SOW-0096 audit
+and SOW-0104 restart-timeout lineage debt.
 
 ## Lessons Extracted
 
@@ -1528,11 +1529,11 @@ Lineage disposition verified:
 - SOW-0099 through SOW-0102 are completed adapter/parity follow-ups.
 - SOW-0103 is closed as superseded by SOW-0105.
 - SOW-0104 remains open and explicitly records SOW-0097 lineage restart debt.
-- SOW-0106 remains open and explicitly records SOW-0097 cleanup/benchmark-gate
-  lineage debt.
+- At this review point, SOW-0106 remained open and explicitly recorded
+  SOW-0097 cleanup/benchmark-gate lineage debt; SOW-0106 has since completed.
 - The SOW-0097 parity-gate framework deliverable remains completed, but the
   broader SOW-0097 ingestion/parity lineage must not be reported finished until
-  SOW-0104 and SOW-0106 are resolved.
+  SOW-0104 is resolved and the parent SOW-0096 audit is closed.
 
 Remaining P3 items:
 
@@ -1636,3 +1637,65 @@ the stale fallbacks that caused the frontend lint regression and does not change
 runtime behavior for valid API responses. The broader raw-status UI consistency
 notes are accepted as P3 follow-up evidence; they are outside this lint
 correction and do not block SOW-0105 closure.
+
+## Operator-Requested External Review - 2026-06-26
+
+### Trigger
+
+The operator requested another external review of SOW-0105 and asked whether
+SOWs between SOW-0097 and SOW-0105 are SOW-0097 technical debt.
+
+### Review Scope
+
+- `.agents/sow/done/SOW-0105-20260625-ui-db-contract-gap-analysis.md`
+- `.agents/sow/done/SOW-0097-20260622-deterministic-ingestion-parity-gates.md`
+- `.agents/sow/done/SOW-0099-20260622-aiagent-v2-fixes.md`
+- `.agents/sow/done/SOW-0100-20260622-claude-code-fixes.md`
+- `.agents/sow/done/SOW-0101-20260622-codex-fixes.md`
+- `.agents/sow/done/SOW-0102-20260622-opencode-fixes.md`
+- `.agents/sow/done/SOW-0103-20260622-ux-captured-surfaces.md`
+- `.agents/sow/current/SOW-0104-20260624-ingester-graceful-restart-timeout.md`
+
+### Reviewer Votes
+
+- `glm`: `PRODUCTION GRADE`; P3-only observations around matrix inverse
+  coverage, duplicate `PayloadContent` local names, `call_path` masking policy,
+  and historical row-count wording.
+- `minimax`: `PRODUCTION GRADE`; P3-only observations around duplicate
+  `PayloadContent`, `call_path` masking, raw-status secondary surfaces, and
+  busy-host benchmark evidence outside SOW-0105 scope.
+- `kimi`: `PRODUCTION GRADE`; P3-only observations around duplicate
+  `PayloadContent`, `call_path` masking, and raw-status secondary surfaces.
+- `mimo`: retry after a technical failure returned `PRODUCTION GRADE`; P3-only
+  observations around duplicate `PayloadContent`, `call_path` masking, and
+  historical row-count wording.
+- `deepseek`: `PRODUCTION GRADE`; P3-only observations around duplicate
+  `PayloadContent`, `call_path` masking, and raw-status secondary surfaces.
+- `qwen`: retry after a technical failure returned `PRODUCTION GRADE`; P3-only
+  observations around duplicate `PayloadContent`, `call_path` masking, and
+  raw-status secondary surfaces.
+
+### Verified False Positives
+
+- `mimo` and `qwen` concluded that SOW-0106 was absent or unfiled after shell
+  glob checks aborted on unmatched `current/` paths. Local evidence verifies
+  `.agents/sow/done/SOW-0106-20260625-benchmark-gate-regression-triage.md`
+  exists and has `Status: completed`.
+
+### Lineage Disposition
+
+- No SOW-0098 exists.
+- SOW-0099 through SOW-0102 are direct SOW-0097 adapter/parity follow-ups and
+  are completed.
+- SOW-0103 is a SOW-0097-derived UI-surfacing follow-up that is closed as
+  superseded by SOW-0105.
+- SOW-0104 is still-open SOW-0097 lineage debt for restart/shutdown reliability.
+- SOW-0105 is downstream DB/API/UI contract debt from the same ingestion/parity
+  program and is completed.
+- SOW-0106 is SOW-0097 cleanup/benchmark-gate lineage debt and is completed.
+- The exact SOW-0097 parity-gate framework deliverable remains complete. The
+  broader ingestion/parity program is not finished while SOW-0104 and the parent
+  SOW-0096 audit remain current.
+
+Reviewer-gate disposition: SOW-0105 remains `PRODUCTION GRADE`; no P0/P1/P2
+findings remain.
