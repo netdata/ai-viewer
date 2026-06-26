@@ -2,13 +2,13 @@
 
 ## Status
 
-Status: in-progress
-Sub-state: Active parent SOW. The original DB-invariant framework plan is
-superseded by the completed deterministic source-to-canonical parity program in
-SOW-0097 plus its adapter/UI/operational follow-ups. SOW-0099 through SOW-0106
-are complete. This parent SOW remains current until a final parent-closure
-review confirms no SOW-0097 or SOW-0099 through SOW-0102 derivative debt
-remains.
+Status: completed
+Sub-state: Completed on 2026-06-26 after final parent-closure review. The
+original DB-invariant framework plan is superseded by the completed
+deterministic source-to-canonical parity program in SOW-0097 plus its
+adapter/UI/operational follow-ups. SOW-0099 through SOW-0106 are complete, and
+the final six-reviewer closure gate found no remaining SOW-0097 or SOW-0099
+through SOW-0102 derivative P0/P1/P2 debt.
 
 ## Correction - 2026-06-22
 
@@ -46,12 +46,89 @@ Pending-SOW audit:
 - `SOW-0072` is an ESLint major-version dependency upgrade, not SOW-0097 lineage
   debt.
 
+Final-closure candidate state:
+
+- `.agents/sow/current/SOW-0096-review-triage.md` is a historical correction
+  artifact, not an open implementation SOW. Its pending reviewer slots are
+  superseded by the completed SOW-0097 parity framework, adapter follow-ups
+  SOW-0099 through SOW-0102, and derivatives SOW-0103 through SOW-0106.
+- `.agents/sow/current/SOW-0096-review-*.txt` are historical reviewer
+  transcripts that must move to `done/` with this parent SOW if the final
+  closure review confirms no derivative P0/P1/P2 remains.
+- `.agents/sow/audit.sh` still reports unrelated historical SOW status hygiene
+  warnings and a missing bootstrap marker, but it reports SOW-0097 and
+  SOW-0099 through SOW-0106 as status-clean in `done/`. Those broad historical
+  warnings are not SOW-0097 derivative debt unless a reviewer proves otherwise.
+
 Closure requirements for this parent SOW:
 
 1. Re-run a final parent-closure review scoped to SOW-0096 plus SOW-0097,
    SOW-0099 through SOW-0106, and the current/pending SOW audit.
 2. Move this parent SOW and `SOW-0096-review-triage.md` out of `current/` only
    after the review confirms no SOW-0097 derivative P0/P1/P2 remains.
+
+## Final Parent-Closure Review - 2026-06-26
+
+Review scope:
+
+- This parent SOW and its review artifacts.
+- SOW-0097 plus SOW-0099 through SOW-0106.
+- Pending SOWs `SOW-0008`, `SOW-0025`, and `SOW-0072`.
+- The SOW-0105 DB/API/UI contract matrix and the SOW-0097 parity availability
+  matrix.
+
+Reviewer votes:
+
+- `glm`: `PRODUCTION GRADE`. It reran focused parity, contract-matrix, and
+  secrets checks; only P3 prompt/path hygiene remained.
+- `minimax`: `PRODUCTION GRADE` on retry. It verified SOW-0104 is already in
+  `done/`, confirmed the 54-row contract matrix and six spec-drift indicators,
+  and found no P0/P1/P2.
+- `kimi`: `PRODUCTION GRADE`. It confirmed the parent closure is correct and
+  no pending SOW blocks SOW-0097 lineage closure.
+- `mimo`: `PRODUCTION GRADE` on retry. It verified SOW-0097 through SOW-0106
+  lineage state, pending-SOW scope, and the contract/parity artifacts; P3-only
+  documentation notes.
+- `deepseek`: `PRODUCTION GRADE` on retry. It verified the same lineage, matrix,
+  and gate evidence; P3-only documentation notes.
+- `qwen`: `PRODUCTION GRADE`. It confirmed SOW-0097 and SOW-0099 through
+  SOW-0106 are complete or superseded correctly, and pending SOWs are not
+  derivative blockers.
+
+Verified lineage disposition:
+
+- SOW-0098 does not exist.
+- SOW-0099 through SOW-0102 are completed direct SOW-0097 adapter/parity
+  follow-ups.
+- SOW-0103 is completed as a superseded SOW-0097 UI-surfacing follow-up; useful
+  scope was absorbed by SOW-0105.
+- SOW-0104 is completed operational restart/shutdown lineage debt.
+- SOW-0105 is completed downstream DB/API/UI contract debt.
+- SOW-0106 is completed benchmark-gate lineage debt.
+- Pending SOWs `SOW-0008`, `SOW-0025`, and `SOW-0072` are not SOW-0097 lineage
+  blockers.
+
+P3 dispositions:
+
+- The old prompt/reference to `testdata/contracts/adapter-availability.yaml`
+  was prompt hygiene only. No repo file references that path. Adapter
+  availability lives in `internal/parity/matrix.go` and
+  `internal/parity/matrix_test.go`; the DB/API/UI contract matrix is
+  `testdata/contracts/field-matrix.yaml`.
+- Historical SOW-0105 review entries that said SOW-0104 was open were correct at
+  the time they were written. SOW-0104 has since moved to `done/` with
+  `Status: completed`; the final lineage state is recorded here and in the
+  SOW-0105 post-closure addendum.
+- SOW-0103 used `Status: closed` for a superseded item. It is normalized to
+  `Status: completed` while preserving the superseded sub-state.
+
+Closure decision: no SOW-0097 or SOW-0099 through SOW-0102 derivative P0/P1/P2
+remains. Move this parent SOW, `SOW-0096-review-triage.md`, and the four
+`SOW-0096-review-*.txt` transcripts to `done/`.
+
+Historical note: sections below this point are retained as audit evidence for
+the original SOW-0096 invariant-framework plan. They are not active
+implementation requirements unless a future SOW explicitly revives them.
 
 ## Pre-Implementation Gate
 

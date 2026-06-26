@@ -1765,3 +1765,21 @@ Same broad scope as the previous operator-requested review:
 Reviewer-gate disposition: SOW-0105 remains `PRODUCTION GRADE`; no P0/P1/P2
 findings remain. SOW-0104 remains the only known open SOW-0097-lineage
 follow-up, and SOW-0096 remains the parent closure gate.
+
+## Post-Closure Addendum - 2026-06-26
+
+The operator-requested review entries above were correct when written:
+SOW-0104 was still open at that point. The final parent-closure review later
+verified that SOW-0104 is now in `done/` with `Status: completed`, and SOW-0106
+is also complete.
+
+Final lineage state:
+
+- SOW-0099 through SOW-0102 are completed direct SOW-0097 adapter/parity
+  follow-ups.
+- SOW-0103 is completed as superseded by SOW-0105.
+- SOW-0104 is completed operational restart/shutdown lineage debt.
+- SOW-0105 remains completed downstream DB/API/UI contract debt.
+- SOW-0106 is completed benchmark-gate lineage debt.
+- The final parent closure decision is recorded in
+  `SOW-0096-20260622-ingestion-accuracy-audit.md`.

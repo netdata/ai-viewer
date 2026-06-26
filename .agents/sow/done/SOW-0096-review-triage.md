@@ -6,27 +6,48 @@ baseline and the open SOW questions.
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: Verification artifact for active SOW-0096. This file records corrected baseline evidence and reviewer-claim triage; it does not authorize implementation by itself. The parent SOW owns implementation scope and gates.
+Sub-state: Historical verification artifact for SOW-0096. Completed on
+2026-06-26 after the parent closure review confirmed that the old reviewer slots
+and invariant-framework plan are superseded by the completed SOW-0097 parity
+program and SOW-0099 through SOW-0106 follow-ups.
 
 ## Correction - 2026-06-22
 
 The operator corrected SOW-0097 after this triage was written. The canonical op-kind findings below remain factual evidence: `user_input` and `assistant` are not canonical `OpKind` values today. The implementation conclusion is superseded: SOW-0097 no longer starts by adding those kinds. It starts by defining deterministic source-to-canonical parity gates. Op-kind and status enum changes are now downstream decisions made only if the parity spec proves they are required.
 
+## Closure Update - 2026-06-26
+
+This artifact is historical evidence for SOW-0096, not an open implementation
+plan. The unchecked reviewer slots below are superseded by the completed
+SOW-0097 parity framework, completed adapter follow-ups SOW-0099 through
+SOW-0102, and completed derivative SOWs SOW-0103 through SOW-0106. Do not
+resume the old invariant-framework plan from this file unless a future SOW
+proves a new need beyond the parity gates.
+
+For final closure, move this file and the `SOW-0096-review-*.txt` transcripts to
+`done/` with the parent SOW only after the final parent-closure review confirms
+that no SOW-0097 or SOW-0099 through SOW-0102 derivative P0/P1/P2 remains.
+
 - [x] Reviewer 1 (codex via codex2) — verified, baseline corrections logged
 - [x] Reviewer 2 (claude-code via claude) — verified, baseline corrections logged
 - [x] Reviewer 3 (canonical via glm) — verified, canonical contract changes logged
 - [x] Reviewer 4 (aiagent_v2 via minimax) — verified, baseline corrections logged
-- [ ] Reviewer 5 (aiagent_v3 via mimo) — pending
-- [ ] Reviewer 6 (opencode via kimi) — pending
-- [ ] Reviewer 7 (framework via deepseek) — pending
-- [ ] Reviewer 8 (SQL via qwen) — pending
-- [ ] Reviewer 9 (UX) — CTO does directly
+- [x] Reviewer 5 (aiagent_v3 via mimo) — superseded by the completed
+  SOW-0097/SOW-0099-through-SOW-0106 parity closure path
+- [x] Reviewer 6 (opencode via kimi) — superseded by the completed
+  SOW-0097/SOW-0099-through-SOW-0106 parity closure path
+- [x] Reviewer 7 (framework via deepseek) — superseded by the completed
+  SOW-0097/SOW-0099-through-SOW-0106 parity closure path
+- [x] Reviewer 8 (SQL via qwen) — superseded by the completed
+  SOW-0097/SOW-0099-through-SOW-0106 parity closure path
+- [x] Reviewer 9 (UX) — superseded by SOW-0105's completed DB/API/UI contract
+  matrix and parent closure review
 
 ## Pre-Implementation Gate
 
-Status: ready
+Gate status: historical-ready
 
 - **Scope**: evidence triage only. Runtime implementation remains governed by the parent SOW-0096 and follow-up SOWs SOW-0097..SOW-0103.
 - **Sensitive data handling plan**: keep only structural counts, adapter names, file paths, and reviewer finding IDs. Do not record payload contents, prompts, responses, secrets, or personal data in this artifact.

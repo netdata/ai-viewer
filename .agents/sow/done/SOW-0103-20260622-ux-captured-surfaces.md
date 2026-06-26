@@ -2,8 +2,8 @@
 
 ## Status
 
-Status: closed
-Sub-state: SUPERSEDED 2026-06-25 by SOW-0105, which absorbs the remaining captured-but-unsurfaced UI contract work into a complete DB/API/TypeScript/UI matrix. SOW-0103's provisional `user_input` / `assistant` op-kind assumption is stale after SOW-0097 was reframed as deterministic ingestion parity gates.
+Status: completed
+Sub-state: Completed as SUPERSEDED on 2026-06-25 by SOW-0105, which absorbs the remaining captured-but-unsurfaced UI contract work into a complete DB/API/TypeScript/UI matrix. SOW-0103's provisional `user_input` / `assistant` op-kind assumption is stale after SOW-0097 was reframed as deterministic ingestion parity gates.
 
 ## Correction - 2026-06-22
 
