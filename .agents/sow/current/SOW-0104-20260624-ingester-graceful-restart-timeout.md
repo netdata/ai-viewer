@@ -2400,6 +2400,25 @@ preferably only after `loadavg 1m` is comfortably below the `12.00` preflight
 threshold, so both attempts can complete if the first attempt reports a
 regression.
 
+### Benchmark Headroom Watch - 2026-06-26
+
+A bounded 30-minute watcher waited for `loadavg 1m < 8.00` before launching
+`scripts/check-bench.sh`. This was intentionally stricter than the benchmark
+gate's hard `12.00` cutoff because the previous attempt started at `11.02` and
+lost the required retry to rising host load.
+
+Observed range during the watch:
+
+- first sample: `loadavg 1m=16.93`.
+- lowest observed sample: `loadavg 1m=9.79`.
+- last sample before timeout: `loadavg 1m=12.43`.
+- result: watcher timed out before launching `scripts/check-bench.sh`.
+
+Disposition: still no valid benchmark pass and no reproduced benchmark failure.
+This is repeated busy-host evidence only. SOW-0104 remains current until the
+local benchmark gate completes in a valid window or the operator explicitly
+accepts a documented exception.
+
 ## Lessons Extracted
 
 - Shutdown terminal markers must reflect all bounded phases, not only the
