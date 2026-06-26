@@ -19,6 +19,26 @@ Sub-state: CTO decision — defer until the serving route (`/api/payloads`, Phas
 
 Reopen when: `/api/payloads` lands, OR the operator requests an attachments gallery, OR a cross-adapter consistency need appears (codex/claude-code/ai-agent attachment analogues).
 
+### SOW-0097 lineage audit (2026-06-26)
+
+The `/api/payloads` route now exists, so this SOW's original revisit trigger is
+true. The SOW is still not SOW-0097 or SOW-0099 through SOW-0102 derivative
+debt:
+
+- It was created by SOW-0005 as a first-class attachment schema/product follow-up,
+  before the SOW-0097 parity program.
+- SOW-0097 represents source-visible attachment references through the
+  `attachment_metadata` parity class and adapter matrices.
+- Adapter specs explicitly distinguish attachment metadata from attached payload
+  bytes. Attached file/image bytes are not implied unless the adapter matrix
+  says a payload artifact exists.
+
+Disposition for the SOW-0097 close-out audit: keep SOW-0025 pending as a
+separate attachment design SOW. It should be picked up on its own merits now
+that `/api/payloads` exists, but it does not block closing SOW-0097 lineage
+unless a future parity matrix change claims attachment payload bytes and leaves
+them unmapped.
+
 ### When-revisited default (operator guidance 2026-06-15)
 
 The operator's standing principle for unresolved UX questions: **"do the thing that enables better/more future potentials."** Applied here, that resolves the Schema-A vs Schema-B tension toward **Schema-B** (make `payload_refs.op_id` nullable + an `attachment` kind, serve via `/api/payloads`), because B is the UX superset:

@@ -3,11 +3,57 @@
 ## Status
 
 Status: in-progress
-Sub-state: Active parent SOW, paused before framework implementation while SOW-0097 defines deterministic source-to-canonical parity gates. Reviewers 1-4 are verified in `SOW-0096-review-triage.md`; remaining reviewers 5-9 are intentionally deferred until the parity contract and adapter follow-up scopes are corrected, so the invariant framework is designed against a provable model instead of DB-only counts.
+Sub-state: Active parent SOW. The original DB-invariant framework plan is
+superseded by the completed deterministic source-to-canonical parity program in
+SOW-0097 plus its adapter/UI/operational follow-ups. SOW-0099 through SOW-0103,
+SOW-0105, and SOW-0106 are complete; SOW-0104 remains the only open
+SOW-0097-lineage follow-up currently known. This parent SOW remains current
+until SOW-0104 closes and a final parent-closure review confirms no SOW-0097 or
+SOW-0099 through SOW-0102 derivative debt remains.
 
 ## Correction - 2026-06-22
 
 The operator corrected the SOW-0097 direction: ingestion accuracy is not an enum/status cleanup problem. SOW-0097 is now the deterministic source-to-canonical parity-gate SOW. Any older language in this parent SOW about `check-invariants`, `OpUserInput`, `OpAssistant`, or typed op statuses is subordinate to the parity design: first prove source artifacts against canonical artifacts, then decide which enum/schema/UI changes are necessary.
+
+## Post-Parity Lineage Audit - 2026-06-26
+
+SOW-0097 closed the original root problem by replacing DB-only invariant counts
+with deterministic source-to-canonical parity gates. The old Chunk 2 plan to
+build a separate `internal/invariants` package and `/api/invariants` endpoint is
+not the next implementation step unless a future SOW proves a monitoring surface
+is still needed on top of the parity gate. Reimplementing the old DB-invariant
+plan now would be a parallel contract and would risk contradicting the parity
+matrix.
+
+Current lineage disposition:
+
+- `SOW-0097`: completed parity framework and final six-reviewer convergence.
+- `SOW-0099` through `SOW-0102`: completed direct adapter/parity follow-ups.
+- `SOW-0103`: closed as superseded by SOW-0105.
+- `SOW-0104`: current; operational restart/shutdown debt found during SOW-0097
+  install validation. This is the only open known SOW-0097-lineage follow-up.
+- `SOW-0105`: completed downstream DB/API/UI contract reconciliation.
+- `SOW-0106`: completed benchmark-gate regression triage.
+
+Pending-SOW audit:
+
+- `SOW-0008` is v0.1 release polish, not SOW-0097 lineage debt.
+- `SOW-0025` is pre-existing attachment schema/product debt from SOW-0005. It is
+  related to payload taxonomy, and `/api/payloads` now exists, but SOW-0097's
+  parity contract explicitly represents source-visible attachments as
+  `attachment_metadata` log/payload metadata unless an adapter matrix row claims
+  attached bytes. Therefore SOW-0025 is not a SOW-0097 or SOW-0099 through SOW-0102
+  derivative blocker.
+- `SOW-0072` is an ESLint major-version dependency upgrade, not SOW-0097 lineage
+  debt.
+
+Closure requirements for this parent SOW:
+
+1. Close SOW-0104 or record a valid blocker according to the project workflow.
+2. Re-run a final parent-closure review scoped to SOW-0096 plus SOW-0097,
+   SOW-0099 through SOW-0106, and the current/pending SOW audit.
+3. Move this parent SOW and `SOW-0096-review-triage.md` out of `current/` only
+   after the review confirms no SOW-0097 derivative P0/P1/P2 remains.
 
 ## Pre-Implementation Gate
 
