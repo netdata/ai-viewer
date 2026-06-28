@@ -103,12 +103,27 @@ substantial milestone for complex SOWs. The reviewers (`glm`, `minimax`, `kimi`,
 - Implementation plan: `READY FOR IMPLEMENTATION` or `NEEDS WORK`.
 - Implementation review: `PRODUCTION GRADE` or `NEEDS WORK`.
 
+Before every external reviewer run, the CTO loads
+`.agents/skills/project-second-opinions/SKILL.md`, completes its
+reviewer-readiness checklist, and records the evidence in the SOW or work
+ledger. Reviewers verify completed stage artifacts. They are not the way the CTO
+discovers requirements, code paths, contracts, tests, migrations, or operational
+risks.
+
 Stop conditions:
 
-- P0/P1/P2 findings → fix or reject with evidence, then re-run the same gate.
-- P3 findings → fix or document.
+- P0/P1/P2 findings → verify, generalize to a class of possible misses, perform
+  and record a local class sweep, then fix or reject with evidence before any
+  re-run of the same gate.
+- P3 findings → fix or document; P3-only comments do not reopen a converged
+  gate unless verification shows a real P0/P1/P2 class.
 - Positive votes from all available reviewers, or every non-positive vote verified as false-positive/noise → advance to the next stage.
-- Repeated hard stall → record in the SOW and surface a business-level recommendation.
+- Round budget: one round is normal; a second is allowed after a class sweep; a
+  third is exceptional and requires a short SOW waste analysis plus full local
+  review first; a fourth blocker round is forbidden without an
+  operator-visible status report and a changed approach.
+- Repeated hard stall → stop buying six-reviewer rounds, record the waste
+  analysis in the SOW, and surface a business-level recommendation.
 
 Technical reviewer failures are handled pragmatically:
 
@@ -123,8 +138,8 @@ Technical reviewer failures are handled pragmatically:
 
 Findings are addressed in the relevant artifact for that gate: gap analysis,
 plan, specs, tests, code, docs, or gates. Reviewers re-run with the same scope
-plus a fix note; iterate until convergence. History is recorded in the SOW under
-`## Reviews`.
+plus a fix note only after readiness remains true and any blocker class sweep is
+recorded. History is recorded in the SOW under `## Reviews`.
 
 The CTO does not claim work "done" before the applicable gate converges.
 
@@ -151,7 +166,13 @@ Before reporting to the operator:
 - Specs reflect new behavior — same commit as code.
 - Tests exist, pass, race-clean, coverage thresholds met.
 - All quality gates green locally.
-- Applicable external reviewer gate converged; P0/P1/P2 findings fixed or rejected with evidence; only documented P3 findings remain.
+- Applicable external reviewer gate converged; reviewer-readiness checklist
+  recorded before the run; P0/P1/P2 findings fixed or rejected with evidence;
+  blocker class sweeps recorded before reruns; only documented P3 findings
+  remain.
+- Reviewer waste controls followed: no reviewer use for discovery, no immediate
+  patch-and-rerun after blockers, no P3-only rerun, no fourth blocker round
+  without operator-visible status and a changed approach.
 - No new TODO/FIXME without a tracked SOW in `pending/`.
 - `AGENTS.md`, skills, specs updated if a new pattern or gotcha emerged.
 - No half-built features.
@@ -199,6 +220,15 @@ The assistant must never:
 - Delegate implementation by default, or write code before the accepted specs,
   tests, and applicable reviewer gates are ready.
 - Claim work done before tests, gates, and review converge.
+- Use external reviewers as the discovery engine for requirements, code paths,
+  contracts, tests, migrations, or operational risks.
+- Treat repeated reviewer rounds as rigor. One round is six external model runs;
+  repeated blocker rounds mean the CTO must stop, self-review, and change the
+  approach.
+- Patch only a cited blocker line and immediately rerun reviewers instead of
+  performing the required class sweep.
+- Rerun reviewers for P3-only comments unless verification shows a real
+  P0/P1/P2 class.
 - Skip the spec update and "add it later".
 - Add `t.Skip`, `// nolint`, `test.skip` to land a PR.
 - Weaken a gate threshold to satisfy a failing run.

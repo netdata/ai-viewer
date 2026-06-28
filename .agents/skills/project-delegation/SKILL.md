@@ -120,6 +120,12 @@ coverage or reduce context noise. Do not use them to avoid CTO responsibility.
 Do not spawn a helper for a one-line typo fix or a question that can be answered
 with a quick local search.
 
+Use bounded helper investigations to finish the CTO's evidence gathering before
+external reviewer gates when that reduces risk or context load. This is not a
+replacement for the `project-second-opinions` readiness checklist, and helper
+subagents never vote on gate outcomes. Their output is raw evidence for the CTO
+to verify before spending a six-reviewer round.
+
 ## Anti-Patterns
 
 - **Delegating implementation by default.** The CTO writes implementation directly.
@@ -128,6 +134,9 @@ with a quick local search.
 - **Serial subagent calls when parallel was possible.** Wastes the operator's time.
 - **Restarting a stuck subagent from scratch when SendMessage would refine.** Loses momentum.
 - **Using helper subagents as external reviewer gates.** Gate reviews are run through `project-second-opinions`.
+- **Skipping local evidence gathering and buying external reviewer rounds.**
+  Helpers can cheaply gather bounded evidence; external reviewers are expensive
+  gates over completed artifacts.
 
 ## Cross-References
 

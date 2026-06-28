@@ -19,7 +19,10 @@ This skill is the assistant's runtime checklist. The contract lives in `AGENTS.m
 
 The CTO owns the work. External reviewers are acceptance gates, not the normal
 work engine. Do not run reviewers during ordinary exploration or before the CTO
-has personally completed the current stage artifact.
+has personally completed the current stage artifact. Before any external
+reviewer invocation, load `.agents/skills/project-second-opinions/SKILL.md`,
+complete its reviewer-readiness checklist, and record the evidence in the SOW or
+work ledger.
 
 ## The Cycle (Invariant Order)
 
@@ -71,9 +74,17 @@ replace it.
 Run the gap analysis gate when the chunk is meaningful enough to require
 external review. The positive vote is `NOTHING MORE CAN BE DONE`.
 
+This gate verifies the CTO's completed gap analysis. It is not the way the CTO
+discovers requirements, code paths, contracts, tests, migrations, or operational
+risks. Complete the `project-second-opinions` readiness checklist before
+running reviewers.
+
 If reviewers find P0/P1/P2 gaps, fix the analysis or reject the finding with
-evidence, then rerun the same gate with the same broad scope plus a short fix
-note. Do not start planning until the gate converges.
+evidence. Before any rerun, generalize each accepted blocker into a class of
+possible misses, self-review that class across the whole stage scope, and record
+the sweep. Then rerun the same gate with the same broad scope plus a short fix
+note, within the `project-second-opinions` round budget. Do not start planning
+until the gate converges.
 
 ## Step 4 — Implementation Plan
 
@@ -86,9 +97,15 @@ installation/rollout steps where relevant.
 Run the plan review gate when the chunk is meaningful enough to require
 external review. The positive vote is `READY FOR IMPLEMENTATION`.
 
+Complete the `project-second-opinions` readiness checklist first. The plan must
+already map accepted gaps to specs, tests, files, sequencing,
+rollback/recovery, validation, and risk controls.
+
 If reviewers find P0/P1/P2 plan defects, fix the plan or reject the finding with
-evidence, then rerun the same gate with the same broad scope plus a short fix
-note. Do not write implementation code until the gate converges.
+evidence. Before any rerun, perform and record the blocker class sweep required
+by `project-second-opinions`. Then rerun the same gate with the same broad scope
+plus a short fix note, within the round budget. Do not write implementation code
+until the gate converges.
 
 ## Step 6 — Spec First
 
@@ -149,12 +166,20 @@ Run the gate when:
 - Focused tests and relevant local gates are green.
 - The diff has been read by the CTO.
 - The review scope is meaningful, not a few incidental lines.
+- The `project-second-opinions` reviewer-readiness checklist is complete and
+  recorded.
 
 For high-risk work such as SOW-0097, run all six reviewers in parallel:
 `glm`, `minimax`, `kimi`, `mimo`, `deepseek`, and `qwen`. Use the same broad
 scope on follow-up rounds, adding only short notes about fixes already made.
 The positive vote is `PRODUCTION GRADE`. Every reviewer claim is a claim, not
 proof; verify file:line, repro, and spec before acting.
+
+If reviewers return accepted P0/P1/P2 findings, do not patch only the cited line
+and rerun. Generalize the blocker into a class of possible misses, self-review
+that class across the whole diff and affected contracts, record the sweep, then
+rerun only within the `project-second-opinions` round budget. P3-only findings
+do not reopen the gate.
 
 If a reviewer fails technically, follow `project-second-opinions`: do not retry
 failed reviewers while accepted P0/P1/P2 findings already exist; fix or reject
@@ -169,7 +194,13 @@ Before reporting completion to the operator:
 - [ ] Specs reflect new behavior — same commit as code.
 - [ ] Tests exist, pass, race-clean, coverage thresholds met.
 - [ ] All quality gates green locally.
-- [ ] Applicable external reviewer gate converged for the current stage; P0/P1/P2 findings fixed or rejected with evidence; only documented P3 findings remain.
+- [ ] Applicable external reviewer gate converged for the current stage;
+      `project-second-opinions` readiness checklist recorded before the run;
+      P0/P1/P2 findings fixed or rejected with evidence; blocker class sweeps
+      recorded before reruns; only documented P3 findings remain.
+- [ ] Reviewer waste controls followed: no reviewer use for discovery, no
+      immediate patch-and-rerun after blockers, no P3-only rerun, no fourth
+      blocker round without operator-visible status and a changed approach.
 - [ ] No new TODO/FIXME without a tracked SOW in `pending/`.
 - [ ] `AGENTS.md`, skills, specs updated if a new pattern or gotcha emerged.
 - [ ] No half-built features.
@@ -253,6 +284,15 @@ and continues. Writing "PR open, awaiting your approval" is a contract breach.
 - "I'll write the tests after the code." → contract breach.
 - "I'll update the spec at the end." → contract breach.
 - "Reviewers can find the gaps for me before I do my own analysis." → contract breach. The CTO does gap analysis, plan, implementation, and self-review first.
+- "More reviewer rounds means more rigor." → false. One round is six external
+  model runs. Repeated blocker rounds mean the CTO skipped local discovery or
+  class-sweeps. Follow `project-second-opinions` readiness and round-budget
+  rules.
+- "A reviewer found one issue, so I'll patch that line and rerun." → wasteful.
+  Accepted blockers require a whole-class self-review before the next round.
+- "Reviewers only had P3 comments, so I'll rerun until perfect." → wasteful.
+  P3-only comments do not reopen the gate unless verified as a real P0/P1/P2
+  class.
 - "The operator can test the UI to confirm." → contract breach.
 - "Run reviewers on every small edit." → wasteful. Review meaningful chunks: at least per SOW, more often only per substantial milestone.
 - "Batch many unrelated SOWs into one reviewer gate." → misses scope. Reviewers must evaluate a coherent goal/chunk.

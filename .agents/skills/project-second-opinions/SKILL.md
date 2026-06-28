@@ -13,6 +13,13 @@ External reviewers are a quality gate, not an implementation strategy. The CTO
 does the gap analysis, planning, coding, tests, gates, and self-review first.
 Reviewers then look for what was missed.
 
+Minimal waste is part of correctness. One reviewer round runs six external
+models. A 19-round gate is roughly 114 model invocations before retries,
+timeouts, or failed outputs. That is not rigor; it means the CTO used reviewers
+as a discovery engine. That false framing is forbidden here. The CTO discovers,
+researches, writes, and self-reviews the stage artifact first; reviewers
+challenge that completed artifact.
+
 The contract lives in `AGENTS.md`; this skill is the runtime pattern. If they
 disagree, `AGENTS.md` wins.
 
@@ -32,6 +39,35 @@ Run these six reviewers for gate reviews:
 Run them in parallel, foreground, from the repository root. Use relative paths
 in prompts.
 
+## Mandatory Readiness Before Any Reviewer Run
+
+Before running external reviewers, complete this checklist and record the
+evidence in the SOW or work ledger. If any item is missing, do not run reviewers
+yet.
+
+- The original goal is written down.
+- The current stage artifact is written down: gap analysis, implementation plan,
+  or implementation evidence.
+- The CTO has locally checked the relevant SOWs, specs, code, tests,
+  migrations, fixtures, install/runtime behavior, pending SOW conflicts, and
+  operational recovery paths for the stage.
+- Known risks, unknowns, rejected alternatives, and sensitive-data handling are
+  explicit.
+- The CTO has performed a local self-review and expects a clean reviewer round,
+  with at most one surprise follow-up.
+- The reviewer prompt uses the same broad scope for every round, relative paths,
+  and neutral wording.
+
+Gate-specific minimums:
+
+- Gap analysis: the SOW or notes name the root-cause model, affected contracts,
+  data/schema/API/UI surfaces, edge cases, tests, spec deltas, migration/repair
+  paths, install/recovery checks, and explicit out-of-scope items.
+- Implementation plan: every accepted gap maps to planned specs, tests, code
+  files, sequencing, rollback/recovery, validation, and risk controls.
+- Implementation review: specs, tests, code, docs, and migrations are complete;
+  focused tests and local gates have run; and the CTO has read the diff.
+
 ## When To Run
 
 Run reviewers on meaningful chunks:
@@ -45,14 +81,60 @@ Do not run reviewers:
 
 - for every line or tiny edit;
 - as a substitute for CTO analysis;
+- when the artifact is exploratory or the CTO expects reviewers to discover
+  basic requirements, code paths, tests, or contracts;
 - after batching many unrelated SOWs together;
 - when the assistant has not yet personally reviewed the goal, plan, code, tests,
   and gate results for the current stage.
 
+## Reviewer Round Budget
+
+The normal result is one reviewer round. A second round is allowed when the
+first round finds real P0/P1/P2 surprises and the CTO has performed the class
+sweep described below.
+
+A third round is exceptional. If round 2 still returns accepted P0/P1/P2
+findings for the same gate, stop the reviewer loop, write a short waste analysis
+in the SOW explaining why self-review missed them, perform a full local review,
+then run one more broad-scope round.
+
+A fourth blocker round for the same gate is forbidden unless the operator has
+received a status report and the CTO has changed the approach. Buying more
+six-reviewer rounds while reviewers are still discovering basic gaps is a
+process failure, not diligence.
+
+P3-only comments do not reopen a converged gate. Record them as cosmetic or
+cleanup notes unless verification shows they imply a real P0/P1/P2 class.
+
+## After A NEEDS WORK Result
+
+Findings are evidence that the CTO may have missed a class of issues, not a
+mechanical todo list.
+
+For each accepted P0/P1/P2 finding:
+
+1. Verify the exact claim against file/spec/SOW evidence.
+2. Identify the broader class of possible misses.
+3. Search and self-review the whole stage scope for that class.
+4. Update the gap analysis, plan, specs, tests, code, docs, or migration notes
+   for the whole class, not only the cited line.
+5. Record the class sweep and disposition in the SOW or work ledger before any
+   rerun.
+
+Examples:
+
+- Missing migration default -> check every migration default, insert path, API
+  serialization, schema contract test, stale comment, and upgrade path.
+- Missing lifecycle transition -> check every state transition, retry path,
+  repair path, status panel, and persisted state.
+- Adapter nil-safety issue -> check every source event variant, absent field,
+  corrupt fixture, and parity/error-surfacing path.
+
 ## Gate 1 — Gap Analysis
 
-Use after the CTO has analyzed the goal and before writing the implementation
-plan.
+Use after the CTO has completed a local analysis of the goal and before writing
+the implementation plan. Reviewers verify a completed gap analysis; they are not
+how the CTO discovers the project.
 
 Reviewer input:
 
@@ -123,8 +205,13 @@ For every gate:
 - P0/P1/P2 findings are fixed, or rejected as false positives/hallucinations with
   evidence.
 - P3 findings may be fixed or documented.
-- Re-run the same gate with the same broad scope after fixes. Add only short notes
-  about fixes already made; do not narrow the prompt to "review the fixes".
+- Before any rerun after accepted P0/P1/P2 findings, complete and record the
+  class sweep from "After A NEEDS WORK Result".
+- Re-run the same gate with the same broad scope after fixes. Add only short
+  notes about fixes already made; do not narrow the prompt to "review the
+  fixes".
+- Apply the "Reviewer Round Budget"; repeated blocker rounds without a changed
+  approach are waste, not rigor.
 - Stop only when every real reviewer response is positive for that gate, or every
   non-positive response is verified as false-positive/noise with evidence.
   Reviewers that fail technically after the allowed single retry are recorded
@@ -203,9 +290,9 @@ Vote ONE of:
 - NOTHING MORE CAN BE DONE — no reasonable missing gap, risk, test, check, spec, or evidence remains.
 - NEEDS WORK — list findings with severity P0/P1/P2/P3, evidence, and concrete additions.
 
-Focus on what else could reasonably be done to achieve the goal. Look for
-missing requirements, edge cases, source evidence, tests, gates, security risks,
-performance risks, operational risks, and unwanted side effects.
+Verify whether the completed gap analysis still misses any material path to the
+goal. Look for missing requirements, edge cases, source evidence, tests, gates,
+security risks, performance risks, operational risks, and unwanted side effects.
 
 MANDATORY RULES (FOLLOW ALWAYS):
 - DO NOT MAKE CHANGES, DO NOT CREATE/MODIFY/DELETE FILES, DO NOT STOP PROCESSES/SERVICES.
@@ -285,28 +372,44 @@ THIS IS A READ-ONLY REQUEST.
 ## Workflow
 
 1. Decide the gate: gap analysis, implementation plan, or implementation review.
-2. Confirm the CTO has completed the work for that stage before reviewer use.
-3. Compose a neutral prompt using the matching template.
+2. Complete and record the "Mandatory Readiness Before Any Reviewer Run"
+   checklist.
+3. Compose a neutral prompt using the matching template and the same broad scope
+   as prior rounds for this gate.
 4. Run all six reviewers in parallel.
 5. Wait for all to return or fail technically.
 6. Synthesize findings:
    - List each unique finding once, attributed to which reviewer flagged it.
    - Classify: P0/P1/P2/P3.
    - Verify every claim.
-7. If P0/P1/P2 findings exist, address or reject them with evidence before any
+7. If accepted P0/P1/P2 findings exist, perform the class sweep from "After A
+   NEEDS WORK Result", then address or reject them with evidence before any
    retry of technically failed reviewers.
 8. If all successful reviewers are positive or P3-only, retry each technically
    failed reviewer once if the missing vote matters for closing the gate.
-9. Re-run the same gate with the same broad scope plus a short note of fixes.
-10. Repeat until positive votes converge, all remaining non-positive claims are
-   rejected with evidence, or technically failed reviewers have exhausted their
-   single retry for this gate.
-11. Record the review history and disposition in the SOW or relevant work ledger.
+9. Re-run the same gate with the same broad scope plus a short note of fixes
+   only after readiness remains true and the class sweep is recorded.
+10. Apply the "Reviewer Round Budget". Do not buy repeated six-reviewer rounds
+    as a substitute for local review.
+11. Stop when positive votes converge, all remaining non-positive claims are
+    rejected with evidence, only P3 remains documented, or technically failed
+    reviewers have exhausted their single retry for this gate.
+12. Record the readiness evidence, review history, class sweeps, and
+    dispositions in the SOW or relevant work ledger.
 
 ## Anti-Patterns
 
 - **Narrowing scope on follow-up reviews.** Leaves the rest unreviewed. Always use the same prompt.
+- **Using reviewers as discovery.** The CTO must discover the requirements,
+  contracts, tests, and risks locally first; reviewers challenge the completed
+  stage artifact.
 - **Running reviewers before doing CTO work.** Reviewers enrich and verify; they do not replace analysis, planning, implementation, or self-review.
+- **Patch-and-rerun after blockers.** Accepted P0/P1/P2 findings require a
+  broader class sweep before another six-reviewer round.
+- **Rerunning after P3-only comments.** P3-only results are not a blocker unless
+  verification shows they imply a real P0/P1/P2 class.
+- **Treating more rounds as rigor.** A fourth blocker round for the same gate is
+  forbidden without operator-visible status and a changed approach.
 - **Running reviewers for tiny edits.** Review meaningful chunks: at least per SOW, more often only per substantial milestone.
 - **Batching unrelated SOWs into one gate.** Reviewers need a coherent goal and scope.
 - **Editing the prompt to be less neutral after a reviewer disagreed.** The disagreement is data, not something to argue with.

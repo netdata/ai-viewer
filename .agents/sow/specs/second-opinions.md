@@ -14,6 +14,9 @@ There are three gates:
 
 The CTO verifies every reviewer claim before acting. P0/P1/P2 findings are fixed
 or rejected with evidence. Only P3 cosmetic findings may be documented and left.
+Minimal waste is part of the gate: reviewers are expensive external checks over
+completed CTO artifacts, not the discovery engine for requirements or code
+paths.
 The full invocation patterns and prompts live in
 `.agents/skills/project-second-opinions/SKILL.md`.
 
@@ -31,16 +34,50 @@ Do not run reviewers:
 - for every line or tiny edit;
 - before the CTO has done their own gap analysis, plan, implementation, and
   self-review for the stage;
+- when the current artifact is still exploratory or the CTO expects reviewers to
+  discover basic requirements, contracts, code paths, or tests;
 - after batching many unrelated SOWs together;
 - for trivial fixes, formatting, or mechanical changes with no behavior change.
+
+## Mandatory Readiness And Waste Control
+
+Before any external reviewer run, the CTO must load
+`.agents/skills/project-second-opinions/SKILL.md`, complete its reviewer-readiness
+checklist, and record the evidence in the SOW or work ledger.
+
+The readiness checklist proves that:
+
+- the original goal and current stage artifact are written down;
+- relevant SOWs, specs, code, tests, migrations, fixtures, install/runtime
+  behavior, pending SOW conflicts, and recovery paths were checked locally;
+- known risks, unknowns, rejected alternatives, and sensitive-data handling are
+  explicit;
+- the CTO self-reviewed the artifact and expects a clean round.
+
+External review rounds have a budget:
+
+- Round 1 is the normal gate.
+- Round 2 is allowed only after accepted P0/P1/P2 findings have been generalized
+  into issue classes and those classes have been locally self-reviewed.
+- Round 3 is exceptional: if round 2 still has accepted P0/P1/P2 findings, the
+  CTO stops, writes a short SOW waste analysis, performs a full local review, and
+  only then runs one more broad-scope round.
+- A fourth blocker round for the same gate is forbidden without an
+  operator-visible status report and a changed approach.
+- P3-only comments do not reopen a converged gate unless verification shows they
+  imply a real P0/P1/P2 class.
+
+A 19-round gate is roughly 114 reviewer invocations before retries or technical
+failures. That is a process failure: the CTO used reviewers for discovery
+instead of completing discovery, class sweeps, and self-review locally first.
 
 ## What to Ask
 
 For each gate, send a clear, unbiased prompt. The full prompt templates live in
 `project-second-opinions/SKILL.md`. Summary:
 
-- **Gap gate**: original goal + CTO gap analysis + evidence. Ask what else could
-  reasonably be done to achieve the goal.
+- **Gap gate**: original goal + CTO gap analysis + evidence. Ask whether the
+  completed analysis still misses any material path to the goal.
 - **Plan gate**: original goal + accepted gap analysis + CTO plan. Ask whether
   the plan is complete, safe, testable, and likely to work.
 - **Implementation gate**: original goal + accepted gap analysis + accepted plan
@@ -77,13 +114,24 @@ Always:
 
 ## Iteration
 
-Iterate until the gate converges. The reason:
+Iterate within the round budget until the gate converges. The reason for keeping
+scope broad is:
 
 > LLMs stop reviewing when they think requirements are satisfied, not when the codebase is exhausted. A follow-up review scoped to "review the fixes" leaves the rest unreviewed.
 
 Therefore: **never narrow the scope between repeated reviews.** Use the same
-prompt, adding only short notes about fixes implemented. Repeat until the gate's
-positive vote is reached, or every non-positive vote is rejected with evidence.
+prompt, adding only short notes about fixes implemented.
+
+Before any rerun after accepted P0/P1/P2 findings, the CTO must:
+
+1. Verify the exact claim.
+2. Identify the broader class of possible misses.
+3. Search and self-review the whole stage scope for that class.
+4. Update the relevant artifact for the whole class, not only the cited line.
+5. Record the sweep and disposition in the SOW or work ledger.
+
+Do not spend repeated six-reviewer rounds while reviewers are still discovering
+basic gaps. Stop and improve the CTO review process.
 
 ## Technical Reviewer Failures
 
@@ -118,9 +166,11 @@ Policy:
 For every reviewer gate during a SOW, record in the SOW under `## Reviews` or a
 stage-specific review subsection:
 
+- Reviewer-readiness checklist evidence.
 - Reviewer attribution and vote.
 - Technical reviewer failures and any single retry attempted.
 - The CTO's claim-verification verdict for each finding.
+- Class sweeps performed before reruns after accepted P0/P1/P2 findings.
 - The fix applied (or "rejected — false positive" with evidence).
 - The final gate outcome.
 

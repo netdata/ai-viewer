@@ -71,7 +71,7 @@ These are the assistant's standing orders. Violating any one is a contract breac
 
 10. **Discipline is recorded.** After every meaningful task, the assistant runs the Discipline Checklist below and updates `AGENTS.md`, the relevant spec, and any relevant skill so the lesson is captured. Repeating a mistake the operator has already corrected is the most serious breach.
 
-11. **Three external reviewer gates protect meaningful work.** The reviewer set is `glm`, `minimax`, `kimi`, `mimo`, `deepseek`, and `qwen`. Reviewers are intentionally diverse and are used to ensure nothing is missed, lost, forgotten, or overlooked. They run on good chunks of work: at least per SOW, and per milestone for complex SOWs. They do not run for every line or trivial edit. The gates are: (1) gap analysis review, vote `NOTHING MORE CAN BE DONE`; (2) implementation-plan review, vote `READY FOR IMPLEMENTATION`; (3) implementation review, vote `PRODUCTION GRADE`.
+11. **Three external reviewer gates protect meaningful work, with minimal waste.** The reviewer set is `glm`, `minimax`, `kimi`, `mimo`, `deepseek`, and `qwen`. Reviewers are intentionally diverse and are used to ensure nothing is missed, lost, forgotten, or overlooked. They are expensive gates, not a discovery engine. Before any external reviewer run, the CTO must read and follow `.agents/skills/project-second-opinions/SKILL.md`, complete the reviewer-readiness checklist in that skill, and record the checklist evidence in the SOW or work ledger. Reviewers run on good chunks of work: at least per SOW, and per milestone for complex SOWs. They do not run for every line, trivial edit, or immature analysis. The gates are: (1) gap analysis review, vote `NOTHING MORE CAN BE DONE`; (2) implementation-plan review, vote `READY FOR IMPLEMENTATION`; (3) implementation review, vote `PRODUCTION GRADE`.
 
 ## Ownership Model
 
@@ -176,7 +176,7 @@ The assistant performs these every time, regardless of how confident it feels. T
 
 1. Read `.agents/sow/pending/` and `.agents/sow/current/` for overlap, contradictions, existing decisions.
 2. Read `.agents/sow/specs/index.md` and the specs it points to that touch the affected areas.
-3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum for implementation work: `project-workflow`, `project-coding`, `project-quality-gates`, `project-testing`, and `project-second-opinions` when a review gate is due. Read `project-delegation` only when using helper subagents.
+3. Read every `project-*` skill under `.agents/skills/` whose trigger matches the work. At minimum for implementation work: `project-workflow`, `project-coding`, `project-quality-gates`, and `project-testing`. **Before any external reviewer invocation, reading `.agents/skills/project-second-opinions/SKILL.md` and completing its reviewer-readiness checklist is mandatory.** Read `project-delegation` only when using helper subagents.
 4. Read source code, tests, fixtures as ground truth.
 5. Ask the operator only for irreducible product/design/risk decisions. Never technical ones.
 
@@ -188,7 +188,8 @@ The assistant runs this checklist before reporting a task complete to the operat
 - [ ] Tests exist covering the new/changed behavior; tests pass; race detector clean.
 - [ ] Coverage thresholds met for affected packages.
 - [ ] All quality gates green locally.
-- [ ] Applicable external reviewer gate run for the current stage; CTO verified every claim; P0/P1/P2 findings fixed or rejected with evidence; only P3 cosmetic findings remain documented.
+- [ ] Applicable external reviewer gate run for the current stage; `project-second-opinions` reviewer-readiness checklist completed before the run; CTO verified every claim; P0/P1/P2 findings fixed or rejected with evidence; only P3 cosmetic findings remain documented.
+- [ ] Reviewer waste controls followed: no P3-only rerun; no immediate rerun after accepted P0/P1/P2 without a generalized self-review sweep; no fourth blocker round without operator-visible status and a changed approach.
 - [ ] No new TODO/FIXME left without a SOW in `.agents/sow/pending/`.
 - [ ] `AGENTS.md`, relevant skills, and relevant specs updated if a new pattern, gotcha, or convention emerged.
 - [ ] No half-built features in the diff.
@@ -332,6 +333,49 @@ milestone for complex SOWs. Do not run reviewers for every line or tiny edit. Do
 not batch many unrelated SOWs into one review. A good default is three gates per
 SOW: gap analysis, implementation plan, and implementation.
 
+### Reviewer Waste Prevention
+
+External reviewers are costly because every round runs six independent models.
+One extra round is not "just one more review"; it is six model runs, six long
+contexts, six result streams, and more wall-clock delay before the operator sees
+progress. A 19-round gate is roughly 114 reviewer invocations before retries and
+technical failures. That is not rigor; it is a process failure.
+
+The failure mode is false framing: treating reviewers as the way to discover
+the missing requirements. The right framing is the opposite. The CTO first does
+the discovery work: reads the code, specs, tests, fixtures, migrations, pending
+SOWs, installed evidence, and operational paths; writes a complete stage
+artifact; then uses reviewers to challenge it. Reviewers may find a missed
+edge case. They must not be repeatedly discovering whole categories of work.
+
+Before running any external reviewer gate, the CTO must:
+
+- Read `.agents/skills/project-second-opinions/SKILL.md` in the current
+  context.
+- Complete that skill's reviewer-readiness checklist for the current gate.
+- Record the checklist evidence in the SOW or work ledger.
+- Confirm the stage artifact is complete enough that the expected outcome is one
+  clean review round, with at most one follow-up for real surprises.
+
+If a reviewer round returns accepted P0/P1/P2 findings, do not patch only the
+literal finding and immediately rerun. First generalize the finding into a
+class of possible misses, perform a local self-review across that whole class,
+and update the SOW/spec/plan/code accordingly. Example: if one migration default
+was missed, check every migration default, insert path, API serialization,
+schema contract test, stale comment, and upgrade path before any rerun.
+
+External reviewer gates are expected to converge in one round, or two when the
+first round finds a real surprise. If the second round for the same gate still
+returns accepted P0/P1/P2 findings, stop the reviewer loop. The CTO must write a
+brief waste analysis in the SOW explaining why self-review failed, run a full
+local review pass, and only then run one more broad-scope reviewer round. A
+fourth blocker round for the same gate is forbidden without an operator-visible
+status report and a changed approach. Continuing to buy six-reviewer rounds
+while reviewers are still discovering basic gaps is a contract breach.
+
+P3-only comments do not reopen a converged gate. Record them as implementation
+or cleanup notes unless they reveal a real P0/P1/P2 class.
+
 ### Gate 1 — Gap Analysis
 
 Input to reviewers:
@@ -346,8 +390,10 @@ Reviewer vote:
 - `NOTHING MORE CAN BE DONE` — the gap analysis is complete enough to plan from.
 - `NEEDS WORK` — one or more gaps, risks, edge cases, tests, specs, or checks are missing.
 
-Purpose: discover what else could reasonably be done to achieve the goal before
-the implementation plan narrows the solution.
+Purpose: verify that the CTO's completed gap analysis did not miss a material
+path to achieving the goal before the implementation plan narrows the solution.
+If reviewers discover whole categories of missing analysis, the CTO ran the gate
+too early.
 
 ### Gate 2 — Implementation Plan
 
@@ -396,7 +442,10 @@ For every gate:
 
 - P0/P1/P2 findings are fixed, or rejected as false positive/hallucination with evidence.
 - P3 findings may be fixed or documented.
-- Re-run the same gate with the same broad scope after fixes. Add only short notes about what changed; do not narrow the scope to "review the fixes".
+- Before any rerun after accepted P0/P1/P2 findings, perform the self-review
+  class sweep from "Reviewer Waste Prevention" above. Then rerun the same gate
+  with the same broad scope after fixes. Add only short notes about what changed;
+  do not narrow the scope to "review the fixes".
 - Stop only when every real reviewer response is positive for that gate, or when every non-positive response is verified as false-positive/noise with evidence. Reviewers that fail technically after the allowed single retry are recorded and skipped for the current gate only.
 
 ### Claim Verification
