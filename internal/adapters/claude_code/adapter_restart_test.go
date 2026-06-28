@@ -768,9 +768,9 @@ func TestScanThenTail_ParkedCompletionDurableAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseCursor #2: %v", err)
 	}
-	// Drive Scan then Tail on the restarted instance (mirrors runAdapter). The
-	// finalize may land in Scan (parent read there) — assert it appears exactly
-	// once across Scan + a brief Tail.
+	// Drive Scan then Tail on the restarted instance, mirroring the source
+	// supervisor handoff. The finalize may land in Scan (parent read there) —
+	// assert it appears exactly once across Scan + a brief Tail.
 	out2 := make(chan canonical.Event, 256)
 	if err := a2.Scan(context.Background(), parsed2, out2); err != nil {
 		t.Fatalf("Scan #2: %v", err)

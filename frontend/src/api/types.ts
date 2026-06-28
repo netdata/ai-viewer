@@ -46,6 +46,28 @@ export type LogSeverity = OpenEnum<'DBG' | 'INF' | 'WRN' | 'ERR'>;
 /** /api/health top-level status union (observability.md). */
 export type HealthStatus = 'ok' | 'degraded' | 'down';
 
+/** source_progress.lifecycle_state known values (open union for forward compatibility). */
+export type SourceLifecycleState = OpenEnum<
+  | 'unknown'
+  | 'starting'
+  | 'start_failed'
+  | 'construct_failed'
+  | 'scanning'
+  | 'scan_failed'
+  | 'scan_complete'
+  | 'tail_starting'
+  | 'tailing'
+  | 'tail_stale'
+  | 'tail_failed'
+  | 'tail_restarting'
+  | 'stopped'
+>;
+
+/** source_progress.read_model_state known values (open union for forward compatibility). */
+export type ReadModelState = OpenEnum<
+  'unknown' | 'repair_pending' | 'repairing' | 'ready' | 'repair_timeout' | 'repair_failed'
+>;
+
 // ── Error envelope ──────────────────────────────────────────────────────────
 
 /** Stable machine-readable error codes (presenter errors.go). Open union so an
@@ -748,6 +770,23 @@ export interface SourceItem {
   last_seq: number;
   last_ts_us: number | null;
   updated_at: number | null;
+  progress_updated_at?: number;
+  lifecycle_state: SourceLifecycleState;
+  lifecycle_state_at?: number;
+  scan_started_at?: number;
+  scan_completed_at?: number;
+  tail_started_at?: number;
+  tail_heartbeat_at?: number;
+  tail_failed_at?: number;
+  tail_restart_count: number;
+  lifecycle_error?: string;
+  read_model_state: ReadModelState;
+  read_model_state_at?: number;
+  read_model_repair_started_at?: number;
+  read_model_repair_completed_at?: number;
+  read_model_repair_failed_at?: number;
+  read_model_repair_attempts: number;
+  read_model_error?: string;
   meta?: Record<string, unknown>;
 }
 
@@ -767,6 +806,23 @@ export interface HealthSource {
   lag_us: number;
   parse_errors: number;
   last_seq: number;
+  progress_updated_at?: number;
+  lifecycle_state: SourceLifecycleState;
+  lifecycle_state_at?: number;
+  scan_started_at?: number;
+  scan_completed_at?: number;
+  tail_started_at?: number;
+  tail_heartbeat_at?: number;
+  tail_failed_at?: number;
+  tail_restart_count: number;
+  lifecycle_error?: string;
+  read_model_state: ReadModelState;
+  read_model_state_at?: number;
+  read_model_repair_started_at?: number;
+  read_model_repair_completed_at?: number;
+  read_model_repair_failed_at?: number;
+  read_model_repair_attempts: number;
+  read_model_error?: string;
   meta?: Record<string, unknown>;
 }
 
@@ -781,6 +837,7 @@ export interface HealthSSE {
 
 export interface HealthResponse {
   status: HealthStatus;
+  status_detail?: string;
   version: string;
   schema_version: number;
   uptime_s: number;

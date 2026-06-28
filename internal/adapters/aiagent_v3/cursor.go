@@ -12,7 +12,7 @@ import (
 // the shape ever changes; ParseCursor refuses unknown versions.
 const cursorVersion = 1
 
-// Cursor is the resume token persisted in sources.cursor for the v3
+// Cursor is the resume token persisted in source_progress.cursor for the v3
 // adapter. It is keyed by the ledger filename (e.g. "<sessionId>.jsonl")
 // and tracks per-file byte offset plus the highest ledger sequence and
 // timestamp consumed. See specs/adapter-aiagent-v3.md §7.

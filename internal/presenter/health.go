@@ -7,7 +7,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // healthStatus values for /api/health per observability.md §`/api/health`.
@@ -17,10 +21,18 @@ const (
 	healthStatusDown     = "down"
 )
 
-// degradedLagThresholdUS is the maximum permissible source lag before
-// /api/health flips to "degraded". 60 s in microseconds, per
-// observability.md.
+const healthStatusDetailNoSourcesConfigured = "no_sources_configured"
+
+// degradedLagThresholdUS is retained for legacy lag display and tests. Source
+// freshness is decided from lifecycle/read-model state after SOW-0114.
 const degradedLagThresholdUS = int64(60_000_000)
+
+const (
+	preTailGraceThresholdUS         = degradedLagThresholdUS
+	longScanThresholdUS             = int64(600_000_000)
+	tailStaleThresholdUS            = int64(300_000_000)
+	readModelRepairGraceThresholdUS = int64(300_000_000)
+)
 
 // recentParseErrorWindow is the look-back window for recent parse
 // errors in the "degraded" rule. Anything inside an hour counts.
@@ -33,6 +45,7 @@ const healthCoreQueryCount = 2
 // dashboards can rely on the field names.
 type healthResponse struct {
 	Status        string         `json:"status"`
+	StatusDetail  string         `json:"status_detail,omitempty"`
 	Version       string         `json:"version"`
 	SchemaVersion int            `json:"schema_version"`
 	UptimeS       int64          `json:"uptime_s"`
@@ -78,31 +91,66 @@ type healthSSE struct {
 // the adapter did not populate the column — absence is the "not
 // populated" signal, not zero / {}.
 type healthSource struct {
-	ID          string          `json:"id"`
-	Format      string          `json:"format"`
-	Location    string          `json:"location"`
-	Enabled     bool            `json:"enabled"`
-	LastSeenAt  *int64          `json:"last_seen_at"`
-	LagUS       int64           `json:"lag_us"`
-	ParseErrors int64           `json:"parse_errors"`
-	LastSeq     int64           `json:"last_seq"`
-	Meta        json.RawMessage `json:"meta,omitempty"`
+	ID                         string          `json:"id"`
+	Format                     string          `json:"format"`
+	Location                   string          `json:"location"`
+	Enabled                    bool            `json:"enabled"`
+	LastSeenAt                 *int64          `json:"last_seen_at"`
+	LagUS                      int64           `json:"lag_us"`
+	ParseErrors                int64           `json:"parse_errors"`
+	LastSeq                    int64           `json:"last_seq"`
+	ProgressUpdatedAt          *int64          `json:"progress_updated_at,omitempty"`
+	LifecycleState             string          `json:"lifecycle_state"`
+	LifecycleStateAt           *int64          `json:"lifecycle_state_at,omitempty"`
+	ScanStartedAt              *int64          `json:"scan_started_at,omitempty"`
+	ScanCompletedAt            *int64          `json:"scan_completed_at,omitempty"`
+	TailStartedAt              *int64          `json:"tail_started_at,omitempty"`
+	TailHeartbeatAt            *int64          `json:"tail_heartbeat_at,omitempty"`
+	TailFailedAt               *int64          `json:"tail_failed_at,omitempty"`
+	TailRestartCount           int64           `json:"tail_restart_count"`
+	LifecycleError             string          `json:"lifecycle_error,omitempty"`
+	ReadModelState             string          `json:"read_model_state"`
+	ReadModelStateAt           *int64          `json:"read_model_state_at,omitempty"`
+	ReadModelRepairStartedAt   *int64          `json:"read_model_repair_started_at,omitempty"`
+	ReadModelRepairCompletedAt *int64          `json:"read_model_repair_completed_at,omitempty"`
+	ReadModelRepairFailedAt    *int64          `json:"read_model_repair_failed_at,omitempty"`
+	ReadModelRepairAttempts    int64           `json:"read_model_repair_attempts"`
+	ReadModelError             string          `json:"read_model_error,omitempty"`
+	Meta                       json.RawMessage `json:"meta,omitempty"`
 }
 
 type healthSignals struct {
-	queriesFailed     int
-	lagDegraded       bool
-	recentParseErrors int64
+	queriesFailed       int
+	sourceDegraded      bool
+	noSourcesConfigured bool
+	recentParseErrors   int64
 }
 
 type healthSourceRow struct {
-	id          string
-	format      string
-	location    string
-	enabled     int64
-	lastSeenAt  sql.NullInt64
-	parseErrors int64
-	lastSeq     int64
+	id                         string
+	format                     string
+	location                   string
+	enabled                    int64
+	lastSeenAt                 sql.NullInt64
+	parseErrors                int64
+	lastSeq                    int64
+	progressUpdatedAt          sql.NullInt64
+	lifecycleState             string
+	lifecycleStateAt           sql.NullInt64
+	scanStartedAt              sql.NullInt64
+	scanCompletedAt            sql.NullInt64
+	tailStartedAt              sql.NullInt64
+	tailHeartbeatAt            sql.NullInt64
+	tailFailedAt               sql.NullInt64
+	tailRestartCount           int64
+	lifecycleError             sql.NullString
+	readModelState             string
+	readModelStateAt           sql.NullInt64
+	readModelRepairStartedAt   sql.NullInt64
+	readModelRepairCompletedAt sql.NullInt64
+	readModelRepairFailedAt    sql.NullInt64
+	readModelRepairAttempts    int64
+	readModelError             sql.NullString
 	// metaJSON is the raw sources.meta_json column. Valid==false means the
 	// adapter did not populate it (the "not populated" signal). String is
 	// empty when Valid==true AND the column was bound to ''; the worker
@@ -118,9 +166,10 @@ type healthSourceRow struct {
 // a 5 s context so a misbehaving SQLite cannot hang the health probe.
 //
 // The status rules per observability.md §`/api/health`:
-//   - "down" when SQLite is unreachable (every query errors).
-//   - "degraded" when any enabled source has lag_us > 60_000_000 OR
-//     parse_errors > 0 in the last hour.
+//   - "down" when SQLite is unreachable (every core query errors).
+//   - "degraded" when any enabled source has a degraded lifecycle/read-model
+//     state, no sources are configured, or source-scoped parse errors occurred
+//     in the last hour.
 //   - "ok" otherwise.
 //
 // The handler intentionally does not refuse to answer when one query
@@ -144,9 +193,12 @@ func (p *Presenter) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp.Status = healthStatusFromSignals(
 		signals.queriesFailed,
 		healthCoreQueryCount,
-		signals.lagDegraded,
+		signals.sourceDegraded || signals.noSourcesConfigured,
 		signals.recentParseErrors,
 	)
+	if resp.Status != healthStatusDown && signals.noSourcesConfigured {
+		resp.StatusDetail = healthStatusDetailNoSourcesConfigured
+	}
 
 	writeJSON(w, r, p.logger, resp)
 }
@@ -160,7 +212,8 @@ func (p *Presenter) collectHealthResponse(ctx context.Context, now time.Time) (h
 		p.logHealthQueryWarning(ctx, "presenter: health source query failed", srcErr)
 	}
 	resp.Sources = sources
-	signals.lagDegraded = lagDegraded
+	signals.sourceDegraded = lagDegraded
+	signals.noSourcesConfigured = srcErr == nil && len(sources) == 0
 
 	recentParseErrors, perErr := p.recentParseErrorCount(ctx, now)
 	if perErr != nil {
@@ -190,11 +243,11 @@ func (p *Presenter) logHealthQueryWarning(ctx context.Context, msg string, err e
 		slog.String("request_id", requestIDFromContext(ctx)))
 }
 
-func healthStatusFromSignals(queriesFailed, totalQueries int, lagDegraded bool, recentParseErrors int64) string {
+func healthStatusFromSignals(queriesFailed, totalQueries int, sourceDegraded bool, recentParseErrors int64) string {
 	switch {
 	case queriesFailed >= totalQueries:
 		return healthStatusDown
-	case lagDegraded || recentParseErrors > 0:
+	case sourceDegraded || recentParseErrors > 0:
 		return healthStatusDegraded
 	default:
 		return healthStatusOK
@@ -218,9 +271,9 @@ func (p *Presenter) collectNotifyHealth(now time.Time) healthNotify {
 	return out
 }
 
-// collectSources returns the source rows used by /api/health and a
-// flag indicating whether any enabled source exceeds the degraded lag
-// threshold.
+// collectSources returns the source rows used by /api/health and a flag
+// indicating whether any enabled source is degraded by lifecycle/read-model
+// state.
 func (p *Presenter) collectSources(ctx context.Context, now time.Time) ([]healthSource, bool, error) {
 	rows, err := p.db.QueryContext(ctx, `
 SELECT
@@ -231,6 +284,23 @@ SELECT
     s.last_seen_at,
     s.parse_errors,
     IFNULL(sp.last_seq, 0),
+    NULLIF(sp.updated_at, 0),
+    IFNULL(sp.lifecycle_state, 'unknown'),
+    NULLIF(sp.lifecycle_state_at, 0),
+    NULLIF(sp.scan_started_at, 0),
+    NULLIF(sp.scan_completed_at, 0),
+    NULLIF(sp.tail_started_at, 0),
+    NULLIF(sp.tail_heartbeat_at, 0),
+    NULLIF(sp.tail_failed_at, 0),
+    IFNULL(sp.tail_restart_count, 0),
+    sp.lifecycle_error,
+    IFNULL(sp.read_model_state, 'unknown'),
+    NULLIF(sp.read_model_state_at, 0),
+    NULLIF(sp.read_model_repair_started_at, 0),
+    NULLIF(sp.read_model_repair_completed_at, 0),
+    NULLIF(sp.read_model_repair_failed_at, 0),
+    IFNULL(sp.read_model_repair_attempts, 0),
+    sp.read_model_error,
     s.meta_json
 FROM sources s
 LEFT JOIN source_progress sp ON sp.source_id = s.id
@@ -274,6 +344,23 @@ func scanHealthSourceRow(rows *sql.Rows) (healthSourceRow, error) {
 		&row.lastSeenAt,
 		&row.parseErrors,
 		&row.lastSeq,
+		&row.progressUpdatedAt,
+		&row.lifecycleState,
+		&row.lifecycleStateAt,
+		&row.scanStartedAt,
+		&row.scanCompletedAt,
+		&row.tailStartedAt,
+		&row.tailHeartbeatAt,
+		&row.tailFailedAt,
+		&row.tailRestartCount,
+		&row.lifecycleError,
+		&row.readModelState,
+		&row.readModelStateAt,
+		&row.readModelRepairStartedAt,
+		&row.readModelRepairCompletedAt,
+		&row.readModelRepairFailedAt,
+		&row.readModelRepairAttempts,
+		&row.readModelError,
 		&row.metaJSON,
 	)
 	return row, err
@@ -281,22 +368,38 @@ func scanHealthSourceRow(rows *sql.Rows) (healthSourceRow, error) {
 
 func buildHealthSource(row healthSourceRow, nowUS int64) (healthSource, bool) {
 	source := healthSource{
-		ID:          row.id,
-		Format:      row.format,
-		Location:    row.location,
-		Enabled:     row.enabled != 0,
-		ParseErrors: row.parseErrors,
-		LastSeq:     row.lastSeq,
+		ID:                      row.id,
+		Format:                  row.format,
+		Location:                row.location,
+		Enabled:                 row.enabled != 0,
+		ParseErrors:             row.parseErrors,
+		LastSeq:                 row.lastSeq,
+		LifecycleState:          effectiveHealthLifecycleState(row, nowUS),
+		TailRestartCount:        row.tailRestartCount,
+		LifecycleError:          sanitizePresenterDiagnostic(row.lifecycleError, row.location),
+		ReadModelState:          defaultReadModelState(row.readModelState),
+		ReadModelRepairAttempts: row.readModelRepairAttempts,
+		ReadModelError:          sanitizePresenterDiagnostic(row.readModelError, row.location),
 	}
 	if row.lastSeenAt.Valid {
 		v := row.lastSeenAt.Int64
 		source.LastSeenAt = &v
 		source.LagUS = sourceLagUS(nowUS, v)
 	}
+	source.ProgressUpdatedAt = ptrNonZero(row.progressUpdatedAt)
+	source.LifecycleStateAt = ptrNonZero(row.lifecycleStateAt)
+	source.ScanStartedAt = ptrNonZero(row.scanStartedAt)
+	source.ScanCompletedAt = ptrNonZero(row.scanCompletedAt)
+	source.TailStartedAt = ptrNonZero(row.tailStartedAt)
+	source.TailHeartbeatAt = ptrNonZero(row.tailHeartbeatAt)
+	source.TailFailedAt = ptrNonZero(row.tailFailedAt)
+	source.ReadModelStateAt = ptrNonZero(row.readModelStateAt)
+	source.ReadModelRepairStartedAt = ptrNonZero(row.readModelRepairStartedAt)
+	source.ReadModelRepairCompletedAt = ptrNonZero(row.readModelRepairCompletedAt)
+	source.ReadModelRepairFailedAt = ptrNonZero(row.readModelRepairFailedAt)
 	// Meta is set by the caller (readHealthSourceRows) via metaFromColumn so
 	// the json.Valid defence + WARN live in one shared helper (SOW-0024).
-	degraded := source.Enabled && source.LastSeenAt != nil &&
-		source.LagUS > degradedLagThresholdUS
+	degraded := source.Enabled && sourceLifecycleDegraded(row, source.LifecycleState, source.ReadModelState, nowUS)
 	return source, degraded
 }
 
@@ -326,6 +429,151 @@ func metaFromColumn(logger *slog.Logger, sourceID string, col sql.NullString) js
 			slog.Int("value_len", len(col.String)))
 	}
 	return nil
+}
+
+func ptrNonZero(v sql.NullInt64) *int64 {
+	if !v.Valid || v.Int64 == 0 {
+		return nil
+	}
+	out := v.Int64
+	return &out
+}
+
+func sanitizePresenterDiagnostic(v sql.NullString, sourceLocation string) string {
+	if !v.Valid {
+		return ""
+	}
+	out := strings.ToValidUTF8(v.String, "")
+	replacements := []struct {
+		from string
+		to   string
+	}{
+		{from: sourceLocation, to: "[source]"},
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		replacements = append(replacements, struct {
+			from string
+			to   string
+		}{from: home, to: "$HOME"})
+	}
+	for _, repl := range replacements {
+		if repl.from == "" {
+			continue
+		}
+		out = strings.ReplaceAll(out, repl.from, repl.to)
+	}
+	var b strings.Builder
+	b.Grow(len(out))
+	lastSpace := false
+	for _, r := range out {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if unicode.IsSpace(r) {
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastSpace = false
+	}
+	out = strings.TrimSpace(b.String())
+	if len(out) <= 1024 {
+		return out
+	}
+	end := 1024
+	for end > 0 && !utf8.ValidString(out[:end]) {
+		end--
+	}
+	return strings.TrimSpace(out[:end])
+}
+
+func effectiveHealthLifecycleState(row healthSourceRow, nowUS int64) string {
+	state := defaultSourceState(row.lifecycleState)
+	if state != "tailing" {
+		return state
+	}
+	refUS, ok := tailHeartbeatReferenceUS(row.tailStartedAt, row.tailHeartbeatAt)
+	if !ok || ageExceedsUS(refUS, nowUS, tailStaleThresholdUS) {
+		return "tail_stale"
+	}
+	return state
+}
+
+func sourceLifecycleDegraded(row healthSourceRow, lifecycleState, readModelState string, nowUS int64) bool {
+	switch lifecycleState {
+	case "start_failed", "construct_failed", "scan_failed", "tail_stale", "tail_failed", "tail_restarting":
+		return true
+	case "unknown", "starting", "scan_complete", "tail_starting":
+		if nullableAgeExceedsUS(row.lifecycleStateAt, nowUS, preTailGraceThresholdUS) {
+			return true
+		}
+	case "scanning":
+		if nullableAgeExceedsUS(firstValidInt64(row.scanStartedAt, row.lifecycleStateAt), nowUS, longScanThresholdUS) {
+			return true
+		}
+	case "stopped":
+		return false
+	}
+	return readModelDegraded(row, readModelState, nowUS)
+}
+
+func readModelDegraded(row healthSourceRow, readModelState string, nowUS int64) bool {
+	switch readModelState {
+	case "repair_timeout", "repair_failed":
+		return true
+	case "repair_pending":
+		return nullableAgeExceedsUS(row.readModelStateAt, nowUS, readModelRepairGraceThresholdUS)
+	case "repairing":
+		return nullableAgeExceedsUS(firstValidInt64(row.readModelRepairStartedAt, row.readModelStateAt), nowUS, readModelRepairGraceThresholdUS)
+	}
+	return false
+}
+
+func defaultSourceState(state string) string {
+	if state == "" {
+		return "unknown"
+	}
+	return state
+}
+
+func defaultReadModelState(state string) string {
+	if state == "" {
+		return "unknown"
+	}
+	return state
+}
+
+func tailHeartbeatReferenceUS(tailStartedAt, tailHeartbeatAt sql.NullInt64) (int64, bool) {
+	if tailHeartbeatAt.Valid && tailHeartbeatAt.Int64 > 0 {
+		return tailHeartbeatAt.Int64, true
+	}
+	if tailStartedAt.Valid && tailStartedAt.Int64 > 0 {
+		return tailStartedAt.Int64, true
+	}
+	return 0, false
+}
+
+func firstValidInt64(values ...sql.NullInt64) sql.NullInt64 {
+	for _, v := range values {
+		if v.Valid && v.Int64 > 0 {
+			return v
+		}
+	}
+	return sql.NullInt64{}
+}
+
+func nullableAgeExceedsUS(v sql.NullInt64, nowUS, thresholdUS int64) bool {
+	if !v.Valid || v.Int64 <= 0 {
+		return false
+	}
+	return ageExceedsUS(v.Int64, nowUS, thresholdUS)
+}
+
+func ageExceedsUS(thenUS, nowUS, thresholdUS int64) bool {
+	return nowUS-thenUS > thresholdUS
 }
 
 func sourceLagUS(nowUS, lastSeenUS int64) int64 {

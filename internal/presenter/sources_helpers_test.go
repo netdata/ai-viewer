@@ -20,16 +20,18 @@ func TestSourcesBuildItem_NullableProgressFieldsAbsent(t *testing.T) {
 		createdAt: 100,
 		cursor:    "",
 		lastSeq:   0,
-	})
+	}, fixedTime.UnixMicro())
 
 	assertSourceItemEqual(t, got, sourceItem{
-		ID:        "src-empty",
-		Format:    "aiagent_v3",
-		Location:  "/tmp/empty",
-		Enabled:   true,
-		CreatedAt: 100,
-		Cursor:    "",
-		LastSeq:   0,
+		ID:             "src-empty",
+		Format:         "aiagent_v3",
+		Location:       "/tmp/empty",
+		Enabled:        true,
+		CreatedAt:      100,
+		Cursor:         "",
+		LastSeq:        0,
+		LifecycleState: "unknown",
+		ReadModelState: "unknown",
 	})
 }
 
@@ -48,21 +50,46 @@ func TestSourcesBuildItem_ValidNullableFields(t *testing.T) {
 		lastSeq:     999,
 		lastTsUS:    sql.NullInt64{Int64: 102, Valid: true},
 		updatedAt:   sql.NullInt64{Int64: 103, Valid: true},
-	})
+	}, fixedTime.UnixMicro())
 
 	assertSourceItemEqual(t, got, sourceItem{
-		ID:          "src-full",
-		Format:      "codex",
-		Location:    "/tmp/full",
-		Enabled:     false,
-		ParseErrors: 3,
-		LastSeenAt:  ptrInt64(101),
-		CreatedAt:   100,
-		Cursor:      `{"offset":42}`,
-		LastSeq:     999,
-		LastTsUS:    ptrInt64(102),
-		UpdatedAt:   ptrInt64(103),
+		ID:                "src-full",
+		Format:            "codex",
+		Location:          "/tmp/full",
+		Enabled:           false,
+		ParseErrors:       3,
+		LastSeenAt:        ptrInt64(101),
+		CreatedAt:         100,
+		Cursor:            `{"offset":42}`,
+		LastSeq:           999,
+		LastTsUS:          ptrInt64(102),
+		UpdatedAt:         ptrInt64(103),
+		ProgressUpdatedAt: ptrInt64(103),
+		LifecycleState:    "unknown",
+		ReadModelState:    "unknown",
 	})
+}
+
+func TestSourcesBuildItem_TailingWithStaleHeartbeatIsEffectiveTailStale(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	got := buildSourceItem(sourceItemRow{
+		id:               "src-tail-stale",
+		format:           "codex",
+		location:         "/tmp/codex",
+		enabled:          1,
+		createdAt:        100,
+		lifecycleState:   "tailing",
+		lifecycleStateAt: sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+		tailStartedAt:    sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+		tailHeartbeatAt:  sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+		readModelState:   "ready",
+	}, nowUS)
+
+	if got.LifecycleState != "tail_stale" {
+		t.Fatalf("lifecycle_state = %q, want effective tail_stale", got.LifecycleState)
+	}
 }
 
 func TestReadSourceItemRows_ScanErrorReturnsNilItems(t *testing.T) {
@@ -84,7 +111,7 @@ SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', 0, NULL, 101, '', 0, NULL,
 	}
 	defer func() { _ = rows.Close() }()
 
-	items, failure := readSourceItemRows(rows, nil)
+	items, failure := readSourceItemRows(rows, nil, fixedTime.UnixMicro())
 	if failure.err == nil {
 		t.Fatal("failure.err = nil, want scan error")
 	}

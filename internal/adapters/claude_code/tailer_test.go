@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,45 @@ func waitForTailEvents(t *testing.T, out <-chan canonical.Event, timeout time.Du
 		case <-deadline:
 			t.Fatalf("%s; got %d events", fail, len(got))
 		}
+	}
+}
+
+func waitForHeartbeat(t *testing.T, count *atomic.Int64, want int64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if count.Load() >= want {
+			return true
+		}
+		select {
+		case <-deadline:
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
+func TestTail_HeartbeatOnIdleTick(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var heartbeats atomic.Int64
+	a, err := New(root, canonical.AdapterOptions{
+		OnTailHeartbeat: func() { heartbeats.Add(1) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	run := startTailTest(t, a)
+	defer run.stop()
+
+	if !waitForHeartbeat(t, &heartbeats, 1, 2*time.Second) {
+		t.Fatalf("tail startup catch-up did not call tail heartbeat")
+	}
+	next := heartbeats.Load() + 1
+	if !waitForHeartbeat(t, &heartbeats, next, tailTickInterval+3*time.Second) {
+		t.Fatalf("idle tail tick did not call tail heartbeat")
 	}
 }
 

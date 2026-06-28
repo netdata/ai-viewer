@@ -68,16 +68,16 @@ type rollout struct {
 }
 
 // discovered is the result of one discovery walk: the modern rollout files
-// (sorted by rel for deterministic replay) plus the basenames of the legacy
-// flat .json files found directly under the root.
+// (sorted by rel newest-first for deterministic cold-rebuild priority) plus
+// the basenames of the legacy flat .json files found directly under the root.
 type discovered struct {
 	modern []rollout
 	legacy []string
 }
 
 // discoverRollouts walks the sessions root and returns every modern rollout
-// file (sorted by relative path) plus the legacy flat .json basenames found
-// directly under the root. Discovery is fail-soft per entry (SOW gate: a
+// file (sorted newest-first by relative path) plus the legacy flat .json
+// basenames found directly under the root. Discovery is fail-soft per entry (SOW gate: a
 // non-IsNotExist error reading one shard/file surfaces a SourceError via
 // onError and is skipped so the walk continues); ONLY the configured root being
 // unreadable is fatal. Modern files are matched by ^rollout-.*\.jsonl$ at any
@@ -163,7 +163,7 @@ func discoverRollouts(root string, onError func(error)) (discovered, error) {
 		}
 		return nil
 	})
-	sort.Slice(out.modern, func(i, j int) bool { return out.modern[i].rel < out.modern[j].rel })
+	sort.Slice(out.modern, func(i, j int) bool { return out.modern[i].rel > out.modern[j].rel })
 	sort.Strings(out.legacy)
 	return out, nil
 }

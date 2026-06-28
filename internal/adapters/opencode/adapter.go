@@ -33,9 +33,10 @@ const sourceIDPrefix = Format + ":"
 // goroutine; concurrent Scan+Tail on one instance is not part of the contract
 // (specs/adapter-contract.md). Mirrors codex.Adapter.
 type Adapter struct {
-	dbPath   string
-	sourceID string
-	logger   *slog.Logger
+	dbPath        string
+	sourceID      string
+	logger        *slog.Logger
+	tailHeartbeat func()
 	// onError surfaces non-fatal per-record parse errors. Never nil after
 	// construction; New and Factory substitute a no-op when nil so adapter code
 	// can call it unconditionally.
@@ -44,9 +45,8 @@ type Adapter struct {
 	// Scan, so a following Tail on the SAME instance resumes from where Scan left
 	// off rather than snapshotting current HEAD (closing the Scan→Tail data-loss
 	// window). Nil until Scan runs (a cold Tail then falls back to
-	// snapshotCursor). The ingester drives Scan→Tail on one instance
-	// (cmd/ai-viewer-ingest/sources.go runAdapter), single-threaded, so a plain
-	// field needs no synchronisation. Mirrors codex.
+	// snapshotCursor). The source supervisor drives Scan→Tail on one instance,
+	// single-threaded, so a plain field needs no synchronisation. Mirrors codex.
 	scanCursor *Cursor
 }
 
@@ -74,10 +74,11 @@ func New(location string, opts canonical.AdapterOptions) (*Adapter, error) {
 		sourceID = sourceIDPrefix + location
 	}
 	return &Adapter{
-		dbPath:   location,
-		sourceID: sourceID,
-		logger:   logger,
-		onError:  onError,
+		dbPath:        location,
+		sourceID:      sourceID,
+		logger:        logger,
+		tailHeartbeat: opts.TailHeartbeat,
+		onError:       onError,
 	}, nil
 }
 
@@ -136,7 +137,7 @@ func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
 		}
 		cur = snap
 	}
-	return tailLoop(ctx, a.dbPath, a.sourceID, cur, warmStart, out, a.logger, a.onError)
+	return tailLoopWithHeartbeat(ctx, a.dbPath, a.sourceID, cur, warmStart, out, a.logger, a.onError, a.tailHeartbeat)
 }
 
 // ParseCursor implements canonical.Adapter. Empty input yields the zero Cursor;

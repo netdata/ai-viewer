@@ -17,10 +17,8 @@ const debounceMaxEntries = 4096
 // new directories that fsnotify (non-recursive on Linux) may have missed.
 const tailTickInterval = 5 * time.Second
 
-// tailLoop runs the fsnotify event loop until ctx is cancelled. The adapter
-// owns the watcher lifecycle.
-func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error)) error {
-	runtime, err := newTailRuntime(ctx, root, sourceID, cur, out, onError)
+func tailLoopWithHeartbeat(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error), tailHeartbeat func()) error {
+	runtime, err := newTailRuntime(ctx, root, sourceID, cur, out, onError, tailHeartbeat)
 	if err != nil || runtime == nil {
 		return err
 	}

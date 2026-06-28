@@ -167,7 +167,7 @@
   --ring: oklch(0.55 0.2 250);
 
   --status-completed: oklch(0.48 0.17 145);
-  --status-running: oklch(0.65 0.16 75);
+  --status-running: oklch(0.48 0.14 75);
   --status-failed: oklch(0.55 0.22 25);
   --status-abandoned: oklch(0.55 0.01 250);
   --status-interrupted: oklch(0.65 0.18 50);

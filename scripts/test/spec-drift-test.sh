@@ -63,6 +63,7 @@ DETECTOR_INPUTS=(
   "go.mod"
   "internal/canonical/events.go"
   "cmd/ai-viewer-ingest/sources.go"
+  "cmd/ai-viewer-ingest/source_discovery.go"
   "frontend/src/api/types.ts"
   "frontend/src/api/payloads.ts"
   "frontend/src/viz/trace.ts"
@@ -516,7 +517,7 @@ case_adapter_probe_no_spec() {
   local fix; fix="$(new_fixture)"
   # Inject a probe struct for a format whose adapter-<name>.md does not exist.
   sed -i 's#\(format:   "aiagent_v3",\)#format: "phantomfmt",\n\t\t\t\1#' \
-    "$fix/cmd/ai-viewer-ingest/sources.go"
+    "$fix/cmd/ai-viewer-ingest/source_discovery.go"
   assert_drift "$name" "$fix" "phantomfmt"
 }
 
@@ -537,7 +538,7 @@ case_adapter_probe_extractor_empty() {
   local name="adapter-probes::extractor_empty_fail_closed"
   local fix; fix="$(new_fixture)"
   sed -i -E 's/format:[[:space:]]+"[a-z0-9_-]+"/format: probeFormat/g' \
-    "$fix/cmd/ai-viewer-ingest/sources.go"
+    "$fix/cmd/ai-viewer-ingest/source_discovery.go"
   assert_drift "$name" "$fix" "no 'format:"
 }
 

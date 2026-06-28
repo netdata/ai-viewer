@@ -86,7 +86,7 @@ Before marking SOW completed:
 | SSE event types | `eventPayload` `case "<kind>"` + control frames in `internal/presenter/events_sse.go` (+ `subscription_filter.go`) | Event-type headings in `sse-protocol.md` (`resync` = §Reconnect control frame) |
 | SQLite columns | `internal/store/migrations/*.sql` (`CREATE TABLE`/`CREATE VIRTUAL TABLE fts5`/`ALTER … ADD COLUMN`) | `data-model.md` (column dir = code→spec; table names bidirectional) |
 | Canonical event kinds | `EvXxx EventKind = "<value>"` in `internal/canonical/events.go` | identical fenced block in `canonical-events.md` (bidirectional, exact) |
-| Adapter discovery probes | `format: "<name>"` structs in `cmd/ai-viewer-ingest/sources.go` | `adapter-<name>.md` exists + names the probe path (underscore→hyphen) |
+| Adapter discovery probes | `format: "<name>"` structs in `cmd/ai-viewer-ingest/source_discovery.go` | `adapter-<name>.md` exists + names the probe path (underscore→hyphen) |
 
 `scripts/spec-drift.sh` covers the **structural** indicators above; it does NOT prove prose accuracy. So a manual audit still applies for everything else:
 

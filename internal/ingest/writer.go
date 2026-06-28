@@ -53,6 +53,10 @@ type writer struct {
 	// source_status_changed notify row when set. Cleared after each
 	// flush. See ingester.md §Notify Channel.
 	sourceStatusChanged bool
+	// readModelRepairRequested flips when the committed batch records durable
+	// read_model_state='repair_pending'. The worker promotes it only after
+	// commit so the supervisor never repairs uncommitted debt.
+	readModelRepairRequested bool
 	// pricingMissDedup tracks (provider, model, missKind) tuples for
 	// which a SourceError WRN has already been emitted AND DURABLY
 	// COMMITTED for THIS SOURCE, across the lifetime of the worker
@@ -188,6 +192,10 @@ type writer struct {
 	// deferReadModels points at the ingester's bulk-scan flag (SOW-0062).
 	// When true, refreshBatchReadModels skips refreshRollups + refreshFTS.
 	deferReadModels *atomic.Bool
+	// readModelRebuildActive points at the ingester-wide full rebuild flag.
+	// When true, Tail batches keep primary rows current but defer derived
+	// FTS/rollup refresh so they cannot race the truncate/rebuild window.
+	readModelRebuildActive *atomic.Bool
 }
 
 // logEntryOnConflict is the ON CONFLICT clause appended to every
@@ -440,6 +448,7 @@ func (w *writer) resetBatch() {
 	w.lastCursor = ""
 	w.hasCursor = false
 	w.sourceStatusChanged = false
+	w.readModelRepairRequested = false
 	// Per-batch rollup notify signals reset every batch; the carried
 	// dirtyRollupBuckets set (above) does not.
 	w.rollupTouchedThisBatch = false
@@ -734,7 +743,10 @@ ON CONFLICT (source_id, native_id) DO UPDATE SET
 }
 
 func (w *writer) applySessionUpdated(ctx context.Context, tx *sql.Tx, ev canonical.SessionUpdatedEvent) error {
-	id := canonicalSessionID(w.sourceID, ev.NativeID)
+	id, err := w.requireSessionID(ctx, tx, ev.NativeID, ev.Ts)
+	if err != nil {
+		return err
+	}
 	// Merge extras into existing JSON. SQLite's json_patch is exactly
 	// what we need: it walks both trees and merges objects.
 	extrasJSON, err := marshalExtras(ev.Extras)
@@ -875,7 +887,10 @@ func loadSessionOpStartTs(ctx context.Context, tx *sql.Tx, sessionID string) ([]
 }
 
 func (w *writer) applySessionFinalized(ctx context.Context, tx *sql.Tx, ev canonical.SessionFinalizedEvent) error {
-	id := canonicalSessionID(w.sourceID, ev.NativeID)
+	id, err := w.requireSessionID(ctx, tx, ev.NativeID, ev.Ts)
+	if err != nil {
+		return err
+	}
 	status := string(ev.Status)
 	if status == "" {
 		status = string(canonical.StatusCompleted)

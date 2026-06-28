@@ -373,7 +373,7 @@ authoritative code/spec locations:
   `.agents/sow/specs/canonical-events.md`. Bidirectional and exact (the value set must match
   byte-for-byte).
 - **Adapter discovery probes** — the `format: "<name>"` probe structs in
-  `cmd/ai-viewer-ingest/sources.go` (the auto-discovery probe list) vs. the
+  `cmd/ai-viewer-ingest/source_discovery.go` (the auto-discovery probe list) vs. the
   existence of the corresponding `.agents/sow/specs/adapter-<name>.md` and that spec
   mentioning the adapter's default probe path. Format→spec-file name maps
   underscore→hyphen (`aiagent_v3` → `adapter-aiagent-v3.md`, `claude-code` →

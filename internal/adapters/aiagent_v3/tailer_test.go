@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,23 @@ func waitForEvent(t *testing.T, ch chan canonical.Event, timeout time.Duration, 
 			}
 		case <-deadline:
 			return nil, false
+		}
+	}
+}
+
+func waitForHeartbeat(t *testing.T, count *atomic.Int64, want int64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if count.Load() >= want {
+			return true
+		}
+		select {
+		case <-deadline:
+			return false
+		case <-tick.C:
 		}
 	}
 }
@@ -161,7 +179,10 @@ func TestTail_EmitsPeriodicProgress(t *testing.T) {
 	if err := mkdirAll(filepath.Join(root, sessionDir)); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	a, _ := New(root, canonical.AdapterOptions{})
+	var heartbeats atomic.Int64
+	a, _ := New(root, canonical.AdapterOptions{
+		OnTailHeartbeat: func() { heartbeats.Add(1) },
+	})
 	out := make(chan canonical.Event, 16)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -180,6 +201,54 @@ func TestTail_EmitsPeriodicProgress(t *testing.T) {
 	}
 	if sp := ev.(canonical.SourceProgressEvent); sp.Cursor == "" {
 		t.Fatalf("progress cursor empty")
+	}
+	if !waitForHeartbeat(t, &heartbeats, 1, time.Second) {
+		t.Fatalf("periodic SourceProgress did not call tail heartbeat")
+	}
+}
+
+func TestScanThenTail_NoLossInWindow(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, sessionDir)
+	if err := mkdirAll(dir); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	path := filepath.Join(dir, "window.jsonl")
+	initial := []byte(`{"version":3,"recordType":"session_start","seq":1,"ts":"2026-05-26T10:00:00.000Z","originId":"window","sessionId":"window","capturePayloads":true}` + "\n")
+	if err := writeFileBytes(path, initial); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+	scanOut := make(chan canonical.Event, 128)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !hasSessionStarted(drainBuffered(scanOut), "window") {
+		t.Fatalf("Scan did not emit the seeded session")
+	}
+
+	// The window: this record lands after Scan returns but before Tail registers.
+	turn := []byte(`{"version":3,"recordType":"turn_start","seq":2,"ts":"2026-05-26T10:00:01.000Z","originId":"window","sessionId":"window","turn":1}` + "\n")
+	if err := appendFileBytes(path, turn); err != nil {
+		t.Fatalf("append window record: %v", err)
+	}
+
+	tailOut := make(chan canonical.Event, 128)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Tail(ctx, tailOut) }()
+
+	if _, ok := waitForEvent(t, tailOut, 5*time.Second, func(ev canonical.Event) bool {
+		ts, is := ev.(canonical.TurnStartedEvent)
+		return is && ts.SessionNativeID == "window" && ts.Seq == 1
+	}); !ok {
+		t.Fatalf("Tail did not emit record appended in the Scan-to-Tail window")
 	}
 }
 
@@ -239,6 +308,16 @@ func TestSortStrings(t *testing.T) {
 	if in[0] != "a" || in[1] != "b" || in[2] != "c" {
 		t.Fatalf("not sorted: %v", in)
 	}
+}
+
+func hasSessionStarted(events []canonical.Event, nativeID string) bool {
+	for _, ev := range events {
+		ss, ok := ev.(canonical.SessionStartedEvent)
+		if ok && ss.NativeID == nativeID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestResetDebounce(t *testing.T) {

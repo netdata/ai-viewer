@@ -40,8 +40,8 @@ func TestMigration0007_ChainHeadSchemaVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "11" {
-		t.Fatalf("schema_meta.version = %q, want %q (full chain head is 0011)", version, "11")
+	if version != "12" {
+		t.Fatalf("schema_meta.version = %q, want %q (full chain head is 0012)", version, "12")
 	}
 }
 
@@ -151,8 +151,8 @@ func TestMigration0007_IsIdempotent(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "11" {
-		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "11")
+	if version != "12" {
+		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "12")
 	}
 
 	if got := scanIntInternal(t, db,

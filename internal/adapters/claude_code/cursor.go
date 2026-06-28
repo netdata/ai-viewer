@@ -14,7 +14,7 @@ import (
 // the shape ever changes; ParseCursor refuses unknown versions.
 const cursorVersion = 1
 
-// Cursor is the resume token persisted in sources.cursor for the
+// Cursor is the resume token persisted in source_progress.cursor for the
 // claude-code adapter. Keys in Files and MetaSeen are paths RELATIVE to the
 // configured projects root (e.g. "<sanitized-cwd>/<sessionId>.jsonl"), so
 // the cursor survives a move of the projects dir and Bun/Node duplicate

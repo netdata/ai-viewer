@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 // returning a cancel func, a wait func, and the live event channel. onError
 // appends to a shared slice the caller can inspect after cancelling.
 func runTail(t *testing.T, root, sourceID string, cur Cursor) (context.CancelFunc, func() []string, chan canonical.Event) {
+	return runTailWithHeartbeat(t, root, sourceID, cur, nil)
+}
+
+func runTailWithHeartbeat(t *testing.T, root, sourceID string, cur Cursor, tailHeartbeat func()) (context.CancelFunc, func() []string, chan canonical.Event) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	out := make(chan canonical.Event, 4096)
@@ -29,7 +34,7 @@ func runTail(t *testing.T, root, sourceID string, cur Cursor) (context.CancelFun
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = tailLoop(ctx, root, sourceID, cur, out, onError)
+		_ = tailLoopWithHeartbeat(ctx, root, sourceID, cur, out, onError, tailHeartbeat)
 	}()
 	wait := func() []string {
 		wg.Wait()
@@ -40,6 +45,23 @@ func runTail(t *testing.T, root, sourceID string, cur Cursor) (context.CancelFun
 		return cp
 	}
 	return cancel, wait, out
+}
+
+func waitForHeartbeat(t *testing.T, count *atomic.Int64, want int64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if count.Load() >= want {
+			return true
+		}
+		select {
+		case <-deadline:
+			return false
+		case <-tick.C:
+		}
+	}
 }
 
 // waitForKind drains out until an event of the given kind appears or the

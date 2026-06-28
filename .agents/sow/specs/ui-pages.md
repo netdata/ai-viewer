@@ -72,7 +72,15 @@ The home page. After SOW-0079:
 
 (SOW-0077)
 - Header: "Sources"
-- Content: source list with health indicators.
+- Content: source list with lifecycle/read-model health indicators, Tail
+  heartbeat/failure evidence, parse-error counts, progress timestamp, and
+  optional cursor/debug metadata.
+- Health badges are derived from lifecycle/read-model fields returned by
+  `/api/sources` and `/api/health`, not from `last_seen_at`/legacy lag alone.
+  `last_seen_at` may appear only as a secondary diagnostic.
+- Lifecycle/read-model badges, including running/repairing states rendered on
+  tinted badge backgrounds, must pass the axe color-contrast gate in both dark
+  and light themes.
 - Adapter metadata (`meta`) is typed as part of the source API contract but is
   not dumped into primary chrome. The page may show safe summary keys and keeps
   raw metadata collapsed or diagnostic-only.
@@ -112,7 +120,11 @@ Same shape as /agents/:name, but filtered to the tool.
 
 - Header: "Ingest errors" + subtitle "Recent parse + ingest errors across all sources."
 - Toolbar: source filter + severity filter
-- Content: log entries table (source, file, line, severity, message, time)
+- Summary strip: total parse errors, sources with errors, sources with degraded
+  lifecycle/read-model state, and overall health.
+- Content: source-ranked table plus error/log detail. Lifecycle/read-model
+  degraded states come from `/api/sources`/`/api/health`; legacy lag/last-seen
+  values are secondary diagnostics only.
 
 ### `/sessions/:id` — Session Detail (SOW-0074, SOW-0083)
 

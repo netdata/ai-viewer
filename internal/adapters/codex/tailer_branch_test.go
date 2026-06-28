@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,7 +138,10 @@ func TestTail_DebounceFlushAndTick(t *testing.T) {
 	path := shardPath(root, uuid7(1))
 	writeFileBytes(t, path, []byte(metaLine("sid-deb", `"exec"`)+"\n"))
 
-	cancel, wait, out := runTail(t, root, "codex:"+root, newCursor())
+	var heartbeats atomic.Int64
+	cancel, wait, out := runTailWithHeartbeat(t, root, "codex:"+root, newCursor(), func() {
+		heartbeats.Add(1)
+	})
 	defer func() { cancel(); wait() }()
 
 	// Drain the catch-up SessionStarted.
@@ -154,8 +158,12 @@ func TestTail_DebounceFlushAndTick(t *testing.T) {
 	// tick interval so the ONLY remaining SourceProgress can come from the tick
 	// arm (tailLoop:126), not a debounce flush — deterministically covering it.
 	drainFor(out, 200*time.Millisecond)
+	nextHeartbeat := heartbeats.Load() + 1
 	if _, ok := waitForKind(out, canonical.EvSourceProgress, tailTickInterval+3*time.Second); !ok {
 		t.Fatal("tick did not emit a SourceProgress during a quiet window")
+	}
+	if !waitForHeartbeat(t, &heartbeats, nextHeartbeat, time.Second) {
+		t.Fatal("quiet tick did not call tail heartbeat")
 	}
 }
 

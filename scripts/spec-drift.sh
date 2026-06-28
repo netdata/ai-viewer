@@ -50,7 +50,7 @@ EVENTS_SSE_GO="internal/presenter/events_sse.go"
 SUB_FILTER_GO="internal/presenter/subscription_filter.go"
 CANONICAL_GO="internal/canonical/events.go"
 MIGRATIONS_DIR="internal/store/migrations"
-DISCOVERY_GO="cmd/ai-viewer-ingest/sources.go"
+DISCOVERY_GO="cmd/ai-viewer-ingest/source_discovery.go"
 SPEC_DIR=".agents/sow/specs"
 REST_SPEC="${SPEC_DIR}/rest-api.md"
 SSE_SPEC="${SPEC_DIR}/sse-protocol.md"
@@ -819,7 +819,7 @@ check_canonical() {
 # --- Indicator (e): adapter discovery probes -------------------------------
 #
 # CODE: the `format: "<name>"` probe structs in the autoDiscoverSources probe
-#   list (sources.go). Each is an adapter the binary auto-discovers.
+#   list (source_discovery.go). Each is an adapter the binary auto-discovers.
 # SPEC: a `.agents/sow/specs/adapter-<name>.md` must EXIST (format→file maps '_' → '-':
 #   aiagent_v3 → adapter-aiagent-v3.md, claude-code → adapter-claude-code.md)
 #   AND that spec must mention the adapter's default probe path (a basename

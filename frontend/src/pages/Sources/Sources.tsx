@@ -3,27 +3,20 @@ import { useSources, useHealth } from '../../api/sources';
 import { useLiveUpdates } from '../../state/useLiveUpdates';
 import { LoadingState, ErrorState } from '../../components/StatusViews';
 import { Button } from '../../components/ui/button';
-import { formatDuration, formatNumber, formatTimestamp } from '../../lib/format';
+import { formatNumber, formatTimestamp } from '../../lib/format';
 import { cn } from '../../lib/utils';
 import type { HealthStatus, SourceItem } from '../../api/types';
 
 // Sources admin / status panel (ui-pages.md §/sources). A per-source table
-// (id, format, enabled, parse_errors, lag, last_seq, last_seen) plus an overall
-// health badge from /api/health. Live: source_status_changed invalidates both
-// ['sources'] and ['health'].
+// (id, format, lifecycle, read models, parse_errors, last_seq, progress) plus
+// an overall health badge from /api/health. Live: source_status_changed
+// invalidates both ['sources'] and ['health'].
 
 const HEALTH_META: Record<HealthStatus, { Icon: typeof CircleCheck; tone: string; label: string }> = {
   ok:       { Icon: CircleCheck, tone: 'text-status-completed', label: 'Healthy' },
   degraded: { Icon: CircleAlert, tone: 'text-status-running',  label: 'Degraded' },
   down:     { Icon: CircleX,     tone: 'text-status-failed',   label: 'Down' },
 };
-
-/** lagFor reads a source's ingest lag from the health snapshot (the sources
- *  list carries no lag field; lag is a health observability metric). */
-function lagFor(lagBySource: Map<string, number>, source: SourceItem): string {
-  const lag = lagBySource.get(source.id);
-  return lag === undefined ? '—' : formatDuration(lag);
-}
 
 function sourceColorVar(format: string): string {
   switch (format) {
@@ -44,6 +37,64 @@ function metadataSummary(meta: SourceItem['meta']): string {
   return `${formatNumber(count)} metadata ${count === 1 ? 'key' : 'keys'}`;
 }
 
+function stateLabel(state: string): string {
+  if (state === '') {
+    return 'Unknown';
+  }
+  const spaced = state.replaceAll('_', ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function lifecycleTone(state: string): string {
+  switch (state) {
+    case 'tailing':
+    case 'scan_complete':
+      return 'bg-status-completed/10 text-status-completed';
+    case 'scanning':
+    case 'tail_starting':
+    case 'tail_restarting':
+    case 'starting':
+      return 'bg-status-running/10 text-status-running';
+    case 'start_failed':
+    case 'construct_failed':
+    case 'scan_failed':
+    case 'tail_stale':
+    case 'tail_failed':
+      return 'bg-status-failed/10 text-status-failed';
+    case 'stopped':
+      return 'bg-muted text-muted-foreground';
+    default:
+      return 'bg-muted text-muted-foreground';
+  }
+}
+
+function readModelTone(state: string): string {
+  switch (state) {
+    case 'ready':
+      return 'bg-status-completed/10 text-status-completed';
+    case 'repair_pending':
+    case 'repairing':
+      return 'bg-status-running/10 text-status-running';
+    case 'repair_timeout':
+    case 'repair_failed':
+      return 'bg-status-failed/10 text-status-failed';
+    default:
+      return 'bg-muted text-muted-foreground';
+  }
+}
+
+function StatusPill({ label, tone }: { label: string; tone: string }) {
+  return (
+    <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium', tone)}>
+      {label}
+    </span>
+  );
+}
+
+function sourceProgressTimestamp(src: SourceItem): number | null {
+  return src.progress_updated_at ?? src.updated_at;
+}
+
 export function Sources() {
   const sources = useSources();
   const health = useHealth();
@@ -51,13 +102,6 @@ export function Sources() {
   // A source_status_changed frame refreshes both ['sources'] and ['health'].
   useLiveUpdates({});
 
-  // On a health error, ignore any stale health.data: TanStack Query keeps the
-  // last successful payload across a failed background refetch (the live
-  // source_status_changed path), so lag must fall back to '—' via lagFor — not
-  // show stale numbers beside the error banner. (ui-pages.md §/sources)
-  const lagBySource = new Map<string, number>(
-    (health.isError ? [] : (health.data?.sources ?? [])).map((s) => [s.id, s.lag_us]),
-  );
   const items = sources.data?.items ?? [];
   const enabledCount = items.filter((s) => s.enabled).length;
   const errorCount = items.reduce((acc, s) => acc + s.parse_errors, 0);
@@ -68,7 +112,7 @@ export function Sources() {
       <div>
         <h1 id="sources-title" className="text-2xl font-semibold tracking-tight">Sources</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Configured ingest sources, their health, and their current parse-error + lag posture.
+          Configured ingest sources, their lifecycle, and their current read-model state.
         </p>
       </div>
 
@@ -132,12 +176,13 @@ export function Sources() {
               <tr>
                 <th scope="col" className="px-4 py-2 text-left font-medium">ID</th>
                 <th scope="col" className="px-4 py-2 text-left font-medium">Format</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Lifecycle</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Read models</th>
                 <th scope="col" className="px-4 py-2 text-left font-medium">Enabled</th>
                 <th scope="col" className="px-4 py-2 text-right font-medium">Parse errors</th>
-                <th scope="col" className="px-4 py-2 text-right font-medium">Lag</th>
                 <th scope="col" className="px-4 py-2 text-left font-medium">Metadata</th>
                 <th scope="col" className="px-4 py-2 text-right font-medium">Last seq</th>
-                <th scope="col" className="px-4 py-2 text-left font-medium">Last seen</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Progress</th>
               </tr>
             </thead>
             <tbody>
@@ -174,6 +219,26 @@ export function Sources() {
                       </span>
                     </td>
                     <td className="px-4 py-2">
+                      <div className="flex flex-col gap-1">
+                        <StatusPill label={stateLabel(src.lifecycle_state)} tone={lifecycleTone(src.lifecycle_state)} />
+                        {src.lifecycle_error ? (
+                          <span className="max-w-[18rem] truncate text-xs text-status-failed">
+                            {src.lifecycle_error}
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-col gap-1">
+                        <StatusPill label={stateLabel(src.read_model_state)} tone={readModelTone(src.read_model_state)} />
+                        {src.read_model_error ? (
+                          <span className="max-w-[18rem] truncate text-xs text-status-failed">
+                            {src.read_model_error}
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2">
                       <span className={cn(
                         'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium',
                         src.enabled
@@ -190,9 +255,6 @@ export function Sources() {
                     )}>
                       {formatNumber(src.parse_errors)}
                     </td>
-                    <td className="px-4 py-2 text-right font-mono tabular-nums text-muted-foreground">
-                      {lagFor(lagBySource, src)}
-                    </td>
                     <td className="px-4 py-2 text-xs text-muted-foreground">
                       {metadataSummary(src.meta)}
                     </td>
@@ -200,7 +262,7 @@ export function Sources() {
                       {formatNumber(src.last_seq)}
                     </td>
                     <td className="px-4 py-2 font-mono text-xs tabular-nums text-muted-foreground">
-                      {formatTimestamp(src.last_seen_at)}
+                      {formatTimestamp(sourceProgressTimestamp(src))}
                     </td>
                   </tr>
                 );

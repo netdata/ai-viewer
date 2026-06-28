@@ -30,32 +30,65 @@ type sourcesResponse struct {
 // the adapter did not populate the column — absence is the "not
 // populated" signal, not zero / {}.
 type sourceItem struct {
-	ID          string          `json:"id"`
-	Format      string          `json:"format"`
-	Location    string          `json:"location"`
-	Enabled     bool            `json:"enabled"`
-	ParseErrors int64           `json:"parse_errors"`
-	LastSeenAt  *int64          `json:"last_seen_at"`
-	CreatedAt   int64           `json:"created_at"`
-	Cursor      string          `json:"cursor,omitempty"`
-	LastSeq     int64           `json:"last_seq"`
-	LastTsUS    *int64          `json:"last_ts_us"`
-	UpdatedAt   *int64          `json:"updated_at"`
-	Meta        json.RawMessage `json:"meta,omitempty"`
+	ID                         string          `json:"id"`
+	Format                     string          `json:"format"`
+	Location                   string          `json:"location"`
+	Enabled                    bool            `json:"enabled"`
+	ParseErrors                int64           `json:"parse_errors"`
+	LastSeenAt                 *int64          `json:"last_seen_at"`
+	CreatedAt                  int64           `json:"created_at"`
+	Cursor                     string          `json:"cursor,omitempty"`
+	LastSeq                    int64           `json:"last_seq"`
+	LastTsUS                   *int64          `json:"last_ts_us"`
+	UpdatedAt                  *int64          `json:"updated_at"`
+	ProgressUpdatedAt          *int64          `json:"progress_updated_at,omitempty"`
+	LifecycleState             string          `json:"lifecycle_state"`
+	LifecycleStateAt           *int64          `json:"lifecycle_state_at,omitempty"`
+	ScanStartedAt              *int64          `json:"scan_started_at,omitempty"`
+	ScanCompletedAt            *int64          `json:"scan_completed_at,omitempty"`
+	TailStartedAt              *int64          `json:"tail_started_at,omitempty"`
+	TailHeartbeatAt            *int64          `json:"tail_heartbeat_at,omitempty"`
+	TailFailedAt               *int64          `json:"tail_failed_at,omitempty"`
+	TailRestartCount           int64           `json:"tail_restart_count"`
+	LifecycleError             string          `json:"lifecycle_error,omitempty"`
+	ReadModelState             string          `json:"read_model_state"`
+	ReadModelStateAt           *int64          `json:"read_model_state_at,omitempty"`
+	ReadModelRepairStartedAt   *int64          `json:"read_model_repair_started_at,omitempty"`
+	ReadModelRepairCompletedAt *int64          `json:"read_model_repair_completed_at,omitempty"`
+	ReadModelRepairFailedAt    *int64          `json:"read_model_repair_failed_at,omitempty"`
+	ReadModelRepairAttempts    int64           `json:"read_model_repair_attempts"`
+	ReadModelError             string          `json:"read_model_error,omitempty"`
+	Meta                       json.RawMessage `json:"meta,omitempty"`
 }
 
 type sourceItemRow struct {
-	id          string
-	format      string
-	location    string
-	cursor      string
-	enabled     int64
-	parseErrors int64
-	lastSeenAt  sql.NullInt64
-	createdAt   int64
-	lastSeq     int64
-	lastTsUS    sql.NullInt64
-	updatedAt   sql.NullInt64
+	id                         string
+	format                     string
+	location                   string
+	cursor                     string
+	enabled                    int64
+	parseErrors                int64
+	lastSeenAt                 sql.NullInt64
+	createdAt                  int64
+	lastSeq                    int64
+	lastTsUS                   sql.NullInt64
+	updatedAt                  sql.NullInt64
+	lifecycleState             string
+	lifecycleStateAt           sql.NullInt64
+	scanStartedAt              sql.NullInt64
+	scanCompletedAt            sql.NullInt64
+	tailStartedAt              sql.NullInt64
+	tailHeartbeatAt            sql.NullInt64
+	tailFailedAt               sql.NullInt64
+	tailRestartCount           int64
+	lifecycleError             sql.NullString
+	readModelState             string
+	readModelStateAt           sql.NullInt64
+	readModelRepairStartedAt   sql.NullInt64
+	readModelRepairCompletedAt sql.NullInt64
+	readModelRepairFailedAt    sql.NullInt64
+	readModelRepairAttempts    int64
+	readModelError             sql.NullString
 	// metaJSON is the raw sources.meta_json column. Valid==false means the
 	// adapter did not populate it (the "not populated" signal). See
 	// healthSourceRow.metaJSON for the full contract.
@@ -140,7 +173,23 @@ SELECT
     IFNULL(sp.cursor, ''),
     IFNULL(sp.last_seq, 0),
     sp.last_ts_us,
-    sp.updated_at,
+    NULLIF(sp.updated_at, 0),
+    IFNULL(sp.lifecycle_state, 'unknown'),
+    NULLIF(sp.lifecycle_state_at, 0),
+    NULLIF(sp.scan_started_at, 0),
+    NULLIF(sp.scan_completed_at, 0),
+    NULLIF(sp.tail_started_at, 0),
+    NULLIF(sp.tail_heartbeat_at, 0),
+    NULLIF(sp.tail_failed_at, 0),
+    IFNULL(sp.tail_restart_count, 0),
+    sp.lifecycle_error,
+    IFNULL(sp.read_model_state, 'unknown'),
+    NULLIF(sp.read_model_state_at, 0),
+    NULLIF(sp.read_model_repair_started_at, 0),
+    NULLIF(sp.read_model_repair_completed_at, 0),
+    NULLIF(sp.read_model_repair_failed_at, 0),
+    IFNULL(sp.read_model_repair_attempts, 0),
+    sp.read_model_error,
     s.meta_json
 FROM sources s
 LEFT JOIN source_progress sp ON sp.source_id = s.id
@@ -159,7 +208,23 @@ SELECT
     '',
     IFNULL(sp.last_seq, 0),
     sp.last_ts_us,
-    sp.updated_at,
+    NULLIF(sp.updated_at, 0),
+    IFNULL(sp.lifecycle_state, 'unknown'),
+    NULLIF(sp.lifecycle_state_at, 0),
+    NULLIF(sp.scan_started_at, 0),
+    NULLIF(sp.scan_completed_at, 0),
+    NULLIF(sp.tail_started_at, 0),
+    NULLIF(sp.tail_heartbeat_at, 0),
+    NULLIF(sp.tail_failed_at, 0),
+    IFNULL(sp.tail_restart_count, 0),
+    sp.lifecycle_error,
+    IFNULL(sp.read_model_state, 'unknown'),
+    NULLIF(sp.read_model_state_at, 0),
+    NULLIF(sp.read_model_repair_started_at, 0),
+    NULLIF(sp.read_model_repair_completed_at, 0),
+    NULLIF(sp.read_model_repair_failed_at, 0),
+    IFNULL(sp.read_model_repair_attempts, 0),
+    sp.read_model_error,
     s.meta_json
 FROM sources s
 LEFT JOIN source_progress sp ON sp.source_id = s.id
@@ -171,17 +236,17 @@ ORDER BY s.created_at, s.id
 		return nil, sourceItemsFailure{kind: sourceItemsFailureQuery, err: err}
 	}
 	defer func() { _ = rows.Close() }()
-	return readSourceItemRows(rows, p.logger)
+	return readSourceItemRows(rows, p.logger, p.now().UnixMicro())
 }
 
-func readSourceItemRows(rows *sql.Rows, logger *slog.Logger) ([]sourceItem, sourceItemsFailure) {
+func readSourceItemRows(rows *sql.Rows, logger *slog.Logger, nowUS int64) ([]sourceItem, sourceItemsFailure) {
 	items := make([]sourceItem, 0, 8)
 	for rows.Next() {
 		row, err := scanSourceItemRow(rows)
 		if err != nil {
 			return nil, sourceItemsFailure{kind: sourceItemsFailureScan, err: err}
 		}
-		item := buildSourceItem(row)
+		item := buildSourceItem(row, nowUS)
 		item.Meta = metaFromColumn(logger, row.id, row.metaJSON)
 		items = append(items, item)
 	}
@@ -205,21 +270,43 @@ func scanSourceItemRow(rows *sql.Rows) (sourceItemRow, error) {
 		&row.lastSeq,
 		&row.lastTsUS,
 		&row.updatedAt,
+		&row.lifecycleState,
+		&row.lifecycleStateAt,
+		&row.scanStartedAt,
+		&row.scanCompletedAt,
+		&row.tailStartedAt,
+		&row.tailHeartbeatAt,
+		&row.tailFailedAt,
+		&row.tailRestartCount,
+		&row.lifecycleError,
+		&row.readModelState,
+		&row.readModelStateAt,
+		&row.readModelRepairStartedAt,
+		&row.readModelRepairCompletedAt,
+		&row.readModelRepairFailedAt,
+		&row.readModelRepairAttempts,
+		&row.readModelError,
 		&row.metaJSON,
 	)
 	return row, err
 }
 
-func buildSourceItem(row sourceItemRow) sourceItem {
+func buildSourceItem(row sourceItemRow, nowUS int64) sourceItem {
 	item := sourceItem{
-		ID:          row.id,
-		Format:      row.format,
-		Location:    row.location,
-		Enabled:     row.enabled != 0,
-		ParseErrors: row.parseErrors,
-		CreatedAt:   row.createdAt,
-		Cursor:      row.cursor,
-		LastSeq:     row.lastSeq,
+		ID:                      row.id,
+		Format:                  row.format,
+		Location:                row.location,
+		Enabled:                 row.enabled != 0,
+		ParseErrors:             row.parseErrors,
+		CreatedAt:               row.createdAt,
+		Cursor:                  row.cursor,
+		LastSeq:                 row.lastSeq,
+		LifecycleState:          effectiveSourceItemLifecycleState(row, nowUS),
+		TailRestartCount:        row.tailRestartCount,
+		LifecycleError:          sanitizePresenterDiagnostic(row.lifecycleError, row.location),
+		ReadModelState:          defaultReadModelState(row.readModelState),
+		ReadModelRepairAttempts: row.readModelRepairAttempts,
+		ReadModelError:          sanitizePresenterDiagnostic(row.readModelError, row.location),
 	}
 	setSourceItemNullables(&item, row)
 	// Meta is set by the caller (readSourceItemRows) via metaFromColumn so
@@ -239,7 +326,30 @@ func setSourceItemNullables(item *sourceItem, row sourceItemRow) {
 	if row.updatedAt.Valid {
 		v := row.updatedAt.Int64
 		item.UpdatedAt = &v
+		item.ProgressUpdatedAt = &v
 	}
+	item.LifecycleStateAt = ptrNonZero(row.lifecycleStateAt)
+	item.ScanStartedAt = ptrNonZero(row.scanStartedAt)
+	item.ScanCompletedAt = ptrNonZero(row.scanCompletedAt)
+	item.TailStartedAt = ptrNonZero(row.tailStartedAt)
+	item.TailHeartbeatAt = ptrNonZero(row.tailHeartbeatAt)
+	item.TailFailedAt = ptrNonZero(row.tailFailedAt)
+	item.ReadModelStateAt = ptrNonZero(row.readModelStateAt)
+	item.ReadModelRepairStartedAt = ptrNonZero(row.readModelRepairStartedAt)
+	item.ReadModelRepairCompletedAt = ptrNonZero(row.readModelRepairCompletedAt)
+	item.ReadModelRepairFailedAt = ptrNonZero(row.readModelRepairFailedAt)
+}
+
+func effectiveSourceItemLifecycleState(row sourceItemRow, nowUS int64) string {
+	state := defaultSourceState(row.lifecycleState)
+	if state != "tailing" {
+		return state
+	}
+	refUS, ok := tailHeartbeatReferenceUS(row.tailStartedAt, row.tailHeartbeatAt)
+	if !ok || ageExceedsUS(refUS, nowUS, tailStaleThresholdUS) {
+		return "tail_stale"
+	}
+	return state
 }
 
 func (p *Presenter) writeSourcesFailure(ctx context.Context, w http.ResponseWriter, r *http.Request, failure sourceItemsFailure) {

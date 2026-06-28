@@ -30,13 +30,18 @@ const sourceIDPrefix = Format + ":"
 // Tail; concurrent Scan+Tail on the same instance is not part of the
 // contract (see specs/adapter-contract.md).
 type Adapter struct {
-	root     string
-	sourceID string
-	logger   *slog.Logger
+	root          string
+	sourceID      string
+	logger        *slog.Logger
+	tailHeartbeat func()
 	// onError surfaces non-fatal per-record parse errors. Never nil
 	// after construction; New and Factory substitute a no-op when the
 	// caller passes nil so adapter code can call it unconditionally.
 	onError func(error)
+	// scanCursor holds the final per-file state recorded by the most recent
+	// Scan, so a following Tail on the same instance catches up from the Scan
+	// boundary instead of snapshotting current disk state.
+	scanCursor *Cursor
 }
 
 // Compile-time conformance: breaks the build if canonical.Adapter
@@ -65,10 +70,11 @@ func New(root string, opts canonical.AdapterOptions) (*Adapter, error) {
 		sourceID = sourceIDPrefix + root
 	}
 	return &Adapter{
-		root:     root,
-		sourceID: sourceID,
-		logger:   logger,
-		onError:  onError,
+		root:          root,
+		sourceID:      sourceID,
+		logger:        logger,
+		tailHeartbeat: opts.TailHeartbeat,
+		onError:       onError,
 	}, nil
 }
 
@@ -86,7 +92,9 @@ func (a *Adapter) Format() string { return Format }
 // closes it.
 func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error {
 	start := a.coerceCursor(since)
-	_, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	final, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	cursorCopy := final
+	a.scanCursor = &cursorCopy
 	if sErr != nil {
 		if errors.Is(sErr, context.Canceled) || errors.Is(sErr, context.DeadlineExceeded) {
 			return nil
@@ -100,11 +108,18 @@ func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- c
 // <root> and emits canonical events as snapshots are
 // created/rewritten. Returns when ctx is cancelled.
 func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
-	cur, err := a.snapshotCursor()
-	if err != nil {
-		return fmt.Errorf("aiagent_v2: tail snapshot: %w", err)
+	var cur Cursor
+	warmStart := a.scanCursor != nil
+	if warmStart {
+		cur = a.coerceCursor(*a.scanCursor)
+	} else {
+		snap, err := a.snapshotCursor()
+		if err != nil {
+			return fmt.Errorf("aiagent_v2: tail snapshot: %w", err)
+		}
+		cur = snap
 	}
-	return tailLoop(ctx, a.root, a.sourceID, cur, out, a.onError)
+	return tailLoopWithHeartbeat(ctx, a.root, a.sourceID, cur, out, a.onError, a.tailHeartbeat, warmStart)
 }
 
 // ParseCursor implements canonical.Adapter. Empty input yields the

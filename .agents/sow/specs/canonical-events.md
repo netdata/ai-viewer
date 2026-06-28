@@ -66,7 +66,13 @@ Notes:
 
 ### SessionUpdatedEvent
 
-Emitted when the adapter learns metadata about an already-started session — e.g. the model name appears in the first LLM call, or the agent name becomes known. The ingester `UPDATE`s the row; idempotent.
+Emitted when the adapter learns metadata about a session — e.g. the model name
+appears in the first LLM call, or the agent name becomes known. The normal path
+updates an already-started row. If metadata legitimately arrives before the
+matching `SessionStartedEvent`, the ingester creates the same stub session row
+used by turn/op/log events, then applies the partial metadata update. The event
+must never mark a session as changed without a durable `sessions` row, because
+notify rows are emitted atomically with the batch.
 
 ```go
 type SessionUpdatedEvent struct {
@@ -103,6 +109,11 @@ const (
     StatusInterrupted SessionStatus = "interrupted"  // started turns but no terminal record (process killed)
 )
 ```
+
+If the terminal signal arrives before a `SessionStartedEvent`, the ingester
+creates a stub session row and applies the terminal status to that row. A later
+`SessionStartedEvent` fills source metadata through the usual idempotent upsert
+rules.
 
 Notes on terminal signal availability per source:
 
@@ -320,7 +331,11 @@ falls back to the deterministic `log://...` selector derived from the log row.
 
 ### SourceProgressEvent
 
-Emitted periodically by an adapter to checkpoint its cursor. The ingester persists this into `sources.cursor` so a restart resumes from there. Cursor format is opaque JSON — each adapter chooses its own shape (file offsets, file mtimes, SQLite rowids, etc.).
+Emitted periodically by an adapter to checkpoint its cursor. The ingester
+persists this into `source_progress.cursor` so a restart resumes from there.
+Cursor format is opaque JSON — each adapter chooses its own shape (file
+offsets, file mtimes, SQLite rowids, etc.). The legacy `sources.cursor` column
+is historical and is not read or written by the daemon.
 
 ### SourceErrorEvent
 

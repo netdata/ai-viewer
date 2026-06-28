@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,7 +195,7 @@ func TestTailLoop_PicksUpNewSession(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	}()
 	// ONE combined teardown: cancel FIRST, then wait. A separate `defer cancel()`
 	// + `defer wg.Wait()` would run LIFO (wait before cancel) and deadlock — the
@@ -220,6 +221,50 @@ func TestTailLoop_PicksUpNewSession(t *testing.T) {
 	// rather than asserting on the slice captured up to the SessionStarted.
 	if _, ok := waitForEventKind(out, canonical.EvSourceProgress, 5*time.Second); !ok {
 		t.Error("tail cycle did not emit a SourceProgress checkpoint after the new session")
+	}
+}
+
+func TestTailLoop_HeartbeatOnIdlePoll(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan canonical.Event, 16)
+	var ce collectErrs
+	var heartbeats atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = tailLoopWithHeartbeat(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError, func() {
+			heartbeats.Add(1)
+		})
+	}()
+	defer func() { cancel(); wg.Wait() }()
+
+	if !waitForHeartbeat(t, &heartbeats, 1, idlePollInterval+2*time.Second) {
+		t.Fatal("idle poll did not call tail heartbeat")
+	}
+}
+
+func waitForHeartbeat(t *testing.T, count *atomic.Int64, want int64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if count.Load() >= want {
+			return true
+		}
+		select {
+		case <-deadline:
+			return false
+		case <-tick.C:
+		}
 	}
 }
 
@@ -251,7 +296,7 @@ func TestTailLoop_CtxCancelReturnsNil(t *testing.T) {
 	var ce collectErrs
 	done := make(chan error, 1)
 	go func() {
-		done <- tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
+		done <- tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	}()
 	// Let it establish + run one cycle, then cancel.
 	time.Sleep(200 * time.Millisecond)
@@ -275,7 +320,7 @@ func TestTailLoop_MissingDBBenign(t *testing.T) {
 	defer cancel()
 	out := make(chan canonical.Event, 4)
 	var ce collectErrs
-	if err := tailLoop(ctx, missing, "opencode:"+missing, newCursor(), false, out, silentLogger(), ce.onError); err != nil {
+	if err := tailLoop(ctx, missing, "opencode:"+missing, newCursor(), out, silentLogger(), ce.onError); err != nil {
 		t.Fatalf("tailLoop(missing) = %v, want nil", err)
 	}
 	if ce.count() == 0 {

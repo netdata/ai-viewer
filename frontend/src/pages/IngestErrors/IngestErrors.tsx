@@ -8,52 +8,72 @@ import { EntitySummaryStrip, EntitySummaryStripSkeleton } from '../../components
 import { Skeleton } from '../../components/ui/skeleton';
 import { ErrorState } from '../../components/StatusViews';
 import { cn } from '../../lib/utils';
-import { formatDuration, formatNumber, formatTimestamp } from '../../lib/format';
+import { formatNumber, formatTimestamp } from '../../lib/format';
+import type { SourceItem } from '../../api/types';
 
 // IngestErrors — /ingest-errors (SOW-0082)
 //
-// Surfaces silent ingest errors per source. The data layer exposes
-// per-source parse_errors count and lag via /api/health and /api/sources;
-// this page ranks sources by error count so the operator sees
+// Surfaces silent ingest errors per source. The data layer exposes parse-error,
+// lifecycle, and read-model state via /api/sources; this page ranks sources by
+// error count so the operator sees
 // "codex has 2042 errors" at a glance without curling /api/health.
 //
-// The /ingest-errors page also shows a lag indicator per source (green
-// < 60s, yellow < 5min, red >= 5min) so the operator can spot a stalled
-// ingest even when its parse_errors count is 0.
+// The /ingest-errors page also shows lifecycle/read-model state per source so
+// the operator can spot a stalled ingest even when its parse_errors count is 0.
 //
 // Recent log entries with severity IN (WRN, ERR) would be the obvious
 // follow-up — would need a cross-source /api/logs endpoint — and is
 // tracked as a separate SOW.
 
-const LAG_GREEN_US = 60 * 1_000_000;          // < 60s → green
-const LAG_YELLOW_US = 5 * 60 * 1_000_000;     // < 5min → yellow
-                                                  // >= 5min → red
-
 // Stable empty array for the useMemo deps (avoids re-memo churn when
 // sources is still pending).
 const EMPTY_ITEMS: readonly NonNullable<ReturnType<typeof useSources>['data']>['items'][number][] = Object.freeze([]);
 
-type LagTone = 'green' | 'yellow' | 'red' | 'unknown';
-
-function lagTone(lagUs: number | null): LagTone {
-  if (lagUs === null) return 'unknown';
-  if (lagUs < LAG_GREEN_US) return 'green';
-  if (lagUs < LAG_YELLOW_US) return 'yellow';
-  return 'red';
+function stateLabel(state: string): string {
+  if (state === '') return 'Unknown';
+  const spaced = state.replaceAll('_', ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function lagToneClass(tone: LagTone): string {
-  switch (tone) {
-    case 'green': return 'text-status-completed';
-    case 'yellow': return 'text-status-running';
-    case 'red': return 'text-status-failed';
-    case 'unknown': return 'text-muted-foreground';
+function lifecycleTone(state: string): string {
+  switch (state) {
+    case 'tailing':
+    case 'scan_complete':
+      return 'text-status-completed';
+    case 'scanning':
+    case 'tail_starting':
+    case 'tail_restarting':
+    case 'starting':
+      return 'text-status-running';
+    case 'start_failed':
+    case 'construct_failed':
+    case 'scan_failed':
+    case 'tail_stale':
+    case 'tail_failed':
+      return 'text-status-failed';
+    default:
+      return 'text-muted-foreground';
   }
 }
 
-function lagLabel(lagUs: number | null): string {
-  if (lagUs === null) return '—';
-  return formatDuration(lagUs);
+function readModelTone(state: string): string {
+  switch (state) {
+    case 'ready':
+      return 'text-status-completed';
+    case 'repair_pending':
+    case 'repairing':
+      return 'text-status-running';
+    case 'repair_timeout':
+    case 'repair_failed':
+      return 'text-status-failed';
+    default:
+      return 'text-muted-foreground';
+  }
+}
+
+function sourceIsDegraded(source: SourceItem): boolean {
+  return lifecycleTone(source.lifecycle_state) === 'text-status-failed' ||
+    readModelTone(source.read_model_state) === 'text-status-failed';
 }
 
 export function IngestErrors() {
@@ -62,11 +82,6 @@ export function IngestErrors() {
 
   // source_status_changed invalidates both ['sources'] and ['health'].
   useLiveUpdates({});
-
-  const lagBySource = useMemo(() => {
-    if (health.isError || !health.data) return new Map<string, number>();
-    return new Map(health.data.sources.map((s) => [s.id, s.lag_us]));
-  }, [health.data, health.isError]);
 
   const rawItems = sources.data?.items;
   // Stable reference for the empty case so the useMemo deps don't churn
@@ -78,17 +93,13 @@ export function IngestErrors() {
       if (a.parse_errors !== b.parse_errors) {
         return b.parse_errors - a.parse_errors;
       }
-      const aLag = lagBySource.get(a.id) ?? -1;
-      const bLag = lagBySource.get(b.id) ?? -1;
-      return bLag - aLag;
+      return Number(sourceIsDegraded(b)) - Number(sourceIsDegraded(a));
     });
-  }, [items, lagBySource]);
+  }, [items]);
 
   const totalErrors = items.reduce((acc, s) => acc + s.parse_errors, 0);
   const erroredSources = items.filter((s) => s.parse_errors > 0).length;
-  const laggingSources = Array.from(lagBySource.values()).filter(
-    (lag) => lag >= LAG_YELLOW_US,
-  ).length;
+  const degradedSources = items.filter(sourceIsDegraded).length;
   const healthLabel =
     health.data && !health.isError
       ? health.data.status
@@ -98,8 +109,8 @@ export function IngestErrors() {
     { label: 'Total parse errors', value: totalErrors, format: 'number' as const,
       tone: totalErrors > 0 ? ('failed' as const) : ('default' as const) },
     { label: 'Sources with errors', value: erroredSources, format: 'number' as const },
-    { label: 'Sources lagging ≥5m', value: laggingSources, format: 'number' as const,
-      tone: laggingSources > 0 ? ('failed' as const) : ('default' as const) },
+    { label: 'Sources degraded', value: degradedSources, format: 'number' as const,
+      tone: degradedSources > 0 ? ('failed' as const) : ('default' as const) },
     { label: 'Health', value: healthLabel === null ? null : healthLabel.toUpperCase(),
       format: 'text' as const,
       tone:
@@ -145,15 +156,14 @@ export function IngestErrors() {
                 <th scope="col" className="px-4 py-2 text-left font-medium">Source</th>
                 <th scope="col" className="px-4 py-2 text-left font-medium">Format</th>
                 <th scope="col" className="px-4 py-2 text-right font-medium">Parse errors</th>
-                <th scope="col" className="px-4 py-2 text-right font-medium">Lag</th>
-                <th scope="col" className="px-4 py-2 text-left font-medium">Last seen</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Lifecycle</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Read models</th>
+                <th scope="col" className="px-4 py-2 text-left font-medium">Progress</th>
                 <th scope="col" className="px-4 py-2 text-left font-medium" />
               </tr>
             </thead>
             <tbody>
               {rankedSources.map((src, i) => {
-                const lagUs = lagBySource.get(src.id) ?? null;
-                const tone = lagTone(lagUs);
                 return (
                   <tr
                     key={src.id}
@@ -172,14 +182,21 @@ export function IngestErrors() {
                     )}>
                       {formatNumber(src.parse_errors)}
                     </td>
-                    <td className={cn(
-                      'px-4 py-2 text-right font-mono tabular-nums',
-                      lagToneClass(tone),
-                    )}>
-                      {lagLabel(lagUs)}
+                    <td className={cn('px-4 py-2 text-xs font-medium', lifecycleTone(src.lifecycle_state))}>
+                      {stateLabel(src.lifecycle_state)}
+                    </td>
+                    <td className={cn('px-4 py-2 text-xs font-medium', readModelTone(src.read_model_state))}>
+                      <div className="flex flex-col gap-1">
+                        <span>{stateLabel(src.read_model_state)}</span>
+                        {src.read_model_error ? (
+                          <span className="max-w-[14rem] truncate text-status-failed">
+                            {src.read_model_error}
+                          </span>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-4 py-2 font-mono text-xs tabular-nums text-muted-foreground">
-                      {formatTimestamp(src.last_seen_at)}
+                      {formatTimestamp(src.progress_updated_at ?? src.updated_at)}
                     </td>
                     <td className="px-4 py-2 text-right">
                       <Link

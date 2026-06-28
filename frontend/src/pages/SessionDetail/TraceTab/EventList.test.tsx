@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { OpDetail, TurnDetail } from '../../../api/types';
 import { buildOpTree, flattenTree, type TraceNode } from '../../../viz/trace';
@@ -57,6 +57,7 @@ function nodesFrom(ops: OpDetail[]): TraceNode[] {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('EventList', () => {
@@ -97,6 +98,63 @@ describe('EventList', () => {
     fireEvent.scroll(scroller, { target: { scrollTop: 900 * 28 } });
     expect(within(table).getByText('name-900')).toBeInTheDocument();
     expect(within(table).queryByText('name-0')).not.toBeInTheDocument();
+  });
+
+  it('sizes the virtual window from the measured scroll viewport when it fills a pane', async () => {
+    class MockResizeObserver {
+      private readonly callback: ResizeObserverCallback;
+
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+
+      observe(target: Element): void {
+        this.callback(
+          [
+            {
+              target,
+              contentRect: {
+                width: 800,
+                height: 84,
+                x: 0,
+                y: 0,
+                top: 0,
+                right: 800,
+                bottom: 84,
+                left: 0,
+                toJSON: () => ({}),
+              },
+              borderBoxSize: [],
+              contentBoxSize: [],
+              devicePixelContentBoxSize: [],
+            },
+          ],
+          this,
+        );
+      }
+
+      unobserve(): void {
+        // no-op
+      }
+
+      disconnect(): void {
+        // no-op
+      }
+    }
+
+    vi.stubGlobal('ResizeObserver', MockResizeObserver);
+    const many: OpDetail[] = [];
+    for (let i = 0; i < 1000; i++) {
+      many.push(op({ id: `op-${i}`, name: `name-${i}`, start_ts: i * 10, end_ts: i * 10 + 5, duration_us: 5 }));
+    }
+
+    render(<EventList nodes={nodesFrom(many)} onSelect={vi.fn()} selectedId={null} fillParent />);
+
+    const table = screen.getByRole('table', { name: /event list/i });
+    await waitFor(() => {
+      const mountedBodyRows = within(table).getAllByRole('row').length - 1;
+      expect(mountedBodyRows).toBeLessThanOrEqual(12);
+    });
   });
 
   it('shows an em-dash (not 0µs) for a point-event op with no measured duration (P2#3)', () => {

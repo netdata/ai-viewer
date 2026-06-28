@@ -38,6 +38,8 @@ The two binaries communicate **only via the SQLite file**: the canonical rows pl
 │              ▼                                                   │
 │  ┌───────────────────────────────────────────────────────────┐   │
 │  │ ingest/                                                   │   │
+│  │   - one source supervisor per configured/discovered source│   │
+│  │   - durable source lifecycle + Tail restart state         │   │
 │  │   - idempotent upserts (natural-identity dedup at SQL layer)│  │
 │  │   - resolve parent/child links                            │   │
 │  │   - write to SQLite in batched txns                       │   │
@@ -139,6 +141,10 @@ the authoritative method docs.)
 - `Scan` is the backfill path: walk what's on disk now, emit events from `since` forward.
 - `Tail` is the realtime path: subscribe to file/DB changes, emit events as they arrive.
 - Both write into the same channel. The ingester does not care which path produced an event.
+- Tail startup is per source. A source that finishes Scan enters Tail without
+  waiting for unrelated sources to finish scanning or repairing read models.
+  The source supervisor records lifecycle/read-model state in
+  `source_progress` and restarts Tail on failure or stale heartbeat.
 
 Adding a new format = one new package, one Adapter implementation, fixture files under `testdata/<format>/`, unit tests, and a row in the adapters table in the UI. No schema migration. No UI change.
 
@@ -155,10 +161,16 @@ Backfill of the 294K existing local snapshots is a separate concern with its own
 
 ## Failure handling principles
 
-- Every parse error is logged with file path, byte offset, format version, and reason. Counted per-adapter. Surfaced in `/health` and in the UI's adapter status panel.
-- A persistently-failing source does NOT block other sources: each adapter runs in its own goroutine pool with its own cursor.
+- Every parse error is logged with file path, byte offset, format version, and
+  reason. Counted per-adapter. Surfaced in `/api/health`, `/api/sources`, and
+  the Sources/Ingest Errors UI.
+- A persistently-failing source does NOT block other sources: each source has
+  its own supervisor, worker, durable cursor, lifecycle state, Tail restart
+  loop, and read-model repair state.
 - The ingester is **at-least-once**; dedup is by natural-identity idempotent upserts in SQLite (every table has an ON CONFLICT key); `(source_id, source_seq)` is NOT the dedup key. Idempotent writes are mandatory.
-- If the canonical schema migrates, the ingester resets its cursor for affected sources and re-reads. Cursors are stored in SQLite alongside the rows.
+- Additive schema migrations preserve `source_progress.cursor`. Operators can
+  delete the derived DB to force a full re-ingest when recovery or proof repair
+  requires it.
 
 ## Code organization rules
 

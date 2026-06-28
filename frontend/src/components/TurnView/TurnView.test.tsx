@@ -548,6 +548,30 @@ describe('TurnView — Copy turn button (header)', () => {
     expect(text).toContain('the assistant reply');
   });
 
+  it('clears the copied reset timer when unmounted', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout');
+
+    const op = makeOp({ id: 'op-reset-cleanup', kind: 'internal', name: 'user_input', payload_refs: [] });
+    const user = userEvent.setup();
+    const { unmount } = renderInRouter(<TurnView turn={makeTurn({ ops: [op] })} />);
+
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      writable: true,
+      value: { writeText },
+    });
+
+    await user.click(screen.getByRole('button', { name: /copy turn/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /copy turn/i })).toHaveAttribute('data-copied', 'true');
+    });
+    unmount();
+
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+  });
+
   it('does not throw when Copy turn is clicked before payloads finish loading', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
 

@@ -13,13 +13,20 @@ main()
   ├─ construct Ingester(db, pricer, logger)
   ├─ Ingester.Start(ctx)
   │     ├─ load per-source observability seq counter from source_progress.last_seq
+  │     ├─ start stale-tail watchdog goroutine
   │     └─ start background resolver goroutine (5 s ticker)
+  ├─ resolve sources and register per-source runtime metadata/options
+  ├─ reconcile persisted source lifecycle/read-model state for the resolved set
   ├─ for each source:
+  │    ├─ record source_progress.lifecycle_state='starting'
   │    ├─ instantiate adapter via registry (ParseCursor from source_progress.cursor)
-  │    ├─ goroutine: adapter.Scan(...) → events chan
-  │    ├─ after all Scan calls return: bounded read-model backfill attempt
-  │    ├─ on Scan return and backfill gate close: adapter.Tail(...) → events chan
-  │    └─ Ingester.Submit(sourceID, events) — spawns one worker
+  │    ├─ Ingester.Submit(sourceID, events) — spawns one worker
+  │    └─ source supervisor goroutine:
+  │         ├─ startup Scan(...) → events chan
+  │         ├─ clear startup read-model deferral
+  │         ├─ schedule per-source read-model repair
+  │         ├─ Tail(...) → events chan immediately for this source
+  │         └─ restart Tail on failure/stale heartbeat with bounded backoff
   └─ wait for SIGTERM/SIGINT → bounded graceful shutdown
 ```
 
@@ -27,18 +34,85 @@ The ingester owns the write-side `*sql.DB`; downstream packages do not
 touch it. The store remains the only SQLite handle; the ingester is the
 only writer (per `data-model.md` §single-writer invariant).
 
-The post-scan read-model backfill is a derived-data repair step, not part of
-the primary canonical ingestion contract. Initial Scan may defer FTS and
-rollup maintenance for throughput, but Tail startup is guarded by a bounded
-backfill gate: after every source Scan returns, the daemon attempts the
-one-shot FTS/rollup backfill with a five-minute startup timeout. If the
-backfill completes, Tail starts with read models current. If the timeout or
-another error cancels the backfill, the daemon logs the failure, closes the
-gate, and starts Tail so new source records continue entering the canonical
-tables. A stuck or expensive read-model rebuild must not leave source_progress
-stale or prevent new sessions, turns, ops, payload refs, or log entries from
-being ingested. The repair path is to rerun the dedicated backfill subcommands;
-primary ingestion remains live.
+Each source has an independent supervisor. A source that finishes startup
+`Scan` starts `Tail` without waiting for unrelated sources to finish scanning,
+repairing derived tables, failing, or timing out. The only all-sources startup
+signal that may remain is a background reconciliation trigger; it must never be
+passed to Tail or block Tail startup.
+
+The source supervisor owns adapter construction, the event channel lifetime,
+per-attempt contexts, source lifecycle transitions, restart requests, and Tail
+backoff. Before any location stat, factory lookup, adapter construction,
+`Submit`, or `Scan`, the supervisor records a durable
+`source_progress.lifecycle_state='starting'` row. Pre-submit failures become
+durable lifecycle states (`start_failed` or `construct_failed`) and emit
+`source_status_changed`. The initial `starting` row is mandatory: if SQLite
+temporarily rejects it, the source startup path retries with
+context-cancellable 1s/2s/.../60s backoff and does not proceed invisibly.
+Supervisor-owned restart and read-model repair request channels are registered
+only for a supervisor that can actually run. If startup returns before the
+supervisor goroutine starts, the ingester must not retain stale request-channel
+registrations for that source.
+
+Initial Scan may defer derived FTS/rollup maintenance for that source, but
+canonical rows, aggregates, `source_progress`, lifecycle/read-model state, and
+notify rows still commit. After the source startup Scan outcome, the supervisor
+clears that source's startup deferral, records/schedules
+`read_model_state='repair_pending'`, and starts Tail. Source-scoped repair runs
+behind Tail under the read-model repair coordinator. Repair attempts are bounded
+by the startup backfill timeout, retry with context-cancellable
+1s/2s/.../60s backoff while the source context is alive, leave interrupted work
+as `repair_pending`, and reset `read_model_repair_attempts` after a successful
+`ready` transition. A retained all-sources reconciliation is background repair
+only; it is not the only path that makes a completed source searchable or
+stat-able.
+
+Tail batches that commit while the retained all-sources reconciliation owns the
+global rebuild-active flag also record `read_model_state='repair_pending'`.
+That durable debt is paired with a post-commit, coalesced repair request to the
+owning source supervisor. The request is sent only after the batch transaction
+commits, and the supervisor repairs it through the same source-scoped
+timeout/backoff/`ready` lifecycle path used for startup-scan repair. A worker
+must never leave rebuild-window repair debt waiting for daemon restart.
+
+Tail liveness has two signals. A returned non-context Tail error records
+`tail_failed`, transitions through `tail_restarting`, reloads
+`source_progress.cursor`, constructs a fresh adapter, runs a catch-up `Scan`,
+then calls `Tail` again with context-cancellable 1s/2s/.../60s backoff. A hung
+Tail is detected by the adapter calling the canonical tail-heartbeat helper from
+inside its real watch/poll loop; absence of heartbeat beyond the stale-tail
+threshold records `tail_stale` and asks the supervisor to restart the active
+attempt. If the old Tail ignores cancellation past the adapter grace, the source
+records terminal/degraded `tail_failed`; process restart is recovery.
+Catch-up `Scan` during `tail_restarting` is not the startup Scan: if it fails,
+the source remains in `tail_restarting`, records sanitized retry evidence,
+backs off, and retries from the durable cursor instead of falling through to
+Tail with an unproven handoff cursor. Sustained restart failure remains retrying
+but records escalated lifecycle evidence after 100 consecutive restart failures
+or 24 hours in the restart loop, whichever comes first.
+The persisted `tail_restart_count` is the consecutive restart-failure counter:
+it increments on each `tail_restarting` attempt and resets to zero after a
+successful transition back to `tailing`.
+
+Supervisor lifecycle writes that make a source observable or monitorable are
+required writes, not best-effort breadcrumbs. Before the supervisor starts or
+restarts Tail, it must durably record the scan/tail state that health and the
+stale-tail watchdog depend on, including the `tailing` transition with
+`tail_started_at` and an initial `tail_heartbeat_at`. If such a write fails,
+the supervisor retries with cancellable backoff and does not enter Tail until
+the state is committed; otherwise Tail could run without watchdog coverage for
+the rest of the daemon process.
+
+Startup reconciliation runs after source resolution because only the resolved
+source list can distinguish configured from historical rows. It transitions
+configured non-active residues to `starting`, unconfigured rows to `stopped`,
+and prior `read_model_state='repairing'` residues to `repair_pending` before
+the source repair loop evaluates work.
+
+Lifecycle and read-model state are stored on `source_progress` (see
+`data-model.md` §source_progress) and are the health source of truth. Legacy
+`sources.last_seen_at` remains a parse-error/pricing-miss diagnostic only and
+must not be used as lifecycle freshness.
 
 ## Ingester API
 
@@ -130,16 +204,22 @@ Flush:
 1. `db.BeginTx(ctx, nil)`.
 2. Ensure the source row exists for the worker's `source_id`.
 3. Apply every event in arrival order via per-kind UPSERTs (writer.go).
-4. Refresh incremental hourly/daily rollups for dirty buckets.
-5. Refresh `fts_ops` rows for dirty ops. `fts_logs` rows are maintained inline
-   by `applyLogEntry` when log entries are written.
+4. Refresh incremental hourly/daily rollups for dirty buckets unless this
+   source's startup deferral or the global rebuild-active flag is set.
+   When skipped, canonical rows still commit and
+   `read_model_state='repair_pending'` is recorded.
+5. Refresh `fts_ops` rows for dirty ops unless derived read-model refresh is
+   deferred. `fts_logs` rows are maintained inline by `applyLogEntry` when log
+   entries are written. The same global rebuild-active flag also suppresses
+   idle rollup refresh-only passes while a full rebuild owns derived tables.
 6. Recompute session/turn aggregates over the dirty set (aggregates.go).
 7. `UPDATE source_progress SET last_seq=MAX(last_seq, batch_max_seq), cursor=last_cursor, updated_at=now()`. `last_seq` is an observability counter (max `SourceSeq` seen), not a dedup gate — see §Dedup and Idempotency.
 8. Append notify rows and prune stale notify rows inside the same transaction.
 9. `tx.Commit()`.
 10. Promote post-commit writer state that must only become visible after a
     successful commit: pending pricing-miss dedup keys, materialized-rollup
-    bucket removals, and the source high-water observability counter.
+    bucket removals, durable read-model repair requests, and the source
+    high-water observability counter.
 
 Shutdown cancellation is not an offending-batch error. Once an event is accepted
 into the worker's in-memory batch, lifecycle cancellation must not cause that
@@ -275,11 +355,19 @@ or a re-scan of a changed file) at the SQL layer:
     interprets a null. The behaviour is idempotent (re-applying the same extras
     yields the same row) and is a no-op graft for adapters whose extras carry no
     `aiViewer` sub-object.
-  - The partial `applySessionUpdated` UPDATE (a `SessionUpdatedEvent`, which is NOT
-    a full re-emit) still MERGES via `json_patch` by design — a partial metadata
-    update must combine with the existing `aiViewer` stash (e.g. the late-meta
-    `toolUseId` repair merges into the child's `parentNativeId`/`rootNativeId`), and
-    its inputs never carry explicit nulls.
+  - `SessionUpdatedEvent` and `SessionFinalizedEvent` are out-of-order tolerant.
+    Before their partial update/finalize SQL runs, the writer resolves the native
+    session id through the same stub-creation path used by turn/op/log events.
+    Therefore an update/finalize that arrives before `SessionStartedEvent` still
+    leaves a durable `sessions` row in the batch transaction. The writer must not
+    add a session id to the dirty/notify sets unless the corresponding
+    `sessions` row exists in that transaction; otherwise `emitNotify` would fail
+    and the worker would drop a valid batch after retry exhaustion. The partial
+    `SessionUpdatedEvent` update (which is NOT a full re-emit) still MERGES via
+    `json_patch` by design — a partial metadata update must combine with the
+    existing `aiViewer` stash (e.g. the late-meta `toolUseId` repair merges into
+    the child's `parentNativeId`/`rootNativeId`), and its inputs never carry
+    explicit nulls.
 - `payload_refs` and `log_entries` (migration `0003`) carry
   natural-identity UNIQUE indexes and insert with `ON CONFLICT DO
   NOTHING`:
@@ -517,8 +605,9 @@ transaction (not after it), the ingester INSERTs `notify` rows so they commit
   batch) and `rollupMaterializedThisRefresh` (a refresh — incl. an idle pass —
   materialized a now-closed carried bucket) preserve the "fire when rollups
   actually changed" semantics (`data-model.md` §Rollup tables, §Full-text search);
-- one `source_status_changed` row when a source's `parse_errors` count or
-  `enabled` flag changed.
+- one `source_status_changed` row when a source's `parse_errors` count,
+  `enabled` flag, lifecycle state, read-model state, or lifecycle/read-model
+  timestamp/error evidence changed.
 
 The ingester is the sole writer of `notify`. Once per flush cycle it also
 **prunes** `notify` rows older than a bounded retention window (≈5 min) so the
@@ -563,12 +652,10 @@ On SIGTERM/SIGINT:
    waiting runs in parallel with worker drain, not as a sequential wait after
    `StopContext`. Adapters get a 5 s grace window; expiry is logged, but process
    shutdown continues.
-   The scan wait group is pre-added for every configured source before any
-   goroutine waits on it. A source that fails before its adapter `Scan`
-   goroutine starts must decrement that pre-added counter exactly once; a source
-   that starts delegates the decrement to `runAdapter` after `Scan` completes or
-   is canceled. This prevents source-start failures from parking the post-scan
-   backfill gate forever.
+   Each source supervisor releases any retained startup-scan-outcome signal
+   exactly once on every path: scan success, recoverable scan error, fatal scan
+   error, start/construct/Submit failure, and cancellation before Scan. That
+   signal is for background reconciliation only and never gates Tail startup.
 3. Workers drain already-buffered events and pending rollup buckets under the
    bounded shutdown-drain context. The current worker drain bound is 10 s, plus
    a conservative post-deadline SQLite `busy_timeout(5000)` tail for any flush
@@ -592,11 +679,10 @@ On SIGTERM/SIGINT:
    `select` on the caller context. It never waits indefinitely. The final
    resolver pass gets `min(remaining caller deadline, 5s)`; if no time remains,
    resolver work returns a timeout outcome instead of extending shutdown.
-7. Post-scan read-model backfill is canceled by the shutdown context. The
-   backfill goroutine is the sole closer of `backfillDone` and `backfillWait`;
-   shutdown waits up to 5 s for `backfillWait`. If the backfill cannot stop in
-   that window, shutdown exits through the bounded guard and skips explicit DB
-   close so live SQLite work is not raced by `Store.Close()`.
+7. Source repair and any retained global reconciliation are canceled by the
+   shutdown context. Unfinished read-model work remains durable as
+   `read_model_state='repair_pending'`, not `repairing`; a later startup
+   retries it. Tail startup is not waiting on these repair loops.
 8. Explicit writer DB close runs under a 5 s goroutine/timer. On timeout, log a
    bounded writer-close timeout and let process exit close the handle. Startup
    and partial-startup paths use the close strategy matrix from SOW-0104:
@@ -612,13 +698,13 @@ On SIGTERM/SIGINT:
 The production ingester stop budget is 30 s:
 `worker_exit_bound=25s + final_resolver<=5s`. The process-level systemd stop
 budget is 45 s: `max(adapter_grace=5s, ingesterStopTimeout=30s) +
-backfill_cancel_wait=5s + store_close=5s + 5s systemd margin`.
+store_close=5s + 10s systemd margin`.
 
 The pprof server is intentionally outside the shutdown wait group. It is off by
 default and operator-gated; process exit reaps its listener and in-flight
 handlers. `StopContext` does not wait for pprof.
 
-`runAdapter` panic recovery is out of scope for SOW-0104. Panics remain
+Source supervisor panic recovery is out of scope for SOW-0104. Panics remain
 process-fatal, matching the pre-existing behavior.
 
 ## One-Shot Commands And Locks
@@ -642,6 +728,11 @@ schema repair observe SIGTERM through their existing `ExecContext` and
 
 ## Failure Recovery
 
-- Crashed adapter (returned error from Tail) → log loudly, mark source `parse_errors++`, restart adapter after exponential backoff (1 s, 2 s, 4 s, … max 60 s).
+- Tail returned non-context error → log loudly, record `tail_failed`, then
+  `tail_restarting`, and restart the source after exponential backoff
+  (1 s, 2 s, 4 s, … max 60 s). Restart reloads `source_progress.cursor`, runs a
+  catch-up Scan on a fresh adapter, then enters Tail.
+- Tail heartbeat stale → record `tail_stale`, cancel the active attempt, and
+  use the same bounded restart path.
 - SQLite transaction failed → retry briefly for transient contention, then log loudly, drop the failed batch's events, and advance past them only after retries are exhausted. Future batches continue. Recovered retries are warnings, not terminal worker errors. If terminal failures spike the operator must intervene (this surfaces in `/api/health`).
 - Disk full → log loudly, refuse new writes until space returns. Adapters continue scanning into a memory-buffered queue with cap 10000 events; oldest dropped if cap exceeded (counted in metrics).

@@ -141,10 +141,14 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 // once via onError and the loop falls back to pure timer polling (the 60 s
 // safety net still guarantees in-place mutations are eventually seen). A watcher
 // error never terminates the loop.
-func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStart bool, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) error {
+func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) error {
+	return tailLoopWithHeartbeat(ctx, dbPath, sourceID, cur, false, out, logger, onError, nil)
+}
+
+func tailLoopWithHeartbeat(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStart bool, out chan<- canonical.Event, logger *slog.Logger, onError func(error), tailHeartbeat func()) error {
 	logger = orDefaultLogger(logger)
 	onError = orNoop(onError)
-	rt, err := openTailRuntime(ctx, dbPath, sourceID, out, logger, onError)
+	rt, err := openTailRuntime(ctx, dbPath, sourceID, out, logger, onError, tailHeartbeat)
 	if err != nil || rt == nil {
 		return err
 	}
@@ -153,18 +157,22 @@ func tailLoop(ctx context.Context, dbPath, sourceID string, cur Cursor, warmStar
 }
 
 type tailRuntime struct {
-	db         *sql.DB
-	dbPath     string
-	schema     schemaSet
-	sourceID   string
-	out        chan<- canonical.Event
-	logger     *slog.Logger
-	onError    func(error)
-	walEvents  <-chan struct{}
-	closeWatch func()
+	db            *sql.DB
+	dbPath        string
+	schema        schemaSet
+	sourceID      string
+	out           chan<- canonical.Event
+	logger        *slog.Logger
+	onError       func(error)
+	tailHeartbeat func()
+	walEvents     <-chan struct{}
+	closeWatch    func()
 }
 
-func openTailRuntime(ctx context.Context, dbPath, sourceID string, out chan<- canonical.Event, logger *slog.Logger, onError func(error)) (*tailRuntime, error) {
+func openTailRuntime(ctx context.Context, dbPath, sourceID string, out chan<- canonical.Event, logger *slog.Logger, onError func(error), tailHeartbeat func()) (*tailRuntime, error) {
+	if tailHeartbeat == nil {
+		tailHeartbeat = func() {}
+	}
 	db, err := openReadOnly(ctx, dbPath, withMaxOpenConns(2))
 	if err != nil {
 		onError(fmt.Errorf("opencode: tail open %s (ro): %w", dbPath, err))
@@ -179,7 +187,7 @@ func openTailRuntime(ctx context.Context, dbPath, sourceID string, out chan<- ca
 	logMissingColumns(logger, schema)
 
 	walEvents, closeWatch := watchWAL(dbPath, onError)
-	return &tailRuntime{db: db, dbPath: dbPath, schema: schema, sourceID: sourceID, out: out, logger: logger, onError: onError, walEvents: walEvents, closeWatch: closeWatch}, nil
+	return &tailRuntime{db: db, dbPath: dbPath, schema: schema, sourceID: sourceID, out: out, logger: logger, onError: onError, tailHeartbeat: tailHeartbeat, walEvents: walEvents, closeWatch: closeWatch}, nil
 }
 
 func (rt *tailRuntime) close() {
@@ -203,6 +211,7 @@ func (rt *tailRuntime) run(ctx context.Context, cur Cursor, warmStart bool) erro
 				walEvents = nil // watcher closed; fall back to pure timer polling
 				continue
 			}
+			rt.tailHeartbeat()
 			st.markWALEvent(time.Now())
 			resetTimer(timer, st.nextInterval(time.Now()))
 		case <-timer.C:
@@ -213,6 +222,7 @@ func (rt *tailRuntime) run(ctx context.Context, cur Cursor, warmStart bool) erro
 			if err != nil {
 				rt.onError(err)
 			}
+			rt.tailHeartbeat()
 			st.markCycle(advanced, time.Now())
 			resetTimer(timer, st.nextInterval(time.Now()))
 		}

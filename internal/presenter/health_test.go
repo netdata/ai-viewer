@@ -19,6 +19,7 @@ import (
 // depends on, not the in-package field names.
 type healthBody struct {
 	Status        string         `json:"status"`
+	StatusDetail  string         `json:"status_detail,omitempty"`
 	Version       string         `json:"version"`
 	SchemaVersion int            `json:"schema_version"`
 	UptimeS       int64          `json:"uptime_s"`
@@ -43,9 +44,9 @@ func doHealth(t *testing.T, p *Presenter) (int, healthBody) {
 	return rr.Code, body
 }
 
-// TestHealth_EmptyDBIsOK asserts a clean database with no rows reports
-// status="ok" and an empty sources slice.
-func TestHealth_EmptyDBIsOK(t *testing.T) {
+// TestHealth_EmptyDBReportsNoSourcesConfigured asserts a clean database with
+// no configured source rows reports the explicit no_sources_configured detail.
+func TestHealth_EmptyDBReportsNoSourcesConfigured(t *testing.T) {
 	t.Parallel()
 	p, _, cleanup := newTestPresenter(t)
 	defer cleanup()
@@ -54,8 +55,11 @@ func TestHealth_EmptyDBIsOK(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
-	if body.Status != healthStatusOK {
-		t.Fatalf("status = %q, want %q", body.Status, healthStatusOK)
+	if body.Status != healthStatusDegraded {
+		t.Fatalf("status = %q, want %q", body.Status, healthStatusDegraded)
+	}
+	if body.StatusDetail != "no_sources_configured" {
+		t.Fatalf("status_detail = %q, want no_sources_configured", body.StatusDetail)
 	}
 	if body.SchemaVersion != SchemaVersion {
 		t.Fatalf("schema_version = %d, want %d", body.SchemaVersion, SchemaVersion)
@@ -71,9 +75,10 @@ func TestHealth_EmptyDBIsOK(t *testing.T) {
 	}
 }
 
-// TestHealth_DegradedOnLag asserts a fresh source whose last_seen_at is
-// older than the 60s threshold flips the global status to "degraded".
-func TestHealth_DegradedOnLag(t *testing.T) {
+// TestHealth_LegacyLastSeenLagIsSecondary asserts sources.last_seen_at lag is
+// still reported but no longer drives health. Lifecycle/read-model state is the
+// freshness truth after SOW-0114.
+func TestHealth_LegacyLastSeenLagIsSecondary(t *testing.T) {
 	t.Parallel()
 	p, db, cleanup := newTestPresenter(t)
 	defer cleanup()
@@ -86,13 +91,23 @@ func TestHealth_DegradedOnLag(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed sources: %v", err)
 	}
+	if _, err := db.Exec(
+		`INSERT INTO source_progress
+		 (source_id, updated_at, lifecycle_state, lifecycle_state_at, tail_heartbeat_at,
+		  read_model_state, read_model_state_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"aiagent_v3:/tmp", fixedTime.UnixMicro(), "tailing", fixedTime.UnixMicro(),
+		fixedTime.UnixMicro(), "ready", fixedTime.UnixMicro(),
+	); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
 
 	code, body := doHealth(t, p)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
-	if body.Status != healthStatusDegraded {
-		t.Fatalf("status = %q, want degraded", body.Status)
+	if body.Status != healthStatusOK {
+		t.Fatalf("status = %q, want ok", body.Status)
 	}
 	if len(body.Sources) != 1 {
 		t.Fatalf("sources len = %d, want 1", len(body.Sources))
@@ -103,6 +118,112 @@ func TestHealth_DegradedOnLag(t *testing.T) {
 	}
 	if !src.Enabled {
 		t.Fatal("source.enabled = false, want true")
+	}
+}
+
+func TestHealth_DegradedOnLifecycleFailure(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	now := fixedTime.UnixMicro()
+	if _, err := db.Exec(
+		`INSERT INTO sources (id, format, location, enabled, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"codex:/tmp/fail", "codex", "/tmp/fail", 1, now, now,
+	); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO source_progress
+		 (source_id, updated_at, lifecycle_state, lifecycle_state_at, tail_failed_at, lifecycle_error,
+		  read_model_state, read_model_state_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"codex:/tmp/fail", now, "tail_failed", now, now, "tail stopped", "ready", now,
+	); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
+
+	code, raw, body := doHealthRaw(t, p)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if body.Status != healthStatusDegraded {
+		t.Fatalf("status = %q, want degraded", body.Status)
+	}
+	var extended struct {
+		Sources []struct {
+			ID               string `json:"id"`
+			LifecycleState   string `json:"lifecycle_state"`
+			LifecycleStateAt int64  `json:"lifecycle_state_at"`
+			TailFailedAt     *int64 `json:"tail_failed_at"`
+			LifecycleError   string `json:"lifecycle_error,omitempty"`
+			ReadModelState   string `json:"read_model_state"`
+			ReadModelStateAt int64  `json:"read_model_state_at"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(raw, &extended); err != nil {
+		t.Fatalf("decode extended health body: %v", err)
+	}
+	if len(extended.Sources) != 1 {
+		t.Fatalf("extended sources len = %d, want 1", len(extended.Sources))
+	}
+	src := extended.Sources[0]
+	if src.LifecycleState != "tail_failed" {
+		t.Fatalf("lifecycle_state = %q, want tail_failed", src.LifecycleState)
+	}
+	if src.LifecycleStateAt != now {
+		t.Fatalf("lifecycle_state_at = %d, want %d", src.LifecycleStateAt, now)
+	}
+	if src.TailFailedAt == nil || *src.TailFailedAt != now {
+		t.Fatalf("tail_failed_at = %v, want %d", src.TailFailedAt, now)
+	}
+	if src.LifecycleError != "tail stopped" {
+		t.Fatalf("lifecycle_error = %q, want tail stopped", src.LifecycleError)
+	}
+	if src.ReadModelState != "ready" || src.ReadModelStateAt != now {
+		t.Fatalf("read-model state = %q/%d, want ready/%d", src.ReadModelState, src.ReadModelStateAt, now)
+	}
+}
+
+func TestHealth_StoppedSourceWithFailedReadModelDoesNotDegrade(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	now := fixedTime.UnixMicro()
+	if _, err := db.Exec(
+		`INSERT INTO sources (id, format, location, enabled, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"codex:/tmp/stopped", "codex", "/tmp/stopped", 1, now,
+	); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO source_progress
+		 (source_id, updated_at, lifecycle_state, lifecycle_state_at,
+		  read_model_state, read_model_state_at, read_model_repair_failed_at, read_model_error)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"codex:/tmp/stopped", now, "stopped", now,
+		"repair_failed", now, now, "historical repair failure",
+	); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
+
+	code, body := doHealth(t, p)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if body.Status != healthStatusOK {
+		t.Fatalf("status = %q, want ok", body.Status)
+	}
+	if len(body.Sources) != 1 {
+		t.Fatalf("sources len = %d, want 1", len(body.Sources))
+	}
+	src := body.Sources[0]
+	if src.LifecycleState != "stopped" {
+		t.Fatalf("lifecycle_state = %q, want stopped", src.LifecycleState)
+	}
+	if src.ReadModelState != "repair_failed" {
+		t.Fatalf("read_model_state = %q, want repair_failed", src.ReadModelState)
 	}
 }
 

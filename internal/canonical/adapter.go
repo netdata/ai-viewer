@@ -35,13 +35,13 @@ type Adapter interface {
 	Tail(ctx context.Context, out chan<- Event) error
 
 	// ParseCursor decodes a stored cursor JSON blob (the value of
-	// sources.cursor) into the adapter's concrete Cursor type. An
+	// source_progress.cursor) into the adapter's concrete Cursor type. An
 	// empty input MUST yield a zero Cursor that compares as not-After
 	// any non-zero cursor.
 	ParseCursor(stored string) (Cursor, error)
 }
 
-// Cursor is the adapter-specific resume token persisted in sources.cursor.
+// Cursor is the adapter-specific resume token persisted in source_progress.cursor.
 // The ingester treats it as opaque; the adapter is responsible for
 // String/After correctness.
 type Cursor interface {
@@ -74,4 +74,17 @@ type AdapterOptions struct {
 	// (source unreachable, schema completely wrong) are returned from
 	// Scan / Tail instead.
 	OnError func(err error)
+	// OnTailHeartbeat is invoked by Tail implementations from their real
+	// watch/poll loop during idle ticks and after emitted events. Adapters
+	// call it through AdapterOptions.TailHeartbeat so an omitted callback is
+	// safe.
+	OnTailHeartbeat func()
+}
+
+// TailHeartbeat invokes the optional tail heartbeat callback. It is nil-safe
+// so adapters can call it unconditionally from Tail loops.
+func (o AdapterOptions) TailHeartbeat() {
+	if o.OnTailHeartbeat != nil {
+		o.OnTailHeartbeat()
+	}
 }

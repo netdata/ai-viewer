@@ -331,6 +331,12 @@ Implications for ai-viewer:
 - React to `fsnotify.Create`, `fsnotify.Write` on `*.jsonl` files inside `YYYY/MM/DD/`:
   - On `Create`: register the new file in the cursor at offset=0; immediate tail read.
   - On `Write`: tail-read from cursor offset to current file size; parse complete lines; advance cursor.
+- On full scan, discover all modern `sessions/YYYY/MM/DD/rollout-*.jsonl`
+  files and process them in descending relative-path order, newest date and
+  filename first. A cold DB rebuild must surface recent Codex sessions before
+  walking old history. This changes only cross-file scan priority: each rollout
+  is still read in source line order, cursor state remains per file, and resume
+  semantics remain idempotent.
 - On full scan, ingest each root-level legacy `rollout-*.json` once and record it
   under `legacy_json`. Legacy files are static historical snapshots; tail
   events on them may be ignored after scan coverage.
@@ -377,6 +383,13 @@ Per-file byte offset plus discovery hints. JSON shape:
 ```
 
 Path keys are RELATIVE to the configured `--codex-home` (default `~/.codex`) — the cursor survives a home-directory move.
+
+Scan-to-Tail handoff is mandatory. `Scan` records its final per-file cursor on
+the adapter instance. A following `Tail` on the same instance resumes from that
+cursor, not from current EOF/current file metadata, so rollout records appended
+between Scan completion and Tail watch startup are read. Tail also calls the
+canonical nil-safe Tail heartbeat helper from the real watch loop during idle
+ticks and after emitted events.
 
 Per-file fields:
 

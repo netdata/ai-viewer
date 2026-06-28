@@ -207,6 +207,16 @@ This spec is the contract for the unified shell. It does NOT replace the TurnVie
 
 The viz and bottom tabs share the LEFT column; the turn view is the RIGHT column. Both columns are resizable horizontally; the viz/bottom split is resizable vertically.
 
+The resizable shell must behave as one coherent workbench, not as nested
+iframe-like fixed boxes:
+
+- Each resize handle has visible, non-zero geometry on both axes. The
+  left/right handle is a vertical bar; the viz/bottom handle is a horizontal
+  bar.
+- A pane's primary scroller fits inside that pane. The Event list may virtualize
+  thousands of rows, but its scroll viewport is measured from the available pane
+  height instead of using a fixed height that can overflow the bottom panel.
+
 ## Click-on-graph → scroll-to-turn
 
 This is the critical UX bridge. When the operator clicks ANY span / op / event in the LEFT pane:

@@ -443,6 +443,10 @@ The `logger` parameter is `*slog.Logger`, threaded from `Adapter.logger` (non-ni
 
 **Adapter Scan→Tail cursor hand-off (Chunk D).** `adapter.go` mirrors codex: `Scan` records the final advanced cursor on the `Adapter` instance (`scanCursor`) even on `ctx` cancellation, and a following `Tail` on the SAME instance resumes from it instead of snapshotting current HEAD — closing the data-loss window where rows committed between `Scan` finishing and `Tail` starting would otherwise be skipped. Any re-emission of an already-seen session tree is absorbed by the ingester's idempotent upserts. A **cold `Tail`** (no preceding `Scan`, e.g. a resumed daemon whose `Scan` ran in a previous process) builds a HEAD-snapshot cursor: open read-only, introspect, and set each tracked table's watermark to its current `MAX(id)` + `MAX(time_updated)` (via `maxID`/`maxTimeUpdated`). This is the SQLite analogue of codex stat'ing current file sizes — `Tail` then follows from NOW rather than replaying full history. The HEAD snapshot also records the real `__drizzle_migrations` schema hash into the cursor. A missing/unreadable database during the snapshot surfaces one structured error and `Tail` returns cleanly (the daemon keeps serving other sources).
 
+`Tail` calls the canonical nil-safe Tail heartbeat helper from the real poll/WAL
+watch loop during idle ticks and after emitted events. A synthetic/test-only
+heartbeat outside that loop does not satisfy the liveness contract.
+
 **Cadence intervals** (decided, SOW-0005 Open Decision #2):
 
 - **Idle** poll interval: 2 s (the previous cycle produced no change).
@@ -492,7 +496,7 @@ A table with no boundary watermark yet (cold start, `MaxTimeUpdatedMs == 0`) or 
 
 ## Cursor
 
-Cursor shape, stored as opaque JSON in `sources.cursor`:
+Cursor shape, stored as opaque JSON in `source_progress.cursor`:
 
 ```json
 {

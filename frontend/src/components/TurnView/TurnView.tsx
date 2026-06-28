@@ -6,7 +6,7 @@
 // "is this the turn I'm interested in?" with full prompt + reasoning + tool
 // request/response + assistant output.
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clipboard } from 'lucide-react';
 import type { TurnDetail } from '../../api/types';
 import { TurnStep } from './TurnStep';
@@ -168,6 +168,15 @@ export function TurnView({
  *  server. If a payload hasn't loaded yet, that step contributes "Loading…". */
 function CopyTurnButton({ turn }: { turn: TurnDetail }) {
   const [copied, setCopied] = useState(false);
+  const copiedResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedResetTimer.current !== null) {
+        clearTimeout(copiedResetTimer.current);
+      }
+    };
+  }, []);
 
   const handleClick = (): void => {
     void doCopy();
@@ -196,12 +205,20 @@ function CopyTurnButton({ turn }: { turn: TurnDetail }) {
       if (typeof cb.writeText === 'function') {
         await cb.writeText(text);
       }
+      if (copiedResetTimer.current !== null) {
+        clearTimeout(copiedResetTimer.current);
+      }
       setCopied(true);
-      setTimeout(() => {
+      copiedResetTimer.current = setTimeout(() => {
+        copiedResetTimer.current = null;
         setCopied(false);
       }, 1500);
     } catch {
       // Best-effort copy; no silent failure.
+      if (copiedResetTimer.current !== null) {
+        clearTimeout(copiedResetTimer.current);
+        copiedResetTimer.current = null;
+      }
       setCopied(false);
     }
   }

@@ -31,6 +31,9 @@ const (
 	defaultResolverInterval    = 5 * time.Second
 	defaultIngesterStopTimeout = 30 * time.Second
 	finalResolverStopTimeout   = 5 * time.Second
+	defaultTailStaleAfter      = 5 * time.Minute
+	defaultTailWatchdogEvery   = 30 * time.Second
+	defaultTailHeartbeatEvery  = 30 * time.Second
 )
 
 // defaultNow is the production wall-clock the incremental rollup refresh
@@ -150,6 +153,21 @@ func WithResolverInterval(d time.Duration) Option {
 	return func(i *Ingester) {
 		if d > 0 {
 			i.resolverInterval = d
+		}
+	}
+}
+
+// WithTailLiveness overrides Tail heartbeat watchdog timings.
+func WithTailLiveness(staleAfter, watchdogEvery, heartbeatPersistEvery time.Duration) Option {
+	return func(i *Ingester) {
+		if staleAfter > 0 {
+			i.tailLiveness.staleAfter = staleAfter
+		}
+		if watchdogEvery > 0 {
+			i.tailLiveness.watchdogEvery = watchdogEvery
+		}
+		if heartbeatPersistEvery > 0 {
+			i.tailLiveness.heartbeatPersistEvery = heartbeatPersistEvery
 		}
 	}
 }
@@ -282,7 +300,8 @@ type Ingester struct {
 	// to build the deferred read models once. During Tail (steady state),
 	// incremental refresh runs as normal. atomic so the main goroutine can
 	// toggle it while the worker goroutine reads it without a lock.
-	deferReadModels atomic.Bool
+	deferReadModels        atomic.Bool
+	readModelRebuildActive atomic.Bool
 	// backfillMu serializes BackfillReadModels across the 5 source goroutines
 	// that finish scanning concurrently. backfillDone is set only on success,
 	// so a failed backfill (e.g. context cancelled during shutdown) allows the
@@ -290,6 +309,17 @@ type Ingester struct {
 	// if the first caller's context was cancelled (SOW-0063).
 	backfillMu   sync.Mutex
 	backfillDone bool
+
+	readModelDeferralMu  sync.Mutex
+	readModelDeferrals   map[string]*atomic.Bool
+	readModelRepairMu    sync.Mutex
+	readModelRepairChans map[string]chan<- struct{}
+
+	tailMu               sync.Mutex
+	tailLiveness         tailLivenessConfig
+	tailHeartbeats       map[string]tailHeartbeatState
+	tailRestartChans     map[string]chan<- struct{}
+	tailHeartbeatPersist chan tailHeartbeatPersistRequest
 }
 
 // New constructs an Ingester. The db must be writable (use
@@ -312,6 +342,16 @@ func New(db *sql.DB, opts ...Option) (*Ingester, error) {
 		locationOverrides:      make(map[string]string),
 		fts5IndexLogsOverrides: make(map[string]bool),
 		sourceMetaOverrides:    make(map[string]string),
+		readModelDeferrals:     make(map[string]*atomic.Bool),
+		readModelRepairChans:   make(map[string]chan<- struct{}),
+		tailLiveness: tailLivenessConfig{
+			staleAfter:            defaultTailStaleAfter,
+			watchdogEvery:         defaultTailWatchdogEvery,
+			heartbeatPersistEvery: defaultTailHeartbeatEvery,
+		},
+		tailHeartbeats:       make(map[string]tailHeartbeatState),
+		tailRestartChans:     make(map[string]chan<- struct{}),
+		tailHeartbeatPersist: make(chan tailHeartbeatPersistRequest, 1024),
 	}
 	for _, opt := range opts {
 		opt(i)
@@ -341,6 +381,11 @@ func (i *Ingester) Start(ctx context.Context) error {
 		defer i.wg.Done()
 		i.resolver.loop(ctx)
 	}()
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.tailLivenessLoop(ctx)
+	}()
 	i.started = true
 	return nil
 }
@@ -364,20 +409,22 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 	}
 	format, location := i.deriveSourceFields(sourceID)
 	w := &worker{
-		sourceID:        sourceID,
-		sourceFormat:    format,
-		location:        location,
-		fts5IndexLogs:   i.resolveFTS5IndexLogs(sourceID),
-		metaJSON:        i.resolveSourceMeta(sourceID),
-		events:          events,
-		db:              i.db,
-		hwm:             i.hwm,
-		pricer:          i.pricer,
-		logger:          i.logger.With("source_id", sourceID),
-		batchSize:       i.batchSize,
-		batchEvery:      i.batchInterval,
-		now:             i.now,
-		deferReadModels: &i.deferReadModels,
+		sourceID:               sourceID,
+		sourceFormat:           format,
+		location:               location,
+		fts5IndexLogs:          i.resolveFTS5IndexLogs(sourceID),
+		metaJSON:               i.resolveSourceMeta(sourceID),
+		events:                 events,
+		db:                     i.db,
+		hwm:                    i.hwm,
+		pricer:                 i.pricer,
+		logger:                 i.logger.With("source_id", sourceID),
+		batchSize:              i.batchSize,
+		batchEvery:             i.batchInterval,
+		now:                    i.now,
+		deferReadModels:        i.readModelDeferralFlag(sourceID),
+		readModelRebuildActive: &i.readModelRebuildActive,
+		requestReadModelRepair: i.RequestSourceReadModelRepair,
 	}
 	w.onErr = func(err error) {
 		i.recordWorkerError(sourceID, err)
@@ -591,14 +638,45 @@ func (i *Ingester) ResolveOrphans(ctx context.Context) error {
 	return i.resolver.linkOrphans(ctx)
 }
 
-// SetDeferReadModels toggles the bulk-scan fast-path (SOW-0063). When true,
-// the worker skips refreshRollups + refreshFTS during batch flush; the binary
-// calls BackfillReadModels after the scan to build them once. Thread-safe
-// (atomic).
-func (i *Ingester) SetDeferReadModels(b bool) { i.deferReadModels.Store(b) }
+// SetDeferReadModels toggles the bulk-scan fast-path default (SOW-0063). New
+// source workers inherit this value; existing source workers are updated too.
+// Source supervisors may then clear their own flag independently once their
+// startup Scan reaches an outcome, so Tail batches from that source refresh read
+// models while unrelated sources are still scanning.
+func (i *Ingester) SetDeferReadModels(b bool) {
+	i.deferReadModels.Store(b)
+	i.readModelDeferralMu.Lock()
+	defer i.readModelDeferralMu.Unlock()
+	for _, flag := range i.readModelDeferrals {
+		flag.Store(b)
+	}
+}
 
 // DeferReadModels reports whether the bulk-scan fast-path is active.
 func (i *Ingester) DeferReadModels() bool { return i.deferReadModels.Load() }
+
+// SetSourceReadModelsDeferred overrides the read-model fast-path for one
+// source. It is safe to call before or after Submit; Submit will use the same
+// per-source flag. The returned value is the previous state, so callers can
+// decide whether clearing the flag requires a source-scoped repair pass.
+func (i *Ingester) SetSourceReadModelsDeferred(sourceID string, deferred bool) bool {
+	flag := i.readModelDeferralFlag(sourceID)
+	wasDeferred := flag.Load()
+	flag.Store(deferred)
+	return wasDeferred
+}
+
+func (i *Ingester) readModelDeferralFlag(sourceID string) *atomic.Bool {
+	i.readModelDeferralMu.Lock()
+	defer i.readModelDeferralMu.Unlock()
+	if flag, ok := i.readModelDeferrals[sourceID]; ok {
+		return flag
+	}
+	flag := &atomic.Bool{}
+	flag.Store(i.deferReadModels.Load())
+	i.readModelDeferrals[sourceID] = flag
+	return flag
+}
 
 // BackfillReadModels rebuilds the FTS index + rollup tables from the committed
 // data (SOW-0063). Called by the binary after the initial Scan completes and
@@ -615,7 +693,9 @@ func (i *Ingester) BackfillReadModels(ctx context.Context) error {
 	if i.backfillDone {
 		return nil
 	}
-	i.deferReadModels.Store(false)
+	i.SetDeferReadModels(false)
+	i.readModelRebuildActive.Store(true)
+	defer i.readModelRebuildActive.Store(false)
 	now := defaultNow()
 	if i.now != nil {
 		now = i.now()

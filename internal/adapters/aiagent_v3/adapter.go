@@ -31,13 +31,18 @@ const sourceIDPrefix = Format + ":"
 // followed by a single Tail goroutine; concurrent Scan+Tail on the same
 // instance is not part of the contract (see specs/adapter-contract.md).
 type Adapter struct {
-	root     string
-	sourceID string
-	logger   *slog.Logger
+	root          string
+	sourceID      string
+	logger        *slog.Logger
+	tailHeartbeat func()
 	// onError surfaces non-fatal per-record parse errors. Never nil after
 	// construction; New and Factory substitute a no-op when the caller
 	// passes nil so adapter code can call it unconditionally.
 	onError func(error)
+	// scanCursor holds the final per-file offsets recorded by the most recent
+	// Scan, so a following Tail on the same instance catches up from the Scan
+	// boundary instead of snapshotting current disk state.
+	scanCursor *Cursor
 }
 
 // Compile-time conformance: this is the canonical "var _ = …" idiom that
@@ -66,10 +71,11 @@ func New(root string, opts canonical.AdapterOptions) (*Adapter, error) {
 		sourceID = sourceIDPrefix + root
 	}
 	return &Adapter{
-		root:     root,
-		sourceID: sourceID,
-		logger:   logger,
-		onError:  onError,
+		root:          root,
+		sourceID:      sourceID,
+		logger:        logger,
+		tailHeartbeat: opts.TailHeartbeat,
+		onError:       onError,
 	}, nil
 }
 
@@ -88,7 +94,9 @@ func (a *Adapter) Format() string { return Format }
 // closes it.
 func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- canonical.Event) error {
 	start := a.coerceCursor(since)
-	_, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	final, sErr := scanAll(ctx, a.root, a.sourceID, start, out, a.onError)
+	cursorCopy := final
+	a.scanCursor = &cursorCopy
 	if sErr != nil {
 		if errors.Is(sErr, context.Canceled) || errors.Is(sErr, context.DeadlineExceeded) {
 			return nil
@@ -102,18 +110,18 @@ func (a *Adapter) Scan(ctx context.Context, since canonical.Cursor, out chan<- c
 // <root>/session/ and emits canonical events as new records appear.
 // Returns when ctx is cancelled.
 func (a *Adapter) Tail(ctx context.Context, out chan<- canonical.Event) error {
-	// Tail starts from an empty cursor; the ingester is responsible for
-	// running Scan first and persisting the cursor before calling Tail.
-	// We re-derive the per-file offsets from disk by treating tail as
-	// "follow what arrives after now" — but to be safe and to allow the
-	// ingester to call Tail without a preceding Scan, we initialise the
-	// cursor from the current file sizes so we don't re-emit existing
-	// data when Tail is started cold. See spec §6.1 and §7.2.
-	cur, err := a.snapshotCursor()
-	if err != nil {
-		return fmt.Errorf("aiagent_v3: tail snapshot: %w", err)
+	var cur Cursor
+	warmStart := a.scanCursor != nil
+	if warmStart {
+		cur = a.coerceCursor(*a.scanCursor)
+	} else {
+		snap, err := a.snapshotCursor()
+		if err != nil {
+			return fmt.Errorf("aiagent_v3: tail snapshot: %w", err)
+		}
+		cur = snap
 	}
-	return tailLoop(ctx, a.root, a.sourceID, cur, out, a.onError)
+	return tailLoopWithHeartbeat(ctx, a.root, a.sourceID, cur, out, a.onError, a.tailHeartbeat, warmStart)
 }
 
 // ParseCursor implements canonical.Adapter. Empty input yields the

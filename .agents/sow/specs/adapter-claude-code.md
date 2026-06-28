@@ -552,7 +552,7 @@ The subagent's NativeID is NOT the parent's `sessionId` (they would collide); th
 
 ### 5.2 Session bootstrapping
 
-A `SessionStartedEvent` is emitted with `Ts = the first record's timestamp that HAS one`. Real transcripts frequently open with one or more timestamp-less metadata snapshots (`permission-mode`, `custom-title`, `last-prompt`, `file-history-snapshot` — §3 records that lack `timestamp`); bootstrapping on the literal first record would seed `start_ts=0` and strand the session at epoch. The adapter therefore DEFERS the `SessionStarted` until the first record carrying a real `timestamp`: the events of any leading timestamp-less records are buffered and emitted AFTER the `SessionStarted` (preserving the writer's UPDATE-after-INSERT contract — `applySessionUpdated` is a pure `UPDATE`, so the session row must exist first). A file that contains ONLY timestamp-less records (an empty/corrupt transcript with no events) finalizes a `SessionStarted` with `Ts=0` at EOF so the session row still exists. Fields of the `SessionStartedEvent`:
+A `SessionStartedEvent` is emitted with `Ts = the first record's timestamp that HAS one`. Real transcripts frequently open with one or more timestamp-less metadata snapshots (`permission-mode`, `custom-title`, `last-prompt`, `file-history-snapshot` — §3 records that lack `timestamp`); bootstrapping on the literal first record would seed `start_ts=0` and strand the session at epoch. The adapter therefore DEFERS the `SessionStarted` until the first record carrying a real `timestamp`: the events of any leading timestamp-less records are buffered and emitted AFTER the `SessionStarted`, so normal transcript metadata updates land on the real row instead of a timestamp-zero stub. A file that contains ONLY timestamp-less records (an empty/corrupt transcript with no events) finalizes a `SessionStarted` with `Ts=0` at EOF so the session row still exists. The ingester remains defensive: if a sidecar/meta repair emits a `SessionUpdatedEvent` before the transcript's `SessionStartedEvent`, it creates a stub row and the later `SessionStartedEvent` fills the metadata. Fields of the `SessionStartedEvent`:
 
 - `Kind`: `'root'` for main session jsonls; `'sub_agent'` for `subagents/agent-*.jsonl` files.
 - `AgentName`: for subagents, the `agentType` from `.meta.json`; for main sessions, empty (the session title/label is in `Extras.{customTitle,aiTitle}`, NOT in AgentName — feedback #4).
@@ -800,8 +800,8 @@ On `CREATE` of a new directory at depth 2 (a new session subdir under a project)
 
 Tail resumes each file from the **persisted cursor offset** where Scan left off —
 NOT from the file's current EOF. The ingester drives one adapter instance through
-`Scan` then `Tail` (`runAdapter`); Scan records its final per-file offsets on the
-adapter, and Tail continues from those. This closes the data-loss window where
+`Scan` then `Tail`; Scan records its final per-file offsets on the adapter, and
+Tail continues from those. This closes the data-loss window where
 records appended to a file *between* Scan finishing and Tail starting would be
 skipped if Tail snapshotted current EOF (any re-emission of an already-seen line is
 absorbed by the ingester's SQL-layer idempotent upserts). A cold Tail with no
@@ -821,6 +821,10 @@ records. After the catch-up, the fsnotify loop drives all further reads.
 
 Stream-parse line-by-line from the cursor offset. A line without a trailing `\n` is an in-flight write; the adapter parks the partial bytes and resumes on the next event. A line that parses but has unknown `type` produces a `SourceError`. A line that fails to parse as JSON: same. The adapter does not skip bytes blindly; it always advances `offset` past completed lines only.
 
+Tail calls the canonical nil-safe Tail heartbeat helper from the real fsnotify
+loop during idle ticks and after emitted records. A synthetic/test-only
+heartbeat outside that loop does not satisfy the liveness contract.
+
 **Oversized line (exceeds the scan buffer).** A single line longer than the scan buffer bound (`scanBufferMax`, 8 MB) cannot be buffered whole. The adapter surfaces exactly one `SourceError` for that line, discards bytes up to AND including the next `\n`, and **continues reading subsequent records** — it does NOT jump to EOF. Skipping to EOF would silently discard every later valid record in the file (a 100 MB transcript with one pathological line would lose everything after it). Only the one oversized line is dropped; the offset advances past its terminating newline so the cursor stays consistent and the records after it are ingested normally.
 
 ### 6.4 Throughput considerations
@@ -831,7 +835,7 @@ The adapter has two deterministic workstation benchmarks in `internal/adapters/c
 
 ## 7. Cursor
 
-The cursor is the adapter's resume contract. Shape (JSON, stored in `sources.cursor`):
+The cursor is the adapter's resume contract. Shape (JSON, stored in `source_progress.cursor`):
 
 ```json
 {

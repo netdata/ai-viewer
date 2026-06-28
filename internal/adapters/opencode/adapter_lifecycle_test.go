@@ -140,6 +140,89 @@ func TestAdapter_ScanThenTailHandoff(t *testing.T) {
 	}
 }
 
+func TestAdapter_FreshRestartScanThenTailWarmHandoff(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, rw := newEmptyDB(t, dir, "opencode.db")
+	insertSession(t, rw, "ses_old", "", 10, 10, 0)
+	insertAssistantMessage(t, rw, "msg_old", "ses_old", 10, 10, 3, 1)
+	insertSession(t, rw, "ses_a", "", 100, 100, 0)
+	insertAssistantMessage(t, rw, "msg_a", "ses_a", 110, 110, 5, 2)
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close rw: %v", err)
+	}
+
+	opts, _, _ := discardOpts()
+	initial, err := New(path, opts)
+	if err != nil {
+		t.Fatalf("New initial: %v", err)
+	}
+	scanOut := make(chan canonical.Event, 4096)
+	if err := initial.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("initial Scan: %v", err)
+	}
+	if initial.scanCursor == nil {
+		t.Fatal("initial Scan did not record cursor")
+	}
+	stored := initial.scanCursor.String()
+
+	rw2, err := openRWAgain(t, path)
+	if err != nil {
+		t.Fatalf("reopen rw for catch-up row: %v", err)
+	}
+	insertSession(t, rw2, "ses_b", "", 200, 200, 0)
+	insertAssistantMessage(t, rw2, "msg_b", "ses_b", 210, 210, 7, 3)
+	if err := rw2.Close(); err != nil {
+		t.Fatalf("close rw2: %v", err)
+	}
+
+	restart, err := New(path, opts)
+	if err != nil {
+		t.Fatalf("New restart: %v", err)
+	}
+	reparsed, err := restart.ParseCursor(stored)
+	if err != nil {
+		t.Fatalf("ParseCursor: %v", err)
+	}
+	catchupOut := make(chan canonical.Event, 4096)
+	if err := restart.Scan(context.Background(), reparsed, catchupOut); err != nil {
+		t.Fatalf("restart catch-up Scan: %v", err)
+	}
+	catchupEvents := drainAll(catchupOut)
+	if !hasSession(catchupEvents, "ses_b") {
+		t.Fatal("restart catch-up Scan did not emit row appended during restart window")
+	}
+	if restart.scanCursor == nil {
+		t.Fatal("restart catch-up Scan did not populate scanCursor for warm Tail")
+	}
+
+	rw3, err := openRWAgain(t, path)
+	if err != nil {
+		t.Fatalf("reopen rw for tail row: %v", err)
+	}
+	defer func() { _ = rw3.Close() }()
+	insertSession(t, rw3, "ses_c", "", 300, 300, 0)
+	insertAssistantMessage(t, rw3, "msg_c", "ses_c", 310, 310, 11, 5)
+
+	tailOut := make(chan canonical.Event, 4096)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = restart.Tail(ctx, tailOut)
+	}()
+	defer func() { cancel(); wg.Wait() }()
+
+	got, ok := waitForSession(tailOut, "ses_c", 8*time.Second)
+	if !ok {
+		t.Fatal("warm Tail on fresh restart adapter did not emit post-catch-up row")
+	}
+	if hasSession(got, "ses_old") {
+		t.Error("fresh restart Tail replayed below-boundary history; catch-up Scan did not establish warm handoff")
+	}
+}
+
 // TestAdapter_TailColdSnapshot covers the cold-Tail path (no preceding Scan):
 // Tail snapshots current HEAD so it follows from now and does NOT replay a
 // pre-existing session; a session inserted AFTER the loop starts is emitted.

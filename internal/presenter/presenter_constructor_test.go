@@ -122,6 +122,14 @@ func TestNewWiresResolvedDefaultsAndHubCleanup_LifecycleDefaults(t *testing.T) {
 	}
 }
 
+func TestSchemaVersionTracksSourceLifecycleMigration(t *testing.T) {
+	t.Parallel()
+
+	if SchemaVersion != 12 {
+		t.Fatalf("SchemaVersion = %d, want 12 for source_progress lifecycle migration", SchemaVersion)
+	}
+}
+
 func TestNewWiresResolvedDefaultsAndHubCleanup_RealtimeDefaults(t *testing.T) {
 	t.Parallel()
 

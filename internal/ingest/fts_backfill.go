@@ -119,6 +119,17 @@ WHERE id > ?
 ORDER BY id ASC
 LIMIT ?`
 
+const sourceOpsForFTSQuery = `
+SELECT o.id, o.name,
+       IFNULL(o.model, ''), IFNULL(o.provider, ''), IFNULL(o.tool_namespace, ''),
+       IFNULL(o.error_class, ''), IFNULL(o.error_message, ''),
+       o.session_id
+FROM ops o
+JOIN sessions s ON o.session_id = s.id
+WHERE s.source_id = ? AND o.id > ?
+ORDER BY o.id ASC
+LIMIT ?`
+
 // backfillFTSOps streams every op into fts_ops in stable-id keyset batches.
 // For each batch: open a transaction, read the next <=ftsBackfillBatchSize ops
 // (cursor FULLY drained into a slice before any write — single-writer
@@ -146,18 +157,48 @@ func backfillFTSOps(ctx context.Context, db *sql.DB) (int, error) {
 	}
 }
 
+func repairSourceFTSOps(ctx context.Context, db *sql.DB, sourceID string) (int, error) {
+	cursor := ""
+	total := 0
+	for {
+		batch, err := loadSourceOpsBatch(ctx, db, sourceID, cursor)
+		if err != nil {
+			return 0, err
+		}
+		if len(batch) == 0 {
+			return total, nil
+		}
+		if err := repairFTSOpsBatch(ctx, db, batch); err != nil {
+			return 0, err
+		}
+		total += len(batch)
+		cursor = batch[len(batch)-1].opID
+		if len(batch) < ftsBackfillBatchSize {
+			return total, nil
+		}
+	}
+}
+
 // loadOpsBatch reads one keyset page of ops (id > cursor, ordered by id) inside
 // its own transaction, fully draining the cursor before the caller writes
 // (single-connection discipline). error_text is composed here with the SAME
 // helper the incremental path uses.
 func loadOpsBatch(ctx context.Context, db *sql.DB, cursor string) ([]ftsOpRow, error) {
+	return loadFTSOpsBatch(ctx, db, allOpsForFTSQuery, cursor, ftsBackfillBatchSize)
+}
+
+func loadSourceOpsBatch(ctx context.Context, db *sql.DB, sourceID, cursor string) ([]ftsOpRow, error) {
+	return loadFTSOpsBatch(ctx, db, sourceOpsForFTSQuery, sourceID, cursor, ftsBackfillBatchSize)
+}
+
+func loadFTSOpsBatch(ctx context.Context, db *sql.DB, query string, args ...any) ([]ftsOpRow, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("fts-backfill: begin ops read tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, allOpsForFTSQuery, cursor, ftsBackfillBatchSize)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fts-backfill: query ops: %w", err)
 	}
@@ -218,6 +259,42 @@ func insertFTSOpsBatch(ctx context.Context, db *sql.DB, ops []ftsOpRow) error {
 	return nil
 }
 
+func repairFTSOpsBatch(ctx context.Context, db *sql.DB, ops []ftsOpRow) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("fts-repair: begin ops write tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, ftsOpsInsert)
+	if err != nil {
+		return fmt.Errorf("fts-repair: prepare fts_ops insert: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for i := range ops {
+		r := &ops[i]
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fts_ops WHERE op_id = ?`, r.opID); err != nil {
+			return fmt.Errorf("fts-repair: delete fts_ops row (op %s): %w", r.opID, err)
+		}
+		if _, err := stmt.ExecContext(ctx,
+			r.name, r.model, r.provider, r.toolNS, r.errorText, r.opID, r.sessionID,
+		); err != nil {
+			return fmt.Errorf("fts-repair: insert fts_ops row (op %s): %w", r.opID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("fts-repair: commit fts_ops batch: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // ftsLogRow is one log's fts_logs payload, read from log_entries.
 type ftsLogRow struct {
 	logID     int64
@@ -259,6 +336,16 @@ WHERE le.session_id IS NOT NULL AND src.fts5_index_logs = 1
 ORDER BY le.id ASC
 LIMIT ?`
 
+const sourceIndexableLogsForFTSQuery = `
+SELECT le.id, le.message, le.session_id, le.op_id, le.severity, le.ts
+FROM log_entries le
+JOIN sessions s ON le.session_id = s.id
+JOIN sources  src ON s.source_id = src.id
+WHERE le.session_id IS NOT NULL AND src.fts5_index_logs = 1
+  AND s.source_id = ? AND le.id > ?
+ORDER BY le.id ASC
+LIMIT ?`
+
 // backfillFTSLogs streams every indexable log into fts_logs in stable-id keyset
 // batches, mirroring backfillFTSOps. log_entries.id is INTEGER, so the cursor is
 // an int64 starting at 0 (below every AUTOINCREMENT id). Returns the total rows
@@ -285,17 +372,47 @@ func backfillFTSLogs(ctx context.Context, db *sql.DB) (int, error) {
 	}
 }
 
+func repairSourceFTSLogs(ctx context.Context, db *sql.DB, sourceID string) (int, error) {
+	var cursor int64
+	total := 0
+	for {
+		batch, err := loadSourceLogsBatch(ctx, db, sourceID, cursor)
+		if err != nil {
+			return 0, err
+		}
+		if len(batch) == 0 {
+			return total, nil
+		}
+		if err := repairFTSLogsBatch(ctx, db, batch); err != nil {
+			return 0, err
+		}
+		total += len(batch)
+		cursor = batch[len(batch)-1].logID
+		if len(batch) < ftsBackfillBatchSize {
+			return total, nil
+		}
+	}
+}
+
 // loadLogsBatch reads one keyset page of indexable logs (le.id > cursor, ordered
 // by le.id) inside its own transaction, fully draining the cursor before the
 // caller writes.
 func loadLogsBatch(ctx context.Context, db *sql.DB, cursor int64) ([]ftsLogRow, error) {
+	return loadFTSLogsBatch(ctx, db, indexableLogsForFTSQuery, cursor, ftsBackfillBatchSize)
+}
+
+func loadSourceLogsBatch(ctx context.Context, db *sql.DB, sourceID string, cursor int64) ([]ftsLogRow, error) {
+	return loadFTSLogsBatch(ctx, db, sourceIndexableLogsForFTSQuery, sourceID, cursor, ftsBackfillBatchSize)
+}
+
+func loadFTSLogsBatch(ctx context.Context, db *sql.DB, query string, args ...any) ([]ftsLogRow, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("fts-backfill: begin logs read tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, indexableLogsForFTSQuery, cursor, ftsBackfillBatchSize)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fts-backfill: query logs: %w", err)
 	}
@@ -353,6 +470,42 @@ func insertFTSLogsBatch(ctx context.Context, db *sql.DB, logs []ftsLogRow) error
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("fts-backfill: commit fts_logs batch: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func repairFTSLogsBatch(ctx context.Context, db *sql.DB, logs []ftsLogRow) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("fts-repair: begin logs write tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, ftsLogsInsert)
+	if err != nil {
+		return fmt.Errorf("fts-repair: prepare fts_logs insert: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for i := range logs {
+		r := &logs[i]
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fts_logs WHERE log_id = ?`, r.logID); err != nil {
+			return fmt.Errorf("fts-repair: delete fts_logs row (log %d): %w", r.logID, err)
+		}
+		if _, err := stmt.ExecContext(ctx,
+			r.message, r.logID, r.sessionID, r.opID, r.severity, r.ts,
+		); err != nil {
+			return fmt.Errorf("fts-repair: insert fts_logs row (log %d): %w", r.logID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("fts-repair: commit fts_logs batch: %w", err)
 	}
 	committed = true
 	return nil

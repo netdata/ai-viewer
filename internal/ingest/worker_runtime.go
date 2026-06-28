@@ -40,6 +40,7 @@ func newWorkerRuntime(w *worker) *workerRuntime {
 		wr.now = w.now
 	}
 	wr.deferReadModels = w.deferReadModels
+	wr.readModelRebuildActive = w.readModelRebuildActive
 	rt := &workerRuntime{
 		worker:     w,
 		writer:     wr,

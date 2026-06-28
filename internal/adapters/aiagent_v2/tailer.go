@@ -30,15 +30,10 @@ const debounceMaxEntries = 1024
 // v3 adapter's cadence so operators see consistent timing.
 const tailTickInterval = 5 * time.Second
 
-// tailLoop runs the fsnotify event loop until ctx is cancelled. The
-// adapter's Tail method delegates here. Owns the watcher lifecycle.
-//
-// Per spec, on every dirty-file flush:
-//  1. Process the file once with the current cursor.
-//  2. Re-stat: if mtime advanced during the read, re-process exactly
-//     ONCE more. Never loop — a fast producer would starve the
-//     watcher otherwise.
-func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error)) error {
+func tailLoopWithHeartbeat(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error), tailHeartbeat func(), catchUp bool) error {
+	if tailHeartbeat == nil {
+		tailHeartbeat = func() {}
+	}
 	if cur.Files == nil {
 		cur = newCursor()
 	}
@@ -60,6 +55,13 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	}
 	if addErr := watcher.Add(root); addErr != nil {
 		return fmt.Errorf("aiagent_v2: watch %s: %w", root, addErr)
+	}
+
+	if catchUp {
+		if perr := catchUpFromCursor(ctx, root, sourceID, &cur, out, onError); perr != nil {
+			return perr
+		}
+		tailHeartbeat()
 	}
 
 	dirty := make(map[string]struct{}, 16)
@@ -101,6 +103,7 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 				if perr := flushDirty(ctx, root, sourceID, dirty, &cur, out, onError); perr != nil {
 					return perr
 				}
+				tailHeartbeat()
 				dirty = make(map[string]struct{}, 16)
 				continue
 			}
@@ -114,6 +117,7 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			if perr := flushDirty(ctx, root, sourceID, dirty, &cur, out, onError); perr != nil {
 				return perr
 			}
+			tailHeartbeat()
 			dirty = make(map[string]struct{}, 16)
 		case <-tick.C:
 			// Only emit a checkpoint on the tail tick if the cursor has
@@ -129,8 +133,21 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 				}
 				lastEmittedFileCount = len(cur.Files)
 			}
+			tailHeartbeat()
 		}
 	}
+}
+
+func catchUpFromCursor(ctx context.Context, root, sourceID string, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
+	files, err := listSnapshots(root)
+	if err != nil {
+		return err
+	}
+	dirty := make(map[string]struct{}, len(files))
+	for _, name := range files {
+		dirty[name] = struct{}{}
+	}
+	return flushDirty(ctx, root, sourceID, dirty, cur, out, onError)
 }
 
 // tailableName returns the file basename if the fsnotify event

@@ -179,7 +179,9 @@ match evaluation runs **in the poller, off the hub's fan-out path**; the hub
 only enqueues the resulting minimal events onto each matching subscription's
 channel. (`stats_invalidated` rows fan out to all subscriptions, coalesced to
 ≈1/s on emit; `source_status_changed` rows fan out to subscriptions whose
-`sources` filter admits that source.)
+`sources` filter admits that source. Source-status rows cover parse-error,
+enabled, lifecycle, and read-model state changes; clients refetch
+`/api/sources` and `/api/health` for the full source state.)
 
 The SSE message does NOT carry the full session data — only `{"type":"session_changed","session_id":"..."}`. The client decides whether to re-fetch the full session detail via REST. This keeps SSE messages tiny and keeps the SQL load on REST endpoints where caching and pagination already live.
 
@@ -284,7 +286,7 @@ GET  /<any non-/api non-/assets> → SPA shell (client-route fallback: /sessions
 GET  /favicon.svg               → embedded root public asset                                (live)
 GET  /assets/*                  → embedded frontend assets                                  (live)
 GET  /api/health                → JSON health status                                        (live)
-GET  /api/sources               → list sources, ingest cursors, parse error counts          (live)
+GET  /api/sources               → list sources, ingest cursors, lifecycle/read-model state  (live)
 GET  /api/sessions              → list sessions with filters and pagination                 (live)
 GET  /api/sessions/:id          → session detail with turns and ops                         (live)
 GET  /api/sessions/:id/logs     → log entries for a session                                 (live)

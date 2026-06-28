@@ -708,7 +708,7 @@ On startup, the adapter walks `<sessions-dir>/session/` once (NOT recursive; the
 
 On startup:
 
-1. Load cursor from `sources.cursor` for this adapter+location.
+1. Load cursor from `source_progress.cursor` for this adapter+location.
 2. For each ledger file in `<sessions-dir>/session/`:
    - If the file is in the cursor and `size_on_disk == cursor.size` and `mtime_on_disk` is unchanged since last scan: skip (no new data).
    - If `size_on_disk > cursor.size`: read from `cursor.offset` to EOF; parse; emit events.
@@ -723,7 +723,15 @@ Cursor is durable because:
 - The ingester writes it as part of the same SQLite transaction that writes the canonical rows from the corresponding records. If the ingester crashes mid-transaction, the cursor reverts atomically with the row writes; on restart the re-read is idempotent (every writer table upserts on a natural identity — SQL-layer idempotency, see `ingester.md` §Dedup and Idempotency).
 - The cursor's per-file byte `Offset` is the resume mechanism: on restart `Scan(since=cursor)` seeks past already-read bytes so completed records are not re-emitted. Resume is cursor-driven, not gated by a per-source `SourceSeq` high-water-mark (removed in SOW-0015; a scalar HWM cannot work when one `sourceID` aggregates many files whose `ledgerSeq` each restart at 1).
 
-### 7.4 Cursor Size Bound
+### 7.4 Scan-to-Tail Handoff And Heartbeat
+
+`Scan` records its final cursor on the adapter instance. A following `Tail` on
+the same instance resumes from that Scan cursor, not from current EOF/current
+file metadata, so records appended between Scan completion and Tail watch
+startup are read. Tail also calls the canonical nil-safe Tail heartbeat helper
+from the real watch loop during idle ticks and after emitted events.
+
+### 7.5 Cursor Size Bound
 
 17 356 sessions × ~120 bytes per cursor entry ≈ 2 MB cursor JSON. That's fine in SQLite. If it grows past a threshold (≥10 MB) Phase 2 may split the cursor across rows or compress, but Phase 1 keeps it simple.
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,23 @@ func waitForEvent(t *testing.T, ch chan canonical.Event, timeout time.Duration, 
 			}
 		case <-deadline:
 			return nil, false
+		}
+	}
+}
+
+func waitForHeartbeat(t *testing.T, count *atomic.Int64, want int64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if count.Load() >= want {
+			return true
+		}
+		select {
+		case <-deadline:
+			return false
+		case <-tick.C:
 		}
 	}
 }
@@ -180,6 +198,59 @@ func TestTail_PeriodicProgress(t *testing.T) {
 	}
 }
 
+func TestTail_HeartbeatOnIdleTick(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var heartbeats atomic.Int64
+	a, err := New(root, canonical.AdapterOptions{
+		OnTailHeartbeat: func() { heartbeats.Add(1) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	out := make(chan canonical.Event, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Tail(ctx, out) }()
+
+	if !waitForHeartbeat(t, &heartbeats, 1, tailTickInterval+2*time.Second) {
+		t.Fatalf("idle tail tick did not call tail heartbeat")
+	}
+}
+
+func TestScanThenTail_NoLossInWindow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	a, err := New(root, canonical.AdapterOptions{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	writeSnapshot(t, root, "scanned-origin", simpleSnapshot(2, "scanned-origin"))
+	scanOut := make(chan canonical.Event, 128)
+	if err := a.Scan(context.Background(), nil, scanOut); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !hasSessionStarted(drainBuffered(scanOut), "scanned-origin") {
+		t.Fatalf("Scan did not emit the seeded session")
+	}
+
+	// The window: a new snapshot lands after Scan returns but before Tail starts.
+	writeSnapshot(t, root, "window-origin", simpleSnapshot(2, "window-origin"))
+
+	tailOut := make(chan canonical.Event, 128)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Tail(ctx, tailOut) }()
+
+	if _, ok := waitForEvent(t, tailOut, 5*time.Second, func(ev canonical.Event) bool {
+		ss, is := ev.(canonical.SessionStartedEvent)
+		return is && ss.NativeID == "window-origin"
+	}); !ok {
+		t.Fatalf("Tail did not emit snapshot appended in the Scan-to-Tail window")
+	}
+}
+
 func TestTailable_IgnoresUnrelated(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -207,6 +278,16 @@ func TestSortStrings(t *testing.T) {
 	if s[0] != "a" || s[1] != "b" || s[2] != "c" {
 		t.Fatalf("sort: %v", s)
 	}
+}
+
+func hasSessionStarted(events []canonical.Event, nativeID string) bool {
+	for _, ev := range events {
+		ss, ok := ev.(canonical.SessionStartedEvent)
+		if ok && ss.NativeID == nativeID {
+			return true
+		}
+	}
+	return false
 }
 
 // TestTailer_RefusesToCreateMissingSourceDir asserts the tailer never

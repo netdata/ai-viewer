@@ -12,7 +12,7 @@ import (
 // shape ever changes; ParseCursor refuses unknown versions.
 const cursorVersion = 1
 
-// Cursor is the resume token persisted in sources.cursor for the codex
+// Cursor is the resume token persisted in source_progress.cursor for the codex
 // adapter. Keys in Files are paths RELATIVE to the configured sessions root
 // (e.g. "YYYY/MM/DD/rollout-...UUIDv7.jsonl"), so the cursor survives a move of
 // $CODEX_HOME. Keys in LegacyJSON are the basenames of legacy flat .json files

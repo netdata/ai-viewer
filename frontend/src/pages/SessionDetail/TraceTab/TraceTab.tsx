@@ -50,9 +50,13 @@ export function TraceTab({ detail, mode = 'full' }: { detail: SessionDetailRespo
   const showToolbar = mode === 'full' || mode === 'viz';
   const showViz = mode === 'full' || mode === 'viz';
   const showEvents = mode === 'full' || mode === 'events';
+  const wrapClassName = mode === 'events' ? `${styles.wrap} ${styles.wrapFill}` : styles.wrap;
+  const eventSectionClassName = mode === 'events'
+    ? `${styles.eventSection} ${styles.eventSectionFill}`
+    : styles.eventSection;
 
   return (
-    <div className={styles.wrap}>
+    <div className={wrapClassName}>
       {showToolbar ? (
         <div className={styles.toolbar}>
           <fieldset className={styles.viewToggle}>
@@ -183,11 +187,16 @@ export function TraceTab({ detail, mode = 'full' }: { detail: SessionDetailRespo
       ) : null}
 
       {showEvents ? (
-        <section className={styles.eventSection} aria-labelledby="event-list-title">
+        <section className={eventSectionClassName} aria-labelledby="event-list-title">
           <h2 id="event-list-title" className={styles.eventTitle}>
             Event list
           </h2>
-          <EventList nodes={flat} onSelect={setSelected} selectedId={selectedId} />
+          <EventList
+            nodes={flat}
+            onSelect={setSelected}
+            selectedId={selectedId}
+            fillParent={mode === 'events'}
+          />
         </section>
       ) : null}
 

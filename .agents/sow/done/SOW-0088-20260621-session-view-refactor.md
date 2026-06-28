@@ -190,3 +190,49 @@ Completed. Moved to `.agents/sow/done/` during the 2026-06-22 SOW ledger hygiene
 ## Related
 
 The 2 small UI bugs are also covered here. They'll be fixed in chunk 1 (immediate, ~1 hour) before the larger work begins.
+
+## Regression Log
+
+See dated regression entries below.
+
+Append regression entries here only after this SOW was completed or closed and
+later testing or use found broken behavior. Use a dated
+`## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend
+regression content above the original SOW narrative.
+
+## Regression - 2026-06-26
+
+### Trigger
+
+The operator requested a UI consistency check of the Session Detail view after
+the full re-ingest, reporting that the session view felt like the same view
+inside itself, similar to iframe nesting.
+
+### Finding
+
+Headless Playwright against the installed app showed:
+
+- `iframe` count = 0 and React root count = 1, so this is not literal iframe or
+  nested-SPA rendering.
+- The unified shell's resize handles had zero main-axis geometry:
+  `.resizeHandleV` measured `height=0`, and `.resizeHandleH` measured `width=0`.
+- The bottom Event list kept a fixed 420px virtual viewport inside a resizable
+  bottom pane. On a large real session this made the event-list scroller extend
+  beyond the bottom panel's bounding box, creating nested fixed-box behavior.
+
+### Root Cause
+
+The resize-handle CSS was dimensioned on the wrong axis for
+`react-resizable-panels`: the vertical viz/bottom split needs a horizontal
+handle (`height: 4px`), while the horizontal left/right split needs a vertical
+handle (`width: 4px`). Separately, `EventList` used a hard-coded virtualization
+viewport height instead of measuring the pane-provided scroll viewport.
+
+### Failing Tests
+
+Added before the fix:
+
+- `frontend/tests/session-layout.spec.ts` pins non-zero resize-handle geometry
+  and asserts the Event list scroll area stays within the bottom pane.
+- `frontend/src/pages/SessionDetail/TraceTab/EventList.test.tsx` pins
+  ResizeObserver-driven viewport sizing for the virtualized Event list.

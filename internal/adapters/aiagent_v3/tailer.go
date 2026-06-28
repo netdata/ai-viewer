@@ -28,10 +28,10 @@ const debounceMaxEntries = 1024
 // §6.2 "5s tick".
 const tailTickInterval = 5 * time.Second
 
-// tailLoop runs the fsnotify event loop until ctx is cancelled. The
-// adapter's Tail method delegates here. The function owns the watcher
-// lifecycle: it is created here and closed via defer on return.
-func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error)) error {
+func tailLoopWithHeartbeat(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error), tailHeartbeat func(), catchUp bool) error {
+	if tailHeartbeat == nil {
+		tailHeartbeat = func() {}
+	}
 	if cur.Files == nil {
 		cur = newCursor()
 	}
@@ -56,6 +56,13 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 	}
 	if addErr := watcher.Add(watchDir); addErr != nil {
 		return fmt.Errorf("aiagent_v3: watch %s: %w", watchDir, addErr)
+	}
+
+	if catchUp {
+		if perr := catchUpFromCursor(ctx, root, sourceID, &cur, out, onError); perr != nil {
+			return perr
+		}
+		tailHeartbeat()
 	}
 
 	dirty := make(map[string]struct{}, 16)
@@ -90,6 +97,7 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 				if perr := flushDirty(ctx, root, sourceID, dirty, &cur, out, onError); perr != nil {
 					return perr
 				}
+				tailHeartbeat()
 				dirty = make(map[string]struct{}, 16)
 				continue
 			}
@@ -103,13 +111,27 @@ func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<-
 			if perr := flushDirty(ctx, root, sourceID, dirty, &cur, out, onError); perr != nil {
 				return perr
 			}
+			tailHeartbeat()
 			dirty = make(map[string]struct{}, 16)
 		case <-tick.C:
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {
 				return perr
 			}
+			tailHeartbeat()
 		}
 	}
+}
+
+func catchUpFromCursor(ctx context.Context, root, sourceID string, cur *Cursor, out chan<- canonical.Event, onError func(error)) error {
+	files, err := listLedgers(root)
+	if err != nil {
+		return err
+	}
+	dirty := make(map[string]struct{}, len(files))
+	for _, name := range files {
+		dirty[name] = struct{}{}
+	}
+	return flushDirty(ctx, root, sourceID, dirty, cur, out, onError)
 }
 
 // tailableName returns the file basename if the fsnotify event targets a

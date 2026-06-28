@@ -173,7 +173,7 @@ func TestTailLoop_WALHintWakesCycle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), false, out, silentLogger(), ce.onError)
+		_ = tailLoop(ctx, path, "opencode:"+path, newCursor(), out, silentLogger(), ce.onError)
 	}()
 	defer func() { cancel(); <-done }()
 

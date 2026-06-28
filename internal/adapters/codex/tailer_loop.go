@@ -13,21 +13,25 @@ import (
 )
 
 type tailRuntime struct {
-	ctx          context.Context
-	root         string
-	resolvedRoot string
-	sourceID     string
-	cur          Cursor
-	out          chan<- canonical.Event
-	onError      func(error)
-	watcher      *fsnotify.Watcher
-	watched      map[string]struct{}
-	dirty        map[string]struct{}
-	debounce     *time.Timer
-	tick         *time.Ticker
+	ctx           context.Context
+	root          string
+	resolvedRoot  string
+	sourceID      string
+	cur           Cursor
+	out           chan<- canonical.Event
+	onError       func(error)
+	tailHeartbeat func()
+	watcher       *fsnotify.Watcher
+	watched       map[string]struct{}
+	dirty         map[string]struct{}
+	debounce      *time.Timer
+	tick          *time.Ticker
 }
 
-func newTailRuntime(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error)) (*tailRuntime, error) {
+func newTailRuntime(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error), tailHeartbeat func()) (*tailRuntime, error) {
+	if tailHeartbeat == nil {
+		tailHeartbeat = func() {}
+	}
 	if cur.Files == nil {
 		cur = newCursor()
 	}
@@ -36,15 +40,16 @@ func newTailRuntime(ctx context.Context, root, sourceID string, cur Cursor, out 
 		return nil, fmt.Errorf("codex: fsnotify watcher: %w", err)
 	}
 	rt := &tailRuntime{
-		ctx:      ctx,
-		root:     root,
-		sourceID: sourceID,
-		cur:      cur,
-		out:      out,
-		onError:  onError,
-		watcher:  watcher,
-		watched:  map[string]struct{}{},
-		dirty:    newDirtySet(),
+		ctx:           ctx,
+		root:          root,
+		sourceID:      sourceID,
+		cur:           cur,
+		out:           out,
+		onError:       onError,
+		tailHeartbeat: tailHeartbeat,
+		watcher:       watcher,
+		watched:       map[string]struct{}{},
+		dirty:         newDirtySet(),
 	}
 	if !rt.prepareRoot() {
 		rt.close()
@@ -76,6 +81,7 @@ func (rt *tailRuntime) run() error {
 	if err := rt.catchUp(); err != nil {
 		return err
 	}
+	rt.tailHeartbeat()
 	rt.startTimers()
 	defer rt.stopTimers()
 	return rt.selectLoop()
@@ -160,12 +166,19 @@ func (rt *tailRuntime) onWatcherError(err error) {
 func (rt *tailRuntime) flushNow() error {
 	err := flushDirty(rt.ctx, rt.resolvedRoot, rt.sourceID, rt.dirty, &rt.cur, rt.out, rt.onError)
 	rt.dirty = newDirtySet()
+	if err == nil {
+		rt.tailHeartbeat()
+	}
 	return err
 }
 
 func (rt *tailRuntime) onTick() error {
 	rt.addWatchTree(rt.resolvedRoot)
-	return emitProgress(rt.ctx, rt.sourceID, rt.cur, rt.out)
+	if err := emitProgress(rt.ctx, rt.sourceID, rt.cur, rt.out); err != nil {
+		return err
+	}
+	rt.tailHeartbeat()
+	return nil
 }
 
 func (rt *tailRuntime) addWatchTree(dir string) {

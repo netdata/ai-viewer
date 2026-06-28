@@ -382,7 +382,7 @@ type LogEntryEvent struct {
 func (LogEntryEvent) EventKind() EventKind { return EvLogEntry }
 
 // SourceProgressEvent checkpoints the adapter's opaque cursor. The
-// ingester persists this into sources.cursor so restarts resume in place.
+// ingester persists this into source_progress.cursor so restarts resume in place.
 type SourceProgressEvent struct {
 	EventBase
 	// Cursor is the adapter-specific opaque cursor encoded as JSON.

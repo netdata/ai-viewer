@@ -215,7 +215,10 @@ export function UnifiedView({ detail }: { detail: SessionDetailResponse }) {
                 </div>
               </Panel>
 
-              <PanelResizeHandle className={styles.resizeHandleV ?? ''} />
+              <PanelResizeHandle
+                className={styles.resizeHandleV ?? ''}
+                aria-label="Resize visualization and event list panels"
+              />
 
               {/* Bottom zone: event list / logs / raw */}
               <Panel
@@ -254,7 +257,10 @@ export function UnifiedView({ detail }: { detail: SessionDetailResponse }) {
             </PanelGroup>
           </Panel>
 
-          <PanelResizeHandle className={styles.resizeHandleH ?? ''} />
+          <PanelResizeHandle
+            className={styles.resizeHandleH ?? ''}
+            aria-label="Resize visualization and turn view panels"
+          />
 
           {/* Right zone: turn view */}
           <Panel

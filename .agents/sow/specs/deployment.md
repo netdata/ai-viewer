@@ -62,13 +62,13 @@ Layout (`/opt/ai-viewer`):
 | `/etc/systemd/system/ai-viewer-{ingest,serve}.service` | system unit templates (under `deploy/systemd-system/`) |
 
 - The services run as the installing operator. The operator owns `/opt/ai-viewer` so the ingester can write `index.db` while reading the operator's owner-only source directories without ACLs.
-- Install/upgrade atomically stages each rebuilt binary under `/opt/ai-viewer/bin` and renames it into place. Upgrade ordering is stop, chown/permission repair, start/verify ingester, start/verify server, then re-check ingester. Direct `cp` over a mapped executable is forbidden because it can fail with `Text file busy`, and replacing a binary without restarting leaves the old process running old code.
+- Install/upgrade atomically stages each rebuilt binary under `/opt/ai-viewer/bin` and renames it into place. Upgrade ordering is stop serve, stop ingest, chown/permission repair, start/verify ingester, wait for migration/liveness evidence, start/verify server, then re-check ingester. Direct `cp` over a mapped executable is forbidden because it can fail with `Text file busy`, and replacing a binary without restarting leaves the old process running old code.
 - The server binds `127.0.0.1:7710` (localhost-only; same as the user install) — no auth in v1 (`security.md` §bind).
 - **Source read access**: the operator reads the operator's agent data (`~/.ai-agent`, `~/.claude`, `~/.codex`, `~/.local/share/opencode`). Those directories are commonly owner-only (`0700`), so a dedicated service user is intentionally not used.
 - The system units apply systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`, `ReadWritePaths` scoped to the data dir for the ingester). The server has no `ReadWritePaths` — it is read-only on the DB (`CheckSchema` + `SELECT`s; never writes).
 - Both system units and both user units set `TimeoutStopSec=45s`. This is an explicit repository-owned graceful-stop budget, not a reliance on host defaults.
 - The memory-capped system ingester unit sets `OOMPolicy=stop` alongside its existing `MemoryHigh=4G`, `MemoryMax=8G`, `LimitNOFILE=65536`, and `IOSchedulingClass=idle` resource directives. Serve units and user units do not set memory caps or `OOMPolicy`.
-- The server starts after the ingester (`After=ai-viewer-ingest.service`) but this orders START only, not readiness — on a fresh install the server may cycle a few `RestartSec=3s` retries until the ingester has created+migrated the schema (same race as the user units; `deployment.md` §systemd).
+- The server starts after the ingester (`After=ai-viewer-ingest.service`) but this orders START only, not readiness. The repository installer compensates by starting ingest first and polling ingester active/migration evidence before starting serve. Direct systemd starts may still rely on `Restart=on-failure` retries until the ingester has created/migrated the schema; this fallback is acceptable only when the runbook documents it as a workstation recovery path, not as readiness proof.
 - **Data is disposable.** `/opt/ai-viewer/data/index.db` is a derived artifact — deleting it triggers a full re-ingest on the next start (the source files are the source of truth). `uninstall` removes it without warning; re-running `install` rebuilds it.
 - Writer one-shot commands are daemon-lock aware and key the lock on `--state-dir`. For a system install, a one-shot targeting `/opt/ai-viewer/data/index.db` must also pass `--state-dir /opt/ai-viewer/data`; otherwise it probes the default user state dir and cannot detect the system daemon lock.
 
@@ -124,10 +124,11 @@ than assume portable cross-distro defaults. SOW-0104 does not add custom
 Installer liveness checks are immediate evidence, not a complete migration
 circuit breaker. After starting the ingester, `scripts/install-system.sh` polls
 `systemctl is-active --quiet ai-viewer-ingest.service` once per second for up to
-15 attempts, starts and validates the server, then re-checks the ingester. A
-delayed migration failure after those checks is diagnosed from `systemctl
-status`, bounded journal output, structured startup/shutdown markers, and the
-effective `StartLimit*` values.
+15 attempts and verifies migration/readiness evidence before starting serve.
+Then it validates the server and re-checks the ingester. A delayed migration
+failure after those checks is diagnosed from `systemctl status`, bounded journal
+output, structured startup/shutdown markers, `/api/health` schema/lifecycle
+fields, and the effective `StartLimit*` values.
 
 ## Build Pipeline
 
@@ -180,9 +181,10 @@ build — it requires `bin/ai-viewer-serve` + `bin/ai-viewer-ingest` to already
 exist (run `scripts/build.sh` first; CI builds before the E2E step). It ingests
 a fixed set of committed fixtures (`testdata/aiagent_v3/{happy_single_turn,
 multi_turn,sub_agent}/INPUT`) into a `mktemp` temp DB, waits until all three
-sources log "adapter scan complete; tail starting" (so every fixture has emitted
-before shutdown), then SIGTERMs the ingester and waits for a clean exit (which
-flushes the final batch and runs the final resolver pass). It then enforces the
+sources reach durable `lifecycle_state='tailing'` or equivalent fixture-ready
+evidence (so every fixture has emitted before shutdown), then SIGTERMs the
+ingester and waits for a clean exit (which flushes the final batch and runs the
+final resolver pass). It then enforces the
 EXACT deterministic seed via a read-only `sqlite3` open — exactly 4 sessions,
 1 child session, 1 linked parent session-op, and 3 sources (a shortfall =
 partial seed; a surplus = fixture drift; both fail loudly) — then `exec`s

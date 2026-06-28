@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { UIEvent } from 'react';
 import type { TraceNode } from '../../../viz/trace';
 import { isInstantOp, windowRange } from '../../../viz/trace';
@@ -15,23 +15,57 @@ import styles from './TraceTab.module.css';
 
 const ROW_HEIGHT = 28;
 const OVERSCAN = 8;
-const VIEWPORT_HEIGHT = 420;
+const DEFAULT_VIEWPORT_HEIGHT = 420;
 
 export interface EventListProps {
   nodes: TraceNode[];
   onSelect: (_node: TraceNode) => void;
   selectedId: string | null;
+  fillParent?: boolean;
 }
 
-export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
+export function EventList({ nodes, onSelect, selectedId, fillParent = false }: EventListProps) {
   const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(DEFAULT_VIEWPORT_HEIGHT);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
+  useLayoutEffect(() => {
+    if (!fillParent) return;
+
+    const scroller = scrollerRef.current;
+    if (scroller === null) return;
+
+    const applyHeight = (height: number): void => {
+      if (!Number.isFinite(height) || height <= 0) return;
+      const next = Math.max(ROW_HEIGHT, Math.floor(height));
+      setViewportHeight((prev) => (prev === next ? prev : next));
+    };
+
+    let frame = window.requestAnimationFrame(() => {
+      applyHeight(scroller.clientHeight);
+    });
+    let observer: ResizeObserver | null = null;
+
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver((entries) => {
+        const height = entries[0]?.contentRect.height;
+        if (height !== undefined) applyHeight(height);
+      });
+      observer.observe(scroller);
+    }
+    return () => {
+      window.cancelAnimationFrame(frame);
+      frame = 0;
+      observer?.disconnect();
+    };
+  }, [fillParent]);
+
+  const effectiveViewportHeight = fillParent ? viewportHeight : DEFAULT_VIEWPORT_HEIGHT;
   const { start, end } = windowRange(
     nodes.length,
     ROW_HEIGHT,
     scrollTop,
-    VIEWPORT_HEIGHT,
+    effectiveViewportHeight,
     OVERSCAN,
   );
   const slice = nodes.slice(start, end);
@@ -45,8 +79,8 @@ export function EventList({ nodes, onSelect, selectedId }: EventListProps) {
   return (
     <div
       ref={scrollerRef}
-      className={styles.eventScroller}
-      style={{ maxHeight: VIEWPORT_HEIGHT }}
+      className={fillParent ? `${styles.eventScroller} ${styles.eventScrollerFill}` : styles.eventScroller}
+      style={fillParent ? undefined : { maxHeight: DEFAULT_VIEWPORT_HEIGHT }}
       onScroll={onScroll}
       tabIndex={0}
       role="region"

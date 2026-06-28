@@ -554,7 +554,15 @@ Go's `compress/gzip` is ~1.4× faster than Python; structured `encoding/json` is
 
 ### Backfill checkpointing
 
-Emit `SourceProgressEvent` after every 1000 files processed. On restart, the cursor's `files` map skips already-processed files in O(1) (Bloom/hash-keyed lookup). The cursor is small: ~80 bytes per file × 294K files ≈ 23 MB JSON. Storing in `sources.cursor` as a single JSON blob is acceptable for v1; if the cursor grows beyond ~100 MB, the adapter should switch to a side table.
+Emit `SourceProgressEvent` after every 1000 files processed. On restart, the cursor's `files` map skips already-processed files in O(1) (Bloom/hash-keyed lookup). The cursor is small: ~80 bytes per file × 294K files ≈ 23 MB JSON. Storing in `source_progress.cursor` as a single JSON blob is acceptable for v1; if the cursor grows beyond ~100 MB, the adapter should switch to a side table.
+
+### Scan-to-Tail Handoff And Heartbeat
+
+`Scan` records its final cursor on the adapter instance. A following `Tail` on
+the same instance resumes from that Scan cursor, not from current EOF/current
+file metadata, so records appended between Scan completion and Tail watch
+startup are read. Tail also calls the canonical nil-safe Tail heartbeat helper
+from the real watch loop during idle ticks and after emitted events.
 
 ### Incremental updates
 

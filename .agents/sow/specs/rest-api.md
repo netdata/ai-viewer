@@ -29,20 +29,42 @@ JSON over HTTP. All implemented endpoints return `application/json` except `/api
 ```json
 {
   "status": "ok" | "degraded" | "down",
+  "status_detail": "no_sources_configured",
   "version": "<git sha>",
-  "schema_version": 5,
+  "schema_version": 12,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,
   "sources": [
     { "id":"...", "format":"aiagent_v3", "location":"...", "enabled":true,
       "last_seen_at":<us>, "lag_us":<int>, "parse_errors":0, "last_seq":12345,
+      "progress_updated_at":<us>,
+      "lifecycle_state":"tailing",
+      "lifecycle_state_at":<us>,
+      "scan_started_at":<us>,
+      "scan_completed_at":<us>,
+      "tail_started_at":<us>,
+      "tail_heartbeat_at":<us>,
+      "tail_failed_at":null,
+      "tail_restart_count":0,
+      "lifecycle_error":null,
+      "read_model_state":"ready",
+      "read_model_state_at":<us>,
+      "read_model_repair_started_at":null,
+      "read_model_repair_completed_at":<us>,
+      "read_model_repair_failed_at":null,
+      "read_model_repair_attempts":0,
+      "read_model_error":null,
       "meta":{ "session_count":42, "message_count":1200, "part_count":3400, "latest_migration":"..." } }
   ],
   "notify": { "last_seq":67890, "lag_us":<int> },
   "sse": { "subscriptions":3 }
 }
 ```
+
+`status_detail` is omitted unless a named top-level degraded reason applies.
+The only value currently defined is `no_sources_configured`; in that case
+`status="degraded"` and `sources=[]`.
 
 The status union and the per-source fields here MUST match
 observability.md §`/api/health`; that spec is the canonical reference
@@ -58,6 +80,14 @@ in iteration 2 of SOW-0001 Chunk 11. The
 `db_size_bytes` and per-source `location` fields landed in iteration 5
 of the same chunk as a spec ↔ code parity fix once codex flagged they
 were emitted by the binary but absent from this spec.
+
+`progress_updated_at` is `source_progress.updated_at`, the timestamp of the
+last committed source-progress row. `last_seen_at` remains a legacy
+parse-error/pricing-miss diagnostic timestamp; clients must not use it as the
+primary freshness signal. Lifecycle freshness comes from
+`lifecycle_state`, `lifecycle_state_at`, `scan_*`, `tail_*`, and
+`read_model_*` fields. Nullable lifecycle/read-model timestamps serialize as
+`null`/omitted when unset; zero sentinels must not appear as epoch timestamps.
 
 `meta` is the **optional** per-source metadata blob (SOW-0024): the
 `sources.meta_json` column rendered verbatim. It is OMITTED from a source
@@ -75,12 +105,14 @@ Each item carries the per-source `last_seq` (opaque adapter
 observability counter = max SourceSeq seen; NOT a dedup gate and NOT a
 portable event count — identical semantics to
 `/api/health.sources[].last_seq`),
-the persisted `cursor`, the `updated_at` timestamp of the last
-writer commit, and the OPTIONAL `meta` blob (identical semantics to
-`/api/health.sources[].meta` — omitted when the adapter did not populate
-`sources.meta_json`; SOW-0024). HEAD is supported on both `/api/health` and
-`/api/sources` and returns the same status + headers with an empty
-body, per RFC 9110 §9.3.2.
+the persisted `cursor` from `source_progress.cursor`, the
+`progress_updated_at` timestamp of the last writer progress commit, the same
+lifecycle/read-model fields as `/api/health.sources[]`, and the OPTIONAL
+`meta` blob (identical semantics to `/api/health.sources[].meta` — omitted when
+the adapter did not populate `sources.meta_json`; SOW-0024). `cursor` remains
+opt-in/debug metadata. HEAD is supported on both `/api/health` and
+`/api/sources` and returns the same status + headers with an empty body, per RFC
+9110 §9.3.2.
 
 ### GET /api/sessions
 

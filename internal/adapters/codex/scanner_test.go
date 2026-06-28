@@ -131,17 +131,19 @@ func hasKind(events []canonical.Event, kind canonical.EventKind) bool {
 
 // --- discovery tests ---
 
-// TestDiscover_MultiShardSorted asserts modern rollouts across several
-// YYYY/MM/DD shard dirs are discovered and returned sorted by rel, and that
+// TestDiscover_MultiShardNewestFirst asserts modern rollouts across several
+// YYYY/MM/DD shard dirs are discovered newest-first by rel, and that
 // archived_sessions/, sqlite, history, and session_index.jsonl are ignored.
-func TestDiscover_MultiShardSorted(t *testing.T) {
+func TestDiscover_MultiShardNewestFirst(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	// Two shard dirs, two files.
+	// Three shard dirs, three files.
 	a := filepath.Join(root, "2025", "11", "20", "rollout-2025-11-20T10-00-00-"+uuid7(1)+".jsonl")
 	b := filepath.Join(root, "2025", "11", "21", "rollout-2025-11-21T10-00-00-"+uuid7(2)+".jsonl")
+	c := filepath.Join(root, "2026", "06", "27", "rollout-2026-06-27T15-01-16-"+uuid7(4)+".jsonl")
 	writeFileBytes(t, a, completeSession("sid-a"))
 	writeFileBytes(t, b, completeSession("sid-b"))
+	writeFileBytes(t, c, completeSession("sid-c"))
 	// Noise that must be ignored.
 	writeFileBytes(t, filepath.Join(root, "archived_sessions", "2025", "11", "20", "rollout-2025-11-20T10-00-00-"+uuid7(3)+".jsonl"), completeSession("sid-arch"))
 	writeFileBytes(t, filepath.Join(root, "session_index.jsonl"), []byte("{}\n"))
@@ -154,15 +156,15 @@ func TestDiscover_MultiShardSorted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverRollouts: %v", err)
 	}
-	if len(disc.modern) != 2 {
-		t.Fatalf("modern count = %d, want 2; got %+v", len(disc.modern), disc.modern)
+	if len(disc.modern) != 3 {
+		t.Fatalf("modern count = %d, want 3; got %+v", len(disc.modern), disc.modern)
 	}
-	if disc.modern[0].rel >= disc.modern[1].rel {
-		t.Errorf("not sorted: %q then %q", disc.modern[0].rel, disc.modern[1].rel)
+	if disc.modern[0].rel <= disc.modern[1].rel || disc.modern[1].rel <= disc.modern[2].rel {
+		t.Errorf("not newest-first: %q, %q, %q", disc.modern[0].rel, disc.modern[1].rel, disc.modern[2].rel)
 	}
-	wantRelA := "2025/11/20/rollout-2025-11-20T10-00-00-" + uuid7(1) + ".jsonl"
-	if disc.modern[0].rel != wantRelA {
-		t.Errorf("rel[0] = %q, want %q", disc.modern[0].rel, wantRelA)
+	wantRelC := "2026/06/27/rollout-2026-06-27T15-01-16-" + uuid7(4) + ".jsonl"
+	if disc.modern[0].rel != wantRelC {
+		t.Errorf("rel[0] = %q, want %q", disc.modern[0].rel, wantRelC)
 	}
 }
 

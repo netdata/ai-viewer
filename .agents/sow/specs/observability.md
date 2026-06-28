@@ -16,6 +16,10 @@ Mandatory log moments:
 
 - Ingester startup: list every configured source with format and location.
 - Adapter scan start/finish with event count and duration.
+- Source lifecycle transitions for start failure, construct failure, scan
+  failure, Tail start, Tail failure, Tail restart/backoff, stale Tail, and
+  clean source stop.
+- Read-model repair pending/start/ready/timeout/failure transitions.
 - Every parse error (with file:offset).
 - Every SQLite error.
 - Source disabled / re-enabled.
@@ -77,7 +81,8 @@ The single source of truth for "is this thing alive and what state is it in":
 {
   "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
-  "schema_version": 5,
+  "status_detail": "no_sources_configured",
+  "schema_version": 12,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,
@@ -88,9 +93,26 @@ The single source of truth for "is this thing alive and what state is it in":
       "location":"...",
       "enabled":true,
       "last_seen_at":<us>,
-      "lag_us":<int>,           // now - last_seen_at
+      "lag_us":<int>,           // legacy diagnostic; not lifecycle freshness
       "parse_errors":0,
       "last_seq":12345,         // per-source observability counter (max SourceSeq seen); NOT a dedup gate
+      "progress_updated_at":<us>,
+      "lifecycle_state":"tailing",
+      "lifecycle_state_at":<us>,
+      "scan_started_at":<us>,
+      "scan_completed_at":<us>,
+      "tail_started_at":<us>,
+      "tail_heartbeat_at":<us>,
+      "tail_failed_at":null,
+      "tail_restart_count":0,
+      "lifecycle_error":null,
+      "read_model_state":"ready",
+      "read_model_state_at":<us>,
+      "read_model_repair_started_at":null,
+      "read_model_repair_completed_at":<us>,
+      "read_model_repair_failed_at":null,
+      "read_model_repair_attempts":0,
+      "read_model_error":null,
       "meta":{                  // OPTIONAL — omitted when the adapter did not populate sources.meta_json
         "session_count":42,     // opencode source-native row counts (the source DB's own tables),
         "message_count":1200,   // NOT ai-viewer's ingested canonical counts; a distinct signal.
@@ -108,6 +130,10 @@ The single source of truth for "is this thing alive and what state is it in":
   }
 }
 ```
+
+`status_detail` is omitted for normal responses. The only current value is
+`no_sources_configured`, returned with `status="degraded"` and an empty source
+list when the ingester has no configured or discovered source.
 
 `notify.last_seq` is the high-water `notify.seq` the read-only poller has
 applied (it starts the cursor at `MAX(seq)` on boot, so `last_seq` advances
@@ -148,9 +174,48 @@ ingester startup (the probe runs once at auto-discovery; a restart refreshes
 it). The presenter renders the blob as-is and has no per-adapter knowledge of
 its shape (`data-model.md` §sources).
 
+Lifecycle/read-model fields are the primary source-health contract:
+
+- `progress_updated_at` is `source_progress.updated_at`, the timestamp of the
+  last committed progress row.
+- `last_seen_at` remains a legacy parse-error/pricing-miss diagnostic timestamp.
+  Do not derive lifecycle freshness or source health from it.
+- `lifecycle_state`, `lifecycle_state_at`, `scan_started_at`,
+  `scan_completed_at`, `tail_started_at`, `tail_heartbeat_at`,
+  `tail_failed_at`, `tail_restart_count`, and `lifecycle_error` are persisted
+  source lifecycle evidence. `tail_restart_count` is consecutive restart
+  evidence and resets to zero after a successful transition back to `tailing`.
+- `read_model_state`, `read_model_state_at`,
+  `read_model_repair_started_at`, `read_model_repair_completed_at`,
+  `read_model_repair_failed_at`, `read_model_repair_attempts`, and
+  `read_model_error` are persisted FTS/rollup repair evidence.
+- Optional lifecycle/read-model timestamps serialize as `null`/omitted when
+  unset. A zero internal sentinel is treated as unset, not epoch.
+- Diagnostic strings are bounded and redacted before persistence and again
+  before presentation: control characters are stripped, whitespace is collapsed,
+  configured source locations and home-directory prefixes are replaced with
+  neutral placeholders, and truncation preserves valid UTF-8.
+- A source must not enter Tail unless the supervisor has durably recorded the
+  `tailing` transition and initial heartbeat evidence. The stale-tail watchdog
+  discovers monitorable sources from persisted lifecycle state; allowing Tail to
+  run after a failed lifecycle write would make a live source invisible to
+  health and restart monitoring until daemon restart.
+
 `status` is `degraded` when:
 
-- Any enabled source has `lag_us > 60_000_000` (60 s of staleness).
+- No sources are configured/discovered (`status_detail="no_sources_configured"`).
+- Any enabled source is in `start_failed`, `construct_failed`, fatal
+  `scan_failed`, `tail_stale`, `tail_failed`, or repeated/prolonged
+  `tail_restarting`.
+- Any enabled source is in `unknown`, `starting`, `scan_complete`, or
+  `tail_starting` beyond the pre-tail grace window.
+- Any enabled source remains `scanning` beyond the long-scan threshold.
+- Any enabled source has `read_model_state` of `repair_pending`,
+  `repair_timeout`, or `repair_failed` outside the accepted repair grace.
+  `repair_pending` created by a committed Tail batch during a global read-model
+  rebuild also sends a coalesced supervisor repair request in the same daemon
+  run; degraded health is evidence of delayed or failed repair, not the normal
+  retry trigger.
 - Any source has parse_errors > 0 in the last hour.
 
 `status` is `down` when:
@@ -199,7 +264,9 @@ Error codes are listed in `internal/presenter/errors.go` with comments. The UI m
 The Sources page renders, per source:
 
 - Last 24h parse error count (red badge if > 0).
-- Lag indicator (green < 1s, amber < 10s, red > 10s).
+- Lifecycle state, Tail heartbeat/failure evidence, and read-model repair state.
+  Any displayed legacy lag/last-seen value is secondary diagnostic text, not the
+  health badge source.
 - Last 100 parse error log lines (expandable).
 - Toggle to enable/disable the source (Phase 2; needs writes).
 

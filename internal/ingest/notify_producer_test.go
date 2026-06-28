@@ -179,6 +179,92 @@ func TestEmitNotify_RootSessionIDFromRow(t *testing.T) {
 	}
 }
 
+func TestEmitNotify_SessionUpdatedBeforeStartCreatesStubAndNotifies(t *testing.T) {
+	t.Parallel()
+	const src = "claude-code:/tmp"
+	const nativeID = "parent:agent:late-meta"
+	const commitTS = int64(9_100_000)
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "claude-code", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "claude-code", "/tmp", NopPricer{})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := w.apply(ctx, tx, canonical.SessionUpdatedEvent{
+		EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+		NativeID:  nativeID,
+		AgentName: "neda",
+		Extras:    map[string]any{"aiViewer": map[string]any{"toolUseId": "toolu_1"}},
+	}); err != nil {
+		t.Fatalf("apply session update: %v", err)
+	}
+	if err := w.emitNotify(ctx, tx, commitTS); err != nil {
+		t.Fatalf("emitNotify: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	wantID := canonicalSessionID(src, nativeID)
+	if got := scanString(t, db, `SELECT agent_name FROM sessions WHERE id = ?`, wantID); got != "neda" {
+		t.Fatalf("agent_name = %q, want neda", got)
+	}
+	if got := scanString(t, db, `SELECT json_extract(extras_json, '$.aiViewer.toolUseId') FROM sessions WHERE id = ?`, wantID); got != "toolu_1" {
+		t.Fatalf("toolUseId = %q, want toolu_1", got)
+	}
+	assertSingleSessionChangedNotify(t, readNotify(t, db), wantID, wantID, commitTS)
+}
+
+func TestEmitNotify_SessionFinalizedBeforeStartCreatesStubAndNotifies(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v2:/tmp"
+	const nativeID = "final-before-start"
+	const commitTS = int64(9_200_000)
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "aiagent_v2", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "aiagent_v2", "/tmp", NopPricer{})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := w.apply(ctx, tx, canonical.SessionFinalizedEvent{
+		EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 2000},
+		NativeID:     nativeID,
+		Status:       canonical.StatusFailed,
+		ErrorClass:   "source_terminal",
+		ErrorMessage: "session ended before start record was replayed",
+		EndTs:        2100,
+	}); err != nil {
+		t.Fatalf("apply session finalized: %v", err)
+	}
+	if err := w.emitNotify(ctx, tx, commitTS); err != nil {
+		t.Fatalf("emitNotify: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	wantID := canonicalSessionID(src, nativeID)
+	if got := scanString(t, db, `SELECT status FROM sessions WHERE id = ?`, wantID); got != string(canonical.StatusFailed) {
+		t.Fatalf("status = %q, want failed", got)
+	}
+	if got := scanInt(t, db, `SELECT IFNULL(end_ts, 0) FROM sessions WHERE id = ?`, wantID); got != 2100 {
+		t.Fatalf("end_ts = %d, want 2100", got)
+	}
+	assertSingleSessionChangedNotify(t, readNotify(t, db), wantID, wantID, commitTS)
+}
+
 // TestEmitNotify_SourceStatusChangedOnParseError asserts a batch that
 // bumps a source's parse_errors (via a SourceErrorEvent) emits exactly
 // one source_status_changed row carrying the source_id.
@@ -267,6 +353,29 @@ func assertSingleStatsInvalidatedNotify(t *testing.T, rows []notifyRow, commitTS
 	}
 	if row.sess != "" || row.root != "" || row.source != "" {
 		t.Fatalf("stats_invalidated carried scoped IDs: %+v", row)
+	}
+}
+
+func assertSingleSessionChangedNotify(t *testing.T, rows []notifyRow, wantSessionID, wantRootID string, wantTS int64) {
+	t.Helper()
+	var got []notifyRow
+	for _, row := range rows {
+		if row.kind == "session_changed" {
+			got = append(got, row)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("session_changed rows = %d, want 1; all rows=%+v", len(got), rows)
+	}
+	row := got[0]
+	if row.sess != wantSessionID {
+		t.Fatalf("session_changed session_id = %q, want %q", row.sess, wantSessionID)
+	}
+	if row.root != wantRootID {
+		t.Fatalf("session_changed root_session_id = %q, want %q", row.root, wantRootID)
+	}
+	if row.tsUS != wantTS {
+		t.Fatalf("session_changed ts_us = %d, want %d", row.tsUS, wantTS)
 	}
 }
 

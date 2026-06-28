@@ -39,13 +39,13 @@ xdg-open http://127.0.0.1:7710
 ```
 
 By default both use `~/.local/share/ai-viewer/index.db`. The ingester
-auto-discovers your **ai-agent** sessions under `~/.ai-agent/sessions` (the
-Phase-1 adapters are ai-agent v2 + v3; claude-code, codex, and opencode adapters
-land in a later phase). To ingest a specific source explicitly, pass
-`--source format:location` (e.g. `--source aiagent_v3:~/.ai-agent/sessions`) —
-any explicit `--source` flag replaces auto-discovery. Override the DB path with
-`--db`, the state dir with `--state-dir`, and (serve only) the bind with
-`--bind 127.0.0.1:<port>`. Run either binary with `--help` for all flags.
+auto-discovers ai-agent v2/v3 (`~/.ai-agent/sessions`), claude-code, codex, and
+opencode sources when their default directories exist. To ingest a specific
+source explicitly, pass `--source format:location` (e.g.
+`--source aiagent_v3:~/.ai-agent/sessions`) — any explicit `--source` flag
+replaces auto-discovery. Override the DB path with `--db`, the state dir with
+`--state-dir`, and (serve only) the bind with `--bind 127.0.0.1:<port>`. Run
+either binary with `--help` for all flags.
 
 > If you start `ai-viewer-serve` before the ingester has created the database,
 > it exits with a schema error — start the ingester first (or use the systemd
@@ -86,8 +86,9 @@ scripts/install-systemd-user.sh uninstall  # stop + remove the units (keeps bina
   works.
 - **`/topology`** — cross-session topology: the actor graph aggregated across
   all sessions in the current timeframe + filters.
-- **`/sources`** — per-source ingest status, lag, parse-error counts, and an
-  overall health badge.
+- **`/sources`** — per-source lifecycle/read-model status, Tail heartbeat or
+  failure evidence, parse-error counts, progress timestamp, and an overall
+  health badge.
 - **Theme** — Auto (follows your OS) / Dark / Light, in the header; your choice
   persists.
 
@@ -115,14 +116,25 @@ re-run `./scripts/build.sh` and restart the binaries.)
 ## Troubleshooting
 
 - **`/sources` shows parse errors or a "degraded"/"down" health badge** — a
-  source file failed to parse or the ingester is behind/stopped. Check the
-  ingester logs (`scripts/install-systemd-user.sh status`, or the manual
-  ingester's output). Parse errors are surfaced per source, never hidden.
+  source file failed to parse, a source is still scanning too long, Tail failed
+  or became stale, read-model repair is pending/failed, or the DB/schema is
+  unavailable. Check `/api/health`, then the ingester logs
+  (`scripts/install-systemd-user.sh status`, or the manual ingester's output).
+  Parse errors, lifecycle failures, and read-model repair failures are surfaced
+  per source, never hidden.
+- **No sources configured/discovered** — `/api/health` returns
+  `status="degraded"` with `status_detail="no_sources_configured"`. Start the
+  ingester with explicit `--source format:path` flags or restore the expected
+  default source directories.
 - **The UI says "UI not built"** — you ran `ai-viewer-serve` without building
   the frontend. Run `./scripts/build.sh` and restart.
-- **`ai-viewer-serve` exits with a schema error** — start `ai-viewer-ingest`
-  first so it creates+migrates the database (the systemd units handle this via
-  auto-restart).
+- **`ai-viewer-serve` exits with a schema error** — the log line is
+  `ai-viewer-serve: schema version mismatch`, usually with
+  `schema_meta.version row missing` or `schema_meta.version is <got>, want 12`.
+  Stop serve, check `journalctl --user -u ai-viewer-ingest.service` for the
+  migration failure, start/restart `ai-viewer-ingest` so it applies migration
+  0012, then start/restart serve. The systemd units handle this ordering with
+  auto-restart.
 - **Reset everything** — stop the services, `rm -rf ~/.local/share/ai-viewer`,
   and re-run the ingester; it re-reads your sources from scratch.
 

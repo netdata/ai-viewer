@@ -569,7 +569,6 @@ func TestStartSourceFailureDecrementsPreAddedScanWG(t *testing.T) {
 		configuredSource{id: "missing:/tmp", format: "missing", location: "/tmp"},
 		silentLogger(),
 		func(string) (canonical.AdapterFactory, bool) { return nil, false },
-		closedChannel(),
 	)
 	if err == nil {
 		t.Fatal("startSourceWithFactoryLookup returned nil for unknown format")

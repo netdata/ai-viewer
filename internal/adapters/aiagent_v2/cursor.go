@@ -13,7 +13,7 @@ import (
 // so older or newer adapters refuse to misinterpret a schema mismatch.
 const cursorVersion = 1
 
-// Cursor is the resume token persisted in sources.cursor for the v2
+// Cursor is the resume token persisted in source_progress.cursor for the v2
 // adapter. Because v2 rewrites the whole `<originId>.json.gz` on every
 // snapshot, byte offsets are meaningless; the cursor instead pins a
 // per-file `(content_hash, mtime_ns, size)` tuple so a re-scan can skip
@@ -48,7 +48,7 @@ func newCursor() Cursor {
 
 // String implements canonical.Cursor. The returned value is stable
 // JSON (sorted map keys via encoding/json) suitable for persistence in
-// `sources.cursor`.
+// `source_progress.cursor`.
 func (c Cursor) String() string {
 	out := c
 	if out.Files == nil {

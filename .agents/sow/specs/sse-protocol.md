@@ -114,7 +114,10 @@ Emitted (rate-limited to ~1 per second) when catalog rollups change so the analy
 
 ### `source_status_changed`
 
-Emitted when a source's parse_errors count changes or enabled flag flips. The Sources panel re-fetches.
+Emitted when a source's parse_errors count, enabled flag, lifecycle state,
+read-model state, or lifecycle/read-model timestamp/error evidence changes.
+The event is only an invalidation hint; clients re-fetch `/api/sources` and
+`/api/health` for the full state.
 
 ```json
 { "source_id": "<id>", "ts": <us> }

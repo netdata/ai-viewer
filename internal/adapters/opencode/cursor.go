@@ -25,7 +25,7 @@ const cursorVersion = 2
 // is out of scope (adapter-opencode.md §"Tables we read").
 var trackedTables = []string{"session", "message", "part", "session_message"}
 
-// Cursor is the resume token persisted in sources.cursor for the opencode
+// Cursor is the resume token persisted in source_progress.cursor for the opencode
 // adapter. Unlike the four file adapters (byte-offset per file), opencode is
 // a single SQLite database, so the cursor is a per-table watermark over
 // time-prefixed Sonyflake IDs and the auto-bumped time_updated column.

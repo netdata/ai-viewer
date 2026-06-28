@@ -1132,6 +1132,72 @@ func TestUpsertSourceProgress_SeqAdvances(t *testing.T) {
 	}
 }
 
+func TestUpsertSourceProgress_PreservesLifecycleAndReadModelColumns(t *testing.T) {
+	t.Parallel()
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	_ = ensureSourceRowDirect(ctx, db, "src", "aiagent_v3", "/loc")
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO source_progress
+    (source_id, last_seq, last_ts_us, cursor, updated_at,
+     lifecycle_state, lifecycle_state_at, tail_started_at, tail_heartbeat_at,
+     read_model_state, read_model_state_at, read_model_repair_attempts)
+VALUES
+    ('src', 100, 1000, '{"offset":1}', 1000,
+     'tailing', 900, 910, 920,
+     'repair_pending', 930, 2)`); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := upsertSourceProgress(ctx, tx, "src", 200, 2000, `{"offset":2}`, true); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("upsert source_progress: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var got struct {
+		lifecycleState          string
+		lifecycleStateAt        int64
+		tailStartedAt           int64
+		tailHeartbeatAt         int64
+		readModelState          string
+		readModelStateAt        int64
+		readModelRepairAttempts int64
+	}
+	if err := db.QueryRowContext(ctx, `
+SELECT lifecycle_state, lifecycle_state_at, tail_started_at, tail_heartbeat_at,
+       read_model_state, read_model_state_at, read_model_repair_attempts
+FROM source_progress
+WHERE source_id='src'
+`).Scan(
+		&got.lifecycleState,
+		&got.lifecycleStateAt,
+		&got.tailStartedAt,
+		&got.tailHeartbeatAt,
+		&got.readModelState,
+		&got.readModelStateAt,
+		&got.readModelRepairAttempts,
+	); err != nil {
+		t.Fatalf("read source_progress: %v", err)
+	}
+	if got.lifecycleState != "tailing" ||
+		got.lifecycleStateAt != 900 ||
+		got.tailStartedAt != 910 ||
+		got.tailHeartbeatAt != 920 ||
+		got.readModelState != "repair_pending" ||
+		got.readModelStateAt != 930 ||
+		got.readModelRepairAttempts != 2 {
+		t.Fatalf("lifecycle/read-model columns changed after progress upsert: %+v", got)
+	}
+}
+
 // fakePricer counts invocations and returns a fixed value. lastTsUS
 // records the most-recent ts argument so tests can assert that the
 // writer forwards the op's pricing timestamp as the temporal-tier

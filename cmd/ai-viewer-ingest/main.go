@@ -247,6 +247,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 		ingest.WithSourceMeta(src.id, src.metaJSON)(ing)
 	}
+	if err := ing.ReconcileSourceLifecycles(ctx, sourceRegistrations(sources)); err != nil {
+		logger.Error("ai-viewer-ingest: failed to reconcile source lifecycle state", "err", err)
+		_ = ing.Stop()
+		return 1
+	}
 
 	// Enable the bulk-scan fast path: skip FTS + rollup refresh during the
 	// initial historical scan; the post-scan backfill rebuilds them once.
@@ -262,11 +267,9 @@ func run(args []string, stdout, stderr *os.File) int {
 	// cannot contend with the writer's own batch transactions.
 	lookup := sqlCursorLookup{db: ws.DB()}
 
-	// scanWG waits for all sources' Scan() to complete. The post-scan
-	// read-model backfill runs ONCE after ALL scans finish (not per-source),
-	// so it doesn't contend with concurrent tail-mode flushes on the single
-	// SQLite connection (the prior per-source approach deadlocked the FTS
-	// backfill's truncate tx against ongoing flushes — SOW-0063).
+	// scanWG waits for all sources' Scan() to reach an outcome. The post-scan
+	// read-model backfill runs as background reconciliation after ALL startup
+	// scans finish. It does not gate per-source Tail startup.
 	//
 	// CRITICAL: scanWG.Add must happen BEFORE scanWG.Wait. The Wait goroutine
 	// below starts immediately; if Add runs later (in the for loop below),
@@ -281,11 +284,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		close(scanDone)
 	}()
 
-	backfillDone, backfillWait := startPostScanBackfill(ctx, scanDone, ing, logger, readModelBackfillStartupTimeout)
+	_, backfillWait := startPostScanBackfill(ctx, scanDone, ing, logger, readModelBackfillStartupTimeout)
 
 	var adapterWG sync.WaitGroup
 	for _, src := range sources {
-		if err := startSource(adapterCtx, &adapterWG, &scanWG, ing, lookup, src, logger, backfillDone); err != nil {
+		if err := startSource(adapterCtx, &adapterWG, &scanWG, ing, lookup, src, logger); err != nil {
 			logger.Warn("ai-viewer-ingest: source skipped",
 				"source", src.id, "err", err)
 			continue
@@ -619,6 +622,9 @@ type readModelBackfiller interface {
 	BackfillReadModels(context.Context) error
 }
 
+// startPostScanBackfill is the retained all-sources reconciliation pass. Its
+// DeferReadModels check only answers whether startup scan deferral was enabled;
+// the returned done channel is no longer passed to per-source Tail startup.
 func startPostScanBackfill(shutdownCtx context.Context, scanDone <-chan struct{}, backfiller readModelBackfiller, logger *slog.Logger, timeout time.Duration) (<-chan struct{}, <-chan struct{}) {
 	backfillDone := make(chan struct{})
 	backfillWait := make(chan struct{})

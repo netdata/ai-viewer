@@ -28,8 +28,12 @@ type sourcesBody struct {
 // (the SOW-0024 contract for meta on NULL — omitempty must skip the
 // field, not emit it as null).
 func doSourcesRaw(t *testing.T, p *Presenter) (int, []byte, sourcesBody) {
+	return doSourcesRawWith(t, p, "")
+}
+
+func doSourcesRawWith(t *testing.T, p *Presenter, query string) (int, []byte, sourcesBody) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/sources", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/sources"+query, nil)
 	rr := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rr, req)
 	raw := rr.Body.Bytes()
@@ -306,6 +310,166 @@ func TestSources_ListsConfiguredSources(t *testing.T) {
 	b := byID["aiagent_v2:/tmp/b"]
 	if b.ParseErrors != 2 {
 		t.Fatalf("source b: parse_errors = %d, want 2", b.ParseErrors)
+	}
+}
+
+func TestSources_ListsLifecycleAndReadModelState(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	now := fixedTime.UnixMicro()
+	if _, err := db.Exec(
+		`INSERT INTO sources (id, format, location, enabled, last_seen_at, parse_errors, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"codex:/tmp/life", "codex", "/tmp/life", 1, now, 0, now,
+	); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO source_progress
+		 (source_id, last_seq, last_ts_us, cursor, updated_at,
+		  lifecycle_state, lifecycle_state_at, scan_started_at, scan_completed_at,
+		  tail_started_at, tail_heartbeat_at, tail_restart_count,
+		  read_model_state, read_model_state_at, read_model_repair_started_at,
+		  read_model_repair_completed_at, read_model_repair_attempts)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"codex:/tmp/life", 100, now-1_000, `{"offset":42}`, now,
+		"tailing", now-900, now-800, now-700, now-600, now-500, 2,
+		"ready", now-400, now-300, now-200, 1,
+	); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
+
+	code, raw, _ := doSourcesRaw(t, p)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	var body struct {
+		Items []struct {
+			ID                         string `json:"id"`
+			LifecycleState             string `json:"lifecycle_state"`
+			LifecycleStateAt           int64  `json:"lifecycle_state_at"`
+			ScanStartedAt              *int64 `json:"scan_started_at"`
+			ScanCompletedAt            *int64 `json:"scan_completed_at"`
+			TailStartedAt              *int64 `json:"tail_started_at"`
+			TailHeartbeatAt            *int64 `json:"tail_heartbeat_at"`
+			TailRestartCount           int64  `json:"tail_restart_count"`
+			ReadModelState             string `json:"read_model_state"`
+			ReadModelStateAt           int64  `json:"read_model_state_at"`
+			ReadModelRepairStartedAt   *int64 `json:"read_model_repair_started_at"`
+			ReadModelRepairCompletedAt *int64 `json:"read_model_repair_completed_at"`
+			ReadModelRepairAttempts    int64  `json:"read_model_repair_attempts"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode extended sources body: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(body.Items))
+	}
+	item := body.Items[0]
+	if item.ID != "codex:/tmp/life" {
+		t.Fatalf("id = %q, want codex:/tmp/life", item.ID)
+	}
+	if item.LifecycleState != "tailing" || item.LifecycleStateAt != now-900 {
+		t.Fatalf("lifecycle state = %q/%d, want tailing/%d", item.LifecycleState, item.LifecycleStateAt, now-900)
+	}
+	if item.ScanStartedAt == nil || *item.ScanStartedAt != now-800 {
+		t.Fatalf("scan_started_at = %v, want %d", item.ScanStartedAt, now-800)
+	}
+	if item.ScanCompletedAt == nil || *item.ScanCompletedAt != now-700 {
+		t.Fatalf("scan_completed_at = %v, want %d", item.ScanCompletedAt, now-700)
+	}
+	if item.TailStartedAt == nil || *item.TailStartedAt != now-600 {
+		t.Fatalf("tail_started_at = %v, want %d", item.TailStartedAt, now-600)
+	}
+	if item.TailHeartbeatAt == nil || *item.TailHeartbeatAt != now-500 {
+		t.Fatalf("tail_heartbeat_at = %v, want %d", item.TailHeartbeatAt, now-500)
+	}
+	if item.TailRestartCount != 2 {
+		t.Fatalf("tail_restart_count = %d, want 2", item.TailRestartCount)
+	}
+	if item.ReadModelState != "ready" || item.ReadModelStateAt != now-400 {
+		t.Fatalf("read-model state = %q/%d, want ready/%d", item.ReadModelState, item.ReadModelStateAt, now-400)
+	}
+	if item.ReadModelRepairStartedAt == nil || *item.ReadModelRepairStartedAt != now-300 {
+		t.Fatalf("read_model_repair_started_at = %v, want %d", item.ReadModelRepairStartedAt, now-300)
+	}
+	if item.ReadModelRepairCompletedAt == nil || *item.ReadModelRepairCompletedAt != now-200 {
+		t.Fatalf("read_model_repair_completed_at = %v, want %d", item.ReadModelRepairCompletedAt, now-200)
+	}
+	if item.ReadModelRepairAttempts != 1 {
+		t.Fatalf("read_model_repair_attempts = %d, want 1", item.ReadModelRepairAttempts)
+	}
+}
+
+func TestSources_ZeroLifecycleTimestampsAreUnset(t *testing.T) {
+	t.Parallel()
+	p, db, cleanup := newTestPresenter(t)
+	defer cleanup()
+
+	now := fixedTime.UnixMicro()
+	if _, err := db.Exec(
+		`INSERT INTO sources (id, format, location, enabled, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"codex:/tmp/zero", "codex", "/tmp/zero", 1, now,
+	); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO source_progress
+		 (source_id, updated_at, lifecycle_state, lifecycle_state_at,
+		  scan_started_at, tail_heartbeat_at, read_model_state, read_model_state_at,
+		  read_model_repair_started_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"codex:/tmp/zero", now, "unknown", 0, 0, 0, "unknown", 0, 0,
+	); err != nil {
+		t.Fatalf("seed source_progress: %v", err)
+	}
+
+	code, raw, _ := doSourcesRaw(t, p)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if strings.Contains(string(raw), `"lifecycle_state_at":0`) ||
+		strings.Contains(string(raw), `"scan_started_at":0`) ||
+		strings.Contains(string(raw), `"tail_heartbeat_at":0`) ||
+		strings.Contains(string(raw), `"read_model_state_at":0`) ||
+		strings.Contains(string(raw), `"read_model_repair_started_at":0`) {
+		t.Fatalf("zero timestamp leaked as wire value: %s", raw)
+	}
+	var body struct {
+		Items []struct {
+			LifecycleStateAt         *int64 `json:"lifecycle_state_at"`
+			ScanStartedAt            *int64 `json:"scan_started_at"`
+			TailHeartbeatAt          *int64 `json:"tail_heartbeat_at"`
+			ReadModelStateAt         *int64 `json:"read_model_state_at"`
+			ReadModelRepairStartedAt *int64 `json:"read_model_repair_started_at"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode extended sources body: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(body.Items))
+	}
+	item := body.Items[0]
+	if item.LifecycleStateAt != nil ||
+		item.ScanStartedAt != nil ||
+		item.TailHeartbeatAt != nil ||
+		item.ReadModelStateAt != nil ||
+		item.ReadModelRepairStartedAt != nil {
+		t.Fatalf("zero timestamp pointers = %+v, want all nil", item)
+	}
+
+	code, raw, _ = doSourcesRawWith(t, p, "?include=cursors")
+	if code != http.StatusOK {
+		t.Fatalf("include=cursors status = %d, want 200", code)
+	}
+	if strings.Contains(string(raw), `"progress_updated_at":0`) ||
+		strings.Contains(string(raw), `"updated_at":0`) ||
+		strings.Contains(string(raw), `"lifecycle_state_at":0`) ||
+		strings.Contains(string(raw), `"read_model_state_at":0`) {
+		t.Fatalf("include=cursors zero timestamp leaked as wire value: %s", raw)
 	}
 }
 

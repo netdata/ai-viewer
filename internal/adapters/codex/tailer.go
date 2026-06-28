@@ -28,7 +28,11 @@ const tailTickInterval = 5 * time.Second
 // to pick up new date dirs created since the last walk (spec §"Watch
 // Strategy"). The adapter owns the watcher lifecycle.
 func tailLoop(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error)) error {
-	runtime, err := newTailRuntime(ctx, root, sourceID, cur, out, onError)
+	return tailLoopWithHeartbeat(ctx, root, sourceID, cur, out, onError, nil)
+}
+
+func tailLoopWithHeartbeat(ctx context.Context, root, sourceID string, cur Cursor, out chan<- canonical.Event, onError func(error), tailHeartbeat func()) error {
+	runtime, err := newTailRuntime(ctx, root, sourceID, cur, out, onError, tailHeartbeat)
 	if err != nil || runtime == nil {
 		return err
 	}

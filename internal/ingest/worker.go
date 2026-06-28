@@ -47,6 +47,13 @@ type worker struct {
 	// cheap session-count update). The binary clears this after the initial
 	// Scan completes and runs BackfillReadModels to build the deferred models.
 	deferReadModels *atomic.Bool
+	// readModelRebuildActive is the global derived-table rebuild flag. It
+	// suppresses incremental FTS/rollup refresh during full truncate/rebuild
+	// windows while still committing canonical rows and source progress.
+	readModelRebuildActive *atomic.Bool
+	// requestReadModelRepair wakes the owning source supervisor after a
+	// committed batch records durable read-model repair debt.
+	requestReadModelRepair func(sourceID string) bool
 	// onErr is invoked for terminal batch failures that lost primary rows.
 	// Defaults to logger.Error if not set.
 	onErr func(error)
@@ -103,6 +110,9 @@ func (w *worker) writeBatchProgressAndNotify(ctx context.Context, tx *sql.Tx, wr
 func (w *worker) promoteCommittedBatch(wr *writer) {
 	wr.promotePendingMissDedup()
 	wr.promoteMaterializedRollupBuckets()
+	if wr.readModelRepairRequested && w.requestReadModelRepair != nil {
+		_ = w.requestReadModelRepair(w.sourceID)
+	}
 	if wr.batchMaxSeq > 0 {
 		w.hwm.Advance(w.sourceID, wr.batchMaxSeq)
 	}
@@ -124,7 +134,11 @@ func (w *writer) refreshBatchReadModels(ctx context.Context, tx *sql.Tx) error {
 	// (rollups + FTS) during the initial scan; the binary backfills them once
 	// after Scan returns. refreshAggregates (cheap session-count update) still
 	// runs so the UI shows correct counts during the scan.
-	if w.deferReadModels != nil && w.deferReadModels.Load() {
+	if (w.deferReadModels != nil && w.deferReadModels.Load()) ||
+		(w.readModelRebuildActive != nil && w.readModelRebuildActive.Load()) {
+		if err := w.markReadModelRepairPending(ctx, tx); err != nil {
+			return err
+		}
 		return refreshAggregates(ctx, tx, w.dirtyTurnIDs, w.dirtySessionIDs)
 	}
 	if err := w.refreshRollups(ctx, tx); err != nil {
@@ -134,6 +148,34 @@ func (w *writer) refreshBatchReadModels(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return refreshAggregates(ctx, tx, w.dirtyTurnIDs, w.dirtySessionIDs)
+}
+
+func (w *writer) markReadModelRepairPending(ctx context.Context, tx *sql.Tx) error {
+	tsUS := defaultNow()
+	if w.now != nil {
+		tsUS = w.now()
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO source_progress (source_id, updated_at, read_model_state, read_model_state_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (source_id) DO UPDATE SET
+    read_model_state = excluded.read_model_state,
+    read_model_state_at = excluded.read_model_state_at,
+    read_model_error = NULL
+WHERE source_progress.read_model_state <> excluded.read_model_state
+`, w.sourceID, tsUS, string(ReadModelRepairPending), tsUS)
+	if err != nil {
+		return fmt.Errorf("mark read model repair pending: %w", err)
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark read model repair pending rows affected: %w", err)
+	}
+	if changed > 0 {
+		w.sourceStatusChanged = true
+		w.readModelRepairRequested = true
+	}
+	return nil
 }
 
 // refreshRollupsOnly runs a DEDICATED rollup refresh with NO events — the idle
@@ -150,6 +192,9 @@ func (w *writer) refreshBatchReadModels(ctx context.Context, tx *sql.Tx) error {
 // materialized bucket — promoteMaterializedRollupBuckets applies it post-commit —
 // so a rolled-back recompute keeps the bucket carried and is naturally retried).
 func (w *worker) refreshRollupsOnly(ctx context.Context, wr *writer) error {
+	if w.readModelRebuildActive != nil && w.readModelRebuildActive.Load() {
+		return nil
+	}
 	wr.clearRollupNotifySignals()
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -259,6 +304,7 @@ func ensureSourceRow(ctx context.Context, tx *sql.Tx, sourceID, format, location
 INSERT INTO sources (id, format, location, enabled, fts5_index_logs, meta_json, created_at)
 VALUES (?, ?, ?, 1, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
+    format          = excluded.format,
     location        = excluded.location,
     fts5_index_logs = excluded.fts5_index_logs,
     meta_json       = excluded.meta_json

@@ -446,7 +446,7 @@ func scanFullSession(t *testing.T, id string, lines []string) []canonical.Event 
 }
 
 // lastCursor returns the cursor JSON from the last SourceProgressEvent in the
-// stream (the checkpoint the ingester persists into sources.cursor).
+// stream (the checkpoint the ingester persists into source_progress.cursor).
 func lastCursor(t *testing.T, events []canonical.Event) string {
 	t.Helper()
 	cur := ""

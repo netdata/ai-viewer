@@ -28,13 +28,13 @@ type Adapter interface {
     // until ctx is cancelled.
     Tail(ctx context.Context, out chan<- Event) error
 
-    // ParseCursor decodes a stored cursor JSON blob from sources.cursor.
+    // ParseCursor decodes a stored cursor JSON blob from source_progress.cursor.
     // Returns a zero Cursor for empty input (first run).
     ParseCursor(stored string) (Cursor, error)
 }
 
 type Cursor interface {
-    // String returns an opaque JSON encoding for persistence in sources.cursor.
+    // String returns an opaque JSON encoding for persistence in source_progress.cursor.
     String() string
     // After reports whether c is strictly after other (used by the ingester for resume-ordering comparison).
     After(other Cursor) bool
@@ -45,7 +45,8 @@ type AdapterFactory func(location string, opts AdapterOptions) (Adapter, error)
 type AdapterOptions struct {
     Logger    *slog.Logger
     SourceID  string             // optional canonical source ID for emitted events; defaults to format:location
-    OnError   func(err error)   // adapter MUST call this for non-fatal parse errors
+    OnError   func(err error)    // adapter MUST call this for non-fatal parse errors
+    OnTailHeartbeat func()        // adapter calls through the nil-safe canonical helper from the real Tail loop
 }
 ```
 
@@ -73,7 +74,20 @@ type AdapterOptions struct {
               └──────────────────────────────┘
 ```
 
-The ingester calls `Scan` first, then `Tail`. The adapter MUST handle the case where new data arrives *during* `Scan`: those events should be picked up by `Tail`; any resulting re-emission is absorbed by the ingester's SQL-layer idempotent upserts (natural-identity keys), NOT by a `SourceSeq` gate. See `ingester.md` §Dedup and Idempotency.
+The ingester calls `Scan` first, then `Tail` on a source-specific supervisor.
+Tail startup is per source and is not blocked by unrelated source scans or
+read-model repair. The adapter MUST handle the case where new data arrives
+*during* `Scan`: those events must be picked up by the immediately following
+`Tail`; any resulting re-emission is absorbed by the ingester's SQL-layer
+idempotent upserts (natural-identity keys), NOT by a `SourceSeq` gate. See
+`ingester.md` §Dedup and Idempotency.
+
+The Scan-to-Tail cursor handoff is mandatory. A `Tail` that immediately follows
+`Scan` on the same adapter instance resumes from the final cursor/offsets
+observed by that `Scan`, not from current EOF/current table maxima. This closes
+the data-loss window where records appended between Scan completion and Tail
+watch startup would otherwise be skipped. A cold `Tail` with no preceding Scan
+may use the adapter's documented warm-start behavior.
 
 `AdapterOptions.SourceID` is the canonical source identifier the ingester uses
 for `sources.id`, cursor persistence, health reporting, and event attribution.
@@ -96,9 +110,17 @@ Two error categories:
 | Category | How to surface |
 |---|---|
 | **Per-record parse error** (one malformed line in a JSONL file) | Call `opts.OnError(err)`. Continue processing. Emit no event for that record. |
-| **Fatal source error** (source root not readable, schema completely wrong) | Return the error from `Scan` or `Tail`. The ingester will mark the source disabled and log loudly. |
+| **Recoverable Scan error** (partial source read failed but Tail can still watch for new work) | Return a normal non-context error from `Scan`; the source supervisor records `scan_failed` evidence and may still proceed to Tail. |
+| **Fatal Scan error** (source root not readable, schema completely wrong) | Return an error marked by the canonical fatal-scan helper; the supervisor records terminal/degraded `scan_failed` and does not Tail for this process run. |
+| **Tail error** (non-context error after Tail started) | Return the error from `Tail`; the supervisor records `tail_failed`, backs off, reloads the durable cursor, constructs a fresh adapter, runs catch-up Scan, and re-enters Tail. |
 
 Adapters MUST NOT panic. Use `recover` in any internal goroutine entry point and convert to a per-record error.
+
+`AdapterOptions.OnTailHeartbeat` is invoked through the canonical nil-safe
+helper, never by directly dereferencing the raw function field. Each Tail
+implementation calls it from inside the real watch/poll loop during idle ticks
+and after emitted events. A test-only heartbeat from outside the loop does not
+satisfy the contract.
 
 ## Cursor Design Guidance
 
@@ -112,7 +134,10 @@ Each adapter chooses its own cursor format. Examples:
   tables, with schema/target metadata (for example:
   `{"version":2,"target_hash":"<sha256>","tables":{"session":{"max_id_seen":"ses_2","max_time_updated":123,"max_time_updated_id":"ses_1"}}}`).
 
-Cursors are stored as JSON in `sources.cursor`. The ingester treats them as opaque. The adapter is responsible for `Cursor.After()` correctness.
+Cursors are stored as JSON in `source_progress.cursor`. The ingester treats
+them as opaque. The adapter is responsible for `Cursor.After()` correctness.
+The legacy `sources.cursor` column is historical and is not the durable resume
+source.
 
 ## Testing Requirements (mandatory per adapter)
 

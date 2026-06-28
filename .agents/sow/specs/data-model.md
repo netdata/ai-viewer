@@ -12,24 +12,28 @@ The schema is **deliberately wider than any single source format** so it cleanly
 - **Format-agnostic.** No `aiagent_only` column, no `claude_code_only` column. Format-specific extras go into `extras_json`.
 - **Payloads stay on disk.** SQLite stores `payload_refs` pointers; original gz/json files are the source of truth.
 - **Catalog tables for fast aggregation.** Denormalized rollups (`catalog_tools`, `catalog_models`, `catalog_agents`, `catalog_providers`) are updated by the ingester after each batch commit.
-- **Cursors live in SQLite.** Each `source` row records its last-ingested position so the ingester resumes after restart.
+- **Cursors live in SQLite.** `source_progress.cursor` records each source's
+  last committed adapter cursor so the ingester resumes after restart. The
+  legacy `sources.cursor` column remains nullable historical schema only.
 - **Wider, not deeper.** Cache tokens, reasoning kind, provider alias, cwd, call_path — these are first-class columns because at least two adapters surface them and the cost-analysis / filtering paths need them. They're not extras_json bloat.
 
-## Schema (v1)
+## Schema (v12 target)
 
 All timestamps are `INTEGER` UNIX-microseconds (UTC). All IDs are `TEXT` UUID-v4 or stable hashes derived from source IDs.
 
 ### sources
 
-Each row is one configured source the ingester watches.
+Each row is one configured source the ingester watches. Operator-facing source
+metadata lives here. Runtime progress, cursor, lifecycle, and read-model repair
+state live in `source_progress`.
 
 ```sql
 CREATE TABLE sources (
     id              TEXT PRIMARY KEY NOT NULL,  -- e.g. "aiagent-v3:/home/user/.ai-agent/sessions"
     format          TEXT NOT NULL,              -- 'aiagent_v3'|'aiagent_v2'|'claude_code'|'codex'|'opencode'
     location        TEXT NOT NULL,              -- filesystem path or DSN
-    cursor          TEXT,                       -- opaque per-adapter cursor (JSON)
-    last_seen_at    INTEGER,
+    cursor          TEXT,                       -- legacy nullable cursor column; not authoritative after migration 0002
+    last_seen_at    INTEGER,                    -- legacy parse-error/pricing-miss diagnostic timestamp, not lifecycle freshness
     enabled         INTEGER NOT NULL DEFAULT 1,
     parse_errors    INTEGER NOT NULL DEFAULT 0,
     fts5_index_logs INTEGER NOT NULL DEFAULT 1, -- per-source log-search opt-out
@@ -462,15 +466,47 @@ CREATE TABLE catalog_cwds (
 
 ### source_progress
 
-Per-source ingest bookkeeping introduced in migration `0002`. Holds an observability sequence counter and the most recent adapter cursor JSON so the ingester can resume scanning from the right offset. Re-emitted events are deduped at the SQL layer (idempotent upserts), not by a sequence watermark — see `ingester.md` §Dedup and Idempotency.
+Per-source ingest bookkeeping introduced in migration `0002` and extended in
+migration `0012`. Holds the observability sequence counter, the authoritative
+adapter cursor JSON, durable lifecycle state, and read-model repair state.
+Re-emitted events are deduped at the SQL layer (idempotent upserts), not by a
+sequence watermark — see `ingester.md` §Dedup and Idempotency.
 
 ```sql
 CREATE TABLE source_progress (
-    source_id  TEXT PRIMARY KEY NOT NULL REFERENCES sources(id),
-    last_seq   INTEGER NOT NULL DEFAULT 0,
-    last_ts_us INTEGER NOT NULL DEFAULT 0,
-    cursor     TEXT,
-    updated_at INTEGER NOT NULL
+    source_id        TEXT PRIMARY KEY NOT NULL REFERENCES sources(id),
+    last_seq         INTEGER NOT NULL DEFAULT 0,
+    last_ts_us       INTEGER NOT NULL DEFAULT 0,
+    cursor           TEXT,
+    updated_at       INTEGER NOT NULL,
+
+    lifecycle_state      TEXT NOT NULL DEFAULT 'unknown',
+    lifecycle_state_at   INTEGER NOT NULL DEFAULT 0,
+    scan_started_at      INTEGER,
+    scan_completed_at    INTEGER,
+    tail_started_at      INTEGER,
+    tail_heartbeat_at    INTEGER,
+    tail_failed_at       INTEGER,
+    tail_restart_count   INTEGER NOT NULL DEFAULT 0,
+    lifecycle_error      TEXT,
+
+    read_model_state     TEXT NOT NULL DEFAULT 'unknown',
+    read_model_state_at  INTEGER NOT NULL DEFAULT 0,
+    read_model_repair_started_at INTEGER,
+    read_model_repair_completed_at INTEGER,
+    read_model_repair_failed_at INTEGER,
+    read_model_repair_attempts INTEGER NOT NULL DEFAULT 0,
+    read_model_error     TEXT,
+
+    CHECK (lifecycle_state IN (
+        'unknown','starting','start_failed','construct_failed','scanning',
+        'scan_failed','scan_complete','tail_starting','tailing','tail_stale',
+        'tail_failed','tail_restarting','stopped'
+    )),
+    CHECK (read_model_state IN (
+        'unknown','repair_pending','repairing','ready',
+        'repair_timeout','repair_failed'
+    ))
 );
 ```
 
@@ -478,8 +514,52 @@ Notes:
 
 - `last_seq` records the maximum `SourceSeq` observed per source, advanced atomically with the batch that wrote the matching events. It is an **observability counter** surfaced via `/api/health`; the ingester does NOT read it as a dedup gate. A per-source scalar watermark is structurally wrong here because one `sourceID` aggregates many independently-sequenced files (`SourceSeq` is per-file, not per-source) — see `ingester.md` §Dedup and Idempotency.
 - `last_ts_us` records the Ts of the most recent observed event for diagnostics; the ingester does not use it for dedup.
-- `cursor` mirrors the adapter's opaque JSON cursor; updated from `SourceProgressEvent` so a restart re-enters the source at the right offset. This is the durable resume point.
-- The table is separate from `sources` (which holds operator-facing configuration) so per-batch updates do not contend with operator metadata. Spec'd in `ingester.md` §Dedup.
+- `cursor` mirrors the adapter's opaque JSON cursor; updated from
+  `SourceProgressEvent` so a restart re-enters the source at the right offset.
+  This is the durable resume point. `sources.cursor` is not read or written by
+  the daemon after migration `0002`, and migration `0012` must not copy legacy
+  `sources.cursor` values into `source_progress.cursor`.
+- Lifecycle states:
+  - `unknown` — migrated or not-yet-reconciled row.
+  - `starting` — configured/discovered source recorded before location stat,
+    adapter factory lookup, construction, `Submit`, or `Scan`.
+  - `start_failed` / `construct_failed` — pre-submit failures visible without
+    relying on logs.
+  - `scanning` / `scan_failed` / `scan_complete` — startup scan phase. A fatal
+    scan failure remains terminal/degraded; a recoverable scan failure may fall
+    through to Tail with evidence.
+  - `tail_starting` / `tailing` / `tail_stale` / `tail_failed` /
+    `tail_restarting` — realtime Tail phase and restart loop.
+  - `stopped` — configured source is no longer active in this daemon run or the
+    daemon is shutting down cleanly. `stopped` does not flip `sources.enabled`.
+- Read-model states:
+  - `unknown` — migrated or not-yet-evaluated state.
+  - `repair_pending` — FTS/rollup repair is required or a derived refresh was
+    skipped by startup deferral or a global rebuild-active deferral.
+  - `repairing` — a per-source or global repair pass currently owns the
+    coordinator.
+  - `ready` — derived read models are current for this source.
+  - `repair_timeout` / `repair_failed` — retryable degraded repair states.
+- `lifecycle_state_at` and `read_model_state_at` are updated on every matching
+  state transition. Optional phase timestamps remain NULL until observed.
+  Internal zero sentinels are not serialized to API clients as epoch times.
+- `lifecycle_error` and `read_model_error` contain sanitized diagnostic text
+  only: no raw prompts, payload bodies, credentials, exact local source paths,
+  or personal filesystem prefixes. Sanitization strips control characters,
+  collapses whitespace, replaces configured source locations and home-directory
+  prefixes with neutral placeholders, and truncates to 1024 bytes without
+  splitting UTF-8 runes.
+- Lifecycle writes that are sensitive to races may include an expected current
+  lifecycle state. If the persisted state differs, the write is a no-op and
+  emits no notify row; the later/winning transition remains authoritative.
+- `tail_restart_count` is the consecutive Tail restart-failure counter. It
+  increments on each `tail_restarting` attempt and resets to zero after a
+  successful transition back to `tailing`.
+- `read_model_repair_attempts` increments for each repair attempt and resets to
+  zero when the read-model state reaches `ready`.
+- The table is separate from `sources` (which holds operator-facing
+  configuration) so per-batch updates do not contend with operator metadata.
+  Spec'd in `ingester.md` §Dedup.
 
 ### notify
 
@@ -500,7 +580,7 @@ Notes:
 
 - `seq` is `AUTOINCREMENT` (not just `ROWID`) so values are **strictly monotonic and never reused**, even after pruning deletes low rows. Serve's poll cursor is a `seq` high-water mark; reuse would make it skip rows. `WHERE seq > ?` uses the primary-key index — no extra index needed.
 - **Atomicity**: rows are inserted in the same `*sql.Tx` as the data they describe, so serve can never observe a `notify` row before the row it refers to is visible (no notify-before-data race).
-- **Producer rules** (`ingester.md` §Notify channel): one `session_changed` row per canonical session ID in the batch's `affectedSessionIDs` (carrying its `root_session_id` and the batch commit `ts_us`); at most one `stats_invalidated` row per batch (or idle refresh-only pass) when an analytics input changed — fired on `len(affectedSessionIDs) > 0 || rollupTouchedThisBatch || rollupMaterializedThisRefresh` (NOT on the carried `dirtyRollupBuckets` set, which under carry-forward stays non-empty while an open bucket is merely pending — `ingester.md` §Notify channel); one `source_status_changed` row when a source's `parse_errors` count or `enabled` flag changed.
+- **Producer rules** (`ingester.md` §Notify channel): one `session_changed` row per canonical session ID in the batch's `affectedSessionIDs` (carrying its `root_session_id` and the batch commit `ts_us`); at most one `stats_invalidated` row per batch (or idle refresh-only pass) when an analytics input changed — fired on `len(affectedSessionIDs) > 0 || rollupTouchedThisBatch || rollupMaterializedThisRefresh` (NOT on the carried `dirtyRollupBuckets` set, which under carry-forward stays non-empty while an open bucket is merely pending — `ingester.md` §Notify channel); one `source_status_changed` row when a source's `parse_errors` count, `enabled` flag, lifecycle state, read-model state, or lifecycle/read-model timestamp/error evidence changed.
 - **Pruning**: the ingester deletes `notify` rows older than a bounded retention window as part of its write cycle so the table stays small; the data is disposable transport, not history. Serve keeps its cursor in memory and jumps to `MAX(seq)` on startup (it only delivers changes that occur while a client is connected; clients reconcile historical state through the REST API), so pruning consumed rows is always safe.
 - **Read-only serve**: serve never writes or prunes `notify` — it only `SELECT`s. All writes/prunes are the ingester's, honoring the read-only-serve contract (`architecture.md`).
 
@@ -511,10 +591,14 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='8', key='created_at' value=...
+-- key='version' value='12', key='created_at' value=...
 ```
 
-Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The store runs them in order at startup, idempotent. Major schema bumps trigger a full re-ingest (source cursors reset).
+Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The
+store runs them in order at startup, idempotent. Additive migrations that
+preserve `source_progress.cursor` do not reset cursors; a full re-ingest remains
+the operator recovery path for disposable DB corruption or incompatible source
+proof fixes.
 
 Migration history:
 
@@ -568,6 +652,23 @@ Migration history:
   which the presenter omits), so it does NOT reset source cursors and does NOT
   trigger a re-ingest — it follows the 0007 precedent of an additive
   `ALTER TABLE ... ADD COLUMN` + version bump with no data move.
+- `0009_first_user_message_hash.sql` — adds
+  `sessions.first_user_message_hash` plus its partial index and bumps
+  `schema_meta.version` to `'9'` in lockstep with `presenter.SchemaVersion`.
+- `0010_fulltext_content.sql` — extends content-search proof/index surfaces and
+  bumps `schema_meta.version` to `'10'` in lockstep with
+  `presenter.SchemaVersion`.
+- `0011_topology_sort_indexes.sql` — adds topology/session sort indexes and
+  bumps `schema_meta.version` to `'11'` in lockstep with
+  `presenter.SchemaVersion`.
+- `0012_source_progress_lifecycle.sql` — adds the lifecycle and read-model
+  repair columns in §source_progress and bumps `schema_meta.version` to `'12'`
+  in lockstep with `presenter.SchemaVersion`. Existing rows default to
+  `lifecycle_state='unknown'` and `read_model_state='unknown'`; the fixed
+  ingester reconciles configured/discovered rows to `starting` before adapter
+  construction and moves unconfigured rows to non-degrading `stopped`. This
+  migration is additive, does not drop `sources.cursor`, and does not copy
+  historical `sources.cursor` into `source_progress.cursor`.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB

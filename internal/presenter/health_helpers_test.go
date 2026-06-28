@@ -23,12 +23,14 @@ func TestHealthBuildSource_NullLastSeen(t *testing.T) {
 	}, nowUS)
 
 	assertHealthSourceEqual(t, gotSource, healthSource{
-		ID:          "src-null",
-		Format:      "aiagent_v3",
-		Location:    "/tmp/null",
-		Enabled:     true,
-		ParseErrors: 2,
-		LastSeq:     17,
+		ID:             "src-null",
+		Format:         "aiagent_v3",
+		Location:       "/tmp/null",
+		Enabled:        true,
+		ParseErrors:    2,
+		LastSeq:        17,
+		LifecycleState: "unknown",
+		ReadModelState: "unknown",
 	})
 	if gotDegraded {
 		t.Fatal("degraded = true, want false")
@@ -49,20 +51,22 @@ func TestHealthBuildSource_FutureLastSeenClampsLag(t *testing.T) {
 	}, nowUS)
 
 	assertHealthSourceEqual(t, gotSource, healthSource{
-		ID:         "src-future",
-		Format:     "codex",
-		Location:   "/tmp/future",
-		Enabled:    true,
-		LastSeenAt: ptrInt64(nowUS + 10),
-		LagUS:      0,
-		LastSeq:    23,
+		ID:             "src-future",
+		Format:         "codex",
+		Location:       "/tmp/future",
+		Enabled:        true,
+		LastSeenAt:     ptrInt64(nowUS + 10),
+		LagUS:          0,
+		LastSeq:        23,
+		LifecycleState: "unknown",
+		ReadModelState: "unknown",
 	})
 	if gotDegraded {
 		t.Fatal("degraded = true, want false")
 	}
 }
 
-func TestHealthBuildSource_EnabledStaleSourceDegrades(t *testing.T) {
+func TestHealthBuildSource_LegacyLastSeenLagDoesNotDegrade(t *testing.T) {
 	t.Parallel()
 
 	nowUS := fixedTime.UnixMicro()
@@ -76,16 +80,184 @@ func TestHealthBuildSource_EnabledStaleSourceDegrades(t *testing.T) {
 	}, nowUS)
 
 	assertHealthSourceEqual(t, gotSource, healthSource{
-		ID:         "src-stale",
-		Format:     "opencode",
-		Location:   "/tmp/stale",
-		Enabled:    true,
-		LastSeenAt: ptrInt64(nowUS - degradedLagThresholdUS - 1),
-		LagUS:      degradedLagThresholdUS + 1,
-		LastSeq:    31,
+		ID:             "src-stale",
+		Format:         "opencode",
+		Location:       "/tmp/stale",
+		Enabled:        true,
+		LastSeenAt:     ptrInt64(nowUS - degradedLagThresholdUS - 1),
+		LagUS:          degradedLagThresholdUS + 1,
+		LastSeq:        31,
+		LifecycleState: "unknown",
+		ReadModelState: "unknown",
 	})
+	if gotDegraded {
+		t.Fatal("degraded = true, want false; lifecycle state drives freshness after SOW-0114")
+	}
+}
+
+func TestHealthBuildSource_TailingWithStaleHeartbeatIsEffectiveTailStale(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	gotSource, gotDegraded := buildHealthSource(healthSourceRow{
+		id:               "src-tail-stale",
+		format:           "codex",
+		location:         "/tmp/codex",
+		enabled:          1,
+		lastSeq:          88,
+		lifecycleState:   "tailing",
+		lifecycleStateAt: sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+		tailStartedAt:    sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+		tailHeartbeatAt:  sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+		readModelState:   "ready",
+	}, nowUS)
+
+	if gotSource.LifecycleState != "tail_stale" {
+		t.Fatalf("lifecycle_state = %q, want effective tail_stale", gotSource.LifecycleState)
+	}
 	if !gotDegraded {
-		t.Fatal("degraded = false, want true")
+		t.Fatal("degraded = false, want true for stale tail heartbeat")
+	}
+}
+
+func TestHealthBuildSource_TailingWithinHeartbeatGraceIsHealthy(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	gotSource, gotDegraded := buildHealthSource(healthSourceRow{
+		id:               "src-tail-healthy",
+		format:           "codex",
+		location:         "/tmp/codex",
+		enabled:          1,
+		lastSeq:          89,
+		lifecycleState:   "tailing",
+		lifecycleStateAt: sql.NullInt64{Int64: nowUS - tailStaleThresholdUS + 1, Valid: true},
+		tailStartedAt:    sql.NullInt64{Int64: nowUS - tailStaleThresholdUS + 1, Valid: true},
+		tailHeartbeatAt:  sql.NullInt64{Int64: nowUS - tailStaleThresholdUS + 1, Valid: true},
+		readModelState:   "ready",
+	}, nowUS)
+
+	if gotSource.LifecycleState != "tailing" {
+		t.Fatalf("lifecycle_state = %q, want tailing", gotSource.LifecycleState)
+	}
+	if gotDegraded {
+		t.Fatal("degraded = true, want false inside heartbeat grace")
+	}
+}
+
+func TestHealthBuildSource_PreTailAndLongScanAgeDegrade(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	tests := []struct {
+		name  string
+		row   healthSourceRow
+		state string
+	}{
+		{
+			name: "starting beyond pre-tail grace",
+			row: healthSourceRow{
+				lifecycleState:   "starting",
+				lifecycleStateAt: sql.NullInt64{Int64: nowUS - preTailGraceThresholdUS - 1, Valid: true},
+			},
+			state: "starting",
+		},
+		{
+			name: "tail_starting beyond pre-tail grace",
+			row: healthSourceRow{
+				lifecycleState:   "tail_starting",
+				lifecycleStateAt: sql.NullInt64{Int64: nowUS - preTailGraceThresholdUS - 1, Valid: true},
+			},
+			state: "tail_starting",
+		},
+		{
+			name: "scanning beyond long-scan threshold",
+			row: healthSourceRow{
+				lifecycleState: "scanning",
+				scanStartedAt:  sql.NullInt64{Int64: nowUS - longScanThresholdUS - 1, Valid: true},
+			},
+			state: "scanning",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.row.id = "src-age"
+			tt.row.format = "aiagent_v3"
+			tt.row.location = "/tmp/age"
+			tt.row.enabled = 1
+			tt.row.readModelState = "ready"
+
+			gotSource, gotDegraded := buildHealthSource(tt.row, nowUS)
+			if gotSource.LifecycleState != tt.state {
+				t.Fatalf("lifecycle_state = %q, want %q", gotSource.LifecycleState, tt.state)
+			}
+			if !gotDegraded {
+				t.Fatal("degraded = false, want true")
+			}
+		})
+	}
+}
+
+func TestHealthBuildSource_ReadModelRepairGrace(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	tests := []struct {
+		name        string
+		stateAt     int64
+		wantDegrade bool
+	}{
+		{name: "within grace", stateAt: nowUS - readModelRepairGraceThresholdUS + 1, wantDegrade: false},
+		{name: "beyond grace", stateAt: nowUS - readModelRepairGraceThresholdUS - 1, wantDegrade: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, gotDegraded := buildHealthSource(healthSourceRow{
+				id:               "src-repair",
+				format:           "opencode",
+				location:         "/tmp/opencode",
+				enabled:          1,
+				lifecycleState:   "tailing",
+				tailStartedAt:    sql.NullInt64{Int64: nowUS, Valid: true},
+				tailHeartbeatAt:  sql.NullInt64{Int64: nowUS, Valid: true},
+				readModelState:   "repair_pending",
+				readModelStateAt: sql.NullInt64{Int64: tt.stateAt, Valid: true},
+			}, nowUS)
+			if gotDegraded != tt.wantDegrade {
+				t.Fatalf("degraded = %v, want %v", gotDegraded, tt.wantDegrade)
+			}
+		})
+	}
+}
+
+func TestHealthBuildSource_StoppedIgnoresReadModelDegradation(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	gotSource, gotDegraded := buildHealthSource(healthSourceRow{
+		id:               "src-stopped",
+		format:           "codex",
+		location:         "/tmp/stopped",
+		enabled:          1,
+		lifecycleState:   "stopped",
+		lifecycleStateAt: sql.NullInt64{Int64: nowUS, Valid: true},
+		readModelState:   "repair_failed",
+		readModelStateAt: sql.NullInt64{Int64: nowUS - readModelRepairGraceThresholdUS - 1, Valid: true},
+		readModelError:   sql.NullString{String: "historical repair failure", Valid: true},
+	}, nowUS)
+
+	if gotSource.LifecycleState != "stopped" {
+		t.Fatalf("lifecycle_state = %q, want stopped", gotSource.LifecycleState)
+	}
+	if gotSource.ReadModelState != "repair_failed" {
+		t.Fatalf("read_model_state = %q, want repair_failed", gotSource.ReadModelState)
+	}
+	if gotDegraded {
+		t.Fatal("degraded = true, want false for stopped source with historical read-model failure")
 	}
 }
 
@@ -103,13 +275,15 @@ func TestHealthBuildSource_DisabledStaleSourceDoesNotDegrade(t *testing.T) {
 	}, nowUS)
 
 	assertHealthSourceEqual(t, gotSource, healthSource{
-		ID:         "src-disabled",
-		Format:     "claude_code",
-		Location:   "/tmp/disabled",
-		Enabled:    false,
-		LastSeenAt: ptrInt64(nowUS - degradedLagThresholdUS - 1),
-		LagUS:      degradedLagThresholdUS + 1,
-		LastSeq:    43,
+		ID:             "src-disabled",
+		Format:         "claude_code",
+		Location:       "/tmp/disabled",
+		Enabled:        false,
+		LastSeenAt:     ptrInt64(nowUS - degradedLagThresholdUS - 1),
+		LagUS:          degradedLagThresholdUS + 1,
+		LastSeq:        43,
+		LifecycleState: "unknown",
+		ReadModelState: "unknown",
 	})
 	if gotDegraded {
 		t.Fatal("degraded = true, want false")
@@ -123,7 +297,7 @@ func TestHealthStatusFromSignals(t *testing.T) {
 		name              string
 		queriesFailed     int
 		totalQueries      int
-		lagDegraded       bool
+		sourceDegraded    bool
 		recentParseErrors int64
 		want              string
 	}{
@@ -140,10 +314,10 @@ func TestHealthStatusFromSignals(t *testing.T) {
 			want:          healthStatusOK,
 		},
 		{
-			name:         "lag signal is degraded",
-			totalQueries: 2,
-			lagDegraded:  true,
-			want:         healthStatusDegraded,
+			name:           "source lifecycle signal is degraded",
+			totalQueries:   2,
+			sourceDegraded: true,
+			want:           healthStatusDegraded,
 		},
 		{
 			name:              "recent parse errors are degraded",
@@ -157,7 +331,7 @@ func TestHealthStatusFromSignals(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := healthStatusFromSignals(tt.queriesFailed, tt.totalQueries, tt.lagDegraded, tt.recentParseErrors)
+			got := healthStatusFromSignals(tt.queriesFailed, tt.totalQueries, tt.sourceDegraded, tt.recentParseErrors)
 			if got != tt.want {
 				t.Fatalf("status = %q, want %q", got, tt.want)
 			}
@@ -176,9 +350,13 @@ func TestReadHealthSourceRows_ScanErrorReturnsNilSources(t *testing.T) {
 
 	nowUS := fixedTime.UnixMicro()
 	rows, err := db.Query(`
-SELECT 'src-ok', 'aiagent_v3', '/tmp/ok', 1, ?, 0, 100, NULL
+SELECT 'src-ok', 'aiagent_v3', '/tmp/ok', 1, ?, 0, 100,
+       1000, 'tail_failed', 1000, NULL, NULL, NULL, NULL, 1000, 0, NULL,
+       'unknown', NULL, NULL, NULL, NULL, 0, NULL, NULL
 UNION ALL
-SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', NULL, 0, 101, NULL
+SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', NULL, 0, 101,
+       NULL, 'unknown', NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL,
+       'unknown', NULL, NULL, NULL, NULL, 0, NULL, NULL
 `, nowUS-degradedLagThresholdUS-1)
 	if err != nil {
 		t.Fatalf("query rows: %v", err)
@@ -193,7 +371,7 @@ SELECT 'src-bad', 'codex', '/tmp/bad', 'not-enabled', NULL, 0, 101, NULL
 		t.Fatalf("sources = %#v, want nil on scan error", sources)
 	}
 	if !lagDegraded {
-		t.Fatal("lagDegraded = false, want true from already-scanned stale source")
+		t.Fatal("sourceDegraded = false, want true from already-scanned failed source")
 	}
 }
 
