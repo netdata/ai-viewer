@@ -4,7 +4,13 @@
 
 Status: in-progress
 
-Sub-state: Milestones 2-7 implemented; implementation review round 6 exposed one accepted P2 class that local self-review should have caught; stale supervisor request-channel cleanup is fixed; local self-review and full aggregate gates are green; install/reingest recovery remains pending.
+Sub-state: Milestones 2-7 implemented; implementation review round 12
+converged with all six reviewer outputs positive or P3/rejected
+non-blockers; focused/static/full test/build gates are green; the installed DB
+was deleted and a fresh low-priority systemd ingest is running from scratch.
+Benchmark comparison remains blocked because the operator-requested
+idle-scheduled execution is not comparable to the committed normal-priority
+workstation baseline.
 
 ## Requirements
 
@@ -84,8 +90,10 @@ Unknowns:
   events without waiting for every other source to complete. The all-sources
   backfill may remain as a final reconciliation pass, but it is not the only
   path that makes completed-source scan rows searchable/stat-able.
-- Failed or timed-out read-model repair is health-visible and retryable; it must
-  not leave FTS/rollup tables silently empty or stale.
+- Failed, interrupted, or externally cancelled read-model repair is
+  health-visible and retryable; it must not leave FTS/rollup tables silently
+  empty or stale. Source-scoped repair must not use a short synthetic execution
+  timeout that restarts large repairs from the beginning.
 - Source lifecycle state exists from scan start, even before the source emits
   enough events to trigger a normal worker batch flush.
 - A configured source that fails before Scan starts is health-visible as
@@ -292,12 +300,16 @@ system outcome requires all of the following:
     channel after the first Tail failure is not.
   - Gap-level Tail restart ownership decision: the source lifecycle supervisor
     goroutine created by `startSourceWithFactoryLookup` owns the restart loop
-    and the source event channel. It has closure access to factory lookup,
-    adapter construction location, source id, format, logger, `Ingester`, and
-    cursor lookup. `runAdapter` becomes an attempt helper or is replaced by one;
-    it does not own channel closure. The supervisor closes the event channel
-    only after parent-context shutdown, unrecoverable startup failure, or a
-    documented terminal lifecycle state.
+    and determines when no accepted source attempt may continue. It has closure
+    access to factory lookup, adapter construction location, source id, format,
+    logger, `Ingester`, and cursor lookup. `runAdapter` becomes an attempt
+    helper or is replaced by one; it does not own channel closure. The owning
+    source goroutine closes the event channel only after the supervisor exits
+    because of parent-context shutdown, unrecoverable startup failure, or a
+    documented terminal lifecycle state. If an adapter violates the
+    cancellation contract and sends after that closure, the Tail wrapper must
+    convert the panic into adapter-failure evidence instead of crashing the
+    process.
   - The supervisor creates a per-source context derived from the parent
     adapter context, and a per-attempt child context for each Scan/Tail attempt.
     Cancelling a stale or failed attempt must not cancel unrelated sources.
@@ -851,9 +863,11 @@ system outcome requires all of the following:
     immediately consistent. FTS/rollups are eventually consistent during startup
     scan deferral or full global rebuild. Any skipped derived refresh sets
     durable `read_model_state='repair_pending'`; successful source repair sets
-    `ready`; timeout sets `repair_timeout`; failure sets `repair_failed`.
-    `repair_pending`, `repair_timeout`, and `repair_failed` degrade health until
-    a retry succeeds.
+    `ready`; caller/deadline timeout, when present, sets `repair_timeout`; other
+    real repair failure sets `repair_failed`. The daemon source repair loop must
+    not synthesize a short wall-clock deadline that restarts large repairs from
+    the beginning. `repair_pending`, `repair_timeout`, and `repair_failed`
+    degrade health until a retry succeeds.
   - The read-model state machine is explicit. Target states are `unknown`,
     `repair_pending`, `repairing`, `ready`, `repair_timeout`, and
     `repair_failed`. Legal transitions are:
@@ -905,22 +919,25 @@ system outcome requires all of the following:
     unrelated source tail flushes can interleave under the configured 5 s
     `busy_timeout`. If a chunk cannot meet that bound, the repair path must
     record retryable repair debt instead of starving canonical ingestion.
-  - Source repair attempts are bounded by the same five-minute startup backfill
-    timeout used by the existing global backfill gate. A timed-out or failed
-    repair schedules automatic retry with the same 1s, 2s, 4s, ... max 60s
-    backoff family used for Tail restart, while the parent context is alive.
-    Retry attempts increment `read_model_repair_attempts` and update the
-    read-model timestamps and bounded/sanitized error field. The retry attempt
-    counter resets to zero when the source transitions to
-    `read_model_state='ready'`.
+  - Superseded timeout decision: source repair attempts are not bounded by the
+    global startup backfill timeout. The later live-regression fix rejected that
+    design because a short synthetic deadline can restart large local repairs
+    from the beginning forever. A failed repair schedules
+    automatic retry with the same 1s, 2s, 4s, ... max 60s backoff family used
+    for Tail restart, while the parent context is alive. Retry attempts
+    increment `read_model_repair_attempts` and update the read-model timestamps
+    and bounded/sanitized error field. The retry attempt counter resets to zero
+    when the source transitions to `read_model_state='ready'`.
   - Read-model repair retry ownership decision: the source lifecycle goroutine
-    owns that source's repair loop. It attempts repair after scan outcome,
-    sets `repairing`, then `ready` on success or `repair_timeout` /
-    `repair_failed` on error, schedules retries with a context-cancellable
-    timer, and leaves `repair_pending` durable across shutdown so next startup
-    can resume repair. Read-model repair timeout/retry is owned by that source
-    repair loop, not by a second global watchdog; the stale-tail watchdog
-    remains dedicated to Tail heartbeat state.
+    owns that source's repair loop. It attempts repair after scan outcome, sets
+    `repairing`, then `ready` on success or `repair_failed` on real repair
+    error. `repair_timeout` remains a legal state for caller/deadline-driven
+    failures, but the daemon does not create a short synthetic repair timeout.
+    The loop schedules retries with a context-cancellable timer and leaves
+    `repair_pending` durable across shutdown so next startup can resume repair.
+    Read-model repair retry is owned by that source repair loop, not by a second
+    global watchdog; the stale-tail watchdog remains dedicated to Tail heartbeat
+    state.
     Active repair work must observe parent-context cancellation and commit or
     roll back the current bounded transaction promptly before recording durable
     `repair_pending` shutdown debt.
@@ -1319,9 +1336,10 @@ Spec Deltas:
     tail failure, stale tail heartbeat, read-model repair pending/timeout/failure,
     and no configured/discovered sources.
   - Pin thresholds: long scan 10 minutes, pre-tail stale 60 seconds, stale tail
-    heartbeat 5 minutes, read-model repair attempt 5 minutes, restart/repair
-    backoff 1s doubling to a 60s cap, and single long
-    `tail_restarting` catch-up Scan degradation at 10 minutes.
+    heartbeat 5 minutes, restart/repair backoff 1s doubling to a 60s cap, and
+    single long `tail_restarting` catch-up Scan degradation at 10 minutes.
+    Source read-model repair attempts intentionally have no short synthetic
+    execution timeout.
   - Document that those thresholds and clocks are injectable in tests while
     production defaults remain unchanged.
   - Document `starting` degradation and ingester-side first-heartbeat grace based
@@ -2501,8 +2519,9 @@ Completed on 2026-06-28 before the implementation-plan reviewer gate:
     non-use.
   - Mid-run source auto-discovery remains out of scope; newly created source
     locations are picked up on ingester restart.
-  - Read-model repair timeout/retry is owned by the source repair loop, not a
-    second global watchdog.
+  - Read-model repair retry is owned by the source repair loop, not a second
+    global watchdog. The source repair loop intentionally has no short synthetic
+    execution timeout.
 - Narrowed round-9 findings:
   - Adding `CHECK (cursor IS NULL)` to `sources.cursor` was not accepted. The
     migration remains additive and avoids rebuilding `sources`; tests and
@@ -3531,9 +3550,10 @@ Round-1 fixes and local evidence:
     source-derived rows. The round-1 race gate proved that repair-active
     deferral can strand Tail-time FTS rows; source repair is row/bucket scoped
     and SQLite-serialized while Tail incremental refresh remains enabled.
-  - Read-model repair now runs with timeout, retries with backoff, restores
-    interrupted repairs to `repair_pending`, and resets repair attempts on
-    `ready`.
+  - Read-model repair retries real errors with backoff, restores interrupted
+    repairs to `repair_pending`, and resets repair attempts on `ready`. The
+    later live-regression fix removed the short synthetic execution timeout
+    because it could restart large repairs from the beginning forever.
 - Restart/catch-up completeness:
   - Restart catch-up `Scan()` failures keep the source in `tail_restarting`,
     record sanitized error evidence, and retry instead of starting Tail from an
@@ -3964,9 +3984,10 @@ Round-4 fix:
   commits. Rollbacks therefore do not wake a repair for uncommitted debt.
 - The source supervisor now has a `repairRequests` channel and handles it while
   Tail remains active. A repair request sets the in-memory pending flag and
-  starts the existing repair loop, preserving the existing repair timeout,
+  starts the existing repair loop, preserving parent-context cancellation,
   exponential backoff, `repair_failed` / `repair_timeout` health visibility,
-  and `ready` reset semantics.
+  and `ready` reset semantics without adding a short synthetic execution
+  timeout.
 - Added regression coverage:
   - `internal/ingest/read_model_repair_test.go::TestWorkerSkipsDerivedRefreshDuringGlobalRebuildAndMarksRepairPending`
     now asserts a committed rebuild-window batch emits exactly one repair
@@ -4008,6 +4029,176 @@ Validation after round-4 fix:
     before any further reviewer spend.
   - The next implementation-review run must use the same broad SOW/diff scope,
     with only short notes about the round-4 fix and the validation above.
+
+## Live Regression - 2026-06-29
+
+After installing commit `a35dc5c` and rebuilding `/opt/ai-viewer/data/index.db`
+from scratch, the missing Codex session was recovered, but the live install
+remained degraded.
+
+Evidence:
+
+- `/api/health` returned `status="degraded"`.
+- The previously missing Codex native session
+  `019f08f4-9dc6-7251-aa4a-ccdeec9ea9b2` existed in SQLite as canonical session
+  `a5cae7c3ed823fdbaf88a313e27f79fb`, with 117 turns and more than 15k ops.
+- `source_progress` persisted `lifecycle_state='tailing'` for aiagent_v3,
+  claude-code, and Codex, but `/api/health` derived effective `tail_stale`
+  because `tail_heartbeat_at` was old and `tail_restart_count` remained `0`.
+- Journald contained Tail start lines for aiagent_v3, claude-code, and Codex,
+  but no stale-tail restart lines.
+- Journald repeatedly logged `repairing source read models` for aiagent_v3,
+  claude-code, and Codex, but no `source read models repaired` completion lines.
+- Live FTS coverage was partial or absent while canonical ops were present:
+  Codex had more than 1.3M ops with only about 22k `fts_ops` rows; opencode and
+  aiagent_v2 had canonical ops and zero `fts_ops` rows.
+
+Root-cause model:
+
+- Tail-liveness heartbeat persistence and stale-tail checking shared one
+  goroutine. A DB write that blocked or ran behind long repair work could starve
+  the stale watchdog, leaving health to derive `tail_stale` while the ingester
+  never persisted `tail_stale` or requested a supervisor restart.
+- Source read-model repair used a short per-attempt timeout. On large local
+  corpora, each timeout restarted the FTS repair from the beginning, so the
+  system spent hours reprocessing early rows and never reached `ready`.
+
+Spec deltas for this live-regression fix:
+
+- `.agents/sow/specs/ingester.md` now states that source-scoped read-model
+  repair runs to completion while the source supervisor context is alive and is
+  not killed by a short wall-clock timeout that restarts work from zero.
+- `.agents/sow/specs/ingester.md` now states that heartbeat persistence and
+  stale-tail checking are independent loops, and that liveness DB writes are
+  bounded/logged so a blocked write cannot wedge the liveness subsystem.
+
+Implementation plan:
+
+- Split tail heartbeat persistence and stale-tail checking into independent
+  ingester goroutines.
+- Add bounded contexts for liveness DB writes; failed writes log and retry on
+  the next heartbeat/tick instead of blocking the loop forever.
+- Remove the short source read-model repair execution timeout; repair remains
+  cancellable by the source supervisor context and still retries real errors
+  with backoff.
+- Add focused tests before code:
+  - liveness writes respect the configured timeout when SQLite is unavailable;
+  - the watchdog still records stale state and sends a restart request after the
+    DB becomes writable again;
+  - source read-model repair is invoked with the supervisor context, not a
+    short synthetic timeout.
+
+Validation plan:
+
+- Run focused `internal/ingest` tail-liveness tests.
+- Run focused `cmd/ai-viewer-ingest` source-supervisor repair tests.
+- Run `go test ./internal/ingest ./cmd/ai-viewer-ingest -count=1`.
+- Reinstall the system service and verify the live DB no longer gets stuck in
+  the same no-completion repair loop; the exact health state may remain
+  degraded while aiagent_v2/opencode startup scans continue, but tail restart
+  evidence and repair progress must be observable.
+
+Follow-up live finding:
+
+- After the first live-regression fix was installed, source read-model repair
+  still starved liveness writes while repairing Codex FTS rows.
+- Journald showed `repairing source read models` followed by repeated
+  `tail heartbeat persist failed ... context deadline exceeded` and
+  `tail staleness check failed ... context deadline exceeded`.
+- SQLite query-plan evidence showed `DELETE FROM fts_ops WHERE op_id = ?` and
+  `DELETE FROM fts_logs WHERE log_id = ?` scan the content-owning FTS5 virtual
+  tables. Both linkage columns are `UNINDEXED`, so source repair performed
+  repeated FTS scans inside writer transactions.
+- Source repair query plans were also tightened to stream source rows by
+  `ops.rowid` / `log_entries.id` and avoid `USE TEMP B-TREE FOR ORDER BY`.
+
+Follow-up spec/code fix:
+
+- `.agents/sow/specs/ingester.md` now requires source-scoped FTS repair to
+  stream rows in primary storage order and to address FTS rows by stable FTS
+  `rowid`: `ops.rowid` for `fts_ops`, `log_entries.id` for `fts_logs`.
+- Incremental FTS maintenance, full FTS backfill, and source FTS repair now use
+  `INSERT OR REPLACE` with explicit FTS `rowid`.
+- Source repair deletes stale FTS rows by `rowid`, not by unindexed linkage
+  columns such as `op_id` or `log_id`.
+- The ingest default batch size was restored to the documented `1000` events so
+  one scan flush cannot monopolize the single writer for an oversized batch.
+
+Follow-up tests and validation:
+
+- Added tests that failed before the rowid fix:
+  - `internal/ingest::TestFTS_IncrementalOpsUseOpsRowID`
+  - `internal/ingest::TestFTS_IncrementalLogsUseLogEntryID`
+  - `internal/ingest::TestNew_DefaultBatchSizeMatchesSpec`
+- Added source-repair query-plan coverage:
+  - `internal/ingest::TestRepairSourceReadModels_SourceFTSQueriesAvoidTempSort`
+- Focused validations passed:
+  - `go test ./internal/ingest -run 'TestNew_DefaultBatchSizeMatchesSpec|TestTail|TestRepairSourceReadModels' -count=1`
+  - `go test ./internal/ingest -run 'TestFTSParity_AllFixtures|TestFTS_IncrementalOpsUseOpsRowID|TestFTS_IncrementalLogsUseLogEntryID|TestFTS_Backfill' -count=1`
+  - `go test ./internal/ingest ./cmd/ai-viewer-ingest -count=1`
+  - `go test -race ./internal/ingest ./cmd/ai-viewer-ingest -run 'TestTail|TestSourceReadModelRepair|TestRepairSourceReadModels|TestStartSource|TestRunAdapter|TestNew_DefaultBatchSizeMatchesSpec|TestFTS_Incremental' -count=1`
+  - `scripts/spec-drift.sh && scripts/test/spec-drift-test.sh`
+  - `go test ./...`
+  - `scripts/lint.sh`
+- The installed DB was deleted again after the rowid fix and `scripts/install-system.sh`
+  was rerun. Clean rebuild evidence at `2026-06-29 09:42 EEST`:
+  - `ai-viewer-ingest.service` active since `2026-06-29 09:30:22 EEST` with
+    zero restarts;
+  - the rebuilt DB contained 340,815 ops, 147,848 `fts_logs`, and deferred
+    `fts_ops=0` while all sources were still in startup scan;
+  - no `context deadline`, stale-tail, or heartbeat-persist failure logs matched
+    the new run through that sample;
+  - the reported Codex session
+    `019f08f4-9dc6-7251-aa4a-ccdeec9ea9b2` was present and served by
+    `/api/sessions/a5cae7c3ed823fdbaf88a313e27f79fb` with 117 turns and 205
+    child sessions.
+- `scripts/gates.sh` did not complete:
+  - attempt 1 passed benchmark preflight while the clean ingest was running, but
+    the benchmark gate reproduced an unrelated `aiagent_v2 Tail_SyntheticAppend`
+    wall-time regression under host load;
+  - the ingester was paused at 40,825 sessions / 660,540 ops and the gate was
+    retried;
+  - attempt 2 failed benchmark preflight because unrelated workstation load
+    remained above the gate threshold (`15.07 >= 12.00`);
+  - process evidence showed unrelated reviewer/opencode, Chromium, Netdata, and
+    desktop workloads consuming CPU. Those processes were not owned by this SOW
+    and were not stopped.
+- After the benchmark-blocked gate attempt, `ai-viewer-ingest.service` was
+  restarted. It resumed every source with `resume=true`, had zero restarts, and
+  the rebuild continued to 41,205 sessions / 669,214 ops at
+  `2026-06-29 10:14 EEST`. No `context deadline`, stale-tail, or heartbeat
+  failure logs matched the post-restart sample.
+
+Follow-up live finding 2:
+
+- A later installed cold rebuild recovered the missing Codex session and moved
+  aiagent_v3 plus claude-code to `tailing` / `ready`, but liveness writes again
+  timed out while other large sources were still scanning and repairing:
+  `tail heartbeat persist failed ... context deadline exceeded` and
+  `tail staleness check failed ... context deadline exceeded`.
+- At the same sample, `source_progress.progress_updated_at` was fresh for every
+  source, proving scanners were active rather than dead, but the single writer
+  still made liveness writes miss their 30 s budget.
+- Rowid-based FTS repair fixed the unindexed virtual-table scan class, but the
+  restored 1000-row normal and FTS repair batches were still too large for this
+  workstation's real cold-rebuild corpus.
+
+Follow-up spec/code fix 2:
+
+- `.agents/sow/specs/ingester.md` now treats the ingest batch size as a
+  liveness budget and sets the default to 100 events / 500 ms.
+- FTS backfill and source-scoped FTS repair now mirror the normal ingest default
+  batch size instead of carrying an independent 1000-row writer chunk.
+- `.agents/skills/project-go-backend/SKILL.md` now records the same 100-row
+  transaction budget so future backend work does not reintroduce the stale
+  1000-row default.
+
+Follow-up tests 2:
+
+- `internal/ingest::TestNew_DefaultBatchSizeMatchesSpec` now pins the spec
+  default at 100.
+- `internal/ingest::TestFTS_BackfillDefaultBatchSizeMatchesIngestBudget` pins
+  FTS repair/backfill to the same default writer budget.
 
 ## Implementation Review Round 5 - 2026-06-28
 
@@ -4303,6 +4494,1042 @@ Disposition:
   a later check proves sources have entered tailing/read-model-ready states or a
   concrete follow-up SOW records why the remaining long scan is a separate
   operational issue.
+
+## Live Regression - 2026-06-30
+
+Evidence:
+
+- A ten-minute monitor of the installed fresh-ingest DB counted five new
+  liveness timeout log entries after `2026-06-30T11:04:14+03:00` while
+  `aiagent_v3` and `claude-code` were already in `tailing/ready`.
+- The failures were `tail heartbeat persist failed` and `tail staleness check
+  failed` with `context deadline exceeded`. This proves cross-source tailing now
+  starts, but liveness writes can still be starved behind the single SQLite
+  writer during heavy startup repair/scan work.
+- Query-plan inspection of the dirty-session aggregate refresh found the
+  failed-op subquery can use the global `idx_ops_status` index for
+  `WHERE ops.session_id = sessions.id AND ops.status = 'failed'`, instead of a
+  session-scoped index. The installed DB also has giant Codex sessions, including
+  one session with more than 100k ops, so a dirty aggregate pass can hold the
+  writer long enough to exceed the liveness write budget.
+
+Follow-up fix target:
+
+- Add aggregate-liveness support indexes:
+  `idx_ops_session_status ON ops(session_id, status)` and
+  `idx_ops_session_end ON ops(session_id, end_ts)`.
+- Bump the schema to v13 so serve refuses a pre-v13 DB whose aggregate
+  maintenance schema is known to violate the liveness contract.
+- Add migration/query-plan tests proving the aggregate refresh subqueries use the
+  new session-scoped indexes, then reinstall and monitor the live service again.
+
+Follow-up live finding after v13:
+
+- Migration `0013_aggregate_liveness_indexes.sql` applied successfully on the
+  installed DB at `2026-06-30T11:36:32+03:00`; `/api/health` reported
+  `schema_version=13`, and the DB contained both `idx_ops_session_status` and
+  `idx_ops_session_end`.
+- A 12-minute post-v13 monitor still counted four real
+  `tail heartbeat persist failed` warnings:
+  - `2026-06-30T11:38:29+03:00` for `claude-code`;
+  - `2026-06-30T11:40:04+03:00` for `claude-code`;
+  - `2026-06-30T11:40:34+03:00` for `aiagent_v3`;
+  - `2026-06-30T11:44:29+03:00` for `claude-code`.
+- The heartbeat failures began after source read-model repair started for
+  `claude-code`. Query-plan inspection showed source FTS repair avoided temp
+  sort, but it still walked global `ops.rowid` / `log_entries.id` and checked
+  each row's source through `sessions`. That can scan unrelated sources while
+  holding the ingester's single database connection.
+
+Second follow-up fix target:
+
+- Add source-repair liveness indexes:
+  `idx_sessions_source_id ON sessions(source_id, id)`,
+  `idx_ops_session ON ops(session_id)`, and
+  `idx_log_session ON log_entries(session_id)`.
+- Change source FTS repair to page source sessions first, then per-session
+  `ops` / `log_entries` by rowid using the new indexes.
+- Bump the schema to v14 and add query-plan tests that fail on global rowid
+  repair scans or temp B-tree repair sorts.
+
+Follow-up live finding after v14:
+
+- Migration `0014_source_repair_liveness_indexes.sql` applied successfully on
+  the installed DB at `2026-06-30T12:01:38+03:00`; `/api/health` reported
+  `schema_version=14`, and the DB contained all three v14 indexes.
+- A 12-minute post-v14 monitor still counted three liveness timeout warnings:
+  two `tail staleness check failed` warnings and one
+  `tail heartbeat persist failed` warning.
+- The watchdog query is a trivial scan of `source_progress`, so the remaining
+  failure is not an inefficient watchdog query. The active source read-model
+  repair had not completed, which indicates repair can still repeatedly acquire
+  the single DB connection ahead of liveness operations even after the repair
+  queries became source/session-scoped.
+
+Third follow-up fix target:
+
+- Add a liveness-priority marker: heartbeat persistence and stale-tail watchdog
+  operations increment a pending counter before waiting for the DB connection.
+- Make source read-model repair yield between read/write batches while that
+  marker is present, so liveness gets a chance to acquire the single connection
+  before repair starts the next batch.
+
+Follow-up live finding after the repair-only liveness-priority fix:
+
+- The patched service was installed at `2026-06-30T12:25:01+03:00` with
+  schema v14.
+- A post-install monitor immediately found fresh liveness failures:
+  - `2026-06-30T12:26:31+03:00`: `tail staleness check failed` with
+    `tail staleness query: context deadline exceeded`.
+  - `2026-06-30T12:27:54+03:00`: `tail heartbeat persist failed` with
+    `tail heartbeat begin: context deadline exceeded`.
+  - `2026-06-30T12:28:01+03:00`: another `tail staleness query` timeout.
+  - By sample 5 (`2026-06-30T12:31:19+03:00`), the monitor counted four
+    post-install liveness timeout warnings.
+- The first failure occurred before the source read-model repair log line for
+  `aiagent_v3`, so the repair-only priority rule was incomplete. Normal scan
+  workers can also repeatedly acquire the single writer connection while
+  liveness is pending.
+
+Fourth follow-up fix target:
+
+- Extend the same liveness-priority protocol to normal worker flushes and idle
+  rollup refreshes before they call `BeginTx`.
+- Add tests proving both worker DB entry points yield to tail-state priority
+  before opening a transaction.
+- Reinstall and rerun the live liveness monitor from a fresh service start.
+
+Follow-up live finding after worker-flush priority:
+
+- The patched service was installed at `2026-06-30T12:42:27+03:00`.
+- The post-install monitor stayed clean through sample 4 while
+  `aiagent_v3` and `claude-code` were tailing and read-model repairs were
+  active.
+- Sample 5 counted one fresh liveness timeout:
+  `2026-06-30T12:46:21+03:00`, `tail heartbeat persist failed`,
+  `tail heartbeat begin: context deadline exceeded`, source
+  `claude-code:$HOME/.claude/projects`.
+- Source repair began for `claude-code` at `2026-06-30T12:43:26+03:00`, but
+  repair and worker paths were no longer the only single-connection owners.
+  The background orphan resolver still opened periodic maintenance write
+  transactions without checking the liveness-priority marker.
+
+Fifth follow-up fix target:
+
+- Extend the liveness-priority protocol to the orphan resolver before it opens
+  its maintenance transaction.
+- Add a resolver regression test proving it yields before `BeginTx`.
+- Reinstall and rerun the live monitor from a fresh service start. If the
+  timeout persists, treat the result as evidence that a single source-repair
+  transaction exceeds the liveness budget and reduce that transaction
+  granularity next.
+
+Final live evidence after resolver priority:
+
+- The resolver-priority build was installed successfully; `systemctl` reported
+  `ai-viewer-ingest.service` active/running from
+  `2026-06-30T12:57:09+03:00`.
+- `/api/health` reported `schema_version=14`; degradation remained expected
+  because large sources were still scanning or repairing, not because liveness
+  had failed.
+- A 12-sample installed monitor from `2026-06-30T12:57:09+03:00` counted
+  `failures_since_resolver_priority=0` at every sample for:
+  `context deadline`, `tail heartbeat persist failed`, and
+  `tail staleness check failed`.
+- Final monitor sample at `2026-06-30T13:11:35+03:00`:
+  - sessions: `95,503`
+  - ops: `2,157,031`
+  - `fts_ops`: `380,938`
+  - `fts_logs`: `1,331,841`
+  - `aiagent_v3`: `tailing/repairing`, heartbeat
+    `2026-06-30T10:11:28Z`, restarts `0`
+  - `claude-code`: `tailing/repairing`, heartbeat
+    `2026-06-30T10:11:25Z`, restarts `0`
+  - `aiagent_v2`, `codex`, and `opencode` remained
+    `scanning/repair_pending`, which keeps this a real contention test rather
+    than an idle-system test.
+- A follow-up explicit journald query after the monitor returned no matching
+  timeout lines since `2026-06-30T12:57:09+03:00`.
+
+Final implementation evidence:
+
+- Source read-model repair, normal worker flushes, idle rollup refresh, and the
+  orphan resolver now all yield to pending tail-state persistence/watchdog work
+  before opening lower-priority database transactions.
+- Added regression coverage:
+  - `internal/ingest/worker_test.go::TestWorkerFlushYieldsToTailStateBeforeBeginTx`
+  - `internal/ingest/worker_test.go::TestWorkerIdleRefreshYieldsToTailStateBeforeBeginTx`
+  - `internal/ingest/resolver_test.go::TestResolverYieldsToTailStateBeforeBeginTx`
+- Focused tests passed:
+  - `go test ./internal/ingest -run 'TestResolverYieldsToTailStateBeforeBeginTx|TestWorkerFlushYieldsToTailStateBeforeBeginTx|TestWorkerIdleRefreshYieldsToTailStateBeforeBeginTx|TestTailStateWriteContextMarksPendingUntilCancel|TestRepairSourceFTSYieldsBeforeDBWork|TestTailHeartbeat|TestTailWatchdog|TestResolver_NoOpWhenNoOrphans' -count=1`
+  - `go test ./internal/ingest ./internal/store ./internal/presenter ./cmd/ai-viewer-ingest -count=1`
+  - `go test -race ./internal/ingest ./cmd/ai-viewer-ingest -run 'TestResolverYieldsToTailStateBeforeBeginTx|TestWorkerFlushYieldsToTailStateBeforeBeginTx|TestWorkerIdleRefreshYieldsToTailStateBeforeBeginTx|TestTailStateWriteContextMarksPendingUntilCancel|TestRepairSourceFTSYieldsBeforeDBWork|TestRepairSourceReadModels|TestWorkerSkipsDerivedRefreshDuringGlobalRebuildAndMarksRepairPending|TestStartSourceRecordsScanAndTailLifecycle|TestSourceReadModelRepairRequestRepairsDurablePendingDebt|TestWorkerRuntime_SQLiteContentionReportsReplayRequiredAndReplays' -count=1`
+  - `scripts/spec-drift.sh && scripts/test/spec-drift-test.sh`
+  - `git diff --check`
+- Post-monitor local gates:
+  - `scripts/gates.sh` stopped at the benchmark regression gate before running
+    the rest of the aggregate gate because the workstation was too busy for
+    valid wall-time benchmark evidence: loadavg `24.27`, threshold `12.00`,
+    exit `2`.
+  - `scripts/lint.sh` passed: module tidy, `gofmt`, `goimports`, `go vet`,
+    `golangci-lint`, standalone `gosec`, `govulncheck`, frontend ESLint,
+    frontend typecheck, bundle-size self-test, and coverage-config self-tests.
+  - `scripts/test.sh` passed: full Go `go test -race -count=1
+    -coverprofile=coverage.out -covermode=atomic ./...`, coverage total
+    `81.6%`, frontend Vitest `931` tests / `76` files, frontend line coverage
+    `90.08%`.
+  - `git diff --exit-code go.mod go.sum` passed after `go mod tidy`.
+
+## Implementation Review Round 7 - 2026-06-30
+
+Reviewer gate:
+
+- Ran all six external implementation reviewers on the whole SOW and whole diff:
+  `glm`, `minimax`, `kimi`, `mimo`, `deepseek`, and `qwen`. No `claude`
+  reviewer was used.
+- Successful responses were either `PRODUCTION GRADE`, P3-only cleanup, or
+  positive votes with P2-labeled claims. Per protocol, every P2-labeled claim is
+  treated as blocking until verified, even when the same response says
+  `PRODUCTION GRADE`.
+
+Accepted blocker class:
+
+- Migration 0014 changed the source-scoped FTS repair contract so `fts_ops` and
+  `fts_logs` are maintained by explicit FTS docids:
+  `fts_ops.rowid = ops.rowid` and `fts_logs.rowid = log_entries.id`. The
+  `ops.rowid` key is an internal no-`VACUUM` maintenance key, not a durable
+  external identifier.
+- The migration added the required source/session indexes but did not clear
+  already-derived `fts_ops` / `fts_logs` rows from stores upgraded in place.
+  Pre-0014 rows can have auto-assigned FTS docids, so later source repair
+  deleting by the new stable rowid key can leave the old row behind and produce
+  duplicate logical search results.
+
+Verified dispositions:
+
+- Accepted and fixed: in-place schema upgrade must clear the affected derived
+  FTS tables when introducing the explicit-docid repair contract.
+- Reclassified to process/packaging checklist: untracked migration/test files
+  were a real commit-risk warning, not a runtime defect. SOW closure requires
+  adding each SOW-0114 file explicitly by path; `git add -A` remains forbidden.
+- Rejected as P2 runtime blocker: the 100-event batch size is deliberate
+  liveness budget, documented in spec, covered by tests, and backed by live
+  evidence that larger scan/repair work starved 30 s tail-state writes.
+  Throughput tuning remains possible only with proof that tail heartbeat and
+  stale-tail writes stay within budget.
+- Rejected as code defect: the benchmark gate did not report a performance
+  regression in the latest run; it refused to sample because the workstation
+  load was above the gate's fail-closed validity threshold. That is a validation
+  gap until a quiet-host aggregate run succeeds, not evidence of a code
+  regression.
+- Not accepted as a blocker to the liveness fix: installed evidence still showed
+  some large sources scanning/repairing, but the live liveness test ran in that
+  exact non-idle condition and recorded zero new heartbeat/stale-tail timeouts
+  after resolver priority. Final SOW closure still needs a fresh installed-state
+  check and either all-source recovery evidence or a concrete follow-up if a
+  remaining source is independently slow.
+
+Targeted class verification before fixing:
+
+- Counted the affected FTS tables: only `fts_ops` and `fts_logs` changed to
+  explicit primary-row docids in SOW-0114. `fts_content` is rebuilt by its own
+  explicit backfill command and was not re-keyed by this liveness work.
+- Checked all maintained paths for the class:
+  - incremental `fts_ops` refresh inserts with explicit `rowid = ops.rowid`;
+  - incremental `fts_logs` insert uses explicit `rowid = log_entries.id`;
+  - source repair deletes and reinserts `fts_ops` by `ops.rowid`;
+  - source repair deletes and reinserts `fts_logs` by `log_entries.id`;
+  - one-shot `BackfillFTS` truncates both tables before rebuilding them.
+- The only missing occurrence was the schema-upgrade boundary: applying 0014 to
+  a store that already had derived FTS rows could preserve old auto-docid rows.
+
+Fresh open-ended milestone review before rerun:
+
+- Re-read the liveness-priority DB owners across the milestone:
+  source repair, normal worker flush, idle rollup refresh, and orphan resolver
+  all yield to pending tail-state operations before opening lower-priority
+  transactions; tail heartbeat/stale-tail writes are the high-priority work and
+  intentionally do not yield to themselves.
+- Re-read supervisor ownership paths from round 6:
+  request-channel registration still happens only after adapter construction
+  and `Ingester.Submit()` succeed, and supervisor-owned cleanup still covers
+  normal shutdown, scan failure, Tail failure, stale-tail restart, and explicit
+  source stop.
+- Re-read schema/version/comment surfaces for stale `0013` chain-head wording.
+  Remaining stale comments in migration tests were fixed to `0014`.
+- Re-read operator docs for schema repair. `docs/runbook.md` now records that
+  migration 0014 clears derived search indexes and that source repair or
+  `rollups-backfill` repopulates them from primary rows.
+
+Round-7 fix:
+
+- Specs updated before code:
+  - `.agents/sow/specs/data-model.md` now records the explicit-docid FTS contract
+    and 0014's derived-table clear.
+  - `.agents/sow/specs/ingester.md` now records that 0014 clears old derived
+    `fts_ops` / `fts_logs` rows before source repair repopulates them.
+- Added regression coverage:
+  - `internal/store/migration_0014_source_repair_liveness_indexes_internal_test.go::TestMigration0014_ClearsDerivedFTSRowsForStableDocIDRekey`
+    applies the chain through 0013, seeds old-docid `fts_ops`/`fts_logs` rows,
+    applies the real embedded 0014 SQL, and asserts both derived tables are
+    empty and `schema_meta.version='14'`.
+  - The test failed before the migration fix with
+    `fts_ops rows after migration 0014 = 1, want 0`.
+- Implemented migration repair:
+  - `internal/store/migrations/0014_source_repair_liveness_indexes.sql`
+    deletes from `fts_ops` and `fts_logs` after creating the liveness indexes
+    and before bumping `schema_meta.version` to `14`.
+
+Validation after round-7 fix:
+
+- Focused test passed:
+  - `go test ./internal/store -run 'TestMigration0014|TestMigration0006_ChainHeadSchemaVersion|TestMigration0007_ChainHeadSchemaVersion|TestMigration0010_ChainHeadSchemaVersion' -count=1`
+- Backend focused tests passed:
+  - `go test ./internal/store ./internal/ingest ./internal/presenter ./cmd/ai-viewer-ingest -count=1`
+- Focused race tests passed:
+  - `go test -race ./internal/store ./internal/ingest ./cmd/ai-viewer-ingest -run 'TestMigration0014|TestRepairSourceReadModels|TestResolverYieldsToTailStateBeforeBeginTx|TestWorkerFlushYieldsToTailStateBeforeBeginTx|TestWorkerIdleRefreshYieldsToTailStateBeforeBeginTx|TestTailStateWriteContextMarksPendingUntilCancel|TestSourceReadModelRepairRequestRepairsDurablePendingDebt' -count=1`
+- Static and full test gates passed:
+  - `scripts/lint.sh`
+  - `scripts/test.sh`
+- Cross-contract gates passed:
+  - `scripts/spec-drift.sh && scripts/test/spec-drift-test.sh`
+  - `scripts/test/check-contract-matrix-test.sh && scripts/check-contract-matrix.sh`
+  - `scripts/test/check-ingestion-parity-test.sh && scripts/check-ingestion-parity.sh --fixtures`
+- Build and hygiene gates passed:
+  - `scripts/build.sh`
+  - `scripts/scan-secrets.sh && scripts/scan-ai-attribution.sh`
+  - `git diff --exit-code go.mod go.sum`
+- Whitespace gate passed:
+  - `git diff --check`
+- Full aggregate gate status:
+  - First post-fix `scripts/gates.sh` attempt failed closed before sampling
+    benchmarks because the workstation load was invalid for wall-time benchmark
+    evidence: loadavg `13.04`, threshold `12.00`, exit `2`.
+  - After stopping only the installed `ai-viewer-ingest.service`, a second
+    `scripts/gates.sh` attempt passed preflight and sampled benchmark attempt 1,
+    but broad unrelated hot-path slowdowns indicated host noise
+    (`aiagent_v2 Tail_SyntheticAppend +26.27%`, `claude Scan_LargeFixture
+    +23.88%`, `opencode Tail_NewParts +33.73%`, `BatchInsert +25.47%`).
+    The retry then failed closed before attempt 2 because loadavg rose to
+    `23.94` over the same `12.00` threshold, exit `2`.
+  - The installed ingester service was restarted after the benchmark attempt and
+    both installed services were active.
+  - A later aggregate retry again failed closed before benchmark sampling:
+    loadavg `13.14`, threshold `12.00`, exit `2`. The restart trap ran after
+    the gate exited, and both installed services were active afterward.
+  - A controlled retry stopped only `ai-viewer-ingest.service`, waited
+    120 seconds for loadavg decay, then ran `scripts/gates.sh` with a restart
+    trap. The benchmark gate still failed closed before sampling: loadavg
+    `19.02`, threshold `12.00`, exit `2`. The restart trap ran after the gate
+    exited, and both installed services were active afterward.
+- Full aggregate gate passed after stopping only `ai-viewer-ingest.service`,
+  waiting 90 seconds for loadavg decay, and using a restart trap:
+  - `scripts/gates.sh` passed every gate.
+  - Benchmark preflight was valid: loadavg `8.71`, threshold `12.00`.
+  - Benchmark gate passed: no `sec/op` regression above the 20% threshold.
+  - Full gate summary: benchmark, lint/static, secrets scan, attribution scan,
+    contract matrix, spec drift, ingestion parity, Codacy self-tests,
+    installer/systemd checks, build, Go race/coverage, coverage threshold,
+    adapter fuzz seeds, and frontend Playwright E2E/axe all passed.
+  - Total gate runtime was `1006s`.
+  - The restart trap ran after the gate exited, and both installed services were
+    active afterward.
+- Pending before rerun:
+  - Rerun the same broad implementation-review prompt with a short fix note.
+
+## Implementation Review Round 8 - 2026-06-30
+
+Reviewer gate:
+
+- Ran the next broad implementation-review gate on the whole SOW and whole diff
+  after the round-7 explicit-docid migration fix. No `claude` reviewer was used.
+- Usable outcomes before fixes:
+  - `mimo`: `PRODUCTION GRADE`.
+  - `qwen`: positive with P3 stale-comment cleanup.
+  - `kimi`: `NEEDS WORK` with accepted P1/P2 lifecycle/read-model ownership
+    findings.
+  - `minimax`: later positive with the same P3 stale-comment cleanup, but on
+    a stale pre-fix snapshot.
+  - `deepseek`: technically incomplete; one partial read-model timeout claim
+    was verified and rejected.
+  - `glm`: timed out without a usable final vote.
+
+Accepted blocker classes:
+
+- Normal source startup still used global read-model deferral. The intended
+  SOW-0114 contract is source-scoped deferral before each source scan, not a
+  global mutable flag that can conflate unrelated sources.
+- All-source `BackfillReadModels()` still cleared source-owned deferral state.
+  The all-source reconciliation pass does not own source repair state and must
+  not erase fresh per-source debt that Tail can create while reconciliation is
+  streaming.
+- `/api/health` degraded every `tail_restarting` state immediately, even though
+  the SOW accepted a 10-minute single-restart grace. This made a transient first
+  restart look as bad as persistent churn.
+- Lifecycle writes for pre-submit source failures and source repair-state
+  transitions were still best-effort in some paths. If those writes fail, the
+  system must return/log that failure instead of silently losing lifecycle
+  truth.
+- Local open-ended review found additional same-milestone lifecycle misses:
+  unexpected `Tail()` nil return while the supervisor context is alive could
+  exit the supervisor and unregister restart channels while the source remained
+  `tailing`; adapters that normalize canceled `Scan()` to nil could leave stale
+  `scanning` state or fall through to Tail during shutdown; destructive global
+  read-model backfill failure could leave FTS/rollups partial without
+  re-marking sources `repair_pending`.
+
+Rejected findings:
+
+- Rejected as false positive: read-model repair has no synthetic timeout. The
+  spec intentionally says source repair runs to completion while the supervisor
+  context is alive, and
+  `internal/ingest/read_model_repair_test.go::TestSourceReadModelRepairContextHasNoSyntheticDeadline`
+  covers it.
+- Rejected as unsafe: global backfill should blanket-mark all sources ready.
+  Tail can commit source-owned work while global reconciliation is streaming;
+  only source-scoped repair may clear the source `repair_pending` state.
+- Rejected as non-blocking: `ExpectedLifecycleState` is not the only guard for
+  lifecycle persistence. The accepted durable-write and abnormal-return issues
+  were fixed directly in the supervisor and startup paths.
+
+Targeted class verification before fixing:
+
+- Re-read global versus source-owned read-model state across:
+  `cmd/ai-viewer-ingest/main.go`, `cmd/ai-viewer-ingest/sources.go`,
+  `internal/ingest/ingester.go`, `internal/ingest/worker.go`,
+  `internal/ingest/writer.go`, and `internal/ingest/read_model_repair.go`.
+  The class count was two real ownership defects: normal startup set global
+  deferral, and all-source backfill cleared source-owned deferral.
+- Re-read lifecycle persistence paths across source construction failure,
+  submit failure, scan return, Tail return, repair success/failure, explicit
+  stop, and stale-tail restart. The class count was four real lifecycle
+  defects: pre-submit failure writes could be dropped, repair-state writes
+  could be dropped, canceled Scan nil could leave stale state, and unexpected
+  Tail nil could look like clean exit.
+- Re-read health state classification for every lifecycle state in
+  `internal/presenter/health.go`. The only real mismatch was immediate
+  degradation for the first `tail_restarting` occurrence inside the accepted
+  grace window.
+
+Fresh open-ended milestone review before rerun:
+
+- Re-read SOW goal, specs, migrations, supervisor lifecycle, read-model repair,
+  global reconciliation, presenter health, paritycheck callers, and stale
+  comments from scratch without limiting the pass to the accepted reviewer
+  classes.
+- Additional issue found and fixed from that pass: global destructive
+  FTS/rollup backfill failures must mark every known source `repair_pending`
+  before returning, otherwise a source can look ready while derived indexes are
+  partial.
+- Additional gate issue found after the aggregate run: `internal/paritycheck`
+  coverage was just below the raw 80% threshold even though the rounded report
+  displayed `80.0%`. Added meaningful snapshot-freeze coverage instead of
+  changing the gate.
+
+Round-8 fixes:
+
+- Specs updated before code:
+  - `.agents/sow/specs/ingester.md` now records that all-source reconciliation
+    does not own source-scoped deferral/repair state; global reconciliation
+    failure marks known sources `repair_pending`; unexpected Tail nil while the
+    supervisor is alive records `tail_failed` and restarts; canceled Scan nil
+    records `stopped` with shutdown-safe context and does not Tail.
+  - `.agents/sow/specs/observability.md` now records the
+    `tail_restarting` grace rule: degraded only after more than one restart or
+    a single restart older than the long-scan grace threshold.
+- `cmd/ai-viewer-ingest/main.go` no longer enables normal global
+  `deferReadModels`; startup backfill only uses the global flag when there are
+  no source-scoped workers to repair.
+- `cmd/ai-viewer-ingest/sources.go` sets source-scoped read-model deferral
+  before source `Submit()` and clears it on submit failure; pre-submit lifecycle
+  failures use required retrying writes and return joined errors when lifecycle
+  persistence also fails.
+- `cmd/ai-viewer-ingest/source_supervisor.go` records repair and lifecycle
+  transitions with required writes; canceled Scan nil records `stopped` and
+  returns; unexpected Tail nil records `tail_failed` and restarts.
+- `internal/ingest/ingester.go` stopped mutating existing source deferral flags
+  from `SetDeferReadModels(false)` and makes `BackfillReadModels()` failure
+  mark all known sources `repair_pending` before returning.
+- `internal/presenter/health.go` applies the accepted restart grace for
+  `tail_restarting`.
+- Removed legacy global-deferral calls from paritycheck helpers.
+- Fixed stale P3 comments in store migration tests.
+- Added paritycheck snapshot-freeze tests for missing source roots and
+  cancellation so the coverage gate failure is fixed by exercising a real
+  fail-closed path.
+
+Validation after round-8 fix:
+
+- Focused tests passed:
+  - `go test ./cmd/ai-viewer-ingest ./internal/ingest ./internal/presenter -count=1`
+  - `go test ./internal/paritycheck -coverprofile=/tmp/paritycheck.coverage.out -covermode=atomic -count=1`
+- Focused race tests passed:
+  - `go test -race ./cmd/ai-viewer-ingest ./internal/ingest ./internal/presenter ./internal/store -run 'TestStartSourceRestartsAfterUnexpectedTailNilReturn|TestStartSourceRecordsStoppedWhenScanReturnsNilAfterCancellation|TestStartSourceRestartsAfterTailFailure|TestBackfillReadModelsDoesNotClearSourceDeferralFlags|TestBackfillReadModelsFailureMarksAllSourcesRepairPending|TestHealthBuildSource_TailRestartingGrace|TestMigration0014_ClearsDerivedFTSRowsForStableDocIDRekey' -count=1`
+- Cross-package focused tests passed:
+  - `go test ./internal/paritycheck ./cmd/ai-viewer-ingest ./internal/ingest ./internal/presenter ./internal/store -count=1`
+- Static and full test gates passed:
+  - `scripts/lint.sh`
+  - `scripts/test.sh`
+  - `scripts/check-coverage.sh coverage.out`
+- Coverage evidence:
+  - `internal/paritycheck` improved from raw-below-threshold rounded `80.0%`
+    to `80.3%`.
+  - gated `internal/*` aggregate remained `85.3%`.
+- Cross-contract gates passed:
+  - `scripts/spec-drift.sh && scripts/test/spec-drift-test.sh`
+  - `scripts/test/check-contract-matrix-test.sh && scripts/check-contract-matrix.sh`
+  - `scripts/test/check-ingestion-parity-test.sh && scripts/check-ingestion-parity.sh --fixtures`
+- Build and hygiene gates passed:
+  - `scripts/build.sh`
+  - `scripts/scan-secrets.sh && scripts/scan-ai-attribution.sh`
+  - `git diff --check`
+- Full aggregate gate status:
+  - First round-8 aggregate run reached `scripts/check-coverage.sh` and failed
+    only because `internal/paritycheck` was raw-below-threshold while displayed
+    as `80.0%`.
+  - After the paritycheck coverage test fix, `scripts/test.sh` and
+    `scripts/check-coverage.sh coverage.out` passed.
+  - A full aggregate retry passed benchmark preflight with
+    `loadavg 8.73 < 12.00`, but benchmark attempt 1 saw a noisy single
+    `CodexTail_SyntheticAppend +29.69% sec/op` result and correctly requested
+    retry. The retry was blocked by host load `12.58 >= 12.00`, so the gate
+    failed closed with exit `2`.
+  - After the operator requested lowest-priority execution, the installed
+    ingester was given a runtime systemd drop-in with `Nice=19`,
+    `CPUSchedulingPolicy=idle`, `IOSchedulingClass=idle`, `CPUWeight=1`, and
+    `IOWeight=1`; live process checks showed the ingester running in `IDL`
+    scheduling class.
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/gates.sh` correctly ran the
+    aggregate at idle CPU/IO priority. Benchmark preflight passed
+    `8.30 < 12.00`, attempt 1 reported broad unrelated sec/op slowdowns, and
+    retry preflight passed `11.28 < 12.00`. The retry reproduced broad
+    slowdowns (`Scan_SyntheticCorpus`, `CodexScan_SyntheticCorpus`,
+    `OpencodeScan_SyntheticDB`, `OpencodeTail_SyntheticAppend`,
+    `SessionsListQuery`) and failed the benchmark gate.
+  - This is a benchmark-validity blocker, not a code pass: the committed
+    `bench/baseline.txt` command is the plain `go test -p=1 ...` workstation
+    baseline, while the requested validation ran under `SCHED_IDLE`. The gate
+    must not be weakened and the baseline must not be refreshed without its own
+    explicit SOW.
+  - To preserve current evidence for the rest of the gate surface, the
+    post-benchmark sections were run manually under the same idle wrapper and
+    passed:
+    `scripts/lint.sh`, `scripts/test/scan-secrets-test.sh`,
+    `scripts/scan-secrets.sh`, `scripts/scan-ai-attribution.sh`,
+    `scripts/test/check-contract-matrix-test.sh`,
+    `scripts/test/spec-drift-test.sh`, `scripts/spec-drift.sh`,
+    `scripts/test/check-ingestion-parity-test.sh`,
+    `scripts/check-ingestion-parity.sh --fixtures`,
+    `scripts/test/codacy-coverage-upload-test.sh`,
+    `scripts/test/codacy-config-test.sh`,
+    `scripts/test/install-system-test.sh`,
+    `scripts/test/systemd-units-test.sh`, `scripts/build.sh`,
+    `scripts/test.sh`, `scripts/check-coverage.sh coverage.out`, adapter fuzz
+    seed corpus + target-set lock, and frontend Playwright E2E + axe.
+  - The installed ingester was restarted after validation and verified active
+    with the idle systemd properties still effective.
+
+Pending before rerun:
+
+- Obtain benchmark evidence in a comparator-compatible execution mode that also
+  respects the workstation-impact constraint. Do not refresh the baseline or
+  weaken the gate for this SOW.
+- Rerun the same broad implementation-review prompt with a short fix note.
+- Install and perform fresh reingest recovery after reviewer convergence.
+
+## Implementation Review Round 9 - 2026-06-30
+
+Reviewer gate:
+
+- Ran the next broad implementation-review gate on the whole SOW and whole diff
+  after the round-8 fixes. No `claude` reviewer was used. All reviewer commands
+  ran under `chrt --idle 0 nice -n 19 ionice -c3` after the operator requested
+  lowest-priority execution.
+- Usable outcomes before fixes:
+  - `mimo`: `PRODUCTION GRADE`, but with two hallucinated validation claims
+    about normal-priority gates and installed recovery; those claims were not
+    accepted as evidence.
+  - `qwen`: `PRODUCTION GRADE`; correctly treated the SCHED_IDLE benchmark
+    mismatch as a validation blocker, not a code pass.
+  - `kimi`: voted `PRODUCTION GRADE` but listed two P2 notes: stale repair
+    timeout wording and FTS DELETE/INSERT redundancy.
+  - `glm`: `NEEDS WORK` with two accepted P2 findings in the all-source
+    read-model repair-pending mark.
+  - `minimax`: timed out with no usable output.
+  - `deepseek`: technical failure / no usable final vote captured.
+
+Accepted blocker class:
+
+- `internal/ingest/ingester.go::markAllSourceReadModelsRepairPending` used a
+  bespoke `source_progress` upsert instead of the source lifecycle writer
+  contract. The conflict path rewrote existing `source_progress.updated_at`,
+  which is progress/cursor freshness exposed as `progress_updated_at`, and it
+  did not emit `source_status_changed` rows atomically with the
+  `read_model_state='repair_pending'` transition.
+
+Accepted cleanup / false-positive disposition:
+
+- Kimi's timeout note identified stale SOW wording, not a code defect. Current
+  code and specs intentionally have no short synthetic source repair timeout;
+  source repair runs under the source supervisor context.
+- Kimi's FTS note was accepted as cleanup. Since explicit-docid maintenance now
+  truncates, deletes by rowid, or inserts only newly-created log rows before FTS
+  writes, the shared FTS insert SQL was tightened from `INSERT OR REPLACE` to
+  plain `INSERT` so duplicate rowid assumptions fail loudly.
+
+Targeted class verification before fixing:
+
+- Re-read every `source_progress`, `read_model_state`, lifecycle, and
+  `source_status_changed` writer across `internal/ingest`, `cmd/ai-viewer-ingest`,
+  presenter specs, and store migrations.
+- Real same-class code defect count was one: the all-source repair-pending mark.
+  Normal worker progress writes legitimately update `updated_at`; lifecycle
+  writers preserve it; Tail stale/heartbeat state changes already wrap state
+  mutation and notify in the same transaction when they change lifecycle state.
+
+Fresh open-ended milestone review before rerun:
+
+- Re-read the source supervisor repair flow, all remaining read-model writers,
+  Tail liveness writers, notify producer rules, and affected specs without
+  limiting the pass to GLM/Kimi's findings.
+- Additional issue found and fixed: specs were too broad about
+  `source_status_changed` on lifecycle/read-model timestamp evidence. Existing
+  tests intentionally pin that heartbeat-only `tail_heartbeat_at` persistence
+  while a source remains `tailing` does not emit source-status SSE. The specs now
+  distinguish transition/error evidence from high-frequency heartbeat evidence
+  that REST health reads on demand.
+
+Round-9 fixes:
+
+- `.agents/sow/specs/ingester.md` now states that all-source backfill failure
+  marks sources through the source lifecycle write contract, emits
+  `source_status_changed` atomically, clears stale read-model errors, and
+  preserves existing `source_progress.updated_at`.
+- `internal/ingest/read_model_repair_test.go::TestBackfillReadModelsFailureMarksAllSourcesRepairPending`
+  now pins preservation of existing `updated_at`, `read_model_state_at`,
+  `read_model_error=NULL`, one `source_status_changed` row per source, and
+  repair request delivery.
+- `internal/ingest/ingester.go::markAllSourceReadModelsRepairPending` now
+  selects source id/format/location, opens one transaction, ensures the progress
+  row, updates read-model state through the lifecycle column helper, and inserts
+  `source_status_changed` rows in that same transaction.
+- `internal/ingest/fts_refresh.go`, `internal/ingest/fts_backfill.go`, and
+  `internal/ingest/writer.go` now use plain `INSERT` for explicit-docid FTS writes
+  where callers already truncate/delete or know the log row is new.
+- `.agents/sow/specs/ingester.md`, `.agents/sow/specs/data-model.md`, and
+  `.agents/sow/specs/sse-protocol.md` now clarify that heartbeat-only
+  `tail_heartbeat_at` persistence does not emit `source_status_changed`.
+- This SOW's requirements and historical round-1 note were clarified so they do
+  not imply the rejected short synthetic repair timeout model.
+
+Validation after round-9 fix:
+
+- Proved the new regression test failed before the code fix:
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest -run '^TestBackfillReadModelsFailureMarksAllSourcesRepairPending$' -count=1`
+  - Failure: `codex:/a updated_at = 9000, want preserved 1000`.
+- Focused tests passed after code fix:
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest -run '^TestBackfillReadModelsFailureMarksAllSourcesRepairPending$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest -run '^(TestBackfillReadModelsFailureMarksAllSourcesRepairPending|TestRepairSourceReadModels|TestWorkerSkipsDerivedRefreshDuringGlobalRebuildAndMarksRepairPending|TestFTS|TestBackfillFTS|TestFTSBackfill|TestFTS_.*|TestFTSParity)' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest ./cmd/ai-viewer-ingest -count=1`
+- Spec drift gates passed after spec clarifications:
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/spec-drift.sh`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/test/spec-drift-test.sh`
+
+Pending before rerun:
+
+- Run whitespace/lint checks after the round-9 edits.
+- Rerun the same broad implementation-review prompt with short round-9 fix
+  notes. Do not narrow the scope.
+- Obtain comparator-compatible benchmark evidence without weakening the gate or
+  refreshing `bench/baseline.txt`.
+- Install and perform fresh reingest recovery after reviewer convergence.
+
+## Implementation Review Round 10 - 2026-06-30
+
+Reviewer gate:
+
+- Reran the same broad implementation-review gate on the whole SOW and whole
+  diff after the round-9 fixes. No `claude` reviewer was used. Reviewer commands
+  ran under `chrt --idle 0 nice -n 19 ionice -c3` to preserve workstation
+  responsiveness.
+- Usable outcomes before fixes:
+  - `kimi`: `PRODUCTION GRADE`; P3 notes only.
+  - `mimo`: `PRODUCTION GRADE`; P3 notes only.
+  - `deepseek`: `PRODUCTION GRADE`.
+  - `qwen`: `PRODUCTION GRADE`.
+  - `minimax`: `PRODUCTION GRADE`.
+  - `glm`: `NEEDS WORK` with six accepted P2 findings.
+
+Accepted P2 classes and verification:
+
+- Already-`repair_pending` sources were refreshed by the all-source repair mark.
+  Verified real: a new regression test failed before code with
+  `read_model_state_at = 9000, want preserved 2000`.
+- Opencode incompatible scan-schema errors were consumed as recoverable supervisor
+  errors because no adapter produced the canonical fatal-scan marker. Verified
+  real: the opencode incompatible-schema test failed before code because the
+  error was not `FatalScanError`.
+- A Tail goroutine that ignored cancellation could send after the owning source
+  goroutine closed the event channel and panic the process. Verified real: the
+  new source-supervisor late-send test failed before code with `panic: send on
+  closed channel`.
+- `.agents/sow/specs/data-model.md` still said `Schema (v12 target)`, while
+  migrations and presenter schema are v14. Verified real by cross-checking the
+  migration history and `internal/presenter/presenter.go::SchemaVersion`.
+- First-heartbeat presenter grace was implemented but lacked direct tests for
+  `tailing` + NULL `tail_heartbeat_at`. Verified as a test gap and pinned in
+  health and source-list helper tests.
+- Watchdog-to-supervisor restart had unit coverage in the pieces but lacked an
+  end-to-end source-supervisor test. Verified as a test gap and pinned with a
+  real supervisor restart request test.
+
+Round-10 fixes:
+
+- `.agents/sow/specs/data-model.md` now states `Schema (v14 target)`.
+- `.agents/sow/specs/adapter-opencode.md` now requires incompatible
+  `scanLoop` schema introspection errors to use the canonical fatal-scan marker.
+- `.agents/sow/specs/ingester.md` now states:
+  - source event channels remain open across restart attempts and close only
+    after no accepted source attempt may send;
+  - a late adapter send after cancellation-timeout closure is converted to
+    adapter-failure evidence instead of process panic;
+  - all-source repair-pending marking does not rewrite already-pending sources,
+    does not emit duplicate `source_status_changed`, and preserves the original
+    `read_model_state_at`.
+- The SOW pre-implementation text now matches the implemented event-channel
+  ownership split: supervisor controls restart lifetime, the owning source
+  goroutine closes the event channel after supervisor exit, and the Tail wrapper
+  shields late adapter sends.
+- `internal/ingest/source_lifecycle.go` added a transition-only guard for
+  read-model updates.
+- `internal/ingest/ingester.go::markAllSourceReadModelsRepairPending` uses that
+  guard so already-`repair_pending` rows keep their original timestamp/error and
+  do not emit a duplicate notify row.
+- `internal/adapters/opencode/tailer.go` wraps incompatible scan introspection
+  with `canonical.NewFatalScanError`.
+- `cmd/ai-viewer-ingest/source_supervisor.go` treats fatal restart catch-up Scan
+  as terminal/degraded `scan_failed` and wraps adapter `Tail` calls so panics
+  become Tail errors.
+- Added focused regression coverage for:
+  - already-pending all-source repair marks;
+  - opencode fatal scan marker production;
+  - restart catch-up fatal Scan stopping without Tail;
+  - late Tail send after cancellation timeout not crashing the process;
+  - watchdog stale-tail restart reaching a fresh Tail;
+  - presenter first-heartbeat grace in both `/api/health` and `/api/sources`.
+
+Class verification before rerun:
+
+- Re-read all current producers and consumers of `FatalScanError`. Only opencode
+  has a source-schema incompatibility that should be fatal in this SOW; startup
+  construction/location failures are handled before Scan, and other adapter scan
+  read errors remain recoverable by contract.
+- Re-read all `read_model_state='repair_pending'` writers. The all-source path
+  now guards same-state rewrites; worker batch repair-pending writes already
+  guarded on the conflict path and legitimately update cursor freshness when
+  they commit new source data.
+- Re-read event-channel ownership and Tail cancellation paths. Recoverable Tail
+  restarts keep the channel open; terminal source exit closes it once; late
+  sends from a non-cooperative adapter are now contained by the Tail wrapper.
+- Re-read presenter effective lifecycle helpers and source-list/health tests.
+  NULL `tail_heartbeat_at` now has direct first-heartbeat grace coverage.
+- Re-ran broad `rg` sweeps over schema version, fatal scan, heartbeat,
+  repair-pending, source-status notify, and supervisor restart terms before
+  reviewer rerun.
+
+Fresh open-ended milestone review before rerun:
+
+- Re-read the SOW goal, updated specs, supervisor lifecycle, source submission
+  wrapper, opencode scan handoff, all-source repair failure path, read-model
+  transition helper, health/source presenter helpers, and the new tests without
+  limiting the pass to GLM's six findings.
+- Additional issue found and fixed during that open-ended pass: stale SOW wording
+  still implied the supervisor itself closed the event channel. The final SOW
+  text now matches the actual code contract.
+- No additional P0/P1/P2 implementation issue was found in this local pass.
+
+Validation after round-10 fixes:
+
+- Proved representative new tests failed before code fixes:
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest -run '^TestBackfillReadModelsFailureDoesNotRefreshAlreadyPendingSources$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/adapters/opencode -run '^TestAdapter_ScanIncompatibleSchemaHardError$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./cmd/ai-viewer-ingest -run '^(TestStartSourceRestartCatchupFatalScanStopsWithoutTail|TestStartSourceRestartsAfterWatchdogStaleRequest|TestStartSourceLateTailSendAfterCancelTimeoutDoesNotPanic)$' -count=1`
+- Focused tests passed after code fixes:
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest -run '^TestBackfillReadModelsFailureDoesNotRefreshAlreadyPendingSources$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/adapters/opencode -run '^TestAdapter_ScanIncompatibleSchemaHardError$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./cmd/ai-viewer-ingest -run '^(TestStartSourceRestartCatchupFatalScanStopsWithoutTail|TestStartSourceRestartsAfterWatchdogStaleRequest|TestStartSourceLateTailSendAfterCancelTimeoutDoesNotPanic)$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/presenter -run '^(TestHealthBuildSource_TailingFirstHeartbeatGrace|TestSourcesBuildItem_TailingFirstHeartbeatGrace)$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest ./cmd/ai-viewer-ingest ./internal/adapters/opencode ./internal/presenter -count=1`
+- Spec and lint gates passed after fixes:
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/spec-drift.sh`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/test/spec-drift-test.sh`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/lint.sh`
+- Full test/build gates passed after fixes:
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/test.sh`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/check-coverage.sh coverage.out`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/build.sh`
+
+Pending before rerun:
+
+- Rerun the same broad implementation-review prompt with short round-10 fix
+  notes. Do not narrow the scope.
+- Obtain comparator-compatible benchmark evidence without weakening the gate or
+  refreshing `bench/baseline.txt`. Under the current workstation-protection
+  instruction, the benchmark gate must not be treated as comparator evidence
+  when run under idle scheduling.
+- Install and perform fresh reingest recovery after reviewer convergence.
+
+## Implementation Review Round 11 - 2026-06-30
+
+Reviewer gate:
+
+- Reran the same broad implementation-review gate on the whole SOW and whole
+  diff after the round-10 fixes. No `claude` reviewer was used.
+- Usable outcomes before fixes:
+  - `kimi`: `PRODUCTION GRADE`; P3 notes only.
+  - `deepseek`: `NEEDS WORK`.
+  - `qwen`: `NEEDS WORK`.
+  - `glm`: `NEEDS WORK`.
+  - `minimax`: internally inconsistent `PRODUCTION GRADE` response that still
+    carried one P2-labeled finding; treated as blocking until verified.
+  - `mimo`: technical failure / no usable final vote captured. It was not
+    retried while accepted P2 findings existed.
+
+Accepted P2 classes and verification:
+
+- Global retained read-model backfill still had one-shot destructive/read/write
+  paths that did not yield to pending Tail lifecycle/heartbeat writes:
+  `BackfillFTS` and `BackfillRollups` ran with the normal offline CLI path from
+  `Ingester.BackfillReadModels`. Verified real by reading both functions and
+  their daemon caller. The same-class count was two global rebuild functions:
+  FTS truncate/read/write batches and rollup truncate/read/day-flush phases.
+- Migration 0014 clears derived `fts_ops` / `fts_logs`, but recovery proof only
+  covered the migration clear, not source-scoped search restoration after the
+  clear. Verified as a missing test, not missing production code: source repair
+  already reads primary rows and inserts explicit FTS docids, but the recovery
+  contract needed executable evidence.
+- The SOW/spec wording still framed `ops.rowid` as durable across all SQLite
+  maintenance. Verified against SQLite's documented rowid-table behavior: an
+  implicit rowid not aliased by `INTEGER PRIMARY KEY` can change during
+  `VACUUM`. Runtime code does not run `VACUUM`, so this was a spec/operations
+  foot-gun rather than an immediate runtime bug.
+- `clearReadModelDeferral` could rewrite an already-`repair_pending` source and
+  clear its stored read-model error evidence because it used a normal
+  `repair_pending` write. Verified real by reading the supervisor path. The
+  same-class count was one additional repair-pending writer beyond the
+  all-source path fixed in round 10.
+
+Round-11 fixes:
+
+- `.agents/sow/specs/ingester.md` now states that daemon retained
+  reconciliation yields before destructive/read/write DB work when live source
+  supervisors have pending Tail lifecycle/heartbeat writes; the offline
+  `rollups-backfill` CLI keeps the no-yield path.
+- `.agents/sow/specs/ingester.md` now states that startup-deferral clearing is a
+  transition-only `repair_pending` write: already-pending sources queue repair
+  in memory but keep their original `read_model_state_at`, `read_model_error`,
+  and notify state.
+- `.agents/sow/specs/data-model.md`, `.agents/sow/specs/ingester.md`,
+  `docs/runbook.md`, and migration 0014 comments now describe `fts_ops.rowid =
+  ops.rowid` as an explicit no-`VACUUM` maintenance key, not a durable stable
+  identifier. External `VACUUM` / rowid-rewriting maintenance requires a full
+  FTS rebuild before search is trusted; source-scoped repair alone is not the
+  recovery path after such maintenance.
+- `internal/ingest/fts_backfill.go` keeps public `BackfillFTS` as the offline
+  no-yield wrapper and adds `backfillFTSWithYield` for daemon reconciliation.
+  The yield-aware path yields before truncating FTS and before each ops/logs
+  read and write batch.
+- `internal/ingest/rollup_backfill.go` keeps public `BackfillRollups` compatible
+  and adds a package-local yield option. The daemon path yields before rollup
+  truncation, before read phases, and before each day flush.
+- `internal/ingest/ingester.go::BackfillReadModels` now uses the yield-aware FTS
+  and rollup paths with `waitForTailStatePriority`. The offline CLI in
+  `cmd/ai-viewer-ingest/backfill.go` still calls the public no-yield functions.
+- `cmd/ai-viewer-ingest/source_supervisor.go::clearReadModelDeferral` now uses
+  the read-model transition-only guard when writing `repair_pending`.
+- Added regression coverage for:
+  - FTS global backfill yielding before its destructive truncate;
+  - rollup global backfill yielding before its destructive truncate;
+  - source repair restoring searchable `fts_ops` / `fts_logs` rows after the
+    derived tables are cleared;
+  - startup-deferral clearing preserving already-pending read-model timestamp
+    and error evidence.
+
+Targeted class verification before fixing:
+
+- Re-read every FTS and rollup backfill caller. Only daemon
+  `Ingester.BackfillReadModels` has live source supervisors and therefore needs
+  `waitForTailStatePriority`; the CLI backfill command is offline and correctly
+  has no live-priority yield.
+- Re-read FTS maintenance paths. Incremental refresh, source repair, and
+  one-shot backfill now all insert explicit docids; migration 0014 clears old
+  auto-docid rows; docs/specs now forbid treating `ops.rowid` as durable across
+  `VACUUM`.
+- Re-read all `repair_pending` writers. The all-source mark and source
+  deferral-clear path now both avoid rewriting already-pending evidence; worker
+  flush repair-pending writes still legitimately occur with new committed source
+  data and cursor freshness.
+
+Fresh open-ended milestone review before rerun:
+
+- Re-read the SOW goal, read-model rebuild/repair specs, migration 0013/0014,
+  FTS backfill/repair, rollup backfill, global backfill failure path, source
+  supervisor deferral clearing, Tail-priority wait path, offline CLI backfill,
+  runbook, and the new tests without limiting the pass to the round-11 findings.
+- Additional issue found and fixed during that pass: SOW history still used a
+  misleading durable-docid phrase. The work ledger now consistently says
+  explicit/no-`VACUUM` maintenance docid.
+- No additional P0/P1/P2 implementation issue was found in this local pass.
+
+Validation after round-11 fixes:
+
+- Proved the new focused tests failed before implementation where applicable:
+  - FTS/rollup yield tests failed to compile before the yield hooks existed.
+  - The source-repair FTS restoration test initially exposed an FTS5 test-query
+    syntax issue (`sonnet-repair` parsed as an operator expression), then passed
+    after the test used an unambiguous token.
+- Focused tests passed:
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest ./cmd/ai-viewer-ingest -run '^(TestFTS_BackfillYieldsBeforeTruncate|TestBackfillRollupsYieldsBeforeTruncate|TestRepairSourceReadModelsRestoresFTSAfterDerivedTableClear|TestClearReadModelDeferralPreservesAlreadyPendingEvidence)$' -count=1`
+  - `chrt --idle 0 nice -n 19 ionice -c3 go test ./internal/ingest ./cmd/ai-viewer-ingest ./internal/store -count=1`
+- Spec and static gates passed:
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/spec-drift.sh`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/test/spec-drift-test.sh`
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/lint.sh`
+- Full test/build gates passed:
+  - First `scripts/test.sh` run passed Go race/coverage and then hit one
+    frontend Topology timeout. The isolated test immediately passed, and a
+    second full `scripts/test.sh` run passed end-to-end.
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/check-coverage.sh coverage.out`
+    passed with gated aggregate `85.3%`.
+  - `chrt --idle 0 nice -n 19 ionice -c3 scripts/build.sh` passed.
+- Systemd priority evidence:
+  - `ai-viewer-ingest.service` is active with `Nice=19`,
+    `CPUSchedulingPolicy=idle`, `IOSchedulingClass=idle`, `CPUWeight=1`, and
+    `IOWeight=1`.
+
+Pending before rerun:
+
+- Rerun the same broad implementation-review prompt with short round-11 fix
+  notes. Do not narrow the scope.
+- Obtain comparator-compatible benchmark evidence later on a quiet host without
+  idle scheduling; idle-priority benchmark runs are not valid comparator
+  evidence.
+- Install and perform fresh reingest recovery after reviewer convergence.
+
+## Implementation Review Round 12 - 2026-06-30
+
+Reviewer gate:
+
+- Reran the same broad implementation-review gate on the whole SOW and whole
+  diff after the round-11 fixes. No `claude` reviewer was used.
+- The low-priority reviewer wrapper wrote complete review outputs for all six
+  reviewers, then exited non-zero because the zsh wrapper used the read-only
+  variable name `status`. The wrapper bug happened after review output capture;
+  the review files are usable evidence for this gate.
+- Outcomes:
+  - `glm`: `PRODUCTION GRADE`; P3 notes only.
+  - `kimi`: `PRODUCTION GRADE`; P3 notes only.
+  - `mimo`: `PRODUCTION GRADE`; P3 notes only.
+  - `minimax`: `PRODUCTION GRADE`; P3/open benchmark-comparator note only.
+  - `qwen`: `PRODUCTION GRADE`; P3 notes only.
+  - `deepseek`: internally inconsistent `PRODUCTION GRADE` vote with one
+    P2-labeled source-repair-timeout claim and two P3 notes; treated as
+    blocking until verified.
+
+Deepseek P2 disposition:
+
+- Finding: `cmd/ai-viewer-ingest/source_supervisor.go::sourceReadModelRepairContext`
+  creates a cancellable context without a deadline, while an old SOW line still
+  said source repair attempts used the same five-minute startup-backfill timeout.
+- Disposition: rejected as a code defect; accepted as SOW ledger cleanup.
+- Evidence:
+  - Current requirements at the top of this SOW state that source-scoped repair
+    must not use a short synthetic execution timeout that restarts large repairs
+    from the beginning.
+  - `.agents/sow/specs/ingester.md` states that source-scoped repair may run to
+    completion while the source supervisor context is alive and must not be
+    killed by a short wall-clock timeout.
+  - `cmd/ai-viewer-ingest/source_supervisor.go::sourceReadModelRepairContext`
+    intentionally uses parent cancellation without adding `WithTimeout`.
+  - `cmd/ai-viewer-ingest/lifecycle_test.go::TestSourceReadModelRepairContextHasNoSyntheticDeadline`
+    pins the no-synthetic-deadline contract and parent-cancellation behavior.
+- Same-class verification: searched the SOW, spec, source supervisor, and ingest
+  package for source-repair timeout/deadline wording. Remaining runtime timeout
+  code is for unrelated shutdown, global startup backfill, tail-state writes,
+  opencode probe, check-parity, and resolver shutdown deadlines.
+- Fix: removed contradictory SOW ledger wording that still implied source repair
+  used the global startup backfill timeout or an "existing repair timeout". The
+  SOW now consistently says source repair has no short synthetic execution
+  timeout; `repair_timeout` remains a legal state for caller/deadline-driven
+  failures, not a daemon-created short deadline.
+
+Round-12 P3 dispositions:
+
+- `meta_json` lifecycle preservation: rejected as a behavior defect. The
+  contract is runtime reassertion from `WithSourceMeta`, not preserving a stale
+  historical metadata blob when runtime metadata is absent. Existing tests cover
+  `meta_json` persistence and restart reassertion; a lifecycle-specific
+  preservation test would encode the wrong contract.
+- Worker/global FTS rebuild race: rejected as theoretical, not actionable.
+  `BackfillReadModels` sets `readModelRebuildActive` before truncation, and the
+  worker checks the flag inside its writer transaction in
+  `refreshBatchReadModels`; SQLite single-writer serialization prevents the
+  claimed duplicate-docid interleaving from becoming a committed race.
+- P3 maintainability observations such as duplicate presenter helpers,
+  `waitForTailStatePriority` polling, and redundant channel return shapes do not
+  block this SOW. They are cosmetic cleanup, not liveness or data-integrity
+  defects.
+- Benchmark comparator remains open by operator constraint: all local
+  compilations/tests ran at idle priority to protect desktop work, and an idle
+  benchmark run is not comparable to the normal-priority workstation baseline.
+
+Fresh open-ended milestone review after the rejected P2:
+
+- Re-read the source repair contract, source supervisor repair loop, current
+  SOW requirements, live ingester spec, `meta_json` contract/tests, global FTS
+  rebuild/worker serialization, and Round-12 reviewer outputs without limiting
+  the pass to Deepseek's cited timeout claim.
+- Additional issue found and fixed during that pass: old SOW ledger text still
+  contained several timeout phrases that conflicted with the accepted no-short-
+  synthetic-deadline repair contract.
+- No additional P0/P1/P2 implementation issue was found in this local pass.
+
+Round-12 gate conclusion:
+
+- External implementation-review gate is converged for SOW-0114: all six
+  reviewer outputs are positive or have only rejected/documented P3/non-blocking
+  findings.
+- Remaining validation before close: rerun cheap spec/diff checks after the SOW
+  ledger cleanup, then install/reingest under the low-priority systemd
+  configuration. Comparator-compatible benchmark evidence must wait for a quiet
+  host and normal scheduling; it cannot be produced during the operator-requested
+  desktop-protection window.
+
+Post-review install and fresh reingest:
+
+- Stopped only `ai-viewer-serve.service` and `ai-viewer-ingest.service`.
+- Deleted only the installed derived SQLite files:
+  `/opt/ai-viewer/data/index.db`, `/opt/ai-viewer/data/index.db-wal`, and
+  `/opt/ai-viewer/data/index.db-shm`.
+- Reinstalled with the idle-priority wrapper:
+  `chrt --idle 0 nice -n 19 ionice -c3 scripts/install-system.sh`.
+- Installer evidence:
+  - frontend/Go build passed;
+  - bundle-size gate passed (`318.6 KB gz / 500.0 KB` main chunk);
+  - units rendered and verified;
+  - five explicit sources were installed:
+    `aiagent_v3`, `aiagent_v2`, `claude-code`, `codex`, and `opencode`;
+  - UI responded at `http://127.0.0.1:7710/`.
+- Fresh DB evidence:
+  - new DB started at schema version 14 and applied migrations 0001 through 0014;
+  - all five sources started with `resume=false`;
+  - after about one minute the fresh DB was `195342336` bytes and all five
+    sources were still `lifecycle_state='scanning'`, which is expected while the
+    low-priority fresh ingest catches up.
+- Runtime priority evidence after reinstall:
+  - `ai-viewer-ingest.service` active/running with `Nice=19`,
+    `CPUSchedulingPolicy=idle`, `IOSchedulingClass=idle`, `CPUWeight=1`, and
+    `IOWeight=1`.
 
 ## Outcome
 

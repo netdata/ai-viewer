@@ -317,6 +317,7 @@ func expectedSchema() []tableContract {
 				{Name: "idx_sessions_parent", Cols: []string{"parent_session_id"}},
 				{Name: "idx_sessions_provider", Cols: []string{"provider"}},
 				{Name: "idx_sessions_root_start", Cols: []string{"root_session_id", "start_ts"}},
+				{Name: "idx_sessions_source_id", Cols: []string{"source_id", "id"}},
 				{Name: "idx_sessions_start", Cols: []string{"start_ts"}},
 				{Name: "idx_sessions_status", Cols: []string{"status"}},
 				{Name: "idx_sessions_tokens", Cols: []string{"", "id"}},
@@ -394,7 +395,10 @@ func expectedSchema() []tableContract {
 				{Name: "idx_ops_model", Cols: []string{"model"}, Partial: true},
 				{Name: "idx_ops_parent", Cols: []string{"parent_op_id"}},
 				{Name: "idx_ops_provider", Cols: []string{"provider"}, Partial: true},
+				{Name: "idx_ops_session", Cols: []string{"session_id"}},
+				{Name: "idx_ops_session_end", Cols: []string{"session_id", "end_ts"}},
 				{Name: "idx_ops_session_start", Cols: []string{"session_id", "start_ts"}},
+				{Name: "idx_ops_session_status", Cols: []string{"session_id", "status"}},
 				{Name: "idx_ops_start", Cols: []string{"start_ts"}},
 				{Name: "idx_ops_status", Cols: []string{"status"}},
 				{Name: "idx_ops_tool", Cols: []string{"tool_namespace", "name"}, Partial: true},
@@ -453,6 +457,7 @@ func expectedSchema() []tableContract {
 				// here as empty strings. The key covers every persisted
 				// content column so a duplicate is a byte-identical row.
 				{Name: "idx_log_entries_identity", Cols: []string{"", "", "", "", "ts", "severity", "source", "message", ""}, Unique: true},
+				{Name: "idx_log_session", Cols: []string{"session_id"}},
 				{Name: "idx_log_session_ts", Cols: []string{"session_id", "ts"}},
 				{Name: "idx_log_severity", Cols: []string{"severity", "ts"}, Partial: true},
 				{Name: "idx_log_source_ts", Cols: []string{"source_id", "ts"}, Partial: true},

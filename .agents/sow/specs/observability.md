@@ -82,7 +82,7 @@ The single source of truth for "is this thing alive and what state is it in":
   "status": "ok" | "degraded" | "down",
   "version": "<git sha>",
   "status_detail": "no_sources_configured",
-  "schema_version": 12,
+  "schema_version": 14,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,
@@ -205,8 +205,10 @@ Lifecycle/read-model fields are the primary source-health contract:
 
 - No sources are configured/discovered (`status_detail="no_sources_configured"`).
 - Any enabled source is in `start_failed`, `construct_failed`, fatal
-  `scan_failed`, `tail_stale`, `tail_failed`, or repeated/prolonged
-  `tail_restarting`.
+  `scan_failed`, `tail_stale`, or `tail_failed`.
+- Any enabled source is in `tail_restarting` with repeated restart evidence
+  (`tail_restart_count > 1`) or a single catch-up restart that has exceeded the
+  long-scan grace window.
 - Any enabled source is in `unknown`, `starting`, `scan_complete`, or
   `tail_starting` beyond the pre-tail grace window.
 - Any enabled source remains `scanning` beyond the long-scan threshold.

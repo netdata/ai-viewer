@@ -15,12 +15,11 @@ import (
 // (rebuild from scratch) produce BYTE-IDENTICAL fts_ops + fts_logs over the SAME
 // data.
 //
-// Comparison is by LOGICAL columns, never internal rowid: content-owning FTS5
-// assigns docids by insert order, which differs between the two build paths, so
-// the indexed columns + UNINDEXED linkage keys are what must match. fts_ops is
-// keyed/ordered by op_id; fts_logs by log_id (the AUTOINCREMENT log_entries.id,
-// which is stable for a row across both paths because the backfill reads the
-// same persisted rows the incremental path wrote).
+// Comparison is by logical columns. The indexed columns + UNINDEXED linkage keys
+// are what must match for /api/search. fts_ops is keyed/ordered by op_id;
+// fts_logs by log_id (the AUTOINCREMENT log_entries.id, which is stable for a
+// row across both paths because the backfill reads the same persisted rows the
+// incremental path wrote).
 //
 // The fixtures are ingested under their NATURAL per-adapter source_format (so
 // multiple source_ids share a format, exactly like the rollup gate) through the
@@ -97,7 +96,7 @@ func TestFTSParity_AllFixtures(t *testing.T) {
 }
 
 // ftsOpsRow is one fts_ops row's logical content (indexed columns + UNINDEXED
-// keys), without the internal docid.
+// keys).
 type ftsOpsRow struct {
 	name, model, provider, toolNS string
 	errorText, opID, sessionID    string

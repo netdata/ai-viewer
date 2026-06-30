@@ -13,13 +13,13 @@ import (
 // presenter.SchemaVersion; that OWN bump is pinned by the internal
 // TestMigration0006_BumpsSchemaVersionTo6_Internal (which stops the chain at
 // 0006). This external file pins 0006's SCHEMA SHAPE (table/index/FTS5 tests
-// below) over the FULL chain, whose head is now 0008=v8.
+// below) over the FULL chain, whose head is now 0014=v14.
 // Source of truth: .agents/sow/specs/data-model.md §Rollup tables (SOW-0007)
 // and §Full-text search (FTS5).
 
 // TestMigration0006_ChainHeadSchemaVersion pins the FULL-chain head version:
-// openInMemory runs every migration through the latest (0008), so the on-disk
-// schema_meta.version is '8'. 0006's OWN bump (to '6') is pinned separately by
+// openInMemory runs every migration through the latest (0014), so the on-disk
+// schema_meta.version is '14'. 0006's OWN bump (to '6') is pinned separately by
 // the internal apply-through-0006 test; this assertion guards the lockstep with
 // presenter.SchemaVersion as new migrations are added.
 func TestMigration0006_ChainHeadSchemaVersion(t *testing.T) {
@@ -32,8 +32,8 @@ func TestMigration0006_ChainHeadSchemaVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "12" {
-		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0012)", "12", version)
+	if version != "14" {
+		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0014)", "14", version)
 	}
 }
 

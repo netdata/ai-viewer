@@ -42,7 +42,11 @@ passed to Tail or block Tail startup.
 
 The source supervisor owns adapter construction, the event channel lifetime,
 per-attempt contexts, source lifecycle transitions, restart requests, and Tail
-backoff. Before any location stat, factory lookup, adapter construction,
+backoff. The event channel stays open across restart attempts and is closed only
+when no accepted source attempt can still send. If an adapter violates the Tail
+cancellation contract and later sends after a cancellation-timeout path, the
+supervisor's Tail goroutine wrapper converts that panic into adapter-failure
+evidence instead of crashing the process. Before any location stat, factory lookup, adapter construction,
 `Submit`, or `Scan`, the supervisor records a durable
 `source_progress.lifecycle_state='starting'` row. Pre-submit failures become
 durable lifecycle states (`start_failed` or `construct_failed`) and emit
@@ -59,21 +63,72 @@ canonical rows, aggregates, `source_progress`, lifecycle/read-model state, and
 notify rows still commit. After the source startup Scan outcome, the supervisor
 clears that source's startup deferral, records/schedules
 `read_model_state='repair_pending'`, and starts Tail. Source-scoped repair runs
-behind Tail under the read-model repair coordinator. Repair attempts are bounded
-by the startup backfill timeout, retry with context-cancellable
-1s/2s/.../60s backoff while the source context is alive, leave interrupted work
-as `repair_pending`, and reset `read_model_repair_attempts` after a successful
-`ready` transition. A retained all-sources reconciliation is background repair
-only; it is not the only path that makes a completed source searchable or
-stat-able.
+behind Tail under the read-model repair coordinator. A repair attempt is allowed
+to run to completion while the source supervisor context is alive; it must not
+be killed by a short wall-clock timeout and restarted from the beginning,
+because large local corpora can make that pattern loop forever while never
+reaching `ready`. Real repair errors retry with context-cancellable
+1s/2s/.../60s backoff while the source context is alive, interrupted shutdown
+work remains `repair_pending`, and `read_model_repair_attempts` resets after a
+successful `ready` transition. A retained all-sources reconciliation is
+background repair only; it is not the only path that makes a completed source
+searchable or stat-able, and it does not own source-scoped deferral or repair
+state. In particular, it must not clear every source's deferral flag at start
+and it must not blanket-mark sources `ready` at completion: Tail batches can
+commit while the all-sources rebuild is streaming and correctly record fresh
+per-source repair debt. Only the source-scoped repair loop clears that debt to
+`ready`.
+
+The startup-deferral clear records `repair_pending` as a transition-only
+read-model state change. If the source is already durably `repair_pending`, the
+supervisor still queues in-process repair, but it does not refresh
+`read_model_state_at`, clear `read_model_error`, or emit a duplicate
+`source_status_changed` row. Existing repair evidence is more important than a
+cosmetic timestamp refresh.
+
+Source-scoped FTS repair streams affected primary rows in storage order
+(`ops.rowid` and `log_entries.id`) through source-session keyset loops:
+`sessions(source_id, id)` pages the source's sessions, then
+`ops(session_id)` and `log_entries(session_id)` page each session's rows by the
+rowid ordering. It must not sort all rows for a source before each page, and it
+must not walk global `ops.rowid` / `log_entries.id` while probing each row's
+session/source ownership. Either plan can hold the single writer connection for
+tens of seconds on large or sparse corpora and starve lifecycle/heartbeat
+writes. The content-owning FTS5 rows are addressed by explicit FTS `rowid`
+(`ops.rowid` for `fts_ops`, `log_entries.id` for `fts_logs`); source repair
+must not delete rows by unindexed linkage columns such as `op_id`,
+`session_id`, or `log_id` inside a per-row loop. `ops.rowid` is not durable
+across SQLite `VACUUM`; ai-viewer runtime code must never run `VACUUM`, and an
+external rowid-rewriting maintenance action requires a full FTS rebuild before
+search is trusted. Migration 0014 clears existing derived `fts_ops` and
+`fts_logs` rows when it introduces this explicit-docid repair contract, because
+rows written by older builds can have auto-assigned FTS docids that source
+repair cannot remove by the new rowid key. The clear is not source-data loss:
+these tables are derived search indexes and are repopulated by source repair or
+`rollups-backfill`; the recovery is test-pinned by clearing the derived tables
+and proving source repair restores searchable rows from primary data.
 
 Tail batches that commit while the retained all-sources reconciliation owns the
 global rebuild-active flag also record `read_model_state='repair_pending'`.
 That durable debt is paired with a post-commit, coalesced repair request to the
 owning source supervisor. The request is sent only after the batch transaction
 commits, and the supervisor repairs it through the same source-scoped
-timeout/backoff/`ready` lifecycle path used for startup-scan repair. A worker
-must never leave rebuild-window repair debt waiting for daemon restart.
+run-to-completion/backoff/`ready` lifecycle path used for startup-scan repair.
+A worker must never leave rebuild-window repair debt waiting for daemon restart.
+If the retained all-sources reconciliation itself fails after entering its
+destructive rebuild path, the ingester records `repair_pending` for every known
+source and sends coalesced repair requests to active supervisors before
+returning the error. A partial global rebuild must be health-visible and
+self-healing, not a silent search/statistics corruption. This all-source mark
+uses the same source lifecycle write contract as normal source state changes:
+each changed source emits `source_status_changed` atomically with its
+`read_model_state='repair_pending'` update, clears stale read-model errors, and
+does not rewrite `source_progress.updated_at` for an existing progress row.
+Sources that are already `repair_pending` are not rewritten, do not emit another
+`source_status_changed`, and keep their original `read_model_state_at` so health
+grace windows cannot be extended by repeated global failures. `updated_at`
+remains the source cursor/progress freshness timestamp; `read_model_state_at`
+records the repair-pending transition time.
 
 Tail liveness has two signals. A returned non-context Tail error records
 `tail_failed`, transitions through `tail_restarting`, reloads
@@ -90,9 +145,43 @@ backs off, and retries from the durable cursor instead of falling through to
 Tail with an unproven handoff cursor. Sustained restart failure remains retrying
 but records escalated lifecycle evidence after 100 consecutive restart failures
 or 24 hours in the restart loop, whichever comes first.
+An adapter `Tail` returning `nil` while the source supervisor context is still
+alive is an abnormal Tail exit, not a clean stop: the supervisor records
+`tail_failed` evidence and enters the same restart path as a Tail error. A
+`nil` Tail return is considered clean only when the supervisor context is
+already cancelled. Likewise, if startup `Scan` or restart catch-up `Scan`
+returns `nil` after the source context was cancelled (some adapters normalize
+context cancellation to nil after saving a partial cursor), the supervisor
+records `stopped` using a shutdown-safe lifecycle context and must not continue
+into Tail or leave the source stuck as `scanning` / `tail_restarting`.
 The persisted `tail_restart_count` is the consecutive restart-failure counter:
 it increments on each `tail_restarting` attempt and resets to zero after a
 successful transition back to `tailing`.
+Heartbeat persistence and stale-tail checks are independent loops. A blocked or
+slow heartbeat-persistence write is bounded and logged, but it cannot block the
+watchdog from evaluating stale sources or enqueueing restart requests on later
+ticks. Heartbeat throttling distinguishes in-memory observation, queued
+persistence, and committed persistence: a heartbeat write that times out or is
+dropped because the persistence queue is full must not advance the committed
+throttle marker. The next heartbeat is then allowed to retry instead of letting
+the durable `tail_heartbeat_at` age into a false `tail_stale` health signal.
+Stale-tail state writes are also bounded per tick; if SQLite is temporarily
+unavailable, the watchdog logs the failure and retries on the next tick instead
+of wedging the liveness subsystem.
+Tail heartbeat persistence and stale-tail watchdog operations mark a liveness
+state operation as pending before they wait for the database connection.
+Source-scoped read-model repair yields between its read/write batches while that
+pending marker is present, so repair cannot repeatedly reacquire the single
+SQLite connection ahead of liveness and starve the 30 s heartbeat/watchdog
+budget.
+Normal worker flushes and idle rollup refreshes participate in the same
+priority rule before opening their write transaction. Startup scans can keep
+multiple workers busy for long periods, so liveness priority cannot be limited
+to read-model repair; every lower-priority worker transaction entry point must
+yield when tail-state persistence or stale-tail checking is pending. The
+background orphan resolver participates too, because its periodic maintenance
+transaction uses the same single writer connection and can otherwise contend
+with liveness even when worker flushes and read-model repair are yielding.
 
 Supervisor lifecycle writes that make a source observable or monitorable are
 required writes, not best-effort breadcrumbs. Before the supervisor starts or
@@ -177,18 +266,22 @@ Options (functional-option pattern):
 
 - `WithLogger(*slog.Logger)` — structured logger; default `slog.Default()`.
 - `WithPricer(Pricer)` — pricing seam; default `NopPricer{}` (returns 0).
-- `WithBatchSize(int)` — batch flush at N events; default 1000.
+- `WithBatchSize(int)` — batch flush at N events; default 100.
 - `WithBatchInterval(time.Duration)` — batch flush at duration; default 500ms.
 - `WithResolverInterval(time.Duration)` — parent-link resolver tick; default 5s.
 
 ## Concurrency Model
 
-- One **worker goroutine per source**. Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 1000 events OR 500 ms**, whichever trips first, and commits.
+- One **worker goroutine per source**. Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 100 events OR 500 ms**, whichever trips first, and commits.
 - The ingest pipeline is **single-writer to SQLite** — every worker uses the same
   `*sql.DB` handle, and the writer store pins `MaxOpenConns=1` for both
   in-memory and on-disk stores. This gives deterministic batch ordering per
   worker while serializing transaction commits before SQLite can return
   avoidable writer-lock `SQLITE_BUSY` errors.
+- The 100-event default is a liveness budget, not a throughput target. Source
+  lifecycle writes, Tail heartbeat persistence, stale-tail watchdog writes, and
+  read-model repair share the same writer connection; larger cold-rebuild
+  batches have live-proven they can starve the 30 s liveness write budget.
 - One **background resolver goroutine** runs at 5 s ticks, retrying parent linkage for sessions inserted with `parent_session_id = NULL` whose `parent_native_id` is now resolvable.
 
 ## Batching
@@ -487,7 +580,18 @@ After each batch's per-event UPSERTs, the ingester runs a **two-stage aggregate 
 1. `UPDATE turns SET tokens_in = (SELECT COALESCE(SUM(tokens_in),0) FROM ops WHERE turn_id = turns.id), tokens_out=..., op_count=..., failure_count=..., cost_usd=... WHERE id IN (...)`.
 2. `UPDATE sessions SET tokens_in = (SELECT COALESCE(SUM(tokens_in),0) FROM turns WHERE session_id = sessions.id), turn_count=..., op_count=(SELECT COALESCE(SUM(op_count),0) FROM turns ...), failure_count=..., cost_usd=..., last_activity_ts=MAX(last_activity_ts, batch_max_ts) WHERE id IN (...)`.
 
-The dirty-set bounding makes each batch's aggregate work O(|dirty sessions| + |dirty turns|), not O(table size). Idempotent — re-running on the same dirty set produces the same numbers.
+The dirty-set bounding makes each batch's aggregate work O(|dirty sessions| +
+|dirty turns|), not O(table size). Idempotent — re-running on the same dirty
+set produces the same numbers. Dirty sessions and turns can still be very large,
+so the planner contract is explicit: turn aggregates use `idx_ops_turn_seq`;
+session aggregates over `turns` use `idx_turns_session_seq`; failed-op counts
+MUST use `idx_ops_session_status`; and `last_activity_ts` repair from
+`MAX(ops.end_ts)` MUST use `idx_ops_session_end`. These support indexes are part
+of the source-liveness budget, because aggregate refresh runs on the same single
+writer connection as source lifecycle writes, Tail heartbeat persistence, and
+the stale-tail watchdog. A dirty aggregate query that scans all failed ops or all
+ops for a giant session can block the 30 s liveness write window and make healthy
+tailers look stale.
 
 ## Catalog Tables
 
@@ -522,7 +626,7 @@ The refresh runs **within / immediately after the same batch transaction** as th
 
 **Notify.** The batch emits exactly one `stats_invalidated` notify row when any rollup or FTS table changed — extending the existing per-batch `stats_invalidated` trigger (today fired on catalog-rollup change; §Notify Channel) to also fire on a rollup/FTS change. Still at most one per batch.
 
-**One-shot backfill.** A `ai-viewer-ingest rollups-backfill` subcommand recomputes **all** closed-bucket rollups from `MIN(start_ts)` to the last closed bucket and builds the FTS index over all ops/logs from scratch. It applies the independent open-hour/open-day cutoffs (`data-model.md` §"Open-bucket rule"): `rollup_hourly` covers every hour bucket `< floor(now, hour)` (**including the current day's already-closed hours**), while `rollup_daily` covers every day bucket `< floor(now, day)` (**excluding the entire current open day**). It is idempotent and re-runnable — recomputing over the same `ops`/`log_entries` data reproduces byte-identical rollup tables (the property the diff gate asserts, `quality-gates.md` §Rollup correctness diff). To stay byte-identical to the incremental path it folds via the same pure `internal/rollups` package. It first **`DELETE`s `rollup_hourly` + `rollup_daily`** so the run is a TRUE full rebuild — a re-run therefore *repairs* stale rows (e.g. a dimension value that has since collapsed into `__other__`, or any row from data that has since changed), matching the incremental path's delete-then-insert and `BackfillFTS`'s delete-before-rebuild; an upsert-only backfill could only refresh rows the recompute still produces, never remove a vanished one. It then bounds memory by streaming `ops` in time order (windowed per UTC day) rather than loading the whole table, folding and inserting each closed bucket (`ON CONFLICT … DO UPDATE` is then just a harmless idempotency guard, since the tables were emptied). `now` is injectable so the closed-bucket boundary is deterministic under test. The backfill builds the FTS index the same way (`DELETE` then re-populate) and respects `fts5_index_logs` exactly as the incremental path does. Like the rollup pass, it **bounds memory** by streaming `ops` and indexable `log_entries` in stable-id keyset batches (`WHERE id > ? ORDER BY id ASC LIMIT N`, each batch fully drained before its own write transaction) rather than loading every row at once — required because on the largest installs the FTS index spans **10M+ log entries** (§R3), and a full materialize would OOM the very memory-constrained hosts the per-source `fts5_index_logs` opt-out exists to protect. A crash mid-rebuild leaves a partial index repaired by the idempotent re-run (the same bounded-memory-over-single-transaction-atomicity tradeoff the rollup pass makes). It is the recovery path when `rollup_*`/`fts_*` are missing or stale (the ingest DB is derived/disposable — `data-model.md` §Schema versioning). The query layer always serves the OPEN hour/day live, so the current period is never wrong; but CLOSED buckets are read ONLY from the materialized rollups — there is deliberately NO live-fold fallback for a missing closed bucket (that absence IS the all-sources fast-path performance contract; gap-filling would re-scan `ops` and defeat the rollup). So a missing or stale CLOSED-bucket rollup is silently UNDERCOUNTED by the all-sources fast path until `rollups-backfill` repairs it. The incremental carry-forward (§"Incremental rollup refresh" — both hours and days are carried until materialized) keeps every closed bucket materialized in normal operation, so a missing rollup is an ABNORMAL state — a corrupted/manually-cleared rollup table, or the window before the first backfill on a fresh store — not a normal occurrence; `rollups-backfill` is the deterministic repair. (A future enhancement could surface rollup staleness via `/api/health`; tracked separately, not required for correctness in normal operation.)
+**One-shot backfill.** A `ai-viewer-ingest rollups-backfill` subcommand recomputes **all** closed-bucket rollups from `MIN(start_ts)` to the last closed bucket and builds the FTS index over all ops/logs from scratch. It applies the independent open-hour/open-day cutoffs (`data-model.md` §"Open-bucket rule"): `rollup_hourly` covers every hour bucket `< floor(now, hour)` (**including the current day's already-closed hours**), while `rollup_daily` covers every day bucket `< floor(now, day)` (**excluding the entire current open day**). It is idempotent and re-runnable — recomputing over the same `ops`/`log_entries` data reproduces byte-identical rollup tables (the property the diff gate asserts, `quality-gates.md` §Rollup correctness diff). To stay byte-identical to the incremental path it folds via the same pure `internal/rollups` package. It first **`DELETE`s `rollup_hourly` + `rollup_daily`** so the run is a TRUE full rebuild — a re-run therefore *repairs* stale rows (e.g. a dimension value that has since collapsed into `__other__`, or any row from data that has since changed), matching the incremental path's delete-then-insert and `BackfillFTS`'s delete-before-rebuild; an upsert-only backfill could only refresh rows the recompute still produces, never remove a vanished one. It then bounds memory by streaming `ops` in time order (windowed per UTC day) rather than loading the whole table, folding and inserting each closed bucket (`ON CONFLICT … DO UPDATE` is then just a harmless idempotency guard, since the tables were emptied). `now` is injectable so the closed-bucket boundary is deterministic under test. The backfill builds the FTS index the same way (`DELETE` then re-populate with explicit FTS docids) and respects `fts5_index_logs` exactly as the incremental path does. Like the rollup pass, it **bounds memory** by streaming `ops` and indexable `log_entries` in keyset batches (`WHERE id > ? ORDER BY id ASC LIMIT N`, each batch fully drained before its own write transaction) rather than loading every row at once — required because on the largest installs the FTS index spans **10M+ log entries** (§R3), and a full materialize would OOM the very memory-constrained hosts the per-source `fts5_index_logs` opt-out exists to protect. FTS rebuild and source-scoped FTS repair use the same 100-row batch budget as normal ingest writer transactions so repair cannot monopolize the single writer long enough to make Tail heartbeat or stale-tail writes time out. When the daemon runs the retained all-sources reconciliation while source supervisors are alive, every destructive/read/write step in `BackfillFTS` and `BackfillRollups` must yield to pending Tail lifecycle/heartbeat writes before opening its transaction; the offline `rollups-backfill` command has no live source supervisors and uses the same functions without a live-priority yield. A crash mid-rebuild leaves a partial index repaired by the idempotent re-run (the same bounded-memory-over-single-transaction-atomicity tradeoff the rollup pass makes). It is the recovery path when `rollup_*`/`fts_*` are missing or stale (the ingest DB is derived/disposable — `data-model.md` §Schema versioning). The query layer always serves the OPEN hour/day live, so the current period is never wrong; but CLOSED buckets are read ONLY from the materialized rollups — there is deliberately NO live-fold fallback for a missing closed bucket (that absence IS the all-sources fast-path performance contract; gap-filling would re-scan `ops` and defeat the rollup). So a missing or stale CLOSED-bucket rollup is silently UNDERCOUNTED by the all-sources fast path until `rollups-backfill` repairs it. The incremental carry-forward (§"Incremental rollup refresh" — both hours and days are carried until materialized) keeps every closed bucket materialized in normal operation, so a missing rollup is an ABNORMAL state — a corrupted/manually-cleared rollup table, or the window before the first backfill on a fresh store — not a normal occurrence; `rollups-backfill` is the deterministic repair. (A future enhancement could surface rollup staleness via `/api/health`; tracked separately, not required for correctness in normal operation.)
 
 ## Cost Computation
 
@@ -607,7 +711,10 @@ transaction (not after it), the ingester INSERTs `notify` rows so they commit
   actually changed" semantics (`data-model.md` §Rollup tables, §Full-text search);
 - one `source_status_changed` row when a source's `parse_errors` count,
   `enabled` flag, lifecycle state, read-model state, or lifecycle/read-model
-  timestamp/error evidence changed.
+  transition/error evidence changed. Heartbeat-only `tail_heartbeat_at`
+  persistence while the source remains `tailing` deliberately does not emit a
+  source-status row; it is high-frequency liveness evidence and REST health
+  reads it on demand.
 
 The ingester is the sole writer of `notify`. Once per flush cycle it also
 **prunes** `notify` rows older than a bounded retention window (≈5 min) so the

@@ -41,11 +41,11 @@ type worker struct {
 	// to pick its open hour/day. Injectable for deterministic tests; defaults
 	// to defaultNow when the worker is built without one.
 	now func() int64
-	// deferReadModels points at the ingester's bulk-scan flag (SOW-0063). When
+	// deferReadModels points at this source's startup-scan deferral flag. When
 	// true, refreshBatchReadModels skips refreshRollups + refreshFTS (the two
 	// super-linear-in-volume refreshes) and runs only refreshAggregates (the
-	// cheap session-count update). The binary clears this after the initial
-	// Scan completes and runs BackfillReadModels to build the deferred models.
+	// cheap session-count update). The source supervisor clears this after the
+	// source Scan reaches an outcome and schedules source-scoped repair.
 	deferReadModels *atomic.Bool
 	// readModelRebuildActive is the global derived-table rebuild flag. It
 	// suppresses incremental FTS/rollup refresh during full truncate/rebuild
@@ -54,6 +54,12 @@ type worker struct {
 	// requestReadModelRepair wakes the owning source supervisor after a
 	// committed batch records durable read-model repair debt.
 	requestReadModelRepair func(sourceID string) bool
+	// waitBeforeDBWork lets tail lifecycle writes take priority before this
+	// worker starts a lower-priority write transaction. It is intentionally
+	// checked immediately before BeginTx, so scan/repair flush bursts cannot
+	// repeatedly reacquire the single writer connection while liveness state is
+	// waiting to persist.
+	waitBeforeDBWork func(context.Context) error
 	// onErr is invoked for terminal batch failures that lost primary rows.
 	// Defaults to logger.Error if not set.
 	onErr func(error)
@@ -65,6 +71,9 @@ type worker struct {
 // caller; workerRuntime owns bounded retry and terminal-drop reporting.
 func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event) error {
 	wr.fts5IndexLogs = w.fts5IndexLogs
+	if err := w.waitForDBWork(ctx); err != nil {
+		return err
+	}
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -195,6 +204,9 @@ func (w *worker) refreshRollupsOnly(ctx context.Context, wr *writer) error {
 	if w.readModelRebuildActive != nil && w.readModelRebuildActive.Load() {
 		return nil
 	}
+	if err := w.waitForDBWork(ctx); err != nil {
+		return err
+	}
 	wr.clearRollupNotifySignals()
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -216,6 +228,16 @@ func (w *worker) refreshRollupsOnly(ctx context.Context, wr *writer) error {
 		return err
 	}
 	wr.promoteMaterializedRollupBuckets()
+	return nil
+}
+
+func (w *worker) waitForDBWork(ctx context.Context) error {
+	if w.waitBeforeDBWork == nil {
+		return nil
+	}
+	if err := w.waitBeforeDBWork(ctx); err != nil {
+		return fmt.Errorf("wait for tail-state priority: %w", err)
+	}
 	return nil
 }
 

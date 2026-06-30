@@ -158,6 +158,66 @@ func newRuntimeTestWorker(db *sql.DB, src, format, location string) *worker {
 	}
 }
 
+func TestWorkerFlushYieldsToTailStateBeforeBeginTx(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	waitErr := errors.New("tail state pending")
+	called := 0
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.waitBeforeDBWork = func(context.Context) error {
+		called++
+		return waitErr
+	}
+	wr := newWriter(src, "aiagent_v3", "/tmp", NopPricer{})
+	wr.now = fixedNow
+	batch := []canonical.Event{
+		canonical.SessionStartedEvent{
+			EventBase:    canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000},
+			NativeID:     "tail-priority",
+			RootNativeID: "tail-priority",
+			Kind:         canonical.KindRoot,
+		},
+	}
+
+	err := w.flush(context.Background(), wr, batch)
+	if !errors.Is(err, waitErr) {
+		t.Fatalf("flush error = %v, want waitErr", err)
+	}
+	if called != 1 {
+		t.Fatalf("waitBeforeDBWork calls = %d, want 1", called)
+	}
+	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id='tail-priority'`); got != 0 {
+		t.Fatalf("session rows after blocked flush = %d, want 0", got)
+	}
+}
+
+func TestWorkerIdleRefreshYieldsToTailStateBeforeBeginTx(t *testing.T) {
+	t.Parallel()
+	const src = "aiagent_v3:/tmp"
+
+	_, db := openTestStore(t)
+	waitErr := errors.New("tail state pending")
+	called := 0
+	w := newRuntimeTestWorker(db, src, "aiagent_v3", "/tmp")
+	w.waitBeforeDBWork = func(context.Context) error {
+		called++
+		return waitErr
+	}
+	wr := newWriter(src, "aiagent_v3", "/tmp", NopPricer{})
+	wr.now = fixedNow
+	wr.dirtyRollupBuckets[0] = struct{}{}
+
+	err := w.refreshRollupsOnly(context.Background(), wr)
+	if !errors.Is(err, waitErr) {
+		t.Fatalf("idle refresh error = %v, want waitErr", err)
+	}
+	if called != 1 {
+		t.Fatalf("waitBeforeDBWork calls = %d, want 1", called)
+	}
+}
+
 func assertWorkerSessionProgress(t *testing.T, db *sql.DB, w *worker, src, nativeID string, wantSeq int64, label string) {
 	t.Helper()
 	if got := scanInt(t, db, `SELECT COUNT(*) FROM sessions WHERE native_id=?`, nativeID); got != 1 {

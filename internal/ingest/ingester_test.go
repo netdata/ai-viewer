@@ -670,6 +670,18 @@ func TestWithOptionsIgnoreZeroValues(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultBatchSizeMatchesSpec(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	i, err := New(db, WithLogger(silentLogger()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if i.batchSize != 100 {
+		t.Fatalf("batchSize = %d, want spec default 100", i.batchSize)
+	}
+}
+
 func TestResolveOrphans_NilResolver(t *testing.T) {
 	t.Parallel()
 	_, db := openTestStore(t)

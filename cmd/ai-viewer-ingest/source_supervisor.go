@@ -18,7 +18,6 @@ var (
 	sourceTailCancelGrace             = 5 * time.Second
 	sourceTailRestartEscalateFailures = 100
 	sourceTailRestartEscalateAfter    = 24 * time.Hour
-	readModelRepairTimeout            = 5 * time.Minute
 )
 
 type sourceSupervisor struct {
@@ -108,6 +107,12 @@ func (s *sourceSupervisor) runAttempt(adapter canonical.Adapter, since canonical
 		}
 		return s.runTail(adapter)
 	}
+	if s.ctx.Err() != nil {
+		s.logger.Info("ai-viewer-ingest: adapter scan cancelled")
+		scanDone()
+		s.recordStopped()
+		return false
+	}
 	if !s.handleScanComplete(startup, scanDone) {
 		return false
 	}
@@ -118,6 +123,17 @@ func (s *sourceSupervisor) handleRestartScanError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || s.ctx.Err() != nil {
 		s.logger.Info("ai-viewer-ingest: restart catch-up scan cancelled")
 		s.recordStopped()
+		return false
+	}
+	if canonical.IsFatalScanError(err) {
+		at := nowMicros()
+		s.logger.Error("ai-viewer-ingest: restart catch-up scan failed fatally", "err", err)
+		s.recordRequired(ingest.SourceLifecycleUpdate{
+			State:             ingest.SourceLifecycleScanFailed,
+			AtUS:              at,
+			ScanCompletedAtUS: &at,
+			Error:             err.Error(),
+		})
 		return false
 	}
 	s.logger.Error("ai-viewer-ingest: restart catch-up scan failed", "err", err)
@@ -147,7 +163,10 @@ func (s *sourceSupervisor) handleScanError(err error, scanDone func()) bool {
 	}
 	recoverable := !canonical.IsFatalScanError(err)
 	if recoverable {
-		s.clearReadModelDeferral()
+		if !s.clearReadModelDeferral() {
+			scanDone()
+			return false
+		}
 	}
 	scanDone()
 	return recoverable
@@ -166,7 +185,10 @@ func (s *sourceSupervisor) handleScanComplete(startup bool, scanDone func()) boo
 			return false
 		}
 	}
-	s.clearReadModelDeferral()
+	if !s.clearReadModelDeferral() {
+		scanDone()
+		return false
+	}
 	scanDone()
 	return true
 }
@@ -197,7 +219,7 @@ func (s *sourceSupervisor) runTail(adapter canonical.Adapter) bool {
 	defer cancelAttempt()
 	done := make(chan error, 1)
 	go func() {
-		done <- adapter.Tail(attemptCtx, s.events)
+		done <- runAdapterTail(attemptCtx, adapter, s.events)
 	}()
 
 	s.startReadModelRepairIfPending()
@@ -235,23 +257,46 @@ func (s *sourceSupervisor) runTail(adapter canonical.Adapter) bool {
 	}
 }
 
-func (s *sourceSupervisor) handleTailReturn(err error) bool {
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			s.logger.Info("ai-viewer-ingest: adapter tail cancelled")
-			s.recordStopped()
-			return false
+func runAdapterTail(ctx context.Context, adapter canonical.Adapter, events chan<- canonical.Event) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = tailPanicError(recovered)
 		}
-		at := nowMicros()
-		s.logger.Error("ai-viewer-ingest: adapter tail failed", "err", err)
-		return s.recordRequired(ingest.SourceLifecycleUpdate{
-			State:          ingest.SourceLifecycleTailFailed,
-			AtUS:           at,
-			TailFailedAtUS: &at,
-			Error:          err.Error(),
-		})
+	}()
+	return adapter.Tail(ctx, events)
+}
+
+func tailPanicError(recovered any) error {
+	switch v := recovered.(type) {
+	case error:
+		return fmt.Errorf("adapter Tail panic: %w", v)
+	default:
+		return fmt.Errorf("adapter Tail panic: %v", v)
 	}
-	return false
+}
+
+func (s *sourceSupervisor) handleTailReturn(err error) bool {
+	if err == nil && s.ctx.Err() != nil {
+		s.logger.Info("ai-viewer-ingest: adapter tail stopped")
+		s.recordStopped()
+		return false
+	}
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && s.ctx.Err() != nil {
+		s.logger.Info("ai-viewer-ingest: adapter tail cancelled")
+		s.recordStopped()
+		return false
+	}
+	if err == nil {
+		err = errors.New("tail returned without error")
+	}
+	at := nowMicros()
+	s.logger.Error("ai-viewer-ingest: adapter tail failed", "err", err)
+	return s.recordRequired(ingest.SourceLifecycleUpdate{
+		State:          ingest.SourceLifecycleTailFailed,
+		AtUS:           at,
+		TailFailedAtUS: &at,
+		Error:          err.Error(),
+	})
 }
 
 func (s *sourceSupervisor) waitTailReturn(done <-chan error) (bool, error) {
@@ -293,18 +338,19 @@ func (s *sourceSupervisor) tailHeartbeat() {
 	s.ing.RecordTailHeartbeat(s.src.id)
 }
 
-func (s *sourceSupervisor) clearReadModelDeferral() {
+func (s *sourceSupervisor) clearReadModelDeferral() bool {
 	if s.ing == nil {
-		return
+		return true
 	}
 	wasDeferred := s.ing.SetSourceReadModelsDeferred(s.src.id, false)
 	if !wasDeferred {
-		return
+		return true
 	}
 	s.setReadModelRepairPending(true)
-	s.record(ingest.SourceLifecycleUpdate{
-		ReadModelState:      ingest.ReadModelRepairPending,
-		ClearReadModelError: true,
+	return s.recordRequired(ingest.SourceLifecycleUpdate{
+		ReadModelState:               ingest.ReadModelRepairPending,
+		ReadModelStateTransitionOnly: true,
+		ClearReadModelError:          true,
 	})
 }
 
@@ -360,13 +406,15 @@ func (s *sourceSupervisor) repairReadModelsLoop() {
 
 func (s *sourceSupervisor) repairReadModelsOnce() bool {
 	at := nowMicros()
-	s.record(ingest.SourceLifecycleUpdate{
+	if !s.recordRequired(ingest.SourceLifecycleUpdate{
 		ReadModelState:      ingest.ReadModelRepairing,
 		AtUS:                at,
 		RepairStartedAtUS:   &at,
 		RepairAttemptsDelta: 1,
-	})
-	repairCtx, cancel := context.WithTimeout(s.ctx, readModelRepairTimeout)
+	}) {
+		return false
+	}
+	repairCtx, cancel := sourceReadModelRepairContext(s.ctx)
 	_, err := s.ing.RepairSourceReadModels(repairCtx, s.src.id)
 	cancel()
 	if err != nil {
@@ -379,24 +427,35 @@ func (s *sourceSupervisor) repairReadModelsOnce() bool {
 		if errors.Is(err, context.DeadlineExceeded) {
 			state = ingest.ReadModelRepairTimeout
 		}
-		s.record(ingest.SourceLifecycleUpdate{
+		if !s.recordRequired(ingest.SourceLifecycleUpdate{
 			ReadModelState:   state,
 			AtUS:             at,
 			RepairFailedAtUS: &at,
 			ReadModelError:   err.Error(),
-		})
+		}) {
+			return false
+		}
 		return false
 	}
-	s.setReadModelRepairPending(false)
 	at = nowMicros()
-	s.record(ingest.SourceLifecycleUpdate{
+	if !s.recordRequired(ingest.SourceLifecycleUpdate{
 		ReadModelState:               ingest.ReadModelReady,
 		AtUS:                         at,
 		RepairCompletedAtUS:          &at,
 		ResetReadModelRepairAttempts: true,
 		ClearReadModelError:          true,
-	})
+	}) {
+		return false
+	}
+	s.setReadModelRepairPending(false)
 	return true
+}
+
+func sourceReadModelRepairContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithCancel(parent)
 }
 
 func (s *sourceSupervisor) recordInterruptedReadModelRepair(err error) {
@@ -426,10 +485,6 @@ func (s *sourceSupervisor) waitBackoff(d time.Duration) bool {
 	case <-s.ctx.Done():
 		return false
 	}
-}
-
-func (s *sourceSupervisor) record(update ingest.SourceLifecycleUpdate) {
-	recordSourceLifecycleBestEffort(s.ctx, s.ing, s.src, s.logger, update)
 }
 
 func (s *sourceSupervisor) recordRequired(update ingest.SourceLifecycleUpdate) bool {
@@ -537,8 +592,4 @@ func retrySourceLifecycle(ctx context.Context, logger *slog.Logger, update inges
 		}
 		backoff = nextSourceBackoff(backoff)
 	}
-}
-
-func recordSourceLifecycleBestEffort(ctx context.Context, ing *ingest.Ingester, src configuredSource, logger *slog.Logger, update ingest.SourceLifecycleUpdate) {
-	_ = recordSourceLifecycle(ctx, ing, src, logger, update)
 }

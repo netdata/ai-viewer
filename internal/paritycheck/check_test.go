@@ -226,6 +226,29 @@ func TestCopySourceSnapshotCopiesDirectoryAndRegularFile(t *testing.T) {
 	}
 }
 
+func TestCopySourceSnapshotRejectsMissingRootAndHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := copySourceSnapshot(context.Background(), filepath.Join(t.TempDir(), "missing"), filepath.Join(t.TempDir(), "frozen")); err == nil {
+		t.Fatal("copySourceSnapshot missing root returned nil, want error")
+	} else if !strings.Contains(err.Error(), "stat source snapshot root") {
+		t.Fatalf("missing root error = %q, want stat source snapshot root", err)
+	}
+
+	root := t.TempDir()
+	writeParityCheckTestFile(t, filepath.Join(root, "session", "a.jsonl"), "alpha\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := copySourceSnapshot(ctx, root, filepath.Join(t.TempDir(), "frozen"))
+	if err == nil {
+		t.Fatal("copySourceSnapshot canceled context returned nil, want context error")
+	}
+	if !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("canceled copy error = %q, want context canceled", err)
+	}
+}
+
 func TestCheckSourcesReportsSnapshotMutation(t *testing.T) {
 	t.Parallel()
 

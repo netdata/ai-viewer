@@ -17,7 +17,7 @@ The schema is **deliberately wider than any single source format** so it cleanly
   legacy `sources.cursor` column remains nullable historical schema only.
 - **Wider, not deeper.** Cache tokens, reasoning kind, provider alias, cwd, call_path — these are first-class columns because at least two adapters surface them and the cost-analysis / filtering paths need them. They're not extras_json bloat.
 
-## Schema (v12 target)
+## Schema (v14 target)
 
 All timestamps are `INTEGER` UNIX-microseconds (UTC). All IDs are `TEXT` UUID-v4 or stable hashes derived from source IDs.
 
@@ -129,6 +129,7 @@ CREATE INDEX idx_sessions_duration ON sessions(duration_us DESC, id ASC);
 CREATE INDEX idx_sessions_op_count ON sessions(op_count DESC, id ASC);
 CREATE INDEX idx_sessions_cost ON sessions(cost_usd DESC, id ASC);
 CREATE INDEX idx_sessions_tokens ON sessions((tokens_in + tokens_out) DESC, id ASC);
+CREATE INDEX idx_sessions_source_id ON sessions(source_id, id);
 ```
 
 Notes:
@@ -209,12 +210,15 @@ CREATE TABLE ops (
 );
 
 CREATE INDEX idx_ops_session_start ON ops(session_id, start_ts);
+CREATE INDEX idx_ops_session ON ops(session_id);
 CREATE INDEX idx_ops_turn_seq ON ops(turn_id, seq);
 CREATE INDEX idx_ops_kind_name ON ops(kind, name);
 CREATE INDEX idx_ops_tool ON ops(tool_namespace, name) WHERE kind='tool';
 CREATE INDEX idx_ops_model ON ops(model) WHERE kind='llm';
 CREATE INDEX idx_ops_provider ON ops(provider) WHERE kind='llm';
 CREATE INDEX idx_ops_status ON ops(status);
+CREATE INDEX idx_ops_session_status ON ops(session_id, status);
+CREATE INDEX idx_ops_session_end ON ops(session_id, end_ts);
 CREATE INDEX idx_ops_start ON ops(start_ts);
 CREATE INDEX idx_ops_parent ON ops(parent_op_id);
 CREATE INDEX idx_ops_compaction ON ops(session_id, start_ts) WHERE kind='compaction';
@@ -353,6 +357,7 @@ CREATE TABLE log_entries (
 );
 
 CREATE INDEX idx_log_session_ts ON log_entries(session_id, ts);
+CREATE INDEX idx_log_session ON log_entries(session_id);
 CREATE INDEX idx_log_source_ts  ON log_entries(source_id, ts) WHERE source_id IS NOT NULL;
 CREATE INDEX idx_log_severity   ON log_entries(severity, ts) WHERE severity IN ('WRN','ERR');
 
@@ -580,7 +585,7 @@ Notes:
 
 - `seq` is `AUTOINCREMENT` (not just `ROWID`) so values are **strictly monotonic and never reused**, even after pruning deletes low rows. Serve's poll cursor is a `seq` high-water mark; reuse would make it skip rows. `WHERE seq > ?` uses the primary-key index — no extra index needed.
 - **Atomicity**: rows are inserted in the same `*sql.Tx` as the data they describe, so serve can never observe a `notify` row before the row it refers to is visible (no notify-before-data race).
-- **Producer rules** (`ingester.md` §Notify channel): one `session_changed` row per canonical session ID in the batch's `affectedSessionIDs` (carrying its `root_session_id` and the batch commit `ts_us`); at most one `stats_invalidated` row per batch (or idle refresh-only pass) when an analytics input changed — fired on `len(affectedSessionIDs) > 0 || rollupTouchedThisBatch || rollupMaterializedThisRefresh` (NOT on the carried `dirtyRollupBuckets` set, which under carry-forward stays non-empty while an open bucket is merely pending — `ingester.md` §Notify channel); one `source_status_changed` row when a source's `parse_errors` count, `enabled` flag, lifecycle state, read-model state, or lifecycle/read-model timestamp/error evidence changed.
+- **Producer rules** (`ingester.md` §Notify channel): one `session_changed` row per canonical session ID in the batch's `affectedSessionIDs` (carrying its `root_session_id` and the batch commit `ts_us`); at most one `stats_invalidated` row per batch (or idle refresh-only pass) when an analytics input changed — fired on `len(affectedSessionIDs) > 0 || rollupTouchedThisBatch || rollupMaterializedThisRefresh` (NOT on the carried `dirtyRollupBuckets` set, which under carry-forward stays non-empty while an open bucket is merely pending — `ingester.md` §Notify channel); one `source_status_changed` row when a source's `parse_errors` count, `enabled` flag, lifecycle state, read-model state, or lifecycle/read-model transition/error evidence changed. Heartbeat-only `tail_heartbeat_at` persistence while the source remains `tailing` does not emit a source-status row.
 - **Pruning**: the ingester deletes `notify` rows older than a bounded retention window as part of its write cycle so the table stays small; the data is disposable transport, not history. Serve keeps its cursor in memory and jumps to `MAX(seq)` on startup (it only delivers changes that occur while a client is connected; clients reconcile historical state through the REST API), so pruning consumed rows is always safe.
 - **Read-only serve**: serve never writes or prunes `notify` — it only `SELECT`s. All writes/prunes are the ingester's, honoring the read-only-serve contract (`architecture.md`).
 
@@ -591,7 +596,7 @@ CREATE TABLE schema_meta (
     key     TEXT PRIMARY KEY NOT NULL,
     value   TEXT NOT NULL
 );
--- key='version' value='12', key='created_at' value=...
+-- key='version' value='14', key='created_at' value=...
 ```
 
 Migrations are file-based under `internal/store/migrations/NNNN_*.sql`. The
@@ -669,6 +674,25 @@ Migration history:
   construction and moves unconfigured rows to non-degrading `stopped`. This
   migration is additive, does not drop `sources.cursor`, and does not copy
   historical `sources.cursor` into `source_progress.cursor`.
+- `0013_aggregate_liveness_indexes.sql` — adds `idx_ops_session_status` and
+  `idx_ops_session_end`, and bumps `schema_meta.version` to `'13'` in lockstep
+  with `presenter.SchemaVersion`. The indexes keep dirty-session aggregate
+  refreshes session-scoped for failed-op counts and `MAX(end_ts)` last-activity
+  repair. They are part of the liveness contract because aggregate refresh,
+  Tail heartbeat persistence, stale-tail watchdog writes, and source lifecycle
+  writes all share the single SQLite writer connection.
+- `0014_source_repair_liveness_indexes.sql` — adds `idx_sessions_source_id`,
+  `idx_ops_session`, and `idx_log_session`, and bumps `schema_meta.version` to
+  `'14'` in lockstep with `presenter.SchemaVersion`. Source read-model repair
+  uses these indexes to iterate source sessions first, then per-session ops/logs
+  by rowid. This avoids holding the single writer connection while scanning
+  unrelated sources to find a sparse source's next FTS repair page. The same
+  migration clears the derived `fts_ops` and `fts_logs` tables because SOW-0114
+  changed their maintenance docids to explicit primary-row docids:
+  `ops.rowid` for `fts_ops` and `log_entries.id` for `fts_logs`. Existing
+  pre-0014 FTS rows may have auto-assigned docids, so source repair cannot
+  safely delete them by the new rowid key. The tables are derived/disposable;
+  source repair and `rollups-backfill` repopulate them from primary rows.
 
 The `0003` indexes are `CREATE UNIQUE INDEX` (no `IF NOT EXISTS` needed —
 the migration runs once, tracked in `_schema_migrations`). The ingest DB
@@ -848,6 +872,24 @@ fully owns makes that a plain `DELETE`/skip, whereas external-content would
 couple index contents to `log_entries` row lifetime. All three rank with BM25
 and expose `snippet()`; `modernc.org/sqlite` compiles FTS5 in, so no build flag
 or extension is needed.
+
+`fts_ops` and `fts_logs` use explicit FTS maintenance docids in all maintained
+paths: `fts_ops.rowid = ops.rowid`, and `fts_logs.rowid = log_entries.id`. This
+lets incremental refresh and source-scoped repair replace one logical search row
+by rowid instead of deleting by unindexed linkage columns. The `fts_logs` docid
+is durable because `log_entries.id` is `INTEGER PRIMARY KEY AUTOINCREMENT`.
+The `fts_ops` docid is intentionally a no-`VACUUM` maintenance key: `ops.rowid`
+is an implicit rowid, not aliased by an `INTEGER PRIMARY KEY`, and SQLite may
+rewrite such rowids during `VACUUM`. ai-viewer runtime code MUST NOT run
+`VACUUM`, `auto_vacuum` mode changes, or any rowid-rewriting table rebuild over
+the ingest database. If an operator or external maintenance tool does so, search
+must be treated as stale until a full FTS rebuild (`rollups-backfill` or daemon
+startup's retained full read-model reconciliation) truncates and repopulates
+`fts_ops` / `fts_logs`. Source-scoped repair alone is not the recovery path for
+post-`VACUUM` `fts_ops` rows, because it deletes by the current `ops.rowid`.
+Migration 0014 clears pre-0014 derived `fts_ops` / `fts_logs` rows during
+in-place upgrade so older auto-assigned docids cannot survive alongside the new
+explicit-docid rows.
 
 All indexed timestamps remain UTC microseconds; the UI converts for display.
 

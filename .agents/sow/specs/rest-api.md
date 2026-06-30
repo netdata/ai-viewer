@@ -31,7 +31,7 @@ JSON over HTTP. All implemented endpoints return `application/json` except `/api
   "status": "ok" | "degraded" | "down",
   "status_detail": "no_sources_configured",
   "version": "<git sha>",
-  "schema_version": 12,
+  "schema_version": 14,
   "uptime_s": 12345,
   "db_path": "...",
   "db_size_bytes": 12345678,

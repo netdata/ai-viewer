@@ -379,8 +379,12 @@ func TestAdapter_ScanIncompatibleSchemaHardError(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	out := make(chan canonical.Event, 16)
-	if err := a.Scan(context.Background(), nil, out); err == nil {
+	err = a.Scan(context.Background(), nil, out)
+	if err == nil {
 		t.Fatal("Scan over an incompatible schema = nil error, want fatal schema error")
+	}
+	if !canonical.IsFatalScanError(err) {
+		t.Fatalf("Scan incompatible schema error is not FatalScanError: %v", err)
 	}
 	if a.scanCursor == nil {
 		t.Error("Scan still records a best-effort cursor even on a hard error")

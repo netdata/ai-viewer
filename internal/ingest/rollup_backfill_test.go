@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -154,6 +155,29 @@ FROM `+table)
 func bucketCount(t *testing.T, db *sql.DB, table string) int {
 	t.Helper()
 	return int(scanInt(t, db, `SELECT COUNT(*) FROM `+table))
+}
+
+func TestBackfillRollupsYieldsBeforeTruncate(t *testing.T) {
+	t.Parallel()
+
+	_, db := openTestStore(t)
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO rollup_hourly
+    (bucket_ts, source_format, dimension, dimension_value, op_count)
+VALUES (?, 'codex', 'total', '', 1)`, ts(0, 9, 0)); err != nil {
+		t.Fatalf("seed rollup_hourly sentinel: %v", err)
+	}
+
+	errYield := errors.New("yield before global rollup backfill db work")
+	_, err := BackfillRollups(context.Background(), db, ts(2, 0, 0), silentLogger(), withBackfillYield(func(context.Context) error {
+		return errYield
+	}))
+	if !errors.Is(err, errYield) {
+		t.Fatalf("BackfillRollups error = %v, want %v", err, errYield)
+	}
+	if got := bucketCount(t, db, "rollup_hourly"); got != 1 {
+		t.Fatalf("rollup_hourly rows = %d, want sentinel preserved because yield ran before truncate", got)
+	}
 }
 
 // T1: a fully-closed past hour with one llm op + one tool op produces the

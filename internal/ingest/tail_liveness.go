@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -10,10 +11,12 @@ type tailLivenessConfig struct {
 	staleAfter            time.Duration
 	watchdogEvery         time.Duration
 	heartbeatPersistEvery time.Duration
+	stateWriteTimeout     time.Duration
 }
 
 type tailHeartbeatState struct {
 	lastUS      int64
+	queuedUS    int64
 	persistedUS int64
 }
 
@@ -51,8 +54,8 @@ func (i *Ingester) RecordTailHeartbeat(sourceID string) {
 	i.tailMu.Lock()
 	state := i.tailHeartbeats[sourceID]
 	state.lastUS = at
-	if state.persistedUS == 0 || at-state.persistedUS >= i.tailLiveness.heartbeatPersistEvery.Microseconds() {
-		state.persistedUS = at
+	if state.queuedUS == 0 && (state.persistedUS == 0 || at-state.persistedUS >= i.tailLiveness.heartbeatPersistEvery.Microseconds()) {
+		state.queuedUS = at
 		shouldPersist = true
 	}
 	i.tailHeartbeats[sourceID] = state
@@ -60,30 +63,123 @@ func (i *Ingester) RecordTailHeartbeat(sourceID string) {
 	if !shouldPersist {
 		return
 	}
-	select {
-	case i.tailHeartbeatPersist <- tailHeartbeatPersistRequest{sourceID: sourceID, atUS: at}:
-	default:
-		i.logger.Warn("tail heartbeat persistence queue full", "source_id", sourceID)
+	i.enqueueTailHeartbeatPersist(tailHeartbeatPersistRequest{sourceID: sourceID, atUS: at})
+}
+
+func (i *Ingester) tailHeartbeatPersistenceLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req := <-i.tailHeartbeatPersist:
+			writeCtx, cancel := i.tailStateWriteContext(ctx)
+			err := i.persistTailHeartbeat(writeCtx, req)
+			next, hasNext := i.finishTailHeartbeatPersist(req.sourceID, req.atUS, err == nil)
+			if err != nil {
+				i.logger.Warn("tail heartbeat persist failed", "source_id", req.sourceID, "err", err)
+			}
+			cancel()
+			if hasNext {
+				i.enqueueTailHeartbeatPersist(next)
+			}
+		}
 	}
 }
 
-func (i *Ingester) tailLivenessLoop(ctx context.Context) {
+func (i *Ingester) enqueueTailHeartbeatPersist(req tailHeartbeatPersistRequest) {
+	select {
+	case i.tailHeartbeatPersist <- req:
+	default:
+		i.clearQueuedTailHeartbeat(req.sourceID, req.atUS)
+		i.logger.Warn("tail heartbeat persistence queue full", "source_id", req.sourceID)
+	}
+}
+
+func (i *Ingester) clearQueuedTailHeartbeat(sourceID string, atUS int64) {
+	i.tailMu.Lock()
+	state := i.tailHeartbeats[sourceID]
+	if state.queuedUS == atUS {
+		state.queuedUS = 0
+		i.tailHeartbeats[sourceID] = state
+	}
+	i.tailMu.Unlock()
+}
+
+func (i *Ingester) finishTailHeartbeatPersist(sourceID string, atUS int64, committed bool) (tailHeartbeatPersistRequest, bool) {
+	i.tailMu.Lock()
+	defer i.tailMu.Unlock()
+
+	state := i.tailHeartbeats[sourceID]
+	if state.queuedUS == atUS {
+		state.queuedUS = 0
+	}
+	if committed && atUS > state.persistedUS {
+		state.persistedUS = atUS
+	}
+	if committed && state.queuedUS == 0 &&
+		state.lastUS > state.persistedUS &&
+		state.lastUS-state.persistedUS >= i.tailLiveness.heartbeatPersistEvery.Microseconds() {
+		state.queuedUS = state.lastUS
+		i.tailHeartbeats[sourceID] = state
+		return tailHeartbeatPersistRequest{sourceID: sourceID, atUS: state.lastUS}, true
+	}
+	i.tailHeartbeats[sourceID] = state
+	return tailHeartbeatPersistRequest{}, false
+}
+
+func (i *Ingester) tailStaleWatchdogLoop(ctx context.Context) {
 	ticker := time.NewTicker(i.tailLiveness.watchdogEvery)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case req := <-i.tailHeartbeatPersist:
-			if err := i.persistTailHeartbeat(ctx, req); err != nil {
-				i.logger.Warn("tail heartbeat persist failed", "source_id", req.sourceID, "err", err)
-			}
 		case <-ticker.C:
-			if err := i.checkTailStaleness(ctx); err != nil {
+			writeCtx, cancel := i.tailStateWriteContext(ctx)
+			if err := i.checkTailStaleness(writeCtx); err != nil {
 				i.logger.Warn("tail staleness check failed", "err", err)
 			}
+			cancel()
 		}
 	}
+}
+
+func (i *Ingester) tailStateWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	i.tailStatePending.Add(1)
+	wrapCancel := func(cancel context.CancelFunc) context.CancelFunc {
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				cancel()
+				i.tailStatePending.Add(-1)
+			})
+		}
+	}
+	if i.tailLiveness.stateWriteTimeout <= 0 {
+		writeCtx, cancel := context.WithCancel(ctx)
+		return writeCtx, wrapCancel(cancel)
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, i.tailLiveness.stateWriteTimeout)
+	return writeCtx, wrapCancel(cancel)
+}
+
+func (i *Ingester) waitForTailStatePriority(ctx context.Context) error {
+	if i == nil {
+		return nil
+	}
+	for i.tailStatePending.Load() > 0 {
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
 }
 
 func (i *Ingester) persistTailHeartbeat(ctx context.Context, req tailHeartbeatPersistRequest) error {

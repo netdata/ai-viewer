@@ -26,8 +26,8 @@ import (
 const migration0007Name = "0007_fts5_index_logs.sql"
 
 // TestMigration0007_ChainHeadSchemaVersion pins the FULL-chain head version:
-// openMigratedSQLite runs every migration through the latest (0008), so the
-// on-disk schema_meta.version is '8'. 0007's OWN bump (to '7') is pinned
+// openMigratedSQLite runs every migration through the latest (0014), so the
+// on-disk schema_meta.version is '14'. 0007's OWN bump (to '7') is pinned
 // separately by TestMigration0007_BumpsSchemaVersionTo7_Internal (in the 0008
 // test file, which stops the chain at 0007); this assertion guards the lockstep
 // with presenter.SchemaVersion as new migrations are added — mirroring how
@@ -40,8 +40,8 @@ func TestMigration0007_ChainHeadSchemaVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "12" {
-		t.Fatalf("schema_meta.version = %q, want %q (full chain head is 0012)", version, "12")
+	if version != "14" {
+		t.Fatalf("schema_meta.version = %q, want %q (full chain head is 0014)", version, "14")
 	}
 }
 
@@ -151,8 +151,8 @@ func TestMigration0007_IsIdempotent(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "12" {
-		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "12")
+	if version != "14" {
+		t.Fatalf("schema_meta.version after re-run = %q, want %q", version, "14")
 	}
 
 	if got := scanIntInternal(t, db,

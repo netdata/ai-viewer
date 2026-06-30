@@ -253,12 +253,6 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	// Enable the bulk-scan fast path: skip FTS + rollup refresh during the
-	// initial historical scan; the post-scan backfill rebuilds them once.
-	// This makes the initial ingest of large source volumes (100k+ files)
-	// minutes instead of hours (SOW-0063).
-	ing.SetDeferReadModels(true)
-
 	adapterCtx, cancelAdapters := context.WithCancel(ctx)
 	defer cancelAdapters()
 
@@ -284,7 +278,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		close(scanDone)
 	}()
 
-	_, backfillWait := startPostScanBackfill(ctx, scanDone, ing, logger, readModelBackfillStartupTimeout)
+	_, backfillWait := startPostScanBackfill(ctx, scanDone, len(sources) > 0, ing, logger, readModelBackfillStartupTimeout)
 
 	var adapterWG sync.WaitGroup
 	for _, src := range sources {
@@ -618,14 +612,14 @@ func closeStoreWithTimeout(st *store.Store, d time.Duration, logger *slog.Logger
 }
 
 type readModelBackfiller interface {
-	DeferReadModels() bool
 	BackfillReadModels(context.Context) error
 }
 
 // startPostScanBackfill is the retained all-sources reconciliation pass. Its
-// DeferReadModels check only answers whether startup scan deferral was enabled;
-// the returned done channel is no longer passed to per-source Tail startup.
-func startPostScanBackfill(shutdownCtx context.Context, scanDone <-chan struct{}, backfiller readModelBackfiller, logger *slog.Logger, timeout time.Duration) (<-chan struct{}, <-chan struct{}) {
+// readModelsDeferred flag answers whether the startup run enabled source-scoped
+// Scan deferral; the returned done channel is no longer passed to per-source
+// Tail startup.
+func startPostScanBackfill(shutdownCtx context.Context, scanDone <-chan struct{}, readModelsDeferred bool, backfiller readModelBackfiller, logger *slog.Logger, timeout time.Duration) (<-chan struct{}, <-chan struct{}) {
 	backfillDone := make(chan struct{})
 	backfillWait := make(chan struct{})
 	go func() {
@@ -642,7 +636,7 @@ func startPostScanBackfill(shutdownCtx context.Context, scanDone <-chan struct{}
 			}
 			return
 		}
-		if !backfiller.DeferReadModels() {
+		if !readModelsDeferred {
 			return
 		}
 		backfillCtx, cancel := context.WithTimeout(shutdownCtx, timeout)

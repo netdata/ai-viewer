@@ -112,15 +112,17 @@ risks.
 
 Stop conditions:
 
-- P0/P1/P2 findings → verify, generalize to a class of possible misses, perform
-  and record a local class sweep, then fix or reject with evidence before any
-  re-run of the same gate.
+- P0/P1/P2 findings → verify, generalize to a class of possible misses, count
+  all occurrences of that class across the milestone, then perform and record a
+  fresh open-ended review of the whole milestone before any re-run of the same
+  gate.
 - P3 findings → fix or document; P3-only comments do not reopen a converged
   gate unless verification shows a real P0/P1/P2 class.
 - Positive votes from all available reviewers, or every non-positive vote verified as false-positive/noise → advance to the next stage.
-- Round budget: one round is normal; a second is allowed after a class sweep; a
-  third is exceptional and requires a short SOW waste analysis plus full local
-  review first; a fourth blocker round is forbidden without an
+- Round budget: one round is normal; a second is allowed only after targeted
+  class verification and a whole-milestone open-ended review; a third is
+  exceptional and requires a short SOW waste analysis plus another full
+  open-ended local review first; a fourth blocker round is forbidden without an
   operator-visible status report and a changed approach.
 - Repeated hard stall → stop buying six-reviewer rounds, record the waste
   analysis in the SOW, and surface a business-level recommendation.
@@ -138,8 +140,9 @@ Technical reviewer failures are handled pragmatically:
 
 Findings are addressed in the relevant artifact for that gate: gap analysis,
 plan, specs, tests, code, docs, or gates. Reviewers re-run with the same scope
-plus a fix note only after readiness remains true and any blocker class sweep is
-recorded. History is recorded in the SOW under `## Reviews`.
+plus a fix note only after readiness remains true, targeted blocker-class
+verification is recorded, and a whole-milestone open-ended review is recorded.
+History is recorded in the SOW under `## Reviews`.
 
 The CTO does not claim work "done" before the applicable gate converges.
 
@@ -168,11 +171,12 @@ Before reporting to the operator:
 - All quality gates green locally.
 - Applicable external reviewer gate converged; reviewer-readiness checklist
   recorded before the run; P0/P1/P2 findings fixed or rejected with evidence;
-  blocker class sweeps recorded before reruns; only documented P3 findings
-  remain.
+  targeted class verifications and open-ended milestone reviews recorded before
+  reruns; only documented P3 findings remain.
 - Reviewer waste controls followed: no reviewer use for discovery, no immediate
-  patch-and-rerun after blockers, no P3-only rerun, no fourth blocker round
-  without operator-visible status and a changed approach.
+  patch-and-rerun after blockers, no limited-scope post-finding review, no
+  P3-only rerun, no fourth blocker round without operator-visible status and a
+  changed approach.
 - No new TODO/FIXME without a tracked SOW in `pending/`.
 - `AGENTS.md`, skills, specs updated if a new pattern or gotcha emerged.
 - No half-built features.
@@ -226,7 +230,8 @@ The assistant must never:
   repeated blocker rounds mean the CTO must stop, self-review, and change the
   approach.
 - Patch only a cited blocker line and immediately rerun reviewers instead of
-  performing the required class sweep.
+  performing the required targeted class verification plus open-ended
+  whole-milestone review.
 - Rerun reviewers for P3-only comments unless verification shows a real
   P0/P1/P2 class.
 - Skip the spec update and "add it later".

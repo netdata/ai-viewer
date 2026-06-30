@@ -115,7 +115,10 @@ Emitted (rate-limited to ~1 per second) when catalog rollups change so the analy
 ### `source_status_changed`
 
 Emitted when a source's parse_errors count, enabled flag, lifecycle state,
-read-model state, or lifecycle/read-model timestamp/error evidence changes.
+read-model state, or lifecycle/read-model transition/error evidence changes.
+Heartbeat-only `tail_heartbeat_at` persistence while the source remains
+`tailing` does not emit this event; clients reconcile that liveness evidence
+through REST health/source reads.
 The event is only an invalidation hint; clients re-fetch `/api/sources` and
 `/api/health` for the full state.
 

@@ -54,6 +54,7 @@ type SourceLifecycleUpdate struct {
 	State                        SourceLifecycleState
 	ExpectedLifecycleState       *SourceLifecycleState
 	ReadModelState               ReadModelState
+	ReadModelStateTransitionOnly bool
 	AtUS                         int64
 	ScanStartedAtUS              *int64
 	ScanCompletedAtUS            *int64
@@ -285,7 +286,7 @@ WHERE source_id = ?`
 }
 
 func updateReadModelColumns(ctx context.Context, tx *sql.Tx, sourceID, location string, tsUS int64, update SourceLifecycleUpdate) (bool, error) {
-	res, err := tx.ExecContext(ctx, `
+	query := `
 UPDATE source_progress
 SET read_model_state = ?,
     read_model_state_at = ?,
@@ -294,8 +295,8 @@ SET read_model_state = ?,
     read_model_repair_failed_at = COALESCE(?, read_model_repair_failed_at),
     read_model_repair_attempts = CASE WHEN ? THEN 0 ELSE read_model_repair_attempts + ? END,
     read_model_error = CASE WHEN ? THEN NULL ELSE COALESCE(?, read_model_error) END
-WHERE source_id = ?
-`,
+WHERE source_id = ?`
+	args := []any{
 		string(update.ReadModelState),
 		tsUS,
 		nullInt64(update.RepairStartedAtUS),
@@ -306,7 +307,12 @@ WHERE source_id = ?
 		update.ClearReadModelError,
 		nullString(sanitizeLifecycleError(update.ReadModelError, location)),
 		sourceID,
-	)
+	}
+	if update.ReadModelStateTransitionOnly {
+		query += ` AND read_model_state <> ?`
+		args = append(args, string(update.ReadModelState))
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return false, fmt.Errorf("read model lifecycle update: %w", err)
 	}

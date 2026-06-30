@@ -930,7 +930,6 @@ func scanSourceIntoDBWithCursor(ctx context.Context, db *sql.DB, logger *slog.Lo
 	if err != nil {
 		return fmt.Errorf("construct ingester: %w", err)
 	}
-	ing.SetDeferReadModels(true)
 	if err := ing.Start(ctx); err != nil {
 		return fmt.Errorf("start ingester: %w", err)
 	}

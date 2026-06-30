@@ -24,6 +24,9 @@ type resolver struct {
 	db       *sql.DB
 	logger   *slog.Logger
 	interval time.Duration
+	// waitBeforeDBWork lets tail lifecycle writes take priority before the
+	// resolver opens its lower-priority maintenance transaction.
+	waitBeforeDBWork func(context.Context) error
 	// stop signals loop to exit on Stop(); buffered so a non-blocking
 	// send always succeeds even if loop isn't yet started.
 	stop chan struct{}
@@ -132,6 +135,9 @@ func (r *resolver) resolverSteps() []resolverStep {
 // fails). The defer/committed pattern is the same one the worker uses; it is
 // extracted here so linkOrphans stays orchestration-only.
 func (r *resolver) runResolverTx(ctx context.Context, body func(context.Context, *sql.Tx) error) error {
+	if err := r.waitForDBWork(ctx); err != nil {
+		return err
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("resolver: begin tx: %w", err)
@@ -149,6 +155,16 @@ func (r *resolver) runResolverTx(ctx context.Context, body func(context.Context,
 		return fmt.Errorf("resolver: commit: %w", err)
 	}
 	committed = true
+	return nil
+}
+
+func (r *resolver) waitForDBWork(ctx context.Context) error {
+	if r.waitBeforeDBWork == nil {
+		return nil
+	}
+	if err := r.waitBeforeDBWork(ctx); err != nil {
+		return fmt.Errorf("resolver: wait for tail-state priority: %w", err)
+	}
 	return nil
 }
 

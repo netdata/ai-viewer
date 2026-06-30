@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netdata/ai-viewer/internal/canonical"
 	"github.com/netdata/ai-viewer/internal/ingest"
 )
 
@@ -89,6 +90,95 @@ func TestStartSourceRestartsAfterTailFailure(t *testing.T) {
 	adapterWG.Wait()
 }
 
+func TestStartSourceRestartsAfterUnexpectedTailNilReturn(t *testing.T) {
+	restore := overrideSourceRestartBackoffForTest(time.Millisecond, time.Millisecond)
+	defer restore()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_, db, ing := openLifecycleIngester(t)
+
+	tailReturned := make(chan struct{})
+	close(tailReturned)
+	secondTailStarted := make(chan struct{})
+	factory := &restartFactory{adapters: []*sourceLifecycleAdapter{
+		{
+			tailStarted: make(chan struct{}),
+			tailBlock:   tailReturned,
+		},
+		{
+			tailStarted: secondTailStarted,
+		},
+	}}
+
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+	if err := startSourceWithFactoryLookup(ctx, &adapterWG, &scanWG, ing, nil, src, silentLogger(), factory.lookup); err != nil {
+		t.Fatalf("startSourceWithFactoryLookup: %v", err)
+	}
+	waitForScanOutcome(t, &scanWG)
+	waitForChannel(t, secondTailStarted, "second tail start after unexpected nil return")
+
+	if got := readLifecycleInt(t, db, `SELECT tail_restart_count FROM source_progress WHERE source_id=?`, src.id); got != 0 {
+		t.Fatalf("tail_restart_count after successful restart = %d, want 0", got)
+	}
+	if got := readLifecycleInt(t, db, `SELECT IFNULL(tail_failed_at, 0) FROM source_progress WHERE source_id=?`, src.id); got == 0 {
+		t.Fatal("tail_failed_at = 0, want failure timestamp for unexpected nil Tail return")
+	}
+
+	cancel()
+	adapterWG.Wait()
+}
+
+func TestStartSourceRecordsStoppedWhenScanReturnsNilAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, db, ing := openLifecycleIngester(t)
+
+	scanStarted := make(chan struct{})
+	scanBlock := make(chan struct{})
+	tailStarted := make(chan struct{})
+	adapter := &sourceLifecycleAdapter{
+		scanStarted:     scanStarted,
+		scanBlock:       scanBlock,
+		scanNilOnCancel: true,
+		tailStarted:     tailStarted,
+	}
+
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+	if err := startSourceWithFactoryLookup(ctx, &adapterWG, &scanWG, ing, nil, src, silentLogger(), singleAdapterLookup(adapter)); err != nil {
+		t.Fatalf("startSourceWithFactoryLookup: %v", err)
+	}
+	waitForChannel(t, scanStarted, "scan start")
+	cancel()
+	adapterWG.Wait()
+	waitForScanOutcome(t, &scanWG)
+
+	state, _ := readLifecycleState(t, db, src.id)
+	if state != string(ingest.SourceLifecycleStopped) {
+		t.Fatalf("lifecycle_state = %q, want %q after cancelled Scan returned nil", state, ingest.SourceLifecycleStopped)
+	}
+	select {
+	case <-tailStarted:
+		t.Fatal("Tail started after Scan returned nil due to source cancellation")
+	default:
+	}
+	close(scanBlock)
+}
+
 func TestStartSourceRestartCatchupScanFailureRetriesWithoutTail(t *testing.T) {
 	restore := overrideSourceRestartBackoffForTest(10*time.Millisecond, 20*time.Millisecond)
 	defer restore()
@@ -149,6 +239,68 @@ func TestStartSourceRestartCatchupScanFailureRetriesWithoutTail(t *testing.T) {
 
 	cancel()
 	adapterWG.Wait()
+}
+
+func TestStartSourceRestartCatchupFatalScanStopsWithoutTail(t *testing.T) {
+	restore := overrideSourceRestartBackoffForTest(time.Millisecond, time.Millisecond)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_, db, ing := openLifecycleIngester(t)
+
+	first := &sourceLifecycleAdapter{
+		tailStarted: make(chan struct{}),
+		tailErr:     errors.New("tail failed"),
+	}
+	second := &sourceLifecycleAdapter{
+		scanStarted: make(chan struct{}),
+		scanErr:     canonical.NewFatalScanError(errors.New("source schema unusable")),
+		tailStarted: make(chan struct{}),
+	}
+	third := &sourceLifecycleAdapter{
+		tailStarted: make(chan struct{}),
+	}
+	factory := &restartFactory{adapters: []*sourceLifecycleAdapter{first, second, third}}
+
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+
+	if err := startSourceWithFactoryLookup(ctx, &adapterWG, &scanWG, ing, nil, src, silentLogger(), factory.lookup); err != nil {
+		t.Fatalf("startSourceWithFactoryLookup: %v", err)
+	}
+	waitForScanOutcome(t, &scanWG)
+	waitForChannel(t, first.tailStarted, "first tail start")
+	waitForChannel(t, second.scanStarted, "restart catch-up scan")
+
+	done := make(chan struct{})
+	go func() {
+		adapterWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-second.tailStarted:
+		t.Fatal("Tail started after fatal restart catch-up Scan")
+	case <-third.tailStarted:
+		t.Fatal("restart continued after fatal restart catch-up Scan")
+	case <-time.After(2 * time.Second):
+		t.Fatal("source supervisor did not stop after fatal restart catch-up Scan")
+	}
+
+	state, lifecycleErr := readLifecycleState(t, db, src.id)
+	if state != string(ingest.SourceLifecycleScanFailed) {
+		t.Fatalf("lifecycle_state = %q, want %q", state, ingest.SourceLifecycleScanFailed)
+	}
+	if lifecycleErr == "" {
+		t.Fatal("lifecycle_error is empty, want fatal restart scan evidence")
+	}
 }
 
 func TestStartSourceEscalatesSustainedTailRestartFailures(t *testing.T) {
@@ -256,6 +408,91 @@ func TestStartSourceRecordsTailFailedWhenTailIgnoresShutdownCancellation(t *test
 	if got := readLifecycleInt(t, db, `SELECT COUNT(*) FROM notify WHERE kind='source_status_changed' AND source_id=?`, src.id); got == 0 {
 		t.Fatal("source_status_changed notify row missing for tail cancellation timeout")
 	}
+}
+
+func TestStartSourceLateTailSendAfterCancelTimeoutDoesNotPanic(t *testing.T) {
+	oldGrace := sourceTailCancelGrace
+	sourceTailCancelGrace = 20 * time.Millisecond
+	defer func() { sourceTailCancelGrace = oldGrace }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, _, ing := openLifecycleIngester(t)
+
+	tailStarted := make(chan struct{})
+	unblockTail := make(chan struct{})
+	lateSend := make(chan struct{})
+	adapter := &sourceLifecycleAdapter{
+		tailStarted:    tailStarted,
+		tailBlock:      unblockTail,
+		tailLateSend:   lateSend,
+		tailLateEvents: []canonical.Event{canonical.SourceProgressEvent{Cursor: `{"late":true}`}},
+	}
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+
+	if err := startSourceWithFactoryLookup(ctx, &adapterWG, &scanWG, ing, nil, src, silentLogger(), singleAdapterLookup(adapter)); err != nil {
+		t.Fatalf("startSourceWithFactoryLookup: %v", err)
+	}
+	waitForScanOutcome(t, &scanWG)
+	waitForChannel(t, tailStarted, "tail start")
+
+	cancel()
+	adapterWG.Wait()
+	close(unblockTail)
+	waitForChannel(t, lateSend, "late tail send")
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestStartSourceRestartsAfterWatchdogStaleRequest(t *testing.T) {
+	restore := overrideSourceRestartBackoffForTest(time.Millisecond, time.Millisecond)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_, db, ing := openLifecycleIngesterWithOptions(t,
+		ingest.WithTailLiveness(20*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond),
+		ingest.WithTailStateWriteTimeout(time.Second),
+	)
+
+	first := &sourceLifecycleAdapter{
+		tailStarted: make(chan struct{}),
+	}
+	second := &sourceLifecycleAdapter{
+		scanStarted: make(chan struct{}),
+		tailStarted: make(chan struct{}),
+	}
+	factory := &restartFactory{adapters: []*sourceLifecycleAdapter{first, second}}
+
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+
+	if err := startSourceWithFactoryLookup(ctx, &adapterWG, &scanWG, ing, nil, src, silentLogger(), factory.lookup); err != nil {
+		t.Fatalf("startSourceWithFactoryLookup: %v", err)
+	}
+	waitForScanOutcome(t, &scanWG)
+	waitForChannel(t, first.tailStarted, "first tail start")
+	waitForChannel(t, second.scanStarted, "watchdog restart catch-up Scan")
+	waitForChannel(t, second.tailStarted, "watchdog restart Tail")
+
+	if !waitForLifecycleState(t, db, src.id, string(ingest.SourceLifecycleTailing), 2*time.Second) {
+		state, _ := readLifecycleState(t, db, src.id)
+		t.Fatalf("lifecycle_state = %q, want restarted %q", state, ingest.SourceLifecycleTailing)
+	}
+
+	cancel()
+	adapterWG.Wait()
 }
 
 func TestStartSourceSuccessfulTailResetsPersistedRestartCount(t *testing.T) {

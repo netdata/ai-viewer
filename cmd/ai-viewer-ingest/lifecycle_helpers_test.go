@@ -41,6 +41,7 @@ type sourceLifecycleAdapter struct {
 	scanStarted     chan struct{}
 	scanStartedOnce sync.Once
 	scanBlock       <-chan struct{}
+	scanNilOnCancel bool
 	scanEvents      []canonical.Event
 	scanEventDelay  time.Duration
 	scanErr         error
@@ -49,6 +50,8 @@ type sourceLifecycleAdapter struct {
 	tailStartedOnce sync.Once
 	tailEvents      []canonical.Event
 	tailBlock       <-chan struct{}
+	tailLateEvents  []canonical.Event
+	tailLateSend    chan struct{}
 }
 
 func (a *sourceLifecycleAdapter) Name() string {
@@ -84,6 +87,9 @@ func (a *sourceLifecycleAdapter) Scan(ctx context.Context, _ canonical.Cursor, o
 		select {
 		case <-a.scanBlock:
 		case <-ctx.Done():
+			if a.scanNilOnCancel {
+				return nil
+			}
 			return ctx.Err()
 		}
 	}
@@ -106,6 +112,12 @@ func (a *sourceLifecycleAdapter) Tail(ctx context.Context, out chan<- canonical.
 	}
 	if a.tailBlock != nil {
 		<-a.tailBlock
+		if a.tailLateSend != nil {
+			close(a.tailLateSend)
+		}
+		for _, ev := range a.tailLateEvents {
+			out <- ev
+		}
 		return nil
 	}
 	<-ctx.Done()
@@ -145,12 +157,22 @@ func (f *restartFactory) lookup(string) (canonical.AdapterFactory, bool) {
 
 func openLifecycleIngester(t *testing.T) (*store.Store, *sql.DB, *ingest.Ingester) {
 	t.Helper()
+	return openLifecycleIngesterWithOptions(t)
+}
+
+func openLifecycleIngesterWithOptions(t *testing.T, opts ...ingest.Option) (*store.Store, *sql.DB, *ingest.Ingester) {
+	t.Helper()
 	st, err := store.OpenWriter(context.Background(), filepath.Join(t.TempDir(), "index.db"), silentLogger())
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	ing, err := ingest.New(st.DB(), ingest.WithLogger(silentLogger()), ingest.WithBatchInterval(10*time.Millisecond))
+	baseOpts := []ingest.Option{
+		ingest.WithLogger(silentLogger()),
+		ingest.WithBatchInterval(10 * time.Millisecond),
+	}
+	baseOpts = append(baseOpts, opts...)
+	ing, err := ingest.New(st.DB(), baseOpts...)
 	if err != nil {
 		t.Fatalf("ingest.New: %v", err)
 	}

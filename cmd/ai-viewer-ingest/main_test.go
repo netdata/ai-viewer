@@ -871,21 +871,17 @@ func TestRun_PartialStartupSignalUsesBoundedCloseAndReleasesLock(t *testing.T) {
 }
 
 type fakeReadModelBackfiller struct {
-	deferReadModels bool
-	calls           chan struct{}
-	ctxDone         chan struct{}
-	returnErr       error
+	calls     chan struct{}
+	ctxDone   chan struct{}
+	returnErr error
 }
 
-func newFakeReadModelBackfiller(deferReadModels bool) *fakeReadModelBackfiller {
+func newFakeReadModelBackfiller() *fakeReadModelBackfiller {
 	return &fakeReadModelBackfiller{
-		deferReadModels: deferReadModels,
-		calls:           make(chan struct{}, 1),
-		ctxDone:         make(chan struct{}, 1),
+		calls:   make(chan struct{}, 1),
+		ctxDone: make(chan struct{}, 1),
 	}
 }
-
-func (f *fakeReadModelBackfiller) DeferReadModels() bool { return f.deferReadModels }
 
 func (f *fakeReadModelBackfiller) BackfillReadModels(ctx context.Context) error {
 	f.calls <- struct{}{}
@@ -902,10 +898,10 @@ func TestStartPostScanBackfillClosesGateOnTimeout(t *testing.T) {
 
 	scanDone := make(chan struct{})
 	close(scanDone)
-	backfiller := newFakeReadModelBackfiller(true)
+	backfiller := newFakeReadModelBackfiller()
 
 	shutdownCtx := context.Background()
-	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), 10*time.Millisecond)
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, true, backfiller, silentLogger(), 10*time.Millisecond)
 
 	select {
 	case <-backfiller.calls:
@@ -933,9 +929,9 @@ func TestStartPostScanBackfillWaitsForScanDone(t *testing.T) {
 	t.Parallel()
 
 	scanDone := make(chan struct{})
-	backfiller := newFakeReadModelBackfiller(true)
+	backfiller := newFakeReadModelBackfiller()
 	shutdownCtx := context.Background()
-	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), 10*time.Millisecond)
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, true, backfiller, silentLogger(), 10*time.Millisecond)
 
 	select {
 	case <-backfiller.calls:
@@ -971,10 +967,10 @@ func TestStartPostScanBackfillSkipsWhenReadModelsNotDeferred(t *testing.T) {
 
 	scanDone := make(chan struct{})
 	close(scanDone)
-	backfiller := newFakeReadModelBackfiller(false)
+	backfiller := newFakeReadModelBackfiller()
 
 	shutdownCtx := context.Background()
-	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), time.Minute)
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, false, backfiller, silentLogger(), time.Minute)
 
 	select {
 	case <-backfillDone:
@@ -998,8 +994,8 @@ func TestStartPostScanBackfillShutdownBeforeScanDoneClosesChannels(t *testing.T)
 
 	shutdownCtx, cancel := context.WithCancel(context.Background())
 	scanDone := make(chan struct{})
-	backfiller := newFakeReadModelBackfiller(true)
-	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, backfiller, silentLogger(), time.Minute)
+	backfiller := newFakeReadModelBackfiller()
+	backfillDone, backfillWait := startPostScanBackfill(shutdownCtx, scanDone, true, backfiller, silentLogger(), time.Minute)
 
 	cancel()
 	select {

@@ -130,11 +130,19 @@ re-run `./scripts/build.sh` and restart the binaries.)
   the frontend. Run `./scripts/build.sh` and restart.
 - **`ai-viewer-serve` exits with a schema error** — the log line is
   `ai-viewer-serve: schema version mismatch`, usually with
-  `schema_meta.version row missing` or `schema_meta.version is <got>, want 12`.
+  `schema_meta.version row missing` or `schema_meta.version is <got>, want 14`.
   Stop serve, check `journalctl --user -u ai-viewer-ingest.service` for the
   migration failure, start/restart `ai-viewer-ingest` so it applies migration
-  0012, then start/restart serve. The systemd units handle this ordering with
-  auto-restart.
+  0014, then start/restart serve. The systemd units handle this ordering with
+  auto-restart. Migration 0014 clears the derived `fts_ops` / `fts_logs` search
+  indexes when upgrading old stores; source repair or `rollups-backfill`
+  repopulates them from primary rows.
+- **Do not run SQLite `VACUUM` on the ingest database while ai-viewer is
+  running.** `fts_ops` uses `ops.rowid` as an internal maintenance docid, and
+  SQLite can rewrite implicit rowids during `VACUUM`. If external maintenance
+  has vacuumed or rebuilt the DB, stop the service and run
+  `ai-viewer-ingest rollups-backfill --db <index.db>` (or let daemon startup
+  complete its retained full read-model reconciliation) before trusting search.
 - **Reset everything** — stop the services, `rm -rf ~/.local/share/ai-viewer`,
   and re-run the ingester; it re-reads your sources from scratch.
 

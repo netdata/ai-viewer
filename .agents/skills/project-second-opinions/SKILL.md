@@ -9,6 +9,28 @@ description: >
 
 # Second Opinions — Three Reviewer Gates
 
+## Non-Negotiable Open-Ended Review Rule
+
+The only valid review is open-ended over the whole milestone/gate scope.
+Targeted class verification is necessary during claim verification, but it is
+not a substitute for a full open-ended review.
+
+When external reviewers find any real P0/P1/P2 issue:
+
+1. Verify the exact claim.
+2. During verification, identify the issue class and count every occurrence of
+   that class across the whole milestone scope.
+3. Then perform a fresh, unbiased, open-ended review of the entire milestone
+   from scratch. Do not limit this review to the cited finding, the issue
+   class, prior fixes, or prior reviewer rounds.
+4. Fix or reject every real issue from both the targeted verification and the
+   open-ended review before rerunning external reviewers.
+
+The common failure mode is biased limited review: a reviewer reports "X is
+wrong", the CTO checks only X-like issues, reruns reviewers, and reviewers then
+find unrelated Y/Z issues. That turns external reviewers into scouts. Stop and
+perform the whole-milestone open-ended review before any rerun.
+
 External reviewers are a quality gate, not an implementation strategy. The CTO
 does the gap analysis, planning, coding, tests, gates, and self-review first.
 Reviewers then look for what was missed.
@@ -90,12 +112,14 @@ Do not run reviewers:
 ## Reviewer Round Budget
 
 The normal result is one reviewer round. A second round is allowed when the
-first round finds real P0/P1/P2 surprises and the CTO has performed the class
-sweep described below.
+first round finds real P0/P1/P2 surprises and the CTO has performed both the
+targeted class verification and the whole-milestone open-ended review described
+below.
 
 A third round is exceptional. If round 2 still returns accepted P0/P1/P2
 findings for the same gate, stop the reviewer loop, write a short waste analysis
-in the SOW explaining why self-review missed them, perform a full local review,
+in the SOW explaining why open-ended self-review missed them, change the review
+approach or split the milestone, perform another full open-ended local review,
 then run one more broad-scope round.
 
 A fourth blocker round for the same gate is forbidden unless the operator has
@@ -114,12 +138,21 @@ mechanical todo list.
 For each accepted P0/P1/P2 finding:
 
 1. Verify the exact claim against file/spec/SOW evidence.
-2. Identify the broader class of possible misses.
-3. Search and self-review the whole stage scope for that class.
+2. Identify the broader class of possible misses during verification.
+3. Search the whole milestone/gate scope and count every occurrence of that
+   class.
 4. Update the gap analysis, plan, specs, tests, code, docs, or migration notes
    for the whole class, not only the cited line.
-5. Record the class sweep and disposition in the SOW or work ledger before any
-   rerun.
+
+After all accepted P0/P1/P2 findings have been verified:
+
+5. Perform a fresh, unbiased, open-ended review of the entire milestone/gate
+   scope from scratch. This review is not scoped to the accepted findings, their
+   classes, the lines changed, prior reviewer comments, or the latest fixes.
+6. Update the stage artifact for every real issue found by that open-ended
+   review.
+7. Record both the targeted class verification and the whole-milestone
+   open-ended review in the SOW or work ledger before any rerun.
 
 Examples:
 
@@ -205,8 +238,9 @@ For every gate:
 - P0/P1/P2 findings are fixed, or rejected as false positives/hallucinations with
   evidence.
 - P3 findings may be fixed or documented.
-- Before any rerun after accepted P0/P1/P2 findings, complete and record the
-  class sweep from "After A NEEDS WORK Result".
+- Before any rerun after accepted P0/P1/P2 findings, complete and record both
+  the targeted class verification and the whole-milestone open-ended review from
+  "After A NEEDS WORK Result".
 - Re-run the same gate with the same broad scope after fixes. Add only short
   notes about fixes already made; do not narrow the prompt to "review the
   fixes".
@@ -382,20 +416,23 @@ THIS IS A READ-ONLY REQUEST.
    - List each unique finding once, attributed to which reviewer flagged it.
    - Classify: P0/P1/P2/P3.
    - Verify every claim.
-7. If accepted P0/P1/P2 findings exist, perform the class sweep from "After A
-   NEEDS WORK Result", then address or reject them with evidence before any
-   retry of technically failed reviewers.
+7. If accepted P0/P1/P2 findings exist, perform the targeted class verification
+   and the whole-milestone open-ended review from "After A NEEDS WORK Result",
+   then address or reject them with evidence before any retry of technically
+   failed reviewers.
 8. If all successful reviewers are positive or P3-only, retry each technically
    failed reviewer once if the missing vote matters for closing the gate.
 9. Re-run the same gate with the same broad scope plus a short note of fixes
-   only after readiness remains true and the class sweep is recorded.
+   only after readiness remains true, targeted verification is recorded, and the
+   open-ended milestone review is recorded.
 10. Apply the "Reviewer Round Budget". Do not buy repeated six-reviewer rounds
     as a substitute for local review.
 11. Stop when positive votes converge, all remaining non-positive claims are
     rejected with evidence, only P3 remains documented, or technically failed
     reviewers have exhausted their single retry for this gate.
-12. Record the readiness evidence, review history, class sweeps, and
-    dispositions in the SOW or relevant work ledger.
+12. Record the readiness evidence, review history, targeted class
+    verifications, open-ended milestone reviews, and dispositions in the SOW or
+    relevant work ledger.
 
 ## Anti-Patterns
 
@@ -404,8 +441,12 @@ THIS IS A READ-ONLY REQUEST.
   contracts, tests, and risks locally first; reviewers challenge the completed
   stage artifact.
 - **Running reviewers before doing CTO work.** Reviewers enrich and verify; they do not replace analysis, planning, implementation, or self-review.
-- **Patch-and-rerun after blockers.** Accepted P0/P1/P2 findings require a
-  broader class sweep before another six-reviewer round.
+- **Patch-and-rerun after blockers.** Accepted P0/P1/P2 findings require
+  targeted class verification plus a fresh open-ended whole-milestone review
+  before another six-reviewer round.
+- **Limited-scope post-finding review.** Reviewing only the cited issue class is
+  biased review. The class check happens inside claim verification; the
+  mandatory pre-rerun review is open-ended across the whole milestone.
 - **Rerunning after P3-only comments.** P3-only results are not a blocker unless
   verification shows they imply a real P0/P1/P2 class.
 - **Treating more rounds as rigor.** A fourth blocker round for the same gate is

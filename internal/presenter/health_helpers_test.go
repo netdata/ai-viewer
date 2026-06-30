@@ -145,6 +145,59 @@ func TestHealthBuildSource_TailingWithinHeartbeatGraceIsHealthy(t *testing.T) {
 	}
 }
 
+func TestHealthBuildSource_TailingFirstHeartbeatGrace(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	tests := []struct {
+		name        string
+		startedAt   sql.NullInt64
+		wantState   string
+		wantDegrade bool
+	}{
+		{
+			name:        "recent start without heartbeat stays tailing",
+			startedAt:   sql.NullInt64{Int64: nowUS - tailStaleThresholdUS + 1, Valid: true},
+			wantState:   "tailing",
+			wantDegrade: false,
+		},
+		{
+			name:        "stale start without heartbeat becomes tail_stale",
+			startedAt:   sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+			wantState:   "tail_stale",
+			wantDegrade: true,
+		},
+		{
+			name:        "missing start and heartbeat becomes tail_stale",
+			startedAt:   sql.NullInt64{},
+			wantState:   "tail_stale",
+			wantDegrade: true,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotSource, gotDegraded := buildHealthSource(healthSourceRow{
+				id:              "src-first-heartbeat",
+				format:          "codex",
+				location:        "/tmp/codex",
+				enabled:         1,
+				lifecycleState:  "tailing",
+				tailStartedAt:   tt.startedAt,
+				tailHeartbeatAt: sql.NullInt64{},
+				readModelState:  "ready",
+			}, nowUS)
+			if gotSource.LifecycleState != tt.wantState {
+				t.Fatalf("lifecycle_state = %q, want %q", gotSource.LifecycleState, tt.wantState)
+			}
+			if gotDegraded != tt.wantDegrade {
+				t.Fatalf("degraded = %v, want %v", gotDegraded, tt.wantDegrade)
+			}
+		})
+	}
+}
+
 func TestHealthBuildSource_PreTailAndLongScanAgeDegrade(t *testing.T) {
 	t.Parallel()
 
@@ -226,6 +279,56 @@ func TestHealthBuildSource_ReadModelRepairGrace(t *testing.T) {
 				tailHeartbeatAt:  sql.NullInt64{Int64: nowUS, Valid: true},
 				readModelState:   "repair_pending",
 				readModelStateAt: sql.NullInt64{Int64: tt.stateAt, Valid: true},
+			}, nowUS)
+			if gotDegraded != tt.wantDegrade {
+				t.Fatalf("degraded = %v, want %v", gotDegraded, tt.wantDegrade)
+			}
+		})
+	}
+}
+
+func TestHealthBuildSource_TailRestartingGrace(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	tests := []struct {
+		name             string
+		stateAt          int64
+		tailRestartCount int64
+		wantDegrade      bool
+	}{
+		{
+			name:             "single restart within long scan grace",
+			stateAt:          nowUS - longScanThresholdUS + 1,
+			tailRestartCount: 1,
+			wantDegrade:      false,
+		},
+		{
+			name:             "single restart beyond long scan grace",
+			stateAt:          nowUS - longScanThresholdUS - 1,
+			tailRestartCount: 1,
+			wantDegrade:      true,
+		},
+		{
+			name:             "repeated restart degrades immediately",
+			stateAt:          nowUS,
+			tailRestartCount: 2,
+			wantDegrade:      true,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, gotDegraded := buildHealthSource(healthSourceRow{
+				id:               "src-restart",
+				format:           "codex",
+				location:         "/tmp/codex",
+				enabled:          1,
+				lifecycleState:   "tail_restarting",
+				lifecycleStateAt: sql.NullInt64{Int64: tt.stateAt, Valid: true},
+				tailRestartCount: tt.tailRestartCount,
+				readModelState:   "ready",
 			}, nowUS)
 			if gotDegraded != tt.wantDegrade {
 				t.Fatalf("degraded = %v, want %v", gotDegraded, tt.wantDegrade)

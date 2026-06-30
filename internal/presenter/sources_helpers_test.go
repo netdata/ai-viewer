@@ -92,6 +92,53 @@ func TestSourcesBuildItem_TailingWithStaleHeartbeatIsEffectiveTailStale(t *testi
 	}
 }
 
+func TestSourcesBuildItem_TailingFirstHeartbeatGrace(t *testing.T) {
+	t.Parallel()
+
+	nowUS := fixedTime.UnixMicro()
+	tests := []struct {
+		name      string
+		startedAt sql.NullInt64
+		want      string
+	}{
+		{
+			name:      "recent start without heartbeat stays tailing",
+			startedAt: sql.NullInt64{Int64: nowUS - tailStaleThresholdUS + 1, Valid: true},
+			want:      "tailing",
+		},
+		{
+			name:      "stale start without heartbeat becomes tail_stale",
+			startedAt: sql.NullInt64{Int64: nowUS - tailStaleThresholdUS - 1, Valid: true},
+			want:      "tail_stale",
+		},
+		{
+			name:      "missing start and heartbeat becomes tail_stale",
+			startedAt: sql.NullInt64{},
+			want:      "tail_stale",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := buildSourceItem(sourceItemRow{
+				id:              "src-first-heartbeat",
+				format:          "codex",
+				location:        "/tmp/codex",
+				enabled:         1,
+				createdAt:       100,
+				lifecycleState:  "tailing",
+				tailStartedAt:   tt.startedAt,
+				tailHeartbeatAt: sql.NullInt64{},
+				readModelState:  "ready",
+			}, nowUS)
+			if got.LifecycleState != tt.want {
+				t.Fatalf("lifecycle_state = %q, want %q", got.LifecycleState, tt.want)
+			}
+		})
+	}
+}
+
 func TestReadSourceItemRows_ScanErrorReturnsNilItems(t *testing.T) {
 	t.Parallel()
 

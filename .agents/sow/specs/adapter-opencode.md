@@ -437,6 +437,11 @@ Rationale for using `time_updated` over `id` (rowid) for the watermark: opencode
 The realtime tailer is a timer-driven poll loop with an fsnotify wakeup hint. It is implemented as two free functions Chunk D's `adapter.go` calls (mirroring codex's free-function tailer rather than methods on the `Adapter` struct):
 
 - `scanLoop(ctx, dbPath, sourceID, since, out, logger, onError) (Cursor, error)` — the historical backfill: introspect once, emit one INFO per missing optional column (see Edge Cases #1), record the schema hash into the cursor, page every tracked table from `since`, derive affected sessions, reload + map each, emit, checkpoint `SourceProgress` every ~1000 rows processed and once at the end, return the advanced cursor.
+- Incompatible schema introspection during `scanLoop` (for example a tracked
+  table missing a required column) returns an error marked by the canonical
+  fatal-scan helper. The source supervisor records terminal/degraded
+  `scan_failed` and does not enter Tail for that process run. Optional-column
+  drift remains non-fatal and is logged through `logMissingColumns`.
 - `tailLoop(ctx, dbPath, sourceID, cur, out, logger, onError) error` — the realtime follow until `ctx` is cancelled (returns `nil` on cancel); also emits the missing-optional-column INFO set once at its introspection.
 
 The `logger` parameter is `*slog.Logger`, threaded from `Adapter.logger` (non-nil after `New`, which defaults to `slog.Default()`); both loops guard a nil logger defensively (`slog.Default()`) so a direct test caller passing nil does not panic.

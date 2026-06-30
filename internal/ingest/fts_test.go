@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -139,10 +140,35 @@ func TestFTS_IncrementalOpsMatchSnippetRank(t *testing.T) {
 	}
 }
 
+func TestFTS_IncrementalOpsUseOpsRowID(t *testing.T) {
+	const src, format = "claude_code:/loc", "claude_code"
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO fts_ops(rowid, name, op_id, session_id) VALUES (900, 'sentinel', 'sentinel-op', 'sentinel-session')`); err != nil {
+		t.Fatalf("seed sentinel fts_ops row: %v", err)
+	}
+
+	start, end := ts(0, 9, 0), ts(0, 9, 5)
+	batch := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", start, 1),
+		canonical.TurnStartedEvent{EventBase: canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: start}, SessionNativeID: "sess-1", Seq: 1},
+	}
+	batch = append(batch, llmOpEvents(src, "sess-1", 1, 1, start, end, "sonnet", "anthropic", 1, 1, 0, false)...)
+	flushBatchFTS(t, db, src, format, true, batch)
+
+	opID := canonicalOpID(canonicalTurnID(canonicalSessionID(src, "sess-1"), 1), 1)
+	opRowID := scanInt(t, db, `SELECT rowid FROM ops WHERE id = ?`, opID)
+	ftsRowID := scanInt(t, db, `SELECT rowid FROM fts_ops WHERE op_id = ?`, opID)
+	if ftsRowID != opRowID {
+		t.Fatalf("fts_ops rowid = %d, want ops.rowid %d", ftsRowID, opRowID)
+	}
+}
+
 // TestFTS_OpReindexedOnFinalize: an op finalized in a LATER batch with an error
 // message becomes findable by that error text (proves applyOpFinalized
 // re-indexes from the FINAL persisted columns), and re-finalizing does NOT
-// duplicate the op's fts_ops row (DELETE-then-INSERT on op_id).
+// duplicate the op's fts_ops row (the row is keyed by ops.rowid).
 func TestFTS_OpReindexedOnFinalize(t *testing.T) {
 	const src, format = "codex:/loc", "codex"
 	_, db := openTestStore(t)
@@ -185,7 +211,7 @@ func TestFTS_OpReindexedOnFinalize(t *testing.T) {
 	}
 	// Exactly one fts_ops row for this op_id (no duplicate from re-index).
 	if n := scanInt(t, db, `SELECT COUNT(*) FROM fts_ops WHERE op_id = ?`, opID); n != 1 {
-		t.Fatalf("fts_ops rows for op = %d, want exactly 1 (DELETE-then-INSERT)", n)
+		t.Fatalf("fts_ops rows for op = %d, want exactly 1", n)
 	}
 
 	// Batch 3: re-finalize the SAME op (corrected error) — still one row.
@@ -281,6 +307,31 @@ func TestFTS_LogsGatingEnabled(t *testing.T) {
 	}
 }
 
+func TestFTS_IncrementalLogsUseLogEntryID(t *testing.T) {
+	const src, format = "claude_code:/loc", "claude_code"
+	_, db := openTestStore(t)
+	seedSource(t, db, src, format)
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO fts_logs(rowid, message, log_id, session_id) VALUES (800, 'sentinel', 800, 'sentinel-session')`); err != nil {
+		t.Fatalf("seed sentinel fts_logs row: %v", err)
+	}
+
+	start := ts(0, 9, 0)
+	message := "compilation failed unexpectedly"
+	batch := []canonical.Event{
+		sessionStartEvent(src, "sess-1", "claude", "/w", start, 1),
+		canonical.TurnStartedEvent{EventBase: canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: start}, SessionNativeID: "sess-1", Seq: 1},
+		logEvent(src, "sess-1", message, ts(0, 9, 1), 50),
+	}
+	flushBatchFTS(t, db, src, format, true, batch)
+
+	logID := scanInt(t, db, `SELECT id FROM log_entries WHERE message = ?`, message)
+	ftsRowID := scanInt(t, db, `SELECT rowid FROM fts_logs WHERE log_id = ?`, logID)
+	if ftsRowID != logID {
+		t.Fatalf("fts_logs rowid = %d, want log_entries.id %d", ftsRowID, logID)
+	}
+}
+
 // TestFTS_LogReplayNoDuplicate: re-emitting a byte-identical log (replay) must
 // not create a second fts_logs row — the ON CONFLICT DO NOTHING RETURNING gate
 // indexes only newly-inserted logs.
@@ -308,9 +359,9 @@ func TestFTS_LogReplayNoDuplicate(t *testing.T) {
 	}
 }
 
-// ftsOpsSnapshot reads fts_ops by its LOGICAL columns (NOT internal rowid),
-// ordered by op_id, so two build paths (incremental vs backfill) can be compared
-// for byte-identical row content despite different internal docids.
+// ftsOpsSnapshot reads fts_ops by its logical columns, ordered by op_id, so two
+// build paths (incremental vs backfill) can be compared for byte-identical row
+// content.
 type ftsOpsLogical struct {
 	name, model, provider, toolNS string
 	errorText, opID, sessionID    string
@@ -441,6 +492,39 @@ func TestFTS_BackfillEmptyStore(t *testing.T) {
 	}
 	if n := scanInt(t, db, `SELECT COUNT(*) FROM fts_logs`); n != 0 {
 		t.Fatalf("fts_logs rows = %d, want 0", n)
+	}
+}
+
+func TestFTS_BackfillYieldsBeforeTruncate(t *testing.T) {
+	t.Parallel()
+
+	_, db := openTestStore(t)
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO fts_ops(rowid, name, op_id, session_id)
+		 VALUES (900, 'sentinel before yield', 'sentinel-op', 'sentinel-session')`); err != nil {
+		t.Fatalf("seed sentinel fts_ops row: %v", err)
+	}
+
+	errYield := errors.New("yield before global fts backfill db work")
+	_, err := backfillFTSWithYield(context.Background(), db, silentLogger(), func(context.Context) error {
+		return errYield
+	})
+	if !errors.Is(err, errYield) {
+		t.Fatalf("backfillFTSWithYield error = %v, want %v", err, errYield)
+	}
+	if n := scanInt(t, db, `SELECT COUNT(*) FROM fts_ops WHERE op_id='sentinel-op'`); n != 1 {
+		t.Fatalf("fts_ops sentinel rows = %d, want preserved because yield ran before truncate", n)
+	}
+}
+
+func TestFTS_BackfillDefaultBatchSizeMatchesIngestBudget(t *testing.T) {
+	t.Parallel()
+
+	if ftsBackfillBatchSize != defaultBatchSize {
+		t.Fatalf("ftsBackfillBatchSize = %d, want defaultBatchSize %d", ftsBackfillBatchSize, defaultBatchSize)
+	}
+	if ftsBackfillBatchSize != 100 {
+		t.Fatalf("ftsBackfillBatchSize = %d, want spec default 100", ftsBackfillBatchSize)
 	}
 }
 

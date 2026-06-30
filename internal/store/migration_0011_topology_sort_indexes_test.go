@@ -16,7 +16,7 @@ import (
 // of a full scan + temp B-tree sort.
 //
 // This file pins:
-//   - The full-chain head version (11)
+//   - The full-chain head version (14)
 //   - The duration_us column shape (INTEGER, NULL when end_ts IS NULL)
 //   - The duration_us backfill correctness (end_ts - start_ts)
 //   - Both new indexes exist with the documented column lists
@@ -34,8 +34,8 @@ func TestMigration0011_ChainHeadSchemaVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "12" {
-		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0012)", "12", version)
+	if version != "14" {
+		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0014)", "14", version)
 	}
 }
 

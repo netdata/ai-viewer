@@ -65,7 +65,10 @@ Hold prepared statements in a package-level `*sql.Stmt` cache initialized once. 
 
 ### Transactions
 
-- Ingest pipeline batches writes in transactions of up to 1000 rows or 500 ms, whichever first.
+- Ingest pipeline batches writes in transactions of up to 100 rows or 500 ms, whichever first.
+- Keep source-scoped derived-table repair chunks at the same 100-row writer
+  budget unless a later SOW proves a larger chunk still leaves Tail
+  heartbeat/stale-tail writes within their 30 s liveness budget.
 - Server-side reads do not use transactions unless multiple queries must be consistent (rare).
 - Always `defer tx.Rollback()` immediately after `Begin`; the deferred call is a no-op if `Commit` succeeded.
 

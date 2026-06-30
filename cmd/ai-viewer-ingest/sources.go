@@ -167,27 +167,33 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanW
 	factory, ok := factoryLookup(src.format)
 	if !ok {
 		err := fmt.Errorf("unknown adapter format %q (registered: %v)", src.format, adapters.Formats())
-		recordSourceLifecycleBestEffort(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
+		if recordErr := recordSourceLifecycleWithRetry(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
 			State: ingest.SourceLifecycleStartFailed,
 			Error: err.Error(),
-		})
+		}); recordErr != nil {
+			return errors.Join(err, recordErr)
+		}
 		return err
 	}
 	if _, err := os.Stat(src.location); err != nil {
 		wrapped := fmt.Errorf("location %q is not accessible: %w", src.location, err)
-		recordSourceLifecycleBestEffort(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
+		if recordErr := recordSourceLifecycleWithRetry(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
 			State: ingest.SourceLifecycleStartFailed,
 			Error: wrapped.Error(),
-		})
+		}); recordErr != nil {
+			return errors.Join(wrapped, recordErr)
+		}
 		return wrapped
 	}
 	adapterLocation, err := adapterConstructionLocation(src)
 	if err != nil {
 		wrapped := fmt.Errorf("resolve adapter location for %q: %w", src.location, err)
-		recordSourceLifecycleBestEffort(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
+		if recordErr := recordSourceLifecycleWithRetry(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
 			State: ingest.SourceLifecycleStartFailed,
 			Error: wrapped.Error(),
-		})
+		}); recordErr != nil {
+			return errors.Join(wrapped, recordErr)
+		}
 		return wrapped
 	}
 
@@ -205,21 +211,31 @@ func startSourceWithFactoryLookup(ctx context.Context, wg *sync.WaitGroup, scanW
 	adapter, err := supervisor.constructAdapter()
 	if err != nil {
 		wrapped := fmt.Errorf("construct adapter: %w", err)
-		recordSourceLifecycleBestEffort(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
+		if recordErr := recordSourceLifecycleWithRetry(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
 			State: ingest.SourceLifecycleConstructFailed,
 			Error: wrapped.Error(),
-		})
+		}); recordErr != nil {
+			return errors.Join(wrapped, recordErr)
+		}
 		return wrapped
 	}
 
 	since := loadSourceCursor(ctx, adapter, lookup, src.id, srcLogger)
 
+	if ing != nil {
+		ing.SetSourceReadModelsDeferred(src.id, true)
+	}
 	if err := ing.Submit(src.id, events); err != nil {
 		wrapped := fmt.Errorf("submit to ingester: %w", err)
-		recordSourceLifecycleBestEffort(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
+		if ing != nil {
+			ing.SetSourceReadModelsDeferred(src.id, false)
+		}
+		if recordErr := recordSourceLifecycleWithRetry(ctx, ing, src, srcLogger, ingest.SourceLifecycleUpdate{
 			State: ingest.SourceLifecycleStartFailed,
 			Error: wrapped.Error(),
-		})
+		}); recordErr != nil {
+			return errors.Join(wrapped, recordErr)
+		}
 		return wrapped
 	}
 

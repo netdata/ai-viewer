@@ -30,6 +30,7 @@ const degradedLagThresholdUS = int64(60_000_000)
 const (
 	preTailGraceThresholdUS         = degradedLagThresholdUS
 	longScanThresholdUS             = int64(600_000_000)
+	tailRestartGraceThresholdUS     = longScanThresholdUS
 	tailStaleThresholdUS            = int64(300_000_000)
 	readModelRepairGraceThresholdUS = int64(300_000_000)
 )
@@ -504,8 +505,11 @@ func effectiveHealthLifecycleState(row healthSourceRow, nowUS int64) string {
 
 func sourceLifecycleDegraded(row healthSourceRow, lifecycleState, readModelState string, nowUS int64) bool {
 	switch lifecycleState {
-	case "start_failed", "construct_failed", "scan_failed", "tail_stale", "tail_failed", "tail_restarting":
+	case "start_failed", "construct_failed", "scan_failed", "tail_stale", "tail_failed":
 		return true
+	case "tail_restarting":
+		return row.tailRestartCount > 1 ||
+			nullableAgeExceedsUS(row.lifecycleStateAt, nowUS, tailRestartGraceThresholdUS)
 	case "unknown", "starting", "scan_complete", "tail_starting":
 		if nullableAgeExceedsUS(row.lifecycleStateAt, nowUS, preTailGraceThresholdUS) {
 			return true

@@ -17,6 +17,10 @@ or rejected with evidence. Only P3 cosmetic findings may be documented and left.
 Minimal waste is part of the gate: reviewers are expensive external checks over
 completed CTO artifacts, not the discovery engine for requirements or code
 paths.
+After a real P0/P1/P2 finding, the CTO must verify that issue class and count
+all occurrences, then perform a fresh open-ended review of the whole milestone
+from scratch before rerunning reviewers. A class-only review is biased and
+insufficient.
 The full invocation patterns and prompts live in
 `.agents/skills/project-second-opinions/SKILL.md`.
 
@@ -58,10 +62,12 @@ External review rounds have a budget:
 
 - Round 1 is the normal gate.
 - Round 2 is allowed only after accepted P0/P1/P2 findings have been generalized
-  into issue classes and those classes have been locally self-reviewed.
+  into issue classes, those classes have been fully verified, and a fresh
+  open-ended whole-milestone review has been completed.
 - Round 3 is exceptional: if round 2 still has accepted P0/P1/P2 findings, the
-  CTO stops, writes a short SOW waste analysis, performs a full local review, and
-  only then runs one more broad-scope round.
+  CTO stops, writes a short SOW waste analysis, changes the approach or splits
+  the milestone, performs another full open-ended local review, and only then
+  runs one more broad-scope round.
 - A fourth blocker round for the same gate is forbidden without an
   operator-visible status report and a changed approach.
 - P3-only comments do not reopen a converged gate unless verification shows they
@@ -69,7 +75,8 @@ External review rounds have a budget:
 
 A 19-round gate is roughly 114 reviewer invocations before retries or technical
 failures. That is a process failure: the CTO used reviewers for discovery
-instead of completing discovery, class sweeps, and self-review locally first.
+instead of completing discovery, targeted class verification, and open-ended
+milestone review locally first.
 
 ## What to Ask
 
@@ -125,10 +132,15 @@ prompt, adding only short notes about fixes implemented.
 Before any rerun after accepted P0/P1/P2 findings, the CTO must:
 
 1. Verify the exact claim.
-2. Identify the broader class of possible misses.
-3. Search and self-review the whole stage scope for that class.
+2. Identify the broader class of possible misses during verification.
+3. Search the whole milestone scope and count every occurrence of that class.
 4. Update the relevant artifact for the whole class, not only the cited line.
-5. Record the sweep and disposition in the SOW or work ledger.
+5. Perform a fresh, unbiased, open-ended review of the whole milestone from
+   scratch. This review is not limited to the cited issue, its class, prior
+   fixes, or prior reviewer rounds.
+6. Update the artifact for every real issue found by the open-ended review.
+7. Record the targeted class verification, open-ended milestone review, and
+   disposition in the SOW or work ledger.
 
 Do not spend repeated six-reviewer rounds while reviewers are still discovering
 basic gaps. Stop and improve the CTO review process.
@@ -170,7 +182,8 @@ stage-specific review subsection:
 - Reviewer attribution and vote.
 - Technical reviewer failures and any single retry attempted.
 - The CTO's claim-verification verdict for each finding.
-- Class sweeps performed before reruns after accepted P0/P1/P2 findings.
+- Targeted class verifications and open-ended milestone reviews performed
+  before reruns after accepted P0/P1/P2 findings.
 - The fix applied (or "rejected — false positive" with evidence).
 - The final gate outcome.
 

@@ -84,7 +84,7 @@ WHERE sessions.id IN (%s)
 
 // inClauseStrings expands ids into a (?, ?, ?) placeholder string and a
 // matching []any slice. SQLite parameter limit is 32766 by default;
-// the batch size of 1000 (and the dirty set is at most one per event)
+// the default batch size of 100 (and the dirty set is at most one per event)
 // stays comfortably below.
 func inClauseStrings(ids []string) (string, []any) {
 	args := make([]any, len(ids))

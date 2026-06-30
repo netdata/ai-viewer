@@ -107,7 +107,7 @@ func scanLoop(ctx context.Context, dbPath, sourceID string, since Cursor, out ch
 		// An incompatible schema (a required column missing) is fatal for this
 		// source — surface it so /api/health shows the failure rather than
 		// silently emitting nothing.
-		return since, fmt.Errorf("opencode: scan introspect %s: %w", dbPath, err)
+		return since, canonical.NewFatalScanError(fmt.Errorf("opencode: scan introspect %s: %w", dbPath, err))
 	}
 	// Surface optional column drift once per (table, column). Scan and Tail each
 	// log this set once on every (re)start; that per-phase duplication is

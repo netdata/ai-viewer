@@ -59,6 +59,16 @@ func BackfillRollups(ctx context.Context, db *sql.DB, now int64, logger *slog.Lo
 func prepareBackfill(ctx context.Context, db *sql.DB, now int64, opts []BackfillOption) (*backfiller, []int64, error) {
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
+	bf := &backfiller{
+		db:            db,
+		openHourStart: openHourStart,
+		openDayStart:  openDayStart,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(bf)
+		}
+	}
 
 	// Wipe both rollup tables before rebuilding so this run is a TRUE full
 	// recompute, not an overwrite. The backfill is the recovery path "when
@@ -74,28 +84,27 @@ func prepareBackfill(ctx context.Context, db *sql.DB, now int64, opts []Backfill
 	// closed buckets below is correct. Runs in its own short transaction that
 	// commits before the per-day loop, keeping the single writer connection
 	// (SetMaxOpenConns(1)) uncontended.
+	if err := callRepairYield(ctx, bf.yield); err != nil {
+		return nil, nil, err
+	}
 	if err := truncateRollups(ctx, db); err != nil {
 		return nil, nil, err
 	}
 
+	if err := callRepairYield(ctx, bf.yield); err != nil {
+		return nil, nil, err
+	}
 	startsByDay, err := loadSessionStarts(ctx, db, openHourStart)
 	if err != nil {
+		return nil, nil, err
+	}
+	bf.startsByDay = startsByDay
+	if err := callRepairYield(ctx, bf.yield); err != nil {
 		return nil, nil, err
 	}
 	days, err := closedDays(ctx, db, openHourStart, startsByDay)
 	if err != nil {
 		return nil, nil, err
-	}
-	bf := &backfiller{
-		db:            db,
-		openHourStart: openHourStart,
-		openDayStart:  openDayStart,
-		startsByDay:   startsByDay,
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(bf)
-		}
 	}
 	return bf, days, nil
 }
@@ -105,6 +114,9 @@ func prepareBackfill(ctx context.Context, db *sql.DB, now int64, opts []Backfill
 // flushDay), so a failure in one day rolls only that day back.
 func runBackfillDays(ctx context.Context, bf *backfiller, days []int64) error {
 	for _, day := range days {
+		if err := callRepairYield(ctx, bf.yield); err != nil {
+			return err
+		}
 		if err := bf.flushDay(ctx, day); err != nil {
 			return err
 		}
@@ -168,6 +180,7 @@ type backfiller struct {
 
 	// startsByDay maps a UTC-day bucket → that day's session starts.
 	startsByDay map[int64][]rollups.SessionStart
+	yield       repairYieldFunc
 
 	// maxRollupRowsPerBucket overrides the R1 collapse cap for this backfill
 	// run (SOW-0062). Zero means "use the rollups-package default" (2000).
@@ -197,6 +210,10 @@ type BackfillOption func(*backfiller)
 // byte-parity invariant breaks for collapse cases.
 func WithBackfillMaxRollupRowsPerBucket(n int) BackfillOption {
 	return func(bf *backfiller) { bf.maxRollupRowsPerBucket = n }
+}
+
+func withBackfillYield(yield repairYieldFunc) BackfillOption {
+	return func(bf *backfiller) { bf.yield = yield }
 }
 
 // flushDay materializes one UTC day in a single transaction: every closed

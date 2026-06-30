@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -98,6 +99,26 @@ func TestResolver_NoOpWhenNoOrphans(t *testing.T) {
 	r := newResolver(db, silentLogger(), time.Minute)
 	if err := r.linkOrphans(context.Background()); err != nil {
 		t.Fatalf("linkOrphans on empty db: %v", err)
+	}
+}
+
+func TestResolverYieldsToTailStateBeforeBeginTx(t *testing.T) {
+	t.Parallel()
+	_, db := openTestStore(t)
+	waitErr := errors.New("tail state pending")
+	called := 0
+	r := newResolver(db, silentLogger(), time.Minute)
+	r.waitBeforeDBWork = func(context.Context) error {
+		called++
+		return waitErr
+	}
+
+	err := r.linkOrphans(context.Background())
+	if !errors.Is(err, waitErr) {
+		t.Fatalf("linkOrphans error = %v, want waitErr", err)
+	}
+	if called != 1 {
+		t.Fatalf("waitBeforeDBWork calls = %d, want 1", called)
 	}
 }
 

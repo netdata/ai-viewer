@@ -466,7 +466,6 @@ func TestSourceTailCommitsWhileAnotherSourceScanIsBlocked(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	_, db, ing := openLifecycleIngester(t)
-	ing.SetDeferReadModels(true)
 
 	var adapterWG sync.WaitGroup
 	var scanWG sync.WaitGroup
@@ -552,13 +551,128 @@ func TestSourceTailCommitsWhileAnotherSourceScanIsBlocked(t *testing.T) {
 	adapterWG.Wait()
 }
 
+func TestStartSourceSetsPerSourceReadModelDeferralBeforeScan(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_, _, ing := openLifecycleIngester(t)
+
+	var adapterWG sync.WaitGroup
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	scanStarted := make(chan struct{})
+	scanBlock := make(chan struct{})
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+	adapter := &sourceLifecycleAdapter{
+		scanStarted: scanStarted,
+		scanBlock:   scanBlock,
+		tailStarted: make(chan struct{}),
+	}
+	if err := startSourceWithFactoryLookup(
+		ctx,
+		&adapterWG,
+		&scanWG,
+		ing,
+		nil,
+		src,
+		silentLogger(),
+		singleAdapterLookup(adapter),
+	); err != nil {
+		t.Fatalf("start source: %v", err)
+	}
+	waitForChannel(t, scanStarted, "source scan start")
+
+	if wasDeferred := ing.SetSourceReadModelsDeferred(src.id, true); !wasDeferred {
+		t.Fatal("source read models were not deferred before Scan started")
+	}
+
+	cancel()
+	close(scanBlock)
+	adapterWG.Wait()
+	waitForScanOutcome(t, &scanWG)
+}
+
+func TestClearReadModelDeferralPreservesAlreadyPendingEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, db, ing := openLifecycleIngesterWithOptions(t, ingest.WithNow(func() int64 { return 9000 }))
+
+	src := configuredSource{
+		id:       "codex:" + t.TempDir(),
+		format:   "codex",
+		location: t.TempDir(),
+	}
+	if err := ing.RecordSourceLifecycle(ctx, src.id, src.format, src.location, ingest.SourceLifecycleUpdate{
+		ReadModelState: ingest.ReadModelRepairPending,
+		AtUS:           1234,
+		ReadModelError: "existing repair evidence",
+	}); err != nil {
+		t.Fatalf("seed repair_pending lifecycle: %v", err)
+	}
+	ing.SetSourceReadModelsDeferred(src.id, true)
+
+	supervisor := &sourceSupervisor{
+		ctx:    ctx,
+		src:    src,
+		ing:    ing,
+		logger: silentLogger(),
+	}
+	if !supervisor.clearReadModelDeferral() {
+		t.Fatal("clearReadModelDeferral returned false")
+	}
+	if supervisor.readModelRepairPending != true {
+		t.Fatal("clearReadModelDeferral did not queue in-process read-model repair")
+	}
+	if wasDeferred := ing.SetSourceReadModelsDeferred(src.id, false); wasDeferred {
+		t.Fatal("source read models remained deferred after clearReadModelDeferral")
+	}
+
+	var got struct {
+		state      string
+		stateAt    int64
+		errorText  string
+		notifyRows int64
+	}
+	if err := db.QueryRowContext(ctx, `
+SELECT read_model_state,
+       read_model_state_at,
+       COALESCE(read_model_error, ''),
+       (SELECT COUNT(*) FROM notify WHERE kind='source_status_changed' AND source_id=? AND ts_us=9000)
+FROM source_progress
+WHERE source_id=?`, src.id, src.id).Scan(
+		&got.state,
+		&got.stateAt,
+		&got.errorText,
+		&got.notifyRows,
+	); err != nil {
+		t.Fatalf("read source_progress: %v", err)
+	}
+	if got.state != string(ingest.ReadModelRepairPending) {
+		t.Fatalf("read_model_state = %q, want %q", got.state, ingest.ReadModelRepairPending)
+	}
+	if got.stateAt != 1234 {
+		t.Fatalf("read_model_state_at = %d, want preserved 1234", got.stateAt)
+	}
+	if got.errorText != "existing repair evidence" {
+		t.Fatalf("read_model_error = %q, want existing repair evidence", got.errorText)
+	}
+	if got.notifyRows != 0 {
+		t.Fatalf("new source_status_changed rows = %d, want 0 for already repair_pending", got.notifyRows)
+	}
+}
+
 func TestSourceReadModelRepairRequestRepairsDurablePendingDebt(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	_, db, ing := openLifecycleIngester(t)
-	ing.SetDeferReadModels(false)
 
 	var adapterWG sync.WaitGroup
 	var scanWG sync.WaitGroup
@@ -615,4 +729,24 @@ func TestSourceReadModelRepairRequestRepairsDurablePendingDebt(t *testing.T) {
 
 	cancel()
 	adapterWG.Wait()
+}
+
+func TestSourceReadModelRepairContextHasNoSyntheticDeadline(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	ctx, cancelRepair := sourceReadModelRepairContext(parent)
+	defer cancelRepair()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("source read-model repair context has a deadline; large repairs must run until completion or source shutdown")
+	}
+
+	cancelParent()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("source read-model repair context did not observe parent cancellation")
+	}
 }

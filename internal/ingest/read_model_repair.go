@@ -49,15 +49,16 @@ func (i *Ingester) RepairSourceReadModels(ctx context.Context, sourceID string) 
 			"source_id", sourceID, "source_format", sourceFormat)
 	}
 
-	ftsOps, err := repairSourceFTSOps(ctx, i.db, sourceID)
+	yield := i.waitForTailStatePriority
+	ftsOps, err := repairSourceFTSOps(ctx, i.db, sourceID, yield)
 	if err != nil {
 		return SourceReadModelRepairStats{}, fmt.Errorf("repair source FTS ops: %w", err)
 	}
-	ftsLogs, err := repairSourceFTSLogs(ctx, i.db, sourceID)
+	ftsLogs, err := repairSourceFTSLogs(ctx, i.db, sourceID, yield)
 	if err != nil {
 		return SourceReadModelRepairStats{}, fmt.Errorf("repair source FTS logs: %w", err)
 	}
-	hourly, daily, err := repairSourceRollups(ctx, i.db, sourceID, sourceFormat, i.now(), i.pricer)
+	hourly, daily, err := repairSourceRollups(ctx, i.db, sourceID, sourceFormat, i.now(), i.pricer, yield)
 	if err != nil {
 		return SourceReadModelRepairStats{}, fmt.Errorf("repair source rollups: %w", err)
 	}
@@ -94,13 +95,19 @@ func sourceFormatForReadModelRepair(ctx context.Context, db *sql.DB, sourceID st
 	return format, nil
 }
 
-func repairSourceRollups(ctx context.Context, db *sql.DB, sourceID, sourceFormat string, now int64, pricer Pricer) (int, int, error) {
+func repairSourceRollups(ctx context.Context, db *sql.DB, sourceID, sourceFormat string, now int64, pricer Pricer, yield repairYieldFunc) (int, int, error) {
 	openHourStart := rollups.BucketTS(now, rollups.Hourly)
 	openDayStart := rollups.BucketTS(now, rollups.Daily)
 
+	if err := callRepairYield(ctx, yield); err != nil {
+		return 0, 0, err
+	}
 	hours, err := loadSourceRollupBuckets(ctx, db, sourceHourlyRollupBucketsQuery, hourSpanUS, sourceID, openHourStart)
 	if err != nil {
 		return 0, 0, fmt.Errorf("load hourly buckets: %w", err)
+	}
+	if err := callRepairYield(ctx, yield); err != nil {
+		return 0, 0, err
 	}
 	days, err := loadSourceRollupBuckets(ctx, db, sourceDailyRollupBucketsQuery, daySpanUS, sourceID, openDayStart)
 	if err != nil {
@@ -109,10 +116,10 @@ func repairSourceRollups(ctx context.Context, db *sql.DB, sourceID, sourceFormat
 
 	wr := newWriter(sourceID, sourceFormat, "", pricer)
 	wr.now = func() int64 { return now }
-	if err := repairRollupBuckets(ctx, db, wr, rollups.Hourly, hours); err != nil {
+	if err := repairRollupBuckets(ctx, db, wr, rollups.Hourly, hours, yield); err != nil {
 		return 0, 0, err
 	}
-	if err := repairRollupBuckets(ctx, db, wr, rollups.Daily, days); err != nil {
+	if err := repairRollupBuckets(ctx, db, wr, rollups.Daily, days, yield); err != nil {
 		return 0, 0, err
 	}
 	return len(hours), len(days), nil
@@ -167,12 +174,15 @@ func loadSourceRollupBuckets(ctx context.Context, db *sql.DB, query string, span
 	return buckets, nil
 }
 
-func repairRollupBuckets(ctx context.Context, db *sql.DB, wr *writer, bucket rollups.Bucket, buckets []int64) error {
+func repairRollupBuckets(ctx context.Context, db *sql.DB, wr *writer, bucket rollups.Bucket, buckets []int64, yield repairYieldFunc) error {
 	spanUS := hourSpanUS
 	if bucket == rollups.Daily {
 		spanUS = daySpanUS
 	}
 	for _, bucketStart := range buckets {
+		if err := callRepairYield(ctx, yield); err != nil {
+			return err
+		}
 		if err := repairRollupBucket(ctx, db, wr, bucket, bucketStart, spanUS); err != nil {
 			return err
 		}

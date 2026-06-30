@@ -163,10 +163,10 @@ type writer struct {
 	// error_text this batch changed (marked by BOTH applyOpStarted and
 	// applyOpFinalized — either write can alter the indexed name/model/
 	// provider/tool_namespace or the error text). refreshFTS (fts_refresh.go)
-	// DELETE-then-INSERTs each one from its FINAL persisted ops row in the same
-	// tx, before commit, so the FTS index is byte-identical to BackfillFTS over
-	// the same data. Cleared in resetBatch. fts_logs needs no dirty set: logs
-	// are append-only and indexed inline in applyLogEntry.
+	// rebuilds each one from its FINAL persisted ops row in the same tx, before
+	// commit, so the FTS index is byte-identical to BackfillFTS over the same
+	// data. Cleared in resetBatch. fts_logs needs no dirty set: logs are
+	// append-only and indexed inline in applyLogEntry.
 	dirtyOpIDs map[string]struct{}
 	// fts5IndexLogs gates fts_logs population for THIS source: when false the
 	// applyLogEntry FTS insert is skipped (data-model.md §Full-text search).
@@ -189,7 +189,7 @@ type writer struct {
 	// the matching BackfillRollups option when a test compares the two paths
 	// (the refresh≡backfill byte-parity invariant); production leaves it 0.
 	maxRollupRowsPerBucket int
-	// deferReadModels points at the ingester's bulk-scan flag (SOW-0062).
+	// deferReadModels points at the source-scoped startup Scan deferral flag.
 	// When true, refreshBatchReadModels skips refreshRollups + refreshFTS.
 	deferReadModels *atomic.Bool
 	// readModelRebuildActive points at the ingester-wide full rebuild flag.
@@ -1684,9 +1684,9 @@ func (w *writer) indexLogEntryFTS(ctx context.Context, tx *sql.Tx, refs logEntry
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fts_logs (message, log_id, session_id, op_id, severity, ts)
-VALUES (?, ?, ?, ?, ?, ?)`,
-		ev.Message, logID, refs.sessionID, refs.opID, refs.severity, ev.Ts); err != nil {
+INSERT INTO fts_logs (rowid, message, log_id, session_id, op_id, severity, ts)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		logID, ev.Message, logID, refs.sessionID, refs.opID, refs.severity, ev.Ts); err != nil {
 		return fmt.Errorf("writer: index log_entry in fts_logs: %w", err)
 	}
 	return nil
@@ -1802,8 +1802,8 @@ func (w *writer) hasPendingRollupBuckets() bool {
 // fts_ops row from the FINAL persisted ops columns at flush time. Marked by BOTH
 // applyOpStarted and applyOpFinalized: either write can change the op's indexed
 // text (name/model/provider/tool_namespace) or its error_text (error_class/
-// error_message, set at finalize). DELETE-then-INSERT against the persisted row
-// makes a started+finalized-in-one-batch op index its final error text once.
+// error_message, set at finalize). Rebuilding from the persisted row makes a
+// started+finalized-in-one-batch op index its final error text once.
 func (w *writer) markDirtyOp(id string) {
 	w.dirtyOpIDs[id] = struct{}{}
 }
