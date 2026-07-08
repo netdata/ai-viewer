@@ -122,11 +122,11 @@ func TestNewWiresResolvedDefaultsAndHubCleanup_LifecycleDefaults(t *testing.T) {
 	}
 }
 
-func TestSchemaVersionTracksSourceRepairLivenessMigration(t *testing.T) {
+func TestSchemaVersionTracksResolverLinkIndexesMigration(t *testing.T) {
 	t.Parallel()
 
-	if SchemaVersion != 14 {
-		t.Fatalf("SchemaVersion = %d, want 14 for source repair liveness migration", SchemaVersion)
+	if SchemaVersion != 16 {
+		t.Fatalf("SchemaVersion = %d, want 16 for resolver link indexes migration", SchemaVersion)
 	}
 }
 

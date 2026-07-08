@@ -54,6 +54,12 @@ type worker struct {
 	// requestReadModelRepair wakes the owning source supervisor after a
 	// committed batch records durable read-model repair debt.
 	requestReadModelRepair func(sourceID string) bool
+	// onCommittedBatch is invoked once per successfully committed canonical
+	// batch. It bumps the ingester's ingestion generation counter so the
+	// resolver knows new rows may need linking (SOW-0117: the resolver skips
+	// its O(all-rows) link passes when the counter is unchanged since the
+	// last pass). nil in tests is safe — the resolver runs unconditionally.
+	onCommittedBatch func()
 	// waitBeforeDBWork lets tail lifecycle writes take priority before this
 	// worker starts a lower-priority write transaction. It is intentionally
 	// checked immediately before BeginTx, so scan/repair flush bursts cannot
@@ -121,6 +127,9 @@ func (w *worker) promoteCommittedBatch(wr *writer) {
 	wr.promoteMaterializedRollupBuckets()
 	if wr.readModelRepairRequested && w.requestReadModelRepair != nil {
 		_ = w.requestReadModelRepair(w.sourceID)
+	}
+	if w.onCommittedBatch != nil {
+		w.onCommittedBatch()
 	}
 	if wr.batchMaxSeq > 0 {
 		w.hwm.Advance(w.sourceID, wr.batchMaxSeq)

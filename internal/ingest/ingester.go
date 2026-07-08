@@ -306,6 +306,12 @@ type Ingester struct {
 	// aggregates, and repair debt while derived FTS/rollup refresh is deferred.
 	deferReadModels        atomic.Bool
 	readModelRebuildActive atomic.Bool
+	// ingestionGen is bumped on every committed canonical batch (sessions OR
+	// ops). The resolver reads it via ingestionGenNow to skip its O(all-rows)
+	// link passes when nothing has been committed since the last pass — the
+	// difference between a ~1-core idle burn and a near-zero idle daemon
+	// (SOW-0117). It is monotonic and never reset.
+	ingestionGen atomic.Int64
 	// backfillMu serializes BackfillReadModels across the 5 source goroutines
 	// that finish scanning concurrently. backfillDone is set only on success,
 	// so a failed backfill (e.g. context cancelled during shutdown) allows the
@@ -383,6 +389,8 @@ func (i *Ingester) Start(ctx context.Context) error {
 	i.cancelFn = cancel
 	i.resolver = newResolver(i.db, i.logger, i.resolverInterval)
 	i.resolver.waitBeforeDBWork = i.waitForTailStatePriority
+	i.resolver.ingestionGenNow = i.ingestionGen.Load
+	i.resolver.sessionWatermarkNow = i.sessionLinkWatermark
 	i.wg.Add(1)
 	go func() {
 		defer i.wg.Done()
@@ -437,6 +445,7 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 		deferReadModels:        i.readModelDeferralFlag(sourceID),
 		readModelRebuildActive: &i.readModelRebuildActive,
 		requestReadModelRepair: i.RequestSourceReadModelRepair,
+		onCommittedBatch:       i.bumpIngestionGen,
 		waitBeforeDBWork:       i.waitForTailStatePriority,
 	}
 	w.onErr = func(err error) {
@@ -662,6 +671,31 @@ func (i *Ingester) SetDeferReadModels(b bool) {
 
 // DeferReadModels reports whether the bulk-scan fast-path is active.
 func (i *Ingester) DeferReadModels() bool { return i.deferReadModels.Load() }
+
+// bumpIngestionGen advances the ingestion generation counter. Called on every
+// committed canonical batch (sessions OR ops) via the worker's onCommittedBatch
+// hook. The resolver reads it to skip its O(all-rows) link passes when nothing
+// has been committed since its last pass (SOW-0117): the difference between a
+// ~1-core idle burn and a near-zero idle daemon.
+func (i *Ingester) bumpIngestionGen() {
+	i.ingestionGen.Add(1)
+}
+
+// sessionLinkWatermark returns MAX(sessions.last_activity_ts), the cheap
+// covering-index probe (idx_sessions_activity) the resolver uses to decide
+// whether the two SESSION link passes (linkParents, linkRoots) need to run.
+// It advances only when a session row is inserted or updated — NOT when only
+// ops commit — so during op-heavy ingestion the resolver skips the O(sessions)
+// linkRoots recursive CTE that otherwise dominated CPU (SOW-0117). Returns an
+// error on query failure; the resolver falls back to running all passes.
+func (i *Ingester) sessionLinkWatermark(ctx context.Context) (int64, error) {
+	var wm sql.NullInt64
+	err := i.db.QueryRowContext(ctx, `SELECT MAX(last_activity_ts) FROM sessions`).Scan(&wm)
+	if err != nil {
+		return 0, fmt.Errorf("resolver session watermark: %w", err)
+	}
+	return wm.Int64, nil
+}
 
 // SetSourceReadModelsDeferred overrides the read-model fast-path for one
 // source. It is safe to call before or after Submit; Submit will use the same

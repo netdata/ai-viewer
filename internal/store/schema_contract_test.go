@@ -312,6 +312,11 @@ func expectedSchema() []tableContract {
 				{Name: "idx_sessions_cwd", Cols: []string{"cwd"}},
 				{Name: "idx_sessions_duration", Cols: []string{"duration_us", "id"}},
 				{Name: "idx_sessions_first_user_message_hash", Cols: []string{"first_user_message_hash"}, Partial: true},
+				// SOW-0117: partial expression indexes backing the resolver's json_extract
+				// link predicates. The single expression column reports as "".
+				{Name: "idx_sessions_link_parent", Cols: []string{""}, Partial: true},
+				{Name: "idx_sessions_link_root", Cols: []string{""}, Partial: true},
+				{Name: "idx_sessions_link_tooluse", Cols: []string{""}, Partial: true},
 				{Name: "idx_sessions_model", Cols: []string{"model"}},
 				{Name: "idx_sessions_op_count", Cols: []string{"op_count", "id"}},
 				{Name: "idx_sessions_parent", Cols: []string{"parent_session_id"}},
@@ -392,6 +397,10 @@ func expectedSchema() []tableContract {
 			indexes: []index{
 				{Name: "idx_ops_compaction", Cols: []string{"session_id", "start_ts"}, Partial: true},
 				{Name: "idx_ops_kind_name", Cols: []string{"kind", "name"}},
+				// SOW-0117: partial expression indexes backing the resolver's json_extract
+				// link predicates. The single expression column reports as "".
+				{Name: "idx_ops_link_child", Cols: []string{""}, Partial: true},
+				{Name: "idx_ops_link_tooluse", Cols: []string{""}, Partial: true},
 				{Name: "idx_ops_model", Cols: []string{"model"}, Partial: true},
 				{Name: "idx_ops_parent", Cols: []string{"parent_op_id"}},
 				{Name: "idx_ops_provider", Cols: []string{"provider"}, Partial: true},
@@ -634,12 +643,17 @@ func TestSchema_PartialIndexPredicates(t *testing.T) {
 	_, db := openInMemory(t)
 
 	want := map[string]string{
-		"idx_ops_compaction": "WHERE kind='compaction'",
-		"idx_ops_model":      "WHERE kind='llm'",
-		"idx_ops_provider":   "WHERE kind='llm'",
-		"idx_ops_tool":       "WHERE kind='tool'",
-		"idx_log_severity":   "WHERE severity IN ('WRN','ERR')",
-		"idx_log_source_ts":  "WHERE source_id IS NOT NULL",
+		"idx_ops_compaction":        "WHERE kind='compaction'",
+		"idx_ops_model":             "WHERE kind='llm'",
+		"idx_ops_provider":          "WHERE kind='llm'",
+		"idx_ops_tool":              "WHERE kind='tool'",
+		"idx_log_severity":          "WHERE severity IN ('WRN','ERR')",
+		"idx_log_source_ts":         "WHERE source_id IS NOT NULL",
+		"idx_sessions_link_parent":  "WHERE json_extract(extras_json, '$.aiViewer.parentNativeId') IS NOT NULL",
+		"idx_sessions_link_root":    "WHERE json_extract(extras_json, '$.aiViewer.rootNativeId') IS NOT NULL",
+		"idx_sessions_link_tooluse": "WHERE json_extract(extras_json, '$.aiViewer.toolUseId') IS NOT NULL",
+		"idx_ops_link_child":        "WHERE json_extract(extras_json, '$.aiViewer.childNativeId') IS NOT NULL",
+		"idx_ops_link_tooluse":      "WHERE json_extract(extras_json, '$.aiViewer.toolUseId') IS NOT NULL",
 	}
 
 	for name, expected := range want {

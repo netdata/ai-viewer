@@ -149,8 +149,8 @@ func TestOpen_RunsMigrations(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "14" {
-		t.Fatalf("schema_meta.version: want %q, got %q", "14", version)
+	if version != "16" {
+		t.Fatalf("schema_meta.version: want %q, got %q", "16", version)
 	}
 
 	var createdAt string
@@ -185,21 +185,21 @@ func TestOpen_Idempotent(t *testing.T) {
 		// expectedMigrations grows by one each time a new SQL file is
 		// added under migrations/. Update the constant in lockstep with
 		// the new migration so this contract test stays meaningful.
-		const expectedMigrations = 14
+		const expectedMigrations = 16
 		if count != expectedMigrations {
 			t.Fatalf("round %d: _schema_migrations rows: want %d, got %d", round, expectedMigrations, count)
 		}
 
 		// Inserting the same schema_meta version twice would be a defect
 		// only if the migration ran a second time without the INSERT OR
-		// REPLACE guard. Sanity-check the version is still '14'.
+		// REPLACE guard. Sanity-check the version is still '16'.
 		var version string
 		if err := s.DB().QueryRowContext(context.Background(),
 			`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 			t.Fatalf("round %d: read schema_meta.version: %v", round, err)
 		}
-		if version != "14" {
-			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "14", version)
+		if version != "16" {
+			t.Fatalf("round %d: schema_meta.version: want %q, got %q", round, "16", version)
 		}
 
 		if err := s.Close(); err != nil {

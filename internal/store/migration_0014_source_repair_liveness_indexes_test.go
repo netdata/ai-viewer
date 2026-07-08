@@ -19,8 +19,8 @@ func TestMigration0014_ChainHeadSchemaVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "14" {
-		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0014)", "14", version)
+	if version != "16" {
+		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0016)", "16", version)
 	}
 }
 

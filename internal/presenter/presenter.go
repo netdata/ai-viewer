@@ -21,8 +21,11 @@ import (
 // store that has not yet had the latest migration applied is rejected rather
 // than served with stale rows. 0014 adds source-repair liveness indexes
 // required by the read-model repair contract, so serve must refuse pre-0014
-// stores.
-const SchemaVersion = 14
+// stores. 0015 adds resolver link-back expression indexes (SOW-0117) that back
+// the json_extract predicates the ingest resolver runs every 5 s; bumped in
+// lockstep with 0013/0014 (ingester-liveness index migrations). 0016 adds the
+// sessions-side toolUseId index backing linkOpChildrenByToolUse's EXISTS.
+const SchemaVersion = 16
 
 // ErrSchemaMismatch is returned by CheckSchema when the on-disk schema
 // version disagrees with the binary's expected version. The main()

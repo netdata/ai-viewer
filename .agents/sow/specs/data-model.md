@@ -130,6 +130,22 @@ CREATE INDEX idx_sessions_op_count ON sessions(op_count DESC, id ASC);
 CREATE INDEX idx_sessions_cost ON sessions(cost_usd DESC, id ASC);
 CREATE INDEX idx_sessions_tokens ON sessions((tokens_in + tokens_out) DESC, id ASC);
 CREATE INDEX idx_sessions_source_id ON sessions(source_id, id);
+-- SOW-0117: resolver link-back indexes. linkParents / linkRoots predicate on
+-- json_extract(extras_json, '$.aiViewer.<field>'); without an index those passes
+-- full-scan every NULL-parent session and parse JSON on each row every resolver
+-- tick (5 s). Partial expression indexes (only rows where the stash is present)
+-- turn each pass into an index seek over the handful of pending-orphans.
+CREATE INDEX idx_sessions_link_parent
+    ON sessions(json_extract(extras_json, '$.aiViewer.parentNativeId'))
+    WHERE json_extract(extras_json, '$.aiViewer.parentNativeId') IS NOT NULL;
+CREATE INDEX idx_sessions_link_root
+    ON sessions(json_extract(extras_json, '$.aiViewer.rootNativeId'))
+    WHERE json_extract(extras_json, '$.aiViewer.rootNativeId') IS NOT NULL;
+-- SOW-0016: sessions-side toolUseId index backing linkOpChildrenByToolUse's
+-- EXISTS join (the op side is idx_ops_link_tooluse, migration 0015).
+CREATE INDEX idx_sessions_link_tooluse
+    ON sessions(json_extract(extras_json, '$.aiViewer.toolUseId'))
+    WHERE json_extract(extras_json, '$.aiViewer.toolUseId') IS NOT NULL;
 ```
 
 Notes:
@@ -222,6 +238,19 @@ CREATE INDEX idx_ops_session_end ON ops(session_id, end_ts);
 CREATE INDEX idx_ops_start ON ops(start_ts);
 CREATE INDEX idx_ops_parent ON ops(parent_op_id);
 CREATE INDEX idx_ops_compaction ON ops(session_id, start_ts) WHERE kind='compaction';
+-- SOW-0117: resolver link-back indexes. linkOpChildren / linkOpChildrenByToolUse
+-- predicate on json_extract(ops.extras_json, '$.aiViewer.<field>'); nearly every
+-- op has child_session_id IS NULL (only kind='session' Agent ops ever get one),
+-- so without an index those passes scan ~all ops and parse JSON on each every
+-- resolver tick (5 s) — the unconditional ~1-core idle burn. Partial expression
+-- indexes (only rows where the stash is present) turn each pass into an index
+-- seek over the few hundred/thousand pending links.
+CREATE INDEX idx_ops_link_child
+    ON ops(json_extract(extras_json, '$.aiViewer.childNativeId'))
+    WHERE json_extract(extras_json, '$.aiViewer.childNativeId') IS NOT NULL;
+CREATE INDEX idx_ops_link_tooluse
+    ON ops(json_extract(extras_json, '$.aiViewer.toolUseId'))
+    WHERE json_extract(extras_json, '$.aiViewer.toolUseId') IS NOT NULL;
 ```
 
 Notes on op kinds:

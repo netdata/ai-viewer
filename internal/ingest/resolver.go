@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,34 @@ type resolver struct {
 	// waitBeforeDBWork lets tail lifecycle writes take priority before the
 	// resolver opens its lower-priority maintenance transaction.
 	waitBeforeDBWork func(context.Context) error
+	// hasNewIngestion reports whether any canonical rows were committed since
+	// the resolver's last completed pass. The resolver's four link passes are
+	// O(all-rows) scans; running them every tick when nothing changed is the
+	// unconditional ~1-core idle burn (SOW-0117). The ingester bumps an atomic
+	// generation counter on every committed batch; the resolver records the
+	// counter after each pass and skips the whole pass when it is unchanged.
+	// nil (tests) means "always run" so a bare newResolver keeps the old
+	// behavior and linkOrphans stays directly drivable.
+	ingestionGenNow func() int64
+	// lastSeenGen is the generation counter value after the resolver's last
+	// completed linkOrphans pass. The next tick skips when ingestionGenNow()
+	// still equals it (nothing committed in between). Starts at -1 so the
+	// first tick after Start always runs (links any orphans from the scan).
+	// atomic so tests can observe it without racing the loop goroutine; in
+	// production it is only touched from the single resolver loop goroutine.
+	lastSeenGen atomic.Int64
+	// sessionWatermarkNow returns MAX(sessions.last_activity_ts), a cheap
+	// covering-index probe (idx_sessions_activity) that advances ONLY when a
+	// session row is inserted or updated — NOT when only ops commit. The two
+	// SESSION link passes (linkParents, linkRoots — the latter builds an
+	// O(sessions) recursive CTE) are gated on it: during op-heavy ingestion
+	// (the common scan case) they are skipped because ops cannot change session
+	// parentage or roots. nil (tests) means "sessions may have changed" so the
+	// session passes always run and linkOrphans stays directly drivable.
+	sessionWatermarkNow func(context.Context) (int64, error)
+	// lastSeenSession is the session watermark after the last pass that ran the
+	// session link passes. Starts at -1 so the first pass always runs them.
+	lastSeenSession atomic.Int64
 	// stop signals loop to exit on Stop(); buffered so a non-blocking
 	// send always succeeds even if loop isn't yet started.
 	stop chan struct{}
@@ -36,18 +65,29 @@ func newResolver(db *sql.DB, logger *slog.Logger, interval time.Duration) *resol
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return &resolver{
+	r := &resolver{
 		db:       db,
 		logger:   logger,
 		interval: interval,
 		stop:     make(chan struct{}),
 	}
+	r.lastSeenGen.Store(-1)     // first tick always runs
+	r.lastSeenSession.Store(-1) // first pass always runs the session passes
+	return r
 }
 
 // loop blocks until ctx is cancelled or Stop is called, running
 // linkOrphans every interval. Errors are logged but never returned —
 // the loop continues running on transient SQL failures because the
 // alternative (the loop dying silently) is worse.
+//
+// When hasNewIngestion is wired (production), a tick with NO committed
+// canonical rows since the last pass skips linkOrphans entirely: the four
+// link passes are O(all-rows) scans, and re-running them when nothing could
+// have changed is pure idle cost (SOW-0117). hasNewIngestion records the
+// ingester's generation counter internally; it advances on every committed
+// batch (sessions OR ops), so any pending link has a chance to run within one
+// interval of its parent/root landing.
 func (r *resolver) loop(ctx context.Context) {
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
@@ -58,7 +98,27 @@ func (r *resolver) loop(ctx context.Context) {
 		case <-r.stop:
 			return
 		case <-t.C:
-			if err := r.linkOrphans(ctx); err != nil && r.logger != nil {
+			if r.ingestionGenNow != nil {
+				now := r.ingestionGenNow()
+				if now == r.lastSeenGen.Load() {
+					continue
+				}
+				r.lastSeenGen.Store(now)
+			}
+			sessionsChanged := true
+			if r.sessionWatermarkNow != nil {
+				wm, err := r.sessionWatermarkNow(ctx)
+				if err != nil {
+					if r.logger != nil {
+						r.logger.Warn("resolver: session watermark probe failed; running all passes", "err", err)
+					}
+				} else if wm == r.lastSeenSession.Load() {
+					sessionsChanged = false
+				} else {
+					r.lastSeenSession.Store(wm)
+				}
+			}
+			if err := r.linkOrphansGated(ctx, sessionsChanged); err != nil && r.logger != nil {
 				r.logger.Warn("resolver: link orphans failed", "err", err)
 			}
 		}
@@ -91,23 +151,41 @@ func (r *resolver) Stop() {
 // the transaction makes no notify rows — an open poller is not spammed for a
 // no-op pass.
 //
+// sessionsChanged gates the two SESSION passes (linkParents, linkRoots). They
+// can only do useful work when a session row changed since the last pass (a
+// new orphan, a newly-landed parent/root, or a provisional root to correct);
+// ops never affect session parentage or roots, so during op-heavy ingestion
+// (the common scan case) skipping them avoids the O(sessions) linkRoots
+// recursive CTE that otherwise dominated CPU (SOW-0117). The op-child passes
+// always run because a newly-arrived op can carry a pending child link.
+//
 // The link passes are organized as a slice of named steps so the iteration
 // stays trivial and the per-step rollback contract (any error rolls the WHOLE
 // tx back) lives in one place; the resolverStep type captures both the SQL
 // pass and its emit hook through the same signature.
-func (r *resolver) linkOrphans(ctx context.Context) error {
+func (r *resolver) linkOrphansGated(ctx context.Context, sessionsChanged bool) error {
 	if r.db == nil {
 		return errors.New("resolver: nil db")
 	}
 	return r.runResolverTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		affected := map[string]struct{}{}
-		for _, step := range r.resolverSteps() {
+		for i, step := range r.resolverSteps() {
+			// Steps 0 (linkParents) and 1 (linkRoots) are session-only; skip
+			// them when no session changed since the last pass. The op-child
+			// steps (2, 3) always run.
+			if !sessionsChanged && i < 2 {
+				continue
+			}
 			if err := step(ctx, tx, affected); err != nil {
 				return err
 			}
 		}
 		return r.emitResolverNotify(ctx, tx, affected)
 	})
+}
+
+func (r *resolver) linkOrphans(ctx context.Context) error {
+	return r.linkOrphansGated(ctx, true)
 }
 
 // resolverStep is one phase of a linkOrphans pass: it accumulates the session

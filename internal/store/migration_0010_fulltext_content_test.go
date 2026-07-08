@@ -13,7 +13,7 @@ import (
 // but with `text` as the indexed column instead of error_text.
 //
 // This file pins:
-//   - The full-chain head version (14)
+//   - The full-chain head version (15)
 //   - The fts_content table shape: indexed column `text` + UNINDEXED
 //     linkage to op_id / session_id / turn_id
 //   - MATCH-style queries against fts_content work (FTS5 is compiled in
@@ -23,7 +23,7 @@ import (
 
 // TestMigration0010_ChainHeadSchemaVersion pins the FULL-chain head
 // version: openInMemory runs every migration through the latest (0014),
-// so the on-disk schema_meta.version is '14'. The bump is also asserted
+// so the on-disk schema_meta.version is '15'. The bump is also asserted
 // by presenter.SchemaVersion (rest-api.md §Schema versioning).
 func TestMigration0010_ChainHeadSchemaVersion(t *testing.T) {
 	t.Parallel()
@@ -35,8 +35,8 @@ func TestMigration0010_ChainHeadSchemaVersion(t *testing.T) {
 		`SELECT value FROM schema_meta WHERE key='version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema_meta.version: %v", err)
 	}
-	if version != "14" {
-		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0014)", "14", version)
+	if version != "16" {
+		t.Fatalf("schema_meta.version: want %q, got %q (full chain head is 0016)", "16", version)
 	}
 }
 
