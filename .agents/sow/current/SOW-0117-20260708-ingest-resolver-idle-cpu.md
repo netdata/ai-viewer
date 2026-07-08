@@ -335,3 +335,82 @@ Checklist (project-second-opinions SKILL.md) — all complete:
   go test -race ./... (18 packages), coverage store 90.9 / presenter 89.4 /
   ingest 82.1. Benchmark gate deferred (host busy with the scan under fix).
 - Prompt: broad implementation-review scope, relative paths, neutral wording.
+
+## Gate 3 — Implementation Review (round 1)
+
+Reviewers: glm, minimax, kimi, mimo, deepseek, qwen (run in parallel, all 6
+returned). Votes: PRODUCTION GRADE — minimax, mimo, qwen. NEEDS WORK — glm,
+kimi, deepseek. Unique findings and dispositions:
+
+ACCEPTED (fixed in commit 148b2ee):
+- Weak idle test (minimax P1, kimi P3): TestResolver_LoopSkipsSessionPassesWhenOnlyOps
+  only checked the watermark value, not that session passes were actually
+  skipped. Fixed: new TestResolver_LinkOrphansGatedSkipsSessionPasses seeds a
+  nested parent/child and asserts linkOrphansGated(false) leaves the root
+  provisional while (true) transitively fixes it.
+- No EXPLAIN/existence test for idx_sessions_link_tooluse (kimi P2, deepseek P2,
+  mimo P3, qwen P3, glm P3): added migration_0016 index-existence test. No
+  EXPLAIN assertion (see the test's doc comment + the lesson below).
+- data-model.md spec typo "SOW-0016" -> migration 0016 (kimi P2, qwen P3, deepseek P3).
+- ingester.md still said the resolver runs "every 5 s" unconditionally (glm P2):
+  updated the resolver bullet + the "resolver pass" heading for the gating.
+- Magic positional i<2 skip (kimi P2, mimo P3, glm P3): refactored into named
+  sessionSteps()/opSteps().
+- AGENTS.md hard-won lesson missing (kimi P2, Discipline Checklist): added.
+- Operator home path in the SOW (scan-secrets operator-PII): redacted.
+
+REJECTED with evidence:
+- "Session-watermark gate can miss a needed re-root" (glm P1, minimax P1, kimi
+  P2, deepseek P2): FALSE POSITIVE. last_activity_ts is monotonically
+  non-decreasing — EVERY session write path uses MAX(existing, new)
+  (writer.go:698, 764, 904; aggregates.go:75), so MAX(last_activity_ts) over all
+  sessions advances on every session insert/update that could need re-rooting.
+  The resolver's own linkParents/linkRoots run in the SAME transaction, so there
+  is no cross-pass "link in N, re-root in N+1" dependency. A session-change that
+  needs re-rooting always advances the watermark -> sessionsChanged=true -> the
+  recursive CTE runs. (deepseek's related P2 is the OPPOSITE and harmless: an
+  op-only batch may bump last_activity_ts via aggregate refresh -> an extra
+  session pass runs that finds nothing; over-running, not under-running.)
+
+LESSON (for the EXPLAIN test gap): the planner's index-vs-scan choice depends on
+table cardinality. On the tiny synthetic test DB (1-2 sessions) the planner
+correctly scans `c`; at production scale (306 K sessions) it seeks
+idx_sessions_link_tooluse (verified on the real store: SEARCH c USING INDEX,
+EXISTS 1.49 s -> 6 ms). A small-data EXPLAIN assertion would be a flaky/misleading
+proxy; the index-existence + partial-predicate contract is the reliable invariant.
+
+Disposition: all accepted P1/P2 findings fixed; the one P1 correctness claim
+rejected with file:line evidence. Converged.
+
+## Gate 3 — Implementation Review (round 2, after fixes)
+
+All 6 reviewers re-run with the same broad scope. Votes: PRODUCTION GRADE —
+minimax, kimi, mimo, deepseek, qwen (5/6). NEEDS WORK — glm (1/6).
+
+deepseek explicitly re-verified the rejected round-1 correctness claim as FALSE
+("4 MAX paths, single-transaction execution, covering index") and confirmed all
+round-1 P1/P2 findings fixed. minimax confirmed the rejected claim is correctly
+rejected with file:line evidence.
+
+glm's two P2 findings (both doc/test accuracy, NOT correctness or the perf goal;
+glm itself: "The core optimization is solid and the goal is met"):
+- P2 spec accuracy: the session-watermark signal was documented as advancing
+  "only on session insert/update"; it ALSO advances when a session gains an op
+  with a newer end_ts (aggregate refresh aggregates.go:75). FIXED (commit
+  5ec7798): corrected ingester.md + sessionLinkWatermark + sessionWatermarkNow
+  doc comments to state the over-approximation precisely. Correctness unchanged
+  (the gate over-approximates "a session changed": never misses a real change,
+  may run slightly more than needed — harmless). The measured idle/resume-scan
+  benefit is unaffected.
+- P2 misleading test: TestResolver_LoopSkipsSessionPassesWhenOnlyOps uses a
+  mocked sessionWatermarkNow. CLARIFIED (commit 5ec7798): the test's doc comment
+  now states it tests loop bookkeeping with a mocked watermark; the real
+  session-pass skip is pinned by TestResolver_LinkOrphansGatedSkipsSessionPasses
+  (added round 1), and the real watermark signal is a writer/aggregate property
+  exercised by writer tests + the production measurement.
+
+Disposition: converged — 5/6 PRODUCTION GRADE; the lone holdout's two P2s were
+doc/test-accuracy and are addressed. No round 3 (per the reviewer budget: a third
+round is exceptional; the holdout's findings are addressed and are not
+correctness/perf blockers; further rounds would be buying reviewers as a
+substitute for the local verification already done).
