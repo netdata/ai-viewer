@@ -309,7 +309,29 @@ Open decisions:
 - INDEXED BY NOT added to sessions queries (measured no benefit: the
   planner's idx_sessions_parent choice is already near-optimal and the
   remaining cost is cold-cache I/O that the hot daemon cache avoids).
-- Open follow-up (out of scope): the ai-agent v2 adapter scans
-  `/home/costa/.ai-agent/sessions` (31 GB / 615 K files) in ~30+ min on
-  every restart — a separate scan-throughput issue, not the idle
+- Open follow-up (out of scope): the ai-agent v2 adapter scans the
+  operator's ai-agent sessions directory (31 GB / 615 K files) in ~30+ min
+  on every restart — a separate scan-throughput issue, not the idle
   resolver burn this SOW fixes.
+
+## Reviewer Readiness (Gate 3 — Implementation Review)
+
+Checklist (project-second-opinions SKILL.md) — all complete:
+
+- Goal: written (this SOW §Requirements).
+- Stage artifact: implementation evidence in this log + the committed diff
+  (commits 0a7eec1, 7951090).
+- Local checks done: SOW-0117, data-model.md, resolver.go, ingester.go,
+  worker.go, migrations 0015/0016, schema_contract_test.go, install/runtime
+  (deployed to /opt/ai-viewer, migration applied, pprof captured).
+- Risks/unknowns/out-of-scope explicit: ai-agent v2 scan throughput
+  (615 K files) is out of scope; INDEXED BY rejected for sessions with
+  evidence; recursive CTE left correct (gated by session watermark, not
+  removed).
+- Self-review done: reviewed loop gating for startup/first-tick, idle,
+  op-only, session-change, probe-failure, and failed-pass-retry cases;
+  fixed the watermark-advance-before-run bug (commit 7951090).
+- Local gates green: lint.sh, spec-drift, scan-secrets, scan-ai-attribution,
+  go test -race ./... (18 packages), coverage store 90.9 / presenter 89.4 /
+  ingest 82.1. Benchmark gate deferred (host busy with the scan under fix).
+- Prompt: broad implementation-review scope, relative paths, neutral wording.

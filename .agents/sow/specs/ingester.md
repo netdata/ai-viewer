@@ -282,7 +282,7 @@ Options (functional-option pattern):
   lifecycle writes, Tail heartbeat persistence, stale-tail watchdog writes, and
   read-model repair share the same writer connection; larger cold-rebuild
   batches have live-proven they can starve the 30 s liveness write budget.
-- One **background resolver goroutine** runs at 5 s ticks, retrying parent linkage for sessions inserted with `parent_session_id = NULL` whose `parent_native_id` is now resolvable.
+- One **background resolver goroutine** runs at 5 s ticks, retrying parent linkage for sessions inserted with `parent_session_id = NULL` whose `parent_native_id` is now resolvable. **Idle gating (SOW-0117):** the pass is skipped entirely when no canonical rows have been committed since the last pass (the worker bumps an atomic generation counter on every committed batch), and the two SESSION passes (parent-link + the transitive root recursive CTE) are additionally skipped when only ops have committed (the resolver probes `MAX(sessions.last_activity_ts)`, which advances only on session insert/update — ops never change session parentage or roots). The watermarks advance only on a successful pass, so a transient failure retries on the next tick. A daemon with nothing to do costs ~0 resolver CPU.
 
 ## Batching
 
@@ -524,7 +524,7 @@ When `SessionStartedEvent` carries a `ParentNativeID`:
 3. If miss, `SELECT id FROM sessions WHERE source_id=? AND native_id=?`.
 4. If still miss (parent not yet ingested), insert child with `parent_session_id = NULL` and queue for the background resolver.
 
-The **resolver pass** (every 5 s):
+The **resolver pass** (every 5 s, gated on new ingestion — SOW-0117; see the resolver bullet in §Concurrency above):
 
 ```sql
 UPDATE sessions

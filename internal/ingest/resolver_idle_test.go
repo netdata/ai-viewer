@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/netdata/ai-viewer/internal/canonical"
 )
 
 // TestResolver_LoopSkipsWhenNoNewIngestion pins SOW-0117's idle-skip: the
@@ -79,6 +81,58 @@ func TestResolver_NilGenerationAlwaysRuns(t *testing.T) {
 	}
 	if r.lastSeenGen.Load() != -1 {
 		t.Fatalf("bare newResolver lastSeenGen: want -1 (first tick runs), got %d", r.lastSeenGen.Load())
+	}
+}
+
+// TestResolver_LinkOrphansGatedSkipsSessionPasses pins that sessionsChanged=false
+// ACTUALLY skips the session link passes (linkParents + linkRoots), not just the
+// watermark bookkeeping. It seeds a nested parent/child whose root the resolver
+// would transitively fix, then asserts linkOrphansGated(false) leaves it unfixed
+// (session passes skipped) while linkOrphansGated(true) fixes it.
+func TestResolver_LinkOrphansGatedSkipsSessionPasses(t *testing.T) {
+	t.Parallel()
+	const src = "codex:/tmp"
+
+	_, db := openTestStore(t)
+	ctx := context.Background()
+	if err := ensureSourceRowDirect(ctx, db, src, "codex", "/tmp"); err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	w := newWriter(src, "codex", "/tmp", NopPricer{})
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	for _, ev := range []canonical.SessionStartedEvent{
+		{EventBase: canonical.EventBase{SourceID: src, SourceSeq: 1, Ts: 1000}, NativeID: "root", RootNativeID: "root", Kind: canonical.KindRoot, AgentName: "root"},
+		{EventBase: canonical.EventBase{SourceID: src, SourceSeq: 2, Ts: 2000}, NativeID: "parent", RootNativeID: "root", ParentNativeID: "root", Kind: canonical.KindSubAgent, AgentName: "parent"},
+		{EventBase: canonical.EventBase{SourceID: src, SourceSeq: 3, Ts: 3000}, NativeID: "child", RootNativeID: "parent", ParentNativeID: "parent", Kind: canonical.KindSubAgent, AgentName: "child"},
+	} {
+		if err := w.apply(ctx, tx, ev); err != nil {
+			t.Fatalf("apply %s: %v", ev.NativeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	rootID := canonicalSessionID(src, "root")
+	childID := canonicalSessionID(src, "child")
+
+	r := newResolver(db, silentLogger(), time.Minute)
+	// sessionsChanged=false → session passes skipped → child stays provisionally
+	// rooted at its direct parent, NOT the transitive root.
+	if err := r.linkOrphansGated(ctx, false); err != nil {
+		t.Fatalf("linkOrphansGated(false): %v", err)
+	}
+	if got := scanString(t, db, `SELECT root_session_id FROM sessions WHERE id=?`, childID); got == rootID {
+		t.Fatalf("sessionsChanged=false must SKIP linkRoots, but child root was transitively fixed to %q", got)
+	}
+	// sessionsChanged=true → session passes run → child re-rooted to the true root.
+	if err := r.linkOrphansGated(ctx, true); err != nil {
+		t.Fatalf("linkOrphansGated(true): %v", err)
+	}
+	if got := scanString(t, db, `SELECT root_session_id FROM sessions WHERE id=?`, childID); got != rootID {
+		t.Fatalf("sessionsChanged=true must run linkRoots: child root = %q, want %q", got, rootID)
 	}
 }
 

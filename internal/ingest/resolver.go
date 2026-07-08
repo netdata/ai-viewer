@@ -114,13 +114,14 @@ func (r *resolver) loop(ctx context.Context) {
 			var wmNow int64
 			if r.sessionWatermarkNow != nil {
 				wm, err := r.sessionWatermarkNow(ctx)
-				if err != nil {
+				switch {
+				case err != nil:
 					if r.logger != nil {
 						r.logger.Warn("resolver: session watermark probe failed; running all passes", "err", err)
 					}
-				} else if wm == r.lastSeenSession.Load() {
+				case wm == r.lastSeenSession.Load():
 					sessionsChanged = false
-				} else {
+				default:
 					wmNow = wm
 					wmAdvanced = true
 				}
@@ -186,13 +187,18 @@ func (r *resolver) linkOrphansGated(ctx context.Context, sessionsChanged bool) e
 	}
 	return r.runResolverTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		affected := map[string]struct{}{}
-		for i, step := range r.resolverSteps() {
-			// Steps 0 (linkParents) and 1 (linkRoots) are session-only; skip
-			// them when no session changed since the last pass. The op-child
-			// steps (2, 3) always run.
-			if !sessionsChanged && i < 2 {
-				continue
-			}
+		// Session passes (linkParents, linkRoots) only do useful work when a
+		// session row changed since the last pass; skip them when the loop has
+		// determined only ops committed (ops cannot change session parentage or
+		// roots). The op-child passes always run because a newly-arrived op can
+		// carry a pending child link. Splitting the steps into sessionSteps /
+		// opSteps (rather than a positional i<2) keeps the skip self-documenting
+		// and robust against future re-ordering (SOW-0117 reviewer feedback).
+		steps := r.opSteps()
+		if sessionsChanged {
+			steps = append(r.sessionSteps(), steps...)
+		}
+		for _, step := range steps {
 			if err := step(ctx, tx, affected); err != nil {
 				return err
 			}
@@ -210,18 +216,20 @@ func (r *resolver) linkOrphans(ctx context.Context) error {
 // signature so the resolver loop is a uniform for-range over a step slice.
 type resolverStep func(ctx context.Context, tx *sql.Tx, affected map[string]struct{}) error
 
-// resolverSteps returns the ordered list of link passes a linkOrphans run
-// must execute. The order is significant: parent-link must run before root
-// re-resolution so root_session_id can re-point at the just-linked parent in
-// the same pass (see linkRoots's WHERE clause). Op-child passes follow the
-// session passes because they read the now-resolved session tree.
-func (r *resolver) resolverSteps() []resolverStep {
-	return []resolverStep{
-		r.linkParents,
-		r.linkRoots,
-		r.linkOpChildren,
-		r.linkOpChildrenByToolUse,
-	}
+// sessionSteps returns the link passes that only do useful work when a session
+// row changed: linkParents (parent linkage) and linkRoots (root re-resolution,
+// including the O(sessions) recursive CTE). linkParents must run before
+// linkRoots so root_session_id can re-point at the just-linked parent in the
+// same pass (see linkRoots's WHERE clause).
+func (r *resolver) sessionSteps() []resolverStep {
+	return []resolverStep{r.linkParents, r.linkRoots}
+}
+
+// opSteps returns the link passes that must run whenever any canonical row was
+// committed, because a newly-arrived op can carry a pending child link. They
+// follow the session passes because they read the now-resolved session tree.
+func (r *resolver) opSteps() []resolverStep {
+	return []resolverStep{r.linkOpChildren, r.linkOpChildrenByToolUse}
 }
 
 // runResolverTx wraps body in the resolver's single-tx contract: BeginTx,

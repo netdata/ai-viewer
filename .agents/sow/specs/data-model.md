@@ -141,8 +141,9 @@ CREATE INDEX idx_sessions_link_parent
 CREATE INDEX idx_sessions_link_root
     ON sessions(json_extract(extras_json, '$.aiViewer.rootNativeId'))
     WHERE json_extract(extras_json, '$.aiViewer.rootNativeId') IS NOT NULL;
--- SOW-0016: sessions-side toolUseId index backing linkOpChildrenByToolUse's
--- EXISTS join (the op side is idx_ops_link_tooluse, migration 0015).
+-- SOW-0117: sessions-side toolUseId index backing linkOpChildrenByToolUse's
+-- EXISTS join (the op side is idx_ops_link_tooluse, migration 0015; this index
+-- is migration 0016).
 CREATE INDEX idx_sessions_link_tooluse
     ON sessions(json_extract(extras_json, '$.aiViewer.toolUseId'))
     WHERE json_extract(extras_json, '$.aiViewer.toolUseId') IS NOT NULL;
