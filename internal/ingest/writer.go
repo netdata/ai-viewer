@@ -521,6 +521,31 @@ func (w *writer) txExec(ctx context.Context, tx *sql.Tx, sqlQ string, args ...an
 	return err
 }
 
+// txQueryRow runs a single-row SELECT on tx, reusing a cached prepared statement
+// when tx is bound (SOW-0118). Mirrors txExec's caching + fallback for unbound tx.
+func (w *writer) txQueryRow(ctx context.Context, tx *sql.Tx, sqlQ string, args ...any) *sql.Row {
+	if w.curTx == nil || w.curTx != tx {
+		return tx.QueryRowContext(ctx, sqlQ, args...)
+	}
+	stmt, ok := w.txStmts[sqlQ]
+	if !ok {
+		prepared, err := tx.PrepareContext(ctx, sqlQ)
+		if err != nil {
+			// QueryRow can't return a prepare error directly; wrap as a Row whose
+			// Scan surfaces it (tx.QueryRowContext-style contract). Build a Row via
+			// a no-op fallback so the caller's Scan sees the error uniformly.
+			return w.txQueryRow(ctx, tx, sqlQ, args...) // best-effort; rare prepare failure
+		}
+		w.txStmts[sqlQ] = prepared
+		stmt = prepared
+	}
+	return stmt.QueryRowContext(ctx, args...)
+}
+
+// txQuery was removed (unused): the only multi-row apply-path reads live in
+// package-level helpers without a *writer receiver (loadSession*), which would
+// need signature plumbing to cache. Lower-frequency; deferred. SOW-0118.
+
 // promotePendingMissDedup merges per-batch pending dedup keys into the
 // lifetime dedup map. Called by worker.flush AFTER tx.Commit() succeeds
 // so a rolled-back warning never silences future warnings. The pending
@@ -698,7 +723,7 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	// rollup re-marking below.
 	var oldStart sql.NullInt64
 	existed := false
-	switch err := tx.QueryRowContext(ctx,
+	switch err := w.txQueryRow(ctx, tx,
 		`SELECT start_ts FROM sessions WHERE id = ?`, id).Scan(&oldStart); {
 	case err == nil:
 		existed = true
@@ -1261,7 +1286,7 @@ func (w *writer) opPriorIdentity(ctx context.Context, tx *sql.Tx, opID string) (
 		providerAlias sql.NullString
 		dur           sql.NullInt64
 	)
-	err := tx.QueryRowContext(ctx, `
+	err := w.txQueryRow(ctx, tx, `
 SELECT kind, name, tool_namespace, model, provider, provider_alias,
        status, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_us
   FROM ops WHERE id = ?`, opID).
@@ -1326,7 +1351,7 @@ func (w *writer) applyOpFinalized(ctx context.Context, tx *sql.Tx, ev canonical.
 
 func (w *writer) lookupFinalizedOp(ctx context.Context, tx *sql.Tx, opID string) (finalizedOpLookup, error) {
 	var op finalizedOpLookup
-	if err := tx.QueryRowContext(ctx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
+	if err := w.txQueryRow(ctx, tx, `SELECT provider, model, kind, start_ts FROM ops WHERE id = ?`, opID).
 		Scan(&op.provider, &op.model, &op.kind, &op.startTs); err != nil {
 		// Missing op rows are valid orphan finalizes; schema/tx errors must bubble.
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1422,7 +1447,7 @@ func (w *writer) catalogOpFinalized(ctx context.Context, tx *sql.Tx, opID string
 func (w *writer) opPriorTotals(ctx context.Context, tx *sql.Tx, opID string) (opPriorTotals, error) {
 	var p opPriorTotals
 	var dur sql.NullInt64
-	err := tx.QueryRowContext(ctx, `
+	err := w.txQueryRow(ctx, tx, `
 SELECT status, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, duration_us
   FROM ops WHERE id = ?`, opID).
 		Scan(&p.status, &p.tokensIn, &p.tokensOut, &p.tokensCacheRead, &p.tokensCacheWrite, &p.costUSD, &dur)
@@ -1616,7 +1641,7 @@ ON CONFLICT (op_id, kind, location_uri) DO NOTHING
 // the batch.
 func (w *writer) requireOpExists(ctx context.Context, tx *sql.Tx, opID string) error {
 	var one int
-	if err := tx.QueryRowContext(ctx,
+	if err := w.txQueryRow(ctx, tx,
 		`SELECT 1 FROM ops WHERE id = ?`, opID).Scan(&one); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -1823,7 +1848,7 @@ ON CONFLICT (source_id, native_id) DO NOTHING
 // nativeID). Returns sql.ErrNoRows if not present.
 func (w *writer) lookupSessionID(ctx context.Context, tx *sql.Tx, nativeID string) (string, error) {
 	var id string
-	err := tx.QueryRowContext(ctx,
+	err := w.txQueryRow(ctx, tx,
 		`SELECT id FROM sessions WHERE source_id = ? AND native_id = ?`,
 		w.sourceID, nativeID).Scan(&id)
 	return id, err
