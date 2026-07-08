@@ -45,13 +45,16 @@ type resolver struct {
 	// production it is only touched from the single resolver loop goroutine.
 	lastSeenGen atomic.Int64
 	// sessionWatermarkNow returns MAX(sessions.last_activity_ts), a cheap
-	// covering-index probe (idx_sessions_activity) that advances ONLY when a
-	// session row is inserted or updated — NOT when only ops commit. The two
-	// SESSION link passes (linkParents, linkRoots — the latter builds an
-	// O(sessions) recursive CTE) are gated on it: during op-heavy ingestion
-	// (the common scan case) they are skipped because ops cannot change session
-	// parentage or roots. nil (tests) means "sessions may have changed" so the
-	// session passes always run and linkOrphans stays directly drivable.
+	// covering-index probe (idx_sessions_activity) used as a CONSERVATIVE signal
+	// for whether the two SESSION link passes (linkParents, linkRoots — the
+	// latter builds an O(sessions) recursive CTE) need to run. It advances when a
+	// session is inserted/updated, and also when a session gains an op with a
+	// newer end_ts (aggregate refresh), so it OVER-approximates "a session
+	// changed": the session passes may run a little more than needed (harmless,
+	// they find nothing) but never miss a real session change. Effective where it
+	// matters — idle and resume scans of unchanged sessions. nil (tests) means
+	// "sessions may have changed" so the session passes always run and
+	// linkOrphans stays directly drivable.
 	sessionWatermarkNow func(context.Context) (int64, error)
 	// lastSeenSession is the session watermark after the last pass that ran the
 	// session link passes. Starts at -1 so the first pass always runs them.

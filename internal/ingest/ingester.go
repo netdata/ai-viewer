@@ -681,13 +681,21 @@ func (i *Ingester) bumpIngestionGen() {
 	i.ingestionGen.Add(1)
 }
 
-// sessionLinkWatermark returns MAX(sessions.last_activity_ts), the cheap
-// covering-index probe (idx_sessions_activity) the resolver uses to decide
-// whether the two SESSION link passes (linkParents, linkRoots) need to run.
-// It advances only when a session row is inserted or updated — NOT when only
-// ops commit — so during op-heavy ingestion the resolver skips the O(sessions)
-// linkRoots recursive CTE that otherwise dominated CPU (SOW-0117). Returns an
-// error on query failure; the resolver falls back to running all passes.
+// sessionLinkWatermark returns MAX(sessions.last_activity_ts), a cheap
+// covering-index probe (idx_sessions_activity) the resolver uses as a
+// CONSERVATIVE signal for whether the two SESSION link passes (linkParents,
+// linkRoots) need to run. It advances when a session is inserted/updated, and
+// also when a session gains an op with a newer end_ts (the aggregate refresh at
+// aggregates.go:75 sets last_activity_ts = MAX(existing, MAX(ops.end_ts))). It is
+// therefore an OVER-APPROXIMATION of "a session changed": the session passes
+// may run a little more often than strictly needed (harmless — they find
+// nothing), but they never miss a real session change, because every path that
+// could need re-rooting advances last_activity_ts. This makes the gate effective
+// exactly where it matters — idle (no commits) and resume scans of unchanged
+// sessions (the common restart case) — where MAX(last_activity_ts) is stable so
+// the session passes (incl. the O(sessions) linkRoots recursive CTE) are skipped
+// (SOW-0117). Returns an error on query failure; the resolver falls back to
+// running all passes.
 func (i *Ingester) sessionLinkWatermark(ctx context.Context) (int64, error) {
 	var wm sql.NullInt64
 	err := i.db.QueryRowContext(ctx, `SELECT MAX(last_activity_ts) FROM sessions`).Scan(&wm)

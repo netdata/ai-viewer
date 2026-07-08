@@ -136,12 +136,16 @@ func TestResolver_LinkOrphansGatedSkipsSessionPasses(t *testing.T) {
 	}
 }
 
-// TestResolver_LoopSkipsSessionPassesWhenOnlyOps pins SOW-0117's session-pass
-// gate: when the ingester's generation counter advances (new batch) but the
-// session watermark (MAX(last_activity_ts)) is UNCHANGED, the loop must run
-// linkOrphansGated with sessionsChanged=false — i.e. skip the two session
-// passes (linkParents + the O(sessions) linkRoots recursive CTE) and run only
-// the op-child passes. This is the common op-heavy ingestion case.
+// TestResolver_LoopSkipsSessionPassesWhenOnlyOps pins the loop's WATERMARK
+// BOOKKEEPING when an op-only batch committed: the generation counter advanced
+// (so linkOrphansGated runs) but a mocked session watermark is static (so the
+// loop records it once and does not drift). It uses a MOCK sessionWatermarkNow
+// by design — it tests the loop's gating logic, not the real MAX(last_activity_ts)
+// behavior. The real session-pass skip is pinned by
+// TestResolver_LinkOrphansGatedSkipsSessionPasses; the real watermark signal
+// (monotonic, advances on session insert/update + aggregate refresh) is a
+// property of the writer/aggregate refresh, exercised by the writer tests and
+// the production measurement in SOW-0117.
 func TestResolver_LoopSkipsSessionPassesWhenOnlyOps(t *testing.T) {
 	t.Parallel()
 
