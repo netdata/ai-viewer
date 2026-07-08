@@ -28,6 +28,11 @@ type resolver struct {
 	// waitBeforeDBWork lets tail lifecycle writes take priority before the
 	// resolver opens its lower-priority maintenance transaction.
 	waitBeforeDBWork func(context.Context) error
+	// deferredNow, when it returns true, makes the loop skip linkOrphans
+	// entirely (SOW-0118): during the startup scan + read-model rebuild the
+	// resolver's slow link passes monopolize the single writer connection and
+	// starve every worker flush. nil (tests) = never defer.
+	deferredNow func() bool
 	// hasNewIngestion reports whether any canonical rows were committed since
 	// the resolver's last completed pass. The resolver's four link passes are
 	// O(all-rows) scans; running them every tick when nothing changed is the
@@ -101,6 +106,17 @@ func (r *resolver) loop(ctx context.Context) {
 		case <-r.stop:
 			return
 		case <-t.C:
+			// SOW-0118: during the startup scan (+ post-scan read-model rebuild),
+			// the resolver's link passes do slow B-tree scans on the large DB and
+			// MONOPOLIZE the single writer connection (SetMaxOpenConns(1)),
+			// starving every worker flush (measured: begin-wait 68–93% of flush
+			// time, resolver holding the connection in 10/10 samples). Linkage is
+			// an eventually-consistent read model; defer it until the scan+rebuild
+			// settle, then one pass links all scan-time orphans. No correctness
+			// loss — the resolver is idempotent.
+			if r.deferredNow != nil && r.deferredNow() {
+				continue
+			}
 			// Capture the current signals BEFORE running. The watermarks advance only
 			// on a SUCCESSFUL pass so a transient linkOrphans failure is retried on
 			// the next tick (preserving the pre-SOW-0117 retry-every-5s contract)

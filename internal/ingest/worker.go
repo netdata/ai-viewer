@@ -69,6 +69,10 @@ type worker struct {
 	// onErr is invoked for terminal batch failures that lost primary rows.
 	// Defaults to logger.Error if not set.
 	onErr func(error)
+	// stageTiming accumulates per-stage wall time across flushes for durable
+	// flush-path visibility (SOW-0118): how flush time splits across
+	// apply/rollups/fts/aggregates/notify/commit. nil-safe (tests).
+	stageTiming *flushStageTiming
 }
 
 // flush opens a transaction, applies every event in batch via the
@@ -80,27 +84,57 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	if err := w.waitForDBWork(ctx); err != nil {
 		return err
 	}
+	var begin func()
+	if w.stageTiming != nil {
+		begin = w.stageTiming.stage("begin")
+	}
 	tx, err := w.db.BeginTx(ctx, nil)
+	if begin != nil {
+		begin()
+	}
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	committed := false
 	defer w.rollbackIfUncommitted(tx, &committed, "worker: rollback failed")
 
-	if err := w.writeBatchRows(ctx, tx, wr, batch); err != nil {
+	if err := w.timedStage("apply", func() error { return w.writeBatchRows(ctx, tx, wr, batch) }); err != nil {
 		return err
 	}
-	if err := wr.refreshBatchReadModels(ctx, tx); err != nil {
+	if err := w.timedReadModels(ctx, wr, tx); err != nil {
 		return err
 	}
-	if err := w.writeBatchProgressAndNotify(ctx, tx, wr, batch); err != nil {
+	if err := w.timedStage("progress_notify", func() error {
+		return w.writeBatchProgressAndNotify(ctx, tx, wr, batch)
+	}); err != nil {
 		return err
 	}
-	if err := commitTx(tx, &committed, "commit"); err != nil {
+	if err := w.timedStage("commit", func() error { return commitTx(tx, &committed, "commit") }); err != nil {
 		return err
 	}
 	w.promoteCommittedBatch(wr)
 	return nil
+}
+
+// timedStage runs f and, if per-stage timing is enabled, attributes its wall
+// time to the named stage. Returns f's error unchanged.
+func (w *worker) timedStage(name string, f func() error) error {
+	stop := func() {}
+	if w.stageTiming != nil {
+		stop = w.stageTiming.stage(name)
+	}
+	err := f()
+	stop()
+	return err
+}
+
+// timedReadModels runs the writer's read-model refresh with sub-stage timing
+// (rollups / fts / aggregates). The writer borrows the worker's stageTiming for
+// the duration of the call so refreshBatchReadModels can attribute its inner
+// stages; nil-safe (tests construct writers without timing).
+func (w *worker) timedReadModels(ctx context.Context, wr *writer, tx *sql.Tx) error {
+	wr.stageTiming = w.stageTiming
+	return w.timedStage("readmodels", func() error { return wr.refreshBatchReadModels(ctx, tx) })
 }
 
 func (w *worker) writeBatchRows(ctx context.Context, tx *sql.Tx, wr *writer, batch []canonical.Event) error {
@@ -154,18 +188,34 @@ func (w *writer) refreshBatchReadModels(ctx context.Context, tx *sql.Tx) error {
 	// runs so the UI shows correct counts during the scan.
 	if (w.deferReadModels != nil && w.deferReadModels.Load()) ||
 		(w.readModelRebuildActive != nil && w.readModelRebuildActive.Load()) {
-		if err := w.markReadModelRepairPending(ctx, tx); err != nil {
+		if err := w.timedWriteStage("repair_pending", func() error { return w.markReadModelRepairPending(ctx, tx) }); err != nil {
 			return err
 		}
+		return w.timedWriteStage("aggregates", func() error {
+			return refreshAggregates(ctx, tx, w.dirtyTurnIDs, w.dirtySessionIDs)
+		})
+	}
+	if err := w.timedWriteStage("rollups", func() error { return w.refreshRollups(ctx, tx) }); err != nil {
+		return err
+	}
+	if err := w.timedWriteStage("fts", func() error { return w.refreshFTS(ctx, tx) }); err != nil {
+		return err
+	}
+	return w.timedWriteStage("aggregates", func() error {
 		return refreshAggregates(ctx, tx, w.dirtyTurnIDs, w.dirtySessionIDs)
+	})
+}
+
+// timedWriteStage is the writer-receiver variant of worker.timedStage: runs f
+// and, if stageTiming is set, attributes its wall time to the named stage.
+func (w *writer) timedWriteStage(name string, f func() error) error {
+	stop := func() {}
+	if w.stageTiming != nil {
+		stop = w.stageTiming.stage(name)
 	}
-	if err := w.refreshRollups(ctx, tx); err != nil {
-		return err
-	}
-	if err := w.refreshFTS(ctx, tx); err != nil {
-		return err
-	}
-	return refreshAggregates(ctx, tx, w.dirtyTurnIDs, w.dirtySessionIDs)
+	err := f()
+	stop()
+	return err
 }
 
 func (w *writer) markReadModelRepairPending(ctx context.Context, tx *sql.Tx) error {
@@ -211,6 +261,16 @@ WHERE source_progress.read_model_state <> excluded.read_model_state
 // so a rolled-back recompute keeps the bucket carried and is naturally retried).
 func (w *worker) refreshRollupsOnly(ctx context.Context, wr *writer) error {
 	if w.readModelRebuildActive != nil && w.readModelRebuildActive.Load() {
+		return nil
+	}
+	// SOW-0118: defer the idle rollup refresh during the startup scan, same as
+	// refreshBatchReadModels does. The refresh queries window ops on the (large)
+	// DB and monopolizes the single writer connection, starving every worker
+	// flush — measured as a connection-holder in rollup_refresh.go while 6+
+	// flushers block in BeginTx. Bulk-scan deferral means rollups are rebuilt
+	// once after Scan returns (BackfillRollups); the idle refresh is pure waste
+	// mid-scan.
+	if w.deferReadModels != nil && w.deferReadModels.Load() {
 		return nil
 	}
 	if err := w.waitForDBWork(ctx); err != nil {

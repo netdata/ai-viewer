@@ -394,6 +394,19 @@ func (s *sourceSupervisor) repairReadModelsLoop() {
 		if !pending || s.ing == nil || s.ctx.Err() != nil {
 			return
 		}
+		// SOW-0118: defer the read-model repair while the global startup Scan is
+		// in progress. repairSourceRollups/repairSourceFTS do slow disk-bound work
+		// on the large DB and monopolize the single writer connection, starving
+		// every worker flush (measured). BackfillReadModels rebuilds read models
+		// once after the scan; per-source repair mid-scan is pure contention.
+		// Keep pending and back off so the loop retries once the scan settles.
+		if s.ing.IsStartupScanActive() {
+			if !s.waitBackoff(backoff) {
+				return
+			}
+			backoff = nextSourceBackoff(backoff)
+			continue
+		}
 		if s.repairReadModelsOnce() {
 			return
 		}

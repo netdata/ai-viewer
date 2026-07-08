@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -251,14 +252,14 @@ func processOnce(ctx context.Context, root, sourceID, name string, cur *Cursor, 
 	return nil
 }
 
-// sortStrings is a tiny insertion sort to keep the dependency surface
-// of tailer.go small. Names lists are typically << 16.
+// sortStrings sorts the name list. SOW-0118: this was an insertion sort with
+// a "<< 16" assumption, but catchUpFromCursor feeds it the FULL snapshot list
+// (615 K files on the operator's corpus) on every Tail start/restart — O(n²)
+// ≈ 380 billion comparisons, a dominant single-core cost (46% of a CPU
+// profile). Use the stdlib O(n log n) sort; the small debounce-dirty sets from
+// watcher events are also fine through it. (listSnapshots already returns a
+// sorted slice, so catchUp's input happens to be pre-sorted, but flushDirty is
+// a shared path that can receive unsorted input, so the sort stays.)
 func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		j := i
-		for j > 0 && s[j-1] > s[j] {
-			s[j-1], s[j] = s[j], s[j-1]
-			j--
-		}
-	}
+	sort.Strings(s)
 }

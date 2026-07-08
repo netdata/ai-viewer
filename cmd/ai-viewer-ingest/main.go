@@ -278,6 +278,20 @@ func run(args []string, stdout, stderr *os.File) int {
 		close(scanDone)
 	}()
 
+	// SOW-0118: defer the resolver's link passes while any source is still
+	// doing its initial Scan. The resolver's slow link queries monopolize the
+	// single writer connection and starve every worker flush (measured: 68–93%
+	// flush time blocked in BeginTx, resolver holding the connection 10/10
+	// samples). Linkage is eventually-consistent; one resolver pass after the
+	// scan settles links all scan-time orphans. Cleared here when scanDone
+	// fires; the post-scan read-model rebuild (readModelRebuildActive) keeps
+	// the resolver deferred until that settles too.
+	ing.SetStartupScanActive(len(sources) > 0)
+	go func() {
+		<-scanDone
+		ing.SetStartupScanActive(false)
+	}()
+
 	_, backfillWait := startPostScanBackfill(ctx, scanDone, len(sources) > 0, ing, logger, readModelBackfillStartupTimeout)
 
 	var adapterWG sync.WaitGroup

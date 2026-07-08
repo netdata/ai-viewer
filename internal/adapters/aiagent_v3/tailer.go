@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -199,16 +200,10 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty map[string]str
 	return emitProgress(ctx, sourceID, *cur, out)
 }
 
-// sortStrings is a tiny indirection to keep the dependency surface of
-// tailer.go small (it doesn't otherwise need `sort`).
+// sortStrings sorts the name list. SOW-0118: this was an insertion sort with a
+// "tiny (≤ debounceMaxEntries)" assumption, but catchUpFromCursor feeds it the
+// FULL snapshot list on every Tail start/restart — O(n²) on a large corpus, a
+// dominant single-core cost. Use the stdlib O(n log n) sort.
 func sortStrings(s []string) {
-	// Simple insertion sort — names lists are tiny (≤ debounceMaxEntries
-	// per flush, typically << 16). Avoids pulling in sort just for this.
-	for i := 1; i < len(s); i++ {
-		j := i
-		for j > 0 && s[j-1] > s[j] {
-			s[j-1], s[j] = s[j], s[j-1]
-			j--
-		}
-	}
+	sort.Strings(s)
 }

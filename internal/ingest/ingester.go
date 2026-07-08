@@ -18,8 +18,13 @@ import (
 const (
 	// defaultBatchSize bounds one SQLite writer transaction. Source lifecycle
 	// and liveness writes share the same single writer; live cold-rebuild
-	// evidence showed 1000-row scan/repair batches can starve 30s tail
-	// heartbeat and stale-tail writes.
+	// evidence showed very large scan/repair batches can starve the 30s tail
+	// heartbeat and stale-tail writes. SOW-0118 measured raising this
+	// (100→500) and found it REGRESSED throughput and triggered tail-stale:
+	// with SetMaxOpenConns(1), larger batches make each flush hold the single
+	// connection longer, worsening begin contention and starving liveness
+	// writes. The real bottleneck is connection contention, not per-flush
+	// overhead (see SOW-0118). 100 retained.
 	defaultBatchSize = 100
 	// defaultBatchInterval is the max time between flushes when the batch hasn't
 	// reached the size threshold. Keeps the UI seeing fresh data during a slow
@@ -306,6 +311,10 @@ type Ingester struct {
 	// aggregates, and repair debt while derived FTS/rollup refresh is deferred.
 	deferReadModels        atomic.Bool
 	readModelRebuildActive atomic.Bool
+	// startupScanActive is true while any source's initial Scan is in progress
+	// (set by the binary from scanDone). The resolver reads it via deferredNow
+	// to skip its connection-monopolizing link passes during the scan (SOW-0118).
+	startupScanActive atomic.Bool
 	// ingestionGen is bumped on every committed canonical batch (sessions OR
 	// ops). The resolver reads it via ingestionGenNow to skip its O(all-rows)
 	// link passes when nothing has been committed since the last pass — the
@@ -391,6 +400,7 @@ func (i *Ingester) Start(ctx context.Context) error {
 	i.resolver.waitBeforeDBWork = i.waitForTailStatePriority
 	i.resolver.ingestionGenNow = i.ingestionGen.Load
 	i.resolver.sessionWatermarkNow = i.sessionLinkWatermark
+	i.resolver.deferredNow = func() bool { return i.startupScanActive.Load() || i.readModelRebuildActive.Load() }
 	i.wg.Add(1)
 	go func() {
 		defer i.wg.Done()
@@ -446,6 +456,7 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 		readModelRebuildActive: &i.readModelRebuildActive,
 		requestReadModelRepair: i.RequestSourceReadModelRepair,
 		onCommittedBatch:       i.bumpIngestionGen,
+		stageTiming:            newFlushStageTiming(sourceID, i.logger.With("subsystem", "ingest")),
 		waitBeforeDBWork:       i.waitForTailStatePriority,
 	}
 	w.onErr = func(err error) {
@@ -671,6 +682,23 @@ func (i *Ingester) SetDeferReadModels(b bool) {
 
 // DeferReadModels reports whether the bulk-scan fast-path is active.
 func (i *Ingester) DeferReadModels() bool { return i.deferReadModels.Load() }
+
+// SetStartupScanActive toggles the startup-scan flag the resolver uses to defer
+// its connection-monopolizing link passes while sources are still doing their
+// initial Scan (SOW-0118). The binary sets it true before starting sources and
+// false once every source's Scan has reached an outcome (scanDone).
+func (i *Ingester) SetStartupScanActive(active bool) {
+	i.startupScanActive.Store(active)
+}
+
+// IsStartupScanActive reports whether the initial multi-source Scan is still in
+// progress. Source supervisors consult it to defer per-source read-model repair
+// during the scan (SOW-0118): the repair monopolizes the single writer
+// connection and starves the scan, and BackfillReadModels rebuilds read models
+// once after the scan anyway.
+func (i *Ingester) IsStartupScanActive() bool {
+	return i.startupScanActive.Load()
+}
 
 // bumpIngestionGen advances the ingestion generation counter. Called on every
 // committed canonical batch (sessions OR ops) via the worker's onCommittedBatch

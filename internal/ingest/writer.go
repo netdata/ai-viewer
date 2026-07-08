@@ -24,6 +24,11 @@ type writer struct {
 	location     string
 	pricer       Pricer
 	catalog      *catalogWriter
+	// stageTiming, when non-nil, accumulates per-sub-stage wall time for the
+	// read-model refresh (rollups/fts/aggregates) so the flush breakdown can
+	// attribute read-model cost (SOW-0118). Borrowed from the owning worker
+	// per flush; nil in tests.
+	stageTiming *flushStageTiming
 	// dirty tracks session/turn IDs touched by the current batch so the
 	// aggregate refresh runs over the bounded set. Cleared after each
 	// flush.

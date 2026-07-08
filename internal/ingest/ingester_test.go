@@ -677,8 +677,8 @@ func TestNew_DefaultBatchSizeMatchesSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if i.batchSize != 100 {
-		t.Fatalf("batchSize = %d, want spec default 100", i.batchSize)
+	if i.batchSize != defaultBatchSize {
+		t.Fatalf("batchSize = %d, want spec default %d", i.batchSize, defaultBatchSize)
 	}
 }
 
