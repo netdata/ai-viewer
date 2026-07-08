@@ -98,14 +98,20 @@ func (r *resolver) loop(ctx context.Context) {
 		case <-r.stop:
 			return
 		case <-t.C:
+			// Capture the current signals BEFORE running. The watermarks advance only
+			// on a SUCCESSFUL pass so a transient linkOrphans failure is retried on
+			// the next tick (preserving the pre-SOW-0117 retry-every-5s contract)
+			// rather than being silently skipped until more data arrives.
+			var genNow int64
 			if r.ingestionGenNow != nil {
-				now := r.ingestionGenNow()
-				if now == r.lastSeenGen.Load() {
+				genNow = r.ingestionGenNow()
+				if genNow == r.lastSeenGen.Load() {
 					continue
 				}
-				r.lastSeenGen.Store(now)
 			}
 			sessionsChanged := true
+			wmAdvanced := false
+			var wmNow int64
 			if r.sessionWatermarkNow != nil {
 				wm, err := r.sessionWatermarkNow(ctx)
 				if err != nil {
@@ -115,11 +121,22 @@ func (r *resolver) loop(ctx context.Context) {
 				} else if wm == r.lastSeenSession.Load() {
 					sessionsChanged = false
 				} else {
-					r.lastSeenSession.Store(wm)
+					wmNow = wm
+					wmAdvanced = true
 				}
 			}
-			if err := r.linkOrphansGated(ctx, sessionsChanged); err != nil && r.logger != nil {
-				r.logger.Warn("resolver: link orphans failed", "err", err)
+			if err := r.linkOrphansGated(ctx, sessionsChanged); err != nil {
+				if r.logger != nil {
+					r.logger.Warn("resolver: link orphans failed", "err", err)
+				}
+				// Do NOT advance the watermarks: retry on the next tick.
+				continue
+			}
+			if r.ingestionGenNow != nil {
+				r.lastSeenGen.Store(genNow)
+			}
+			if wmAdvanced {
+				r.lastSeenSession.Store(wmNow)
 			}
 		}
 	}
