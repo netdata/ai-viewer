@@ -97,6 +97,11 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	}
 	committed := false
 	defer w.rollbackIfUncommitted(tx, &committed, "worker: rollback failed")
+	// Bind the writer to this flush's tx so per-event upserts reuse prepared
+	// statements (SOW-0118). endTx (close stmts) is deferred AFTER the rollback
+	// defer so it runs FIRST (LIFO) — stmts close before the tx ends.
+	wr.beginTx(tx)
+	defer wr.endTx()
 
 	if err := w.timedStage("apply", func() error { return w.writeBatchRows(ctx, tx, wr, batch) }); err != nil {
 		return err

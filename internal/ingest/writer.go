@@ -29,6 +29,13 @@ type writer struct {
 	// attribute read-model cost (SOW-0118). Borrowed from the owning worker
 	// per flush; nil in tests.
 	stageTiming *flushStageTiming
+	// curTx is the transaction bound to the current flush (set by beginTx, cleared
+	// by endTx). txStmts caches statements prepared on curTx so per-event upserts
+	// reuse the compiled plan instead of re-preparing on every Exec (SOW-0118:
+	// statement preparation was ~59% of apply cost). Both are per-flush lifecycle:
+	// endTx closes every cached stmt. nil/empty outside a flush.
+	curTx   *sql.Tx
+	txStmts map[string]*sql.Stmt
 	// dirty tracks session/turn IDs touched by the current batch so the
 	// aggregate refresh runs over the bounded set. Cleared after each
 	// flush.
@@ -461,6 +468,59 @@ func (w *writer) resetBatch() {
 	w.batchObservabilityErrs = w.batchObservabilityErrs[:0]
 }
 
+// beginTx binds the writer to a flush's transaction so per-event upserts can
+// reuse prepared statements (SOW-0118: statement preparation was ~59% of apply
+// cost). Paired with endTx at flush exit. Safe to call with the same tx across
+// a flush; the worker calls this right after BeginTx.
+func (w *writer) beginTx(tx *sql.Tx) {
+	w.curTx = tx
+	if w.txStmts == nil {
+		w.txStmts = make(map[string]*sql.Stmt)
+	}
+}
+
+// endTx closes every prepared statement cached for the current flush's
+// transaction and unbinds it. Called by the worker at flush exit (commit OR
+// rollback). Statements are tx-scoped, so they MUST be closed before the tx
+// ends or modernc leaks prepared-statement handles.
+func (w *writer) endTx() {
+	for _, stmt := range w.txStmts {
+		_ = stmt.Close()
+	}
+	clear(w.txStmts)
+	w.curTx = nil
+}
+
+// txExec runs sqlQ (with args) on tx, reusing a prepared statement cached for
+// tx so the SQL is compiled once per flush instead of re-prepared on every Exec
+// (SOW-0118: statement preparation was ~59% of apply cost). The cache is only
+// populated when tx == w.curTx (i.e. the worker bound the writer to this flush's
+// tx via beginTx); a direct caller passing a different/unbound tx falls back to
+// a plain Exec (correctness identical, no caching — used by tests). Returns only
+// the error because every caller discards the Result.
+func (w *writer) txExec(ctx context.Context, tx *sql.Tx, sqlQ string, args ...any) error {
+	var (
+		res sql.Result
+		err error
+	)
+	if w.curTx == nil || w.curTx != tx {
+		_, err = tx.ExecContext(ctx, sqlQ, args...)
+		return err
+	}
+	stmt, ok := w.txStmts[sqlQ]
+	if !ok {
+		prepared, perr := tx.PrepareContext(ctx, sqlQ)
+		if perr != nil {
+			return perr
+		}
+		w.txStmts[sqlQ] = prepared
+		stmt = prepared
+	}
+	res, err = stmt.ExecContext(ctx, args...)
+	_ = res
+	return err
+}
+
 // promotePendingMissDedup merges per-batch pending dedup keys into the
 // lifetime dedup map. Called by worker.flush AFTER tx.Commit() succeeds
 // so a rolled-back warning never silences future warnings. The pending
@@ -660,7 +720,7 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 	// carries real source metadata, keep source-owned fields and graft only
 	// missing aiViewer linkage hints from the synthetic replay.
 	if !existed {
-		if _, err := tx.ExecContext(ctx, `
+		if err := w.txExec(ctx, tx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
     kind, agent_name, model, provider, provider_alias, cwd, call_path, status,
@@ -683,7 +743,7 @@ INSERT INTO sessions (
 		// #nosec G202 -- the interpolated values are SQL fragments built solely from
 		// compile-time-constant column literals and package-const JSON key lists; no
 		// caller/source input reaches the SQL.
-		if _, err := tx.ExecContext(ctx, `
+		if err := w.txExec(ctx, tx, `
 INSERT INTO sessions (
     id, source_id, native_id, parent_session_id, root_session_id,
     kind, agent_name, model, provider, provider_alias, cwd, call_path, status,
@@ -758,7 +818,7 @@ func (w *writer) applySessionUpdated(ctx context.Context, tx *sql.Tx, ev canonic
 	if err != nil {
 		return fmt.Errorf("writer: marshal session updated extras: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 UPDATE sessions SET
     agent_name        = COALESCE(NULLIF(?, ''), agent_name),
     model             = COALESCE(NULLIF(?, ''), model),
@@ -900,7 +960,7 @@ func (w *writer) applySessionFinalized(ctx context.Context, tx *sql.Tx, ev canon
 	if status == "" {
 		status = string(canonical.StatusCompleted)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 UPDATE sessions SET
     status           = ?,
     error_class      = NULLIF(?, ''),
@@ -923,7 +983,7 @@ func (w *writer) applyTurnStarted(ctx context.Context, tx *sql.Tx, ev canonical.
 		return err
 	}
 	turnID := canonicalTurnID(sessionID, ev.Seq)
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO turns (id, session_id, seq, start_ts, status)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (session_id, seq) DO UPDATE SET
@@ -955,7 +1015,7 @@ func (w *writer) applyTurnFinalized(ctx context.Context, tx *sql.Tx, ev canonica
 		return fmt.Errorf("writer: marshal turn extras: %w", err)
 	}
 	// Insert if missing (e.g. TurnFinalized arrives without a TurnStarted).
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO turns (id, session_id, seq, start_ts, end_ts, status, error_class, extras_json)
 VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)
 ON CONFLICT (session_id, seq) DO UPDATE SET
@@ -1060,7 +1120,7 @@ func (w *writer) opStartedIdentity(ctx context.Context, tx *sql.Tx, ev canonical
 	// Ensure parent turn row exists — synthesize a running turn if no
 	// TurnStarted arrived first. This matches the spec: turns may be implicit
 	// when the source format doesn't emit explicit start records.
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO turns (id, session_id, seq, start_ts, status)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (session_id, seq) DO NOTHING
@@ -1131,7 +1191,7 @@ func (w *writer) upsertOpStarted(ctx context.Context, tx *sql.Tx, ev canonical.O
 	// #nosec G202 -- the only interpolated value is graftAiViewerExtras's output,
 	// built solely from the compile-time-constant column literal "ops.extras_json"
 	// and the package-const aiViewerStashKeys; no caller/source input reaches the SQL.
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO ops (
     id, turn_id, session_id, parent_op_id, seq,
     kind, name, tool_namespace, model, provider, provider_alias,
@@ -1302,7 +1362,7 @@ func resolveFinalizedOpTiming(ev canonical.OpFinalizedEvent, startTs sql.NullInt
 }
 
 func (w *writer) updateFinalizedOp(ctx context.Context, tx *sql.Tx, opID string, ev canonical.OpFinalizedEvent, timing finalizedOpTiming, cost float64) error {
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 UPDATE ops SET
     end_ts             = COALESCE(?, end_ts),
     duration_us        = COALESCE(?, duration_us),
@@ -1475,7 +1535,7 @@ func (w *writer) emitPricingMiss(ctx context.Context, tx *sql.Tx, provider, mode
 	if err != nil {
 		return fmt.Errorf("writer: marshal pricing-miss extras: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (NULL, ?, NULL, NULL, ?, 'WRN', ?, ?, ?)
 `+logEntryOnConflict, w.sourceID, tsUS, w.sourceFormat, msg, string(extras)); err != nil {
@@ -1494,7 +1554,7 @@ VALUES (NULL, ?, NULL, NULL, ?, 'WRN', ?, ?, ?)
 // surfaces parse errors and pricing misses through the same metric.
 // Both call sites must agree on what counts as a "recent error".
 func (w *writer) bumpSourceErrorCounter(ctx context.Context, tx *sql.Tx, tsUS int64) error {
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 UPDATE sources SET parse_errors = parse_errors + 1, last_seen_at = MAX(COALESCE(last_seen_at, 0), ?)
 WHERE id = ?
 `, tsUS, w.sourceID); err != nil {
@@ -1534,7 +1594,7 @@ func (w *writer) applyPayloadRef(ctx context.Context, tx *sql.Tx, ev canonical.P
 	// (op_id, kind, location_uri) makes the write idempotent: re-emitting
 	// the same payload (Tail re-read, file re-scan) never duplicates the
 	// row. See migration 0003 and ingester.md §Dedup and Idempotency.
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes, sha256)
 VALUES (?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, ''))
 ON CONFLICT (op_id, kind, location_uri) DO NOTHING
@@ -1588,7 +1648,7 @@ func (w *writer) reportOrphanPayloadRef(ctx context.Context, tx *sql.Tx, ev cano
 		return fmt.Errorf("writer: marshal orphan payload_ref extras: %w", err)
 	}
 	msg := fmt.Sprintf("payload_ref references unknown op %s; dropped to protect the batch", opID)
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (NULL, ?, NULL, NULL, ?, 'ERR', ?, ?, ?)
 `+logEntryOnConflict, w.sourceID, ev.Ts, w.sourceFormat, msg, string(extras)); err != nil {
@@ -1688,7 +1748,7 @@ func (w *writer) indexLogEntryFTS(ctx context.Context, tx *sql.Tx, refs logEntry
 	if !insertedNewLog || !w.fts5IndexLogs {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO fts_logs (rowid, message, log_id, session_id, op_id, severity, ts)
 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		logID, ev.Message, logID, refs.sessionID, refs.opID, refs.severity, ev.Ts); err != nil {
@@ -1720,7 +1780,7 @@ func (w *writer) applySourceError(ctx context.Context, tx *sql.Tx, ev canonical.
 	if err != nil {
 		return fmt.Errorf("writer: marshal source error extras: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if err := w.txExec(ctx, tx, `
 INSERT INTO log_entries (session_id, source_id, turn_id, op_id, ts, severity, source, message, extras_json)
 VALUES (NULL, ?, NULL, NULL, ?, 'ERR', ?, ?, ?)
 `+logEntryOnConflict, w.sourceID, ev.Ts, w.sourceFormat, ev.Message, string(extras)); err != nil {
@@ -1746,7 +1806,7 @@ func (w *writer) requireSessionID(ctx context.Context, tx *sql.Tx, nativeID stri
 		return "", err
 	}
 	id = canonicalSessionID(w.sourceID, nativeID)
-	if _, insErr := tx.ExecContext(ctx, `
+	if insErr := w.txExec(ctx, tx, `
 INSERT INTO sessions (id, source_id, native_id, root_session_id, kind, status, start_ts, last_activity_ts)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (source_id, native_id) DO NOTHING
