@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -261,6 +262,25 @@ func run(args []string, stdout, stderr *os.File) int {
 	// cannot contend with the writer's own batch transactions.
 	lookup := sqlCursorLookup{db: ws.DB()}
 
+	// SOW-0118: for the INITIAL scan (empty DB), drop the non-unique secondary
+	// indexes to eliminate ~95% of the per-event index write amplification (the
+	// dominant cost at GB scale). The 2 UNIQUE constraints (upsert ON CONFLICT
+	// targets) stay. Indexes are rebuilt after the scan completes (scanDone).
+	// Gate: only for a truly initial scan (no prior ops). A resume scan keeps
+	// indexes (it skips most unchanged files — the rebuild cost would exceed the
+	// insert savings).
+	var droppedIndexDefs []store.IndexDef
+	if isInitialScan(ctx, ws.DB()) {
+		logger.Info("ai-viewer-ingest: initial scan — dropping non-unique secondary indexes for fast bulk ingest")
+		defs, err := store.DropNonUniqueIndexes(ctx, ws.DB())
+		if err != nil {
+			logger.Error("ai-viewer-ingest: failed to drop indexes for scan; continuing with indexes", "err", err)
+		} else {
+			droppedIndexDefs = defs
+			logger.Info("ai-viewer-ingest: dropped non-unique secondary indexes", "count", len(defs))
+		}
+	}
+
 	// scanWG waits for all sources' Scan() to reach an outcome. The post-scan
 	// read-model backfill runs as background reconciliation after ALL startup
 	// scans finish. It does not gate per-source Tail startup.
@@ -289,6 +309,15 @@ func run(args []string, stdout, stderr *os.File) int {
 	ing.SetStartupScanActive(len(sources) > 0)
 	go func() {
 		<-scanDone
+		// SOW-0118: recreate the non-unique secondary indexes that were dropped
+		// for the initial scan BEFORE the post-scan backfill (the backfill reads
+		// some of these indexes; recreating first avoids slow scans during backfill).
+		if len(droppedIndexDefs) > 0 {
+			logger.Info("ai-viewer-ingest: recreating secondary indexes after scan")
+			if err := store.RecreateIndexes(ctx, ws.DB(), droppedIndexDefs); err != nil {
+				logger.Error("ai-viewer-ingest: failed to recreate indexes after scan", "err", err)
+			}
+		}
 		ing.SetStartupScanActive(false)
 	}()
 
@@ -772,4 +801,16 @@ func acquireSingleInstanceLock(stateDir string, logger *slog.Logger) (release fu
 		_ = lockFile.Close()
 	}
 	return release, nil
+}
+
+// isInitialScan reports whether this is a fresh/initial scan (no prior canonical
+// rows). SOW-0118: used to gate the index-drop lifecycle — only an initial scan
+// benefits from dropping secondary indexes (a resume scan skips unchanged files,
+// so the index rebuild cost would exceed the insert savings).
+func isInitialScan(ctx context.Context, db *sql.DB) bool {
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ops`).Scan(&n); err != nil {
+		return false // on error, don't drop (safe default)
+	}
+	return n == 0
 }

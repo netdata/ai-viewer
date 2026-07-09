@@ -24,7 +24,7 @@ import (
 // (scan_indexes_test.go) pins that every ON CONFLICT target survives.
 
 // indexDef captures one CREATE INDEX statement for drop/rebuild.
-type indexDef struct {
+type IndexDef struct {
 	name string
 	sql  string
 }
@@ -35,7 +35,7 @@ type indexDef struct {
 // post-scan. Safe to call multiple times (idempotent: already-dropped indexes
 // are absent from sqlite_master). Does NOT drop FTS virtual tables or their
 // shadow indexes (those are managed by the FTS backfill path).
-func DropNonUniqueIndexes(ctx context.Context, db *sql.DB) ([]indexDef, error) {
+func DropNonUniqueIndexes(ctx context.Context, db *sql.DB) ([]IndexDef, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT name, sql FROM sqlite_master
 WHERE type = 'index'
@@ -46,9 +46,9 @@ ORDER BY name
 	if err != nil {
 		return nil, fmt.Errorf("scan-index-drop: query indexes: %w", err)
 	}
-	var defs []indexDef
+	var defs []IndexDef
 	for rows.Next() {
-		var def indexDef
+		var def IndexDef
 		if err := rows.Scan(&def.name, &def.sql); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan-index-drop: scan: %w", err)
@@ -73,7 +73,7 @@ ORDER BY name
 // RecreateIndexes re-executes the captured CREATE INDEX statements (from
 // DropNonUniqueIndexes). The statements use IF NOT EXISTS (from migrations) so
 // the recreate is idempotent. Call after the bulk scan completes.
-func RecreateIndexes(ctx context.Context, db *sql.DB, defs []indexDef) error {
+func RecreateIndexes(ctx context.Context, db *sql.DB, defs []IndexDef) error {
 	for _, def := range defs {
 		sqlText := strings.TrimSpace(def.sql)
 		if sqlText == "" {
