@@ -272,13 +272,13 @@ Options (functional-option pattern):
 
 ## Concurrency Model
 
-- One **worker goroutine per source**. Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 100 events OR 500 ms**, whichever trips first, and commits.
+- One **worker goroutine per source**. Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 1000 events OR 500 ms**, whichever trips first, and commits.
 - The ingest pipeline is **single-writer to SQLite** — every worker uses the same
   `*sql.DB` handle, and the writer store pins `MaxOpenConns=1` for both
   in-memory and on-disk stores. This gives deterministic batch ordering per
   worker while serializing transaction commits before SQLite can return
   avoidable writer-lock `SQLITE_BUSY` errors.
-- The 100-event default is a liveness budget, not a throughput target. Source
+- The 1000-event default is a liveness budget, not a throughput target. Source
   lifecycle writes, Tail heartbeat persistence, stale-tail watchdog writes, and
   read-model repair share the same writer connection; larger cold-rebuild
   batches have live-proven they can starve the 30 s liveness write budget.

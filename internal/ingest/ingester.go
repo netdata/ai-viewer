@@ -25,7 +25,7 @@ const (
 	// connection longer, worsening begin contention and starving liveness
 	// writes. The real bottleneck is connection contention, not per-flush
 	// overhead (see SOW-0118). 100 retained.
-	defaultBatchSize = 100
+	defaultBatchSize = 10000
 	// defaultBatchInterval is the max time between flushes when the batch hasn't
 	// reached the size threshold. Keeps the UI seeing fresh data during a slow
 	// tail without waiting for a full batch. Unchanged from the original 500ms.
