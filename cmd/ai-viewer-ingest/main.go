@@ -795,27 +795,53 @@ func acquireSingleInstanceLock(stateDir string, logger *slog.Logger) (release fu
 	return release, nil
 }
 
-// isInitialScan reports whether this is a fresh/initial scan (no prior canonical
-// rows). SOW-0118: used to gate the index-drop lifecycle — only an initial scan
-// benefits from dropping secondary indexes (a resume scan skips unchanged files,
-// so the index rebuild cost would exceed the insert savings).
-func isInitialScan(ctx context.Context, db *sql.DB) bool {
-	var n int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ops`).Scan(&n); err != nil {
+// isBulkScan reports whether this startup will do substantial bulk ingestion
+// (vs a fast resume scan that stats+skips unchanged files). SOW-0118.
+//
+// A bulk scan is one where a source's cursor is absent or empty — meaning the
+// adapter will re-ingest ALL files from scratch. This covers:
+//   - Fresh install (no source_progress rows at all)
+//   - Cursor-cleared re-scan (cursor IS NULL)
+//   - First scan of a newly-added source
+//
+// On a normal restart (cursors present), this returns false — the resume scan
+// stats+skips unchanged files, and the index rebuild cost would exceed the
+// near-zero insert savings.
+func isBulkScan(ctx context.Context, db *sql.DB) bool {
+	// Fresh install: no source_progress rows at all.
+	var sourceCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM source_progress`).Scan(&sourceCount); err != nil {
 		return false // on error, don't drop (safe default)
 	}
-	return n == 0
+	if sourceCount == 0 {
+		return true // fresh install
+	}
+	// Check if any source has an absent/empty cursor (bulk re-scan).
+	var missingCursor int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM source_progress WHERE cursor IS NULL OR cursor = ''`).
+		Scan(&missingCursor); err != nil {
+		return false
+	}
+	return missingCursor > 0
 }
 
-// dropScanIndexesIfInitial checks if this is a fresh/initial scan (no prior ops)
-// and, if so, drops the non-unique secondary indexes for fast bulk ingest.
-// Returns the captured index definitions for post-scan rebuild. On error or
-// non-initial scan, returns nil (indexes stay). SOW-0118.
+// dropScanIndexesIfInitial checks if this is a bulk scan (fresh install OR
+// cursor-cleared re-scan) and, if so, drops the non-unique secondary indexes
+// for fast bulk ingest. Returns the captured index definitions for post-scan
+// rebuild. On error or resume scan, returns nil (indexes stay). SOW-0118.
+//
+// The gate: fire when ANY source lacks a cursor (cursor IS NULL or empty).
+// This covers fresh installs (no source_progress rows) and cursor-cleared
+// re-scans (cursor set to NULL). On a normal restart (cursors present), the
+// resume scan stats+skips unchanged files — keeping indexes is correct there
+// because the rebuild cost would exceed the near-zero insert savings.
 func dropScanIndexesIfInitial(ctx context.Context, db *sql.DB, logger *slog.Logger) []store.IndexDef {
-	if !isInitialScan(ctx, db) {
+	bulk := isBulkScan(ctx, db)
+	if !bulk {
 		return nil
 	}
-	logger.Info("ai-viewer-ingest: initial scan — dropping non-unique secondary indexes for fast bulk ingest")
+	logger.Info("ai-viewer-ingest: bulk scan detected — dropping non-unique secondary indexes for fast bulk ingest")
 	defs, err := store.DropNonUniqueIndexes(ctx, db)
 	if err != nil {
 		logger.Error("ai-viewer-ingest: failed to drop indexes for scan; continuing with indexes", "err", err)
