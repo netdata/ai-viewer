@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"runtime"
 	"sync/atomic"
@@ -226,4 +227,75 @@ func heapSamplerIngest(ctx context.Context, interval time.Duration, peak *atomic
 			}
 		}
 	}
+}
+
+// dropBenchSecondaryIndexes drops every CREATE INDEX (origin 'c') on the
+// high-volume tables, keeping PK + UNIQUE (autoindex) so upserts still work.
+// Mirrors the SOW-0118 scan-time index-drop rule (bulk scan = drop secondaries;
+// tail = keep). Used only by the no-index benchmark variant below.
+func dropBenchSecondaryIndexes(b *testing.B, db *sql.DB) {
+	b.Helper()
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ('sessions','turns','ops','payload_refs')`)
+	if err != nil {
+		b.Fatalf("list indexes: %v", err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			b.Fatalf("scan: %v", err)
+		}
+		names = append(names, n)
+	}
+	_ = rows.Close()
+	for _, n := range names {
+		if _, err := db.Exec(`DROP INDEX ` + n); err != nil {
+			b.Fatalf("drop %s: %v", n, err)
+		}
+	}
+}
+
+// BenchmarkBatchInsert_NoSecondaryIndexes is the same flush as
+// BenchmarkBatchInsert but with the secondary indexes dropped (PK+UNIQUE kept),
+// isolating the index-write-amplification cost (SOW-0118). Compare its
+// events/sec to BenchmarkBatchInsert to get the index multiplier.
+func BenchmarkBatchInsert_NoSecondaryIndexes(b *testing.B) {
+	const src = "claude_code:/bench"
+	const format = "claude_code"
+	batch := buildSyntheticBatch(src)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		s := openBenchStore(b)
+		dropBenchSecondaryIndexes(b, s.DB())
+		w := &worker{
+			sourceID: src, sourceFormat: format, location: "/bench",
+			fts5IndexLogs: true,
+			db:            s.DB(),
+			hwm:           newHWMCache(),
+			pricer:        NopPricer{},
+			logger:        silentLogger(),
+			batchSize:     len(batch),
+			batchEvery:    time.Second,
+		}
+		wr := newWriter(w.sourceID, w.sourceFormat, w.location, w.pricer)
+		b.StartTimer()
+
+		if err := w.flush(context.Background(), wr, batch); err != nil {
+			b.Fatalf("flush: %v", err)
+		}
+
+		b.StopTimer()
+		_ = s.Close()
+		b.StartTimer()
+	}
+	b.StopTimer()
+
+	wallSec := b.Elapsed().Seconds() / float64(max(b.N, 1))
+	if wallSec <= 0 {
+		wallSec = 1e-9
+	}
+	b.ReportMetric(float64(len(batch))/wallSec, "events/sec")
 }
