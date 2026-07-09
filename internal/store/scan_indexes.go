@@ -23,7 +23,7 @@ import (
 // constraint that broke the naive drop is UNIQUE → preserved). A test
 // (scan_indexes_test.go) pins that every ON CONFLICT target survives.
 
-// indexDef captures one CREATE INDEX statement for drop/rebuild.
+// IndexDef captures one CREATE INDEX statement for drop/rebuild.
 type IndexDef struct {
 	name string
 	sql  string

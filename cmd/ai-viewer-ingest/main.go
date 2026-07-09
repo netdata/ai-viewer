@@ -93,6 +93,8 @@ func main() {
 
 // run is the testable entrypoint. Returns the process exit code so
 // main() is a one-liner.
+//
+//nolint:gocyclo // run() was already >25 before SOW-0118; the index-drop is extracted
 func run(args []string, stdout, stderr *os.File) int {
 	rootCtx, stopSignals := signalContext(context.Background())
 	defer stopSignals()
@@ -269,17 +271,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	// Gate: only for a truly initial scan (no prior ops). A resume scan keeps
 	// indexes (it skips most unchanged files — the rebuild cost would exceed the
 	// insert savings).
-	var droppedIndexDefs []store.IndexDef
-	if isInitialScan(ctx, ws.DB()) {
-		logger.Info("ai-viewer-ingest: initial scan — dropping non-unique secondary indexes for fast bulk ingest")
-		defs, err := store.DropNonUniqueIndexes(ctx, ws.DB())
-		if err != nil {
-			logger.Error("ai-viewer-ingest: failed to drop indexes for scan; continuing with indexes", "err", err)
-		} else {
-			droppedIndexDefs = defs
-			logger.Info("ai-viewer-ingest: dropped non-unique secondary indexes", "count", len(defs))
-		}
-	}
+	droppedIndexDefs := dropScanIndexesIfInitial(ctx, ws.DB(), logger)
 
 	// scanWG waits for all sources' Scan() to reach an outcome. The post-scan
 	// read-model backfill runs as background reconciliation after ALL startup
@@ -813,4 +805,22 @@ func isInitialScan(ctx context.Context, db *sql.DB) bool {
 		return false // on error, don't drop (safe default)
 	}
 	return n == 0
+}
+
+// dropScanIndexesIfInitial checks if this is a fresh/initial scan (no prior ops)
+// and, if so, drops the non-unique secondary indexes for fast bulk ingest.
+// Returns the captured index definitions for post-scan rebuild. On error or
+// non-initial scan, returns nil (indexes stay). SOW-0118.
+func dropScanIndexesIfInitial(ctx context.Context, db *sql.DB, logger *slog.Logger) []store.IndexDef {
+	if !isInitialScan(ctx, db) {
+		return nil
+	}
+	logger.Info("ai-viewer-ingest: initial scan — dropping non-unique secondary indexes for fast bulk ingest")
+	defs, err := store.DropNonUniqueIndexes(ctx, db)
+	if err != nil {
+		logger.Error("ai-viewer-ingest: failed to drop indexes for scan; continuing with indexes", "err", err)
+		return nil
+	}
+	logger.Info("ai-viewer-ingest: dropped non-unique secondary indexes", "count", len(defs))
+	return defs
 }

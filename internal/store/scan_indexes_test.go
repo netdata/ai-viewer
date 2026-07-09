@@ -3,7 +3,6 @@ package store_test
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 
 	"github.com/netdata/ai-viewer/internal/store"
@@ -107,15 +106,7 @@ func TestScanIndexLifecycle_UpsertStillWorks(t *testing.T) {
 
 	// Upsert a payload_ref — this uses ON CONFLICT (op_id, kind, location_uri)
 	// which requires the UNIQUE index idx_payload_refs_identity.
-	insertSQL := strings.TrimSpace(`
-INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes, sha256)
-VALUES ('op1', 'request', 'json', 'gzip', 'file:///test', 100, 50, 'abc123')
-ON CONFLICT (op_id, kind, location_uri) DO UPDATE SET
-    original_bytes = excluded.original_bytes,
-    stored_bytes = excluded.stcluded_stored_bytes
-`)
-	// Fix the typo (excluded.stcluded -> excluded.stored) — testing the pattern.
-	insertSQL = `INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes, sha256)
+	insertSQL := `INSERT INTO payload_refs (op_id, kind, format, compression, location_uri, original_bytes, stored_bytes, sha256)
 VALUES ('op1', 'request', 'json', 'gzip', 'file:///test', 100, 50, 'abc123')
 ON CONFLICT (op_id, kind, location_uri) DO UPDATE SET
     original_bytes = excluded.original_bytes,
