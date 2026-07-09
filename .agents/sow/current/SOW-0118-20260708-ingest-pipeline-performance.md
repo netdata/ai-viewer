@@ -334,3 +334,38 @@ the bottleneck shifted from begin-wait to progress_notify + adapter-side work.
 The coalescer fixed the CONTENTION; the per-event work (apply + notify) is now
 the limiting factor. This is the profile-driven loop working as designed: fix
 biggest offender → measure → next biggest offender.
+
+### 2026-07-09 — BATCH=1000 + COALESCER: REAL-SYSTEM VERIFICATION
+
+**Per-source breakdown (coalescer + batch=1000 + prepare-reuse):**
+
+| Source | begin-wait | apply | progress_notify | per-flush |
+|---|---|---|---|---|
+| aiagent_v2 (scan) | **0%** | 79% | 4% | 1199 ms |
+| aiagent_v3 (tail) | **0%** | 2% | 50% | **2.7 ms** |
+| claude-code (tail) | **0%** | 0.4% | 8% | **5.0 ms** |
+| opencode (scan) | **0%** | — | — | — |
+
+**KEY FINDINGS:**
+1. **begin-wait = 0% across ALL sources** — the coalescer eliminated the 80%+
+   contention. This is the structural fix the goal targeted.
+2. **Tail sources are ALREADY LIGHTWEIGHT**: aiagent_v3 and claude-code flush
+   in 2-5 ms (was 295 ms before). A single new message → flush in the next
+   coalesced batch → ≤500 ms → 2-5 ms of actual write. This meets the goal's
+   "single new message without multi-core spike."
+3. **aiagent_v2 scan**: apply=79% (the 31 GB-scale per-event insert with 15
+   indexes). This is what the index-drop lifecycle addresses (fresh installs).
+4. **Scan rate improved**: 3.6→12.9 files/sec with batch=1000 (3.6×).
+
+**The remaining bottleneck: apply=79% for the scan** — the genuine per-event
+insert at 31 GB scale. The index-drop lifecycle (implemented, tested, dormant
+until a fresh install) is the lever for this. On a fresh install, dropping the
+42 non-unique secondary indexes cuts ~95% of the per-event index write
+amplification.
+
+**What the daemon does now (coalescer deployed):**
+- Idle (no data): ~0% CPU (verified post-scan earlier)
+- Single new message: flush in 2-5 ms (the tail sources' measured per-flush)
+- Bulk scan: apply-bound (79% of the per-event cost is the 15-index insert at
+  31 GB scale). Without the index-drop (which only fires on fresh installs),
+  the scan rate is ~13 files/sec.
