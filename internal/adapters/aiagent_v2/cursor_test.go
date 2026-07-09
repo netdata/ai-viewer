@@ -10,7 +10,7 @@ import (
 func TestCursor_StringRoundtrip(t *testing.T) {
 	t.Parallel()
 	c := newCursor()
-	c = c.withFile("a.json.gz", FileCursor{ContentHash: "abc", LastMtime: 100, LastSize: 9})
+	c.withFile("a.json.gz", FileCursor{ContentHash: "abc", LastMtime: 100, LastSize: 9})
 	s := c.String()
 	parsed, err := ParseCursor(s)
 	if err != nil {
@@ -60,8 +60,10 @@ func TestCursor_ParseAcceptsZeroVersion(t *testing.T) {
 
 func TestCursor_After_DetectsContentDiff(t *testing.T) {
 	t.Parallel()
-	older := newCursor().withFile("a", FileCursor{ContentHash: "old", LastMtime: 1})
-	newer := newCursor().withFile("a", FileCursor{ContentHash: "new", LastMtime: 2})
+	older := newCursor()
+	older.withFile("a", FileCursor{ContentHash: "old", LastMtime: 1})
+	newer := newCursor()
+	newer.withFile("a", FileCursor{ContentHash: "new", LastMtime: 2})
 	if !newer.After(older) {
 		t.Fatalf("expected newer.After(older) = true")
 	}
@@ -72,8 +74,10 @@ func TestCursor_After_DetectsContentDiff(t *testing.T) {
 
 func TestCursor_After_MtimeRegressionDefeats(t *testing.T) {
 	t.Parallel()
-	a := newCursor().withFile("x", FileCursor{ContentHash: "h", LastMtime: 100})
-	b := newCursor().withFile("x", FileCursor{ContentHash: "h", LastMtime: 50})
+	a := newCursor()
+	a.withFile("x", FileCursor{ContentHash: "h", LastMtime: 100})
+	b := newCursor()
+	b.withFile("x", FileCursor{ContentHash: "h", LastMtime: 50})
 	if b.After(a) {
 		t.Fatalf("regression should defeat After")
 	}
@@ -81,10 +85,11 @@ func TestCursor_After_MtimeRegressionDefeats(t *testing.T) {
 
 func TestCursor_After_MissingFileInTargetIsRegression(t *testing.T) {
 	t.Parallel()
-	full := newCursor().
-		withFile("a", FileCursor{ContentHash: "h", LastMtime: 1}).
-		withFile("b", FileCursor{ContentHash: "h", LastMtime: 1})
-	partial := newCursor().withFile("a", FileCursor{ContentHash: "h", LastMtime: 1})
+	full := newCursor()
+	full.withFile("a", FileCursor{ContentHash: "h", LastMtime: 1})
+	full.withFile("b", FileCursor{ContentHash: "h", LastMtime: 1})
+	partial := newCursor()
+	partial.withFile("a", FileCursor{ContentHash: "h", LastMtime: 1})
 	if partial.After(full) {
 		t.Fatalf("losing a file is a regression")
 	}
@@ -92,7 +97,8 @@ func TestCursor_After_MissingFileInTargetIsRegression(t *testing.T) {
 
 func TestCursor_After_AlienTypeFallsBackToEmptiness(t *testing.T) {
 	t.Parallel()
-	a := newCursor().withFile("x", FileCursor{ContentHash: "h"})
+	a := newCursor()
+	a.withFile("x", FileCursor{ContentHash: "h"})
 	if !a.After(alienCursor{}) {
 		t.Fatalf("non-empty cursor should be After alien empty")
 	}
@@ -103,8 +109,10 @@ func TestCursor_After_AlienTypeFallsBackToEmptiness(t *testing.T) {
 
 func TestCursor_After_EqualReturnsFalse(t *testing.T) {
 	t.Parallel()
-	a := newCursor().withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
-	b := newCursor().withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
+	a := newCursor()
+	a.withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
+	b := newCursor()
+	b.withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
 	if a.After(b) {
 		t.Fatalf("equal cursors should not be After each other")
 	}
@@ -112,8 +120,11 @@ func TestCursor_After_EqualReturnsFalse(t *testing.T) {
 
 func TestCursor_After_NewFileAdvances(t *testing.T) {
 	t.Parallel()
-	a := newCursor().withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
-	b := a.withFile("y", FileCursor{ContentHash: "g", LastMtime: 1})
+	a := newCursor()
+	a.withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
+	b := newCursor()
+	b.withFile("x", FileCursor{ContentHash: "h", LastMtime: 1})
+	b.withFile("y", FileCursor{ContentHash: "g", LastMtime: 1})
 	if !b.After(a) {
 		t.Fatalf("adding a new file should advance")
 	}

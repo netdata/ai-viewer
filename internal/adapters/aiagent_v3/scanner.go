@@ -250,7 +250,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			onError(rerr)
 			continue
 		}
-		cur = cur.withFile(name, updated)
+		cur.withFile(name, updated)
 		emittedSinceProgress += n
 		if emittedSinceProgress >= progressEveryEvents || time.Since(lastProgress) >= progressEveryDuration {
 			if perr := emitProgress(ctx, sourceID, cur, out); perr != nil {

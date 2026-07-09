@@ -230,7 +230,7 @@ func processOnce(ctx context.Context, root, sourceID, name string, cur *Cursor, 
 		return perr
 	}
 	if changed {
-		*cur = cur.withFile(name, updated)
+		cur.withFile(name, updated)
 	}
 	// Re-stat post-read; if mtime advanced, retry ONCE.
 	postInfo, err := os.Stat(full)
@@ -247,7 +247,7 @@ func processOnce(ctx context.Context, root, sourceID, name string, cur *Cursor, 
 		return perr
 	}
 	if changed {
-		*cur = cur.withFile(name, updated)
+		cur.withFile(name, updated)
 	}
 	return nil
 }

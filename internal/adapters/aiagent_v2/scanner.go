@@ -72,7 +72,7 @@ func scanAll(ctx context.Context, root, sourceID string, start Cursor, out chan<
 			continue
 		}
 		if changed {
-			cur = cur.withFile(name, updated)
+			cur.withFile(name, updated)
 		}
 		processed++
 		if processed >= scanProgressEveryFiles || time.Since(lastProgress) >= progressEveryDuration {

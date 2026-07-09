@@ -209,23 +209,6 @@ func TestCursor_StringStableShape(t *testing.T) {
 	}
 }
 
-func TestCursor_WithFileDoesNotMutateReceiver(t *testing.T) {
-	t.Parallel()
-
-	a := newCursor()
-	a.Files["a.jsonl"] = FileCursor{Offset: 1}
-	b := a.withFile("b.jsonl", FileCursor{Offset: 2})
-	if _, ok := a.Files["b.jsonl"]; ok {
-		t.Fatalf("receiver was mutated by withFile")
-	}
-	if b.Files["b.jsonl"].Offset != 2 {
-		t.Fatalf("withFile lost the new entry: %+v", b)
-	}
-	if b.Files["a.jsonl"].Offset != 1 {
-		t.Fatalf("withFile dropped existing entries: %+v", b)
-	}
-}
-
 func TestCursor_FileCursorMissingReturnsZero(t *testing.T) {
 	t.Parallel()
 

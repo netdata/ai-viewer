@@ -195,7 +195,7 @@ func flushDirty(ctx context.Context, root, sourceID string, dirty map[string]str
 			onError(rerr)
 			continue
 		}
-		*cur = cur.withFile(name, updated)
+		cur.withFile(name, updated)
 	}
 	return emitProgress(ctx, sourceID, *cur, out)
 }

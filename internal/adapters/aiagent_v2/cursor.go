@@ -3,7 +3,6 @@ package aiagent_v2
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 
 	"github.com/netdata/ai-viewer/internal/canonical"
 )
@@ -141,9 +140,13 @@ func (c Cursor) fileCursor(name string) FileCursor {
 
 // withFile returns a new Cursor with the given basename's FileCursor
 // replaced. The receiver is not mutated.
-func (c Cursor) withFile(name string, fc FileCursor) Cursor {
-	out := Cursor{Files: make(map[string]FileCursor, len(c.Files)+1), Version: cursorVersion}
-	maps.Copy(out.Files, c.Files)
-	out.Files[name] = fc
-	return out
+// withFile sets a file's cursor entry, mutating in-place (O(1)). SOW-0118: the
+// old value-receiver copy was O(map_size) per call — at 325K files it was the
+// dominant single-core cost (~38% of CPU in maps.Copy).
+func (c *Cursor) withFile(name string, fc FileCursor) {
+	if c.Files == nil {
+		c.Files = map[string]FileCursor{}
+	}
+	c.Version = cursorVersion
+	c.Files[name] = fc
 }

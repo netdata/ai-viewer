@@ -172,7 +172,7 @@ func (a *Adapter) snapshotCursor() (Cursor, error) {
 			a.onError(fmt.Errorf("aiagent_v2: snapshot stat %s: %w", name, sErr))
 			continue
 		}
-		cur = cur.withFile(name, FileCursor{
+		cur.withFile(name, FileCursor{
 			LastMtime: info.ModTime().UnixNano(),
 			LastSize:  info.Size(),
 		})

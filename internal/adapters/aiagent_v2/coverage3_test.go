@@ -123,7 +123,7 @@ func TestProcessFile_ContentHashMatchesUpdatesMtimeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	cur = cur.withFile(origin+".json.gz", updated)
+	cur.withFile(origin+".json.gz", updated)
 	// Touch mtime forward without changing content.
 	info, _ := os.Stat(path)
 	newTime := info.ModTime().Add(3 * time.Second)

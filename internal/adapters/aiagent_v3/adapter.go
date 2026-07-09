@@ -180,7 +180,7 @@ func (a *Adapter) snapshotCursor() (Cursor, error) {
 		}
 		fc.Offset = size
 		fc.Size = size
-		cur = cur.withFile(name, fc)
+		cur.withFile(name, fc)
 	}
 	return cur, nil
 }
