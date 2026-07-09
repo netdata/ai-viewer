@@ -438,3 +438,48 @@ attribution, tests=15/15 pass, race-clean).
 
 **Daemon:** deployed, healthy (44/44 indexes, 0 failures, begin=0% across all
 sources, idle=0% when not scanning, tail flushes 0.5–4ms).
+
+### 2026-07-09 — BREAKTHROUGH: cursor withFile O(1) + resolver race fix
+
+**THE KILLER BUG (found by real-system profiling): the cursor's `withFile` was
+O(n) — it copied the ENTIRE Files map on EVERY file processed.**
+
+Both aiagent_v2 and aiagent_v3 Cursor.withFile used a value receiver + maps.Copy:
+at 325K files with an average map size of ~162K entries, that was ~52 BILLION
+map entry copies — the dominant single-core cost (38% of CPU in maps.Copy).
+
+Changed to a pointer receiver that mutates in-place: O(1) per file.
+
+**ALSO FIXED: resolver race — startupScanActive initialized to TRUE so the
+resolver is deferred from its first tick (before, the resolver goroutine
+started in Ingester.Start before main.go set startupScanActive, and its first
+linkOrphansGated pass monopolized the connection for minutes on the 31GB DB).**
+
+**RESULT (real system, all fixes deployed):**
+
+| Source | Scan time | Files/sec |
+|---|---|---|
+| aiagent_v3 | **0.5 s** | — |
+| codex | **1.8 s** | — |
+| aiagent_v2 (325K files) | **9.4 s** | **~36,000** |
+| claude-code | **35.2 s** | — |
+| **TOTAL (file-based)** | **~47 s** | — |
+
+The file-based adapter startup scan completes in **under 1 minute** (was hours).
+The opencode adapter (SQLite DB, not file-based) is the remaining slow holdout.
+
+**Idle CPU: 0%** once scans complete.
+**Tail flushes: 0.5–4 ms** (single-message lightweight).
+
+**Cumulative single-core optimizations this SOW (all measured):**
+
+| Fix | Cost before | Cost after | Reduction |
+|---|---|---|---|
+| Cursor withFile O(n)→O(1) | 38% of CPU (maps.Copy) | ~0% | **eliminated** |
+| Resolver race (init-true) | 99% of CPU (first-pass monopoly) | 0% | **eliminated** |
+| Coalescer (begin-wait) | 80%+ of flush | 0% | **eliminated** |
+| Prepare reuse | 59% of apply | 6% | **~10×** |
+| Batch 100→1000 | pn=42% | pn=5% | **~8×** |
+| O(n²) sort → O(n log n) | 46% of a core | ~0% | **eliminated** |
+| Session/turn batch cache | ~600 SQL/batch | ~0 SQL/batch | **~600×** |
+| Read-model defer | monopolized conn | deferred | **eliminated** |
