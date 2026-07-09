@@ -483,3 +483,23 @@ The opencode adapter (SQLite DB, not file-based) is the remaining slow holdout.
 | O(n²) sort → O(n log n) | 46% of a core | ~0% | **eliminated** |
 | Session/turn batch cache | ~600 SQL/batch | ~0 SQL/batch | **~600×** |
 | Read-model defer | monopolized conn | deferred | **eliminated** |
+
+### 2026-07-09 — DAEMON IDLE AT 0% (all work complete)
+
+The daemon (PID 4094008, 1h+ elapsed) completed all work and is now **0.0% CPU**:
+
+- All 5 adapter scans completed (aiagent_v2: 9.4s, aiagent_v3: 0.8s, codex: 5.6s,
+  claude-code: 30.9s, opencode: ~5 min for its 28 GB DB).
+- The post-scan resolver pass (linkRoots recursive CTE on 552K sessions) completed
+  in ~5 min (one-time, does not repeat due to the generation gate).
+- The daemon is now tailing all 5 sources at 0.5–4 ms per flush.
+- **Idle CPU: 0.0%** (5 consecutive samples, 10s apart).
+- **Total commits SOW-0118: 25.**
+- **All gates green: 0 lint issues, race-clean, gofmt clean, spec-drift PASS,
+  secrets PASS.**
+
+The daemon is **fast and lightweight**:
+- Startup scan: file-based adapters in <1 min; opencode in ~5 min (28GB DB).
+- Idle: 0% CPU.
+- Single-message tail: 0.5–4 ms.
+- begin-wait: 0% (coalescer eliminated the contention).
