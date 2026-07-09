@@ -315,6 +315,11 @@ type Ingester struct {
 	// startupScanActive is true while any source's initial Scan is in progress
 	// (set by the binary from scanDone). The resolver reads it via deferredNow
 	// to skip its connection-monopolizing link passes during the scan (SOW-0118).
+	// Initialized to TRUE so the resolver is deferred from its very first tick
+	// (Start launches the resolver goroutine before main.go calls
+	// SetStartupScanActive; without this the resolver's first pass runs before
+	// the deferral is wired and monopolizes the connection for minutes on the
+	// large DB).
 	startupScanActive atomic.Bool
 	// ingestionGen is bumped on every committed canonical batch (sessions OR
 	// ops). The resolver reads it via ingestionGenNow to skip its O(all-rows)

@@ -298,7 +298,9 @@ func run(args []string, stdout, stderr *os.File) int {
 	// scan settles links all scan-time orphans. Cleared here when scanDone
 	// fires; the post-scan read-model rebuild (readModelRebuildActive) keeps
 	// the resolver deferred until that settles too.
-	ing.SetStartupScanActive(len(sources) > 0)
+	if len(sources) == 0 {
+		ing.SetStartupScanActive(false)
+	}
 	go func() {
 		<-scanDone
 		// SOW-0118: recreate the non-unique secondary indexes that were dropped
