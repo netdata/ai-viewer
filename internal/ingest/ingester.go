@@ -340,6 +340,10 @@ type Ingester struct {
 	tailRestartChans     map[string]chan<- struct{}
 	tailHeartbeatPersist chan tailHeartbeatPersistRequest
 	tailStatePending     atomic.Int64
+
+	// coalescer (SOW-0118): replaces per-source worker goroutines with a single
+	// writer goroutine that owns the connection. nil = legacy per-source mode.
+	coalescer *coalescer
 }
 
 // New constructs an Ingester. The db must be writable (use
@@ -417,6 +421,17 @@ func (i *Ingester) Start(ctx context.Context) error {
 		i.tailStaleWatchdogLoop(ctx)
 	}()
 	i.started = true
+
+	// SOW-0118: the coalescer replaces per-source worker goroutines with a
+	// single writer goroutine that owns the connection, eliminating the 80%+
+	// begin-wait from 5 workers competing for SetMaxOpenConns(1).
+	i.coalescer = newCoalescer(i.db, i.logger.With("subsystem", "ingest"), i.batchSize, i.batchInterval)
+	i.coalescer.onCommittedBatch = i.bumpIngestionGen
+	i.wg.Add(1)
+	go func() {
+		defer i.wg.Done()
+		i.coalescer.run(ctx)
+	}()
 	return nil
 }
 
@@ -463,13 +478,13 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 		i.recordWorkerError(sourceID, err)
 	}
 	i.workers[sourceID] = w
-	ctx := i.ctx
 	i.mu.Unlock()
-	i.wg.Add(1)
-	go func() {
-		defer i.wg.Done()
-		w.run(ctx)
-	}()
+
+	// SOW-0118: register the source with the coalescer (single writer goroutine)
+	// instead of starting a per-source workerRuntime.run() goroutine. The
+	// coalescer drains all sources through a merged channel and flushes in a
+	// single transaction, eliminating the begin-wait.
+	i.coalescer.register(sourceID, w, events)
 	return nil
 }
 

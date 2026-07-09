@@ -32,9 +32,10 @@ type coalescer struct {
 	mu      sync.Mutex // guards workers map
 	workers map[string]*coalescedSource
 
-	merged chan taggedEvent
-	stop   chan struct{}
-	wg     sync.WaitGroup
+	merged   chan taggedEvent
+	stop     chan struct{}
+	wg       sync.WaitGroup // coalescer run goroutine
+	mergerWG sync.WaitGroup // per-source merger goroutines
 
 	onCommittedBatch func()
 }
@@ -68,6 +69,8 @@ func newCoalescer(db *sql.DB, logger *slog.Logger, batchSize int, batchEvery tim
 
 // register adds a source's worker + event channel to the coalescer. A merger
 // goroutine forwards events from the per-source channel to the merged channel.
+// Any already-buffered events are forwarded synchronously before returning
+// (so a Submit+Stop sequence in tests doesn't lose events to a scheduling gap).
 func (c *coalescer) register(sourceID string, w *worker, events <-chan canonical.Event) {
 	wr := newWriter(w.sourceID, w.sourceFormat, w.location, w.pricer)
 	if w.now != nil {
@@ -80,12 +83,40 @@ func (c *coalescer) register(sourceID string, w *worker, events <-chan canonical
 	c.workers[sourceID] = &coalescedSource{worker: w, writer: wr}
 	c.mu.Unlock()
 
-	c.wg.Add(1)
+	// Forward any already-buffered events synchronously (the test pattern of
+	// close(ch) → Submit → Stop needs these to reach the merged channel before
+	// the coalescer's shutdown drain).
+	for len(events) > 0 {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				goto startMerger
+			}
+			c.merged <- taggedEvent{sourceID: sourceID, ev: ev}
+		default:
+			goto startMerger
+		}
+	}
+
+startMerger:
+	c.mergerWG.Add(1)
 	go func() {
-		defer c.wg.Done()
-		for ev := range events {
+		defer c.mergerWG.Done()
+		for {
 			select {
-			case c.merged <- taggedEvent{sourceID: sourceID, ev: ev}:
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				select {
+				case c.merged <- taggedEvent{sourceID: sourceID, ev: ev}:
+				case <-c.stop:
+					select {
+					case c.merged <- taggedEvent{sourceID: sourceID, ev: ev}:
+					default:
+					}
+					return
+				}
 			case <-c.stop:
 				return
 			}
@@ -119,10 +150,25 @@ func (c *coalescer) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Signal merger goroutines to stop accepting new events.
+			close(c.stop)
+			// Wait for all merger goroutines to finish draining their source
+			// channels (they exit when the channel is closed or c.stop fires).
+			c.mergerWG.Wait()
+			// Drain any remaining events from the merged channel, then flush.
 			for len(c.merged) > 0 {
 				batch = append(batch, <-c.merged)
 			}
-			flush("ctx done")
+			// Use a DETACHED context for the final flush so SQL writes succeed even
+			// though the parent ctx was cancelled (mirrors the old workerRuntime's
+			// detachedWriteContext pattern — SOW-0118).
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if len(batch) > 0 {
+				if err := c.flushBatch(drainCtx, batch, "ctx done"); err != nil && c.logger != nil {
+					c.logger.Warn("coalescer: final flush failed", "err", err)
+				}
+			}
+			drainCancel()
 			return
 
 		case te := <-c.merged:
