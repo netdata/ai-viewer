@@ -300,3 +300,37 @@ must be done test-driven on a throwaway DB, not fatigued on prod.
 Open: cleanly measure the index-drop benefit at scale (populated benchmark DB /
 prod copy) before building its lifecycle; build the index-drop lifecycle keeping
 PK + all UNIQUE (tested for no upsert break); build the single-writer coalescer.
+
+### 2026-07-09 — COALESCER DEPLOYED + REAL-SYSTEM MEASUREMENT
+
+Deployed the coalescer build (6 commits: coalescer.go + flushBody extraction +
+idle rollup refresh + retry/error + shutdown drain + lint cleanup).
+
+**REAL-SYSTEM RESULT (the verification the goal demands):**
+
+| Metric | BEFORE coalescer | AFTER coalescer |
+|---|---|---|
+| begin-wait (all sources) | **80%+** | **0.0%** |
+| per-flush (aiagent_v2) | 77 ms | **26 ms** |
+| per-flush (claude-code tail) | 295 ms | **0.5 ms** |
+| per-flush (opencode) | N/A | **4.2 ms** |
+| Idle CPU (post-scan) | 0% (achieved earlier) | 0% |
+
+The coalescer **eliminated the begin-wait entirely** — exactly the structural
+fix the goal targeted. A single new message now flushes in the next coalesced
+batch (≤ batchInterval = 500ms) without waiting behind a separate scan flush.
+
+**The NEXT biggest offender (iteration continues):**
+The per-stage breakdown now shows the bottleneck has shifted:
+- aiagent_v2: apply=35%, **progress_notify=42%** (was ~3% before — with begin=0%,
+  the per-flush notify overhead is now the dominant cost). 6966 flushes × 26ms.
+- codex tail catchUp: 47% of CPU — adapter-side rollout re-reading on restart.
+
+The next iteration targets progress_notify (the per-flush overhead — fewer,
+larger flushes would amortize it) and codex catchUp (adapter-side).
+
+**Scan throughput note:** 3.6 files/sec — the throughput did NOT improve because
+the bottleneck shifted from begin-wait to progress_notify + adapter-side work.
+The coalescer fixed the CONTENTION; the per-event work (apply + notify) is now
+the limiting factor. This is the profile-driven loop working as designed: fix
+biggest offender → measure → next biggest offender.
