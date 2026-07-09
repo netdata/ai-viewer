@@ -180,6 +180,13 @@ type writer struct {
 	// data. Cleared in resetBatch. fts_logs needs no dirty set: logs are
 	// append-only and indexed inline in applyLogEntry.
 	dirtyOpIDs map[string]struct{}
+	// batchSessionIDs caches nativeID → canonical session ID within the current
+	// batch, so ops referencing the same session skip the SELECT lookup. Cleared
+	// in resetBatch. SOW-0118: eliminates ~600 SQL queries per 1000-event batch.
+	batchSessionIDs map[string]string
+	// batchTurns caches turnID → true within the current batch, so the turn
+	// synthesis (INSERT ON CONFLICT DO NOTHING) only runs once per turn. SOW-0118.
+	batchTurns map[string]bool
 	// fts5IndexLogs gates fts_logs population for THIS source: when false the
 	// applyLogEntry FTS insert is skipped (data-model.md §Full-text search).
 	// fts_ops is ALWAYS indexed regardless of this flag. Set per batch by
@@ -412,6 +419,8 @@ func newWriter(sourceID, sourceFormat, location string, pricer Pricer) *writer {
 		dirtyRollupDays:            make(map[int64]struct{}),
 		pendingMaterializedDays:    make(map[int64]struct{}),
 		dirtyOpIDs:                 make(map[string]struct{}),
+		batchSessionIDs:            make(map[string]string, 32),
+		batchTurns:                 make(map[string]bool, 64),
 		now:                        defaultNow,
 	}
 }
@@ -456,6 +465,8 @@ func (w *writer) resetBatch() {
 	// retried; commit promotes them first.
 	clear(w.pendingMaterializedDays)
 	clear(w.dirtyOpIDs)
+	clear(w.batchSessionIDs)
+	clear(w.batchTurns)
 	w.batchMaxSeq = 0
 	w.lastCursor = ""
 	w.hasCursor = false
@@ -701,16 +712,26 @@ func (w *writer) applySessionStarted(ctx context.Context, tx *sql.Tx, ev canonic
 			return err
 		}
 	}
-	extras := mergeExtras(ev.Extras, map[string]any{
-		"aiViewer": map[string]any{
-			"parentNativeId": ev.ParentNativeID,
-			"parentOpKey":    ev.ParentOpKey,
-			"rootNativeId":   ev.RootNativeID,
-		},
-	})
-	extrasJSON, err := marshalExtras(extras)
-	if err != nil {
-		return fmt.Errorf("writer: marshal session extras: %w", err)
+	// Fast path: build the aiViewer stash JSON directly when the event has no
+	// adapter-specific extras (the common case — aiagent_v2/v3 don't populate
+	// Extras on SessionStarted). Eliminates 2 map allocations + 1 json.Marshal
+	// per event (SOW-0118: the maps/GC overhead was 26% of CPU).
+	var extrasJSON any
+	if len(ev.Extras) == 0 {
+		extrasJSON = marshalSessionAiViewerStash(ev.ParentNativeID, ev.ParentOpKey, ev.RootNativeID)
+	} else {
+		extras := mergeExtras(ev.Extras, map[string]any{
+			"aiViewer": map[string]any{
+				"parentNativeId": ev.ParentNativeID,
+				"parentOpKey":    ev.ParentOpKey,
+				"rootNativeId":   ev.RootNativeID,
+			},
+		})
+		var err2 error
+		extrasJSON, err2 = marshalExtras(extras)
+		if err2 != nil {
+			return fmt.Errorf("writer: marshal session extras: %w", err2)
+		}
 	}
 	kind := string(ev.Kind)
 	if kind == "" {
@@ -1142,15 +1163,17 @@ func (w *writer) opStartedIdentity(ctx context.Context, tx *sql.Tx, ev canonical
 		return "", "", "", priorOpIdentity{}, err
 	}
 	turnID := canonicalTurnID(sessionID, ev.TurnSeq)
-	// Ensure parent turn row exists — synthesize a running turn if no
-	// TurnStarted arrived first. This matches the spec: turns may be implicit
-	// when the source format doesn't emit explicit start records.
-	if err := w.txExec(ctx, tx, `
+	// SOW-0118: skip the turn synthesis INSERT if this turn was already
+	// ensured in this batch (same session, same turn seq → same turnID).
+	if !w.batchTurns[turnID] {
+		if err := w.txExec(ctx, tx, `
 INSERT INTO turns (id, session_id, seq, start_ts, status)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (session_id, seq) DO NOTHING
 `, turnID, sessionID, ev.TurnSeq, ev.Ts, string(canonical.StatusRunning)); err != nil {
-		return "", "", "", priorOpIdentity{}, fmt.Errorf("writer: synthesize turn for op: %w", err)
+			return "", "", "", priorOpIdentity{}, fmt.Errorf("writer: synthesize turn for op: %w", err)
+		}
+		w.batchTurns[turnID] = true
 	}
 	opID := canonicalOpID(turnID, ev.Seq)
 	prior, err := w.opPriorIdentity(ctx, tx, opID)
@@ -1823,8 +1846,15 @@ func (w *writer) requireSessionID(ctx context.Context, tx *sql.Tx, nativeID stri
 	if nativeID == "" {
 		return "", errors.New("writer: empty session native id")
 	}
+	// SOW-0118: check the per-batch cache first. Within a batch, the same
+	// session's ops all resolve to the same canonical ID — the SELECT is
+	// redundant after the first lookup.
+	if cached, ok := w.batchSessionIDs[nativeID]; ok {
+		return cached, nil
+	}
 	id, err := w.lookupSessionID(ctx, tx, nativeID)
 	if err == nil {
+		w.batchSessionIDs[nativeID] = id
 		return id, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -1840,6 +1870,7 @@ ON CONFLICT (source_id, native_id) DO NOTHING
 	); insErr != nil {
 		return "", fmt.Errorf("writer: stub session: %w", insErr)
 	}
+	w.batchSessionIDs[nativeID] = id
 	w.markDirtySession(id)
 	return id, nil
 }
@@ -1966,4 +1997,33 @@ func mergeExtras(a, b map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// sessionAiViewerStash is the fixed-shape JSON object the ingester stashes in
+// sessions.extras_json.aiViewer. Using a struct (not a map) avoids the map
+// allocation + json.Marshal(map) overhead on the hot path (SOW-0118).
+type sessionAiViewerStash struct {
+	ParentNativeID string `json:"parentNativeId,omitempty"`
+	ParentOpKey    string `json:"parentOpKey,omitempty"`
+	RootNativeID   string `json:"rootNativeId,omitempty"`
+}
+
+// marshalSessionAiViewerStash builds the extras_json value for a SessionStarted
+// event that has no adapter-specific extras — just the aiViewer stash. Returns
+// the JSON string or nil if all fields are empty.
+func marshalSessionAiViewerStash(parentNativeID, parentOpKey, rootNativeID string) any {
+	if parentNativeID == "" && parentOpKey == "" && rootNativeID == "" {
+		return nil
+	}
+	b, err := json.Marshal(map[string]any{
+		"aiViewer": sessionAiViewerStash{
+			ParentNativeID: parentNativeID,
+			ParentOpKey:    parentOpKey,
+			RootNativeID:   rootNativeID,
+		},
+	})
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }
