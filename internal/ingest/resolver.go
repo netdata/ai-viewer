@@ -64,6 +64,12 @@ type resolver struct {
 	// lastSeenSession is the session watermark after the last pass that ran the
 	// session link passes. Starts at -1 so the first pass always runs them.
 	lastSeenSession atomic.Int64
+	// lastRootsGen is the generation counter value at the last linkRoots run.
+	// linkRoots is skipped on subsequent ticks until the generation advances.
+	// SOW-0118: at 552K sessions the recursive CTE takes ~30s (longer than the
+	// 5s resolver interval), creating a busy-loop that dominated CPU. This flag
+	// limits it to once per generation advance.
+	lastRootsGen atomic.Int64
 	// stop signals loop to exit on Stop(); buffered so a non-blocking
 	// send always succeeds even if loop isn't yet started.
 	stop chan struct{}
@@ -80,6 +86,7 @@ func newResolver(db *sql.DB, logger *slog.Logger, interval time.Duration) *resol
 		stop:     make(chan struct{}),
 	}
 	r.lastSeenGen.Store(-1)     // first tick always runs
+	r.lastRootsGen.Store(-1)    // first pass always runs linkRoots
 	r.lastSeenSession.Store(-1) // first pass always runs the session passes
 	return r
 }
@@ -210,14 +217,29 @@ func (r *resolver) linkOrphansGated(ctx context.Context, sessionsChanged bool) e
 		// session row changed since the last pass; skip them when the loop has
 		// determined only ops committed (ops cannot change session parentage or
 		// roots). The op-child passes always run because a newly-arrived op can
-		// carry a pending child link. Splitting the steps into sessionSteps /
-		// opSteps (rather than a positional i<2) keeps the skip self-documenting
-		// and robust against future re-ordering (SOW-0117 reviewer feedback).
-		steps := r.opSteps()
+		// carry a pending child link.
+		//
+		// SOW-0118: linkRoots' transitive recursive CTE is O(sessions) and takes
+		// ~30s on 552K rows. It is gated on lastRootsGen: only run when the
+		// generation counter has advanced since the last roots run. This breaks
+		// the busy-loop where the CTE takes longer than the 5s resolver interval.
+		// linkParents (index-backed, fast) always runs when sessionsChanged.
 		if sessionsChanged {
-			steps = append(r.sessionSteps(), steps...)
+			if err := r.linkParents(ctx, tx, affected); err != nil {
+				return err
+			}
+			genNow := int64(0)
+			if r.ingestionGenNow != nil {
+				genNow = r.ingestionGenNow()
+			}
+			if genNow != r.lastRootsGen.Load() {
+				if err := r.linkRoots(ctx, tx, affected); err != nil {
+					return err
+				}
+				r.lastRootsGen.Store(genNow)
+			}
 		}
-		for _, step := range steps {
+		for _, step := range r.opSteps() {
 			if err := step(ctx, tx, affected); err != nil {
 				return err
 			}
@@ -240,9 +262,6 @@ type resolverStep func(ctx context.Context, tx *sql.Tx, affected map[string]stru
 // including the O(sessions) recursive CTE). linkParents must run before
 // linkRoots so root_session_id can re-point at the just-linked parent in the
 // same pass (see linkRoots's WHERE clause).
-func (r *resolver) sessionSteps() []resolverStep {
-	return []resolverStep{r.linkParents, r.linkRoots}
-}
 
 // opSteps returns the link passes that must run whenever any canonical row was
 // committed, because a newly-arrived op can carry a pending child link. They
