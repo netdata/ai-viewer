@@ -141,8 +141,43 @@ func (c *coalescer) run(ctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := c.flushBatch(ctx, batch, reason); err != nil && c.logger != nil {
-			c.logger.Warn("coalescer: flush failed", "reason", reason, "events", len(batch), "err", err)
+		// Retry with backoff (mirrors flushBatchWithWriteContext — SOW-0063).
+		for attempt := 0; attempt <= flushMaxRetries; attempt++ {
+			err := c.flushBatch(ctx, batch, reason)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				// Shutdown: preserve for replay (don't drop).
+				if c.logger != nil {
+					c.logger.Warn("coalescer: flush suppressed on shutdown", "reason", reason, "events", len(batch), "err", err)
+				}
+				return
+			}
+			if attempt < flushMaxRetries {
+				if c.logger != nil {
+					c.logger.Warn("coalescer: flush retry", "reason", reason, "attempt", attempt+1, "err", err)
+				}
+				backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			// Exhausted retries: log + report to the ingester via the first source's
+			// worker.onErr so Stop surfaces it (like the old workerRuntime).
+			if c.logger != nil {
+				c.logger.Error("coalescer: flush DROPPING events", "reason", reason, "events", len(batch), "err", err)
+			}
+			c.mu.Lock()
+			if len(batch) > 0 {
+				if cs, ok := c.workers[batch[0].sourceID]; ok {
+					cs.worker.report(fmt.Errorf("coalescer: flush (%s) failed after %d attempts, DROPPING %d events: %w", reason, flushMaxRetries+1, len(batch), err))
+				}
+			}
+			c.mu.Unlock()
 		}
 		batch = batch[:0]
 	}
@@ -164,8 +199,26 @@ func (c *coalescer) run(ctx context.Context) {
 			// detachedWriteContext pattern — SOW-0118).
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if len(batch) > 0 {
-				if err := c.flushBatch(drainCtx, batch, "ctx done"); err != nil && c.logger != nil {
-					c.logger.Warn("coalescer: final flush failed", "err", err)
+				for attempt := 0; attempt <= flushMaxRetries; attempt++ {
+					err := c.flushBatch(drainCtx, batch, "ctx done")
+					if err == nil {
+						break
+					}
+					if attempt < flushMaxRetries {
+						time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+						continue
+					}
+					// Exhausted: report to the first source's worker so Stop surfaces it.
+					if c.logger != nil {
+						c.logger.Error("coalescer: final flush DROPPING", "events", len(batch), "err", err)
+					}
+					c.mu.Lock()
+					if len(batch) > 0 {
+						if cs, ok := c.workers[batch[0].sourceID]; ok {
+							cs.worker.report(fmt.Errorf("coalescer: flush (ctx done) failed after %d attempts, DROPPING %d events: %w", flushMaxRetries+1, len(batch), err))
+						}
+					}
+					c.mu.Unlock()
 				}
 			}
 			drainCancel()
@@ -182,6 +235,37 @@ func (c *coalescer) run(ctx context.Context) {
 
 		case <-timer.C:
 			flush("interval")
+			// Idle rollup refresh: materialize carried-open buckets for each source
+			// (mirrors the old handleTimer → idleRefresh path). SOW-0118.
+			c.mu.Lock()
+			sources := make([]*coalescedSource, 0, len(c.workers))
+			for _, cs := range c.workers {
+				if cs.writer.hasPendingRollupBuckets() {
+					sources = append(sources, cs)
+				}
+			}
+			c.mu.Unlock()
+			for _, cs := range sources {
+				if err := cs.worker.refreshRollupsOnly(ctx, cs.writer); err != nil && c.logger != nil {
+					c.logger.Warn("coalescer: idle rollup refresh failed", "source_id", cs.worker.sourceID, "err", err)
+				}
+				cs.writer.resetBatch()
+			}
+			// Re-arm the timer if any source still has pending rollup buckets
+			// (so a closing hour gets materialized on the next tick even with no
+			// new events — mirrors the old rearmTimer/hasPendingRollupBuckets).
+			c.mu.Lock()
+			rearm := false
+			for _, cs := range c.workers {
+				if cs.writer.hasPendingRollupBuckets() {
+					rearm = true
+					break
+				}
+			}
+			c.mu.Unlock()
+			if rearm {
+				timer.Reset(c.batchEvery)
+			}
 		}
 	}
 }
