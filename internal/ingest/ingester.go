@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -485,6 +486,11 @@ func (i *Ingester) Submit(sourceID string, events <-chan canonical.Event) error 
 	// coalescer drains all sources through a merged channel and flushes in a
 	// single transaction, eliminating the begin-wait.
 	i.coalescer.register(sourceID, w, events)
+	// Yield to the merger goroutine so it has a chance to start forwarding
+	// events before the caller proceeds (Submit→Stop test patterns depend on
+	// the coalescer being ready to receive; without this, the merger goroutine
+	// might not be scheduled yet when Stop fires). SOW-0118.
+	runtime.Gosched()
 	return nil
 }
 
