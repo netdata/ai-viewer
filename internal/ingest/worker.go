@@ -103,15 +103,7 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	wr.beginTx(tx)
 	defer wr.endTx()
 
-	if err := w.timedStage("apply", func() error { return w.writeBatchRows(ctx, tx, wr, batch) }); err != nil {
-		return err
-	}
-	if err := w.timedReadModels(ctx, wr, tx); err != nil {
-		return err
-	}
-	if err := w.timedStage("progress_notify", func() error {
-		return w.writeBatchProgressAndNotify(ctx, tx, wr, batch)
-	}); err != nil {
+	if err := w.flushBody(ctx, tx, wr, batch); err != nil {
 		return err
 	}
 	if err := w.timedStage("commit", func() error { return commitTx(tx, &committed, "commit") }); err != nil {
@@ -119,6 +111,23 @@ func (w *worker) flush(ctx context.Context, wr *writer, batch []canonical.Event)
 	}
 	w.promoteCommittedBatch(wr)
 	return nil
+}
+
+// flushBody applies the batch (writeBatchRows + read-model refresh + progress +
+// notify) within an existing tx — NO BeginTx/commit. The coalescer calls this
+// for each source within a shared tx so all sources' events commit atomically
+// (SOW-0118). The per-source worker's flush() calls this too (after its own
+// BeginTx).
+func (w *worker) flushBody(ctx context.Context, tx *sql.Tx, wr *writer, batch []canonical.Event) error {
+	if err := w.timedStage("apply", func() error { return w.writeBatchRows(ctx, tx, wr, batch) }); err != nil {
+		return err
+	}
+	if err := w.timedReadModels(ctx, wr, tx); err != nil {
+		return err
+	}
+	return w.timedStage("progress_notify", func() error {
+		return w.writeBatchProgressAndNotify(ctx, tx, wr, batch)
+	})
 }
 
 // timedStage runs f and, if per-stage timing is enabled, attributes its wall
