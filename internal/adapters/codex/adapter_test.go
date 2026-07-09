@@ -132,7 +132,8 @@ func TestAdapter_ParseCursor(t *testing.T) {
 		t.Fatal("ParseCursor(\"\") = nil cursor")
 	}
 	// Round-trip a non-empty cursor.
-	seed := newCursor().withFile("2025/11/20/rollout-x.jsonl", FileCursor{Offset: 42, Size: 42})
+	seed := newCursor()
+	seed.withFile("2025/11/20/rollout-x.jsonl", FileCursor{Offset: 42, Size: 42})
 	got, err := a.ParseCursor(seed.String())
 	if err != nil {
 		t.Fatalf("ParseCursor(round-trip): %v", err)

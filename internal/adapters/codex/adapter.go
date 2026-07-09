@@ -190,7 +190,7 @@ func (a *Adapter) snapshotCursor() (Cursor, error) {
 			continue
 		}
 		size := info.Size()
-		cur = cur.withFile(r.rel, FileCursor{
+		cur.withFile(r.rel, FileCursor{
 			Offset:  size,
 			Size:    size,
 			MtimeUs: info.ModTime().UnixMicro(),

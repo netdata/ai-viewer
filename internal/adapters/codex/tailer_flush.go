@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -71,11 +72,19 @@ func (f *tailFlush) processDirtyRollout(rel string) error {
 
 func (f *tailFlush) readAndRecordRollout(r rollout) error {
 	fc := f.cur.fileCursor(r.rel)
+	// SOW-0118: stat-skip before opening. If the cursor offset already covers
+	// the file size (fully consumed), skip the open+read entirely. Avoids
+	// opening 4090 rollout files on every tail catch-up when nothing changed.
+	if fc.Offset > 0 && fc.Size > 0 {
+		if info, err := os.Stat(r.abs); err == nil && info.Size() == fc.Size && fc.Offset >= info.Size() {
+			return nil // no new bytes
+		}
+	}
 	updated, _, err := readRollout(f.ctx, f.resolvedRoot, r, f.sourceID, fc, f.out, f.onError, nil) // SOW-0022: tailer passes nil (no cross-file dedup on incremental tail)
 	if err != nil {
 		return f.handleRolloutError(err)
 	}
-	*f.cur = f.cur.withFile(r.rel, updated)
+	f.cur.withFile(r.rel, updated)
 	return nil
 }
 

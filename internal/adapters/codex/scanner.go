@@ -83,7 +83,7 @@ func scanModernRollouts(ctx context.Context, resolvedRoot, sourceID string, roll
 			continue
 		}
 		if skip {
-			cur = cur.withFile(r.rel, fc)
+			cur.withFile(r.rel, fc)
 			continue
 		}
 		updated, n, err := readRollout(ctx, resolvedRoot, r, sourceID, fc, out, onError, seenIDs)
@@ -94,7 +94,7 @@ func scanModernRollouts(ctx context.Context, resolvedRoot, sourceID string, roll
 			onError(err)
 			continue
 		}
-		cur = cur.withFile(r.rel, updated)
+		cur.withFile(r.rel, updated)
 		if err := progress.record(ctx, sourceID, cur, n, out); err != nil {
 			return cur, err
 		}

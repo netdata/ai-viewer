@@ -21,9 +21,9 @@ func TestParseCursor_Empty(t *testing.T) {
 func TestParseCursor_RoundTrip(t *testing.T) {
 	t.Parallel()
 	rel := "2025/11/20/rollout-2025-11-20T18-59-09-019aa234.jsonl"
-	orig := newCursor().
-		withFile(rel, FileCursor{Offset: 100, Size: 100, MtimeUs: 42, LastTsUs: 123}).
-		withLegacyIngested("rollout-2025-06-26-5556f03d.json")
+	orig := newCursor()
+	orig.withFile(rel, FileCursor{Offset: 100, Size: 100, MtimeUs: 42, LastTsUs: 123})
+	orig.withLegacyIngested("rollout-2025-06-26-5556f03d.json")
 	encoded := orig.String()
 	got, err := ParseCursor(encoded)
 	if err != nil {
@@ -83,9 +83,9 @@ func TestParseCursor_Malformed(t *testing.T) {
 
 func TestCursor_StringStableSortedKeys(t *testing.T) {
 	t.Parallel()
-	c := newCursor().
-		withFile("2025/11/20/b.jsonl", FileCursor{Offset: 2}).
-		withFile("2025/11/20/a.jsonl", FileCursor{Offset: 1})
+	c := newCursor()
+	c.withFile("2025/11/20/b.jsonl", FileCursor{Offset: 2})
+	c.withFile("2025/11/20/a.jsonl", FileCursor{Offset: 1})
 	first := c.String()
 	second := c.String()
 	if first != second {
@@ -105,9 +105,12 @@ func TestCursor_StringStableSortedKeys(t *testing.T) {
 func TestCursor_After(t *testing.T) {
 	t.Parallel()
 	rel := "2025/11/20/r.jsonl"
-	base := newCursor().withFile(rel, FileCursor{Offset: 50, Size: 50})
-	ahead := newCursor().withFile(rel, FileCursor{Offset: 100, Size: 100})
-	behind := newCursor().withFile(rel, FileCursor{Offset: 10, Size: 10})
+	base := newCursor()
+	base.withFile(rel, FileCursor{Offset: 50, Size: 50})
+	ahead := newCursor()
+	ahead.withFile(rel, FileCursor{Offset: 100, Size: 100})
+	behind := newCursor()
+	behind.withFile(rel, FileCursor{Offset: 10, Size: 10})
 
 	if !ahead.After(base) {
 		t.Error("ahead.After(base) = false, want true")
@@ -132,25 +135,26 @@ func TestCursor_AfterMultiFile(t *testing.T) {
 	t.Parallel()
 	a := "2025/11/20/a.jsonl"
 	b := "2025/11/20/b.jsonl"
-	base := newCursor().
-		withFile(a, FileCursor{Offset: 50}).
-		withFile(b, FileCursor{Offset: 50})
+	base := newCursor()
+	base.withFile(a, FileCursor{Offset: 50})
+	base.withFile(b, FileCursor{Offset: 50})
 	// One file advances, the other holds: After.
-	oneAdvances := newCursor().
-		withFile(a, FileCursor{Offset: 60}).
-		withFile(b, FileCursor{Offset: 50})
+	oneAdvances := newCursor()
+	oneAdvances.withFile(a, FileCursor{Offset: 60})
+	oneAdvances.withFile(b, FileCursor{Offset: 50})
 	if !oneAdvances.After(base) {
 		t.Error("oneAdvances.After(base) = false, want true")
 	}
 	// One advances but the other regresses: NOT After.
-	mixed := newCursor().
-		withFile(a, FileCursor{Offset: 60}).
-		withFile(b, FileCursor{Offset: 40})
+	mixed := newCursor()
+	mixed.withFile(a, FileCursor{Offset: 60})
+	mixed.withFile(b, FileCursor{Offset: 40})
 	if mixed.After(base) {
 		t.Error("mixed (one regresses).After(base) = true, want false")
 	}
 	// Missing a file the other has progress on: regression, NOT After.
-	missing := newCursor().withFile(a, FileCursor{Offset: 100})
+	missing := newCursor()
+	missing.withFile(a, FileCursor{Offset: 100})
 	if missing.After(base) {
 		t.Error("missing-file.After(base) = true, want false")
 	}
@@ -159,7 +163,8 @@ func TestCursor_AfterMultiFile(t *testing.T) {
 func TestCursor_AfterAlienType(t *testing.T) {
 	t.Parallel()
 	type alien struct{ canonical.Cursor }
-	c := newCursor().withFile("2025/11/20/r.jsonl", FileCursor{Offset: 1})
+	c := newCursor()
+	c.withFile("2025/11/20/r.jsonl", FileCursor{Offset: 1})
 	if !c.After(alien{}) {
 		t.Error("cursor with progress should be After an alien cursor type")
 	}
@@ -174,11 +179,12 @@ func TestCursor_AfterAlienType(t *testing.T) {
 func TestCursor_LegacyNotPartOfAfter(t *testing.T) {
 	t.Parallel()
 	rel := "2025/11/20/r.jsonl"
-	a := newCursor().withFile(rel, FileCursor{Offset: 50, Size: 50})
+	a := newCursor()
+	a.withFile(rel, FileCursor{Offset: 50, Size: 50})
 	// Same byte progress, but b additionally marked a legacy file ingested.
-	b := newCursor().
-		withFile(rel, FileCursor{Offset: 50, Size: 50}).
-		withLegacyIngested("legacy.json")
+	b := newCursor()
+	b.withFile(rel, FileCursor{Offset: 50, Size: 50})
+	b.withLegacyIngested("legacy.json")
 	if a.After(b) || b.After(a) {
 		t.Errorf("legacyJSON must not affect After ordering: a.After(b)=%v b.After(a)=%v", a.After(b), b.After(a))
 	}
@@ -190,8 +196,11 @@ func TestCursor_LegacyNotPartOfAfter(t *testing.T) {
 func TestCursor_CloneIndependent(t *testing.T) {
 	t.Parallel()
 	rel := "2025/11/20/r.jsonl"
-	orig := newCursor().withFile(rel, FileCursor{Offset: 10})
-	derived := orig.withFile(rel, FileCursor{Offset: 20}).withLegacyIngested("x.json")
+	orig := newCursor()
+	orig.withFile(rel, FileCursor{Offset: 10})
+	derived := orig.clone()
+	derived.withFile(rel, FileCursor{Offset: 20})
+	derived.withLegacyIngested("x.json")
 	if orig.Files[rel].Offset != 10 {
 		t.Errorf("receiver mutated: orig offset = %d, want 10", orig.Files[rel].Offset)
 	}

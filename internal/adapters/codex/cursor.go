@@ -168,10 +168,13 @@ func ParseCursor(stored string) (Cursor, error) {
 
 // withFile returns a new Cursor with the given relative path's FileCursor
 // replaced. The receiver is not mutated.
-func (c Cursor) withFile(rel string, fc FileCursor) Cursor {
-	out := c.clone()
-	out.Files[rel] = fc
-	return out
+// withFile sets a file's cursor entry, mutating in-place (O(1)). SOW-0118: the
+// old clone-based copy was O(map_size) per call.
+func (c *Cursor) withFile(rel string, fc FileCursor) {
+	if c.Files == nil {
+		c.Files = map[string]FileCursor{}
+	}
+	c.Files[rel] = fc
 }
 
 // legacyIngested reports whether the legacy .json file at basename has already
@@ -185,10 +188,11 @@ func (c Cursor) legacyIngested(basename string) bool {
 
 // withLegacyIngested returns a new Cursor recording that the legacy .json file
 // at basename has been consumed by a full scan. The receiver is not mutated.
-func (c Cursor) withLegacyIngested(basename string) Cursor {
-	out := c.clone()
-	out.LegacyJSON[basename] = LegacyFile{Ingested: true}
-	return out
+func (c *Cursor) withLegacyIngested(basename string) {
+	if c.LegacyJSON == nil {
+		c.LegacyJSON = map[string]LegacyFile{}
+	}
+	c.LegacyJSON[basename] = LegacyFile{Ingested: true}
 }
 
 // clone deep-copies the cursor's maps so callers can mutate the result without

@@ -34,11 +34,11 @@ func scanLegacyRollouts(ctx context.Context, resolvedRoot, sourceID string, lega
 				return cur, err
 			}
 			onError(err)
-			cur = cur.withLegacyIngested(base)
+			cur.withLegacyIngested(base)
 			continue
 		}
 		_ = n
-		cur = cur.withLegacyIngested(base)
+		cur.withLegacyIngested(base)
 	}
 	return cur, nil
 }

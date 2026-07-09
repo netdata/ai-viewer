@@ -282,7 +282,8 @@ func TestScan_SkipsUnchangedEOFFinalizedRolloutBeforeProbe(t *testing.T) {
 		t.Fatalf("relpath rollout: %v", err)
 	}
 	rel = filepath.ToSlash(rel)
-	since := newCursor().withFile(rel, FileCursor{
+	since := newCursor()
+	since.withFile(rel, FileCursor{
 		Offset:           info.Size(),
 		Size:             info.Size(),
 		MtimeUs:          info.ModTime().UnixMicro(),
