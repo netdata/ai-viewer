@@ -86,15 +86,15 @@ func (c *coalescer) register(sourceID string, w *worker, events <-chan canonical
 	// Forward any already-buffered events synchronously (the test pattern of
 	// close(ch) → Submit → Stop needs these to reach the merged channel before
 	// the coalescer's shutdown drain).
-	for len(events) > 0 {
+	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				goto startMerger
+				goto startMerger // channel closed; all events forwarded
 			}
 			c.merged <- taggedEvent{sourceID: sourceID, ev: ev}
 		default:
-			goto startMerger
+			goto startMerger // no more buffered events
 		}
 	}
 
