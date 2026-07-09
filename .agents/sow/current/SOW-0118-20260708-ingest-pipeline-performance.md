@@ -224,3 +224,79 @@ bottleneck after cold-scan measurement is likely the per-op index maintenance
 there if cold-scan ingest still misses the floor.
 
 NEXT: cold-scan ingest-throughput measurement; then gates + reviewer gate.
+
+### 2026-07-08 — REAL-SYSTEM INVESTIGATION (the daemon burning >100% CPU)
+
+Operator feedback: the running daemon constantly uses >100% CPU (spiking 2-4
+cores). Acceptable for massive bulk ingestion; UNACCEPTABLE for ingesting a
+single new message. "Ingestion must be optimal. No 'good enough'." Benchmarks
+are a tool to prove improvements, NOT the verdict — if the real result isn't
+right, benchmarks were circumstantial/incomplete. Long, very large sessions
+(weeks-long Codex sessions; multi-day sessions) are LEGITIMATE and DESIRED —
+the system must ingest a 535 MB / 60K-event session fast, not cap/tame the data.
+
+Real-system findings (profiled the live daemon):
+
+1. **Constant CPU during a forced full re-ingest** (the operator's corpus is
+   325,587 top-level v2 .json.gz files, NOT 615,232 — the 615K was a recursive
+   find counting v3 subdirs). I triggered re-ingest by clearing the cursor during
+   cold-scan tests. This is the bulk case (CPU spike acceptable) but it must not
+   take HOURS, and it must not starve steady-state tailing.
+
+2. **The single writer (SetMaxOpenConns(1)) is the structural contention:**
+   5 adapters + resolver + repair all flush through one SQLite connection. During
+   a bulk scan the scan holds the writer and the 4 tailing adapters block in
+   BeginTx (begin-wait 75-98%). This is why a single new message (a tail flush)
+   spikes/waits during bulk — the operator's primary complaint.
+
+3. **Monster files:** 22 files >50 MiB compressed (2.6 GB total), each ~150 MiB
+   compressed → ~535 MiB decompressed, ~9K ops but ~60K events (OpStarted +
+   OpFinalized + payload-refs + accounting per op), parse+map 6.7 s each. These
+   are legitimate large sessions, not anomalies.
+
+4. **payload_refs are REFERENCE rows** (op_id, kind, location_uri, sha256, sizes)
+   — NO content column. The giant payloads are stored externally (location_uri);
+   they are NOT written as big content rows. (Earlier "giant payloads written"
+   claim was wrong — corrected.)
+
+Fixes this session (committed):
+
+- 0e78dc1: prepare-statement reuse per flush (txExec) — apply 48%->22% on the
+  real system; BenchmarkBatchInsert ~2x (4586 -> ~9300 events/s).
+- 11b10d9: also cache prepared read statements (txQueryRow).
+- a559fab: no-secondary-index benchmark variant.
+
+INDEX-DROP EXPERIMENT — LESSONS (must not repeat):
+
+- Operator rule: initial scan CAN drop secondary indexes; incremental (tail)
+  CANNOT (serve needs them live).
+- Naive "drop all CREATE INDEX" is a DATA-LOSS FOOTGUN: it drops the UNIQUE
+  constraints the upserts depend on (e.g. idx_payload_refs_identity for
+  payload_refs ON CONFLICT (op_id,kind,location_uri)). The worker hit "ON CONFLICT
+  clause does not match any PRIMARY KEY or UNIQUE constraint", retried, and
+  DROPPED events. Caught + fully restored all 44 indexes (verified vs a fresh
+  migration DB: 0 missing). The drop MUST keep PK + EVERY UNIQUE constraint and
+  drop only NON-UNIQUE secondaries.
+- Fresh-DB index benefit is only ~1.2x (BenchmarkBatchInsert_NoSecondaryIndexes:
+  ~12,400 vs ~10,300 events/s) — indexes are cheap on an empty DB; the real
+  index cost bites at GB scale (deep B-trees, page I/O), which a fresh-DB bench
+  can't show. The real scale benefit was NOT cleanly measured (every live attempt
+  was confounded by restart ramp / the data-loss failure). A populated-DB
+  benchmark (or a throwaway copy of the prod DB) is needed to measure it safely.
+- DO NOT experiment on the live production DB. It caused a data-loss incident and
+  left the prod DB missing 21 indexes until restored. Future index/scan work must
+  use a throwaway copy or a populated benchmark DB.
+
+NEXT (the structural fix — the operator's actual complaint):
+
+The single-writer contention is what makes a single new message non-lightweight
+during bulk. The fix is architectural, WITHIN SQLite (no backend change):
+introduce ONE dedicated writer goroutine that owns the connection and drains a
+merged channel from all adapters — no competing BeginTx (eliminates the 75-98%
+begin-wait), and tail-priority fairness lives in one place so a single new
+message is ingested immediately even mid-scan. This is SOW-sized core-path work;
+must be done test-driven on a throwaway DB, not fatigued on prod.
+
+Open: cleanly measure the index-drop benefit at scale (populated benchmark DB /
+prod copy) before building its lifecycle; build the index-drop lifecycle keeping
+PK + all UNIQUE (tested for no upsert break); build the single-writer coalescer.
