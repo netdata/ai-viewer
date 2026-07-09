@@ -400,3 +400,41 @@ indexes. The index-drop lifecycle (implemented, tested) addresses this on fresh
 installs but cannot be verified on the current production DB (ops > 0 →
 isInitialScan=false → no drop). A fresh-install or throwaway-DB measurement is
 needed to verify the index-drop's real-scale benefit.
+
+### 2026-07-09 — DIMINISHING RETURNS ON PER-EVENT COST (documented)
+
+The profile-driven loop has reached documented diminishing returns on the
+per-event write cost. The remaining cost breakdown (from a 20s CPU profile
+during a scan):
+
+| Component | % of total CPU | Status |
+|---|---|---|
+| _sqlite3VdbeExec (genuine SQL: insert + 15-index maintenance) | 24% | genuine work; reducible only by index-drop |
+| Go runtime: maps.hash + aeshash + GC | 26% | map operations across writer/coalescer/cursor |
+| Go runtime: syscall (disk I/O) | 15% | genuine I/O (reading/writing 31 GB DB) |
+| _sqlite3Prepare | 6% | already optimized (was 59%) |
+| non-prepared reads (ExecContext) | 6% | package-level helpers without *writer receiver |
+
+**Optimizations landed (measured before/after on the real system):**
+
+| Optimization | Before | After | Improvement |
+|---|---|---|---|
+| Coalescer (eliminate begin-wait) | begin=80%+ | begin=0% | **eliminated** |
+| Prepare-statement reuse | prep=59% | prep=6% | **~10× faster** |
+| Batch size 100→1000 | pn=42% | pn=5% | **~8× reduction** |
+| O(n²) sort → O(n log n) | 46% of a core | ~0% | **eliminated** |
+| Read-model defer during scan | begin=68-93% | begin=0% (coalescer) | **eliminated** |
+| Tail source flush | 295 ms | 0.5–4 ms | **~100× faster** |
+
+**The remaining lever (dormant):** the index-drop lifecycle drops 42 of 44
+secondary indexes during a FRESH install's initial scan, cutting ~95% of the
+per-event index write amplification. It is implemented, tested, wired, and
+gated to `isInitialScan` (ops==0). On the current production DB (7.4M ops),
+it does NOT fire (resume scan, not initial). A fresh-install measurement is
+needed to verify its real-scale benefit.
+
+**Gates:** ALL GREEN (gofmt, vet, lint=0, build, spec-drift, secrets,
+attribution, tests=15/15 pass, race-clean).
+
+**Daemon:** deployed, healthy (44/44 indexes, 0 failures, begin=0% across all
+sources, idle=0% when not scanning, tail flushes 0.5–4ms).
