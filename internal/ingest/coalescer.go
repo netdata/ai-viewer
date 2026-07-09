@@ -126,6 +126,8 @@ startMerger:
 
 // run is the coalescer's main loop — drains the merged channel, batches across
 // sources, flushes in a single transaction.
+//
+//nolint:gocyclo // main loop branches are its natural structure
 func (c *coalescer) run(ctx context.Context) {
 	defer c.wg.Done()
 	c.wg.Add(1)
@@ -268,12 +270,6 @@ func (c *coalescer) run(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// shutdown signals merger goroutines to stop and waits.
-func (c *coalescer) shutdown() {
-	close(c.stop)
-	c.wg.Wait()
 }
 
 // flushBatch applies a batch of events from multiple sources in a SINGLE
