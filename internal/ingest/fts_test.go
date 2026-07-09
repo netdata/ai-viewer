@@ -523,8 +523,8 @@ func TestFTS_BackfillDefaultBatchSizeMatchesIngestBudget(t *testing.T) {
 	if ftsBackfillBatchSize != defaultBatchSize {
 		t.Fatalf("ftsBackfillBatchSize = %d, want defaultBatchSize %d", ftsBackfillBatchSize, defaultBatchSize)
 	}
-	if ftsBackfillBatchSize != 100 {
-		t.Fatalf("ftsBackfillBatchSize = %d, want spec default 100", ftsBackfillBatchSize)
+	if ftsBackfillBatchSize != defaultBatchSize {
+		t.Fatalf("ftsBackfillBatchSize = %d, want spec default %d", ftsBackfillBatchSize, defaultBatchSize)
 	}
 }
 
