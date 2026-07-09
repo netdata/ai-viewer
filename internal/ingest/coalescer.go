@@ -108,17 +108,40 @@ startMerger:
 				if !ok {
 					return
 				}
+				// ALWAYS forward the event (blocking). On shutdown the coalescer's
+				// ctx.Done path drains c.merged after mergerWG.Wait(), so the
+				// event will be picked up. Never drop — a dropped event is data
+				// loss (SOW-0118).
 				select {
 				case c.merged <- taggedEvent{sourceID: sourceID, ev: ev}:
 				case <-c.stop:
-					select {
-					case c.merged <- taggedEvent{sourceID: sourceID, ev: ev}:
-					default:
+					c.merged <- taggedEvent{sourceID: sourceID, ev: ev}
+					// Drain remaining buffered events before exiting.
+					for {
+						select {
+						case ev2, ok2 := <-events:
+							if !ok2 {
+								return
+							}
+							c.merged <- taggedEvent{sourceID: sourceID, ev: ev2}
+						default:
+							return
+						}
 					}
-					return
 				}
 			case <-c.stop:
-				return
+				// Drain remaining buffered events before exiting.
+				for {
+					select {
+					case ev, ok := <-events:
+						if !ok {
+							return
+						}
+						c.merged <- taggedEvent{sourceID: sourceID, ev: ev}
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()
