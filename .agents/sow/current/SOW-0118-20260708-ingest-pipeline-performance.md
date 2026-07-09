@@ -369,3 +369,34 @@ amplification.
 - Bulk scan: apply-bound (79% of the per-event cost is the 15-index insert at
   31 GB scale). Without the index-drop (which only fires on fresh installs),
   the scan rate is ~13 files/sec.
+
+### 2026-07-09 — FINAL STATE (all tests pass, coalescer stable, deployed)
+
+**All tests pass (15/15 consecutive runs), race-clean, lint-clean.** The
+coalescer's merger drains buffered events on shutdown (fixing the parity flake).
+
+**Real-system verification (coalescer + batch=1000 + prepare-reuse deployed):**
+
+| Metric | Value | Goal criterion |
+|---|---|---|
+| begin-wait (all sources) | **0%** | ✅ (was 80%+) |
+| Idle CPU (no scan) | **0%** | ✅ ≤1% |
+| Single-message (tail flush) | **0.5–4 ms** | ✅ no spike |
+| Scan rate (aiagent_v2, resume) | **~13 files/sec** | ❌ <5 min target |
+| apply (the remaining scan cost) | **79%** of flush | index-drop lever |
+| Tests | **15/15 pass, race-clean** | ✅ |
+
+**What's ACHIEVED:**
+1. The daemon is LIGHTWEIGHT when idle (0% CPU). ✅
+2. A single new message ingests in 0.5–4 ms (tail sources). ✅
+3. The coalescer eliminated the 80%+ begin-wait contention. ✅
+4. All adapters benefit (begin=0% across all sources). ✅
+5. No data loss (merger drains on shutdown; race-clean). ✅
+
+**What REMAINS:**
+The bulk scan speed (~13 files/sec → target ~1000 for <5 min). The remaining
+cost is apply=79% — the genuine per-event insert at 31 GB DB scale with 15
+indexes. The index-drop lifecycle (implemented, tested) addresses this on fresh
+installs but cannot be verified on the current production DB (ops > 0 →
+isInitialScan=false → no drop). A fresh-install or throwaway-DB measurement is
+needed to verify the index-drop's real-scale benefit.
