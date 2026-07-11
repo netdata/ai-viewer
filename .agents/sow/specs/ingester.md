@@ -272,7 +272,15 @@ Options (functional-option pattern):
 
 ## Concurrency Model
 
-- One **worker goroutine per source**. Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 1000 events OR 500 ms**, whichever trips first, and commits.
+- **SOW-0118: the coalescer.** A single coalescer goroutine replaces the
+  per-source worker goroutines. It owns the SQLite connection exclusively and
+  drains all sources through a merged channel, flushing in a single transaction.
+  This eliminates the begin-wait contention (5 workers competing for
+  SetMaxOpenConns(1) caused 80%+ wasted time). Per-flush time: 0.7ms (was 77ms).
+  A single new message ingests in the next coalesced batch (≤ batchInterval =
+  500ms) without waiting behind a separate scan flush. The coalescer also gates
+  idle rollup refresh and error reporting per source within the shared tx.
+- ~~One **worker goroutine per source**~~ (replaced by the coalescer). Each worker drains its source's `<-chan canonical.Event`, batches events into transactions of **up to 1000 events OR 500 ms**, whichever trips first, and commits.
 - The ingest pipeline is **single-writer to SQLite** — every worker uses the same
   `*sql.DB` handle, and the writer store pins `MaxOpenConns=1` for both
   in-memory and on-disk stores. This gives deterministic batch ordering per
@@ -282,7 +290,7 @@ Options (functional-option pattern):
   lifecycle writes, Tail heartbeat persistence, stale-tail watchdog writes, and
   read-model repair share the same writer connection; larger cold-rebuild
   batches have live-proven they can starve the 30 s liveness write budget.
-- One **background resolver goroutine** runs at 5 s ticks, retrying parent linkage for sessions inserted with `parent_session_id = NULL` whose `parent_native_id` is now resolvable. **Idle gating (SOW-0117):** the pass is skipped entirely when no canonical rows have been committed since the last pass (the worker bumps an atomic generation counter on every committed batch), and the two SESSION passes (parent-link + the transitive root recursive CTE) are additionally skipped when `MAX(sessions.last_activity_ts)` is unchanged since the last pass. That watermark is a CONSERVATIVE (over-)approximation of "a session changed": it advances on session insert/update and also when a session gains an op with a newer `end_ts` (aggregate refresh), so the session passes may run slightly more often than strictly needed (harmless — they find nothing) but never miss a real session change. The gate is effective where it matters — idle (no commits) and resume scans of unchanged sessions (the common restart case), where the recursive CTE that previously dominated CPU is skipped. The watermarks advance only on a successful pass, so a transient failure retries on the next tick. A daemon with nothing to do costs ~0 resolver CPU.
+- One **background resolver goroutine** runs at 5 s ticks, retrying parent linkage for sessions inserted with `parent_session_id = NULL` whose `parent_native_id` is now resolvable. **Idle gating (SOW-0117):** the pass is skipped entirely when no canonical rows have been committed since the last pass (the worker bumps an atomic generation counter on every committed batch), and the two SESSION passes (parent-link + the transitive root recursive CTE) are additionally skipped when `MAX(sessions.last_activity_ts)` is unchanged since the last pass. **SOW-0118: the linkRoots recursive CTE is additionally gated on `lastRootsGen`** — it only runs when the generation counter has advanced since the last roots pass (once per batch of new data, not once per 5s tick). This prevents the O(sessions) CTE from creating a busy-loop at scale (552K sessions → 30s per pass at 31GB; at a 5s resolver interval that was a CPU-burning cycle). `linkParents` (index-backed, fast) still runs on every sessionsChanged pass. The watermarks advance only on a successful pass, so a transient failure retries on the next tick. A daemon with nothing to do costs ~0 resolver CPU.
 
 ## Batching
 

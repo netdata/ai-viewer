@@ -82,6 +82,50 @@ Weakening a gate to make it pass is a contract breach. Fix the root cause.
 - Treating reviewer claims as facts without verifying them against code/spec/tests.
 - Claiming code "works" without automated tests proving it.
 
+## Hot-Path Performance Rules (SOW-0118)
+
+These rules are non-negotiable for code in the ingest pipeline (adapters,
+coalescer, writer, resolver) and any path that runs per-event, per-file, or
+per-row at scale (325K+ files, 552K+ sessions, 5M+ ops).
+
+- **NEVER use value-receiver methods that clone maps or slices in hot paths.**
+  A `func (c Cursor) withFile(...) Cursor { out := c.clone(); ... }` that calls
+  `maps.Copy` is O(map_size) PER CALL. At 325K files × 162K average entries,
+  that's ~52 billion map copies — the dominant single-core cost. Use pointer
+  receivers and mutate in-place: `func (c *Cursor) withFile(...)`. Profile the
+  REAL system at scale — fresh-DB benchmarks hide this because empty maps are
+  cheap to copy.
+- **Cache lookups that are constant within a batch.** Within a 1000-event
+  batch, the same session's ops resolve to the same canonical ID. A per-batch
+  `sessionIDs map[string]string` (cleared in `resetBatch`) eliminates ~600
+  SQL SELECTs per batch. Same for turn existence.
+- **Reuse prepared statements per-tx.** modernc/database/sql re-prepares on
+  every `ExecContext(ctx, sqlString, args)`. Cache prepared statements per-tx
+  via `writer.beginTx(tx)` / `writer.endTx()` + the `txExec` helper. Cuts
+  per-event overhead by ~10×.
+- **Gate expensive O(n) maintenance queries on a generation counter.** The
+  resolver's `linkRoots` recursive CTE is O(sessions) (~30s at 552K rows).
+  Running it on every 5s tick creates a busy-loop. Gate it on
+  `lastRootsGen`: run only when the generation counter advanced since the last
+  pass.
+- **Defer read-model maintenance during the initial scan.** Resolver, idle
+  rollup refresh, and per-source repair all do expensive DB work that is
+  redundant during the initial scan (rebuilt post-scan). Gate them on
+  `startupScanActive` (initialized to TRUE so the deferral covers the first
+  tick).
+- **Batch size matters when per-flush overhead is non-trivial.** With the
+  coalescer (begin-wait=0%), batch size 1000 amortizes the progress+notify
+  overhead 10× vs 100 (progress_notify dropped from 42% to 5% of flush).
+- **NEVER experiment on the live production DB.** Clearing cursors or dropping
+  indexes on the running daemon caused a data-loss incident (89 events
+  dropped). Use throwaway DB copies for any index/scan experiment.
+- **The index-drop lifecycle is safe ONLY with `DropNonUniqueIndexes`** (keeps
+  PK + all UNIQUE). The naive `DROP INDEX` breaks upsert ON CONFLICT targets
+  and silently drops events.
+- **Profile the REAL system, not just benchmarks.** Fresh-DB benchmarks are
+  circumstantial — index costs, map sizes, and query plans are all different
+  at 31GB scale. Always verify on the real corpus before claiming a fix.
+
 ## Cross-References
 
 - Workflow: `.agents/skills/project-workflow/SKILL.md`
