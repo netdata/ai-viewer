@@ -127,12 +127,25 @@ func applyAccounting(ev *canonical.OpFinalizedEvent, acc accountingEntry) {
 	}
 	ev.TokensIn = acc.Tokens.InputTokens
 	ev.TokensOut = acc.Tokens.OutputTokens
-	ev.TokensCacheRead = acc.Tokens.CacheReadInputTokens + acc.Tokens.CachedTokens
+	// ai-agent records cachedTokens as an alias of cacheReadInputTokens
+	// (SOW-0190): prefer the explicit field and fall back to the alias, but
+	// never add them, or a cache read is counted twice.
+	ev.TokensCacheRead = cacheReadTokens(acc.Tokens)
 	ev.TokensCacheWrite = acc.Tokens.CacheWriteInputTokens
 	ev.CostUSD = acc.CostUSD
 	// Canonical CtxUsed = TokensIn + TokensCacheRead + TokensCacheWrite + TokensOut
-	// (SOW-0031: the old 3-term formula omitted cache_write).
+	// (SOW-0031: the old 3-term formula omitted cache_write). Under both
+	// ai-agent token conventions (inclusive input before SOW-0190,
+	// cache-exclusive input after) the four components are a complete
+	// prompt+output sum, so historical records stay comparable.
 	ev.CtxUsed = acc.Tokens.InputTokens + ev.TokensCacheRead + ev.TokensCacheWrite + acc.Tokens.OutputTokens
+}
+
+func cacheReadTokens(t *tokens) int64 {
+	if t.CacheReadInputTokens > 0 {
+		return t.CacheReadInputTokens
+	}
+	return t.CachedTokens
 }
 
 func applyToolCharacterAccounting(ev *canonical.OpFinalizedEvent, acc accountingEntry) {
@@ -218,7 +231,7 @@ func addAccountingCacheExtras(out map[string]any, entries []accountingEntry) {
 }
 
 func addTokenCacheExtras(out map[string]any, t *tokens) {
-	cacheRead := t.CacheReadInputTokens + t.CachedTokens
+	cacheRead := cacheReadTokens(t)
 	if cacheRead > 0 {
 		out["tokensCacheRead"] = cacheRead
 	}

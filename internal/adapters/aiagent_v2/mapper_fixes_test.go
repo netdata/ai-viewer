@@ -7,8 +7,10 @@ import (
 )
 
 // TestMap_CtxUsedIncludesOutputTokens pins the "context window
-// consumed" definition: input + cache-read + output. A regression on
-// any one of the three trips the assertion.
+// consumed" definition: input + cache-read + cache-write + output. A
+// regression on any one of the four trips the assertion. cachedTokens
+// is an alias of cacheReadInputTokens and must never be added on top
+// of it (ai-agent SOW-0190).
 func TestMap_CtxUsedIncludesOutputTokens(t *testing.T) {
 	t.Parallel()
 	snap := simpleSnapshot(2, "ctx-used")
@@ -18,7 +20,7 @@ func TestMap_CtxUsedIncludesOutputTokens(t *testing.T) {
 			InputTokens:          1000,
 			OutputTokens:         200,
 			CacheReadInputTokens: 100,
-			CachedTokens:         50,
+			CachedTokens:         100, // alias of the same read count
 		},
 	}
 	events := mapSimple(t, snap)
@@ -28,9 +30,53 @@ func TestMap_CtxUsedIncludesOutputTokens(t *testing.T) {
 			got = of.CtxUsed
 		}
 	}
-	const want = 1000 + 100 + 50 + 200
+	const want = 1000 + 100 + 200
 	if got != want {
 		t.Fatalf("CtxUsed = %d, want %d (input + cacheRead + output)", got, want)
+	}
+}
+
+// TestMap_CtxUsedStableAcrossTokenConventions pins that the corrected
+// ai-agent records (cache-exclusive input plus disjoint components,
+// SOW-0190) yield the true prompt+output context count, while a
+// pre-correction record (inclusive input plus additive alias) still
+// shows the old additive value. Field names alone cannot distinguish
+// the two conventions in historical snapshots.
+func TestMap_CtxUsedStableAcrossTokenConventions(t *testing.T) {
+	t.Parallel()
+	ctxFor := func(tk *tokens) int64 {
+		snap := simpleSnapshot(2, "convention")
+		snap.OpTree.Turns[0].Ops[0].Accounting[0] = accountingEntry{Type: "llm", Tokens: tk}
+		var got int64
+		for _, ev := range mapSimple(t, snap) {
+			if of, ok := ev.(canonical.OpFinalizedEvent); ok && of.TokensIn > 0 {
+				got = of.CtxUsed
+			}
+		}
+		return got
+	}
+	// Corrected record: exclusive input 16,814 + 163,840 reads + 1,185 out.
+	fresh := ctxFor(&tokens{
+		InputTokens:          16_814,
+		OutputTokens:         1_185,
+		CacheReadInputTokens: 163_840,
+		CachedTokens:         163_840,
+	})
+	const want = 181_839
+	if fresh != want {
+		t.Fatalf("CtxUsed: corrected record = %d, want %d", fresh, want)
+	}
+	// Historical pre-correction record: inclusive input 180,654 (reads
+	// already inside it) plus the additive alias — the documented
+	// double-count display, unchanged for old snapshots.
+	historical := ctxFor(&tokens{
+		InputTokens:  180_654,
+		OutputTokens: 1_185,
+		CachedTokens: 163_840,
+	})
+	const historicalWant = 345_679
+	if historical != historicalWant {
+		t.Fatalf("CtxUsed: historical record = %d, want %d", historical, historicalWant)
 	}
 }
 

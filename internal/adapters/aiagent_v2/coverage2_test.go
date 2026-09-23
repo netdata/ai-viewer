@@ -179,7 +179,7 @@ func TestOpStartedExtras_AllBranches(t *testing.T) {
 	if extras["childSessionSummary"] == nil {
 		t.Fatalf("childSessionSummary missing")
 	}
-	if extras["tokensCacheRead"].(int64) != 8 { // 5 + 3
+	if extras["tokensCacheRead"].(int64) != 5 { // explicit field wins; alias never adds (SOW-0190)
 		t.Fatalf("tokensCacheRead: %v", extras["tokensCacheRead"])
 	}
 	if extras["tokensCacheWrite"].(int64) != 7 {

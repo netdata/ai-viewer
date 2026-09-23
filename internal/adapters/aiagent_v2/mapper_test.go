@@ -349,14 +349,14 @@ func TestMap_AccountingTokenNormalization(t *testing.T) {
 			OutputTokens:          200,
 			CacheReadInputTokens:  150,
 			CacheWriteInputTokens: 25,
-			CachedTokens:          50, // openai-style alias; should add to cache-read
+			CachedTokens:          50, // alias; must never add to cache-read (SOW-0190)
 		},
 	}
 	events := mapSimple(t, snap)
 	for _, ev := range events {
 		if of, ok := ev.(canonical.OpFinalizedEvent); ok {
-			if of.TokensCacheRead != 200 { // 150 + 50
-				t.Fatalf("CacheRead normalisation: got %d want 200", of.TokensCacheRead)
+			if of.TokensCacheRead != 150 { // explicit field wins; no alias addition
+				t.Fatalf("CacheRead normalisation: got %d want 150", of.TokensCacheRead)
 			}
 			if of.TokensCacheWrite != 25 {
 				t.Fatalf("CacheWrite: got %d", of.TokensCacheWrite)

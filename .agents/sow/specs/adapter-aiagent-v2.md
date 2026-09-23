@@ -185,7 +185,9 @@ Two values for `type`:
 - `type: "llm"`: carries `provider`, `model`, `tokens: { inputTokens, outputTokens, cacheReadInputTokens?, cacheWriteInputTokens?, cachedTokens?, totalTokens? }`, `costUsd`, `stopReason`, `latency`, `status`.
 - `type: "tool"`: carries `mcpServer`, `command`, `charactersIn`, `charactersOut`, `latency`, `status`, optional `error`.
 
-`tokens` has both Anthropic (`cacheReadInputTokens`, `cacheWriteInputTokens`) and OpenAI (`cachedTokens`) cache-token naming in the same data. The adapter normalizes to canonical `tokens_in` (FRESH/uncached input only) plus the separate canonical fields `tokens_cache_read` (= `cacheReadInputTokens + cachedTokens`) and `tokens_cache_write` (= `cacheWriteInputTokens`) — see `mapper_ops.go:115-122`. Per the SOW-0029 token contract, cache is NEVER folded into `tokens_in`.
+`tokens` has both Anthropic (`cacheReadInputTokens`, `cacheWriteInputTokens`) and OpenAI (`cachedTokens`) cache-token naming in the same data. The adapter normalizes to canonical `tokens_in` (FRESH/uncached input only) plus the separate canonical fields `tokens_cache_read` (= `cacheReadInputTokens`, falling back to `cachedTokens` when the explicit field is absent — `cachedTokens` is an alias of the same read count per ai-agent SOW-0190 and is NEVER added on top of it) and `tokens_cache_write` (= `cacheWriteInputTokens`) — see `mapper_ops.go` (`cacheReadTokens`). Per the SOW-0029 token contract, cache is NEVER folded into `tokens_in`.
+
+ai-agent records before SOW-0190 carry an inclusive `inputTokens` (cache reads/writes already inside it) under the same field name; records after carry a cache-exclusive `inputTokens`. Field names alone cannot distinguish the two, so `ctx_used` remains the four-component sum: for corrected records this is the true prompt+output count, while historical records keep their documented additive display.
 
 #### reasoning shape
 
