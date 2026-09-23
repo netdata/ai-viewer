@@ -215,7 +215,7 @@ jobs:
         if: steps.detect.outputs.go == 'true' && steps.detect.outputs.golangci == 'true'
         # SHA-pinned for supply-chain integrity; the golangci-lint binary
         # version still comes from .golangci-lint-version via the input below.
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
         with:
           # Single source of truth: .golangci-lint-version (SOW-0009). A version
           # bump is an intentional, reviewable one-line diff. The action also
